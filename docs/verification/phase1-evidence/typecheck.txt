@@ -1,0 +1,16 @@
+
+> compact-emr@0.0.0 typecheck
+> npm run typecheck --workspaces --if-present
+
+
+> frontend@0.0.0 typecheck
+> tsc -p tsconfig.json --noEmit
+
+
+> backend@0.0.0 typecheck
+> tsc -p tsconfig.json --noEmit
+
+
+> infra@0.0.0 typecheck
+> tsc -p tsconfig.json --noEmit
+

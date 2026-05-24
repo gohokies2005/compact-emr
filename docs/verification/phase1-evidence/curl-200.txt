@@ -1,0 +1,11 @@
+$ curl -s -i -H "Authorization: Bearer <redacted>" http://localhost:3017/api/v1/health
+HTTP/1.1 200 OK
+X-Powered-By: Express
+Content-Type: application/json; charset=utf-8
+Content-Length: 91
+ETag: W/"5b-LTJzGjtQmWO6c2Pn4jrfS52eq88"
+Date: Sat, 23 May 2026 02:47:23 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+
+{"ok":true,"user":{"sub":"local-admin-sub","email":"admin@example.test","roles":["admin"]}}

@@ -1,0 +1,73 @@
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as cdk from 'aws-cdk-lib';
+import { Duration, Stack, type StackProps } from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import { aws_cognito as cognito, aws_iam as iam, aws_lambda as lambda, aws_lambda_nodejs as nodejs, aws_logs as logs } from 'aws-cdk-lib';
+import type { CompactEmrConfig } from './config.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+export interface AuthStackProps extends StackProps { config: CompactEmrConfig }
+
+export class AuthStack extends Stack {
+  public readonly userPool: cognito.UserPool;
+  public readonly userPoolClient: cognito.UserPoolClient;
+  public readonly breakGlassMfaResetFunction: nodejs.NodejsFunction;
+
+  constructor(scope: Construct, id: string, props: AuthStackProps) {
+    super(scope, id, props);
+
+    this.userPool = new cognito.UserPool(this, 'UserPool', {
+      userPoolName: `compact-emr-${props.config.envName}`,
+      selfSignUpEnabled: false,
+      signInAliases: { email: true },
+      autoVerify: { email: true },
+      mfa: cognito.Mfa.REQUIRED,
+      mfaSecondFactor: { sms: false, otp: true },
+      passwordPolicy: {
+        minLength: 12,
+        requireDigits: true,
+        requireLowercase: true,
+        requireUppercase: true,
+        requireSymbols: true,
+      },
+    });
+
+    this.userPoolClient = this.userPool.addClient('WebClient', {
+      userPoolClientName: `compact-emr-${props.config.envName}-web`,
+      authFlows: { userPassword: true, userSrp: true },
+      preventUserExistenceErrors: true,
+    });
+
+    for (const groupName of ['physician', 'ops_staff', 'admin']) {
+      new cognito.CfnUserPoolGroup(this, `${groupName}Group`, {
+        userPoolId: this.userPool.userPoolId,
+        groupName,
+      });
+    }
+
+    const breakGlassLogGroup = new logs.LogGroup(this, 'BreakGlassMfaResetLogGroup', {
+      logGroupName: `/aws/lambda/compact-emr-${props.config.envName}-break-glass-mfa-reset`,
+      retention: logs.RetentionDays.SIX_MONTHS,
+      removalPolicy: props.config.envName === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    this.breakGlassMfaResetFunction = new nodejs.NodejsFunction(this, 'BreakGlassMfaResetFunction', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.resolve(__dirname, '../lambda/break-glass-mfa-reset.ts'),
+      handler: 'handler',
+      timeout: Duration.seconds(30),
+      memorySize: 256,
+      logGroup: breakGlassLogGroup,
+      environment: {
+        USER_POOL_ID: this.userPool.userPoolId,
+      },
+    });
+
+    this.breakGlassMfaResetFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:AdminSetUserMFAPreference'],
+      resources: [this.userPool.userPoolArn],
+    }));
+  }
+}

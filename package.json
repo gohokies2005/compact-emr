@@ -1,0 +1,31 @@
+{
+  "name": "compact-emr",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Compact EMR Phase 0 scaffold for Flat Rate Nexus.",
+  "workspaces": [
+    "frontend",
+    "backend",
+    "infra"
+  ],
+  "scripts": {
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "dev:frontend": "npm run dev -w frontend",
+    "dev:backend": "npm run dev -w backend",
+    "cdk:synth:staging": "npm run cdk -w infra -- synth --context env=staging",
+    "cdk:synth:prod": "npm run cdk -w infra -- synth --context env=prod",
+    "db:migrate": "npm run db:migrate -w backend",
+    "db:seed": "npm run db:seed -w backend",
+    "db:generate": "npm run db:generate -w backend",
+    "db:migrate:deploy": "npm run db:migrate:deploy -w backend",
+    "migrate:check": "node scripts/check-migrations-committed.cjs",
+    "migrate:diff-check": "node scripts/check-prisma-migration-diff.cjs"
+  },
+  "engines": {
+    "node": ">=20.11.0",
+    "npm": ">=10.0.0"
+  }
+}

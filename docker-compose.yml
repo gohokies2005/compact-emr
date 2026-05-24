@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: compact-emr-postgres
+    environment:
+      POSTGRES_DB: compact_emr
+      POSTGRES_USER: compact_emr
+      POSTGRES_PASSWORD: compact_emr_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - compact_emr_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U compact_emr -d compact_emr"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  localstack:
+    image: localstack/localstack:3
+    container_name: compact-emr-localstack
+    environment:
+      SERVICES: s3,sqs,secretsmanager,kms
+      DEFAULT_REGION: us-west-2
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DEBUG: "0"
+    ports:
+      - "4566:4566"
+    volumes:
+      - compact_emr_localstack:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"s3\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  cognito-local:
+    image: jagregory/cognito-local:latest
+    container_name: compact-emr-cognito-local
+    ports:
+      - "9229:9229"
+    volumes:
+      - ./local/cognito:/app/.cognito
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9229/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  compact_emr_pgdata:
+  compact_emr_localstack:

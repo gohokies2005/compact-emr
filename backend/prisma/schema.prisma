@@ -1,0 +1,434 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum YesNoUnknown {
+  yes
+  no
+  unknown
+
+  @@map("yes_no_unknown")
+}
+
+enum ClaimType {
+  initial
+  supplemental
+  hlr
+  appeal_bva
+
+  @@map("claim_type")
+}
+
+enum CaseStatus {
+  intake
+  records
+  viability
+  drafting
+  physician_review
+  correction_requested
+  correction_review
+  delivered
+  paid
+  rejected
+
+  @@map("case_status")
+}
+
+enum CdsVerdict {
+  accept
+  caution
+  reject
+  not_yet_run
+
+  @@map("cds_verdict")
+}
+
+enum DraftJobState {
+  queued
+  running
+  done
+  failed
+
+  @@map("draft_job_state")
+}
+
+enum CorrectionReason {
+  veteran_added_info
+  physician_caught_error
+  ops_caught_error
+  va_examiner_feedback
+  other
+
+  @@map("correction_reason")
+}
+
+enum BillingTier {
+  free_first
+  free_our_fault
+  paid_50
+
+  @@map("billing_tier")
+}
+
+enum PhysicianActivity {
+  letter_review
+  correction_review
+
+  @@map("physician_activity")
+}
+
+enum EmailDirection {
+  inbound
+  outbound
+
+  @@map("email_direction")
+}
+
+enum PaymentKind {
+  review_50
+  letter_350
+  refund
+  correction_fee
+
+  @@map("payment_kind")
+}
+
+enum AppRole {
+  physician
+  ops_staff
+  admin
+
+  @@map("app_role")
+}
+
+model AppUser {
+  id          String   @id @default(uuid())
+  cognitoSub  String   @unique @map("cognito_sub")
+  email       String   @unique
+  roles       AppUserRole[]
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version     Int      @default(1)
+
+  @@index([email])
+  @@map("app_users")
+}
+
+model CognitoGroup {
+  name      AppRole @id
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("cognito_groups")
+}
+
+model AppUserRole {
+  userId String  @map("user_id")
+  role   AppRole
+  user   AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, role])
+  @@index([role])
+  @@map("app_user_roles")
+}
+
+model Veteran {
+  id               String       @id
+  lastName         String       @map("last_name")
+  firstName        String       @map("first_name")
+  dob              DateTime     @db.Date
+  email            String
+  phone            String?
+  address          String?
+  branch           String
+  serviceStartYear Int          @map("service_start_year")
+  serviceEndYear   Int          @map("service_end_year")
+  combatVeteran    YesNoUnknown @map("combat_veteran")
+  pactArea         YesNoUnknown @map("pact_area")
+  teraConceded     YesNoUnknown @map("tera_conceded")
+  heightIn         Int?         @map("height_in")
+  weightLb         Int?         @map("weight_lb")
+  searchVector     Unsupported("tsvector")? @map("search_vector")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version          Int          @default(1)
+
+  scConditions      ScCondition[]
+  activeProblems    ActiveProblem[]
+  activeMedications ActiveMedication[]
+  cases             Case[]
+  activityLogs      ActivityLog[]
+
+  @@index([lastName, firstName])
+  @@index([email])
+  @@index([branch])
+  @@map("veterans")
+}
+
+model ScCondition {
+  id          String   @id @default(uuid())
+  veteranId   String   @map("veteran_id")
+  condition   String
+  dcCode      String?  @map("dc_code")
+  ratingPct   Int?     @map("rating_pct")
+  grantedDate DateTime? @map("granted_date") @db.Date
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version     Int      @default(1)
+  veteran     Veteran  @relation(fields: [veteranId], references: [id], onDelete: Cascade)
+
+  @@index([veteranId])
+  @@index([condition])
+  @@index([dcCode])
+  @@map("sc_conditions")
+}
+
+model ActiveProblem {
+  id        String   @id @default(uuid())
+  veteranId String   @map("veteran_id")
+  problem   String
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version   Int      @default(1)
+  veteran   Veteran  @relation(fields: [veteranId], references: [id], onDelete: Cascade)
+
+  @@index([veteranId])
+  @@index([problem])
+  @@map("active_problems")
+}
+
+model ActiveMedication {
+  id         String   @id @default(uuid())
+  veteranId  String   @map("veteran_id")
+  drugName   String   @map("drug_name")
+  dose       String?
+  frequency  String?
+  indication String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version    Int      @default(1)
+  veteran    Veteran  @relation(fields: [veteranId], references: [id], onDelete: Cascade)
+
+  @@index([veteranId])
+  @@index([drugName])
+  @@index([indication])
+  @@map("active_medications")
+}
+
+model Case {
+  id                  String     @id
+  veteranId           String     @map("veteran_id")
+  claimedCondition    String     @map("claimed_condition")
+  claimType           ClaimType  @map("claim_type")
+  framingChoice       String?    @map("framing_choice")
+  upstreamScCondition String?    @map("upstream_sc_condition")
+  veteranStatement    String?    @map("veteran_statement")
+  inServiceEvent      String?    @map("in_service_event")
+  status              CaseStatus @default(intake)
+  cdsVerdict          CdsVerdict @default(not_yet_run) @map("cds_verdict")
+  cdsOddsPct          Int?       @map("cds_odds_pct")
+  cdsRationale        Json?      @map("cds_rationale")
+  assignedPhysicianId String?    @map("assigned_physician_id")
+  refundEligible      Boolean    @default(false) @map("refund_eligible")
+  currentVersion      Int        @default(0) @map("current_version")
+  createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version             Int        @default(1)
+
+  veteran           Veteran     @relation(fields: [veteranId], references: [id], onDelete: Cascade)
+  assignedPhysician Physician?  @relation(fields: [assignedPhysicianId], references: [id])
+  documents         Document[]
+  draftJobs         DraftJob[]
+  corrections       Correction[]
+  compensationRows  PhysicianCompensation[]
+  emails            Email[]
+  activityLogs      ActivityLog[]
+  payments          Payment[]
+
+  @@index([veteranId])
+  @@index([assignedPhysicianId])
+  @@index([claimedCondition])
+  @@index([status, updatedAt])
+  @@index([veteranId, status])
+  @@map("cases")
+}
+
+model Document {
+  id          String   @id @default(uuid())
+  caseId      String   @map("case_id")
+  filename    String
+  sizeBytes   BigInt   @map("size_bytes")
+  contentType String   @map("content_type")
+  docTag      String?  @map("doc_tag")
+  s3Key       String   @unique @map("s3_key")
+  uploadedAt  DateTime @default(now()) @map("uploaded_at") @db.Timestamptz(6)
+  uploadedBy  String   @map("uploaded_by")
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version     Int      @default(1)
+  case        Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+  @@index([caseId, docTag])
+  @@index([filename])
+  @@index([uploadedBy])
+  @@map("documents")
+}
+
+model DraftJob {
+  id          String        @id @default(uuid())
+  caseId      String        @map("case_id")
+  version     Int
+  sqsMessageId String?      @map("sqs_message_id")
+  state       DraftJobState @default(queued)
+  enqueuedAt  DateTime      @default(now()) @map("enqueued_at") @db.Timestamptz(6)
+  startedAt   DateTime?     @map("started_at") @db.Timestamptz(6)
+  completedAt DateTime?     @map("completed_at") @db.Timestamptz(6)
+  errorMessage String?      @map("error_message")
+  updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  case        Case          @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+  @@index([state])
+  @@index([caseId, version])
+  @@map("draft_jobs")
+}
+
+model Correction {
+  id               String           @id @default(uuid())
+  caseId            String           @map("case_id")
+  fromVersion       Int              @map("from_version")
+  toVersion         Int?             @map("to_version")
+  correctionReason  CorrectionReason @map("correction_reason")
+  correctionNote    String           @map("correction_note")
+  affectsSections   Json             @map("affects_sections")
+  billingTier       BillingTier      @map("billing_tier")
+  requestedBy       String           @map("requested_by")
+  requestedAt       DateTime         @default(now()) @map("requested_at") @db.Timestamptz(6)
+  approvedBy        String?          @map("approved_by")
+  approvedAt        DateTime?        @map("approved_at") @db.Timestamptz(6)
+  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version           Int              @default(1)
+  case              Case             @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+  @@index([requestedBy])
+  @@index([approvedBy])
+  @@index([billingTier])
+  @@map("corrections")
+}
+
+model Physician {
+  id                  String   @id
+  fullName             String   @map("full_name")
+  npi                  String   @unique
+  specialty            String
+  medicalLicense       String   @map("medical_license")
+  email                String
+  phone                String?
+  signatureImageS3Key  String?  @map("signature_image_s3_key")
+  active               Boolean  @default(true)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version              Int      @default(1)
+
+  cases            Case[]
+  compensationRows PhysicianCompensation[]
+
+  @@index([fullName])
+  @@index([npi])
+  @@index([email])
+  @@index([active])
+  @@map("physicians")
+}
+
+model PhysicianCompensation {
+  id             String            @id @default(uuid())
+  physicianId    String            @map("physician_id")
+  caseId         String            @map("case_id")
+  activity       PhysicianActivity
+  amountCents    Int               @map("amount_cents")
+  accruedAt      DateTime          @default(now()) @map("accrued_at") @db.Timestamptz(6)
+  paidAt         DateTime?         @map("paid_at") @db.Timestamptz(6)
+  payrollBatchId String?           @map("payroll_batch_id")
+  updatedAt      DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version        Int               @default(1)
+  physician      Physician         @relation(fields: [physicianId], references: [id])
+  case           Case              @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([physicianId])
+  @@index([caseId])
+  @@index([activity])
+  @@index([accruedAt])
+  @@index([paidAt])
+  @@index([payrollBatchId])
+  @@map("physician_compensation")
+}
+
+model Email {
+  id             String         @id @default(uuid())
+  caseId         String         @map("case_id")
+  direction      EmailDirection
+  subject        String
+  body           String
+  fromAddress    String         @map("from_address")
+  toAddress      String         @map("to_address")
+  sentAt         DateTime       @map("sent_at") @db.Timestamptz(6)
+  gmailMessageId String?        @map("gmail_message_id")
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version        Int            @default(1)
+  case           Case           @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+  @@index([sentAt])
+  @@index([fromAddress])
+  @@index([toAddress])
+  @@index([gmailMessageId])
+  @@map("emails")
+}
+
+model ActivityLog {
+  id          String   @id @default(uuid())
+  caseId      String?  @map("case_id")
+  veteranId   String?  @map("veteran_id")
+  actorUserId String?  @map("actor_user_id")
+  action      String
+  detailsJson Json?    @map("details_json")
+  ts          DateTime @default(now()) @db.Timestamptz(6)
+
+  case    Case?    @relation(fields: [caseId], references: [id], onDelete: SetNull)
+  veteran Veteran? @relation(fields: [veteranId], references: [id], onDelete: SetNull)
+
+  @@index([caseId])
+  @@index([veteranId])
+  @@index([actorUserId])
+  @@index([action])
+  @@index([ts])
+  @@map("activity_log")
+}
+
+model Payment {
+  id             String      @id @default(uuid())
+  caseId         String      @map("case_id")
+  kind           PaymentKind
+  amountCents    Int         @map("amount_cents")
+  stripeChargeId String?     @map("stripe_charge_id")
+  status         String
+  settledAt      DateTime?   @map("settled_at") @db.Timestamptz(6)
+  createdAt      DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version        Int         @default(1)
+  case           Case        @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+  @@index([kind])
+  @@index([status])
+  @@index([settledAt])
+  @@index([stripeChargeId])
+  @@map("payments")
+}

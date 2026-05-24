@@ -1,0 +1,10 @@
+Not executed in this sandbox: Docker is unavailable (`docker: command not found`), so local Postgres could not be started here.
+
+Expected command on a developer machine:
+  docker compose up -d postgres
+  DATABASE_URL=postgresql://compact_emr:compact_emr_dev_password@localhost:5432/compact_emr npm run db:migrate
+
+Also attempted `npm run db:generate -w backend`; Prisma engine download failed in this sandbox with:
+  request to https://binaries.prisma.sh/.../schema-engine.gz.sha256 failed, reason: getaddrinfo EAI_AGAIN binaries.prisma.sh
+
+The migration SQL and seed file are included under backend/prisma/.

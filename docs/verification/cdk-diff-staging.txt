@@ -1,0 +1,23 @@
+
+> infra@0.0.0 cdk
+> cdk diff --context env=staging
+
+Bundling asset compact-emr-staging-auth/BreakGlassMfaResetFunction/Code/Stage...
+
+  ...bcc0b80c765a02199e37e1ebc89240be0fdddd17b13ee33b-building/index.js  1.9kb
+
+⚡ Done in 15ms
+Bundling asset compact-emr-staging-api/PlaceholderApiLambda/Code/Stage...
+
+  ...9935f64ee26a84638c5eef72ccda65c3d3ffff1d8e2850-building/index.js  1.2mb ⚠️
+
+⚡ Done in 102ms
+Unable to resolve AWS account to use. It must be either configured when you define your CDK Stack, or through the environment
+Unable to resolve AWS account to use. It must be either configured when you define your CDK Stack, or through the environment
+npm error Lifecycle script `cdk` failed with error:
+npm error code 1
+npm error path /mnt/data/compact-emr/infra
+npm error workspace infra@0.0.0
+npm error location /mnt/data/compact-emr/infra
+npm error command failed
+npm error command sh -c cdk diff --context env=staging

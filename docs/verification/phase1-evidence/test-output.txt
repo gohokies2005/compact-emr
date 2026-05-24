@@ -1,0 +1,43 @@
+
+> compact-emr@0.0.0 test
+> npm run test --workspaces --if-present
+
+
+> frontend@0.0.0 test
+> vitest run --passWithNoTests
+
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.7 [39m[90m/mnt/data/compact-emr/frontend[39m
+
+No test files found, exiting with code 0
+
+[2minclude: [22m[33m**/*.{test,spec}.?(c|m)[jt]s?(x)[39m
+[2mexclude:  [22m[33m**/node_modules/**[2m, [22m**/.git/**[39m
+
+
+> backend@0.0.0 test
+> vitest run
+
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.7 [39m[90m/mnt/data/compact-emr/backend[39m
+
+ [32m✓[39m src/__tests__/optimistic-locking.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+ [32m✓[39m src/__tests__/auth.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 44[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m2 passed[39m[22m[90m (2)[39m
+[2m      Tests [22m [1m[32m6 passed[39m[22m[90m (6)[39m
+[2m   Start at [22m 02:46:14
+[2m   Duration [22m 690ms[2m (transform 134ms, setup 0ms, import 437ms, tests 49ms, environment 0ms)[22m
+
+
+> infra@0.0.0 test
+> vitest run --passWithNoTests
+
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.7 [39m[90m/mnt/data/compact-emr/infra[39m
+
+No test files found, exiting with code 0
+
+[2minclude: [22m[33m**/*.{test,spec}.?(c|m)[jt]s?(x)[39m
+[2mexclude:  [22m[33m**/node_modules/**[2m, [22m**/.git/**[39m
+

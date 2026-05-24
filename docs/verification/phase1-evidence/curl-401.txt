@@ -1,0 +1,11 @@
+$ curl -s -i http://localhost:3017/api/v1/health
+HTTP/1.1 401 Unauthorized
+X-Powered-By: Express
+Content-Type: application/json; charset=utf-8
+Content-Length: 32
+ETag: W/"20-FZW4F2HGVfOSxtkVpX/RIBTrl98"
+Date: Sat, 23 May 2026 02:47:23 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+
+{"error":"missing_bearer_token"}

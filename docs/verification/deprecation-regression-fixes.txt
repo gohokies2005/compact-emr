@@ -1,0 +1,9 @@
+Deprecation/regression verification
+
+Applied requested changes only:
+1. frontend-stack.ts now uses origins.S3BucketOrigin.withOriginAccessControl(siteBucket); no OAI or manual CloudFront canonical-user bucket policy remains.
+2. frontend-stack.ts now uses acm.Certificate with CertificateValidation.fromDns(hostedZone); no DnsValidatedCertificate remains.
+3. api-stack.ts and auth-stack.ts use explicit logs.LogGroup resources passed via the NodejsFunction logGroup prop; logRetention prop removed.
+4. Region defaults and workflows now use us-east-1 throughout.
+
+npm run cdk:synth:staging succeeded with zero deprecation warnings.

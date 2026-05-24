@@ -1,0 +1,15 @@
+{
+  "UserPoolDefaults": {
+    "UsernameAttributes": ["email"],
+    "AutoVerifiedAttributes": ["email"],
+    "Policies": {
+      "PasswordPolicy": {
+        "MinimumLength": 12,
+        "RequireUppercase": true,
+        "RequireLowercase": true,
+        "RequireNumbers": true,
+        "RequireSymbols": true
+      }
+    }
+  }
+}

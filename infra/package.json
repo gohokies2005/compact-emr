@@ -1,0 +1,34 @@
+{
+  "name": "infra",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "compact-emr": "bin/compact-emr.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "cdk": "cdk"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "latest",
+    "constructs": "latest",
+    "source-map-support": "latest",
+    "@aws-sdk/client-cognito-identity-provider": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "aws-cdk": "latest",
+    "eslint": "latest",
+    "@eslint/js": "latest",
+    "typescript": "latest",
+    "typescript-eslint": "latest",
+    "ts-node": "latest",
+    "vitest": "latest",
+    "esbuild": "latest",
+    "tsx": "latest"
+  }
+}

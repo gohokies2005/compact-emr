@@ -1,0 +1,21 @@
+{
+  "app": "npx tsx bin/compact-emr.ts",
+  "context": {
+    "staging": {
+      "domainName": "emr.flatratenexus.com",
+      "apiDomainName": "api.emr.flatratenexus.com",
+      "hostedZoneName": "emr.flatratenexus.com",
+      "hostedZoneId": "Z04954742POTN645MPHSZ",
+      "envName": "staging",
+      "deletionProtection": false
+    },
+    "prod": {
+      "domainName": "emr.flatratenexus.com",
+      "apiDomainName": "api.emr.flatratenexus.com",
+      "hostedZoneName": "emr.flatratenexus.com",
+      "hostedZoneId": "Z04954742POTN645MPHSZ",
+      "envName": "prod",
+      "deletionProtection": true
+    }
+  }
+}

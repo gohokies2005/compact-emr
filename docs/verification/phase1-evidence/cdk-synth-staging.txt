@@ -1,0 +1,21 @@
+
+> compact-emr@0.0.0 cdk:synth:staging
+> npm run cdk -w infra -- synth --context env=staging
+
+
+> infra@0.0.0 cdk
+> cdk synth --context env=staging
+
+Bundling asset compact-emr-staging-auth/BreakGlassMfaResetFunction/Code/Stage...
+
+  ...bcc0b80c765a02199e37e1ebc89240be0fdddd17b13ee33b-building/index.js  1.9kb
+
+⚡ Done in 15ms
+Bundling asset compact-emr-staging-api/PlaceholderApiLambda/Code/Stage...
+
+  ...9935f64ee26a84638c5eef72ccda65c3d3ffff1d8e2850-building/index.js  1.2mb ⚠️
+
+⚡ Done in 123ms
+Successfully synthesized to /mnt/data/compact-emr/infra/cdk.out
+Supply a stack id (compact-emr-staging-network, compact-emr-staging-database, compact-emr-staging-storage, compact-emr-staging-auth, compact-emr-staging-queue, compact-emr-staging-api, compact-emr-staging-frontend) to display its template.
+79 feature flags are not configured. Run 'cdk flags --unstable=flags' to learn more.

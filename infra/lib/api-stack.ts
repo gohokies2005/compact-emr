@@ -102,6 +102,11 @@ export class ApiStack extends Stack {
       vpc: props.vpc,
       subnetSelection: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [fnSg],
+      source: codebuild.Source.gitHub({
+        owner: 'gohokies2005',
+        repo: 'compact-emr',
+        cloneDepth: 1,
+      }),
       environment: {
         buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
         computeType: codebuild.ComputeType.SMALL,
@@ -115,8 +120,12 @@ export class ApiStack extends Stack {
         version: '0.2',
         phases: {
           install: { commands: ['npm ci'] },
-          pre_build: { commands: ['echo "DATABASE_URL is read by migration wrapper from Secrets Manager at runtime"'] },
-          build: { commands: ['npm run db:migrate:deploy'] },
+          build: {
+            commands: [
+              'chmod +x scripts/codebuild-prisma-migrate.sh',
+              './scripts/codebuild-prisma-migrate.sh',
+            ],
+          },
         },
       }),
     });

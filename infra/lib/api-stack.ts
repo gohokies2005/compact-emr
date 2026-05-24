@@ -17,6 +17,7 @@ import {
   aws_s3 as s3,
   aws_secretsmanager as secretsmanager,
   aws_codebuild as codebuild,
+  aws_iam as iam,
   aws_sqs as sqs,
 } from 'aws-cdk-lib';
 import type { CompactEmrConfig } from './config.js';
@@ -130,6 +131,17 @@ export class ApiStack extends Stack {
       }),
     });
     props.databaseSecret.grantRead(migrationProject);
+    migrationProject.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'codeconnections:UseConnection',
+        'codestar-connections:UseConnection',
+      ],
+      resources: [
+        `arn:aws:codeconnections:${this.region}:${this.account}:connection/*`,
+        `arn:aws:codestar-connections:${this.region}:${this.account}:connection/*`,
+      ],
+    }));
     new ec2.CfnSecurityGroupIngress(this, 'DatabaseIngressFromMigrationCodeBuild', {
       groupId: props.databaseSecurityGroup.securityGroupId,
       ipProtocol: 'tcp',

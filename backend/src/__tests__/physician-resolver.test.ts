@@ -46,6 +46,7 @@ function buildDb(physiciansByCognitoSub: Record<string, PhysicianRecord>): AppDb
     activeProblem: {} as never,
     activeMedication: {} as never,
     signOff: {} as never,
+    clarification: {} as never,
     $transaction: (async (fn: (tx: never) => unknown) => fn({} as never)) as never,
   };
 }

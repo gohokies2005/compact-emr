@@ -140,6 +140,7 @@ export interface AppDbTransaction {
   activeProblem: ActiveProblemDelegate;
   activeMedication: ActiveMedicationDelegate;
   signOff: SignOffDelegate;
+  clarification: ClarificationDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -302,4 +303,32 @@ export interface SignOffDelegate {
   findFirst(args: unknown): Promise<SignOffRecord | null>;
   findMany(args: unknown): Promise<readonly SignOffRecord[]>;
   create(args: unknown): Promise<SignOffRecord>;
+}
+
+// ====================== Phase 5: Clarification queue ======================
+
+export type ClarificationAudience = 'physician' | 'ops_staff' | 'veteran';
+export type ClarificationStatus = 'open' | 'resolved' | 'dismissed';
+
+export interface ClarificationRecord {
+  id: string;
+  caseId: string;
+  raisedBy: string;
+  audience: ClarificationAudience;
+  question: string;
+  status: ClarificationStatus;
+  resolution: string | null;
+  resolvedBy: string | null;
+  resolvedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface ClarificationDelegate {
+  findUnique(args: unknown): Promise<ClarificationRecord | null>;
+  findFirst(args: unknown): Promise<ClarificationRecord | null>;
+  findMany(args: unknown): Promise<readonly ClarificationRecord[]>;
+  create(args: unknown): Promise<ClarificationRecord>;
+  update(args: unknown): Promise<ClarificationRecord>;
 }

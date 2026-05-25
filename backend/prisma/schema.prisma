@@ -471,3 +471,23 @@ model SignOff {
   @@index([signedAt])
   @@map("sign_offs")
 }
+
+model Clarification {
+  id          String    @id @default(uuid())
+  caseId      String    @map("case_id")
+  raisedBy    String    @map("raised_by")
+  audience    String    @db.VarChar(20)
+  question    String
+  status      String    @default("open") @db.VarChar(20)
+  resolution  String?
+  resolvedBy  String?   @map("resolved_by")
+  resolvedAt  DateTime? @map("resolved_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version     Int       @default(1)
+
+  @@index([caseId])
+  @@index([status])
+  @@index([audience])
+  @@map("clarifications")
+}

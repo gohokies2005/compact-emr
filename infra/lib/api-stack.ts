@@ -120,7 +120,10 @@ export class ApiStack extends Stack {
       buildSpec: codebuild.BuildSpec.fromObject({
         version: '0.2',
         phases: {
-          install: { commands: ['npm ci'] },
+          install: {
+            'runtime-versions': { nodejs: '20' },
+            commands: ['npm ci'],
+          },
           build: {
             commands: [
               'chmod +x scripts/codebuild-prisma-migrate.sh',

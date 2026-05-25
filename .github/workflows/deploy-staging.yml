@@ -31,6 +31,22 @@ jobs:
       - run: npm run cdk:synth:staging
       - run: npm run cdk -w infra -- deploy --all --require-approval never --context env=staging
 
+      - name: Apply database migrations
+        run: |
+          set -e
+          # Use start-build (current project config), NOT retry-build (replays the old buildspec).
+          BUILD_ID=$(aws codebuild start-build --project-name compact-emr-staging-prisma-migrate-deploy --region us-east-1 --query 'build.id' --output text)
+          echo "Started migration build: $BUILD_ID"
+          while true; do
+            STATUS=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --region us-east-1 --query 'builds[0].buildStatus' --output text)
+            echo "Migration build status: $STATUS"
+            case "$STATUS" in
+              SUCCEEDED) echo "::notice::Database migrations applied"; break ;;
+              FAILED|FAULT|STOPPED|TIMED_OUT) echo "::error::Migration build $STATUS"; exit 1 ;;
+              *) sleep 15 ;;
+            esac
+          done
+
       - run: npm run build -w frontend
         env:
           VITE_AWS_REGION: ${{ secrets.VITE_AWS_REGION }}

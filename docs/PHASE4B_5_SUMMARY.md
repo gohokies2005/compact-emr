@@ -4,15 +4,16 @@ Built by Claude Code against `main` (on top of 4B-4). Two commits:
 1. `fix(ci): generate prisma client in CI + let documents.ts infer real types`
 2. `feat(backend): Phase 4B-5 chart notes`
 
-## ⚠️ DEPLOY ACTION REQUIRED (Ryan) — run the migration
+## Migration deployment — now automated (no manual step)
 
-This adds a new table. After the push deploys to staging, **the `chart_notes` table is NOT created until the migration runs.** Per DEPLOY.md, migrations do **not** auto-apply — run the CodeBuild project manually from CloudShell:
+This adds a new table. The staging deploy workflow (`deploy-staging.yml`) now runs the
+`compact-emr-staging-prisma-migrate-deploy` CodeBuild project automatically after `cdk deploy`
+(via `aws codebuild start-build` + poll), so `chart_notes` is created as part of the deploy —
+no manual CloudShell command. The migration step uses **start-build** (current config), not
+"Retry build" (the Phase-2 hard lesson), and fails the deploy if the migration fails.
 
-```
-aws codebuild start-build --project-name compact-emr-staging-prisma-migrate-deploy --region us-east-1
-```
-
-Use **"Start build"** (from the project page), NOT "Retry build" (the Phase-2 hard lesson). Local AWS creds are dead on this laptop, so I can't run it. Verify `chart_notes` exists afterward.
+The only gate is the existing **staging-environment reviewer approval** before the deploy runs.
+(deploy-prod.yml is manual `workflow_dispatch` and not yet exercised; mirror this step there when prod goes live.)
 
 ## Chart notes — new / modified files
 

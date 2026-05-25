@@ -454,3 +454,20 @@ model ChartNote {
   @@index([createdAt])
   @@map("chart_notes")
 }
+
+model SignOff {
+  id          String   @id @default(uuid())
+  caseId      String   @map("case_id")
+  physicianId String   @map("physician_id")
+  signedAt    DateTime @default(now()) @map("signed_at") @db.Timestamptz(6)
+  answersJson Json     @map("answers_json")
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version     Int      @default(1)
+
+  @@index([caseId])
+  @@index([physicianId])
+  @@index([signedAt])
+  @@map("sign_offs")
+}

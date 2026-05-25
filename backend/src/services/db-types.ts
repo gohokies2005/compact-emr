@@ -139,6 +139,7 @@ export interface AppDbTransaction {
   chartNote: ChartNoteDelegate;
   activeProblem: ActiveProblemDelegate;
   activeMedication: ActiveMedicationDelegate;
+  signOff: SignOffDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -280,4 +281,25 @@ export interface ActiveMedicationDelegate {
   create(args: unknown): Promise<ActiveMedicationRecord>;
   update(args: unknown): Promise<ActiveMedicationRecord>;
   delete(args: unknown): Promise<ActiveMedicationRecord>;
+}
+
+// ====================== Phase 5: SignOff ======================
+
+export interface SignOffRecord {
+  id: string;
+  caseId: string;
+  physicianId: string;
+  signedAt: Date;
+  answersJson: Record<string, unknown>;
+  notes: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface SignOffDelegate {
+  findUnique(args: unknown): Promise<SignOffRecord | null>;
+  findFirst(args: unknown): Promise<SignOffRecord | null>;
+  findMany(args: unknown): Promise<readonly SignOffRecord[]>;
+  create(args: unknown): Promise<SignOffRecord>;
 }

@@ -28,6 +28,10 @@ A deterministic, reproducible Clinical Decision Support verdict, grounded in BVA
 - `cdsRationale` carries the exact pair, `n`, `tier`, `imo_win_pct`/`win_pct`, and which gate fired — auditable.
 - Honest limits by design: the structured odds cover **secondary** claims (the atlas is upstream→claimed); direct/aggravation lean on the hard-gates and otherwise return `caution` (refer to gate). Nuanced no's (onset timing, age-typical progression) still need the gate/physician — Layer A only catches *structural* no's.
 
+## Stress test (Ryan: "prefer rare false-viables over over-screening")
+
+`cds-stress.test.ts` runs **722 cases** (every BVA pair clean + a deliberately messy phrasing variant + hard-no's + fuzz/edge). Initial run exposed **338 false-non-viables** — the strict SC-anchor matcher over-rejected real-world phrasing. Loosened the anchor gate to "shares any meaningful (non-stopword) token ⇒ anchored; hard-reject only on a clear zero-overlap mismatch." Result: **0 crashes, 0 false-non-viables, reject dropped 346 → 9** (the genuine hard-no's + sub-50% odds). Distribution accept 256 / caution 457 / reject 9 — loose, not over-screening. The stress test is a committed regression guard (asserts 0 crashes + 0 false-non-viables).
+
 ## Verification (local; evidence under `docs/verification/phase5-cds-evidence/`)
 
 - backend `tsc --noEmit` → 0 · `lint`/`typecheck` (root) → 0 · `migrate:check`/`migrate:diff-check` → 0 (no schema change)

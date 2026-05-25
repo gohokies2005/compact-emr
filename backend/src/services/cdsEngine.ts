@@ -106,8 +106,22 @@ function matchKey(input: string | null | undefined, keys: readonly string[]): st
   return null;
 }
 
-function matchesAny(input: string, candidates: readonly string[]): boolean {
-  return matchKey(input, candidates) !== null;
+// Descriptor noise that should not count as a "shared concept" between conditions.
+const STOPWORDS = new Set(['service', 'connected', 'secondary', 'residuals', 'chronic', 'disorder', 'disorders', 'syndrome', 'disease', 'condition', 'conditions', 'rated', 'percent', 'left', 'right', 'bilateral', 'acute', 'claimed', 'confirmed', 'due', 'status', 'post', 'history', 'the', 'and', 'with', 'for', 'mild', 'moderate', 'severe', 'unspecified', 'exam', 'and', 'related', 'other', 'general']);
+
+function conceptTokens(value: string): string[] {
+  const norm = normalize(value);
+  const aliased = ALIASES[norm] ?? norm;
+  return significantTokens(aliased).filter((t) => !STOPWORDS.has(t));
+}
+
+// LOOSE anchor test (Ryan: prefer rare false-viables over over-screening viable cases). The upstream
+// condition counts as service-connected if it shares ANY meaningful (non-stopword) token with any of
+// the veteran's SC conditions. Only a CLEAR mismatch (zero overlap) hard-rejects.
+function hasScAnchor(upstream: string, scConditions: readonly string[]): boolean {
+  const up = new Set(conceptTokens(upstream));
+  if (up.size === 0) return scConditions.length > 0; // upstream is all-descriptor: don't reject if any SC exists
+  return scConditions.some((sc) => conceptTokens(sc).some((t) => up.has(t)));
 }
 
 // Direct-causation theories the VA bars by statute (no nexus can rescue them).
@@ -141,7 +155,7 @@ export function evaluateCds(input: CdsEngineInput): CdsResult {
   if (input.activeProblems.length === 0) {
     return { ...base, verdict: 'reject', oddsPct: null, summary: 'Recommend reject: no diagnosis on file for any condition. A current diagnosis is required.', hardGate: { triggered: true, rule: 'no_diagnosis', detail: 'The veteran has no active problems / diagnoses recorded.' }, bva };
   }
-  if (isSecondary && input.upstreamScCondition && !matchesAny(input.upstreamScCondition, input.serviceConnectedConditions)) {
+  if (isSecondary && input.upstreamScCondition && !hasScAnchor(input.upstreamScCondition, input.serviceConnectedConditions)) {
     const detail = `Secondary claim, but the upstream condition "${input.upstreamScCondition}" is not among the veteran's service-connected conditions.`;
     return { ...base, verdict: 'reject', oddsPct: null, summary: `Recommend reject: ${detail}`, hardGate: { triggered: true, rule: 'no_sc_anchor', detail }, bva };
   }

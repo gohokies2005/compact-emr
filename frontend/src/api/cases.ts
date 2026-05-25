@@ -142,3 +142,90 @@ export interface CdsResult {
 export async function runCds(id: string): Promise<{ data: CdsResult }> {
   return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/cds`, {});
 }
+
+// === Phase 6 sign-off ===
+
+export type SignOffQuestionKey =
+  | 'records_reviewed'
+  | 'diagnosis_documented'
+  | 'nexus_supported'
+  | 'no_phi_in_letter'
+  | 'final_pdf_correct';
+
+export type SignOffAnswers = Record<SignOffQuestionKey, boolean>;
+
+export interface SignOffInput {
+  readonly answers: SignOffAnswers;
+  readonly notes?: string;
+}
+
+export interface SignOff {
+  readonly id: string;
+  readonly caseId: string;
+  readonly physicianId: string;
+  readonly signedAt: string;
+  readonly answersJson: Partial<SignOffAnswers>;
+  readonly notes: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly version: number;
+}
+
+export async function signOffCase(id: string, input: SignOffInput): Promise<{ data: SignOff }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/sign-off`, input);
+}
+
+export async function listCaseSignOffs(id: string): Promise<{ data: readonly SignOff[] }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(id)}/sign-offs`);
+}
+
+// === Phase 6 clarifications ===
+
+export type ClarificationAudience = 'physician' | 'ops_staff' | 'veteran';
+export type ClarificationStatus = 'open' | 'resolved' | 'dismissed';
+
+export interface Clarification {
+  readonly id: string;
+  readonly caseId: string;
+  readonly audience: ClarificationAudience;
+  readonly status: ClarificationStatus;
+  readonly question: string;
+  readonly resolution: string | null;
+  readonly raisedBy: string;
+  readonly resolvedBy: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly resolvedAt: string | null;
+}
+
+export interface CreateClarificationInput {
+  readonly audience: ClarificationAudience;
+  readonly question: string;
+}
+
+export interface ResolveClarificationInput {
+  readonly status: 'resolved' | 'dismissed';
+  readonly resolution?: string;
+}
+
+export async function listClarifications(
+  id: string,
+  status?: ClarificationStatus,
+): Promise<{ data: readonly Clarification[] }> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+  return apiGet(`/api/v1/cases/${encodeURIComponent(id)}/clarifications${qs}`);
+}
+
+export async function createClarification(
+  id: string,
+  input: CreateClarificationInput,
+): Promise<{ data: Clarification }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/clarifications`, input);
+}
+
+export async function resolveClarification(
+  id: string,
+  input: ResolveClarificationInput,
+): Promise<{ data: Clarification }> {
+  return apiPatch(`/api/v1/clarifications/${encodeURIComponent(id)}/resolve`, input);
+}

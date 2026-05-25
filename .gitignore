@@ -6,6 +6,7 @@ coverage/
 .env.*
 !.env.example
 cdk.out/
+infra/cdk.context.json
 .DS_Store
 *.log
 .prisma/

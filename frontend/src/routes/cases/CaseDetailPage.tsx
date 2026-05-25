@@ -7,6 +7,9 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { TabBar, type TabItem } from '../../components/ui/TabBar';
 import { CdsPanelForCase } from '../../components/CdsPanel';
+import { SignOffPopup } from '../../components/SignOffPopup';
+import { ClarificationsPanel } from '../../components/ClarificationsPanel';
+import { listClarifications } from '../../api/cases';
 import { useAuth } from '../../auth/useAuth';
 import { ConflictError } from '../../api/client';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
@@ -17,11 +20,12 @@ import {
 } from '../../api/cases';
 import type { CaseStatus, Role } from '../../types/prisma';
 
-type TabId = 'overview' | 'drafts' | 'corrections' | 'documents' | 'activity';
+type TabId = 'overview' | 'drafts' | 'corrections' | 'clarifications' | 'documents' | 'activity';
 const TABS: readonly TabItem<TabId>[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'drafts', label: 'Draft jobs' },
   { id: 'corrections', label: 'Corrections' },
+  { id: 'clarifications', label: 'Clarifications' },
   { id: 'documents', label: 'Documents' },
   { id: 'activity', label: 'Activity' },
 ];
@@ -38,8 +42,15 @@ export function CaseDetailPage() {
   const qc = useQueryClient();
   const [tab, setTab] = useState<TabId>('overview');
   const [pendingTo, setPendingTo] = useState<CaseStatus | null>(null);
+  const [signOffOpen, setSignOffOpen] = useState(false);
 
   const caseQuery = useQuery({ queryKey: ['case', caseId], queryFn: () => getCase(caseId), enabled: caseId.length > 0 });
+  const openClarificationsQuery = useQuery({
+    queryKey: ['case', caseId, 'clarifications', 'open'],
+    queryFn: () => listClarifications(caseId, 'open'),
+    enabled: caseId.length > 0,
+  });
+  const openClarificationCount = openClarificationsQuery.data?.data.length ?? 0;
   const refetch = () => qc.invalidateQueries({ queryKey: ['case', caseId] });
 
   const patch = useMutation({
@@ -54,6 +65,13 @@ export function CaseDetailPage() {
   if (!caseQuery.data) return <AppShell><EmptyState title="Case not found" message="The requested case could not be loaded." /></AppShell>;
   const c = caseQuery.data.data;
   const nextStatuses = allowedNextStatusesForRole(role, c.status);
+  const canShowSignOff =
+    c.status === 'physician_review' && c.cdsVerdict !== 'reject' && (role === 'admin' || role === 'physician');
+  const tabsWithBadge = TABS.map((t) =>
+    t.id === 'clarifications' && openClarificationCount > 0
+      ? { ...t, label: `Clarifications (${openClarificationCount})` }
+      : t,
+  );
 
   return <AppShell><div className="space-y-6">
     <div className="rounded-lg border border-slate-200 bg-white p-6">
@@ -66,6 +84,7 @@ export function CaseDetailPage() {
           <p className="mt-1 text-xs text-slate-400">Updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
         </div>
         <div className="flex flex-wrap items-start gap-2">
+          {canShowSignOff ? <Button variant="primary" size="sm" onClick={() => setSignOffOpen(true)}>Sign off</Button> : null}
           {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>Move to {CASE_STATUS_LABELS[to].toLowerCase()}</Button>)}
           {role === 'admin' ? <Button variant="destructive" size="sm" onClick={() => { if (window.confirm('Reject and soft-delete this case? It will be marked rejected.')) del.mutate(); }} loading={del.isPending}>Reject + soft delete</Button> : null}
         </div>
@@ -75,17 +94,19 @@ export function CaseDetailPage() {
     <CdsPanelForCase c={c} />
 
     <div className="rounded-lg border border-slate-200 bg-white">
-      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+      <TabBar tabs={tabsWithBadge} active={tab} onChange={setTab} />
       <div className="p-4">
         {tab === 'overview' ? <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} /> : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
         {tab === 'corrections' ? <CorrectionsTab caseId={caseId} /> : null}
+        {tab === 'clarifications' ? <ClarificationsPanel caseId={caseId} /> : null}
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} /> : null}
         {tab === 'activity' ? <EmptyState title="Activity" message="The per-case activity log ships in a later phase." /> : null}
       </div>
     </div>
 
     {pendingTo ? <TransitionModal caseId={caseId} from={c.status} to={pendingTo} version={c.version} onClose={() => setPendingTo(null)} onDone={async () => { setPendingTo(null); await refetch(); }} /> : null}
+    <SignOffPopup caseId={caseId} open={signOffOpen} onClose={() => setSignOffOpen(false)} onSignedOff={refetch} />
   </div></AppShell>;
 }
 

@@ -135,7 +135,11 @@ export class ApiStack extends Stack {
       effect: iam.Effect.ALLOW,
       actions: [
         'codeconnections:UseConnection',
+        'codeconnections:GetConnection',
+        'codeconnections:GetConnectionToken',
         'codestar-connections:UseConnection',
+        'codestar-connections:GetConnection',
+        'codestar-connections:GetConnectionToken',
       ],
       resources: [
         `arn:aws:codeconnections:${this.region}:${this.account}:connection/*`,

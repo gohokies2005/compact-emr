@@ -1,4 +1,4 @@
-import * as path from 'node:path';
+﻿import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as cdk from 'aws-cdk-lib';
 import { Duration, Stack, type StackProps } from 'aws-cdk-lib';
@@ -107,6 +107,12 @@ export class ApiStack extends Stack {
         owner: 'gohokies2005',
         repo: 'compact-emr',
         cloneDepth: 1,
+        webhook: true,
+        webhookFilters: [
+          codebuild.FilterGroup.inEventOf(codebuild.EventAction.PUSH)
+            .andBranchIs('main')
+            .andFilePathIs('backend/prisma/migrations/.*'),
+        ],
       }),
       environment: {
         buildImage: codebuild.LinuxBuildImage.AMAZON_LINUX_2023_5,

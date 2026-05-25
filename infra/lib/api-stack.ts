@@ -121,8 +121,7 @@ export class ApiStack extends Stack {
         version: '0.2',
         phases: {
           install: {
-            'runtime-versions': { nodejs: '20' },
-            commands: ['npm ci'],
+            commands: ['dnf install -y postgresql15 jq'],
           },
           build: {
             commands: [

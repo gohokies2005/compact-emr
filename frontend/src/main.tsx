@@ -1,18 +1,14 @@
 import React from 'react';
-import { createRoot } from 'react-dom/client';
-import './styles.css';
+import ReactDOM from 'react-dom/client';
+import { Amplify } from 'aws-amplify';
+import { amplifyConfig } from './auth/AmplifyConfig';
+import { App } from './App';
+import './styles/globals.css';
 
-function App() {
-  return (
-    <main className="app-shell">
-      <h1>Compact EMR</h1>
-      <p>Phase 0 frontend placeholder. UI scaffolding begins in Phase 2.</p>
-    </main>
-  );
-}
+Amplify.configure(amplifyConfig);
 
-createRoot(document.getElementById('root')!).render(
+ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
     <App />
-  </React.StrictMode>,
+  </React.StrictMode>
 );

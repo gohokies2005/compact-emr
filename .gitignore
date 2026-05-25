@@ -11,3 +11,4 @@ cdk.out/
 .prisma/
 .vscode/
 .idea/
+*.tsbuildinfo

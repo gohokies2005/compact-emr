@@ -29,3 +29,20 @@ jobs:
       - run: npm ci
       - run: npm run cdk:synth:staging
       - run: npm run cdk -w infra -- deploy --all --require-approval never --context env=staging
+
+      - run: npm run build -w frontend
+        env:
+          VITE_AWS_REGION: ${{ secrets.VITE_AWS_REGION }}
+          VITE_COGNITO_USER_POOL_ID: ${{ secrets.VITE_COGNITO_USER_POOL_ID }}
+          VITE_COGNITO_CLIENT_ID: ${{ secrets.VITE_COGNITO_CLIENT_ID }}
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+          VITE_USE_MOCK_API: ${{ secrets.VITE_USE_MOCK_API }}
+      - name: Read frontend stack outputs
+        id: frontend_outputs
+        run: |
+          FRONTEND_BUCKET=$(aws cloudformation describe-stacks --stack-name compact-emr-staging-frontend --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text)
+          DISTRIBUTION_ID=$(aws cloudformation describe-stacks --stack-name compact-emr-staging-frontend --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue" --output text)
+          echo "frontend_bucket=$FRONTEND_BUCKET" >> "$GITHUB_OUTPUT"
+          echo "distribution_id=$DISTRIBUTION_ID" >> "$GITHUB_OUTPUT"
+      - run: aws s3 sync frontend/dist s3://${{ steps.frontend_outputs.outputs.frontend_bucket }} --delete
+      - run: aws cloudfront create-invalidation --distribution-id ${{ steps.frontend_outputs.outputs.distribution_id }} --paths "/*"

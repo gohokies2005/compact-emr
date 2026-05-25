@@ -1,4 +1,4 @@
-import { RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
+import { CfnOutput, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { aws_certificatemanager as acm, aws_cloudfront as cloudfront, aws_cloudfront_origins as origins, aws_route53 as route53, aws_route53_targets as targets, aws_s3 as s3 } from 'aws-cdk-lib';
 import type { CompactEmrConfig } from './config.js';
@@ -46,6 +46,16 @@ export class FrontendStack extends Stack {
       zone: hostedZone,
       recordName: props.config.domainName,
       target: route53.RecordTarget.fromAlias(new targets.CloudFrontTarget(distribution)),
+    });
+
+    new CfnOutput(this, 'FrontendBucketName', {
+      value: siteBucket.bucketName,
+      exportName: `compact-emr-${props.config.envName}-frontend-bucket-name`,
+    });
+
+    new CfnOutput(this, 'DistributionId', {
+      value: distribution.distributionId,
+      exportName: `compact-emr-${props.config.envName}-distribution-id`,
     });
   }
 }

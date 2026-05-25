@@ -16,6 +16,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+
+      - run: npm run lint -w frontend
+      - run: npm run typecheck -w frontend
+      - run: npm run test -w frontend
       - run: npm run typecheck
       - run: npm run migrate:check
       - run: npm run migrate:diff-check

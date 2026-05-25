@@ -1,0 +1,7 @@
+## backend tsc --noEmit
+exit 0
+## npm test (all)
+[2m Test Files [22m [1m[32m11 passed[39m[22m[90m (11)[39m
+[2m      Tests [22m [1m[32m18 passed[39m[22m[90m (18)[39m
+ Test Files  9 passed (9)
+      Tests  61 passed (61)

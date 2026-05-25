@@ -90,6 +90,16 @@ export class ApiStack extends Stack {
         DATABASE_URL: databaseUrl,
         DATABASE_URL_SECRET_ARN: props.databaseSecret.secretArn,
       },
+      bundling: {
+        nodeModules: ['@prisma/client', 'prisma'],
+        commandHooks: {
+          beforeBundling: (inputDir, outputDir) => [
+            'cp -R ' + inputDir + '/backend/prisma ' + outputDir + '/',
+          ],
+          afterBundling: () => [],
+          beforeInstall: () => [],
+        },
+      }
     });
 
     props.phiBucket.grantReadWrite(handler);

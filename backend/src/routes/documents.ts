@@ -72,7 +72,7 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
         version: true,
       },
     });
-    res.json({ data: documents.map((doc: { sizeBytes: bigint } & Record<string, unknown>) => ({ ...doc, sizeBytes: doc.sizeBytes.toString() })) });
+    res.json({ data: documents.map((doc) => ({ ...doc, sizeBytes: doc.sizeBytes.toString() })) });
   });
 
   router.post('/veterans/:id/documents/presign', requireRole(['admin', 'ops_staff']), async (req: Request, res: Response) => {
@@ -134,7 +134,7 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     if (!owningCase) return error(res, 404, 'case_not_found', 'Case was not found for this veteran.');
 
     const actorUserId = req.user?.sub;
-    const created = await prisma.$transaction(async (tx: PrismaClient) => {
+    const created = await prisma.$transaction(async (tx) => {
       const document = await tx.document.create({
         data: {
           caseId,
@@ -180,7 +180,7 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     if (!document) return error(res, 404, 'document_not_found', 'Document was not found.');
 
     await s3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: document.s3Key }));
-    await prisma.$transaction(async (tx: PrismaClient) => {
+    await prisma.$transaction(async (tx) => {
       await tx.document.delete({ where: { id: document.id } });
       await tx.activityLog.create({
         data: {

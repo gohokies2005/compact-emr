@@ -91,13 +91,16 @@ export class ApiStack extends Stack {
         DATABASE_URL_SECRET_ARN: props.databaseSecret.secretArn,
       },
       bundling: {
-        nodeModules: ['@prisma/client', 'prisma'],
+        externalModules: ['@prisma/client', '@prisma/engines'],
         commandHooks: {
-          beforeBundling: (inputDir, outputDir) => [
+          beforeBundling: () => [],
+          beforeInstall: () => [],
+          afterBundling: (inputDir, outputDir) => [
+            'mkdir -p ' + outputDir + '/node_modules',
+            'cp -R ' + inputDir + '/backend/node_modules/@prisma ' + outputDir + '/node_modules/',
+            'cp -R ' + inputDir + '/backend/node_modules/.prisma ' + outputDir + '/node_modules/',
             'cp -R ' + inputDir + '/backend/prisma ' + outputDir + '/',
           ],
-          afterBundling: () => [],
-          beforeInstall: () => [],
         },
       }
     });

@@ -1,5 +1,5 @@
 import { createContext, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { confirmSignIn as amplifyConfirmSignIn, fetchAuthSession, fetchUserAttributes, getCurrentUser, signIn as amplifySignIn, signOut as amplifySignOut, setUpTOTP, verifyTOTPSetup } from 'aws-amplify/auth';
+import { confirmSignIn as amplifyConfirmSignIn, fetchAuthSession, fetchUserAttributes, getCurrentUser, signIn as amplifySignIn, signOut as amplifySignOut } from 'aws-amplify/auth';
 import type { Role } from '../types/prisma';
 
 export interface AuthUser { readonly sub: string; readonly email: string; readonly roles: readonly Role[]; readonly role: Role; }
@@ -91,13 +91,16 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
     setTotpSetupDetails(null);
   }, []);
 
-  const completeIfSignedIn = useCallback(async (step: AuthStep) => {
+  const applyNextStep = useCallback(async (nextStep: { signInStep: string; totpSetupDetails?: { sharedSecret?: string; getSetupUri?: (appName: string) => URL } }) => {
+    const step = nextStepToAuthStep(nextStep.signInStep);
     setChallengeStep(step);
     if (step === 'mfa_setup') {
-      const setup = await setUpTOTP();
-      const sharedSecret = 'sharedSecret' in setup ? setup.sharedSecret : undefined;
-      const uri = typeof setup.getSetupUri === 'function' ? setup.getSetupUri('Compact EMR').toString() : undefined;
-      setTotpSetupDetails({ sharedSecret, uri });
+      const totp = nextStep.totpSetupDetails;
+      if (totp) {
+        const sharedSecret = totp.sharedSecret;
+        const uri = typeof totp.getSetupUri === 'function' ? totp.getSetupUri('Compact EMR').toString() : undefined;
+        setTotpSetupDetails({ sharedSecret, uri });
+      }
       return;
     }
     if (step === 'signed_in') await refreshUser();
@@ -105,24 +108,23 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
 
   const signIn = useCallback(async (email: string, password: string) => {
     const result = await amplifySignIn({ username: email, password });
-    await completeIfSignedIn(nextStepToAuthStep(result.nextStep.signInStep));
-  }, [completeIfSignedIn]);
+    await applyNextStep(result.nextStep as unknown as Parameters<typeof applyNextStep>[0]);
+  }, [applyNextStep]);
 
   const confirmNewPassword = useCallback(async (password: string) => {
     const result = await amplifyConfirmSignIn({ challengeResponse: password });
-    await completeIfSignedIn(nextStepToAuthStep(result.nextStep.signInStep));
-  }, [completeIfSignedIn]);
+    await applyNextStep(result.nextStep as unknown as Parameters<typeof applyNextStep>[0]);
+  }, [applyNextStep]);
 
   const confirmMfaCode = useCallback(async (code: string) => {
     const result = await amplifyConfirmSignIn({ challengeResponse: code });
-    await completeIfSignedIn(nextStepToAuthStep(result.nextStep.signInStep));
-  }, [completeIfSignedIn]);
+    await applyNextStep(result.nextStep as unknown as Parameters<typeof applyNextStep>[0]);
+  }, [applyNextStep]);
 
   const confirmTotpSetup = useCallback(async (code: string) => {
-    await verifyTOTPSetup({ code });
     const result = await amplifyConfirmSignIn({ challengeResponse: code });
-    await completeIfSignedIn(nextStepToAuthStep(result.nextStep.signInStep));
-  }, [completeIfSignedIn]);
+    await applyNextStep(result.nextStep as unknown as Parameters<typeof applyNextStep>[0]);
+  }, [applyNextStep]);
 
   const value = useMemo<AuthContextValue>(() => ({
     user,

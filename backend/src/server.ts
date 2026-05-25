@@ -8,6 +8,7 @@ import { createDocumentsRouter } from './routes/documents.js';
 import { createCasesRouter } from './routes/cases.js';
 import { createChartNotesRouter } from './routes/chart-notes.js';
 import { createCdsRouter } from './routes/cds.js';
+import { createLookupRouter } from './routes/lookup.js';
 import type { AppDb } from './services/db-types.js';
 
 export interface CreateAppOptions {
@@ -29,6 +30,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createCasesRouter(db));
   app.use('/api/v1', authenticateJwt(), createChartNotesRouter(db));
   app.use('/api/v1', authenticateJwt(), createCdsRouter(db));
+  app.use('/api/v1', authenticateJwt(), createLookupRouter());
 
   app.use((req, res) => {
     sendError(res, 404, 'not_found', 'Route was not found.');

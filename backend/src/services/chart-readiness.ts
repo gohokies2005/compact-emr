@@ -23,7 +23,7 @@ const MIN_WORDS_FOR_READ = 40;
 const GARBLED_RATIO_THRESHOLD = 0.08;
 const MANUAL_SUMMARY_MIN_LENGTH = 40;
 
-const CLEAN_CODE_PATTERN = /^(?:[A-Z]\d{1,2}(?:[.\-]\d{1,3}[A-Z]?){0,3}|L\d-L\d|S\d-S\d|T\d{1,2}-T\d{1,2}|C\d-C\d)$/;
+const CLEAN_CODE_PATTERN = /^(?:[A-Z]\d{1,2}(?:[.-]\d{1,3}[A-Z]?){0,3}|L\d-L\d|S\d-S\d|T\d{1,2}-T\d{1,2}|C\d-C\d)$/;
 const TOKEN_SPLIT = /[\s,;:()[\]{}!?"'`]+/;
 const LETTER_BEARING = /[A-Za-z]/;
 const EMBEDDED_SYMBOL_IN_LETTERS = /(?:[A-Za-z][^A-Za-z0-9\s][A-Za-z])|(?:[A-Za-z][0-9\W]+[A-Za-z][0-9\W]+[A-Za-z])/;

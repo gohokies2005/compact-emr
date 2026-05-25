@@ -1,0 +1,10 @@
+--- a/backend/src/server.ts
++++ b/backend/src/server.ts
+@@
+ import { createVeteransRouter } from './routes/veterans';
+ import { createDocumentsRouter } from './routes/documents';
++import { createCasesRouter } from './routes/cases';
+@@
+ app.use('/api/v1', createVeteransRouter(defaultPrisma));
+ app.use('/api/v1', createDocumentsRouter());
++app.use('/api/v1', createCasesRouter(defaultPrisma));

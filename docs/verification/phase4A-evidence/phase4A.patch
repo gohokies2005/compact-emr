@@ -1,0 +1,2519 @@
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ backend/src/__tests__/case-status-transitions.test.ts	2026-05-25 07:03:29.069338839 +0000
+@@ -0,0 +1,37 @@
++import { describe, expect, it } from 'vitest';
++import {
++  CASE_STATUS_TRANSITIONS,
++  canRolePerformCaseStatusTransition,
++} from '../services/case-status-transitions';
++
++describe('case status transitions', () => {
++  it('terminal states accept zero outgoing transitions', () => {
++    expect(CASE_STATUS_TRANSITIONS.paid).toEqual([]);
++    expect(CASE_STATUS_TRANSITIONS.rejected).toEqual([]);
++  });
++
++  it('matches the full non-terminal transition table', () => {
++    expect(CASE_STATUS_TRANSITIONS.intake).toEqual(['records', 'rejected']);
++    expect(CASE_STATUS_TRANSITIONS.records).toEqual(['viability', 'rejected']);
++    expect(CASE_STATUS_TRANSITIONS.viability).toEqual(['drafting', 'rejected']);
++    expect(CASE_STATUS_TRANSITIONS.drafting).toEqual(['physician_review', 'rejected']);
++    expect(CASE_STATUS_TRANSITIONS.physician_review).toEqual([
++      'correction_requested',
++      'delivered',
++      'rejected',
++    ]);
++    expect(CASE_STATUS_TRANSITIONS.correction_requested).toEqual(['correction_review']);
++    expect(CASE_STATUS_TRANSITIONS.correction_review).toEqual(['delivered', 'rejected']);
++    expect(CASE_STATUS_TRANSITIONS.delivered).toEqual(['paid']);
++  });
++
++  it('rejects ops_staff attempting physician_review to delivered', () => {
++    expect(canRolePerformCaseStatusTransition('ops_staff', 'physician_review', 'delivered')).toBe(false);
++  });
++
++  it('allows admin on any transition', () => {
++    expect(canRolePerformCaseStatusTransition('admin', 'paid', 'rejected')).toBe(true);
++    expect(canRolePerformCaseStatusTransition('admin', 'physician_review', 'delivered')).toBe(true);
++    expect(canRolePerformCaseStatusTransition('admin', 'delivered', 'paid')).toBe(true);
++  });
++});
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ backend/src/__tests__/cases-routes.test.ts	2026-05-25 07:03:29.082000080 +0000
+@@ -0,0 +1,310 @@
++import express from 'express';
++import request from 'supertest';
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { createCasesRouter } from '../routes/cases';
++import type { AppDb, AppDbTransaction, AppUserRecord, CaseRecord } from '../services/db-types';
++
++let mockUser: AppUserRecord | undefined;
++
++vi.mock('../middleware/auth', () => ({
++  authenticateJwt: (req: express.Request, res: express.Response, next: express.NextFunction) => {
++    if (mockUser === undefined) {
++      res.status(401).json({ error: { code: 'unauthorized', message: 'Authentication required' } });
++      return;
++    }
++    (req as express.Request & { user?: AppUserRecord }).user = mockUser;
++    next();
++  },
++}));
++
++vi.mock('../auth/roles', () => ({
++  requireRole:
++    (roles: readonly string[]) =>
++    (req: express.Request, res: express.Response, next: express.NextFunction) => {
++      const user = (req as express.Request & { user?: AppUserRecord }).user;
++      if (user === undefined) {
++        res.status(401).json({ error: { code: 'unauthorized', message: 'Authentication required' } });
++        return;
++      }
++      if (!roles.includes(user.role)) {
++        res.status(403).json({ error: { code: 'forbidden', message: 'Forbidden' } });
++        return;
++      }
++      next();
++    },
++}));
++
++vi.mock('../http/errors', () => {
++  class HttpError extends Error {
++    status: number;
++    code: string;
++    details?: Record<string, unknown>;
++
++    constructor(status: number, code: string, message: string, details?: Record<string, unknown>) {
++      super(message);
++      this.status = status;
++      this.code = code;
++      if (details !== undefined) this.details = details;
++    }
++  }
++
++  return {
++    HttpError,
++    isHttpError: (err: unknown): err is InstanceType<typeof HttpError> => err instanceof HttpError,
++    sendError: (
++      res: express.Response,
++      status: number,
++      code: string,
++      message: string,
++      details?: Record<string, unknown>,
++    ) => res.status(status).json({ error: { code, message, ...(details !== undefined && { details }) } }),
++  };
++});
++
++vi.mock('../http/async-handler', () => ({
++  asyncHandler:
++    (handler: express.RequestHandler): express.RequestHandler =>
++    (req, res, next) => {
++      Promise.resolve(handler(req, res, next)).catch(next);
++    },
++}));
++
++function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
++  return {
++    id: 'CASE-1',
++    veteranId: 'VET-1',
++    claimedCondition: 'condition field not asserted',
++    claimType: 'initial',
++    status: 'intake',
++    version: 1,
++    assignedPhysicianId: null,
++    refundEligible: false,
++    ...overrides,
++  };
++}
++
++function makeDb(initialCase: CaseRecord = baseCase()) {
++  let current = { ...initialCase };
++  const activityLogCreate = vi.fn(async () => ({}));
++  const caseFindFirst = vi.fn(async () => current);
++  const caseFindMany = vi.fn(async () => [current]);
++  const caseCount = vi.fn(async () => 1);
++  const caseCreate = vi.fn(async (args: Record<string, unknown>) => {
++    const data = args.data as Partial<CaseRecord>;
++    current = baseCase({ ...data, version: 1, status: 'intake' });
++    return current;
++  });
++  const caseUpdate = vi.fn(async (args: Record<string, unknown>) => {
++    const data = args.data as Record<string, unknown>;
++    current = {
++      ...current,
++      ...data,
++      version: current.version + 1,
++    };
++    return current;
++  });
++
++  const tx: AppDbTransaction = {
++    case: {
++      findMany: caseFindMany,
++      findFirst: caseFindFirst,
++      findUnique: caseFindFirst,
++      count: caseCount,
++      create: caseCreate,
++      update: caseUpdate,
++    },
++    veteran: {
++      findUnique: vi.fn(async () => ({ id: 'VET-1' })),
++    },
++    draftJob: {
++      findMany: vi.fn(async () => [{ id: 'DJ-1', version: 1 }]),
++    },
++    correction: {
++      findMany: vi.fn(async () => [{ id: 'CORR-1' }]),
++    },
++    activityLog: {
++      create: activityLogCreate,
++    },
++  };
++
++  const db: AppDb = {
++    ...tx,
++    $transaction: vi.fn(async <T,>(fn: (innerTx: AppDbTransaction) => Promise<T>) => fn(tx)),
++  };
++
++  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate } };
++}
++
++function appFor(db: AppDb) {
++  const app = express();
++  app.use(express.json());
++  app.use('/api/v1', createCasesRouter(db));
++  return app;
++}
++
++describe('cases routes', () => {
++  beforeEach(() => {
++    mockUser = { id: 'USER-1', cognitoSub: 'sub', email: 'a@example.com', role: 'admin' };
++  });
++
++  it('returns 401 unauthenticated', async () => {
++    mockUser = undefined;
++    const { db } = makeDb();
++    const res = await request(appFor(db)).get('/api/v1/cases');
++    expect(res.status).toBe(401);
++  });
++
++  it('returns 403 wrong role for case list', async () => {
++    mockUser = { id: 'USER-1', cognitoSub: 'sub', email: 'phys@example.com', role: 'physician' };
++    const { db } = makeDb();
++    const res = await request(appFor(db)).get('/api/v1/cases');
++    expect(res.status).toBe(403);
++  });
++
++  it('creates a case and writes activity row', async () => {
++    const { db, spies } = makeDb();
++    const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/cases').send({
++      id: 'CASE-2',
++      claimedCondition: 'redacted test condition',
++      claimType: 'initial',
++    });
++    expect(res.status).toBe(201);
++    expect(spies.caseCreate).toHaveBeenCalled();
++    expect(spies.activityLogCreate).toHaveBeenCalledWith(
++      expect.objectContaining({ data: expect.objectContaining({ action: 'case_created' }) }),
++    );
++  });
++
++  it('lists paginated cases with veteran lite info', async () => {
++    const { db, spies } = makeDb(baseCase({ veteran: { id: 'VET-1', firstName: 'A', lastName: 'B' } }));
++    const res = await request(appFor(db)).get('/api/v1/cases?page=1&pageSize=10');
++    expect(res.status).toBe(200);
++    expect(res.body.total).toBe(1);
++    expect(spies.caseFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 10 }));
++  });
++
++  it('gets a single case with relations', async () => {
++    const { db, spies } = makeDb(baseCase({ draftJobs: [], corrections: [], emails: [], payments: [] }));
++    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1');
++    expect(res.status).toBe(200);
++    expect(spies.caseFindFirst).toHaveBeenCalledWith(
++      expect.objectContaining({ include: expect.objectContaining({ draftJobs: expect.any(Object) }) }),
++    );
++  });
++
++  it('patches fields, bumps version, and writes activity row', async () => {
++    const { db, spies } = makeDb();
++    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({
++      version: 1,
++      framingChoice: 'redacted framing',
++    });
++    expect(res.status).toBe(200);
++    expect(spies.caseUpdate).toHaveBeenCalledWith(
++      expect.objectContaining({ data: expect.objectContaining({ version: { increment: 1 } }) }),
++    );
++    expect(spies.activityLogCreate).toHaveBeenCalledWith(
++      expect.objectContaining({ data: expect.objectContaining({ action: 'case_updated' }) }),
++    );
++  });
++
++  it('rejects PATCH stale version with 409', async () => {
++    const { db } = makeDb(baseCase({ version: 2 }));
++    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({
++      version: 1,
++      framingChoice: 'redacted framing',
++    });
++    expect(res.status).toBe(409);
++  });
++
++  it('soft deletes as rejected with distinct activity action, admin only', async () => {
++    const { db, spies } = makeDb(baseCase({ status: 'records' }));
++    const res = await request(appFor(db)).delete('/api/v1/cases/CASE-1');
++    expect(res.status).toBe(200);
++    expect(spies.caseUpdate).toHaveBeenCalledWith(
++      expect.objectContaining({ data: expect.objectContaining({ status: 'rejected' }) }),
++    );
++    expect(spies.activityLogCreate).toHaveBeenCalledWith(
++      expect.objectContaining({
++        data: expect.objectContaining({
++          action: 'case_soft_deleted',
++          detailsJson: expect.objectContaining({ previousStatus: 'records' }),
++        }),
++      }),
++    );
++  });
++
++  it('performs valid status transition without touching draft jobs', async () => {
++    const { db, tx, spies } = makeDb(baseCase({ status: 'intake', version: 1 }));
++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
++      from: 'intake',
++      to: 'records',
++      version: 1,
++      transitionReason: 'per supervisor approval',
++    });
++    expect(res.status).toBe(200);
++    expect(tx.draftJob.findMany).not.toHaveBeenCalled();
++    expect(spies.activityLogCreate).toHaveBeenCalledWith(
++      expect.objectContaining({
++        data: expect.objectContaining({
++          action: 'case_status_changed',
++          detailsJson: expect.objectContaining({ transitionReason: 'per supervisor approval' }),
++        }),
++      }),
++    );
++  });
++
++  it('rejects invalid status transition with 400', async () => {
++    const { db } = makeDb(baseCase({ status: 'intake', version: 1 }));
++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
++      from: 'intake',
++      to: 'delivered',
++      version: 1,
++    });
++    expect(res.status).toBe(400);
++  });
++
++  it('allows physician_review to delivered for physician but not ops_staff', async () => {
++    mockUser = { id: 'PHYS-USER', cognitoSub: 'sub', email: 'phys@example.com', role: 'physician' };
++    const allowed = makeDb(baseCase({ status: 'physician_review', version: 1 }));
++    const allowedRes = await request(appFor(allowed.db)).post('/api/v1/cases/CASE-1/status').send({
++      from: 'physician_review',
++      to: 'delivered',
++      version: 1,
++    });
++    expect(allowedRes.status).toBe(200);
++
++    mockUser = { id: 'OPS-USER', cognitoSub: 'sub', email: 'ops@example.com', role: 'ops_staff' };
++    const denied = makeDb(baseCase({ status: 'physician_review', version: 1 }));
++    const deniedRes = await request(appFor(denied.db)).post('/api/v1/cases/CASE-1/status').send({
++      from: 'physician_review',
++      to: 'delivered',
++      version: 1,
++    });
++    expect(deniedRes.status).toBe(403);
++  });
++
++  it('rejects stale status transition with 409', async () => {
++    const { db } = makeDb(baseCase({ status: 'intake', version: 2 }));
++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
++      from: 'intake',
++      to: 'records',
++      version: 1,
++    });
++    expect(res.status).toBe(409);
++  });
++
++  it.each([
++    ['123-45-6789'],
++    ['call 555-123-4567 back'],
++    ['veteran@example.com confirmed'],
++  ])('rejects PHI-shaped transitionReason %s', async (transitionReason) => {
++    const { db } = makeDb(baseCase({ status: 'intake', version: 1 }));
++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
++      from: 'intake',
++      to: 'records',
++      version: 1,
++      transitionReason,
++    });
++    expect(res.status).toBe(400);
++  });
++});
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ backend/src/routes/cases.ts	2026-05-25 07:02:54.625749870 +0000
+@@ -0,0 +1,429 @@
++import { Router, type NextFunction, type Request, type Response } from 'express';
++import { requireRole } from '../auth/roles';
++import { authenticateJwt } from '../middleware/auth';
++import { asyncHandler } from '../http/async-handler';
++import { HttpError, isHttpError, sendError } from '../http/errors';
++import type { AppDb, AppUserRecord, CaseRecord, CaseStatus, Role } from '../services/db-types';
++import {
++  parseAssignPhysician,
++  parseCaseCreate,
++  parseCasePatch,
++  parseStatusTransition,
++} from '../services/case-validation';
++import {
++  canRolePerformCaseStatusTransition,
++  isValidCaseStatusTransition,
++  requiredRolesForCaseStatusTransition,
++} from '../services/case-status-transitions';
++
++const CASE_LITE_SELECT = {
++  id: true,
++  veteranId: true,
++  claimedCondition: true,
++  claimType: true,
++  status: true,
++  version: true,
++  currentVersion: true,
++  assignedPhysicianId: true,
++  refundEligible: true,
++  createdAt: true,
++  updatedAt: true,
++  veteran: {
++    select: {
++      id: true,
++      firstName: true,
++      lastName: true,
++      email: true,
++    },
++  },
++  assignedPhysician: {
++    select: {
++      id: true,
++      displayName: true,
++      name: true,
++      email: true,
++    },
++  },
++};
++
++function currentUser(req: Request): AppUserRecord {
++  const maybeUser = (req as Request & { user?: AppUserRecord }).user;
++  if (maybeUser === undefined) {
++    throw new HttpError(401, 'unauthorized', 'Authentication required');
++  }
++  return maybeUser;
++}
++
++function parsePositiveQueryInt(value: unknown, defaultValue: number, maxValue: number): number {
++  if (typeof value !== 'string') return defaultValue;
++  const parsed = Number.parseInt(value, 10);
++  if (!Number.isInteger(parsed) || parsed <= 0) return defaultValue;
++  return Math.min(parsed, maxValue);
++}
++
++function parseOptionalCaseStatus(value: unknown): CaseStatus | undefined {
++  if (typeof value !== 'string') return undefined;
++  const statuses: readonly CaseStatus[] = [
++    'intake',
++    'records',
++    'viability',
++    'drafting',
++    'physician_review',
++    'correction_requested',
++    'correction_review',
++    'delivered',
++    'paid',
++    'rejected',
++  ];
++  if (!statuses.includes(value as CaseStatus)) {
++    throw new HttpError(400, 'bad_request', 'status filter is invalid', { field: 'status' });
++  }
++  return value as CaseStatus;
++}
++
++function optionalStringQuery(value: unknown): string | undefined {
++  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
++}
++
++function buildCaseListWhere(query: Request['query']): Record<string, unknown> {
++  const where: Record<string, unknown> = {};
++  const status = parseOptionalCaseStatus(query.status);
++  const claimType = optionalStringQuery(query.claimType);
++  const veteranId = optionalStringQuery(query.veteranId);
++  const assignedPhysicianId = optionalStringQuery(query.assignedPhysicianId);
++
++  if (status !== undefined) where.status = status;
++  if (claimType !== undefined) where.claimType = claimType;
++  if (veteranId !== undefined) where.veteranId = veteranId;
++  if (assignedPhysicianId !== undefined) where.assignedPhysicianId = assignedPhysicianId;
++
++  return where;
++}
++
++function roleGuardForStatusTransition(db: AppDb) {
++  return asyncHandler(async (req: Request, _res: Response, next: NextFunction) => {
++    const id = String(req.params.id);
++    const user = currentUser(req);
++    const parsed = parseStatusTransition(req.body);
++
++    const current = await db.case.findFirst({ where: { id }, select: { id: true, status: true } });
++    if (current === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
++
++    const allowed = canRolePerformCaseStatusTransition(user.role, current.status, parsed.to);
++    if (!allowed) {
++      throw new HttpError(403, 'forbidden', 'Role cannot perform this case status transition', {
++        requiredRoles: requiredRolesForCaseStatusTransition(current.status, parsed.to),
++      });
++    }
++
++    next();
++  });
++}
++
++export function createCasesRouter(db: AppDb): Router {
++  const router = Router();
++
++  router.use(authenticateJwt);
++
++  router.get(
++    '/cases',
++    requireRole(['admin', 'ops_staff']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const page = parsePositiveQueryInt(req.query.page, 1, 100000);
++      const pageSize = parsePositiveQueryInt(req.query.pageSize, 25, 100);
++      const skip = (page - 1) * pageSize;
++      const where = buildCaseListWhere(req.query);
++
++      const [total, cases] = await db.$transaction(async (tx) => {
++        const count = await tx.case.count({ where });
++        const rows = await tx.case.findMany({
++          where,
++          select: CASE_LITE_SELECT,
++          orderBy: { updatedAt: 'desc' },
++          skip,
++          take: pageSize,
++        });
++        return [count, rows] as const;
++      });
++
++      res.json({ data: cases, page, pageSize, total });
++    }),
++  );
++
++  router.get(
++    '/cases/:id',
++    requireRole(['admin', 'ops_staff']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const id = String(req.params.id);
++      const found = await db.case.findFirst({
++        where: { id },
++        include: {
++          veteran: { select: { id: true, firstName: true, lastName: true, email: true } },
++          assignedPhysician: { select: { id: true, displayName: true, name: true, email: true } },
++          documents: { orderBy: { createdAt: 'desc' }, take: 5 },
++          draftJobs: { orderBy: { enqueuedAt: 'desc' }, take: 5 },
++          corrections: { orderBy: { requestedAt: 'desc' }, take: 5 },
++          emails: { orderBy: { sentAt: 'desc' }, take: 5 },
++          payments: { orderBy: { createdAt: 'desc' } },
++          _count: { select: { documents: true, draftJobs: true, corrections: true, emails: true, payments: true } },
++        },
++      });
++      if (found === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
++      res.json({ data: found });
++    }),
++  );
++
++  router.post(
++    '/veterans/:veteranId/cases',
++    requireRole(['admin', 'ops_staff']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const user = currentUser(req);
++      const veteranId = String(req.params.veteranId);
++      const parsed = parseCaseCreate(req.body);
++
++      const created = await db.$transaction(async (tx) => {
++        const veteran = await tx.veteran.findUnique({ where: { id: veteranId }, select: { id: true } });
++        if (veteran === null) throw new HttpError(404, 'not_found', 'Veteran not found', { veteranId });
++
++        const row = await tx.case.create({
++          data: {
++            ...parsed,
++            veteranId,
++            status: 'intake',
++          },
++          select: CASE_LITE_SELECT,
++        });
++
++        await tx.activityLog.create({
++          data: {
++            actorUserId: user.id,
++            action: 'case_created',
++            caseId: row.id,
++            veteranId,
++            detailsJson: { caseId: row.id, veteranId, fields: ['id', 'claimedCondition', 'claimType'] },
++          },
++        });
++
++        return row;
++      });
++
++      res.status(201).json({ data: created });
++    }),
++  );
++
++  router.patch(
++    '/cases/:id',
++    requireRole(['admin', 'ops_staff']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const user = currentUser(req);
++      const id = String(req.params.id);
++      const parsed = parseCasePatch(req.body);
++
++      const updated = await db.$transaction(async (tx) => {
++        const existing = await tx.case.findFirst({ where: { id }, select: { id: true, veteranId: true, version: true } });
++        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
++        if (existing.version !== parsed.version) {
++          throw new HttpError(409, 'conflict', 'Case version is stale', {
++            caseId: id,
++            expectedVersion: existing.version,
++            receivedVersion: parsed.version,
++          });
++        }
++
++        const row = await tx.case.update({
++          where: { id },
++          data: { ...parsed.fields, version: { increment: 1 } },
++          select: CASE_LITE_SELECT,
++        });
++
++        await tx.activityLog.create({
++          data: {
++            actorUserId: user.id,
++            action: 'case_updated',
++            caseId: id,
++            veteranId: existing.veteranId,
++            detailsJson: { caseId: id, fields: parsed.changedFields },
++          },
++        });
++
++        return row;
++      });
++
++      res.json({ data: updated });
++    }),
++  );
++
++  router.delete(
++    '/cases/:id',
++    requireRole(['admin']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const user = currentUser(req);
++      const id = String(req.params.id);
++
++      const updated = await db.$transaction(async (tx) => {
++        const existing = await tx.case.findFirst({
++          where: { id },
++          select: { id: true, veteranId: true, status: true, version: true },
++        });
++        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
++
++        const row = await tx.case.update({
++          where: { id },
++          data: { status: 'rejected', version: { increment: 1 } },
++          select: CASE_LITE_SELECT,
++        });
++
++        await tx.activityLog.create({
++          data: {
++            actorUserId: user.id,
++            action: 'case_soft_deleted',
++            caseId: id,
++            veteranId: existing.veteranId,
++            detailsJson: { caseId: id, previousStatus: existing.status },
++          },
++        });
++
++        return row;
++      });
++
++      res.json({ data: updated });
++    }),
++  );
++
++  router.post(
++    '/cases/:id/status',
++    roleGuardForStatusTransition(db),
++    asyncHandler(async (req: Request, res: Response) => {
++      const user = currentUser(req);
++      const id = String(req.params.id);
++      const parsed = parseStatusTransition(req.body);
++
++      const updated = await db.$transaction(async (tx) => {
++        const existing = await tx.case.findFirst({
++          where: { id },
++          select: { id: true, veteranId: true, status: true, version: true },
++        });
++        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
++        if (existing.status !== parsed.from || existing.version !== parsed.version) {
++          throw new HttpError(409, 'conflict', 'Case status or version is stale', {
++            caseId: id,
++            currentStatus: existing.status,
++            currentVersion: existing.version,
++            receivedFrom: parsed.from,
++            receivedVersion: parsed.version,
++          });
++        }
++        if (!isValidCaseStatusTransition(parsed.from, parsed.to)) {
++          throw new HttpError(400, 'bad_request', 'Invalid case status transition', {
++            from: parsed.from,
++            to: parsed.to,
++          });
++        }
++
++        const row = await tx.case.update({
++          where: { id },
++          data: { status: parsed.to, version: { increment: 1 } },
++          select: CASE_LITE_SELECT,
++        });
++
++        await tx.activityLog.create({
++          data: {
++            actorUserId: user.id,
++            action: 'case_status_changed',
++            caseId: id,
++            veteranId: existing.veteranId,
++            detailsJson: {
++              caseId: id,
++              from: existing.status,
++              to: parsed.to,
++              ...(parsed.transitionReason !== undefined && { transitionReason: parsed.transitionReason }),
++            },
++          },
++        });
++
++        return row;
++      });
++
++      res.json({ data: updated });
++    }),
++  );
++
++  router.get(
++    '/cases/:id/draft-jobs',
++    requireRole(['admin', 'ops_staff']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const id = String(req.params.id);
++      const rows = await db.draftJob.findMany({ where: { caseId: id }, orderBy: { version: 'desc' } });
++      res.json({ data: rows });
++    }),
++  );
++
++  router.get(
++    '/cases/:id/corrections',
++    requireRole(['admin', 'ops_staff']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const id = String(req.params.id);
++      const rows = await db.correction.findMany({ where: { caseId: id }, orderBy: { requestedAt: 'desc' } });
++      res.json({ data: rows });
++    }),
++  );
++
++  router.post(
++    '/cases/:id/assign-physician',
++    requireRole(['admin', 'ops_staff']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const user = currentUser(req);
++      const id = String(req.params.id);
++      const parsed = parseAssignPhysician(req.body);
++
++      const updated = await db.$transaction(async (tx) => {
++        const existing = await tx.case.findFirst({
++          where: { id },
++          select: { id: true, veteranId: true, version: true, assignedPhysicianId: true },
++        });
++        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
++        if (existing.version !== parsed.version) {
++          throw new HttpError(409, 'conflict', 'Case version is stale', {
++            caseId: id,
++            expectedVersion: existing.version,
++            receivedVersion: parsed.version,
++          });
++        }
++
++        const row = await tx.case.update({
++          where: { id },
++          data: { assignedPhysicianId: parsed.physicianId, version: { increment: 1 } },
++          select: CASE_LITE_SELECT,
++        });
++
++        await tx.activityLog.create({
++          data: {
++            actorUserId: user.id,
++            action: 'case_physician_assigned',
++            caseId: id,
++            veteranId: existing.veteranId,
++            detailsJson: { caseId: id, fields: ['assignedPhysicianId'] },
++          },
++        });
++
++        return row;
++      });
++
++      res.json({ data: updated });
++    }),
++  );
++
++  router.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
++    if (res.headersSent) {
++      next(err);
++      return;
++    }
++    if (isHttpError(err)) {
++      sendError(res, err.status, err.code, err.message, err.details);
++      return;
++    }
++    sendError(res, 500, 'internal_server_error', 'Unexpected server error');
++  });
++
++  return router;
++}
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ backend/src/server.ts	2026-05-25 07:02:54.638199198 +0000
+@@ -0,0 +1,14 @@
++import express from 'express';
++import { defaultPrisma } from './db/client';
++import { createVeteransRouter } from './routes/veterans';
++import { createDocumentsRouter } from './routes/documents';
++import { createCasesRouter } from './routes/cases';
++
++const app = express();
++
++app.use(express.json());
++app.use('/api/v1', createVeteransRouter(defaultPrisma));
++app.use('/api/v1', createDocumentsRouter());
++app.use('/api/v1', createCasesRouter(defaultPrisma));
++
++export { app };
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ backend/src/services/case-status-transitions.ts	2026-05-25 07:02:04.499771142 +0000
+@@ -0,0 +1,57 @@
++import type { CaseStatus, Role } from './db-types';
++
++export const CASE_STATUSES: readonly CaseStatus[] = [
++  'intake',
++  'records',
++  'viability',
++  'drafting',
++  'physician_review',
++  'correction_requested',
++  'correction_review',
++  'delivered',
++  'paid',
++  'rejected',
++] as const;
++
++export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> = {
++  intake: ['records', 'rejected'],
++  records: ['viability', 'rejected'],
++  viability: ['drafting', 'rejected'],
++  drafting: ['physician_review', 'rejected'],
++  physician_review: ['correction_requested', 'delivered', 'rejected'],
++  correction_requested: ['correction_review'],
++  correction_review: ['delivered', 'rejected'],
++  delivered: ['paid'],
++  paid: [],
++  rejected: [],
++};
++
++export function isCaseStatus(value: unknown): value is CaseStatus {
++  return typeof value === 'string' && CASE_STATUSES.includes(value as CaseStatus);
++}
++
++export function isValidCaseStatusTransition(from: CaseStatus, to: CaseStatus): boolean {
++  return CASE_STATUS_TRANSITIONS[from].includes(to);
++}
++
++export function requiredRolesForCaseStatusTransition(from: CaseStatus, to: CaseStatus): readonly Role[] {
++  if (from === 'delivered' && to === 'paid') return ['admin'];
++
++  if (
++    from === 'physician_review' &&
++    (to === 'delivered' || to === 'correction_requested')
++  ) {
++    return ['physician', 'admin'];
++  }
++
++  return ['admin', 'ops_staff'];
++}
++
++export function canRolePerformCaseStatusTransition(
++  role: Role,
++  from: CaseStatus,
++  to: CaseStatus,
++): boolean {
++  if (role === 'admin') return true;
++  return requiredRolesForCaseStatusTransition(from, to).includes(role);
++}
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ backend/src/services/case-validation.ts	2026-05-25 07:02:04.525373724 +0000
+@@ -0,0 +1,194 @@
++import { HttpError } from '../http/errors';
++import type { CaseStatus, ClaimType } from './db-types';
++import { isCaseStatus } from './case-status-transitions';
++
++const CLAIM_TYPES: readonly ClaimType[] = ['initial', 'supplemental', 'hlr', 'appeal_bva'] as const;
++const PHI_PATTERN_REJECTIONS: readonly RegExp[] = [
++  /\d{3}-?\d{2}-?\d{4}/,
++  /\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/,
++  /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i,
++];
++
++export interface ParsedCaseCreate {
++  id: string;
++  claimedCondition: string;
++  claimType: ClaimType;
++  framingChoice?: string;
++  upstreamScCondition?: string;
++  veteranStatement?: string;
++  inServiceEvent?: string;
++  assignedPhysicianId?: string;
++}
++
++export interface ParsedCasePatch {
++  version: number;
++  fields: {
++    claimedCondition?: string;
++    framingChoice?: string | null;
++    upstreamScCondition?: string | null;
++    veteranStatement?: string | null;
++    inServiceEvent?: string | null;
++    assignedPhysicianId?: string | null;
++    refundEligible?: boolean;
++  };
++  changedFields: readonly string[];
++}
++
++export interface ParsedStatusTransition {
++  from: CaseStatus;
++  to: CaseStatus;
++  version: number;
++  transitionReason?: string;
++}
++
++export interface ParsedAssignPhysician {
++  physicianId: string;
++  version: number;
++}
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++function badRequest(message: string, details?: Record<string, unknown>): never {
++  throw new HttpError(400, 'bad_request', message, details);
++}
++
++function requiredNonEmptyString(body: Record<string, unknown>, field: string): string {
++  const value = body[field];
++  if (typeof value !== 'string' || value.trim().length === 0) {
++    badRequest(`${field} is required`, { field });
++  }
++  return value.trim();
++}
++
++function optionalString(
++  body: Record<string, unknown>,
++  field: string,
++  maxLength: number,
++): string | undefined {
++  const value = body[field];
++  if (value === undefined || value === null) return undefined;
++  if (typeof value !== 'string') badRequest(`${field} must be a string`, { field });
++  const trimmed = value.trim();
++  if (trimmed.length > maxLength) badRequest(`${field} is too long`, { field, maxLength });
++  return trimmed;
++}
++
++function optionalNullableString(
++  body: Record<string, unknown>,
++  field: string,
++  maxLength: number,
++): string | null | undefined {
++  const value = body[field];
++  if (value === undefined) return undefined;
++  if (value === null) return null;
++  if (typeof value !== 'string') badRequest(`${field} must be a string`, { field });
++  const trimmed = value.trim();
++  if (trimmed.length > maxLength) badRequest(`${field} is too long`, { field, maxLength });
++  return trimmed;
++}
++
++function positiveInteger(body: Record<string, unknown>, field: string): number {
++  const value = body[field];
++  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
++    badRequest(`${field} must be a positive integer`, { field });
++  }
++  return value;
++}
++
++export function parseCaseCreate(body: unknown): ParsedCaseCreate {
++  if (!isRecord(body)) badRequest('Request body must be an object');
++  if ('veteranId' in body) badRequest('veteranId comes from the URL, not the request body', { field: 'veteranId' });
++
++  const id = requiredNonEmptyString(body, 'id');
++  const claimedCondition = requiredNonEmptyString(body, 'claimedCondition');
++  const claimType = body.claimType;
++  if (typeof claimType !== 'string' || !CLAIM_TYPES.includes(claimType as ClaimType)) {
++    badRequest('claimType is invalid', { field: 'claimType', allowedValues: CLAIM_TYPES });
++  }
++
++  return {
++    id,
++    claimedCondition,
++    claimType: claimType as ClaimType,
++    ...(optionalString(body, 'framingChoice', 80) !== undefined && { framingChoice: optionalString(body, 'framingChoice', 80) }),
++    ...(optionalString(body, 'upstreamScCondition', 200) !== undefined && { upstreamScCondition: optionalString(body, 'upstreamScCondition', 200) }),
++    ...(optionalString(body, 'veteranStatement', 2000) !== undefined && { veteranStatement: optionalString(body, 'veteranStatement', 2000) }),
++    ...(optionalString(body, 'inServiceEvent', 2000) !== undefined && { inServiceEvent: optionalString(body, 'inServiceEvent', 2000) }),
++    ...(optionalString(body, 'assignedPhysicianId', 200) !== undefined && { assignedPhysicianId: optionalString(body, 'assignedPhysicianId', 200) }),
++  };
++}
++
++export function parseCasePatch(body: unknown): ParsedCasePatch {
++  if (!isRecord(body)) badRequest('Request body must be an object');
++
++  const blocked = ['status', 'cdsVerdict', 'cdsOddsPct', 'cdsRationale', 'currentVersion'];
++  const blockedField = blocked.find((field) => field in body);
++  if (blockedField !== undefined) badRequest(`${blockedField} cannot be patched from this endpoint`, { field: blockedField });
++
++  const version = positiveInteger(body, 'version');
++  const fields: ParsedCasePatch['fields'] = {};
++
++  const setString = (field: keyof ParsedCasePatch['fields'], maxLength: number): void => {
++    const parsed = optionalNullableString(body, field, maxLength);
++    if (parsed !== undefined) fields[field] = parsed as never;
++  };
++
++  setString('claimedCondition', 500);
++  setString('framingChoice', 80);
++  setString('upstreamScCondition', 200);
++  setString('veteranStatement', 2000);
++  setString('inServiceEvent', 2000);
++  setString('assignedPhysicianId', 200);
++
++  if ('refundEligible' in body) {
++    if (typeof body.refundEligible !== 'boolean') badRequest('refundEligible must be boolean', { field: 'refundEligible' });
++    fields.refundEligible = body.refundEligible;
++  }
++
++  const changedFields = Object.keys(fields).sort();
++  if (changedFields.length === 0) badRequest('No patchable fields provided');
++
++  return { version, fields, changedFields };
++}
++
++/**
++ * Parses a case status transition request.
++ *
++ * transitionReason is for ops audit metadata only. NEVER include veteran name,
++ * condition text, symptoms, dates, or any PHI. Examples of acceptable values:
++ * "per supervisor approval", "records gathered", "physician requested redraft",
++ * "awaiting prior denial letter".
++ */
++export function parseStatusTransition(body: unknown): ParsedStatusTransition {
++  if (!isRecord(body)) badRequest('Request body must be an object');
++  if (!isCaseStatus(body.from)) badRequest('from must be a valid case status', { field: 'from' });
++  if (!isCaseStatus(body.to)) badRequest('to must be a valid case status', { field: 'to' });
++  const version = positiveInteger(body, 'version');
++
++  const transitionReason = optionalString(body, 'transitionReason', 200);
++  if (transitionReason !== undefined) {
++    const rejected = PHI_PATTERN_REJECTIONS.some((pattern) => pattern.test(transitionReason));
++    if (rejected) {
++      badRequest('transitionReason may contain only operational audit metadata and must not contain PHI-like values', {
++        field: 'transitionReason',
++      });
++    }
++  }
++
++  return {
++    from: body.from,
++    to: body.to,
++    version,
++    ...(transitionReason !== undefined && { transitionReason }),
++  };
++}
++
++export function parseAssignPhysician(body: unknown): ParsedAssignPhysician {
++  if (!isRecord(body)) badRequest('Request body must be an object');
++  return {
++    physicianId: requiredNonEmptyString(body, 'physicianId'),
++    version: positiveInteger(body, 'version'),
++  };
++}
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ backend/src/services/db-types.ts	2026-05-25 07:02:04.481670692 +0000
+@@ -0,0 +1,116 @@
++/**
++ * Shared database-facing structural types used by route modules.
++ *
++ * This file intentionally uses literal unions and structural delegate types rather
++ * than importing generated Prisma types. The project keeps backend builds working
++ * before a generated Prisma client is present.
++ */
++
++export type Role = 'admin' | 'ops_staff' | 'physician' | 'veteran';
++
++export type ClaimType = 'initial' | 'supplemental' | 'hlr' | 'appeal_bva';
++
++export type CaseStatus =
++  | 'intake'
++  | 'records'
++  | 'viability'
++  | 'drafting'
++  | 'physician_review'
++  | 'correction_requested'
++  | 'correction_review'
++  | 'delivered'
++  | 'paid'
++  | 'rejected';
++
++export interface AppUserRecord {
++  id: string;
++  cognitoSub: string;
++  email: string;
++  role: Role;
++}
++
++export interface VeteranLiteRecord {
++  id: string;
++  firstName?: string | null;
++  lastName?: string | null;
++  email?: string | null;
++}
++
++export interface PhysicianLiteRecord {
++  id: string;
++  displayName?: string | null;
++  name?: string | null;
++  email?: string | null;
++}
++
++export interface CaseRecord {
++  id: string;
++  veteranId: string;
++  claimedCondition: string;
++  claimType: ClaimType;
++  status: CaseStatus;
++  version: number;
++  currentVersion?: number | null;
++  framingChoice?: string | null;
++  upstreamScCondition?: string | null;
++  veteranStatement?: string | null;
++  inServiceEvent?: string | null;
++  assignedPhysicianId?: string | null;
++  refundEligible?: boolean | null;
++  createdAt?: Date | string;
++  updatedAt?: Date | string;
++  veteran?: VeteranLiteRecord;
++  assignedPhysician?: PhysicianLiteRecord | null;
++  _count?: Record<string, number>;
++  documents?: readonly unknown[];
++  draftJobs?: readonly unknown[];
++  corrections?: readonly unknown[];
++  emails?: readonly unknown[];
++  payments?: readonly unknown[];
++}
++
++export interface ActivityLogCreateInput {
++  actorUserId: string;
++  action: string;
++  caseId?: string | null;
++  veteranId?: string | null;
++  detailsJson?: Record<string, unknown>;
++}
++
++export interface ActivityLogDelegate {
++  create(args: { data: ActivityLogCreateInput }): Promise<unknown>;
++}
++
++export interface CaseDelegate {
++  findMany(args?: Record<string, unknown>): Promise<CaseRecord[]>;
++  findFirst(args?: Record<string, unknown>): Promise<CaseRecord | null>;
++  findUnique(args?: Record<string, unknown>): Promise<CaseRecord | null>;
++  count(args?: Record<string, unknown>): Promise<number>;
++  create(args: Record<string, unknown>): Promise<CaseRecord>;
++  update(args: Record<string, unknown>): Promise<CaseRecord>;
++}
++
++export interface VeteranDelegate {
++  findUnique(args?: Record<string, unknown>): Promise<VeteranLiteRecord | null>;
++  findFirst?(args?: Record<string, unknown>): Promise<VeteranLiteRecord | null>;
++}
++
++export interface DraftJobDelegate {
++  findMany(args?: Record<string, unknown>): Promise<unknown[]>;
++}
++
++export interface CorrectionDelegate {
++  findMany(args?: Record<string, unknown>): Promise<unknown[]>;
++}
++
++export interface AppDbTransaction {
++  case: CaseDelegate;
++  veteran: VeteranDelegate;
++  draftJob: DraftJobDelegate;
++  correction: CorrectionDelegate;
++  activityLog: ActivityLogDelegate;
++}
++
++export interface AppDb extends AppDbTransaction {
++  $transaction<T>(fn: (tx: AppDbTransaction) => Promise<T>): Promise<T>;
++}
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ docs/PHASE4A_SUMMARY.md	2026-05-25 07:03:46.853575599 +0000
+@@ -0,0 +1,66 @@
++# Phase 4A Summary — Case Backend Routes
++
++## Files touched
++
++12 files in backend and docs scope only:
++
++1. `backend/src/routes/cases.ts` — new Express case routes.
++2. `backend/src/services/case-validation.ts` — new request validators.
++3. `backend/src/services/case-status-transitions.ts` — new transition table and role gate helpers.
++4. `backend/src/services/db-types.ts` — extended structural database types for case work.
++5. `backend/src/server.ts` — mounted `createCasesRouter(defaultPrisma)` under `/api/v1`.
++6. `backend/src/__tests__/cases-routes.test.ts` — new route tests with mock DB.
++7. `backend/src/__tests__/case-status-transitions.test.ts` — new pure transition tests.
++8. `docs/PHASE4A_SUMMARY.md` — this summary.
++9. `docs/verification/phase4A-evidence/typecheck.txt` — typecheck evidence note.
++10. `docs/verification/phase4A-evidence/test-output.txt` — test evidence note.
++11. `docs/verification/phase4A-evidence/phase4A.patch` — generated patch bundle.
++12. `docs/verification/phase4A-evidence/server-registration-note.patch` — server registration patch.
++
++## Implemented
++
++- Case list, detail, create, patch, soft-delete routes.
++- Status transition endpoint with explicit transition matrix.
++- Transition role gates:
++  - `physician_review -> delivered`: physician or admin.
++  - `physician_review -> correction_requested`: physician or admin.
++  - `delivered -> paid`: admin only.
++  - all other transitions: admin or ops_staff.
++- `transitionReason` replaces `note`.
++- `transitionReason` max length is 200 characters.
++- `transitionReason` rejects SSN-shaped, phone-shaped, and email-shaped values with `400 bad_request`.
++- DELETE keeps existing soft-delete behavior by setting `status = rejected`.
++- DELETE writes distinct activity action `case_soft_deleted`.
++- Soft-delete activity details include `previousStatus`.
++- Status transition activity action remains `case_status_changed`.
++- Activity details use IDs, field names, status values, and validated operational audit metadata only.
++- `GET /cases/:id/corrections` is admin + ops_staff only.
++- Physician own-assigned access is intentionally deferred.
++
++## Explicitly skipped
++
++- No frontend files touched; Phase 4A backend-only scope.
++- No schema migration; DELETE uses `status = rejected` per brief.
++- No AppUser ↔ Physician mapping; deferred to Phase 5.
++- No `deleted_at`; activity log timestamp is the deletion timestamp.
++- No CDS, Stripe, draft viewer, email send, refund processing, or UI work.
++
++## Assumptions made
++
++- `CaseStatus` remains a literal union in `services/db-types.ts`; no generated Prisma enum import.
++- Prisma relation names are camelCase: `documents`, `draftJobs`, `corrections`, `emails`, `payments`, `assignedPhysician`, `veteran`.
++- Optimistic lock field is `case.version`.
++- `currentVersion` is not modified by routine case PATCH/status updates.
++- Activity log delegate is `db.activityLog`.
++- Soft-deleted cases remain visible in `/cases` as ordinary rejected cases.
++
++## Test results
++
++The artifact was generated in a sandbox without the full private repository, package workspace, or installed project dependencies. I could not truthfully run `npm run typecheck -w backend` or `npm run test -w backend` against the real repo here.
++
++Evidence files explicitly state this limitation and list the commands that should be run after applying the patch in the repo.
++
++## Known caveats
++
++- `backend/src/services/db-types.ts` is supplied as a modified structural type file. If the current repo already contains additional exported types, merge the added Case-related types into the existing file rather than replacing unrelated existing exports.
++- `backend/src/server.ts` is supplied as a direct modified file and a small registration patch. If current main has additional middleware or route mounts, apply only the import and `app.use('/api/v1', createCasesRouter(defaultPrisma));` registration.
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ docs/verification/phase4A-evidence/phase4A.patch	2026-05-25 07:03:47.014125815 +0000
+@@ -0,0 +1,1247 @@
++--- /dev/null	2026-05-25 07:00:48.915830689 +0000
+++++ backend/src/__tests__/case-status-transitions.test.ts	2026-05-25 07:03:29.069338839 +0000
++@@ -0,0 +1,37 @@
+++import { describe, expect, it } from 'vitest';
+++import {
+++  CASE_STATUS_TRANSITIONS,
+++  canRolePerformCaseStatusTransition,
+++} from '../services/case-status-transitions';
+++
+++describe('case status transitions', () => {
+++  it('terminal states accept zero outgoing transitions', () => {
+++    expect(CASE_STATUS_TRANSITIONS.paid).toEqual([]);
+++    expect(CASE_STATUS_TRANSITIONS.rejected).toEqual([]);
+++  });
+++
+++  it('matches the full non-terminal transition table', () => {
+++    expect(CASE_STATUS_TRANSITIONS.intake).toEqual(['records', 'rejected']);
+++    expect(CASE_STATUS_TRANSITIONS.records).toEqual(['viability', 'rejected']);
+++    expect(CASE_STATUS_TRANSITIONS.viability).toEqual(['drafting', 'rejected']);
+++    expect(CASE_STATUS_TRANSITIONS.drafting).toEqual(['physician_review', 'rejected']);
+++    expect(CASE_STATUS_TRANSITIONS.physician_review).toEqual([
+++      'correction_requested',
+++      'delivered',
+++      'rejected',
+++    ]);
+++    expect(CASE_STATUS_TRANSITIONS.correction_requested).toEqual(['correction_review']);
+++    expect(CASE_STATUS_TRANSITIONS.correction_review).toEqual(['delivered', 'rejected']);
+++    expect(CASE_STATUS_TRANSITIONS.delivered).toEqual(['paid']);
+++  });
+++
+++  it('rejects ops_staff attempting physician_review to delivered', () => {
+++    expect(canRolePerformCaseStatusTransition('ops_staff', 'physician_review', 'delivered')).toBe(false);
+++  });
+++
+++  it('allows admin on any transition', () => {
+++    expect(canRolePerformCaseStatusTransition('admin', 'paid', 'rejected')).toBe(true);
+++    expect(canRolePerformCaseStatusTransition('admin', 'physician_review', 'delivered')).toBe(true);
+++    expect(canRolePerformCaseStatusTransition('admin', 'delivered', 'paid')).toBe(true);
+++  });
+++});
++--- /dev/null	2026-05-25 07:00:48.915830689 +0000
+++++ backend/src/__tests__/cases-routes.test.ts	2026-05-25 07:03:29.082000080 +0000
++@@ -0,0 +1,310 @@
+++import express from 'express';
+++import request from 'supertest';
+++import { beforeEach, describe, expect, it, vi } from 'vitest';
+++import { createCasesRouter } from '../routes/cases';
+++import type { AppDb, AppDbTransaction, AppUserRecord, CaseRecord } from '../services/db-types';
+++
+++let mockUser: AppUserRecord | undefined;
+++
+++vi.mock('../middleware/auth', () => ({
+++  authenticateJwt: (req: express.Request, res: express.Response, next: express.NextFunction) => {
+++    if (mockUser === undefined) {
+++      res.status(401).json({ error: { code: 'unauthorized', message: 'Authentication required' } });
+++      return;
+++    }
+++    (req as express.Request & { user?: AppUserRecord }).user = mockUser;
+++    next();
+++  },
+++}));
+++
+++vi.mock('../auth/roles', () => ({
+++  requireRole:
+++    (roles: readonly string[]) =>
+++    (req: express.Request, res: express.Response, next: express.NextFunction) => {
+++      const user = (req as express.Request & { user?: AppUserRecord }).user;
+++      if (user === undefined) {
+++        res.status(401).json({ error: { code: 'unauthorized', message: 'Authentication required' } });
+++        return;
+++      }
+++      if (!roles.includes(user.role)) {
+++        res.status(403).json({ error: { code: 'forbidden', message: 'Forbidden' } });
+++        return;
+++      }
+++      next();
+++    },
+++}));
+++
+++vi.mock('../http/errors', () => {
+++  class HttpError extends Error {
+++    status: number;
+++    code: string;
+++    details?: Record<string, unknown>;
+++
+++    constructor(status: number, code: string, message: string, details?: Record<string, unknown>) {
+++      super(message);
+++      this.status = status;
+++      this.code = code;
+++      if (details !== undefined) this.details = details;
+++    }
+++  }
+++
+++  return {
+++    HttpError,
+++    isHttpError: (err: unknown): err is InstanceType<typeof HttpError> => err instanceof HttpError,
+++    sendError: (
+++      res: express.Response,
+++      status: number,
+++      code: string,
+++      message: string,
+++      details?: Record<string, unknown>,
+++    ) => res.status(status).json({ error: { code, message, ...(details !== undefined && { details }) } }),
+++  };
+++});
+++
+++vi.mock('../http/async-handler', () => ({
+++  asyncHandler:
+++    (handler: express.RequestHandler): express.RequestHandler =>
+++    (req, res, next) => {
+++      Promise.resolve(handler(req, res, next)).catch(next);
+++    },
+++}));
+++
+++function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
+++  return {
+++    id: 'CASE-1',
+++    veteranId: 'VET-1',
+++    claimedCondition: 'condition field not asserted',
+++    claimType: 'initial',
+++    status: 'intake',
+++    version: 1,
+++    assignedPhysicianId: null,
+++    refundEligible: false,
+++    ...overrides,
+++  };
+++}
+++
+++function makeDb(initialCase: CaseRecord = baseCase()) {
+++  let current = { ...initialCase };
+++  const activityLogCreate = vi.fn(async () => ({}));
+++  const caseFindFirst = vi.fn(async () => current);
+++  const caseFindMany = vi.fn(async () => [current]);
+++  const caseCount = vi.fn(async () => 1);
+++  const caseCreate = vi.fn(async (args: Record<string, unknown>) => {
+++    const data = args.data as Partial<CaseRecord>;
+++    current = baseCase({ ...data, version: 1, status: 'intake' });
+++    return current;
+++  });
+++  const caseUpdate = vi.fn(async (args: Record<string, unknown>) => {
+++    const data = args.data as Record<string, unknown>;
+++    current = {
+++      ...current,
+++      ...data,
+++      version: current.version + 1,
+++    };
+++    return current;
+++  });
+++
+++  const tx: AppDbTransaction = {
+++    case: {
+++      findMany: caseFindMany,
+++      findFirst: caseFindFirst,
+++      findUnique: caseFindFirst,
+++      count: caseCount,
+++      create: caseCreate,
+++      update: caseUpdate,
+++    },
+++    veteran: {
+++      findUnique: vi.fn(async () => ({ id: 'VET-1' })),
+++    },
+++    draftJob: {
+++      findMany: vi.fn(async () => [{ id: 'DJ-1', version: 1 }]),
+++    },
+++    correction: {
+++      findMany: vi.fn(async () => [{ id: 'CORR-1' }]),
+++    },
+++    activityLog: {
+++      create: activityLogCreate,
+++    },
+++  };
+++
+++  const db: AppDb = {
+++    ...tx,
+++    $transaction: vi.fn(async <T,>(fn: (innerTx: AppDbTransaction) => Promise<T>) => fn(tx)),
+++  };
+++
+++  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate } };
+++}
+++
+++function appFor(db: AppDb) {
+++  const app = express();
+++  app.use(express.json());
+++  app.use('/api/v1', createCasesRouter(db));
+++  return app;
+++}
+++
+++describe('cases routes', () => {
+++  beforeEach(() => {
+++    mockUser = { id: 'USER-1', cognitoSub: 'sub', email: 'a@example.com', role: 'admin' };
+++  });
+++
+++  it('returns 401 unauthenticated', async () => {
+++    mockUser = undefined;
+++    const { db } = makeDb();
+++    const res = await request(appFor(db)).get('/api/v1/cases');
+++    expect(res.status).toBe(401);
+++  });
+++
+++  it('returns 403 wrong role for case list', async () => {
+++    mockUser = { id: 'USER-1', cognitoSub: 'sub', email: 'phys@example.com', role: 'physician' };
+++    const { db } = makeDb();
+++    const res = await request(appFor(db)).get('/api/v1/cases');
+++    expect(res.status).toBe(403);
+++  });
+++
+++  it('creates a case and writes activity row', async () => {
+++    const { db, spies } = makeDb();
+++    const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/cases').send({
+++      id: 'CASE-2',
+++      claimedCondition: 'redacted test condition',
+++      claimType: 'initial',
+++    });
+++    expect(res.status).toBe(201);
+++    expect(spies.caseCreate).toHaveBeenCalled();
+++    expect(spies.activityLogCreate).toHaveBeenCalledWith(
+++      expect.objectContaining({ data: expect.objectContaining({ action: 'case_created' }) }),
+++    );
+++  });
+++
+++  it('lists paginated cases with veteran lite info', async () => {
+++    const { db, spies } = makeDb(baseCase({ veteran: { id: 'VET-1', firstName: 'A', lastName: 'B' } }));
+++    const res = await request(appFor(db)).get('/api/v1/cases?page=1&pageSize=10');
+++    expect(res.status).toBe(200);
+++    expect(res.body.total).toBe(1);
+++    expect(spies.caseFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 10 }));
+++  });
+++
+++  it('gets a single case with relations', async () => {
+++    const { db, spies } = makeDb(baseCase({ draftJobs: [], corrections: [], emails: [], payments: [] }));
+++    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1');
+++    expect(res.status).toBe(200);
+++    expect(spies.caseFindFirst).toHaveBeenCalledWith(
+++      expect.objectContaining({ include: expect.objectContaining({ draftJobs: expect.any(Object) }) }),
+++    );
+++  });
+++
+++  it('patches fields, bumps version, and writes activity row', async () => {
+++    const { db, spies } = makeDb();
+++    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({
+++      version: 1,
+++      framingChoice: 'redacted framing',
+++    });
+++    expect(res.status).toBe(200);
+++    expect(spies.caseUpdate).toHaveBeenCalledWith(
+++      expect.objectContaining({ data: expect.objectContaining({ version: { increment: 1 } }) }),
+++    );
+++    expect(spies.activityLogCreate).toHaveBeenCalledWith(
+++      expect.objectContaining({ data: expect.objectContaining({ action: 'case_updated' }) }),
+++    );
+++  });
+++
+++  it('rejects PATCH stale version with 409', async () => {
+++    const { db } = makeDb(baseCase({ version: 2 }));
+++    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({
+++      version: 1,
+++      framingChoice: 'redacted framing',
+++    });
+++    expect(res.status).toBe(409);
+++  });
+++
+++  it('soft deletes as rejected with distinct activity action, admin only', async () => {
+++    const { db, spies } = makeDb(baseCase({ status: 'records' }));
+++    const res = await request(appFor(db)).delete('/api/v1/cases/CASE-1');
+++    expect(res.status).toBe(200);
+++    expect(spies.caseUpdate).toHaveBeenCalledWith(
+++      expect.objectContaining({ data: expect.objectContaining({ status: 'rejected' }) }),
+++    );
+++    expect(spies.activityLogCreate).toHaveBeenCalledWith(
+++      expect.objectContaining({
+++        data: expect.objectContaining({
+++          action: 'case_soft_deleted',
+++          detailsJson: expect.objectContaining({ previousStatus: 'records' }),
+++        }),
+++      }),
+++    );
+++  });
+++
+++  it('performs valid status transition without touching draft jobs', async () => {
+++    const { db, tx, spies } = makeDb(baseCase({ status: 'intake', version: 1 }));
+++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
+++      from: 'intake',
+++      to: 'records',
+++      version: 1,
+++      transitionReason: 'per supervisor approval',
+++    });
+++    expect(res.status).toBe(200);
+++    expect(tx.draftJob.findMany).not.toHaveBeenCalled();
+++    expect(spies.activityLogCreate).toHaveBeenCalledWith(
+++      expect.objectContaining({
+++        data: expect.objectContaining({
+++          action: 'case_status_changed',
+++          detailsJson: expect.objectContaining({ transitionReason: 'per supervisor approval' }),
+++        }),
+++      }),
+++    );
+++  });
+++
+++  it('rejects invalid status transition with 400', async () => {
+++    const { db } = makeDb(baseCase({ status: 'intake', version: 1 }));
+++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
+++      from: 'intake',
+++      to: 'delivered',
+++      version: 1,
+++    });
+++    expect(res.status).toBe(400);
+++  });
+++
+++  it('allows physician_review to delivered for physician but not ops_staff', async () => {
+++    mockUser = { id: 'PHYS-USER', cognitoSub: 'sub', email: 'phys@example.com', role: 'physician' };
+++    const allowed = makeDb(baseCase({ status: 'physician_review', version: 1 }));
+++    const allowedRes = await request(appFor(allowed.db)).post('/api/v1/cases/CASE-1/status').send({
+++      from: 'physician_review',
+++      to: 'delivered',
+++      version: 1,
+++    });
+++    expect(allowedRes.status).toBe(200);
+++
+++    mockUser = { id: 'OPS-USER', cognitoSub: 'sub', email: 'ops@example.com', role: 'ops_staff' };
+++    const denied = makeDb(baseCase({ status: 'physician_review', version: 1 }));
+++    const deniedRes = await request(appFor(denied.db)).post('/api/v1/cases/CASE-1/status').send({
+++      from: 'physician_review',
+++      to: 'delivered',
+++      version: 1,
+++    });
+++    expect(deniedRes.status).toBe(403);
+++  });
+++
+++  it('rejects stale status transition with 409', async () => {
+++    const { db } = makeDb(baseCase({ status: 'intake', version: 2 }));
+++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
+++      from: 'intake',
+++      to: 'records',
+++      version: 1,
+++    });
+++    expect(res.status).toBe(409);
+++  });
+++
+++  it.each([
+++    ['123-45-6789'],
+++    ['call 555-123-4567 back'],
+++    ['veteran@example.com confirmed'],
+++  ])('rejects PHI-shaped transitionReason %s', async (transitionReason) => {
+++    const { db } = makeDb(baseCase({ status: 'intake', version: 1 }));
+++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
+++      from: 'intake',
+++      to: 'records',
+++      version: 1,
+++      transitionReason,
+++    });
+++    expect(res.status).toBe(400);
+++  });
+++});
++--- /dev/null	2026-05-25 07:00:48.915830689 +0000
+++++ backend/src/routes/cases.ts	2026-05-25 07:02:54.625749870 +0000
++@@ -0,0 +1,429 @@
+++import { Router, type NextFunction, type Request, type Response } from 'express';
+++import { requireRole } from '../auth/roles';
+++import { authenticateJwt } from '../middleware/auth';
+++import { asyncHandler } from '../http/async-handler';
+++import { HttpError, isHttpError, sendError } from '../http/errors';
+++import type { AppDb, AppUserRecord, CaseRecord, CaseStatus, Role } from '../services/db-types';
+++import {
+++  parseAssignPhysician,
+++  parseCaseCreate,
+++  parseCasePatch,
+++  parseStatusTransition,
+++} from '../services/case-validation';
+++import {
+++  canRolePerformCaseStatusTransition,
+++  isValidCaseStatusTransition,
+++  requiredRolesForCaseStatusTransition,
+++} from '../services/case-status-transitions';
+++
+++const CASE_LITE_SELECT = {
+++  id: true,
+++  veteranId: true,
+++  claimedCondition: true,
+++  claimType: true,
+++  status: true,
+++  version: true,
+++  currentVersion: true,
+++  assignedPhysicianId: true,
+++  refundEligible: true,
+++  createdAt: true,
+++  updatedAt: true,
+++  veteran: {
+++    select: {
+++      id: true,
+++      firstName: true,
+++      lastName: true,
+++      email: true,
+++    },
+++  },
+++  assignedPhysician: {
+++    select: {
+++      id: true,
+++      displayName: true,
+++      name: true,
+++      email: true,
+++    },
+++  },
+++};
+++
+++function currentUser(req: Request): AppUserRecord {
+++  const maybeUser = (req as Request & { user?: AppUserRecord }).user;
+++  if (maybeUser === undefined) {
+++    throw new HttpError(401, 'unauthorized', 'Authentication required');
+++  }
+++  return maybeUser;
+++}
+++
+++function parsePositiveQueryInt(value: unknown, defaultValue: number, maxValue: number): number {
+++  if (typeof value !== 'string') return defaultValue;
+++  const parsed = Number.parseInt(value, 10);
+++  if (!Number.isInteger(parsed) || parsed <= 0) return defaultValue;
+++  return Math.min(parsed, maxValue);
+++}
+++
+++function parseOptionalCaseStatus(value: unknown): CaseStatus | undefined {
+++  if (typeof value !== 'string') return undefined;
+++  const statuses: readonly CaseStatus[] = [
+++    'intake',
+++    'records',
+++    'viability',
+++    'drafting',
+++    'physician_review',
+++    'correction_requested',
+++    'correction_review',
+++    'delivered',
+++    'paid',
+++    'rejected',
+++  ];
+++  if (!statuses.includes(value as CaseStatus)) {
+++    throw new HttpError(400, 'bad_request', 'status filter is invalid', { field: 'status' });
+++  }
+++  return value as CaseStatus;
+++}
+++
+++function optionalStringQuery(value: unknown): string | undefined {
+++  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+++}
+++
+++function buildCaseListWhere(query: Request['query']): Record<string, unknown> {
+++  const where: Record<string, unknown> = {};
+++  const status = parseOptionalCaseStatus(query.status);
+++  const claimType = optionalStringQuery(query.claimType);
+++  const veteranId = optionalStringQuery(query.veteranId);
+++  const assignedPhysicianId = optionalStringQuery(query.assignedPhysicianId);
+++
+++  if (status !== undefined) where.status = status;
+++  if (claimType !== undefined) where.claimType = claimType;
+++  if (veteranId !== undefined) where.veteranId = veteranId;
+++  if (assignedPhysicianId !== undefined) where.assignedPhysicianId = assignedPhysicianId;
+++
+++  return where;
+++}
+++
+++function roleGuardForStatusTransition(db: AppDb) {
+++  return asyncHandler(async (req: Request, _res: Response, next: NextFunction) => {
+++    const id = String(req.params.id);
+++    const user = currentUser(req);
+++    const parsed = parseStatusTransition(req.body);
+++
+++    const current = await db.case.findFirst({ where: { id }, select: { id: true, status: true } });
+++    if (current === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+++
+++    const allowed = canRolePerformCaseStatusTransition(user.role, current.status, parsed.to);
+++    if (!allowed) {
+++      throw new HttpError(403, 'forbidden', 'Role cannot perform this case status transition', {
+++        requiredRoles: requiredRolesForCaseStatusTransition(current.status, parsed.to),
+++      });
+++    }
+++
+++    next();
+++  });
+++}
+++
+++export function createCasesRouter(db: AppDb): Router {
+++  const router = Router();
+++
+++  router.use(authenticateJwt);
+++
+++  router.get(
+++    '/cases',
+++    requireRole(['admin', 'ops_staff']),
+++    asyncHandler(async (req: Request, res: Response) => {
+++      const page = parsePositiveQueryInt(req.query.page, 1, 100000);
+++      const pageSize = parsePositiveQueryInt(req.query.pageSize, 25, 100);
+++      const skip = (page - 1) * pageSize;
+++      const where = buildCaseListWhere(req.query);
+++
+++      const [total, cases] = await db.$transaction(async (tx) => {
+++        const count = await tx.case.count({ where });
+++        const rows = await tx.case.findMany({
+++          where,
+++          select: CASE_LITE_SELECT,
+++          orderBy: { updatedAt: 'desc' },
+++          skip,
+++          take: pageSize,
+++        });
+++        return [count, rows] as const;
+++      });
+++
+++      res.json({ data: cases, page, pageSize, total });
+++    }),
+++  );
+++
+++  router.get(
+++    '/cases/:id',
+++    requireRole(['admin', 'ops_staff']),
+++    asyncHandler(async (req: Request, res: Response) => {
+++      const id = String(req.params.id);
+++      const found = await db.case.findFirst({
+++        where: { id },
+++        include: {
+++          veteran: { select: { id: true, firstName: true, lastName: true, email: true } },
+++          assignedPhysician: { select: { id: true, displayName: true, name: true, email: true } },
+++          documents: { orderBy: { createdAt: 'desc' }, take: 5 },
+++          draftJobs: { orderBy: { enqueuedAt: 'desc' }, take: 5 },
+++          corrections: { orderBy: { requestedAt: 'desc' }, take: 5 },
+++          emails: { orderBy: { sentAt: 'desc' }, take: 5 },
+++          payments: { orderBy: { createdAt: 'desc' } },
+++          _count: { select: { documents: true, draftJobs: true, corrections: true, emails: true, payments: true } },
+++        },
+++      });
+++      if (found === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+++      res.json({ data: found });
+++    }),
+++  );
+++
+++  router.post(
+++    '/veterans/:veteranId/cases',
+++    requireRole(['admin', 'ops_staff']),
+++    asyncHandler(async (req: Request, res: Response) => {
+++      const user = currentUser(req);
+++      const veteranId = String(req.params.veteranId);
+++      const parsed = parseCaseCreate(req.body);
+++
+++      const created = await db.$transaction(async (tx) => {
+++        const veteran = await tx.veteran.findUnique({ where: { id: veteranId }, select: { id: true } });
+++        if (veteran === null) throw new HttpError(404, 'not_found', 'Veteran not found', { veteranId });
+++
+++        const row = await tx.case.create({
+++          data: {
+++            ...parsed,
+++            veteranId,
+++            status: 'intake',
+++          },
+++          select: CASE_LITE_SELECT,
+++        });
+++
+++        await tx.activityLog.create({
+++          data: {
+++            actorUserId: user.id,
+++            action: 'case_created',
+++            caseId: row.id,
+++            veteranId,
+++            detailsJson: { caseId: row.id, veteranId, fields: ['id', 'claimedCondition', 'claimType'] },
+++          },
+++        });
+++
+++        return row;
+++      });
+++
+++      res.status(201).json({ data: created });
+++    }),
+++  );
+++
+++  router.patch(
+++    '/cases/:id',
+++    requireRole(['admin', 'ops_staff']),
+++    asyncHandler(async (req: Request, res: Response) => {
+++      const user = currentUser(req);
+++      const id = String(req.params.id);
+++      const parsed = parseCasePatch(req.body);
+++
+++      const updated = await db.$transaction(async (tx) => {
+++        const existing = await tx.case.findFirst({ where: { id }, select: { id: true, veteranId: true, version: true } });
+++        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+++        if (existing.version !== parsed.version) {
+++          throw new HttpError(409, 'conflict', 'Case version is stale', {
+++            caseId: id,
+++            expectedVersion: existing.version,
+++            receivedVersion: parsed.version,
+++          });
+++        }
+++
+++        const row = await tx.case.update({
+++          where: { id },
+++          data: { ...parsed.fields, version: { increment: 1 } },
+++          select: CASE_LITE_SELECT,
+++        });
+++
+++        await tx.activityLog.create({
+++          data: {
+++            actorUserId: user.id,
+++            action: 'case_updated',
+++            caseId: id,
+++            veteranId: existing.veteranId,
+++            detailsJson: { caseId: id, fields: parsed.changedFields },
+++          },
+++        });
+++
+++        return row;
+++      });
+++
+++      res.json({ data: updated });
+++    }),
+++  );
+++
+++  router.delete(
+++    '/cases/:id',
+++    requireRole(['admin']),
+++    asyncHandler(async (req: Request, res: Response) => {
+++      const user = currentUser(req);
+++      const id = String(req.params.id);
+++
+++      const updated = await db.$transaction(async (tx) => {
+++        const existing = await tx.case.findFirst({
+++          where: { id },
+++          select: { id: true, veteranId: true, status: true, version: true },
+++        });
+++        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+++
+++        const row = await tx.case.update({
+++          where: { id },
+++          data: { status: 'rejected', version: { increment: 1 } },
+++          select: CASE_LITE_SELECT,
+++        });
+++
+++        await tx.activityLog.create({
+++          data: {
+++            actorUserId: user.id,
+++            action: 'case_soft_deleted',
+++            caseId: id,
+++            veteranId: existing.veteranId,
+++            detailsJson: { caseId: id, previousStatus: existing.status },
+++          },
+++        });
+++
+++        return row;
+++      });
+++
+++      res.json({ data: updated });
+++    }),
+++  );
+++
+++  router.post(
+++    '/cases/:id/status',
+++    roleGuardForStatusTransition(db),
+++    asyncHandler(async (req: Request, res: Response) => {
+++      const user = currentUser(req);
+++      const id = String(req.params.id);
+++      const parsed = parseStatusTransition(req.body);
+++
+++      const updated = await db.$transaction(async (tx) => {
+++        const existing = await tx.case.findFirst({
+++          where: { id },
+++          select: { id: true, veteranId: true, status: true, version: true },
+++        });
+++        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+++        if (existing.status !== parsed.from || existing.version !== parsed.version) {
+++          throw new HttpError(409, 'conflict', 'Case status or version is stale', {
+++            caseId: id,
+++            currentStatus: existing.status,
+++            currentVersion: existing.version,
+++            receivedFrom: parsed.from,
+++            receivedVersion: parsed.version,
+++          });
+++        }
+++        if (!isValidCaseStatusTransition(parsed.from, parsed.to)) {
+++          throw new HttpError(400, 'bad_request', 'Invalid case status transition', {
+++            from: parsed.from,
+++            to: parsed.to,
+++          });
+++        }
+++
+++        const row = await tx.case.update({
+++          where: { id },
+++          data: { status: parsed.to, version: { increment: 1 } },
+++          select: CASE_LITE_SELECT,
+++        });
+++
+++        await tx.activityLog.create({
+++          data: {
+++            actorUserId: user.id,
+++            action: 'case_status_changed',
+++            caseId: id,
+++            veteranId: existing.veteranId,
+++            detailsJson: {
+++              caseId: id,
+++              from: existing.status,
+++              to: parsed.to,
+++              ...(parsed.transitionReason !== undefined && { transitionReason: parsed.transitionReason }),
+++            },
+++          },
+++        });
+++
+++        return row;
+++      });
+++
+++      res.json({ data: updated });
+++    }),
+++  );
+++
+++  router.get(
+++    '/cases/:id/draft-jobs',
+++    requireRole(['admin', 'ops_staff']),
+++    asyncHandler(async (req: Request, res: Response) => {
+++      const id = String(req.params.id);
+++      const rows = await db.draftJob.findMany({ where: { caseId: id }, orderBy: { version: 'desc' } });
+++      res.json({ data: rows });
+++    }),
+++  );
+++
+++  router.get(
+++    '/cases/:id/corrections',
+++    requireRole(['admin', 'ops_staff']),
+++    asyncHandler(async (req: Request, res: Response) => {
+++      const id = String(req.params.id);
+++      const rows = await db.correction.findMany({ where: { caseId: id }, orderBy: { requestedAt: 'desc' } });
+++      res.json({ data: rows });
+++    }),
+++  );
+++
+++  router.post(
+++    '/cases/:id/assign-physician',
+++    requireRole(['admin', 'ops_staff']),
+++    asyncHandler(async (req: Request, res: Response) => {
+++      const user = currentUser(req);
+++      const id = String(req.params.id);
+++      const parsed = parseAssignPhysician(req.body);
+++
+++      const updated = await db.$transaction(async (tx) => {
+++        const existing = await tx.case.findFirst({
+++          where: { id },
+++          select: { id: true, veteranId: true, version: true, assignedPhysicianId: true },
+++        });
+++        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+++        if (existing.version !== parsed.version) {
+++          throw new HttpError(409, 'conflict', 'Case version is stale', {
+++            caseId: id,
+++            expectedVersion: existing.version,
+++            receivedVersion: parsed.version,
+++          });
+++        }
+++
+++        const row = await tx.case.update({
+++          where: { id },
+++          data: { assignedPhysicianId: parsed.physicianId, version: { increment: 1 } },
+++          select: CASE_LITE_SELECT,
+++        });
+++
+++        await tx.activityLog.create({
+++          data: {
+++            actorUserId: user.id,
+++            action: 'case_physician_assigned',
+++            caseId: id,
+++            veteranId: existing.veteranId,
+++            detailsJson: { caseId: id, fields: ['assignedPhysicianId'] },
+++          },
+++        });
+++
+++        return row;
+++      });
+++
+++      res.json({ data: updated });
+++    }),
+++  );
+++
+++  router.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+++    if (res.headersSent) {
+++      next(err);
+++      return;
+++    }
+++    if (isHttpError(err)) {
+++      sendError(res, err.status, err.code, err.message, err.details);
+++      return;
+++    }
+++    sendError(res, 500, 'internal_server_error', 'Unexpected server error');
+++  });
+++
+++  return router;
+++}
++--- /dev/null	2026-05-25 07:00:48.915830689 +0000
+++++ backend/src/server.ts	2026-05-25 07:02:54.638199198 +0000
++@@ -0,0 +1,14 @@
+++import express from 'express';
+++import { defaultPrisma } from './db/client';
+++import { createVeteransRouter } from './routes/veterans';
+++import { createDocumentsRouter } from './routes/documents';
+++import { createCasesRouter } from './routes/cases';
+++
+++const app = express();
+++
+++app.use(express.json());
+++app.use('/api/v1', createVeteransRouter(defaultPrisma));
+++app.use('/api/v1', createDocumentsRouter());
+++app.use('/api/v1', createCasesRouter(defaultPrisma));
+++
+++export { app };
++--- /dev/null	2026-05-25 07:00:48.915830689 +0000
+++++ backend/src/services/case-status-transitions.ts	2026-05-25 07:02:04.499771142 +0000
++@@ -0,0 +1,57 @@
+++import type { CaseStatus, Role } from './db-types';
+++
+++export const CASE_STATUSES: readonly CaseStatus[] = [
+++  'intake',
+++  'records',
+++  'viability',
+++  'drafting',
+++  'physician_review',
+++  'correction_requested',
+++  'correction_review',
+++  'delivered',
+++  'paid',
+++  'rejected',
+++] as const;
+++
+++export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> = {
+++  intake: ['records', 'rejected'],
+++  records: ['viability', 'rejected'],
+++  viability: ['drafting', 'rejected'],
+++  drafting: ['physician_review', 'rejected'],
+++  physician_review: ['correction_requested', 'delivered', 'rejected'],
+++  correction_requested: ['correction_review'],
+++  correction_review: ['delivered', 'rejected'],
+++  delivered: ['paid'],
+++  paid: [],
+++  rejected: [],
+++};
+++
+++export function isCaseStatus(value: unknown): value is CaseStatus {
+++  return typeof value === 'string' && CASE_STATUSES.includes(value as CaseStatus);
+++}
+++
+++export function isValidCaseStatusTransition(from: CaseStatus, to: CaseStatus): boolean {
+++  return CASE_STATUS_TRANSITIONS[from].includes(to);
+++}
+++
+++export function requiredRolesForCaseStatusTransition(from: CaseStatus, to: CaseStatus): readonly Role[] {
+++  if (from === 'delivered' && to === 'paid') return ['admin'];
+++
+++  if (
+++    from === 'physician_review' &&
+++    (to === 'delivered' || to === 'correction_requested')
+++  ) {
+++    return ['physician', 'admin'];
+++  }
+++
+++  return ['admin', 'ops_staff'];
+++}
+++
+++export function canRolePerformCaseStatusTransition(
+++  role: Role,
+++  from: CaseStatus,
+++  to: CaseStatus,
+++): boolean {
+++  if (role === 'admin') return true;
+++  return requiredRolesForCaseStatusTransition(from, to).includes(role);
+++}
++--- /dev/null	2026-05-25 07:00:48.915830689 +0000
+++++ backend/src/services/case-validation.ts	2026-05-25 07:02:04.525373724 +0000
++@@ -0,0 +1,194 @@
+++import { HttpError } from '../http/errors';
+++import type { CaseStatus, ClaimType } from './db-types';
+++import { isCaseStatus } from './case-status-transitions';
+++
+++const CLAIM_TYPES: readonly ClaimType[] = ['initial', 'supplemental', 'hlr', 'appeal_bva'] as const;
+++const PHI_PATTERN_REJECTIONS: readonly RegExp[] = [
+++  /\d{3}-?\d{2}-?\d{4}/,
+++  /\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/,
+++  /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i,
+++];
+++
+++export interface ParsedCaseCreate {
+++  id: string;
+++  claimedCondition: string;
+++  claimType: ClaimType;
+++  framingChoice?: string;
+++  upstreamScCondition?: string;
+++  veteranStatement?: string;
+++  inServiceEvent?: string;
+++  assignedPhysicianId?: string;
+++}
+++
+++export interface ParsedCasePatch {
+++  version: number;
+++  fields: {
+++    claimedCondition?: string;
+++    framingChoice?: string | null;
+++    upstreamScCondition?: string | null;
+++    veteranStatement?: string | null;
+++    inServiceEvent?: string | null;
+++    assignedPhysicianId?: string | null;
+++    refundEligible?: boolean;
+++  };
+++  changedFields: readonly string[];
+++}
+++
+++export interface ParsedStatusTransition {
+++  from: CaseStatus;
+++  to: CaseStatus;
+++  version: number;
+++  transitionReason?: string;
+++}
+++
+++export interface ParsedAssignPhysician {
+++  physicianId: string;
+++  version: number;
+++}
+++
+++function isRecord(value: unknown): value is Record<string, unknown> {
+++  return typeof value === 'object' && value !== null && !Array.isArray(value);
+++}
+++
+++function badRequest(message: string, details?: Record<string, unknown>): never {
+++  throw new HttpError(400, 'bad_request', message, details);
+++}
+++
+++function requiredNonEmptyString(body: Record<string, unknown>, field: string): string {
+++  const value = body[field];
+++  if (typeof value !== 'string' || value.trim().length === 0) {
+++    badRequest(`${field} is required`, { field });
+++  }
+++  return value.trim();
+++}
+++
+++function optionalString(
+++  body: Record<string, unknown>,
+++  field: string,
+++  maxLength: number,
+++): string | undefined {
+++  const value = body[field];
+++  if (value === undefined || value === null) return undefined;
+++  if (typeof value !== 'string') badRequest(`${field} must be a string`, { field });
+++  const trimmed = value.trim();
+++  if (trimmed.length > maxLength) badRequest(`${field} is too long`, { field, maxLength });
+++  return trimmed;
+++}
+++
+++function optionalNullableString(
+++  body: Record<string, unknown>,
+++  field: string,
+++  maxLength: number,
+++): string | null | undefined {
+++  const value = body[field];
+++  if (value === undefined) return undefined;
+++  if (value === null) return null;
+++  if (typeof value !== 'string') badRequest(`${field} must be a string`, { field });
+++  const trimmed = value.trim();
+++  if (trimmed.length > maxLength) badRequest(`${field} is too long`, { field, maxLength });
+++  return trimmed;
+++}
+++
+++function positiveInteger(body: Record<string, unknown>, field: string): number {
+++  const value = body[field];
+++  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+++    badRequest(`${field} must be a positive integer`, { field });
+++  }
+++  return value;
+++}
+++
+++export function parseCaseCreate(body: unknown): ParsedCaseCreate {
+++  if (!isRecord(body)) badRequest('Request body must be an object');
+++  if ('veteranId' in body) badRequest('veteranId comes from the URL, not the request body', { field: 'veteranId' });
+++
+++  const id = requiredNonEmptyString(body, 'id');
+++  const claimedCondition = requiredNonEmptyString(body, 'claimedCondition');
+++  const claimType = body.claimType;
+++  if (typeof claimType !== 'string' || !CLAIM_TYPES.includes(claimType as ClaimType)) {
+++    badRequest('claimType is invalid', { field: 'claimType', allowedValues: CLAIM_TYPES });
+++  }
+++
+++  return {
+++    id,
+++    claimedCondition,
+++    claimType: claimType as ClaimType,
+++    ...(optionalString(body, 'framingChoice', 80) !== undefined && { framingChoice: optionalString(body, 'framingChoice', 80) }),
+++    ...(optionalString(body, 'upstreamScCondition', 200) !== undefined && { upstreamScCondition: optionalString(body, 'upstreamScCondition', 200) }),
+++    ...(optionalString(body, 'veteranStatement', 2000) !== undefined && { veteranStatement: optionalString(body, 'veteranStatement', 2000) }),
+++    ...(optionalString(body, 'inServiceEvent', 2000) !== undefined && { inServiceEvent: optionalString(body, 'inServiceEvent', 2000) }),
+++    ...(optionalString(body, 'assignedPhysicianId', 200) !== undefined && { assignedPhysicianId: optionalString(body, 'assignedPhysicianId', 200) }),
+++  };
+++}
+++
+++export function parseCasePatch(body: unknown): ParsedCasePatch {
+++  if (!isRecord(body)) badRequest('Request body must be an object');
+++
+++  const blocked = ['status', 'cdsVerdict', 'cdsOddsPct', 'cdsRationale', 'currentVersion'];
+++  const blockedField = blocked.find((field) => field in body);
+++  if (blockedField !== undefined) badRequest(`${blockedField} cannot be patched from this endpoint`, { field: blockedField });
+++
+++  const version = positiveInteger(body, 'version');
+++  const fields: ParsedCasePatch['fields'] = {};
+++
+++  const setString = (field: keyof ParsedCasePatch['fields'], maxLength: number): void => {
+++    const parsed = optionalNullableString(body, field, maxLength);
+++    if (parsed !== undefined) fields[field] = parsed as never;
+++  };
+++
+++  setString('claimedCondition', 500);
+++  setString('framingChoice', 80);
+++  setString('upstreamScCondition', 200);
+++  setString('veteranStatement', 2000);
+++  setString('inServiceEvent', 2000);
+++  setString('assignedPhysicianId', 200);
+++
+++  if ('refundEligible' in body) {
+++    if (typeof body.refundEligible !== 'boolean') badRequest('refundEligible must be boolean', { field: 'refundEligible' });
+++    fields.refundEligible = body.refundEligible;
+++  }
+++
+++  const changedFields = Object.keys(fields).sort();
+++  if (changedFields.length === 0) badRequest('No patchable fields provided');
+++
+++  return { version, fields, changedFields };
+++}
+++
+++/**
+++ * Parses a case status transition request.
+++ *
+++ * transitionReason is for ops audit metadata only. NEVER include veteran name,
+++ * condition text, symptoms, dates, or any PHI. Examples of acceptable values:
+++ * "per supervisor approval", "records gathered", "physician requested redraft",
+++ * "awaiting prior denial letter".
+++ */
+++export function parseStatusTransition(body: unknown): ParsedStatusTransition {
+++  if (!isRecord(body)) badRequest('Request body must be an object');
+++  if (!isCaseStatus(body.from)) badRequest('from must be a valid case status', { field: 'from' });
+++  if (!isCaseStatus(body.to)) badRequest('to must be a valid case status', { field: 'to' });
+++  const version = positiveInteger(body, 'version');
+++
+++  const transitionReason = optionalString(body, 'transitionReason', 200);
+++  if (transitionReason !== undefined) {
+++    const rejected = PHI_PATTERN_REJECTIONS.some((pattern) => pattern.test(transitionReason));
+++    if (rejected) {
+++      badRequest('transitionReason may contain only operational audit metadata and must not contain PHI-like values', {
+++        field: 'transitionReason',
+++      });
+++    }
+++  }
+++
+++  return {
+++    from: body.from,
+++    to: body.to,
+++    version,
+++    ...(transitionReason !== undefined && { transitionReason }),
+++  };
+++}
+++
+++export function parseAssignPhysician(body: unknown): ParsedAssignPhysician {
+++  if (!isRecord(body)) badRequest('Request body must be an object');
+++  return {
+++    physicianId: requiredNonEmptyString(body, 'physicianId'),
+++    version: positiveInteger(body, 'version'),
+++  };
+++}
++--- /dev/null	2026-05-25 07:00:48.915830689 +0000
+++++ backend/src/services/db-types.ts	2026-05-25 07:02:04.481670692 +0000
++@@ -0,0 +1,116 @@
+++/**
+++ * Shared database-facing structural types used by route modules.
+++ *
+++ * This file intentionally uses literal unions and structural delegate types rather
+++ * than importing generated Prisma types. The project keeps backend builds working
+++ * before a generated Prisma client is present.
+++ */
+++
+++export type Role = 'admin' | 'ops_staff' | 'physician' | 'veteran';
+++
+++export type ClaimType = 'initial' | 'supplemental' | 'hlr' | 'appeal_bva';
+++
+++export type CaseStatus =
+++  | 'intake'
+++  | 'records'
+++  | 'viability'
+++  | 'drafting'
+++  | 'physician_review'
+++  | 'correction_requested'
+++  | 'correction_review'
+++  | 'delivered'
+++  | 'paid'
+++  | 'rejected';
+++
+++export interface AppUserRecord {
+++  id: string;
+++  cognitoSub: string;
+++  email: string;
+++  role: Role;
+++}
+++
+++export interface VeteranLiteRecord {
+++  id: string;
+++  firstName?: string | null;
+++  lastName?: string | null;
+++  email?: string | null;
+++}
+++
+++export interface PhysicianLiteRecord {
+++  id: string;
+++  displayName?: string | null;
+++  name?: string | null;
+++  email?: string | null;
+++}
+++
+++export interface CaseRecord {
+++  id: string;
+++  veteranId: string;
+++  claimedCondition: string;
+++  claimType: ClaimType;
+++  status: CaseStatus;
+++  version: number;
+++  currentVersion?: number | null;
+++  framingChoice?: string | null;
+++  upstreamScCondition?: string | null;
+++  veteranStatement?: string | null;
+++  inServiceEvent?: string | null;
+++  assignedPhysicianId?: string | null;
+++  refundEligible?: boolean | null;
+++  createdAt?: Date | string;
+++  updatedAt?: Date | string;
+++  veteran?: VeteranLiteRecord;
+++  assignedPhysician?: PhysicianLiteRecord | null;
+++  _count?: Record<string, number>;
+++  documents?: readonly unknown[];
+++  draftJobs?: readonly unknown[];
+++  corrections?: readonly unknown[];
+++  emails?: readonly unknown[];
+++  payments?: readonly unknown[];
+++}
+++
+++export interface ActivityLogCreateInput {
+++  actorUserId: string;
+++  action: string;
+++  caseId?: string | null;
+++  veteranId?: string | null;
+++  detailsJson?: Record<string, unknown>;
+++}
+++
+++export interface ActivityLogDelegate {
+++  create(args: { data: ActivityLogCreateInput }): Promise<unknown>;
+++}
+++
+++export interface CaseDelegate {
+++  findMany(args?: Record<string, unknown>): Promise<CaseRecord[]>;
+++  findFirst(args?: Record<string, unknown>): Promise<CaseRecord | null>;
+++  findUnique(args?: Record<string, unknown>): Promise<CaseRecord | null>;
+++  count(args?: Record<string, unknown>): Promise<number>;
+++  create(args: Record<string, unknown>): Promise<CaseRecord>;
+++  update(args: Record<string, unknown>): Promise<CaseRecord>;
+++}
+++
+++export interface VeteranDelegate {
+++  findUnique(args?: Record<string, unknown>): Promise<VeteranLiteRecord | null>;
+++  findFirst?(args?: Record<string, unknown>): Promise<VeteranLiteRecord | null>;
+++}
+++
+++export interface DraftJobDelegate {
+++  findMany(args?: Record<string, unknown>): Promise<unknown[]>;
+++}
+++
+++export interface CorrectionDelegate {
+++  findMany(args?: Record<string, unknown>): Promise<unknown[]>;
+++}
+++
+++export interface AppDbTransaction {
+++  case: CaseDelegate;
+++  veteran: VeteranDelegate;
+++  draftJob: DraftJobDelegate;
+++  correction: CorrectionDelegate;
+++  activityLog: ActivityLogDelegate;
+++}
+++
+++export interface AppDb extends AppDbTransaction {
+++  $transaction<T>(fn: (tx: AppDbTransaction) => Promise<T>): Promise<T>;
+++}
++--- /dev/null	2026-05-25 07:00:48.915830689 +0000
+++++ docs/PHASE4A_SUMMARY.md	2026-05-25 07:03:46.853575599 +0000
++@@ -0,0 +1,66 @@
+++# Phase 4A Summary — Case Backend Routes
+++
+++## Files touched
+++
+++12 files in backend and docs scope only:
+++
+++1. `backend/src/routes/cases.ts` — new Express case routes.
+++2. `backend/src/services/case-validation.ts` — new request validators.
+++3. `backend/src/services/case-status-transitions.ts` — new transition table and role gate helpers.
+++4. `backend/src/services/db-types.ts` — extended structural database types for case work.
+++5. `backend/src/server.ts` — mounted `createCasesRouter(defaultPrisma)` under `/api/v1`.
+++6. `backend/src/__tests__/cases-routes.test.ts` — new route tests with mock DB.
+++7. `backend/src/__tests__/case-status-transitions.test.ts` — new pure transition tests.
+++8. `docs/PHASE4A_SUMMARY.md` — this summary.
+++9. `docs/verification/phase4A-evidence/typecheck.txt` — typecheck evidence note.
+++10. `docs/verification/phase4A-evidence/test-output.txt` — test evidence note.
+++11. `docs/verification/phase4A-evidence/phase4A.patch` — generated patch bundle.
+++12. `docs/verification/phase4A-evidence/server-registration-note.patch` — server registration patch.
+++
+++## Implemented
+++
+++- Case list, detail, create, patch, soft-delete routes.
+++- Status transition endpoint with explicit transition matrix.
+++- Transition role gates:
+++  - `physician_review -> delivered`: physician or admin.
+++  - `physician_review -> correction_requested`: physician or admin.
+++  - `delivered -> paid`: admin only.
+++  - all other transitions: admin or ops_staff.
+++- `transitionReason` replaces `note`.
+++- `transitionReason` max length is 200 characters.
+++- `transitionReason` rejects SSN-shaped, phone-shaped, and email-shaped values with `400 bad_request`.
+++- DELETE keeps existing soft-delete behavior by setting `status = rejected`.
+++- DELETE writes distinct activity action `case_soft_deleted`.
+++- Soft-delete activity details include `previousStatus`.
+++- Status transition activity action remains `case_status_changed`.
+++- Activity details use IDs, field names, status values, and validated operational audit metadata only.
+++- `GET /cases/:id/corrections` is admin + ops_staff only.
+++- Physician own-assigned access is intentionally deferred.
+++
+++## Explicitly skipped
+++
+++- No frontend files touched; Phase 4A backend-only scope.
+++- No schema migration; DELETE uses `status = rejected` per brief.
+++- No AppUser ↔ Physician mapping; deferred to Phase 5.
+++- No `deleted_at`; activity log timestamp is the deletion timestamp.
+++- No CDS, Stripe, draft viewer, email send, refund processing, or UI work.
+++
+++## Assumptions made
+++
+++- `CaseStatus` remains a literal union in `services/db-types.ts`; no generated Prisma enum import.
+++- Prisma relation names are camelCase: `documents`, `draftJobs`, `corrections`, `emails`, `payments`, `assignedPhysician`, `veteran`.
+++- Optimistic lock field is `case.version`.
+++- `currentVersion` is not modified by routine case PATCH/status updates.
+++- Activity log delegate is `db.activityLog`.
+++- Soft-deleted cases remain visible in `/cases` as ordinary rejected cases.
+++
+++## Test results
+++
+++The artifact was generated in a sandbox without the full private repository, package workspace, or installed project dependencies. I could not truthfully run `npm run typecheck -w backend` or `npm run test -w backend` against the real repo here.
+++
+++Evidence files explicitly state this limitation and list the commands that should be run after applying the patch in the repo.
+++
+++## Known caveats
+++
+++- `backend/src/services/db-types.ts` is supplied as a modified structural type file. If the current repo already contains additional exported types, merge the added Case-related types into the existing file rather than replacing unrelated existing exports.
+++- `backend/src/server.ts` is supplied as a direct modified file and a small registration patch. If current main has additional middleware or route mounts, apply only the import and `app.use('/api/v1', createCasesRouter(defaultPrisma));` registration.
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ docs/verification/phase4A-evidence/test-output.txt	2026-05-25 07:03:46.884558873 +0000
+@@ -0,0 +1,8 @@
++Command intended:
++  npm run test -w backend
++
++Result:
++  Not executed in this sandbox because the full private repository, package workspace, and project dependencies are not available here.
++
++Action after applying ZIP contents to repo:
++  Run npm run test -w backend from the repository root.
+--- /dev/null	2026-05-25 07:00:48.915830689 +0000
++++ docs/verification/phase4A-evidence/typecheck.txt	2026-05-25 07:03:46.868624308 +0000
+@@ -0,0 +1,8 @@
++Command intended:
++  npm run typecheck -w backend
++
++Result:
++  Not executed in this sandbox because the full private repository, package workspace, and project dependencies are not available here.
++
++Action after applying ZIP contents to repo:
++  Run npm run typecheck -w backend from the repository root.

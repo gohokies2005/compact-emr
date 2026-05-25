@@ -1,5 +1,7 @@
 import type { AuthenticatedUser } from '../auth/roles.js';
 
+export type Role = 'admin' | 'ops_staff' | 'physician';
+
 export type YesNoUnknown = 'yes' | 'no' | 'unknown';
 export type ClaimType = 'initial' | 'supplemental' | 'hlr' | 'appeal_bva';
 export type CaseStatus =
@@ -131,6 +133,9 @@ export interface ActivityLogDelegate {
 export interface AppDbTransaction {
   veteran: VeteranDelegate;
   activityLog: ActivityLogDelegate;
+  case: CaseDelegate;
+  draftJob: DraftJobDelegate;
+  correction: CorrectionDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -141,4 +146,44 @@ export interface AppDb extends AppDbTransaction {
 export interface RequestActor {
   id?: string;
   user: AuthenticatedUser;
+}
+
+// ====================== Phase 4A: Case types ======================
+
+export interface CaseRecord {
+  id: string;
+  veteranId: string;
+  claimedCondition: string;
+  claimType: ClaimType;
+  framingChoice: string | null;
+  upstreamScCondition: string | null;
+  veteranStatement: string | null;
+  inServiceEvent: string | null;
+  status: CaseStatus;
+  cdsVerdict: CdsVerdict;
+  cdsOddsPct: number | null;
+  cdsRationale: Record<string, unknown> | null;
+  assignedPhysicianId: string | null;
+  refundEligible: boolean;
+  currentVersion: number;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface CaseDelegate {
+  findMany(args: unknown): Promise<readonly CaseRecord[]>;
+  count(args: unknown): Promise<number>;
+  findUnique(args: unknown): Promise<CaseRecord | null>;
+  findFirst(args: unknown): Promise<CaseRecord | null>;
+  create(args: unknown): Promise<CaseRecord>;
+  update(args: unknown): Promise<CaseRecord>;
+}
+
+export interface DraftJobDelegate {
+  findMany(args: unknown): Promise<readonly unknown[]>;
+}
+
+export interface CorrectionDelegate {
+  findMany(args: unknown): Promise<readonly unknown[]>;
 }

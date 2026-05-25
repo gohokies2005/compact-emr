@@ -1,0 +1,8 @@
+Command intended:
+  npm run typecheck -w backend
+
+Result:
+  Not executed in this sandbox because the full private repository, package workspace, and project dependencies are not available here.
+
+Action after applying ZIP contents to repo:
+  Run npm run typecheck -w backend from the repository root.

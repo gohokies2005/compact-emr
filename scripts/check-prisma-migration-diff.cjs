@@ -33,7 +33,10 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compact-emr-prisma-main-'
 const mainSchema = path.join(tempDir, 'schema.prisma');
 fs.writeFileSync(mainSchema, execSync('git show origin/main:backend/prisma/schema.prisma', { encoding: 'utf8' }));
 
-const diff = execSync(`npx prisma migrate diff --from-schema-datamodel ${mainSchema} --to-schema-datamodel backend/prisma/schema.prisma --script`, { encoding: 'utf8' });
+// Run prisma from the backend workspace (it is not hoisted to the root bin), with absolute
+// schema paths so it works regardless of the workspace cwd, on Linux CI and Windows alike.
+const toSchema = path.resolve('backend/prisma/schema.prisma');
+const diff = execSync(`npm exec --workspace backend -- prisma migrate diff --from-schema-datamodel "${mainSchema}" --to-schema-datamodel "${toSchema}" --script`, { encoding: 'utf8' });
 const hasMeaningfulDiff = diff.trim().length > 0 && !diff.includes('This is an empty migration.');
 
 if (hasMeaningfulDiff && !migrationChanged) {

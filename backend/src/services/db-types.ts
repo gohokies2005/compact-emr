@@ -141,6 +141,7 @@ export interface AppDbTransaction {
 
 export interface AppDb extends AppDbTransaction {
   appUser: AppUserDelegate;
+  physician: PhysicianDelegate;
   $transaction<T>(fn: (tx: AppDbTransaction) => Promise<T>): Promise<T>;
 }
 
@@ -207,4 +208,31 @@ export interface ChartNoteDelegate {
   create(args: unknown): Promise<ChartNoteRecord>;
   update(args: unknown): Promise<ChartNoteRecord>;
   delete(args: unknown): Promise<ChartNoteRecord>;
+}
+
+
+// ====================== Phase 5: Physician types ======================
+
+export interface PhysicianRecord {
+  id: string;
+  cognitoSub: string | null;
+  fullName: string;
+  npi: string;
+  specialty: string;
+  medicalLicense: string;
+  email: string;
+  phone: string | null;
+  signatureImageS3Key: string | null;
+  active: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface PhysicianDelegate {
+  findUnique(args: unknown): Promise<PhysicianRecord | null>;
+  findFirst(args: unknown): Promise<PhysicianRecord | null>;
+  findMany(args: unknown): Promise<readonly PhysicianRecord[]>;
+  create(args: unknown): Promise<PhysicianRecord>;
+  update(args: unknown): Promise<PhysicianRecord>;
 }

@@ -328,6 +328,7 @@ model Correction {
 
 model Physician {
   id                  String   @id
+  cognitoSub           String?  @unique @map("cognito_sub")
   fullName             String   @map("full_name")
   npi                  String   @unique
   specialty            String
@@ -346,8 +347,8 @@ model Physician {
   @@index([fullName])
   @@index([npi])
   @@index([email])
-  @@index([active])
-  @@map("physicians")
+    @@index([cognitoSub])
+
 }
 
 model PhysicianCompensation {

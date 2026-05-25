@@ -1,0 +1,6 @@
+Phase 3A-2 intended local command:
+  npm run test -w backend -- documents.test.ts
+
+Sandbox note:
+  The exact current main snapshot was not available in /mnt/data; this package is patch-style and should be applied to Ryan's current main where 3A-1 is already wired.
+  Tests were authored against mocked Prisma and S3 clients and are expected to run without AWS credentials.

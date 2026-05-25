@@ -186,5 +186,17 @@ export class ApiStack extends Stack {
       integration: new integrations.HttpLambdaIntegration('HealthIntegration', handler),
       authorizer,
     });
+
+    httpApi.addRoutes({
+      path: '/api/v1/{proxy+}',
+      methods: [
+        apigwv2.HttpMethod.GET,
+        apigwv2.HttpMethod.POST,
+        apigwv2.HttpMethod.PATCH,
+        apigwv2.HttpMethod.DELETE,
+      ],
+      integration: new integrations.HttpLambdaIntegration('ApiProxyIntegration', handler),
+      authorizer,
+    });
   }
 }

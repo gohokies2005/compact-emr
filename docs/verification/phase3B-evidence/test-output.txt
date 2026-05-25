@@ -1,0 +1,7 @@
+Phase 3B intended local commands:
+  npm run typecheck -w frontend
+  npm run test -w frontend -- VeteransPage.test.tsx VeteranChart.test.tsx
+
+Sandbox note:
+  The exact current main snapshot was not available in /mnt/data; this package is patch-style and should be applied to Ryan's current main where 3A-1 is already wired.
+  Tests were authored with mocked API calls and require the existing Phase 2 test setup fix for jest-dom matchers.

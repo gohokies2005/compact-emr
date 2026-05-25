@@ -21,11 +21,12 @@
   "dependencies": {
     "@aws-sdk/client-s3": "latest",
     "@aws-sdk/client-sqs": "latest",
-    "@prisma/client": "^6.6.0",
+    "@prisma/client": "latest",
     "express": "latest",
     "jose": "latest",
     "serverless-http": "latest",
-    "@aws-sdk/client-secrets-manager": "latest"
+    "@aws-sdk/client-secrets-manager": "latest",
+    "@aws-sdk/s3-request-presigner": "latest"
   },
   "devDependencies": {
     "@types/aws-lambda": "latest",
@@ -38,7 +39,7 @@
     "typescript-eslint": "latest",
     "tsx": "latest",
     "vitest": "latest",
-    "prisma": "^6.6.0",
+    "prisma": "latest",
     "supertest": "latest"
   }
 }

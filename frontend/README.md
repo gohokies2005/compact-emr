@@ -36,3 +36,7 @@ Do not log PHI to the browser console. Components that eventually render veteran
 ## Deploy notes
 
 The staging workflow builds `frontend/dist`, syncs it to the CloudFront-backed S3 bucket, and invalidates CloudFront. Bucket name and distribution ID are read from the `FrontendBucketName` and `DistributionId` CloudFormation outputs.
+
+## HIPAA conventions
+
+Do not log PHI in browser logs. Veteran names, DOB, addresses, claimed conditions, document filenames/content, and clinical details must not be written to `console.log`, `console.error`, analytics tools, or third-party telemetry. If client-side diagnostics are unavoidable, use opaque IDs only, such as veteran ID, case ID, document ID, and request ID.

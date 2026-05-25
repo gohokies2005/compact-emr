@@ -6,7 +6,8 @@ import { SignInScreen } from './auth/SignInScreen';
 import { HomePage } from './routes/HomePage';
 import { NoAccessPage } from './routes/NoAccessPage';
 import { NotFoundPage } from './routes/NotFoundPage';
-import { VeteransPage } from './routes/stubs/VeteransPage';
+import { VeteransPage } from './routes/veterans/VeteransPage';
+import { VeteranChart } from './routes/veterans/VeteranChart';
 import { CasesPage } from './routes/stubs/CasesPage';
 import { TemplatesPage } from './routes/stubs/TemplatesPage';
 import { PhysiciansPage } from './routes/stubs/PhysiciansPage';
@@ -25,6 +26,7 @@ export function App() {
     <Route path="/signin" element={<SignInScreen />} />
     <Route path="/" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><HomePage /></ProtectedRoute>} />
     <Route path="/veterans" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><VeteransPage /></ProtectedRoute>} />
+    <Route path="/veterans/:id" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><VeteranChart /></ProtectedRoute>} />
     <Route path="/cases" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><CasesPage /></ProtectedRoute>} />
     <Route path="/templates" element={<ProtectedRoute requiredRole={['admin']}><TemplatesPage /></ProtectedRoute>} />
     <Route path="/physicians" element={<ProtectedRoute requiredRole={['admin']}><PhysiciansPage /></ProtectedRoute>} />

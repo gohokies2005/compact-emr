@@ -4,6 +4,7 @@ import { requireRole } from './auth/roles.js';
 import { isHttpError, sendError } from './http/errors.js';
 import { prisma } from './db/client.js';
 import { createVeteransRouter } from './routes/veterans.js';
+import { createDocumentsRouter } from './routes/documents.js';
 import type { AppDb } from './services/db-types.js';
 
 export interface CreateAppOptions {
@@ -21,6 +22,7 @@ export function createApp(options: CreateAppOptions = {}) {
   });
 
   app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
+  app.use('/api/v1', authenticateJwt(), createDocumentsRouter());
 
   app.use((req, res) => {
     sendError(res, 404, 'not_found', 'Route was not found.');

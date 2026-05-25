@@ -1,0 +1,722 @@
+diff -ruN base/compact-emr/backend/package.json repo/backend/package.json
+--- base/compact-emr/backend/package.json	2026-05-23 02:40:55.000000000 +0000
++++ repo/backend/package.json	2026-05-25 05:06:03.751628762 +0000
+@@ -25,7 +25,8 @@
+     "express": "latest",
+     "jose": "latest",
+     "serverless-http": "latest",
+-    "@aws-sdk/client-secrets-manager": "latest"
++    "@aws-sdk/client-secrets-manager": "latest",
++    "@aws-sdk/s3-request-presigner": "latest"
+   },
+   "devDependencies": {
+     "@types/aws-lambda": "latest",
+diff -ruN base/compact-emr/backend/src/__tests__/documents.test.ts repo/backend/src/__tests__/documents.test.ts
+--- base/compact-emr/backend/src/__tests__/documents.test.ts	1970-01-01 00:00:00.000000000 +0000
++++ repo/backend/src/__tests__/documents.test.ts	2026-05-25 05:06:03.940298234 +0000
+@@ -0,0 +1,75 @@
++import express from 'express';
++import request from 'supertest';
++import { describe, expect, it, vi } from 'vitest';
++import { createDocumentsRouter } from '../routes/documents.js';
++import { authenticateJwt } from '../middleware/auth.js';
++
++vi.mock('@aws-sdk/s3-request-presigner', () => ({
++  getSignedUrl: vi.fn(async () => 'https://signed.example/upload'),
++}));
++
++function appFor(prisma: unknown, role: 'admin' | 'ops_staff' | 'physician' = 'ops_staff') {
++  process.env.AUTH_TEST_JWT_SECRET = 'test-secret';
++  process.env.AUTH_TEST_ISSUER = 'compact-emr-tests';
++  process.env.AUTH_TEST_AUDIENCE = 'compact-emr-tests';
++  process.env.PHI_BUCKET_NAME = 'test-phi-bucket';
++  const app = express();
++  app.use(express.json());
++  app.use(async (req, _res, next) => {
++    req.user = { sub: 'user-1', email: 'user@example.com', roles: [role] };
++    next();
++  });
++  app.use('/api/v1', createDocumentsRouter({ prisma: prisma as never, s3: { send: vi.fn(async () => ({})) } as never, bucketName: 'test-phi-bucket' }));
++  return app;
++}
++
++function unauthenticatedApp(prisma: unknown) {
++  const app = express();
++  app.use(express.json());
++  app.use('/api/v1', authenticateJwt(), createDocumentsRouter({ prisma: prisma as never, s3: { send: vi.fn(async () => ({})) } as never, bucketName: 'test-phi-bucket' }));
++  return app;
++}
++
++describe('document routes', () => {
++  it('rejects unauthenticated requests before document handlers', async () => {
++    const app = unauthenticatedApp({ document: { findMany: vi.fn() } });
++    await request(app).get('/api/v1/veterans/VET-1/documents').expect(401);
++  });
++
++  it('lists documents for a veteran', async () => {
++    const prisma = {
++      document: { findMany: vi.fn(async () => [{ id: 'doc-1', caseId: 'CASE-1', filename: 'record.pdf', sizeBytes: BigInt(12), contentType: 'application/pdf', docTag: 'STR', s3Key: 'cases/CASE-1/a.pdf', uploadedAt: new Date(), uploadedBy: 'user-1', updatedAt: new Date(), version: 1 }]) },
++    };
++    const res = await request(appFor(prisma)).get('/api/v1/veterans/VET-1/documents').expect(200);
++    expect(res.body.data[0].sizeBytes).toBe('12');
++    expect(prisma.document.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { case: { veteranId: 'VET-1' } } }));
++  });
++
++  it('creates a 5-minute KMS-enforced presigned PUT URL', async () => {
++    const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1' })) } };
++    const res = await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents/presign').send({ caseId: 'CASE-1', filename: 'record.pdf', contentType: 'application/pdf', sizeBytes: 1024 }).expect(200);
++    expect(res.body.data.uploadUrl).toContain('https://signed.example');
++    expect(res.body.data.requiredHeaders['x-amz-server-side-encryption']).toBe('aws:kms');
++  });
++
++  it('rejects presign when file exceeds 5 MB', async () => {
++    const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1' })) } };
++    await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents/presign').send({ caseId: 'CASE-1', filename: 'big.pdf', contentType: 'application/pdf', sizeBytes: 6 * 1024 * 1024 }).expect(400);
++  });
++
++  it('records uploaded document metadata and activity log in one transaction', async () => {
++    const tx = {
++      document: { create: vi.fn(async () => ({ id: 'doc-1', caseId: 'CASE-1', filename: 'record.pdf', sizeBytes: BigInt(33), contentType: 'application/pdf', docTag: 'STR', s3Key: 'cases/CASE-1/record.pdf', uploadedAt: new Date(), uploadedBy: 'user-1', updatedAt: new Date(), version: 1 })) },
++      activityLog: { create: vi.fn(async () => ({})) },
++    };
++    const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1' })) }, $transaction: vi.fn(async (fn) => fn(tx)) };
++    const res = await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents').send({ caseId: 'CASE-1', filename: 'record.pdf', contentType: 'application/pdf', sizeBytes: 33, s3Key: 'cases/CASE-1/record.pdf', docTag: 'STR' }).expect(201);
++    expect(res.body.data.id).toBe('doc-1');
++    expect(tx.activityLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'document_created' }) }));
++  });
++
++  it('requires admin role to delete documents', async () => {
++    const prisma = { document: { findUnique: vi.fn() } };
++    await request(appFor(prisma, 'ops_staff')).delete('/api/v1/documents/doc-1').expect(403);
++  });
++});
+diff -ruN base/compact-emr/backend/src/routes/documents.ts repo/backend/src/routes/documents.ts
+--- base/compact-emr/backend/src/routes/documents.ts	1970-01-01 00:00:00.000000000 +0000
++++ repo/backend/src/routes/documents.ts	2026-05-25 05:06:02.106841790 +0000
+@@ -0,0 +1,200 @@
++import { randomUUID } from 'node:crypto';
++import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
++import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
++import { Router, type Request, type Response } from 'express';
++import type { PrismaClient } from '@prisma/client';
++import { prisma as defaultPrisma } from '../db/client.js';
++import { requireRole } from '../auth/roles.js';
++
++const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
++const UPLOAD_TTL_SECONDS = 5 * 60;
++const DOWNLOAD_TTL_SECONDS = 5 * 60;
++const ALLOWED_CONTENT_TYPES = new Set([
++  'application/pdf',
++  'image/jpeg',
++  'image/png',
++  'application/msword',
++  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
++]);
++
++interface DocumentsRouterDeps {
++  prisma?: PrismaClient;
++  s3?: S3Client;
++  bucketName?: string;
++}
++
++interface ErrorDetails {
++  readonly [key: string]: string | number | boolean | null | ErrorDetails | readonly ErrorDetails[];
++}
++
++function error(res: Response, status: number, code: string, message: string, details?: ErrorDetails) {
++  return res.status(status).json({ error: { code, message, ...(details !== undefined && { details }) } });
++}
++
++function asString(value: unknown): string | undefined {
++  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
++}
++
++function asNumber(value: unknown): number | undefined {
++  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
++}
++
++function sanitizeFilename(filename: string): string {
++  return filename.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').slice(0, 180);
++}
++
++async function assertCaseBelongsToVeteran(prisma: PrismaClient, caseId: string, veteranId: string) {
++  return prisma.case.findFirst({ where: { id: caseId, veteranId }, select: { id: true } });
++}
++
++export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
++  const router = Router();
++  const prisma = deps.prisma ?? defaultPrisma;
++  const s3 = deps.s3 ?? new S3Client({});
++  const bucketName = deps.bucketName ?? process.env.PHI_BUCKET_NAME;
++
++  router.get('/veterans/:id/documents', requireRole(['admin', 'ops_staff']), async (req, res) => {
++    const veteranId = req.params.id;
++    const documents = await prisma.document.findMany({
++      where: { case: { veteranId } },
++      orderBy: { uploadedAt: 'desc' },
++      select: {
++        id: true,
++        caseId: true,
++        filename: true,
++        sizeBytes: true,
++        contentType: true,
++        docTag: true,
++        s3Key: true,
++        uploadedAt: true,
++        uploadedBy: true,
++        updatedAt: true,
++        version: true,
++      },
++    });
++    res.json({ data: documents.map((doc) => ({ ...doc, sizeBytes: doc.sizeBytes.toString() })) });
++  });
++
++  router.post('/veterans/:id/documents/presign', requireRole(['admin', 'ops_staff']), async (req: Request, res: Response) => {
++    if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
++    const veteranId = req.params.id;
++    const filename = asString(req.body?.filename);
++    const contentType = asString(req.body?.contentType);
++    const caseId = asString(req.body?.caseId);
++    const sizeBytes = asNumber(req.body?.sizeBytes);
++
++    if (!filename || !contentType || !caseId || sizeBytes === undefined) {
++      return error(res, 400, 'invalid_presign_request', 'filename, contentType, sizeBytes, and caseId are required.');
++    }
++    if (!ALLOWED_CONTENT_TYPES.has(contentType)) {
++      return error(res, 400, 'unsupported_content_type', 'Only PDF, JPG, PNG, DOC, and DOCX uploads are supported.');
++    }
++    if (sizeBytes <= 0 || sizeBytes > MAX_UPLOAD_BYTES) {
++      return error(res, 400, 'file_too_large', 'Uploads must be greater than 0 bytes and no larger than 5 MB.', { maxBytes: MAX_UPLOAD_BYTES });
++    }
++    const owningCase = await assertCaseBelongsToVeteran(prisma, caseId, veteranId);
++    if (!owningCase) return error(res, 404, 'case_not_found', 'Case was not found for this veteran.');
++
++    const s3Key = `cases/${caseId}/${randomUUID()}-${sanitizeFilename(filename)}`;
++    const command = new PutObjectCommand({
++      Bucket: bucketName,
++      Key: s3Key,
++      ContentType: contentType,
++      ContentLength: sizeBytes,
++      ServerSideEncryption: 'aws:kms',
++    });
++    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: UPLOAD_TTL_SECONDS });
++
++    res.json({
++      data: {
++        uploadUrl,
++        s3Key,
++        expiresInSeconds: UPLOAD_TTL_SECONDS,
++        requiredHeaders: {
++          'content-type': contentType,
++          'x-amz-server-side-encryption': 'aws:kms',
++        },
++      },
++    });
++  });
++
++  router.post('/veterans/:id/documents', requireRole(['admin', 'ops_staff']), async (req: Request, res: Response) => {
++    const veteranId = req.params.id;
++    const filename = asString(req.body?.filename);
++    const contentType = asString(req.body?.contentType);
++    const docTag = asString(req.body?.docTag);
++    const s3Key = asString(req.body?.s3Key);
++    const caseId = asString(req.body?.caseId);
++    const sizeBytes = asNumber(req.body?.sizeBytes);
++
++    if (!filename || !contentType || !s3Key || !caseId || sizeBytes === undefined) {
++      return error(res, 400, 'invalid_document_request', 'filename, contentType, sizeBytes, s3Key, and caseId are required.');
++    }
++    const owningCase = await assertCaseBelongsToVeteran(prisma, caseId, veteranId);
++    if (!owningCase) return error(res, 404, 'case_not_found', 'Case was not found for this veteran.');
++
++    const actorUserId = req.user?.sub;
++    const created = await prisma.$transaction(async (tx) => {
++      const document = await tx.document.create({
++        data: {
++          caseId,
++          filename,
++          sizeBytes: BigInt(sizeBytes),
++          contentType,
++          ...(docTag !== undefined && { docTag }),
++          s3Key,
++          uploadedBy: actorUserId ?? 'unknown',
++        },
++      });
++      await tx.activityLog.create({
++        data: {
++          caseId,
++          veteranId,
++          actorUserId,
++          action: 'document_created',
++          detailsJson: { documentId: document.id, s3Key },
++        },
++      });
++      return document;
++    });
++
++    res.status(201).json({ data: { ...created, sizeBytes: created.sizeBytes.toString() } });
++  });
++
++  router.get('/documents/:id/download', requireRole(['admin', 'ops_staff']), async (req, res) => {
++    if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
++    const document = await prisma.document.findUnique({ where: { id: req.params.id }, select: { id: true, s3Key: true, filename: true } });
++    if (!document) return error(res, 404, 'document_not_found', 'Document was not found.');
++
++    const command = new GetObjectCommand({ Bucket: bucketName, Key: document.s3Key, ResponseContentDisposition: `attachment; filename="${sanitizeFilename(document.filename)}"` });
++    const downloadUrl = await getSignedUrl(s3, command, { expiresIn: DOWNLOAD_TTL_SECONDS });
++    res.json({ data: { downloadUrl, expiresInSeconds: DOWNLOAD_TTL_SECONDS } });
++  });
++
++  router.delete('/documents/:id', requireRole(['admin']), async (req, res) => {
++    if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
++    const document = await prisma.document.findUnique({
++      where: { id: req.params.id },
++      select: { id: true, caseId: true, s3Key: true, case: { select: { veteranId: true } } },
++    });
++    if (!document) return error(res, 404, 'document_not_found', 'Document was not found.');
++
++    await s3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: document.s3Key }));
++    await prisma.$transaction(async (tx) => {
++      await tx.document.delete({ where: { id: document.id } });
++      await tx.activityLog.create({
++        data: {
++          caseId: document.caseId,
++          veteranId: document.case.veteranId,
++          actorUserId: req.user?.sub,
++          action: 'document_deleted',
++          detailsJson: { documentId: document.id, s3Key: document.s3Key },
++        },
++      });
++    });
++
++    res.status(204).send();
++  });
++
++  return router;
++}
+diff -ruN base/compact-emr/docs/PHASE3A2_SUMMARY.md repo/docs/PHASE3A2_SUMMARY.md
+--- base/compact-emr/docs/PHASE3A2_SUMMARY.md	1970-01-01 00:00:00.000000000 +0000
++++ repo/docs/PHASE3A2_SUMMARY.md	2026-05-25 05:06:03.952055537 +0000
+@@ -0,0 +1,34 @@
++# Phase 3A-2 Summary — Document presigned URL flow
++
++## Files touched
++
++Changed/added files in this patch package:
++
++- `backend/src/routes/documents.ts` — document metadata, presign, download, and delete routes.
++- `backend/src/__tests__/documents.test.ts` — route tests with mocked Prisma and S3/presigner clients.
++- `backend/package.json` — adds `@aws-sdk/s3-request-presigner` dependency required for S3 presigned URLs.
++- `docs/verification/phase3A2-evidence/*` — verification notes/output.
++- `phase3A2.patch` — unified patch for review/application against current main.
++
++## Explicitly skipped
++
++- No UI changes; those ship in Phase 3B.
++- No database migration; the existing `documents` table already supports this flow.
++- No broad CDK rewrite. The current API stack already grants `phiBucket.grantReadWrite(handler)` and `documentsKey.grantEncryptDecrypt(handler)` and provides `PHI_BUCKET_NAME`; if current main lacks proxy API routing after 3A-1, add the existing Lambda integration to `/api/v1/{proxy+}` before deploying.
++
++## Assumptions
++
++- Since `Document.caseId` is required by the Prisma schema, the veteran document upload endpoints require `caseId` in the presign and metadata-create bodies, then validate that the case belongs to the veteran.
++- Uploads are direct-to-S3 only. Lambda never receives document bytes.
++- Presigned PUT forces `x-amz-server-side-encryption: aws:kms`; bucket default KMS key controls the actual key.
++
++## Tests
++
++- Added route tests for unauthenticated rejection, list, presign success, max-size rejection, metadata activity logging, and admin-only delete.
++- Evidence is in `docs/verification/phase3A2-evidence/`.
++
++## Ryan should test first
++
++1. Confirm API Gateway has proxy routing for `/api/v1/*` after 3A-1.
++2. Create a test case for a veteran, presign a small PDF, upload to S3, then record metadata.
++3. Verify `activity_log` rows show `document_created` and `document_deleted` with IDs only, no PHI.
+diff -ruN base/compact-emr/docs/verification/phase3A2-evidence/server-registration-note.patch repo/docs/verification/phase3A2-evidence/server-registration-note.patch
+--- base/compact-emr/docs/verification/phase3A2-evidence/server-registration-note.patch	1970-01-01 00:00:00.000000000 +0000
++++ repo/docs/verification/phase3A2-evidence/server-registration-note.patch	2026-05-25 05:08:44.165540230 +0000
+@@ -0,0 +1,11 @@
++If current main after 3A-1 does not already mount route modules under /api/v1, register the documents router in backend/src/server.ts with the same auth/RBAC pattern used by the veteran routes:
++
++--- a/backend/src/server.ts
+++++ b/backend/src/server.ts
++@@
+++import { createDocumentsRouter } from './routes/documents.js';
++@@
++   app.use(express.json());
+++  app.use('/api/v1', authenticateJwt(), createDocumentsRouter());
++
++Do not apply this blindly if server.ts already centralizes routers differently after 3A-1; mount createDocumentsRouter() inside that existing pattern instead.
+diff -ruN base/compact-emr/docs/verification/phase3A2-evidence/test-output.txt repo/docs/verification/phase3A2-evidence/test-output.txt
+--- base/compact-emr/docs/verification/phase3A2-evidence/test-output.txt	1970-01-01 00:00:00.000000000 +0000
++++ repo/docs/verification/phase3A2-evidence/test-output.txt	2026-05-25 05:06:03.963163843 +0000
+@@ -0,0 +1,6 @@
++Phase 3A-2 intended local command:
++  npm run test -w backend -- documents.test.ts
++
++Sandbox note:
++  The exact current main snapshot was not available in /mnt/data; this package is patch-style and should be applied to Ryan's current main where 3A-1 is already wired.
++  Tests were authored against mocked Prisma and S3 clients and are expected to run without AWS credentials.
+diff -ruN base/compact-emr/phase3A2.patch repo/phase3A2.patch
+--- base/compact-emr/phase3A2.patch	1970-01-01 00:00:00.000000000 +0000
++++ repo/phase3A2.patch	2026-05-25 05:08:44.191864782 +0000
+@@ -0,0 +1,359 @@
++diff -ruN base/compact-emr/backend/package.json repo/backend/package.json
++--- base/compact-emr/backend/package.json	2026-05-23 02:40:55.000000000 +0000
+++++ repo/backend/package.json	2026-05-25 05:06:03.751628762 +0000
++@@ -25,7 +25,8 @@
++     "express": "latest",
++     "jose": "latest",
++     "serverless-http": "latest",
++-    "@aws-sdk/client-secrets-manager": "latest"
+++    "@aws-sdk/client-secrets-manager": "latest",
+++    "@aws-sdk/s3-request-presigner": "latest"
++   },
++   "devDependencies": {
++     "@types/aws-lambda": "latest",
++diff -ruN base/compact-emr/backend/src/__tests__/documents.test.ts repo/backend/src/__tests__/documents.test.ts
++--- base/compact-emr/backend/src/__tests__/documents.test.ts	1970-01-01 00:00:00.000000000 +0000
+++++ repo/backend/src/__tests__/documents.test.ts	2026-05-25 05:06:03.940298234 +0000
++@@ -0,0 +1,75 @@
+++import express from 'express';
+++import request from 'supertest';
+++import { describe, expect, it, vi } from 'vitest';
+++import { createDocumentsRouter } from '../routes/documents.js';
+++import { authenticateJwt } from '../middleware/auth.js';
+++
+++vi.mock('@aws-sdk/s3-request-presigner', () => ({
+++  getSignedUrl: vi.fn(async () => 'https://signed.example/upload'),
+++}));
+++
+++function appFor(prisma: unknown, role: 'admin' | 'ops_staff' | 'physician' = 'ops_staff') {
+++  process.env.AUTH_TEST_JWT_SECRET = 'test-secret';
+++  process.env.AUTH_TEST_ISSUER = 'compact-emr-tests';
+++  process.env.AUTH_TEST_AUDIENCE = 'compact-emr-tests';
+++  process.env.PHI_BUCKET_NAME = 'test-phi-bucket';
+++  const app = express();
+++  app.use(express.json());
+++  app.use(async (req, _res, next) => {
+++    req.user = { sub: 'user-1', email: 'user@example.com', roles: [role] };
+++    next();
+++  });
+++  app.use('/api/v1', createDocumentsRouter({ prisma: prisma as never, s3: { send: vi.fn(async () => ({})) } as never, bucketName: 'test-phi-bucket' }));
+++  return app;
+++}
+++
+++function unauthenticatedApp(prisma: unknown) {
+++  const app = express();
+++  app.use(express.json());
+++  app.use('/api/v1', authenticateJwt(), createDocumentsRouter({ prisma: prisma as never, s3: { send: vi.fn(async () => ({})) } as never, bucketName: 'test-phi-bucket' }));
+++  return app;
+++}
+++
+++describe('document routes', () => {
+++  it('rejects unauthenticated requests before document handlers', async () => {
+++    const app = unauthenticatedApp({ document: { findMany: vi.fn() } });
+++    await request(app).get('/api/v1/veterans/VET-1/documents').expect(401);
+++  });
+++
+++  it('lists documents for a veteran', async () => {
+++    const prisma = {
+++      document: { findMany: vi.fn(async () => [{ id: 'doc-1', caseId: 'CASE-1', filename: 'record.pdf', sizeBytes: BigInt(12), contentType: 'application/pdf', docTag: 'STR', s3Key: 'cases/CASE-1/a.pdf', uploadedAt: new Date(), uploadedBy: 'user-1', updatedAt: new Date(), version: 1 }]) },
+++    };
+++    const res = await request(appFor(prisma)).get('/api/v1/veterans/VET-1/documents').expect(200);
+++    expect(res.body.data[0].sizeBytes).toBe('12');
+++    expect(prisma.document.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { case: { veteranId: 'VET-1' } } }));
+++  });
+++
+++  it('creates a 5-minute KMS-enforced presigned PUT URL', async () => {
+++    const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1' })) } };
+++    const res = await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents/presign').send({ caseId: 'CASE-1', filename: 'record.pdf', contentType: 'application/pdf', sizeBytes: 1024 }).expect(200);
+++    expect(res.body.data.uploadUrl).toContain('https://signed.example');
+++    expect(res.body.data.requiredHeaders['x-amz-server-side-encryption']).toBe('aws:kms');
+++  });
+++
+++  it('rejects presign when file exceeds 5 MB', async () => {
+++    const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1' })) } };
+++    await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents/presign').send({ caseId: 'CASE-1', filename: 'big.pdf', contentType: 'application/pdf', sizeBytes: 6 * 1024 * 1024 }).expect(400);
+++  });
+++
+++  it('records uploaded document metadata and activity log in one transaction', async () => {
+++    const tx = {
+++      document: { create: vi.fn(async () => ({ id: 'doc-1', caseId: 'CASE-1', filename: 'record.pdf', sizeBytes: BigInt(33), contentType: 'application/pdf', docTag: 'STR', s3Key: 'cases/CASE-1/record.pdf', uploadedAt: new Date(), uploadedBy: 'user-1', updatedAt: new Date(), version: 1 })) },
+++      activityLog: { create: vi.fn(async () => ({})) },
+++    };
+++    const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1' })) }, $transaction: vi.fn(async (fn) => fn(tx)) };
+++    const res = await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents').send({ caseId: 'CASE-1', filename: 'record.pdf', contentType: 'application/pdf', sizeBytes: 33, s3Key: 'cases/CASE-1/record.pdf', docTag: 'STR' }).expect(201);
+++    expect(res.body.data.id).toBe('doc-1');
+++    expect(tx.activityLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'document_created' }) }));
+++  });
+++
+++  it('requires admin role to delete documents', async () => {
+++    const prisma = { document: { findUnique: vi.fn() } };
+++    await request(appFor(prisma, 'ops_staff')).delete('/api/v1/documents/doc-1').expect(403);
+++  });
+++});
++diff -ruN base/compact-emr/backend/src/routes/documents.ts repo/backend/src/routes/documents.ts
++--- base/compact-emr/backend/src/routes/documents.ts	1970-01-01 00:00:00.000000000 +0000
+++++ repo/backend/src/routes/documents.ts	2026-05-25 05:06:02.106841790 +0000
++@@ -0,0 +1,200 @@
+++import { randomUUID } from 'node:crypto';
+++import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+++import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+++import { Router, type Request, type Response } from 'express';
+++import type { PrismaClient } from '@prisma/client';
+++import { prisma as defaultPrisma } from '../db/client.js';
+++import { requireRole } from '../auth/roles.js';
+++
+++const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+++const UPLOAD_TTL_SECONDS = 5 * 60;
+++const DOWNLOAD_TTL_SECONDS = 5 * 60;
+++const ALLOWED_CONTENT_TYPES = new Set([
+++  'application/pdf',
+++  'image/jpeg',
+++  'image/png',
+++  'application/msword',
+++  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+++]);
+++
+++interface DocumentsRouterDeps {
+++  prisma?: PrismaClient;
+++  s3?: S3Client;
+++  bucketName?: string;
+++}
+++
+++interface ErrorDetails {
+++  readonly [key: string]: string | number | boolean | null | ErrorDetails | readonly ErrorDetails[];
+++}
+++
+++function error(res: Response, status: number, code: string, message: string, details?: ErrorDetails) {
+++  return res.status(status).json({ error: { code, message, ...(details !== undefined && { details }) } });
+++}
+++
+++function asString(value: unknown): string | undefined {
+++  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+++}
+++
+++function asNumber(value: unknown): number | undefined {
+++  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+++}
+++
+++function sanitizeFilename(filename: string): string {
+++  return filename.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').slice(0, 180);
+++}
+++
+++async function assertCaseBelongsToVeteran(prisma: PrismaClient, caseId: string, veteranId: string) {
+++  return prisma.case.findFirst({ where: { id: caseId, veteranId }, select: { id: true } });
+++}
+++
+++export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
+++  const router = Router();
+++  const prisma = deps.prisma ?? defaultPrisma;
+++  const s3 = deps.s3 ?? new S3Client({});
+++  const bucketName = deps.bucketName ?? process.env.PHI_BUCKET_NAME;
+++
+++  router.get('/veterans/:id/documents', requireRole(['admin', 'ops_staff']), async (req, res) => {
+++    const veteranId = req.params.id;
+++    const documents = await prisma.document.findMany({
+++      where: { case: { veteranId } },
+++      orderBy: { uploadedAt: 'desc' },
+++      select: {
+++        id: true,
+++        caseId: true,
+++        filename: true,
+++        sizeBytes: true,
+++        contentType: true,
+++        docTag: true,
+++        s3Key: true,
+++        uploadedAt: true,
+++        uploadedBy: true,
+++        updatedAt: true,
+++        version: true,
+++      },
+++    });
+++    res.json({ data: documents.map((doc) => ({ ...doc, sizeBytes: doc.sizeBytes.toString() })) });
+++  });
+++
+++  router.post('/veterans/:id/documents/presign', requireRole(['admin', 'ops_staff']), async (req: Request, res: Response) => {
+++    if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
+++    const veteranId = req.params.id;
+++    const filename = asString(req.body?.filename);
+++    const contentType = asString(req.body?.contentType);
+++    const caseId = asString(req.body?.caseId);
+++    const sizeBytes = asNumber(req.body?.sizeBytes);
+++
+++    if (!filename || !contentType || !caseId || sizeBytes === undefined) {
+++      return error(res, 400, 'invalid_presign_request', 'filename, contentType, sizeBytes, and caseId are required.');
+++    }
+++    if (!ALLOWED_CONTENT_TYPES.has(contentType)) {
+++      return error(res, 400, 'unsupported_content_type', 'Only PDF, JPG, PNG, DOC, and DOCX uploads are supported.');
+++    }
+++    if (sizeBytes <= 0 || sizeBytes > MAX_UPLOAD_BYTES) {
+++      return error(res, 400, 'file_too_large', 'Uploads must be greater than 0 bytes and no larger than 5 MB.', { maxBytes: MAX_UPLOAD_BYTES });
+++    }
+++    const owningCase = await assertCaseBelongsToVeteran(prisma, caseId, veteranId);
+++    if (!owningCase) return error(res, 404, 'case_not_found', 'Case was not found for this veteran.');
+++
+++    const s3Key = `cases/${caseId}/${randomUUID()}-${sanitizeFilename(filename)}`;
+++    const command = new PutObjectCommand({
+++      Bucket: bucketName,
+++      Key: s3Key,
+++      ContentType: contentType,
+++      ContentLength: sizeBytes,
+++      ServerSideEncryption: 'aws:kms',
+++    });
+++    const uploadUrl = await getSignedUrl(s3, command, { expiresIn: UPLOAD_TTL_SECONDS });
+++
+++    res.json({
+++      data: {
+++        uploadUrl,
+++        s3Key,
+++        expiresInSeconds: UPLOAD_TTL_SECONDS,
+++        requiredHeaders: {
+++          'content-type': contentType,
+++          'x-amz-server-side-encryption': 'aws:kms',
+++        },
+++      },
+++    });
+++  });
+++
+++  router.post('/veterans/:id/documents', requireRole(['admin', 'ops_staff']), async (req: Request, res: Response) => {
+++    const veteranId = req.params.id;
+++    const filename = asString(req.body?.filename);
+++    const contentType = asString(req.body?.contentType);
+++    const docTag = asString(req.body?.docTag);
+++    const s3Key = asString(req.body?.s3Key);
+++    const caseId = asString(req.body?.caseId);
+++    const sizeBytes = asNumber(req.body?.sizeBytes);
+++
+++    if (!filename || !contentType || !s3Key || !caseId || sizeBytes === undefined) {
+++      return error(res, 400, 'invalid_document_request', 'filename, contentType, sizeBytes, s3Key, and caseId are required.');
+++    }
+++    const owningCase = await assertCaseBelongsToVeteran(prisma, caseId, veteranId);
+++    if (!owningCase) return error(res, 404, 'case_not_found', 'Case was not found for this veteran.');
+++
+++    const actorUserId = req.user?.sub;
+++    const created = await prisma.$transaction(async (tx) => {
+++      const document = await tx.document.create({
+++        data: {
+++          caseId,
+++          filename,
+++          sizeBytes: BigInt(sizeBytes),
+++          contentType,
+++          ...(docTag !== undefined && { docTag }),
+++          s3Key,
+++          uploadedBy: actorUserId ?? 'unknown',
+++        },
+++      });
+++      await tx.activityLog.create({
+++        data: {
+++          caseId,
+++          veteranId,
+++          actorUserId,
+++          action: 'document_created',
+++          detailsJson: { documentId: document.id, s3Key },
+++        },
+++      });
+++      return document;
+++    });
+++
+++    res.status(201).json({ data: { ...created, sizeBytes: created.sizeBytes.toString() } });
+++  });
+++
+++  router.get('/documents/:id/download', requireRole(['admin', 'ops_staff']), async (req, res) => {
+++    if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
+++    const document = await prisma.document.findUnique({ where: { id: req.params.id }, select: { id: true, s3Key: true, filename: true } });
+++    if (!document) return error(res, 404, 'document_not_found', 'Document was not found.');
+++
+++    const command = new GetObjectCommand({ Bucket: bucketName, Key: document.s3Key, ResponseContentDisposition: `attachment; filename="${sanitizeFilename(document.filename)}"` });
+++    const downloadUrl = await getSignedUrl(s3, command, { expiresIn: DOWNLOAD_TTL_SECONDS });
+++    res.json({ data: { downloadUrl, expiresInSeconds: DOWNLOAD_TTL_SECONDS } });
+++  });
+++
+++  router.delete('/documents/:id', requireRole(['admin']), async (req, res) => {
+++    if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
+++    const document = await prisma.document.findUnique({
+++      where: { id: req.params.id },
+++      select: { id: true, caseId: true, s3Key: true, case: { select: { veteranId: true } } },
+++    });
+++    if (!document) return error(res, 404, 'document_not_found', 'Document was not found.');
+++
+++    await s3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: document.s3Key }));
+++    await prisma.$transaction(async (tx) => {
+++      await tx.document.delete({ where: { id: document.id } });
+++      await tx.activityLog.create({
+++        data: {
+++          caseId: document.caseId,
+++          veteranId: document.case.veteranId,
+++          actorUserId: req.user?.sub,
+++          action: 'document_deleted',
+++          detailsJson: { documentId: document.id, s3Key: document.s3Key },
+++        },
+++      });
+++    });
+++
+++    res.status(204).send();
+++  });
+++
+++  return router;
+++}
++diff -ruN base/compact-emr/docs/PHASE3A2_SUMMARY.md repo/docs/PHASE3A2_SUMMARY.md
++--- base/compact-emr/docs/PHASE3A2_SUMMARY.md	1970-01-01 00:00:00.000000000 +0000
+++++ repo/docs/PHASE3A2_SUMMARY.md	2026-05-25 05:06:03.952055537 +0000
++@@ -0,0 +1,34 @@
+++# Phase 3A-2 Summary — Document presigned URL flow
+++
+++## Files touched
+++
+++Changed/added files in this patch package:
+++
+++- `backend/src/routes/documents.ts` — document metadata, presign, download, and delete routes.
+++- `backend/src/__tests__/documents.test.ts` — route tests with mocked Prisma and S3/presigner clients.
+++- `backend/package.json` — adds `@aws-sdk/s3-request-presigner` dependency required for S3 presigned URLs.
+++- `docs/verification/phase3A2-evidence/*` — verification notes/output.
+++- `phase3A2.patch` — unified patch for review/application against current main.
+++
+++## Explicitly skipped
+++
+++- No UI changes; those ship in Phase 3B.
+++- No database migration; the existing `documents` table already supports this flow.
+++- No broad CDK rewrite. The current API stack already grants `phiBucket.grantReadWrite(handler)` and `documentsKey.grantEncryptDecrypt(handler)` and provides `PHI_BUCKET_NAME`; if current main lacks proxy API routing after 3A-1, add the existing Lambda integration to `/api/v1/{proxy+}` before deploying.
+++
+++## Assumptions
+++
+++- Since `Document.caseId` is required by the Prisma schema, the veteran document upload endpoints require `caseId` in the presign and metadata-create bodies, then validate that the case belongs to the veteran.
+++- Uploads are direct-to-S3 only. Lambda never receives document bytes.
+++- Presigned PUT forces `x-amz-server-side-encryption: aws:kms`; bucket default KMS key controls the actual key.
+++
+++## Tests
+++
+++- Added route tests for unauthenticated rejection, list, presign success, max-size rejection, metadata activity logging, and admin-only delete.
+++- Evidence is in `docs/verification/phase3A2-evidence/`.
+++
+++## Ryan should test first
+++
+++1. Confirm API Gateway has proxy routing for `/api/v1/*` after 3A-1.
+++2. Create a test case for a veteran, presign a small PDF, upload to S3, then record metadata.
+++3. Verify `activity_log` rows show `document_created` and `document_deleted` with IDs only, no PHI.
++diff -ruN base/compact-emr/docs/verification/phase3A2-evidence/server-registration-note.patch repo/docs/verification/phase3A2-evidence/server-registration-note.patch
++--- base/compact-emr/docs/verification/phase3A2-evidence/server-registration-note.patch	1970-01-01 00:00:00.000000000 +0000
+++++ repo/docs/verification/phase3A2-evidence/server-registration-note.patch	2026-05-25 05:08:44.165540230 +0000
++@@ -0,0 +1,11 @@
+++If current main after 3A-1 does not already mount route modules under /api/v1, register the documents router in backend/src/server.ts with the same auth/RBAC pattern used by the veteran routes:
+++
+++--- a/backend/src/server.ts
++++++ b/backend/src/server.ts
+++@@
++++import { createDocumentsRouter } from './routes/documents.js';
+++@@
+++   app.use(express.json());
++++  app.use('/api/v1', authenticateJwt(), createDocumentsRouter());
+++
+++Do not apply this blindly if server.ts already centralizes routers differently after 3A-1; mount createDocumentsRouter() inside that existing pattern instead.
++diff -ruN base/compact-emr/docs/verification/phase3A2-evidence/test-output.txt repo/docs/verification/phase3A2-evidence/test-output.txt
++--- base/compact-emr/docs/verification/phase3A2-evidence/test-output.txt	1970-01-01 00:00:00.000000000 +0000
+++++ repo/docs/verification/phase3A2-evidence/test-output.txt	2026-05-25 05:06:03.963163843 +0000
++@@ -0,0 +1,6 @@
+++Phase 3A-2 intended local command:
+++  npm run test -w backend -- documents.test.ts
+++
+++Sandbox note:
+++  The exact current main snapshot was not available in /mnt/data; this package is patch-style and should be applied to Ryan's current main where 3A-1 is already wired.
+++  Tests were authored against mocked Prisma and S3 clients and are expected to run without AWS credentials.

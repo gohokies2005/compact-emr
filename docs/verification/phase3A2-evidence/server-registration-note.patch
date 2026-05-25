@@ -1,0 +1,11 @@
+If current main after 3A-1 does not already mount route modules under /api/v1, register the documents router in backend/src/server.ts with the same auth/RBAC pattern used by the veteran routes:
+
+--- a/backend/src/server.ts
++++ b/backend/src/server.ts
+@@
++import { createDocumentsRouter } from './routes/documents.js';
+@@
+   app.use(express.json());
++  app.use('/api/v1', authenticateJwt(), createDocumentsRouter());
+
+Do not apply this blindly if server.ts already centralizes routers differently after 3A-1; mount createDocumentsRouter() inside that existing pattern instead.

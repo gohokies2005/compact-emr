@@ -5,6 +5,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb, AppDbTransaction, AppUserRecord, VeteranRecord } from '../services/db-types.js';
 import { assertPatchAllowedForRoles, parseVeteranCreate, parseVeteranPatch } from '../services/veteran-validation.js';
+import { parseActiveMedicationCreate, parseActiveProblemCreate } from '../services/chart-entry-validation.js';
 
 const OPS_ROLES = ['admin', 'ops_staff'] as const;
 
@@ -232,6 +233,133 @@ export function createVeteransRouter(db: AppDb): Router {
           action: 'veteran_soft_deleted',
           veteranId: id,
           detailsJson: { veteranId: id },
+        });
+      });
+
+      res.status(204).send();
+    }),
+  );
+
+  // ====================== Phase 5: chart entry CRUD ======================
+
+  router.post(
+    '/veterans/:id/problems',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const veteranId = String(req.params.id);
+      if (!veteranId) throw new HttpError(400, 'bad_request', 'Veteran id is required.');
+      const parsed = parseActiveProblemCreate(req.body);
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      const created = await db.$transaction(async (tx) => {
+        const veteran = await tx.veteran.findFirst({ where: { id: veteranId, inactive: false } });
+        if (!veteran) throw new HttpError(404, 'not_found', 'Veteran was not found.');
+
+        const row = await tx.activeProblem.create({
+          data: {
+            veteranId,
+            problem: parsed.problem,
+            icd10: parsed.icd10,
+            notes: parsed.notes,
+          },
+        });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'active_problem_created',
+          veteranId,
+          detailsJson: { veteranId, fields: ['problem', 'icd10'] },
+        });
+        return row;
+      });
+
+      res.status(201).json({ data: created });
+    }),
+  );
+
+  router.delete(
+    '/veterans/:veteranId/problems/:problemId',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const veteranId = String(req.params.veteranId);
+      const problemId = String(req.params.problemId);
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      await db.$transaction(async (tx) => {
+        const existing = await tx.activeProblem.findFirst({ where: { id: problemId, veteranId } });
+        if (!existing) throw new HttpError(404, 'not_found', 'Active problem was not found.');
+        await tx.activeProblem.delete({ where: { id: problemId } });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'active_problem_deleted',
+          veteranId,
+          detailsJson: { veteranId, problemId },
+        });
+      });
+
+      res.status(204).send();
+    }),
+  );
+
+  router.post(
+    '/veterans/:id/medications',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const veteranId = String(req.params.id);
+      if (!veteranId) throw new HttpError(400, 'bad_request', 'Veteran id is required.');
+      const parsed = parseActiveMedicationCreate(req.body);
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      const created = await db.$transaction(async (tx) => {
+        const veteran = await tx.veteran.findFirst({ where: { id: veteranId, inactive: false } });
+        if (!veteran) throw new HttpError(404, 'not_found', 'Veteran was not found.');
+
+        const row = await tx.activeMedication.create({
+          data: {
+            veteranId,
+            drugName: parsed.drugName,
+            dose: parsed.dose,
+            frequency: parsed.frequency,
+            indication: parsed.indication,
+          },
+        });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'active_medication_created',
+          veteranId,
+          detailsJson: { veteranId, fields: ['drugName', 'dose'] },
+        });
+        return row;
+      });
+
+      res.status(201).json({ data: created });
+    }),
+  );
+
+  router.delete(
+    '/veterans/:veteranId/medications/:medicationId',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const veteranId = String(req.params.veteranId);
+      const medicationId = String(req.params.medicationId);
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      await db.$transaction(async (tx) => {
+        const existing = await tx.activeMedication.findFirst({ where: { id: medicationId, veteranId } });
+        if (!existing) throw new HttpError(404, 'not_found', 'Active medication was not found.');
+        await tx.activeMedication.delete({ where: { id: medicationId } });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'active_medication_deleted',
+          veteranId,
+          detailsJson: { veteranId, medicationId },
         });
       });
 

@@ -137,6 +137,8 @@ export interface AppDbTransaction {
   draftJob: DraftJobDelegate;
   correction: CorrectionDelegate;
   chartNote: ChartNoteDelegate;
+  activeProblem: ActiveProblemDelegate;
+  activeMedication: ActiveMedicationDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -235,4 +237,47 @@ export interface PhysicianDelegate {
   findMany(args: unknown): Promise<readonly PhysicianRecord[]>;
   create(args: unknown): Promise<PhysicianRecord>;
   update(args: unknown): Promise<PhysicianRecord>;
+}
+
+// ====================== Phase 5: ActiveProblem / ActiveMedication ======================
+
+export interface ActiveProblemRecord {
+  id: string;
+  veteranId: string;
+  problem: string;
+  icd10: string | null;
+  notes: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface ActiveProblemDelegate {
+  findUnique(args: unknown): Promise<ActiveProblemRecord | null>;
+  findFirst(args: unknown): Promise<ActiveProblemRecord | null>;
+  findMany(args: unknown): Promise<readonly ActiveProblemRecord[]>;
+  create(args: unknown): Promise<ActiveProblemRecord>;
+  update(args: unknown): Promise<ActiveProblemRecord>;
+  delete(args: unknown): Promise<ActiveProblemRecord>;
+}
+
+export interface ActiveMedicationRecord {
+  id: string;
+  veteranId: string;
+  drugName: string;
+  dose: string | null;
+  frequency: string | null;
+  indication: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface ActiveMedicationDelegate {
+  findUnique(args: unknown): Promise<ActiveMedicationRecord | null>;
+  findFirst(args: unknown): Promise<ActiveMedicationRecord | null>;
+  findMany(args: unknown): Promise<readonly ActiveMedicationRecord[]>;
+  create(args: unknown): Promise<ActiveMedicationRecord>;
+  update(args: unknown): Promise<ActiveMedicationRecord>;
+  delete(args: unknown): Promise<ActiveMedicationRecord>;
 }

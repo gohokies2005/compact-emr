@@ -195,6 +195,7 @@ model ActiveProblem {
   id        String   @id @default(uuid())
   veteranId String   @map("veteran_id")
   problem   String
+  icd10     String?  @db.VarChar(16)
   notes     String?
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -203,6 +204,7 @@ model ActiveProblem {
 
   @@index([veteranId])
   @@index([problem])
+  @@index([icd10])
   @@map("active_problems")
 }
 

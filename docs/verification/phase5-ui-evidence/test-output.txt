@@ -1,0 +1,50 @@
+
+> frontend@0.0.0 test
+> vitest run --run
+
+
+[1m[7m[36m RUN [39m[27m[22m [36mv2.1.9 [39m[90mC:/Users/ryank/compact-emr-work/frontend[39m
+
+ [32m✓[39m src/__tests__/api-client.test.ts [2m([22m[2m1 test[22m[2m)[22m[90m 158[2mms[22m[39m
+ [32m✓[39m src/__tests__/CaseStatusBadge.test.tsx [2m([22m[2m3 tests[22m[2m)[22m[90m 66[2mms[22m[39m
+[90mstderr[2m | src/__tests__/ProtectedRoute.test.tsx[2m > [22m[2mProtectedRoute[2m > [22m[2munauthenticated users see sign-in
+[22m[39m⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.
+⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.
+
+[90mstderr[2m | src/__tests__/CasesPage.test.tsx[2m > [22m[2mCasesPage[2m > [22m[2mrenders filters and a case row with status badge
+[22m[39m⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.
+⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.
+
+[90mstderr[2m | src/__tests__/VeteransPage.test.tsx[2m > [22m[2mVeteransPage[2m > [22m[2mrenders search and veteran rows
+[22m[39m⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.
+⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.
+
+ [32m✓[39m src/__tests__/NewClaimModal.test.tsx [2m([22m[2m2 tests[22m[2m)[22m[33m 363[2mms[22m[39m
+   [33m[2m✓[22m[39m NewClaimModal[2m > [22msubmits the entered claim fields (omitting empty optionals) [33m335[2mms[22m[39m
+ [32m✓[39m src/__tests__/CasesPage.test.tsx [2m([22m[2m1 test[22m[2m)[22m[90m 152[2mms[22m[39m
+ [32m✓[39m src/__tests__/ProtectedRoute.test.tsx [2m([22m[2m3 tests[22m[2m)[22m[90m 110[2mms[22m[39m
+ [32m✓[39m src/__tests__/VeteransPage.test.tsx [2m([22m[2m1 test[22m[2m)[22m[90m 172[2mms[22m[39m
+[90mstderr[2m | src/__tests__/CaseDetailPage.test.tsx[2m > [22m[2mCaseDetailPage[2m > [22m[2mrenders the case header and admin transition controls
+[22m[39m⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.
+⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.
+
+[90mstderr[2m | src/__tests__/VeteranChart.test.tsx[2m > [22m[2mVeteranChart[2m > [22m[2mrenders veteran chart panels
+[22m[39m⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.
+⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.
+
+ [32m✓[39m src/__tests__/VeteranChart.test.tsx [2m([22m[2m1 test[22m[2m)[22m[90m 126[2mms[22m[39m
+ [32m✓[39m src/__tests__/ChartNotesPanel.test.tsx [2m([22m[2m1 test[22m[2m)[22m[90m 157[2mms[22m[39m
+ [32m✓[39m src/__tests__/date.test.ts [2m([22m[2m3 tests[22m[2m)[22m[90m 5[2mms[22m[39m
+ [32m✓[39m src/__tests__/CaseDetailPage.test.tsx [2m([22m[2m1 test[22m[2m)[22m[90m 234[2mms[22m[39m
+[90mstderr[2m | src/__tests__/App.smoke.test.tsx[2m > [22m[2mrenders sign-in for unauthenticated users without console errors
+[22m[39m⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition.
+⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath.
+
+ [32m✓[39m src/__tests__/CdsPanel.test.tsx [2m([22m[2m4 tests[22m[2m)[22m[90m 264[2mms[22m[39m
+ [32m✓[39m src/__tests__/App.smoke.test.tsx [2m([22m[2m1 test[22m[2m)[22m[90m 71[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m12 passed[39m[22m[90m (12)[39m
+[2m      Tests [22m [1m[32m22 passed[39m[22m[90m (22)[39m
+[2m   Start at [22m 14:03:21
+[2m   Duration [22m 15.45s[2m (transform 3.90s, setup 3.41s, collect 22.48s, tests 1.88s, environment 15.96s, prepare 3.00s)[22m
+

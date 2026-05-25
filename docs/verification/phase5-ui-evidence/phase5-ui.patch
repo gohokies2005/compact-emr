@@ -1,0 +1,59 @@
+warning: in the working copy of 'frontend/src/api/cases.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/routes/cases/CaseDetailPage.tsx', LF will be replaced by CRLF the next time Git touches it
+diff --git a/frontend/src/api/cases.ts b/frontend/src/api/cases.ts
+index 23361ef..46fff52 100644
+--- a/frontend/src/api/cases.ts
++++ b/frontend/src/api/cases.ts
+@@ -114,3 +114,31 @@ export async function listDraftJobs(id: string): Promise<{ data: readonly DraftJ
+ export async function listCorrections(id: string): Promise<{ data: readonly Correction[] }> {
+   return apiGet(`/api/v1/cases/${encodeURIComponent(id)}/corrections`);
+ }
++
++// === Phase 5 CDS (Clinical Decision Support) ===
++
++export interface CdsResult {
++  readonly verdict: 'accept' | 'caution' | 'reject';
++  readonly oddsPct: number | null;
++  readonly summary: string;
++  readonly hardGate: {
++    readonly triggered: boolean;
++    readonly rule: string | null;
++    readonly detail: string | null;
++  };
++  readonly bva: {
++    readonly matched: boolean;
++    readonly upstream: string | null;
++    readonly claimed: string | null;
++    readonly n: number | null;
++    readonly tier: 'high' | 'medium' | 'low' | null;
++    readonly winPct: number | null;
++    readonly imoWinPct: number | null;
++  };
++  readonly checkedAt: string;
++  readonly engineVersion: string;
++}
++
++export async function runCds(id: string): Promise<{ data: CdsResult }> {
++  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/cds`, {});
++}
+diff --git a/frontend/src/routes/cases/CaseDetailPage.tsx b/frontend/src/routes/cases/CaseDetailPage.tsx
+index 73907a6..769e151 100644
+--- a/frontend/src/routes/cases/CaseDetailPage.tsx
++++ b/frontend/src/routes/cases/CaseDetailPage.tsx
+@@ -6,6 +6,7 @@ import { Button } from '../../components/ui/Button';
+ import { EmptyState } from '../../components/ui/EmptyState';
+ import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
+ import { TabBar, type TabItem } from '../../components/ui/TabBar';
++import { CdsPanelForCase } from '../../components/CdsPanel';
+ import { useAuth } from '../../auth/useAuth';
+ import { ConflictError } from '../../api/client';
+ import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
+@@ -71,6 +72,8 @@ export function CaseDetailPage() {
+       </div>
+     </div>
+ 
++    <CdsPanelForCase c={c} />
++
+     <div className="rounded-lg border border-slate-200 bg-white">
+       <TabBar tabs={TABS} active={tab} onChange={setTab} />
+       <div className="p-4">

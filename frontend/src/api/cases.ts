@@ -114,3 +114,31 @@ export async function listDraftJobs(id: string): Promise<{ data: readonly DraftJ
 export async function listCorrections(id: string): Promise<{ data: readonly Correction[] }> {
   return apiGet(`/api/v1/cases/${encodeURIComponent(id)}/corrections`);
 }
+
+// === Phase 5 CDS (Clinical Decision Support) ===
+
+export interface CdsResult {
+  readonly verdict: 'accept' | 'caution' | 'reject';
+  readonly oddsPct: number | null;
+  readonly summary: string;
+  readonly hardGate: {
+    readonly triggered: boolean;
+    readonly rule: string | null;
+    readonly detail: string | null;
+  };
+  readonly bva: {
+    readonly matched: boolean;
+    readonly upstream: string | null;
+    readonly claimed: string | null;
+    readonly n: number | null;
+    readonly tier: 'high' | 'medium' | 'low' | null;
+    readonly winPct: number | null;
+    readonly imoWinPct: number | null;
+  };
+  readonly checkedAt: string;
+  readonly engineVersion: string;
+}
+
+export async function runCds(id: string): Promise<{ data: CdsResult }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/cds`, {});
+}

@@ -6,6 +6,7 @@ import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { TabBar, type TabItem } from '../../components/ui/TabBar';
+import { CdsPanelForCase } from '../../components/CdsPanel';
 import { useAuth } from '../../auth/useAuth';
 import { ConflictError } from '../../api/client';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
@@ -70,6 +71,8 @@ export function CaseDetailPage() {
         </div>
       </div>
     </div>
+
+    <CdsPanelForCase c={c} />
 
     <div className="rounded-lg border border-slate-200 bg-white">
       <TabBar tabs={TABS} active={tab} onChange={setTab} />

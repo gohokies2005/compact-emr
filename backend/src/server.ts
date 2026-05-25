@@ -12,6 +12,7 @@ import { createLookupRouter } from './routes/lookup.js';
 import { createSignOffsRouter } from './routes/sign-offs.js';
 import { createClarificationsRouter } from './routes/clarifications.js';
 import { createViabilityRouter } from './routes/viability.js';
+import { createChartReadinessRouter } from './routes/chart-readiness.js';
 import type { AppDb } from './services/db-types.js';
 
 export interface CreateAppOptions {
@@ -37,6 +38,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createSignOffsRouter(db));
   app.use('/api/v1', authenticateJwt(), createClarificationsRouter(db));
   app.use('/api/v1', authenticateJwt(), createViabilityRouter(db));
+  app.use('/api/v1', authenticateJwt(), createChartReadinessRouter(db));
 
   app.use((req, res) => {
     sendError(res, 404, 'not_found', 'Route was not found.');

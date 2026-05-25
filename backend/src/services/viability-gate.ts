@@ -9,7 +9,8 @@ export interface ViabilityBlocker {
     | 'cds_reject'
     | 'no_assigned_physician'
     | 'no_upstream_for_secondary'
-    | 'chart_records_pending';
+    | 'chart_records_pending'
+    | 'chart_files_unread';
   readonly severity: 'block' | 'warn';
   readonly detail: string;
 }
@@ -20,6 +21,7 @@ export interface ViabilityInput {
     'id' | 'status' | 'claimedCondition' | 'claimType' | 'framingChoice' | 'upstreamScCondition' | 'assignedPhysicianId' | 'cdsVerdict'
   >;
   readonly activeProblems: readonly { problem: string }[];
+  readonly chartReadiness?: { ready: boolean; manualSummaryRequired: number };
 }
 
 export interface ViabilityResult {
@@ -50,6 +52,18 @@ function isSecondary(framingChoice: string | null): boolean {
 export function evaluateViabilityGate(input: ViabilityInput): ViabilityResult {
   const blockers: ViabilityBlocker[] = [];
   const recommendations: string[] = [];
+
+  // Chart-readiness gate (Phase 5.2 OCR HARD-STOP). If any uploaded file is unread without
+  // a manual summary, the case is `needs_from_vet`-equivalent (RN must intervene). This block
+  // is unbypassable and outranks every soft warning below it.
+  if (input.chartReadiness !== undefined && !input.chartReadiness.ready) {
+    blockers.push({
+      code: 'chart_files_unread',
+      severity: 'block',
+      detail: `${input.chartReadiness.manualSummaryRequired} file(s) cannot be read by any OCR method and need RN manual interpretation.`,
+    });
+    recommendations.push('Open the files-pending-manual list and have an RN provide a manual summary (>=40 chars) for each blocking file.');
+  }
 
   // Hard blocks (-> not_viable)
   if (input.activeProblems.length === 0) {
@@ -107,7 +121,7 @@ export function evaluateViabilityGate(input: ViabilityInput): ViabilityResult {
   let verdict: ViabilityVerdict;
   if (hardCodes.has('cds_reject') || hardCodes.has('no_diagnosis_on_file')) {
     verdict = 'not_viable';
-  } else if (hardCodes.has('chart_records_pending')) {
+  } else if (hardCodes.has('chart_records_pending') || hardCodes.has('chart_files_unread')) {
     verdict = 'needs_from_vet';
   } else if (blockers.some((b) => b.severity === 'warn')) {
     verdict = 'clarify';

@@ -141,6 +141,7 @@ export interface AppDbTransaction {
   activeMedication: ActiveMedicationDelegate;
   signOff: SignOffDelegate;
   clarification: ClarificationDelegate;
+  fileReadStatus: FileReadStatusDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -331,4 +332,41 @@ export interface ClarificationDelegate {
   findMany(args: unknown): Promise<readonly ClarificationRecord[]>;
   create(args: unknown): Promise<ClarificationRecord>;
   update(args: unknown): Promise<ClarificationRecord>;
+}
+
+// ====================== Phase 5.2: FileReadStatus ======================
+
+export type FileTerminalStatus = 'read' | 'manual_summary_required' | 'manual_summary_provided';
+
+export interface FileReadAttempt {
+  readonly method: 'native_pdf_text' | 'tesseract_ocr' | 'claude_vision';
+  readonly wordCount: number;
+  readonly corruptedTokenRatio: number;
+  readonly attemptedAt: string;
+  readonly note: string | null;
+}
+
+export interface FileReadStatusRecord {
+  id: string;
+  caseId: string;
+  filePath: string;
+  fileSha256: string;
+  terminalStatus: FileTerminalStatus;
+  attemptsJson: readonly FileReadAttempt[];
+  manualSummary: string | null;
+  manualSummaryAt: Date | null;
+  manualSummaryBy: string | null;
+  lastCheckedAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface FileReadStatusDelegate {
+  findUnique(args: unknown): Promise<FileReadStatusRecord | null>;
+  findFirst(args: unknown): Promise<FileReadStatusRecord | null>;
+  findMany(args: unknown): Promise<readonly FileReadStatusRecord[]>;
+  create(args: unknown): Promise<FileReadStatusRecord>;
+  update(args: unknown): Promise<FileReadStatusRecord>;
+  upsert(args: unknown): Promise<FileReadStatusRecord>;
 }

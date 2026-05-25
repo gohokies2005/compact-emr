@@ -491,3 +491,24 @@ model Clarification {
   @@index([audience])
   @@map("clarifications")
 }
+
+model FileReadStatus {
+  id              String    @id @default(uuid())
+  caseId          String    @map("case_id")
+  filePath        String    @map("file_path") @db.VarChar(500)
+  fileSha256      String    @map("file_sha256") @db.VarChar(64)
+  terminalStatus  String    @map("terminal_status") @db.VarChar(40)
+  attemptsJson    Json      @map("attempts_json")
+  manualSummary   String?   @map("manual_summary")
+  manualSummaryAt DateTime? @map("manual_summary_at") @db.Timestamptz(6)
+  manualSummaryBy String?   @map("manual_summary_by")
+  lastCheckedAt   DateTime  @default(now()) @map("last_checked_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version         Int       @default(1)
+
+  @@unique([caseId, filePath], map: "file_read_status_case_file_uq")
+  @@index([caseId])
+  @@index([terminalStatus])
+  @@map("file_read_status")
+}

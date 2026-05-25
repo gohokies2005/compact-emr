@@ -103,6 +103,15 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physicianBySub?: R
     physician: { findUnique: physicianFindUnique, findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), create: vi.fn(), update: vi.fn() },
     activityLog: { create: activityLogCreate },
     signOff: { findUnique: vi.fn(async () => null), findFirst: vi.fn(async () => null), findMany: signOffFindMany, create: signOffCreate },
+    // Phase 5.2: OCR HARD-STOP gate. Tests run with no uploaded files (readiness vacuously ready).
+    fileReadStatus: {
+      findUnique: vi.fn(async () => null),
+      findFirst: vi.fn(async () => null),
+      findMany: vi.fn(async () => []),
+      create: vi.fn(),
+      update: vi.fn(),
+      upsert: vi.fn(),
+    },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
   return { db, signOffs, spies: { caseFindFirst, physicianFindUnique, activityLogCreate, signOffCreate, signOffFindMany } };
@@ -236,5 +245,20 @@ describe('sign-offs routes', () => {
     });
     const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/sign-offs');
     expect(res.status).toBe(403);
+  });
+
+  it('POST sign-off is BLOCKED (409 chart_not_ready) when a file is manual_summary_required', async () => {
+    mockUser = { sub: 'ADMIN-SUB', roles: ['admin'] };
+    const { db } = makeDb();
+    // Inject a blocking file row into the fileReadStatus delegate for this case.
+    const now = new Date();
+    (db.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([{
+      id: 'FRS-blocking', caseId: 'CASE-1', filePath: 'records/garbled.pdf', fileSha256: 'a'.repeat(64),
+      terminalStatus: 'manual_summary_required', attemptsJson: [], manualSummary: null,
+      manualSummaryAt: null, manualSummaryBy: null, lastCheckedAt: now, createdAt: now, updatedAt: now, version: 1,
+    }]);
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/sign-off').send({ answers: { q1: true } });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('chart_not_ready');
   });
 });

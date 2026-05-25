@@ -6,6 +6,7 @@ export type ErrorCode =
   | 'forbidden'
   | 'not_found'
   | 'conflict'
+  | 'chart_not_ready'
   | 'internal_error';
 
 export interface ErrorEnvelope {

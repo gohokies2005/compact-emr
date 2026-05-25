@@ -5,6 +5,7 @@ import { requireRole } from '../auth/roles.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import { resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor } from '../services/request-actor.js';
+import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import type { AppDb } from '../services/db-types.js';
 
 export function createSignOffsRouter(db: AppDb): Router {
@@ -30,6 +31,19 @@ export function createSignOffsRouter(db: AppDb): Router {
 
       const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true, assignedPhysicianId: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+
+      // OCR HARD-STOP gate (Phase 5.2): no sign-off until every uploaded file is read or has
+      // a manual summary. Unbypassable — no admin override per Ryan's HARD RULE.
+      const fileRows = await db.fileReadStatus.findMany({ where: { caseId } });
+      const readiness = evaluateChartReadiness(fileRows);
+      if (!readiness.ready) {
+        throw new HttpError(409, 'chart_not_ready', 'Sign-off blocked: chart-readiness gate failed.', {
+          caseId,
+          totalFiles: readiness.totalFiles,
+          blockingFiles: readiness.blockingFiles,
+          gateVersion: readiness.gateVersion,
+        });
+      }
 
       // Resolve the physician issuing the sign-off. Admin can sign on behalf when no physician
       // is assigned (rare) — otherwise the resolver must produce a real physician identity.

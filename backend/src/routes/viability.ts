@@ -3,6 +3,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { evaluateViabilityGate } from '../services/viability-gate.js';
+import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import type { AppDb } from '../services/db-types.js';
 
 export function createViabilityRouter(db: AppDb): Router {
@@ -39,10 +40,12 @@ export function createViabilityRouter(db: AppDb): Router {
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
 
       const cw = c as typeof c & { veteranId: string };
-      const activeProblems = await db.activeProblem.findMany({
-        where: { veteranId: cw.veteranId },
-        select: { problem: true },
-      });
+      const [activeProblems, fileRows] = await Promise.all([
+        db.activeProblem.findMany({ where: { veteranId: cw.veteranId }, select: { problem: true } }),
+        db.fileReadStatus.findMany({ where: { caseId } }),
+      ]);
+
+      const chartReadiness = evaluateChartReadiness(fileRows);
 
       const result = evaluateViabilityGate({
         caseRow: {
@@ -56,6 +59,7 @@ export function createViabilityRouter(db: AppDb): Router {
           cdsVerdict: c.cdsVerdict,
         },
         activeProblems: activeProblems as readonly { problem: string }[],
+        chartReadiness: { ready: chartReadiness.ready, manualSummaryRequired: chartReadiness.manualSummaryRequired },
       });
 
       res.json({ data: result });

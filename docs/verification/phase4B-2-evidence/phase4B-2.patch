@@ -1,0 +1,280 @@
+diff --git a/docs/PHASE4B_2_SUMMARY.md b/docs/PHASE4B_2_SUMMARY.md
+new file mode 100644
+index 0000000..5f89874
+--- /dev/null
++++ b/docs/PHASE4B_2_SUMMARY.md
+@@ -0,0 +1,22 @@
++# Phase 4B-2 Summary — `/cases` list page
++
++Built by Claude Code against `main` (on top of 4B-1). Frontend-only; no backend changes.
++
++## New / modified files
++
++- `frontend/src/api/cases.ts` (new) — `listCases(params)` + `CaseLite` / `CaseListResult` types matching the backend `CASE_LITE_SELECT` shape and the **offset** envelope `{ data, page, pageSize, total }` (the existing `types/api.ts` `CaseListResponse` assumed a cursor envelope, which does not match the real endpoint — left untouched; new types live in `api/cases.ts`).
++- `frontend/src/routes/cases/CasesPage.tsx` (new) — replaces the Phase 2 stub. Filter row (status dropdown, claim-type dropdown, debounced veteran search using `listVeterans` → top-5 dropdown → `?veteranId=`, clear-filters); table (case id link → `/cases/:id`, veteran name link → `/veterans/:id`, condition, claim type, `<CaseStatusBadge>`, relative `updatedAt`, version); offset pagination (page + pageSize 25/50/100). `<EmptyState message=…>` on no results.
++- `frontend/src/App.tsx` (modified) — repointed `CasesPage` import from `routes/stubs/CasesPage` to `routes/cases/CasesPage`.
++- `frontend/src/routes/stubs/CasesPage.tsx` (deleted) — superseded; nothing else imported it.
++- `frontend/src/__tests__/CasesPage.test.tsx` (new) — renders filters + a mocked case row + status badge.
++
++## Notes / decisions
++
++- Veteran search reuses the existing `listVeterans(q)` (which hits `GET /api/v1/veterans?q=`) and slices to the top 5 client-side, rather than assuming a `pageSize` query param the frontend client didn't already send.
++- Filters reset to page 1 on change. Pagination derives `totalPages` from `total`.
++- TanStack Query keys include the full filter set so changing any filter refetches.
++
++## Verification (local; evidence under `docs/verification/phase4B-2-evidence/`)
++
++- `npm run lint -w frontend` → 0 · `npm run typecheck -w frontend` → 0 · `npm run test -w frontend` → **8 files / 14 tests pass**
++- `npm run lint` (root) → 0 · `npm run typecheck` (root) → 0 · `migrate:check` / `migrate:diff-check` → 0
+diff --git a/docs/verification/phase4B-2-evidence/test-output.txt b/docs/verification/phase4B-2-evidence/test-output.txt
+new file mode 100644
+index 0000000..64b7b7d
+--- /dev/null
++++ b/docs/verification/phase4B-2-evidence/test-output.txt
+@@ -0,0 +1,5 @@
++[2m Test Files [22m [1m[32m8 passed[39m[22m[90m (8)[39m
++[2m      Tests [22m [1m[32m14 passed[39m[22m[90m (14)[39m
++[2m   Start at [22m 10:17:25
++[2m   Duration [22m 17.84s[2m (transform 2.64s, setup 1.57s, collect 16.07s, tests 880ms, environment 11.12s, prepare 1.86s)[22m
++
+diff --git a/docs/verification/phase4B-2-evidence/typecheck.txt b/docs/verification/phase4B-2-evidence/typecheck.txt
+new file mode 100644
+index 0000000..eec00c1
+--- /dev/null
++++ b/docs/verification/phase4B-2-evidence/typecheck.txt
+@@ -0,0 +1 @@
++frontend tsc exit: 0
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 90ef5e3..6d00616 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -8,7 +8,7 @@ import { NoAccessPage } from './routes/NoAccessPage';
+ import { NotFoundPage } from './routes/NotFoundPage';
+ import { VeteransPage } from './routes/veterans/VeteransPage';
+ import { VeteranChart } from './routes/veterans/VeteranChart';
+-import { CasesPage } from './routes/stubs/CasesPage';
++import { CasesPage } from './routes/cases/CasesPage';
+ import { CaseDetailPage } from './routes/cases/CaseDetailPage';
+ import { TemplatesPage } from './routes/stubs/TemplatesPage';
+ import { PhysiciansPage } from './routes/stubs/PhysiciansPage';
+diff --git a/frontend/src/__tests__/CasesPage.test.tsx b/frontend/src/__tests__/CasesPage.test.tsx
+new file mode 100644
+index 0000000..7b2f97c
+--- /dev/null
++++ b/frontend/src/__tests__/CasesPage.test.tsx
+@@ -0,0 +1,32 @@
++import type { ReactNode } from 'react';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { render, screen } from '@testing-library/react';
++import { MemoryRouter } from 'react-router-dom';
++import { describe, expect, it, vi } from 'vitest';
++import { CasesPage } from '../routes/cases/CasesPage';
++
++vi.mock('../api/cases', () => ({
++  listCases: vi.fn(async () => ({
++    data: [{
++      id: 'CASE-001', veteranId: 'VET-1', claimedCondition: 'Obstructive sleep apnea', claimType: 'initial',
++      status: 'drafting', version: 3, currentVersion: 2, assignedPhysicianId: null, refundEligible: false,
++      createdAt: '2026-05-01T00:00:00Z', updatedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
++      veteran: { id: 'VET-1', firstName: 'Matthew', lastName: 'Young', email: 'm@example.com' }, assignedPhysician: null,
++    }],
++    page: 1, pageSize: 25, total: 1,
++  })),
++}));
++vi.mock('../api/veterans', () => ({ listVeterans: vi.fn(async () => ({ data: [] })) }));
++vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
++
++describe('CasesPage', () => {
++  it('renders filters and a case row with status badge', async () => {
++    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++    render(<QueryClientProvider client={client}><MemoryRouter><CasesPage /></MemoryRouter></QueryClientProvider>);
++    expect(screen.getByText('All statuses')).toBeInTheDocument();
++    expect(await screen.findByText('CASE-001')).toBeInTheDocument();
++    expect(screen.getByText('Matthew Young')).toBeInTheDocument();
++    // "Drafting" appears in the status filter option AND the row badge — assert the badge specifically.
++    expect(screen.getAllByText('Drafting').some((el) => el.className.includes('bg-purple-100'))).toBe(true);
++  });
++});
+diff --git a/frontend/src/api/cases.ts b/frontend/src/api/cases.ts
+new file mode 100644
+index 0000000..fd9cbe1
+--- /dev/null
++++ b/frontend/src/api/cases.ts
+@@ -0,0 +1,51 @@
++import { apiGet } from './client';
++import type { CaseStatus, ClaimType } from '../types/prisma';
++
++export interface CaseVeteranLite { readonly id: string; readonly firstName: string; readonly lastName: string; readonly email: string; }
++export interface CasePhysicianLite { readonly id: string; readonly fullName: string; readonly email: string; }
++
++// Matches the backend CASE_LITE_SELECT shape returned by GET /cases and the list rows.
++export interface CaseLite {
++  readonly id: string;
++  readonly veteranId: string;
++  readonly claimedCondition: string;
++  readonly claimType: ClaimType;
++  readonly status: CaseStatus;
++  readonly version: number;
++  readonly currentVersion: number;
++  readonly assignedPhysicianId: string | null;
++  readonly refundEligible: boolean;
++  readonly createdAt: string;
++  readonly updatedAt: string;
++  readonly veteran?: CaseVeteranLite | null;
++  readonly assignedPhysician?: CasePhysicianLite | null;
++}
++
++// Offset-paginated envelope (cases list uses page/pageSize/total, not cursor).
++export interface CaseListResult {
++  readonly data: readonly CaseLite[];
++  readonly page: number;
++  readonly pageSize: number;
++  readonly total: number;
++}
++
++export interface ListCasesParams {
++  readonly status?: CaseStatus;
++  readonly claimType?: ClaimType;
++  readonly veteranId?: string;
++  readonly assignedPhysicianId?: string;
++  readonly page?: number;
++  readonly pageSize?: number;
++}
++
++export async function listCases(params: ListCasesParams = {}): Promise<CaseListResult> {
++  const sp = new URLSearchParams();
++  if (params.status) sp.set('status', params.status);
++  if (params.claimType) sp.set('claimType', params.claimType);
++  if (params.veteranId) sp.set('veteranId', params.veteranId);
++  if (params.assignedPhysicianId) sp.set('assignedPhysicianId', params.assignedPhysicianId);
++  if (params.page) sp.set('page', String(params.page));
++  if (params.pageSize) sp.set('pageSize', String(params.pageSize));
++  const qs = sp.toString();
++  return apiGet<CaseListResult>(`/api/v1/cases${qs ? `?${qs}` : ''}`);
++}
+diff --git a/frontend/src/routes/cases/CasesPage.tsx b/frontend/src/routes/cases/CasesPage.tsx
+new file mode 100644
+index 0000000..dbaa51f
+--- /dev/null
++++ b/frontend/src/routes/cases/CasesPage.tsx
+@@ -0,0 +1,110 @@
++import { useEffect, useState } from 'react';
++import { useQuery } from '@tanstack/react-query';
++import { Link } from 'react-router-dom';
++import { AppShell } from '../../layout/AppShell';
++import { Button } from '../../components/ui/Button';
++import { EmptyState } from '../../components/ui/EmptyState';
++import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
++import { CASE_STATUS_LABELS } from '../../lib/caseStatus';
++import { formatRelativeTime } from '../../lib/date';
++import { listCases } from '../../api/cases';
++import { listVeterans } from '../../api/veterans';
++import type { CaseStatus, ClaimType } from '../../types/prisma';
++
++function useDebounced<T>(value: T, ms: number): T {
++  const [debounced, setDebounced] = useState(value);
++  useEffect(() => { const t = window.setTimeout(() => setDebounced(value), ms); return () => window.clearTimeout(t); }, [value, ms]);
++  return debounced;
++}
++
++const CLAIM_TYPE_LABELS: Record<ClaimType, string> = { initial: 'Initial', supplemental: 'Supplemental', hlr: 'Higher-level review', appeal_bva: 'Board appeal' };
++const STATUS_OPTIONS = Object.entries(CASE_STATUS_LABELS) as [CaseStatus, string][];
++const CLAIM_TYPE_OPTIONS = Object.entries(CLAIM_TYPE_LABELS) as [ClaimType, string][];
++const PAGE_SIZES = [25, 50, 100];
++
++export function CasesPage() {
++  const [status, setStatus] = useState<CaseStatus | ''>('');
++  const [claimType, setClaimType] = useState<ClaimType | ''>('');
++  const [vetQuery, setVetQuery] = useState('');
++  const [veteran, setVeteran] = useState<{ id: string; label: string } | null>(null);
++  const [page, setPage] = useState(1);
++  const [pageSize, setPageSize] = useState(25);
++
++  const debouncedVet = useDebounced(vetQuery, 300);
++  // Reset to page 1 whenever a filter changes.
++  useEffect(() => { setPage(1); }, [status, claimType, veteran?.id, pageSize]);
++
++  const vetMatches = useQuery({
++    queryKey: ['veteran-search', debouncedVet],
++    queryFn: () => listVeterans(debouncedVet),
++    enabled: debouncedVet.trim().length > 0 && veteran === null,
++  });
++
++  const cases = useQuery({
++    queryKey: ['cases', { status, claimType, veteranId: veteran?.id ?? '', page, pageSize }],
++    queryFn: () => listCases({
++      ...(status && { status }),
++      ...(claimType && { claimType }),
++      ...(veteran && { veteranId: veteran.id }),
++      page,
++      pageSize,
++    }),
++  });
++
++  function clearFilters() { setStatus(''); setClaimType(''); setVetQuery(''); setVeteran(null); }
++  const total = cases.data?.total ?? 0;
++  const totalPages = Math.max(1, Math.ceil(total / pageSize));
++
++  return <AppShell><div className="space-y-6">
++    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
++      <div><h1 className="text-2xl font-semibold text-slate-900">Cases</h1><p className="text-sm text-slate-500">Browse and filter claims across all veterans.</p></div>
++    </div>
++
++    <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
++      <label className="block text-sm lg:w-56"><span className="mb-1 block font-medium text-slate-700">Status</span>
++        <select className="input" value={status} onChange={(e) => setStatus(e.target.value as CaseStatus | '')}><option value="">All statuses</option>{STATUS_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
++      </label>
++      <label className="block text-sm lg:w-56"><span className="mb-1 block font-medium text-slate-700">Claim type</span>
++        <select className="input" value={claimType} onChange={(e) => setClaimType(e.target.value as ClaimType | '')}><option value="">All claim types</option>{CLAIM_TYPE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
++      </label>
++      <div className="relative block text-sm lg:flex-1">
++        <span className="mb-1 block font-medium text-slate-700">Veteran</span>
++        {veteran
++          ? <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2"><span className="text-slate-900">{veteran.label}</span><button type="button" className="text-xs text-indigo-600" onClick={() => { setVeteran(null); setVetQuery(''); }}>Clear</button></div>
++          : <input className="input" aria-label="Search veterans" placeholder="Search veteran by name or ID…" value={vetQuery} onChange={(e) => setVetQuery(e.target.value)} />}
++        {!veteran && debouncedVet.trim() && vetMatches.data && vetMatches.data.data.length > 0
++          ? <ul className="absolute z-10 mt-1 w-full overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">{vetMatches.data.data.slice(0, 5).map((v) => <li key={v.id}><button type="button" className="flex w-full justify-between px-3 py-2 text-left hover:bg-slate-50" onClick={() => { setVeteran({ id: v.id, label: `${v.firstName} ${v.lastName} (${v.id})` }); }}><span>{v.firstName} {v.lastName}</span><span className="text-slate-500">{v.dob?.slice(0, 4) ?? ''}</span></button></li>)}</ul>
++          : null}
++      </div>
++      <Button variant="secondary" onClick={clearFilters}>Clear filters</Button>
++    </div>
++
++    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
++      <table className="min-w-full divide-y divide-slate-200 text-sm">
++        <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Case</th><th className="px-4 py-3">Veteran</th><th className="px-4 py-3">Condition</th><th className="px-4 py-3">Type</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Updated</th><th className="px-4 py-3">v</th></tr></thead>
++        <tbody className="divide-y divide-slate-100">
++          {cases.data?.data.map((c) => <tr key={c.id} className="hover:bg-slate-50">
++            <td className="px-4 py-3 font-medium"><Link className="text-indigo-600" to={`/cases/${encodeURIComponent(c.id)}`}>{c.id}</Link></td>
++            <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</Link></td>
++            <td className="px-4 py-3 text-slate-700">{c.claimedCondition}</td>
++            <td className="px-4 py-3 text-slate-600">{CLAIM_TYPE_LABELS[c.claimType]}</td>
++            <td className="px-4 py-3"><CaseStatusBadge status={c.status} /></td>
++            <td className="px-4 py-3 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
++            <td className="px-4 py-3 text-slate-400">{c.version}</td>
++          </tr>)}
++        </tbody>
++      </table>
++      {cases.isLoading ? <div className="p-6 text-sm text-slate-500">Loading cases…</div> : null}
++      {!cases.isLoading && total === 0 ? <EmptyState title="No cases found" message="Adjust the filters or create a claim from a veteran chart." /> : null}
++    </div>
++
++    <div className="flex flex-col items-center justify-between gap-3 text-sm text-slate-600 sm:flex-row">
++      <div>{total} case{total === 1 ? '' : 's'} · page {page} of {totalPages}</div>
++      <div className="flex items-center gap-2">
++        <label className="flex items-center gap-2">Per page<select className="input w-auto" value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>{PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
++        <Button variant="secondary" size="sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Previous</Button>
++        <Button variant="secondary" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>Next</Button>
++      </div>
++    </div>
++  </div></AppShell>;
++}
+diff --git a/frontend/src/routes/stubs/CasesPage.tsx b/frontend/src/routes/stubs/CasesPage.tsx
+deleted file mode 100644
+index 94773b8..0000000
+--- a/frontend/src/routes/stubs/CasesPage.tsx
++++ /dev/null
+@@ -1,4 +0,0 @@
+-import { AppShell } from '../../layout/AppShell';
+-import { EmptyState } from '../../components/ui/EmptyState';
+-
+-export function CasesPage() { return <AppShell><div className="mb-8 flex items-center justify-between"><div><h1 className="text-2xl font-semibold text-slate-900">Cases</h1><p className="mt-2 text-sm text-slate-500">Phase 2 placeholder.</p></div></div><EmptyState message="This page ships in Phase 3 (placeholder)." /></AppShell>; }

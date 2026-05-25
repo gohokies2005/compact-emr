@@ -8,7 +8,7 @@ import { NoAccessPage } from './routes/NoAccessPage';
 import { NotFoundPage } from './routes/NotFoundPage';
 import { VeteransPage } from './routes/veterans/VeteransPage';
 import { VeteranChart } from './routes/veterans/VeteranChart';
-import { CasesPage } from './routes/stubs/CasesPage';
+import { CasesPage } from './routes/cases/CasesPage';
 import { CaseDetailPage } from './routes/cases/CaseDetailPage';
 import { TemplatesPage } from './routes/stubs/TemplatesPage';
 import { PhysiciansPage } from './routes/stubs/PhysiciansPage';

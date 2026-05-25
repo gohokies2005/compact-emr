@@ -1,0 +1,1046 @@
+diff -ruN orig3/compact-emr/backend/prisma/migrations/20260525030000_phase3a_veteran_inactive/migration.sql work3/compact-emr/backend/prisma/migrations/20260525030000_phase3a_veteran_inactive/migration.sql
+--- orig3/compact-emr/backend/prisma/migrations/20260525030000_phase3a_veteran_inactive/migration.sql	1970-01-01 00:00:00.000000000 +0000
++++ work3/compact-emr/backend/prisma/migrations/20260525030000_phase3a_veteran_inactive/migration.sql	2026-05-25 04:00:32.525657296 +0000
+@@ -0,0 +1,4 @@
++-- Phase 3A-1: support admin-only soft delete for veterans.
++-- No PHI is removed; active list endpoints filter inactive rows by default.
++ALTER TABLE "veterans" ADD COLUMN IF NOT EXISTS "inactive" BOOLEAN NOT NULL DEFAULT false;
++CREATE INDEX IF NOT EXISTS "veterans_inactive_idx" ON "veterans"("inactive");
+diff -ruN orig3/compact-emr/backend/prisma/schema.prisma work3/compact-emr/backend/prisma/schema.prisma
+--- orig3/compact-emr/backend/prisma/schema.prisma	2026-05-23 02:41:21.000000000 +0000
++++ work3/compact-emr/backend/prisma/schema.prisma	2026-05-25 04:00:32.355562907 +0000
+@@ -166,6 +166,7 @@
+   @@index([lastName, firstName])
+   @@index([email])
+   @@index([branch])
++  @@index([inactive])
+   @@map("veterans")
+ }
+ 
+diff -ruN orig3/compact-emr/backend/src/__tests__/veterans-routes.test.ts work3/compact-emr/backend/src/__tests__/veterans-routes.test.ts
+--- orig3/compact-emr/backend/src/__tests__/veterans-routes.test.ts	1970-01-01 00:00:00.000000000 +0000
++++ work3/compact-emr/backend/src/__tests__/veterans-routes.test.ts	2026-05-25 04:02:12.064374368 +0000
+@@ -0,0 +1,219 @@
++import { SignJWT } from 'jose';
++import request from 'supertest';
++import { beforeEach, describe, expect, it } from 'vitest';
++import { createApp } from '../server.js';
++import type { AppDb, AppDbTransaction, AppUserRecord, VeteranRecord } from '../services/db-types.js';
++
++const secret = new TextEncoder().encode('phase3a-test-secret');
++
++async function makeJwt(groups: string[], sub = 'test-sub-123') {
++  return new SignJWT({ email: 'admin@example.test', 'cognito:groups': groups })
++    .setProtectedHeader({ alg: 'HS256' })
++    .setSubject(sub)
++    .setIssuer('compact-emr-test')
++    .setAudience('compact-emr-api')
++    .setIssuedAt()
++    .setExpirationTime(Math.floor(Date.now() / 1000) + 3600)
++    .sign(secret);
++}
++
++function sampleVeteran(overrides: Partial<VeteranRecord> = {}): VeteranRecord {
++  const now = new Date('2026-05-24T00:00:00.000Z');
++  return {
++    id: 'TEST-001',
++    lastName: 'Smith',
++    firstName: 'John',
++    dob: new Date('1980-01-01T00:00:00.000Z'),
++    email: 'smith@example.test',
++    phone: null,
++    address: null,
++    branch: 'Army',
++    serviceStartYear: 2001,
++    serviceEndYear: 2008,
++    combatVeteran: 'unknown',
++    pactArea: 'unknown',
++    teraConceded: 'unknown',
++    heightIn: null,
++    weightLb: null,
++    inactive: false,
++    createdAt: now,
++    updatedAt: now,
++    version: 1,
++    ...overrides,
++  };
++}
++
++class MockDb implements AppDb {
++  public veterans = new Map<string, VeteranRecord>();
++  public activities: Array<{ data: Record<string, unknown> }> = [];
++  public appUserRecord: AppUserRecord | null = {
++    id: 'app-user-1',
++    cognitoSub: 'test-sub-123',
++    email: 'admin@example.test',
++    roles: [{ role: 'admin' }],
++  };
++
++  public appUser = {
++    findUnique: async (): Promise<AppUserRecord | null> => this.appUserRecord,
++  };
++
++  public activityLog = {
++    create: async (args: { data: Record<string, unknown> }): Promise<unknown> => {
++      this.activities.push(args);
++      return args.data;
++    },
++  };
++
++  public veteran = {
++    findMany: async (): Promise<Array<VeteranRecord & { _count: { cases: number } }>> =>
++      [...this.veterans.values()].filter((v) => !v.inactive).map((v) => ({ ...v, _count: { cases: 0 } })),
++    count: async (): Promise<number> => [...this.veterans.values()].filter((v) => !v.inactive).length,
++    findUnique: async (args: unknown): Promise<VeteranRecord | null> => {
++      const id = this.extractId(args);
++      return this.veterans.get(id) ?? null;
++    },
++    findFirst: async (args: unknown): Promise<VeteranRecord | null> => {
++      const id = this.extractId(args);
++      const veteran = this.veterans.get(id) ?? null;
++      return veteran && !veteran.inactive ? veteran : null;
++    },
++    create: async (args: { data: Omit<VeteranRecord, 'createdAt' | 'updatedAt' | 'version' | 'inactive'> }): Promise<VeteranRecord> => {
++      const created = sampleVeteran({ ...args.data, version: 1, inactive: false });
++      this.veterans.set(created.id, created);
++      return created;
++    },
++    update: async (args: { where: { id: string }; data: Record<string, unknown> }): Promise<VeteranRecord> => {
++      const current = this.veterans.get(args.where.id);
++      if (!current) throw new Error('missing veteran in mock');
++      const nextVersion = typeof args.data.version === 'object' && args.data.version !== null ? current.version + 1 : current.version;
++      const { version: _version, ...rest } = args.data;
++      const updated = { ...current, ...rest, version: nextVersion, updatedAt: new Date('2026-05-24T01:00:00.000Z') } as VeteranRecord;
++      this.veterans.set(args.where.id, updated);
++      return updated;
++    },
++  };
++
++  public async $transaction<T>(fn: (tx: AppDbTransaction) => Promise<T>): Promise<T> {
++    return fn(this);
++  }
++
++  private extractId(args: unknown): string {
++    if (typeof args !== 'object' || args === null) return '';
++    const maybeWhere = (args as { where?: unknown }).where;
++    if (typeof maybeWhere !== 'object' || maybeWhere === null) return '';
++    const id = (maybeWhere as { id?: unknown }).id;
++    return typeof id === 'string' ? id : '';
++  }
++}
++
++beforeEach(() => {
++  process.env.AUTH_TEST_JWT_SECRET = 'phase3a-test-secret';
++  process.env.AUTH_TEST_ISSUER = 'compact-emr-test';
++  process.env.AUTH_TEST_AUDIENCE = 'compact-emr-api';
++});
++
++describe('Phase 3A-1 veteran routes', () => {
++  it('GET /api/v1/me returns the authenticated user envelope', async () => {
++    const db = new MockDb();
++    const token = await makeJwt(['admin']);
++    const res = await request(createApp({ db })).get('/api/v1/me').set('Authorization', `Bearer ${token}`);
++    expect(res.status).toBe(200);
++    expect(res.body.data).toMatchObject({ sub: 'test-sub-123', roles: ['admin'], appUserId: 'app-user-1' });
++  });
++
++  it('POST /api/v1/veterans creates a veteran and writes an activity row', async () => {
++    const db = new MockDb();
++    const token = await makeJwt(['ops_staff']);
++    const res = await request(createApp({ db }))
++      .post('/api/v1/veterans')
++      .set('Authorization', `Bearer ${token}`)
++      .send({
++        id: 'TEST-001',
++        firstName: 'John',
++        lastName: 'Smith',
++        dob: '1980-01-01',
++        email: 'smith@example.test',
++        branch: 'Army',
++        serviceStartYear: 2001,
++        serviceEndYear: 2008,
++        combatVeteran: 'unknown',
++        pactArea: 'unknown',
++        teraConceded: 'unknown',
++      });
++
++    expect(res.status).toBe(201);
++    expect(res.body.data.id).toBe('TEST-001');
++    expect(db.activities[0]?.data).toMatchObject({ action: 'veteran_created', veteranId: 'TEST-001' });
++  });
++
++  it('GET /api/v1/veterans rejects missing JWT with 401', async () => {
++    const db = new MockDb();
++    const res = await request(createApp({ db })).get('/api/v1/veterans');
++    expect(res.status).toBe(401);
++    expect(res.body.error.code).toBe('unauthorized');
++  });
++
++  it('GET /api/v1/veterans rejects physician role with 403', async () => {
++    const db = new MockDb();
++    const token = await makeJwt(['physician']);
++    const res = await request(createApp({ db })).get('/api/v1/veterans').set('Authorization', `Bearer ${token}`);
++    expect(res.status).toBe(403);
++    expect(res.body.error.code).toBe('forbidden');
++  });
++
++  it('PATCH /api/v1/veterans/:id increments version and writes fields-only activity details', async () => {
++    const db = new MockDb();
++    db.veterans.set('TEST-001', sampleVeteran());
++    const token = await makeJwt(['ops_staff']);
++    const res = await request(createApp({ db }))
++      .patch('/api/v1/veterans/TEST-001')
++      .set('Authorization', `Bearer ${token}`)
++      .send({ version: 1, email: 'new@example.test' });
++
++    expect(res.status).toBe(200);
++    expect(res.body.data.version).toBe(2);
++    expect(db.activities[0]?.data).toMatchObject({
++      action: 'veteran_updated',
++      veteranId: 'TEST-001',
++      detailsJson: { veteranId: 'TEST-001', fields: ['email'] },
++    });
++  });
++
++  it('PATCH /api/v1/veterans/:id returns 409 on stale version', async () => {
++    const db = new MockDb();
++    db.veterans.set('TEST-001', sampleVeteran({ version: 3 }));
++    const token = await makeJwt(['admin']);
++    const res = await request(createApp({ db }))
++      .patch('/api/v1/veterans/TEST-001')
++      .set('Authorization', `Bearer ${token}`)
++      .send({ version: 1, email: 'new@example.test' });
++
++    expect(res.status).toBe(409);
++    expect(res.body.error.code).toBe('conflict');
++    expect(res.body.error.details).toMatchObject({ id: 'TEST-001', version: 3 });
++  });
++
++  it('PATCH /api/v1/veterans/:id blocks ops staff from changing name or DOB', async () => {
++    const db = new MockDb();
++    db.veterans.set('TEST-001', sampleVeteran());
++    const token = await makeJwt(['ops_staff']);
++    const res = await request(createApp({ db }))
++      .patch('/api/v1/veterans/TEST-001')
++      .set('Authorization', `Bearer ${token}`)
++      .send({ version: 1, lastName: 'Jones' });
++
++    expect(res.status).toBe(403);
++    expect(res.body.error.code).toBe('forbidden');
++  });
++
++  it('DELETE /api/v1/veterans/:id is admin-only and soft deletes', async () => {
++    const db = new MockDb();
++    db.veterans.set('TEST-001', sampleVeteran());
++    const token = await makeJwt(['admin']);
++    const res = await request(createApp({ db })).delete('/api/v1/veterans/TEST-001').set('Authorization', `Bearer ${token}`);
++
++    expect(res.status).toBe(204);
++    expect(db.veterans.get('TEST-001')?.inactive).toBe(true);
++    expect(db.activities[0]?.data).toMatchObject({ action: 'veteran_soft_deleted', veteranId: 'TEST-001' });
++  });
++});
+diff -ruN orig3/compact-emr/backend/src/auth/roles.ts work3/compact-emr/backend/src/auth/roles.ts
+--- orig3/compact-emr/backend/src/auth/roles.ts	2026-05-23 02:45:49.000000000 +0000
++++ work3/compact-emr/backend/src/auth/roles.ts	2026-05-25 04:00:43.967273770 +0000
+@@ -1,4 +1,5 @@
+ import type { NextFunction, Request, Response } from 'express';
++import { sendError } from '../http/errors.js';
+ 
+ export const ROLES = ['physician', 'ops_staff', 'admin'] as const;
+ export type Role = (typeof ROLES)[number];
+@@ -16,12 +17,12 @@
+ export function requireRole(allowedRoles: Role[]) {
+   return (req: Request, res: Response, next: NextFunction) => {
+     if (!req.user) {
+-      return res.status(401).json({ error: 'unauthorized' });
++      return sendError(res, 401, 'unauthorized', 'Authentication is required.');
+     }
+ 
+     const hasRole = req.user.roles.some((role) => allowedRoles.includes(role));
+     if (!hasRole) {
+-      return res.status(403).json({ error: 'forbidden', requiredRoles: allowedRoles });
++      return sendError(res, 403, 'forbidden', 'This route is not available for your role.', { requiredRoles: allowedRoles });
+     }
+ 
+     return next();
+diff -ruN orig3/compact-emr/backend/src/http/async-handler.ts work3/compact-emr/backend/src/http/async-handler.ts
+--- orig3/compact-emr/backend/src/http/async-handler.ts	1970-01-01 00:00:00.000000000 +0000
++++ work3/compact-emr/backend/src/http/async-handler.ts	2026-05-25 04:00:37.749763426 +0000
+@@ -0,0 +1,9 @@
++import type { NextFunction, Request, Response } from 'express';
++
++export type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise<unknown>;
++
++export function asyncHandler(handler: AsyncHandler) {
++  return (req: Request, res: Response, next: NextFunction): void => {
++    void handler(req, res, next).catch(next);
++  };
++}
+diff -ruN orig3/compact-emr/backend/src/http/errors.ts work3/compact-emr/backend/src/http/errors.ts
+--- orig3/compact-emr/backend/src/http/errors.ts	1970-01-01 00:00:00.000000000 +0000
++++ work3/compact-emr/backend/src/http/errors.ts	2026-05-25 04:00:37.736389940 +0000
+@@ -0,0 +1,44 @@
++import type { Response } from 'express';
++
++export type ErrorCode =
++  | 'bad_request'
++  | 'unauthorized'
++  | 'forbidden'
++  | 'not_found'
++  | 'conflict'
++  | 'internal_error';
++
++export interface ErrorEnvelope {
++  error: {
++    code: ErrorCode;
++    message: string;
++    details?: unknown;
++  };
++}
++
++export function sendError(res: Response, status: number, code: ErrorCode, message: string, details?: unknown): Response {
++  const payload: ErrorEnvelope = {
++    error: {
++      code,
++      message,
++      ...(details !== undefined ? { details } : {}),
++    },
++  };
++  return res.status(status).json(payload);
++}
++
++export class HttpError extends Error {
++  constructor(
++    public readonly status: number,
++    public readonly code: ErrorCode,
++    message: string,
++    public readonly details?: unknown,
++  ) {
++    super(message);
++    this.name = 'HttpError';
++  }
++}
++
++export function isHttpError(error: unknown): error is HttpError {
++  return error instanceof HttpError;
++}
+diff -ruN orig3/compact-emr/backend/src/middleware/auth.ts work3/compact-emr/backend/src/middleware/auth.ts
+--- orig3/compact-emr/backend/src/middleware/auth.ts	2026-05-23 02:45:49.000000000 +0000
++++ work3/compact-emr/backend/src/middleware/auth.ts	2026-05-25 04:00:45.699881416 +0000
+@@ -1,6 +1,7 @@
+ import type { NextFunction, Request, Response } from 'express';
+ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+ import { isRole, type Role } from '../auth/roles.js';
++import { sendError } from '../http/errors.js';
+ 
+ let jwks: ReturnType<typeof createRemoteJWKSet> | undefined;
+ 
+@@ -41,14 +42,14 @@
+   return async (req: Request, res: Response, next: NextFunction) => {
+     const token = getBearerToken(req);
+     if (!token) {
+-      return res.status(401).json({ error: 'missing_bearer_token' });
++      return sendError(res, 401, 'unauthorized', 'Missing bearer token.');
+     }
+ 
+     try {
+       const payload = await verifyPayload(token);
+       const sub = payload.sub;
+       if (!sub) {
+-        return res.status(401).json({ error: 'missing_subject' });
++        return sendError(res, 401, 'unauthorized', 'JWT subject is missing.');
+       }
+ 
+       req.user = {
+@@ -58,7 +59,7 @@
+       };
+       return next();
+     } catch {
+-      return res.status(401).json({ error: 'invalid_token' });
++      return sendError(res, 401, 'unauthorized', 'JWT is invalid or expired.');
+     }
+   };
+ }
+diff -ruN orig3/compact-emr/backend/src/routes/veterans.ts work3/compact-emr/backend/src/routes/veterans.ts
+--- orig3/compact-emr/backend/src/routes/veterans.ts	1970-01-01 00:00:00.000000000 +0000
++++ work3/compact-emr/backend/src/routes/veterans.ts	2026-05-25 04:01:40.901001062 +0000
+@@ -0,0 +1,240 @@
++import type { Router } from 'express';
++import express from 'express';
++import { requireRole } from '../auth/roles.js';
++import { asyncHandler } from '../http/async-handler.js';
++import { HttpError } from '../http/errors.js';
++import type { AppDb, AppDbTransaction, AppUserRecord, VeteranRecord } from '../services/db-types.js';
++import { assertPatchAllowedForRoles, parseVeteranCreate, parseVeteranPatch } from '../services/veteran-validation.js';
++
++const OPS_ROLES = ['admin', 'ops_staff'] as const;
++
++function toPositiveInt(value: unknown, fallback: number, max: number): number {
++  if (typeof value !== 'string') return fallback;
++  const parsed = Number.parseInt(value, 10);
++  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
++  return Math.min(parsed, max);
++}
++
++function hasText(value: unknown): value is string {
++  return typeof value === 'string' && value.trim().length > 0;
++}
++
++function sanitizeQuery(q: string): string {
++  return q.trim().replace(/[^A-Za-z0-9@._' -]/g, ' ').replace(/\s+/g, ' ').trim();
++}
++
++function actorId(user: AppUserRecord | null, fallbackSub: string): string {
++  return user?.id ?? fallbackSub;
++}
++
++async function resolveAppUser(db: AppDb, sub: string): Promise<AppUserRecord | null> {
++  return db.appUser.findUnique({
++    where: { cognitoSub: sub },
++    include: { roles: true },
++  });
++}
++
++async function writeActivity(
++  tx: AppDbTransaction,
++  input: { actorUserId: string; action: string; veteranId?: string; detailsJson?: Record<string, unknown> },
++): Promise<void> {
++  await tx.activityLog.create({
++    data: {
++      actorUserId: input.actorUserId,
++      action: input.action,
++      ...(input.veteranId !== undefined ? { veteranId: input.veteranId } : {}),
++      ...(input.detailsJson !== undefined ? { detailsJson: input.detailsJson } : {}),
++    },
++  });
++}
++
++function conflictDetails(current: VeteranRecord): Record<string, unknown> {
++  return {
++    id: current.id,
++    version: current.version,
++    updatedAt: current.updatedAt.toISOString(),
++  };
++}
++
++function buildVeteranListWhere(q: unknown): Record<string, unknown> {
++  const base = { inactive: false };
++  if (!hasText(q)) return base;
++  const query = sanitizeQuery(q);
++  if (!query) return base;
++  return {
++    AND: [
++      base,
++      {
++        OR: [
++          { lastName: { contains: query, mode: 'insensitive' } },
++          { firstName: { contains: query, mode: 'insensitive' } },
++          { email: { contains: query, mode: 'insensitive' } },
++          { id: { contains: query, mode: 'insensitive' } },
++        ],
++      },
++    ],
++  };
++}
++
++export function createVeteransRouter(db: AppDb): Router {
++  const router = express.Router();
++
++  router.get(
++    '/me',
++    requireRole(['admin', 'ops_staff', 'physician']),
++    asyncHandler(async (req, res) => {
++      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
++      const appUser = await resolveAppUser(db, req.user.sub);
++      res.json({
++        data: {
++          sub: req.user.sub,
++          email: req.user.email ?? appUser?.email ?? null,
++          roles: req.user.roles,
++          appUserId: appUser?.id ?? null,
++        },
++      });
++    }),
++  );
++
++  router.get(
++    '/veterans',
++    requireRole([...OPS_ROLES]),
++    asyncHandler(async (req, res) => {
++      const limit = toPositiveInt(req.query.limit, 25, 100);
++      const page = toPositiveInt(req.query.page, 1, 10_000);
++      const skip = (page - 1) * limit;
++      const where = buildVeteranListWhere(req.query.q);
++
++      const [items, total] = await Promise.all([
++        db.veteran.findMany({
++          where,
++          orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }, { id: 'asc' }],
++          skip,
++          take: limit,
++          include: { _count: { select: { cases: true } } },
++        }),
++        db.veteran.count({ where }),
++      ]);
++
++      res.json({
++        data: items.map((item) => ({
++          id: item.id,
++          lastName: item.lastName,
++          firstName: item.firstName,
++          dob: item.dob.toISOString().slice(0, 10),
++          branch: item.branch,
++          serviceStartYear: item.serviceStartYear,
++          serviceEndYear: item.serviceEndYear,
++          activeCases: item._count.cases,
++          updatedAt: item.updatedAt.toISOString(),
++          version: item.version,
++        })),
++        pagination: { page, limit, total, hasMore: skip + items.length < total },
++      });
++    }),
++  );
++
++  router.post(
++    '/veterans',
++    requireRole([...OPS_ROLES]),
++    asyncHandler(async (req, res) => {
++      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
++      const data = parseVeteranCreate(req.body);
++      const appUser = await resolveAppUser(db, req.user.sub);
++      const actor = actorId(appUser, req.user.sub);
++
++      const created = await db.$transaction(async (tx) => {
++        const veteran = await tx.veteran.create({ data });
++        await writeActivity(tx, {
++          actorUserId: actor,
++          action: 'veteran_created',
++          veteranId: veteran.id,
++          detailsJson: { veteranId: veteran.id },
++        });
++        return veteran;
++      });
++
++      res.status(201).json({ data: created });
++    }),
++  );
++
++  router.get(
++    '/veterans/:id',
++    requireRole([...OPS_ROLES]),
++    asyncHandler(async (req, res) => {
++      const id = req.params.id;
++      const veteran = await db.veteran.findFirst({
++        where: { id, inactive: false },
++        include: {
++          scConditions: { orderBy: { condition: 'asc' } },
++          activeProblems: { orderBy: { problem: 'asc' } },
++          activeMedications: { orderBy: { drugName: 'asc' } },
++          cases: { orderBy: { updatedAt: 'desc' } },
++        },
++      });
++      if (!veteran) throw new HttpError(404, 'not_found', 'Veteran was not found.');
++      res.json({ data: veteran });
++    }),
++  );
++
++  router.patch(
++    '/veterans/:id',
++    requireRole([...OPS_ROLES]),
++    asyncHandler(async (req, res) => {
++      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
++      const id = req.params.id;
++      const { version, data, changedFields } = parseVeteranPatch(req.body);
++      assertPatchAllowedForRoles(changedFields, req.user.roles);
++      const appUser = await resolveAppUser(db, req.user.sub);
++      const actor = actorId(appUser, req.user.sub);
++
++      const updated = await db.$transaction(async (tx) => {
++        const current = await tx.veteran.findFirst({ where: { id, inactive: false } });
++        if (!current) throw new HttpError(404, 'not_found', 'Veteran was not found.');
++        if (current.version !== version) {
++          throw new HttpError(409, 'conflict', 'Veteran was modified by another user.', conflictDetails(current));
++        }
++        const veteran = await tx.veteran.update({
++          where: { id },
++          data: { ...data, version: { increment: 1 } },
++        });
++        await writeActivity(tx, {
++          actorUserId: actor,
++          action: 'veteran_updated',
++          veteranId: id,
++          detailsJson: { veteranId: id, fields: changedFields },
++        });
++        return veteran;
++      });
++
++      res.json({ data: updated });
++    }),
++  );
++
++  router.delete(
++    '/veterans/:id',
++    requireRole(['admin']),
++    asyncHandler(async (req, res) => {
++      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
++      const id = req.params.id;
++      const appUser = await resolveAppUser(db, req.user.sub);
++      const actor = actorId(appUser, req.user.sub);
++
++      await db.$transaction(async (tx) => {
++        const current = await tx.veteran.findFirst({ where: { id, inactive: false } });
++        if (!current) throw new HttpError(404, 'not_found', 'Veteran was not found.');
++        await tx.veteran.update({ where: { id }, data: { inactive: true, version: { increment: 1 } } });
++        await writeActivity(tx, {
++          actorUserId: actor,
++          action: 'veteran_soft_deleted',
++          veteranId: id,
++          detailsJson: { veteranId: id },
++        });
++      });
++
++      res.status(204).send();
++    }),
++  );
++
++  return router;
++}
+diff -ruN orig3/compact-emr/backend/src/server.ts work3/compact-emr/backend/src/server.ts
+--- orig3/compact-emr/backend/src/server.ts	2026-05-23 02:40:04.000000000 +0000
++++ work3/compact-emr/backend/src/server.ts	2026-05-25 04:03:57.425430189 +0000
+@@ -1,15 +1,38 @@
+ import express from 'express';
+ import { authenticateJwt } from './middleware/auth.js';
+ import { requireRole } from './auth/roles.js';
++import { isHttpError, sendError } from './http/errors.js';
++import { prisma } from './db/client.js';
++import { createVeteransRouter } from './routes/veterans.js';
++import type { AppDb } from './services/db-types.js';
+ 
+-export function createApp() {
++export interface CreateAppOptions {
++  db?: AppDb;
++}
++
++export function createApp(options: CreateAppOptions = {}) {
+   const app = express();
+-  app.use(express.json());
++  const db = options.db ?? (prisma as unknown as AppDb);
++
++  app.use(express.json({ limit: '1mb' }));
+ 
+   app.get('/api/v1/health', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), (req, res) => {
+     res.json({ ok: true, user: req.user });
+   });
+ 
++  app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
++
++  app.use((req, res) => {
++    sendError(res, 404, 'not_found', 'Route was not found.');
++  });
++
++  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
++    if (isHttpError(error)) {
++      return sendError(res, error.status, error.code, error.message, error.details);
++    }
++    return sendError(res, 500, 'internal_error', 'Unexpected server error.');
++  });
++
+   return app;
+ }
+ 
+diff -ruN orig3/compact-emr/backend/src/services/db-types.ts work3/compact-emr/backend/src/services/db-types.ts
+--- orig3/compact-emr/backend/src/services/db-types.ts	1970-01-01 00:00:00.000000000 +0000
++++ work3/compact-emr/backend/src/services/db-types.ts	2026-05-25 04:01:40.900225771 +0000
+@@ -0,0 +1,144 @@
++import type { AuthenticatedUser } from '../auth/roles.js';
++
++export type YesNoUnknown = 'yes' | 'no' | 'unknown';
++export type ClaimType = 'initial' | 'supplemental' | 'hlr' | 'appeal_bva';
++export type CaseStatus =
++  | 'intake'
++  | 'records'
++  | 'viability'
++  | 'drafting'
++  | 'physician_review'
++  | 'correction_requested'
++  | 'correction_review'
++  | 'delivered'
++  | 'paid'
++  | 'rejected';
++export type CdsVerdict = 'accept' | 'caution' | 'reject' | 'not_yet_run';
++
++export interface VeteranRecord {
++  id: string;
++  lastName: string;
++  firstName: string;
++  dob: Date;
++  email: string;
++  phone: string | null;
++  address: string | null;
++  branch: string;
++  serviceStartYear: number;
++  serviceEndYear: number;
++  combatVeteran: YesNoUnknown;
++  pactArea: YesNoUnknown;
++  teraConceded: YesNoUnknown;
++  heightIn: number | null;
++  weightLb: number | null;
++  inactive: boolean;
++  createdAt: Date;
++  updatedAt: Date;
++  version: number;
++}
++
++export interface CaseSummaryRecord {
++  id: string;
++  claimedCondition: string;
++  claimType: ClaimType;
++  status: CaseStatus;
++  currentVersion: number;
++  updatedAt: Date;
++}
++
++export interface RelatedCount {
++  _count: {
++    cases: number;
++  };
++}
++
++export interface VeteranDetailRecord extends VeteranRecord {
++  scConditions: unknown[];
++  activeProblems: unknown[];
++  activeMedications: unknown[];
++  cases: CaseSummaryRecord[];
++}
++
++export interface AppUserRecord {
++  id: string;
++  cognitoSub: string;
++  email: string;
++  roles: Array<{ role: string }>;
++}
++
++export interface ActivityCreateInput {
++  actorUserId?: string;
++  action: string;
++  veteranId?: string;
++  caseId?: string;
++  detailsJson?: Record<string, unknown>;
++}
++
++export interface VeteranCreateInput {
++  id: string;
++  lastName: string;
++  firstName: string;
++  dob: Date;
++  email: string;
++  phone?: string;
++  address?: string;
++  branch: string;
++  serviceStartYear: number;
++  serviceEndYear: number;
++  combatVeteran: YesNoUnknown;
++  pactArea: YesNoUnknown;
++  teraConceded: YesNoUnknown;
++  heightIn?: number;
++  weightLb?: number;
++}
++
++export interface VeteranUpdateInput {
++  lastName?: string;
++  firstName?: string;
++  dob?: Date;
++  email?: string;
++  phone?: string | null;
++  address?: string | null;
++  branch?: string;
++  serviceStartYear?: number;
++  serviceEndYear?: number;
++  combatVeteran?: YesNoUnknown;
++  pactArea?: YesNoUnknown;
++  teraConceded?: YesNoUnknown;
++  heightIn?: number | null;
++  weightLb?: number | null;
++  inactive?: boolean;
++  version?: { increment: number };
++}
++
++export interface VeteranDelegate {
++  findMany(args: unknown): Promise<Array<VeteranRecord & RelatedCount>>;
++  count(args: unknown): Promise<number>;
++  findUnique(args: unknown): Promise<VeteranRecord | VeteranDetailRecord | null>;
++  findFirst(args: unknown): Promise<VeteranRecord | VeteranDetailRecord | null>;
++  create(args: { data: VeteranCreateInput }): Promise<VeteranRecord>;
++  update(args: { where: { id: string }; data: VeteranUpdateInput }): Promise<VeteranRecord>;
++}
++
++export interface AppUserDelegate {
++  findUnique(args: unknown): Promise<AppUserRecord | null>;
++}
++
++export interface ActivityLogDelegate {
++  create(args: { data: ActivityCreateInput }): Promise<unknown>;
++}
++
++export interface AppDbTransaction {
++  veteran: VeteranDelegate;
++  activityLog: ActivityLogDelegate;
++}
++
++export interface AppDb extends AppDbTransaction {
++  appUser: AppUserDelegate;
++  $transaction<T>(fn: (tx: AppDbTransaction) => Promise<T>): Promise<T>;
++}
++
++export interface RequestActor {
++  id?: string;
++  user: AuthenticatedUser;
++}
+diff -ruN orig3/compact-emr/backend/src/services/veteran-validation.ts work3/compact-emr/backend/src/services/veteran-validation.ts
+--- orig3/compact-emr/backend/src/services/veteran-validation.ts	1970-01-01 00:00:00.000000000 +0000
++++ work3/compact-emr/backend/src/services/veteran-validation.ts	2026-05-25 04:01:14.983509658 +0000
+@@ -0,0 +1,230 @@
++import { HttpError } from '../http/errors.js';
++import type { YesNoUnknown, VeteranCreateInput, VeteranUpdateInput } from './db-types.js';
++
++const YES_NO_UNKNOWN = new Set(['yes', 'no', 'unknown']);
++const ADMIN_ONLY_FIELDS = new Set(['firstName', 'lastName', 'dob']);
++const ALLOWED_UPDATE_FIELDS = new Set([
++  'firstName',
++  'lastName',
++  'dob',
++  'email',
++  'phone',
++  'address',
++  'branch',
++  'serviceStartYear',
++  'serviceEndYear',
++  'combatVeteran',
++  'pactArea',
++  'teraConceded',
++  'heightIn',
++  'weightLb',
++]);
++
++function isObject(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++function requiredString(input: Record<string, unknown>, key: string): string {
++  const value = input[key];
++  if (typeof value !== 'string' || value.trim() === '') {
++    throw new HttpError(400, 'bad_request', `${key} is required.`);
++  }
++  return value.trim();
++}
++
++function optionalString(input: Record<string, unknown>, key: string): string | undefined {
++  const value = input[key];
++  if (value === undefined || value === null || value === '') return undefined;
++  if (typeof value !== 'string') throw new HttpError(400, 'bad_request', `${key} must be a string.`);
++  return value.trim();
++}
++
++function nullableString(input: Record<string, unknown>, key: string): string | null | undefined {
++  const value = input[key];
++  if (value === undefined) return undefined;
++  if (value === null || value === '') return null;
++  if (typeof value !== 'string') throw new HttpError(400, 'bad_request', `${key} must be a string or null.`);
++  return value.trim();
++}
++
++function requiredInt(input: Record<string, unknown>, key: string): number {
++  const value = input[key];
++  if (typeof value !== 'number' || !Number.isInteger(value)) {
++    throw new HttpError(400, 'bad_request', `${key} must be an integer.`);
++  }
++  return value;
++}
++
++function optionalNullableInt(input: Record<string, unknown>, key: string): number | null | undefined {
++  const value = input[key];
++  if (value === undefined) return undefined;
++  if (value === null || value === '') return null;
++  if (typeof value !== 'number' || !Number.isInteger(value)) {
++    throw new HttpError(400, 'bad_request', `${key} must be an integer or null.`);
++  }
++  return value;
++}
++
++function requiredEnum(input: Record<string, unknown>, key: string): YesNoUnknown {
++  const value = input[key];
++  if (typeof value !== 'string' || !YES_NO_UNKNOWN.has(value)) {
++    throw new HttpError(400, 'bad_request', `${key} must be yes, no, or unknown.`);
++  }
++  return value as YesNoUnknown;
++}
++
++function optionalEnum(input: Record<string, unknown>, key: string): YesNoUnknown | undefined {
++  const value = input[key];
++  if (value === undefined) return undefined;
++  if (typeof value !== 'string' || !YES_NO_UNKNOWN.has(value)) {
++    throw new HttpError(400, 'bad_request', `${key} must be yes, no, or unknown.`);
++  }
++  return value as YesNoUnknown;
++}
++
++function parseDate(value: unknown, key: string): Date {
++  if (typeof value !== 'string' || value.trim() === '') {
++    throw new HttpError(400, 'bad_request', `${key} must be an ISO date string.`);
++  }
++  const date = new Date(`${value.slice(0, 10)}T00:00:00.000Z`);
++  if (Number.isNaN(date.valueOf())) {
++    throw new HttpError(400, 'bad_request', `${key} must be a valid date.`);
++  }
++  return date;
++}
++
++function maybeDate(input: Record<string, unknown>, key: string): Date | undefined {
++  const value = input[key];
++  if (value === undefined) return undefined;
++  return parseDate(value, key);
++}
++
++function optionalVersion(input: Record<string, unknown>): number {
++  const value = input.version;
++  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
++    throw new HttpError(400, 'bad_request', 'version is required and must be a positive integer.');
++  }
++  return value;
++}
++
++export function parseVeteranCreate(body: unknown): VeteranCreateInput {
++  if (!isObject(body)) throw new HttpError(400, 'bad_request', 'Request body must be an object.');
++  const heightIn = optionalNullableInt(body, 'heightIn');
++  const weightLb = optionalNullableInt(body, 'weightLb');
++  return {
++    id: requiredString(body, 'id'),
++    lastName: requiredString(body, 'lastName'),
++    firstName: requiredString(body, 'firstName'),
++    dob: parseDate(body.dob, 'dob'),
++    email: requiredString(body, 'email'),
++    ...(optionalString(body, 'phone') !== undefined ? { phone: optionalString(body, 'phone') } : {}),
++    ...(optionalString(body, 'address') !== undefined ? { address: optionalString(body, 'address') } : {}),
++    branch: requiredString(body, 'branch'),
++    serviceStartYear: requiredInt(body, 'serviceStartYear'),
++    serviceEndYear: requiredInt(body, 'serviceEndYear'),
++    combatVeteran: requiredEnum(body, 'combatVeteran'),
++    pactArea: requiredEnum(body, 'pactArea'),
++    teraConceded: requiredEnum(body, 'teraConceded'),
++    ...(heightIn !== undefined && heightIn !== null ? { heightIn } : {}),
++    ...(weightLb !== undefined && weightLb !== null ? { weightLb } : {}),
++  };
++}
++
++export function parseVeteranPatch(body: unknown): { version: number; data: VeteranUpdateInput; changedFields: string[] } {
++  if (!isObject(body)) throw new HttpError(400, 'bad_request', 'Request body must be an object.');
++  const version = optionalVersion(body);
++  const data: VeteranUpdateInput = {};
++  const changedFields: string[] = [];
++
++  for (const key of Object.keys(body)) {
++    if (key === 'version') continue;
++    if (!ALLOWED_UPDATE_FIELDS.has(key)) {
++      throw new HttpError(400, 'bad_request', `${key} cannot be updated on this endpoint.`);
++    }
++  }
++
++  const firstName = optionalString(body, 'firstName');
++  if (firstName !== undefined) {
++    data.firstName = firstName;
++    changedFields.push('firstName');
++  }
++  const lastName = optionalString(body, 'lastName');
++  if (lastName !== undefined) {
++    data.lastName = lastName;
++    changedFields.push('lastName');
++  }
++  const dob = maybeDate(body, 'dob');
++  if (dob !== undefined) {
++    data.dob = dob;
++    changedFields.push('dob');
++  }
++  const email = optionalString(body, 'email');
++  if (email !== undefined) {
++    data.email = email;
++    changedFields.push('email');
++  }
++  const phone = nullableString(body, 'phone');
++  if (phone !== undefined) {
++    data.phone = phone;
++    changedFields.push('phone');
++  }
++  const address = nullableString(body, 'address');
++  if (address !== undefined) {
++    data.address = address;
++    changedFields.push('address');
++  }
++  const branch = optionalString(body, 'branch');
++  if (branch !== undefined) {
++    data.branch = branch;
++    changedFields.push('branch');
++  }
++  if (body.serviceStartYear !== undefined) {
++    data.serviceStartYear = requiredInt(body, 'serviceStartYear');
++    changedFields.push('serviceStartYear');
++  }
++  if (body.serviceEndYear !== undefined) {
++    data.serviceEndYear = requiredInt(body, 'serviceEndYear');
++    changedFields.push('serviceEndYear');
++  }
++  const combatVeteran = optionalEnum(body, 'combatVeteran');
++  if (combatVeteran !== undefined) {
++    data.combatVeteran = combatVeteran;
++    changedFields.push('combatVeteran');
++  }
++  const pactArea = optionalEnum(body, 'pactArea');
++  if (pactArea !== undefined) {
++    data.pactArea = pactArea;
++    changedFields.push('pactArea');
++  }
++  const teraConceded = optionalEnum(body, 'teraConceded');
++  if (teraConceded !== undefined) {
++    data.teraConceded = teraConceded;
++    changedFields.push('teraConceded');
++  }
++  const heightIn = optionalNullableInt(body, 'heightIn');
++  if (heightIn !== undefined) {
++    data.heightIn = heightIn;
++    changedFields.push('heightIn');
++  }
++  const weightLb = optionalNullableInt(body, 'weightLb');
++  if (weightLb !== undefined) {
++    data.weightLb = weightLb;
++    changedFields.push('weightLb');
++  }
++
++  if (changedFields.length === 0) {
++    throw new HttpError(400, 'bad_request', 'At least one update field is required.');
++  }
++
++  return { version, data, changedFields };
++}
++
++export function assertPatchAllowedForRoles(changedFields: string[], roles: readonly string[]): void {
++  const isAdmin = roles.includes('admin');
++  if (isAdmin) return;
++
++  const adminOnlyTouched = changedFields.filter((field) => ADMIN_ONLY_FIELDS.has(field));
++  if (adminOnlyTouched.length > 0) {
++    throw new HttpError(403, 'forbidden', 'Only admins can update veteran name or DOB.', { fields: adminOnlyTouched });
++  }
++}
+diff -ruN orig3/compact-emr/docs/verification/phase3a1-evidence/typecheck.exit work3/compact-emr/docs/verification/phase3a1-evidence/typecheck.exit
+--- orig3/compact-emr/docs/verification/phase3a1-evidence/typecheck.exit	1970-01-01 00:00:00.000000000 +0000
++++ work3/compact-emr/docs/verification/phase3a1-evidence/typecheck.exit	2026-05-25 04:03:45.994739824 +0000
+@@ -0,0 +1 @@
++2
+diff -ruN orig3/compact-emr/docs/verification/phase3a1-evidence/typecheck.txt work3/compact-emr/docs/verification/phase3a1-evidence/typecheck.txt
+--- orig3/compact-emr/docs/verification/phase3a1-evidence/typecheck.txt	1970-01-01 00:00:00.000000000 +0000
++++ work3/compact-emr/docs/verification/phase3a1-evidence/typecheck.txt	2026-05-25 04:03:45.980148317 +0000
+@@ -0,0 +1,3 @@
++error TS2688: Cannot find type definition file for 'node'.
++  The file is in the program because:
++    Entry point of type library 'node' specified in compilerOptions

@@ -21,7 +21,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "latest",
     "@aws-sdk/client-sqs": "latest",
-    "@prisma/client": "latest",
+    "@prisma/client": "^6.6.0",
     "express": "latest",
     "jose": "latest",
     "serverless-http": "latest",
@@ -38,7 +38,7 @@
     "typescript-eslint": "latest",
     "tsx": "latest",
     "vitest": "latest",
-    "prisma": "latest",
+    "prisma": "^6.6.0",
     "supertest": "latest"
   }
 }

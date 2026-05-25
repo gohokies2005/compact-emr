@@ -1,13 +1,36 @@
 import express from 'express';
 import { authenticateJwt } from './middleware/auth.js';
 import { requireRole } from './auth/roles.js';
+import { isHttpError, sendError } from './http/errors.js';
+import { prisma } from './db/client.js';
+import { createVeteransRouter } from './routes/veterans.js';
+import type { AppDb } from './services/db-types.js';
 
-export function createApp() {
+export interface CreateAppOptions {
+  db?: AppDb;
+}
+
+export function createApp(options: CreateAppOptions = {}) {
   const app = express();
-  app.use(express.json());
+  const db = options.db ?? (prisma as unknown as AppDb);
+
+  app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/v1/health', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), (req, res) => {
     res.json({ ok: true, user: req.user });
+  });
+
+  app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
+
+  app.use((req, res) => {
+    sendError(res, 404, 'not_found', 'Route was not found.');
+  });
+
+  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (isHttpError(error)) {
+      return sendError(res, error.status, error.code, error.message, error.details);
+    }
+    return sendError(res, 500, 'internal_error', 'Unexpected server error.');
   });
 
   return app;

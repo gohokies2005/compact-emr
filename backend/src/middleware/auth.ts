@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { isRole, type Role } from '../auth/roles.js';
+import { sendError } from '../http/errors.js';
 
 let jwks: ReturnType<typeof createRemoteJWKSet> | undefined;
 
@@ -41,14 +42,14 @@ export function authenticateJwt() {
   return async (req: Request, res: Response, next: NextFunction) => {
     const token = getBearerToken(req);
     if (!token) {
-      return res.status(401).json({ error: 'missing_bearer_token' });
+      return sendError(res, 401, 'unauthorized', 'Missing bearer token.');
     }
 
     try {
       const payload = await verifyPayload(token);
       const sub = payload.sub;
       if (!sub) {
-        return res.status(401).json({ error: 'missing_subject' });
+        return sendError(res, 401, 'unauthorized', 'JWT subject is missing.');
       }
 
       req.user = {
@@ -58,7 +59,7 @@ export function authenticateJwt() {
       };
       return next();
     } catch {
-      return res.status(401).json({ error: 'invalid_token' });
+      return sendError(res, 401, 'unauthorized', 'JWT is invalid or expired.');
     }
   };
 }

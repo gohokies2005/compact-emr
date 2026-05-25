@@ -1,0 +1,3 @@
+Command attempted: npm ci --workspace backend
+Result: could not complete in this sandbox.
+Observed before timeout: the available local artifact's package-lock.json was out of sync with package.json during an earlier npm ci attempt, so dependencies were not installable without regenerating package-lock.json. Per instruction, package-lock.json was not modified in this Phase 3A-1 patch.

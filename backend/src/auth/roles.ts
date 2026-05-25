@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
+import { sendError } from '../http/errors.js';
 
 export const ROLES = ['physician', 'ops_staff', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
@@ -16,12 +17,12 @@ export function isRole(value: string): value is Role {
 export function requireRole(allowedRoles: Role[]) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.user) {
-      return res.status(401).json({ error: 'unauthorized' });
+      return sendError(res, 401, 'unauthorized', 'Authentication is required.');
     }
 
     const hasRole = req.user.roles.some((role) => allowedRoles.includes(role));
     if (!hasRole) {
-      return res.status(403).json({ error: 'forbidden', requiredRoles: allowedRoles });
+      return sendError(res, 403, 'forbidden', 'This route is not available for your role.', { requiredRoles: allowedRoles });
     }
 
     return next();

@@ -15,7 +15,7 @@ export type CdsEngineVerdict = 'accept' | 'caution' | 'reject';
 
 export interface PairStats {
   readonly n: number;
-  readonly tier: 'high' | 'medium' | 'low';
+  readonly tier: 'high' | 'moderate' | 'low';
   readonly win_pct: number;
   readonly grant_pct: number;
   readonly imo_n: number | null;
@@ -27,7 +27,7 @@ export interface CdsResult {
   oddsPct: number | null;
   summary: string;
   hardGate: { triggered: boolean; rule: string | null; detail: string | null };
-  bva: { matched: boolean; upstream: string | null; claimed: string | null; n: number | null; tier: 'high' | 'medium' | 'low' | null; winPct: number | null; imoWinPct: number | null };
+  bva: { matched: boolean; upstream: string | null; claimed: string | null; n: number | null; tier: 'high' | 'moderate' | 'low' | null; winPct: number | null; imoWinPct: number | null };
   checkedAt: string;
   engineVersion: string;
 }

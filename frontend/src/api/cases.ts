@@ -131,7 +131,7 @@ export interface CdsResult {
     readonly upstream: string | null;
     readonly claimed: string | null;
     readonly n: number | null;
-    readonly tier: 'high' | 'medium' | 'low' | null;
+    readonly tier: 'high' | 'moderate' | 'low' | null;
     readonly winPct: number | null;
     readonly imoWinPct: number | null;
   };

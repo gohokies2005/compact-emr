@@ -14,6 +14,7 @@ import {
   isValidCaseStatusTransition,
   requiredRolesForCaseStatusTransition,
 } from '../services/case-status-transitions.js';
+import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
 
 const CASE_LITE_SELECT = {
   id: true,
@@ -102,13 +103,47 @@ function buildCaseListWhere(query: Request['query']): Record<string, unknown> {
   return where;
 }
 
+/**
+ * Allow access when the caller has one of `staffRoles` (admin / ops_staff)
+ * OR is a physician resolving to the Physician row assigned to the URL case.
+ *
+ * Wired Phase 5 (2026-05-25): physicians get self-access to their assigned cases
+ * for read/patch/draft-jobs/corrections. Status transitions stay under
+ * `roleGuardForStatusTransition` which adds its own assigned-physician check.
+ */
+function requireStaffOrAssignedPhysician(db: AppDb, staffRoles: readonly Role[]) {
+  return asyncHandler(async (req: Request, _res: Response, next: NextFunction) => {
+    const user = currentUser(req);
+    if ((staffRoles as readonly Role[]).includes(user.role)) return next();
+    if (user.role !== 'physician') {
+      throw new HttpError(403, 'forbidden', 'This route is not available for your role.', {
+        requiredRoles: [...staffRoles, 'physician (assigned)'],
+      });
+    }
+
+    const id = String(req.params.id);
+    const c = await db.case.findFirst({ where: { id }, select: { id: true, assignedPhysicianId: true } });
+    if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+
+    const ok = await isAssignedPhysicianForCase(db, user.sub, c.assignedPhysicianId);
+    if (!ok) {
+      throw new HttpError(403, 'forbidden', 'Physician is not assigned to this case.', { caseId: id });
+    }
+
+    next();
+  });
+}
+
 function roleGuardForStatusTransition(db: AppDb) {
   return asyncHandler(async (req: Request, _res: Response, next: NextFunction) => {
     const id = String(req.params.id);
     const user = currentUser(req);
     const parsed = parseStatusTransition(req.body);
 
-    const current = await db.case.findFirst({ where: { id }, select: { id: true, status: true } });
+    const current = await db.case.findFirst({
+      where: { id },
+      select: { id: true, status: true, assignedPhysicianId: true },
+    });
     if (current === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
 
     const allowed = canRolePerformCaseStatusTransition(user.role, current.status, parsed.to);
@@ -116,6 +151,13 @@ function roleGuardForStatusTransition(db: AppDb) {
       throw new HttpError(403, 'forbidden', 'Role cannot perform this case status transition', {
         requiredRoles: requiredRolesForCaseStatusTransition(current.status, parsed.to),
       });
+    }
+
+    if (user.role === 'physician') {
+      const isAssigned = await isAssignedPhysicianForCase(db, user.sub, current.assignedPhysicianId);
+      if (!isAssigned) {
+        throw new HttpError(403, 'forbidden', 'Physician is not assigned to this case.', { caseId: id });
+      }
     }
 
     next();
@@ -128,12 +170,23 @@ export function createCasesRouter(db: AppDb): Router {
 
   router.get(
     '/cases',
-    requireRole(['admin', 'ops_staff']),
+    requireRole(['admin', 'ops_staff', 'physician']),
     asyncHandler(async (req: Request, res: Response) => {
+      const user = currentUser(req);
       const page = parsePositiveQueryInt(req.query.page, 1, 100000);
       const pageSize = parsePositiveQueryInt(req.query.pageSize, 25, 100);
       const skip = (page - 1) * pageSize;
       const where = buildCaseListWhere(req.query);
+
+      if (user.role === 'physician') {
+        const physician = await resolveCurrentPhysician(db, user.sub);
+        if (physician === null) {
+          // Physician account exists in Cognito but has no Physician row mapping yet.
+          res.json({ data: [], page, pageSize, total: 0 });
+          return;
+        }
+        where.assignedPhysicianId = physician.id;
+      }
 
       const [total, cases] = await db.$transaction(async (tx) => {
         const count = await tx.case.count({ where });
@@ -153,7 +206,7 @@ export function createCasesRouter(db: AppDb): Router {
 
   router.get(
     '/cases/:id',
-    requireRole(['admin', 'ops_staff']),
+    requireStaffOrAssignedPhysician(db, ['admin', 'ops_staff']),
     asyncHandler(async (req: Request, res: Response) => {
       const id = String(req.params.id);
       const found = await db.case.findFirst({
@@ -214,7 +267,7 @@ export function createCasesRouter(db: AppDb): Router {
 
   router.patch(
     '/cases/:id',
-    requireRole(['admin', 'ops_staff']),
+    requireStaffOrAssignedPhysician(db, ['admin', 'ops_staff']),
     asyncHandler(async (req: Request, res: Response) => {
       const user = currentUser(req);
       const id = String(req.params.id);
@@ -351,7 +404,7 @@ export function createCasesRouter(db: AppDb): Router {
 
   router.get(
     '/cases/:id/draft-jobs',
-    requireRole(['admin', 'ops_staff']),
+    requireStaffOrAssignedPhysician(db, ['admin', 'ops_staff']),
     asyncHandler(async (req: Request, res: Response) => {
       const id = String(req.params.id);
       const rows = await db.draftJob.findMany({ where: { caseId: id }, orderBy: { version: 'desc' } });
@@ -361,7 +414,7 @@ export function createCasesRouter(db: AppDb): Router {
 
   router.get(
     '/cases/:id/corrections',
-    requireRole(['admin', 'ops_staff']),
+    requireStaffOrAssignedPhysician(db, ['admin', 'ops_staff']),
     asyncHandler(async (req: Request, res: Response) => {
       const id = String(req.params.id);
       const rows = await db.correction.findMany({ where: { caseId: id }, orderBy: { requestedAt: 'desc' } });

@@ -43,8 +43,11 @@ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
   };
 }
 
-function makeDb(initialCase: CaseRecord = baseCase()) {
+interface PhysicianStub { readonly id: string; readonly cognitoSub: string | null; readonly active: boolean; }
+
+function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognitoSub?: Record<string, PhysicianStub> } = {}) {
   let current = { ...initialCase };
+  const physiciansByCognitoSub = opts.physiciansByCognitoSub ?? {};
   const activityLogCreate = vi.fn(async () => ({}));
   const caseFindFirst = vi.fn(async () => current);
   const caseFindMany = vi.fn(async () => [current]);
@@ -54,6 +57,11 @@ function makeDb(initialCase: CaseRecord = baseCase()) {
   const draftJobFindMany = vi.fn(async () => [{ id: 'DJ-1', version: 1 }]);
   const correctionFindMany = vi.fn(async () => [{ id: 'CORR-1' }]);
   const veteranFindUnique = vi.fn(async () => ({ id: 'VET-1' }));
+  const physicianFindUnique = vi.fn(async (args: { where: { cognitoSub?: string; id?: string } }) => {
+    const sub = args.where.cognitoSub;
+    if (sub !== undefined) return physiciansByCognitoSub[sub] ?? null;
+    return null;
+  });
 
   const tx = {
     case: { findMany: caseFindMany, findFirst: caseFindFirst, findUnique: caseFindFirst, count: caseCount, create: caseCreate, update: caseUpdate },
@@ -61,10 +69,11 @@ function makeDb(initialCase: CaseRecord = baseCase()) {
     draftJob: { findMany: draftJobFindMany },
     correction: { findMany: correctionFindMany },
     activityLog: { create: activityLogCreate },
+    physician: { findUnique: physicianFindUnique },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
 
-  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, draftJobFindMany } };
+  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, draftJobFindMany, physicianFindUnique } };
 }
 
 function appFor(db: AppDb) {
@@ -86,11 +95,13 @@ describe('cases routes', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 wrong role for case list', async () => {
-    mockUser = { sub: 'USER-1', email: 'phys@example.com', roles: ['physician'] };
-    const { db } = makeDb();
+  it('returns empty list when physician has no Physician row mapping', async () => {
+    mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+    const { db } = makeDb(); // no physiciansByCognitoSub → resolver returns null
     const res = await request(appFor(db)).get('/api/v1/cases');
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([]);
+    expect(res.body.total).toBe(0);
   });
 
   it('creates a case and writes activity row', async () => {
@@ -152,9 +163,12 @@ describe('cases routes', () => {
     expect(res.status).toBe(400);
   });
 
-  it('allows physician_review to delivered for physician but not ops_staff', async () => {
+  it('allows physician_review to delivered for assigned physician but not ops_staff', async () => {
     mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
-    const allowed = makeDb(baseCase({ status: 'physician_review', version: 1 }));
+    const allowed = makeDb(
+      baseCase({ status: 'physician_review', version: 1, assignedPhysicianId: 'PHYS-001' }),
+      { physiciansByCognitoSub: { 'PHYS-USER': { id: 'PHYS-001', cognitoSub: 'PHYS-USER', active: true } } },
+    );
     const allowedRes = await request(appFor(allowed.db)).post('/api/v1/cases/CASE-1/status').send({ from: 'physician_review', to: 'delivered', version: 1 });
     expect(allowedRes.status).toBe(200);
 
@@ -162,6 +176,59 @@ describe('cases routes', () => {
     const denied = makeDb(baseCase({ status: 'physician_review', version: 1 }));
     const deniedRes = await request(appFor(denied.db)).post('/api/v1/cases/CASE-1/status').send({ from: 'physician_review', to: 'delivered', version: 1 });
     expect(deniedRes.status).toBe(403);
+  });
+
+  it('denies physician_review to delivered when physician is not assigned to the case', async () => {
+    mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+    const { db } = makeDb(
+      baseCase({ status: 'physician_review', version: 1, assignedPhysicianId: 'PHYS-OTHER' }),
+      { physiciansByCognitoSub: { 'PHYS-USER': { id: 'PHYS-001', cognitoSub: 'PHYS-USER', active: true } } },
+    );
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({ from: 'physician_review', to: 'delivered', version: 1 });
+    expect(res.status).toBe(403);
+  });
+
+  it('lets assigned physician GET /cases/:id and scopes list to their assigned cases', async () => {
+    mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+    const { db, spies } = makeDb(
+      baseCase({ assignedPhysicianId: 'PHYS-001' }),
+      { physiciansByCognitoSub: { 'PHYS-USER': { id: 'PHYS-001', cognitoSub: 'PHYS-USER', active: true } } },
+    );
+    const detail = await request(appFor(db)).get('/api/v1/cases/CASE-1');
+    expect(detail.status).toBe(200);
+    const list = await request(appFor(db)).get('/api/v1/cases');
+    expect(list.status).toBe(200);
+    expect(spies.caseFindMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ assignedPhysicianId: 'PHYS-001' }) }));
+  });
+
+  it('blocks physician from GET /cases/:id when not assigned (403)', async () => {
+    mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+    const { db } = makeDb(
+      baseCase({ assignedPhysicianId: 'PHYS-OTHER' }),
+      { physiciansByCognitoSub: { 'PHYS-USER': { id: 'PHYS-001', cognitoSub: 'PHYS-USER', active: true } } },
+    );
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1');
+    expect(res.status).toBe(403);
+  });
+
+  it('blocks PATCH /cases/:id by physician when not assigned (403)', async () => {
+    mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+    const { db } = makeDb(
+      baseCase({ assignedPhysicianId: 'PHYS-OTHER' }),
+      { physiciansByCognitoSub: { 'PHYS-USER': { id: 'PHYS-001', cognitoSub: 'PHYS-USER', active: true } } },
+    );
+    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, veteranStatement: 'updated' });
+    expect(res.status).toBe(403);
+  });
+
+  it('blocks inactive physician from case access even when sub matches assignment', async () => {
+    mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+    const { db } = makeDb(
+      baseCase({ assignedPhysicianId: 'PHYS-001' }),
+      { physiciansByCognitoSub: { 'PHYS-USER': { id: 'PHYS-001', cognitoSub: 'PHYS-USER', active: false } } },
+    );
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1');
+    expect(res.status).toBe(403);
   });
 
   it('rejects stale status transition with 409', async () => {

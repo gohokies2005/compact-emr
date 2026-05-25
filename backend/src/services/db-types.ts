@@ -136,6 +136,7 @@ export interface AppDbTransaction {
   case: CaseDelegate;
   draftJob: DraftJobDelegate;
   correction: CorrectionDelegate;
+  chartNote: ChartNoteDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -186,4 +187,24 @@ export interface DraftJobDelegate {
 
 export interface CorrectionDelegate {
   findMany(args: unknown): Promise<readonly unknown[]>;
+}
+
+// ====================== Phase 4B-5: Chart notes ======================
+
+export interface ChartNoteRecord {
+  id: string;
+  veteranId: string;
+  body: string;
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface ChartNoteDelegate {
+  findMany(args: unknown): Promise<readonly ChartNoteRecord[]>;
+  findFirst(args: unknown): Promise<ChartNoteRecord | null>;
+  create(args: unknown): Promise<ChartNoteRecord>;
+  update(args: unknown): Promise<ChartNoteRecord>;
+  delete(args: unknown): Promise<ChartNoteRecord>;
 }

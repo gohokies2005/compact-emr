@@ -164,6 +164,7 @@ model Veteran {
   activeMedications ActiveMedication[]
   cases             Case[]
   activityLogs      ActivityLog[]
+  chartNotes        ChartNote[]
 
   @@index([lastName, firstName])
   @@index([email])
@@ -434,4 +435,19 @@ model Payment {
   @@index([settledAt])
   @@index([stripeChargeId])
   @@map("payments")
+}
+
+model ChartNote {
+  id        String   @id @default(uuid())
+  veteranId String   @map("veteran_id")
+  body      String
+  createdBy String   @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version   Int      @default(1)
+  veteran   Veteran  @relation(fields: [veteranId], references: [id], onDelete: Cascade)
+
+  @@index([veteranId])
+  @@index([createdAt])
+  @@map("chart_notes")
 }

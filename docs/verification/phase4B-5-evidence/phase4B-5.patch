@@ -1,0 +1,454 @@
+diff --git a/backend/prisma/migrations/20260525120000_chart_notes/migration.sql b/backend/prisma/migrations/20260525120000_chart_notes/migration.sql
+new file mode 100644
+index 0000000..349eddf
+--- /dev/null
++++ b/backend/prisma/migrations/20260525120000_chart_notes/migration.sql
+@@ -0,0 +1,16 @@
++-- Phase 4B-5: per-veteran chart notes. Idempotent so deploys can be retried safely.
++CREATE TABLE IF NOT EXISTS chart_notes (
++  id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
++  veteran_id text NOT NULL REFERENCES veterans(id) ON DELETE CASCADE,
++  body text NOT NULL,
++  created_by text NOT NULL,
++  created_at timestamptz NOT NULL DEFAULT now(),
++  updated_at timestamptz NOT NULL DEFAULT now(),
++  version int NOT NULL DEFAULT 1
++);
++CREATE INDEX IF NOT EXISTS chart_notes_veteran_id_idx ON chart_notes(veteran_id);
++CREATE INDEX IF NOT EXISTS chart_notes_created_at_idx ON chart_notes(created_at);
++
++-- Match the version-touch trigger applied to every other versioned table in Phase 1.
++DROP TRIGGER IF EXISTS chart_notes_touch_version ON chart_notes;
++CREATE TRIGGER chart_notes_touch_version BEFORE UPDATE ON chart_notes FOR EACH ROW EXECUTE FUNCTION compact_emr_touch_version();
+diff --git a/backend/prisma/schema.prisma b/backend/prisma/schema.prisma
+index aa358e5..aece320 100644
+--- a/backend/prisma/schema.prisma
++++ b/backend/prisma/schema.prisma
+@@ -164,6 +164,7 @@ model Veteran {
+   activeMedications ActiveMedication[]
+   cases             Case[]
+   activityLogs      ActivityLog[]
++  chartNotes        ChartNote[]
+ 
+   @@index([lastName, firstName])
+   @@index([email])
+@@ -435,3 +436,18 @@ model Payment {
+   @@index([stripeChargeId])
+   @@map("payments")
+ }
++
++model ChartNote {
++  id        String   @id @default(uuid())
++  veteranId String   @map("veteran_id")
++  body      String
++  createdBy String   @map("created_by")
++  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
++  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
++  version   Int      @default(1)
++  veteran   Veteran  @relation(fields: [veteranId], references: [id], onDelete: Cascade)
++
++  @@index([veteranId])
++  @@index([createdAt])
++  @@map("chart_notes")
++}
+diff --git a/backend/src/__tests__/chart-notes-routes.test.ts b/backend/src/__tests__/chart-notes-routes.test.ts
+new file mode 100644
+index 0000000..1f6eed3
+--- /dev/null
++++ b/backend/src/__tests__/chart-notes-routes.test.ts
+@@ -0,0 +1,127 @@
++import express from 'express';
++import request from 'supertest';
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { createChartNotesRouter } from '../routes/chart-notes.js';
++import type { AppDb, ChartNoteRecord, Role } from '../services/db-types.js';
++
++interface MockUser { readonly sub: string; readonly roles: Role[]; }
++let mockUser: MockUser | undefined;
++
++vi.mock('../auth/roles', () => ({
++  requireRole:
++    (allowed: readonly string[]) =>
++    (req: express.Request, res: express.Response, next: express.NextFunction) => {
++      const user = (req as express.Request & { user?: MockUser }).user;
++      if (user === undefined) { res.status(401).json({ error: { code: 'unauthorized', message: 'Authentication required' } }); return; }
++      if (!user.roles.some((r) => allowed.includes(r))) { res.status(403).json({ error: { code: 'forbidden', message: 'Forbidden' } }); return; }
++      next();
++    },
++}));
++
++function note(overrides: Partial<ChartNoteRecord> = {}): ChartNoteRecord {
++  return { id: 'NOTE-1', veteranId: 'VET-1', body: 'baseline note', createdBy: 'USER-1', createdAt: new Date('2026-05-24T00:00:00.000Z'), updatedAt: new Date('2026-05-24T00:00:00.000Z'), version: 1, ...overrides };
++}
++
++function makeDb(initial: ChartNoteRecord = note()) {
++  let current = { ...initial };
++  const chartNoteFindMany = vi.fn(async () => [current]);
++  const chartNoteFindFirst = vi.fn(async () => current);
++  const chartNoteCreate = vi.fn(async (args: { data: Partial<ChartNoteRecord> }) => { current = note({ ...args.data, version: 1 }); return current; });
++  const chartNoteUpdate = vi.fn(async (args: { data: Record<string, unknown> }) => { current = { ...current, ...args.data, version: current.version + 1 } as ChartNoteRecord; return current; });
++  const chartNoteDelete = vi.fn(async () => current);
++  const veteranFindUnique = vi.fn(async () => ({ id: 'VET-1' }));
++  const activityLogCreate = vi.fn(async () => ({}));
++  const tx = {
++    chartNote: { findMany: chartNoteFindMany, findFirst: chartNoteFindFirst, create: chartNoteCreate, update: chartNoteUpdate, delete: chartNoteDelete },
++    veteran: { findUnique: veteranFindUnique },
++    activityLog: { create: activityLogCreate },
++  };
++  const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
++  return { db, spies: { chartNoteFindMany, chartNoteCreate, chartNoteUpdate, chartNoteDelete, activityLogCreate } };
++}
++
++function appFor(db: AppDb) {
++  const app = express();
++  app.use(express.json());
++  app.use((req, _res, next) => { if (mockUser) (req as express.Request & { user?: MockUser }).user = mockUser; next(); });
++  app.use('/api/v1', createChartNotesRouter(db));
++  return app;
++}
++
++describe('chart-notes routes', () => {
++  beforeEach(() => { mockUser = { sub: 'USER-1', roles: ['admin'] }; });
++
++  it('returns 401 unauthenticated', async () => {
++    mockUser = undefined;
++    const res = await request(appFor(makeDb().db)).get('/api/v1/veterans/VET-1/chart-notes');
++    expect(res.status).toBe(401);
++  });
++
++  it('returns 403 for physician (not admin/ops_staff)', async () => {
++    mockUser = { sub: 'PHYS', roles: ['physician'] };
++    const res = await request(appFor(makeDb().db)).get('/api/v1/veterans/VET-1/chart-notes');
++    expect(res.status).toBe(403);
++  });
++
++  it('lists notes for a veteran', async () => {
++    const res = await request(appFor(makeDb().db)).get('/api/v1/veterans/VET-1/chart-notes');
++    expect(res.status).toBe(200);
++    expect(res.body.data).toHaveLength(1);
++  });
++
++  it('creates a note with createdBy from the JWT sub and writes activity', async () => {
++    mockUser = { sub: 'OPS', roles: ['ops_staff'] };
++    const { db, spies } = makeDb();
++    const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/chart-notes').send({ body: 'spoke with veteran' });
++    expect(res.status).toBe(201);
++    expect(spies.chartNoteCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ createdBy: 'OPS', veteranId: 'VET-1' }) }));
++    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'chart_note_created' }) }));
++  });
++
++  it('rejects empty body with 400', async () => {
++    const res = await request(appFor(makeDb().db)).post('/api/v1/veterans/VET-1/chart-notes').send({ body: '   ' });
++    expect(res.status).toBe(400);
++  });
++
++  it('lets the author (ops_staff) edit their own note', async () => {
++    mockUser = { sub: 'OPS', roles: ['ops_staff'] };
++    const { db, spies } = makeDb(note({ createdBy: 'OPS', version: 1 }));
++    const res = await request(appFor(db)).patch('/api/v1/chart-notes/NOTE-1').send({ version: 1, body: 'updated' });
++    expect(res.status).toBe(200);
++    expect(spies.chartNoteUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ version: { increment: 1 } }) }));
++  });
++
++  it("forbids ops_staff editing another user's note", async () => {
++    mockUser = { sub: 'OPS', roles: ['ops_staff'] };
++    const { db } = makeDb(note({ createdBy: 'SOMEONE-ELSE', version: 1 }));
++    const res = await request(appFor(db)).patch('/api/v1/chart-notes/NOTE-1').send({ version: 1, body: 'updated' });
++    expect(res.status).toBe(403);
++  });
++
++  it('lets an admin edit any note', async () => {
++    mockUser = { sub: 'ADMIN', roles: ['admin'] };
++    const { db } = makeDb(note({ createdBy: 'SOMEONE-ELSE', version: 1 }));
++    const res = await request(appFor(db)).patch('/api/v1/chart-notes/NOTE-1').send({ version: 1, body: 'admin edit' });
++    expect(res.status).toBe(200);
++  });
++
++  it('rejects a stale version with 409', async () => {
++    const { db } = makeDb(note({ createdBy: 'USER-1', version: 3 }));
++    const res = await request(appFor(db)).patch('/api/v1/chart-notes/NOTE-1').send({ version: 1, body: 'updated' });
++    expect(res.status).toBe(409);
++  });
++
++  it('lets an admin delete a note (204) and writes activity', async () => {
++    const { db, spies } = makeDb();
++    const res = await request(appFor(db)).delete('/api/v1/chart-notes/NOTE-1');
++    expect(res.status).toBe(204);
++    expect(spies.chartNoteDelete).toHaveBeenCalled();
++    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'chart_note_deleted' }) }));
++  });
++
++  it('forbids ops_staff from deleting', async () => {
++    mockUser = { sub: 'OPS', roles: ['ops_staff'] };
++    const res = await request(appFor(makeDb().db)).delete('/api/v1/chart-notes/NOTE-1');
++    expect(res.status).toBe(403);
++  });
++});
+diff --git a/backend/src/routes/chart-notes.ts b/backend/src/routes/chart-notes.ts
+new file mode 100644
+index 0000000..b0ebb22
+--- /dev/null
++++ b/backend/src/routes/chart-notes.ts
+@@ -0,0 +1,98 @@
++import { Router, type Request, type Response } from 'express';
++import { requireRole } from '../auth/roles.js';
++import { asyncHandler } from '../http/async-handler.js';
++import { HttpError } from '../http/errors.js';
++import type { AppDb, Role } from '../services/db-types.js';
++import { parseChartNoteCreate, parseChartNotePatch } from '../services/chart-note-validation.js';
++
++interface RequestActor { readonly sub: string; readonly roles: readonly Role[]; readonly role: Role; }
++
++function currentUser(req: Request): RequestActor {
++  const u = (req as Request & { user?: { sub: string; roles: readonly Role[] } }).user;
++  if (u === undefined) throw new HttpError(401, 'unauthorized', 'Authentication required');
++  const priority: readonly Role[] = ['admin', 'physician', 'ops_staff'];
++  const role = priority.find((r) => u.roles.includes(r));
++  if (role === undefined) throw new HttpError(403, 'forbidden', 'No valid role found in JWT');
++  return { sub: u.sub, roles: u.roles, role };
++}
++
++export function createChartNotesRouter(db: AppDb): Router {
++  const router = Router();
++
++  router.get(
++    '/veterans/:veteranId/chart-notes',
++    requireRole(['admin', 'ops_staff']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const veteranId = String(req.params.veteranId);
++      const rows = await db.chartNote.findMany({ where: { veteranId }, orderBy: { createdAt: 'desc' } });
++      res.json({ data: rows });
++    }),
++  );
++
++  router.post(
++    '/veterans/:veteranId/chart-notes',
++    requireRole(['admin', 'ops_staff']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const user = currentUser(req);
++      const veteranId = String(req.params.veteranId);
++      const parsed = parseChartNoteCreate(req.body);
++
++      const created = await db.$transaction(async (tx) => {
++        const veteran = await tx.veteran.findUnique({ where: { id: veteranId }, select: { id: true } });
++        if (veteran === null) throw new HttpError(404, 'not_found', 'Veteran not found', { veteranId });
++
++        const row = await tx.chartNote.create({ data: { veteranId, body: parsed.body, createdBy: user.sub } });
++        await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'chart_note_created', veteranId, detailsJson: { noteId: row.id, veteranId } } });
++        return row;
++      });
++
++      res.status(201).json({ data: created });
++    }),
++  );
++
++  router.patch(
++    '/chart-notes/:id',
++    requireRole(['admin', 'ops_staff']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const user = currentUser(req);
++      const id = String(req.params.id);
++      const parsed = parseChartNotePatch(req.body);
++
++      const updated = await db.$transaction(async (tx) => {
++        const existing = await tx.chartNote.findFirst({ where: { id }, select: { id: true, veteranId: true, createdBy: true, version: true } });
++        if (existing === null) throw new HttpError(404, 'not_found', 'Chart note not found', { noteId: id });
++        if (user.role !== 'admin' && existing.createdBy !== user.sub) {
++          throw new HttpError(403, 'forbidden', 'Only the author or an admin may edit this note', { noteId: id });
++        }
++        if (existing.version !== parsed.version) {
++          throw new HttpError(409, 'conflict', 'Chart note version is stale', { noteId: id, expectedVersion: existing.version, receivedVersion: parsed.version });
++        }
++        const row = await tx.chartNote.update({ where: { id }, data: { body: parsed.body, version: { increment: 1 } } });
++        await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'chart_note_updated', veteranId: existing.veteranId, detailsJson: { noteId: id, veteranId: existing.veteranId } } });
++        return row;
++      });
++
++      res.json({ data: updated });
++    }),
++  );
++
++  router.delete(
++    '/chart-notes/:id',
++    requireRole(['admin']),
++    asyncHandler(async (req: Request, res: Response) => {
++      const user = currentUser(req);
++      const id = String(req.params.id);
++
++      await db.$transaction(async (tx) => {
++        const existing = await tx.chartNote.findFirst({ where: { id }, select: { id: true, veteranId: true } });
++        if (existing === null) throw new HttpError(404, 'not_found', 'Chart note not found', { noteId: id });
++        await tx.chartNote.delete({ where: { id } });
++        await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'chart_note_deleted', veteranId: existing.veteranId, detailsJson: { noteId: id, veteranId: existing.veteranId } } });
++      });
++
++      res.status(204).send();
++    }),
++  );
++
++  return router;
++}
+diff --git a/backend/src/server.ts b/backend/src/server.ts
+index 5d2182c..919fcf7 100644
+--- a/backend/src/server.ts
++++ b/backend/src/server.ts
+@@ -6,6 +6,7 @@ import { prisma } from './db/client.js';
+ import { createVeteransRouter } from './routes/veterans.js';
+ import { createDocumentsRouter } from './routes/documents.js';
+ import { createCasesRouter } from './routes/cases.js';
++import { createChartNotesRouter } from './routes/chart-notes.js';
+ import type { AppDb } from './services/db-types.js';
+ 
+ export interface CreateAppOptions {
+@@ -25,6 +26,7 @@ export function createApp(options: CreateAppOptions = {}) {
+   app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
+   app.use('/api/v1', authenticateJwt(), createDocumentsRouter());
+   app.use('/api/v1', authenticateJwt(), createCasesRouter(db));
++  app.use('/api/v1', authenticateJwt(), createChartNotesRouter(db));
+ 
+   app.use((req, res) => {
+     sendError(res, 404, 'not_found', 'Route was not found.');
+diff --git a/backend/src/services/chart-note-validation.ts b/backend/src/services/chart-note-validation.ts
+new file mode 100644
+index 0000000..406a867
+--- /dev/null
++++ b/backend/src/services/chart-note-validation.ts
+@@ -0,0 +1,33 @@
++import { HttpError } from '../http/errors.js';
++
++const MAX_BODY = 5000;
++
++function badRequest(message: string, details?: Record<string, unknown>): never {
++  throw new HttpError(400, 'bad_request', message, details);
++}
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++// Chart notes are PHI by nature, so there is NO PHI-pattern rejection here — only trim + length + non-empty.
++function parseBody(body: Record<string, unknown>): string {
++  const value = body.body;
++  if (typeof value !== 'string') badRequest('body is required', { field: 'body' });
++  const trimmed = value.trim();
++  if (trimmed.length === 0) badRequest('body cannot be empty', { field: 'body' });
++  if (trimmed.length > MAX_BODY) badRequest('body is too long', { field: 'body', maxLength: MAX_BODY });
++  return trimmed;
++}
++
++export function parseChartNoteCreate(body: unknown): { body: string } {
++  if (!isRecord(body)) badRequest('Request body must be an object');
++  return { body: parseBody(body) };
++}
++
++export function parseChartNotePatch(body: unknown): { version: number; body: string } {
++  if (!isRecord(body)) badRequest('Request body must be an object');
++  const version = body.version;
++  if (typeof version !== 'number' || !Number.isInteger(version) || version <= 0) badRequest('version must be a positive integer', { field: 'version' });
++  return { version, body: parseBody(body) };
++}
+diff --git a/backend/src/services/db-types.ts b/backend/src/services/db-types.ts
+index f305322..0c3bd31 100644
+--- a/backend/src/services/db-types.ts
++++ b/backend/src/services/db-types.ts
+@@ -136,6 +136,7 @@ export interface AppDbTransaction {
+   case: CaseDelegate;
+   draftJob: DraftJobDelegate;
+   correction: CorrectionDelegate;
++  chartNote: ChartNoteDelegate;
+ }
+ 
+ export interface AppDb extends AppDbTransaction {
+@@ -187,3 +188,23 @@ export interface DraftJobDelegate {
+ export interface CorrectionDelegate {
+   findMany(args: unknown): Promise<readonly unknown[]>;
+ }
++
++// ====================== Phase 4B-5: Chart notes ======================
++
++export interface ChartNoteRecord {
++  id: string;
++  veteranId: string;
++  body: string;
++  createdBy: string;
++  createdAt: Date;
++  updatedAt: Date;
++  version: number;
++}
++
++export interface ChartNoteDelegate {
++  findMany(args: unknown): Promise<readonly ChartNoteRecord[]>;
++  findFirst(args: unknown): Promise<ChartNoteRecord | null>;
++  create(args: unknown): Promise<ChartNoteRecord>;
++  update(args: unknown): Promise<ChartNoteRecord>;
++  delete(args: unknown): Promise<ChartNoteRecord>;
++}
+diff --git a/docs/PHASE4B_5_SUMMARY.md b/docs/PHASE4B_5_SUMMARY.md
+new file mode 100644
+index 0000000..f047700
+--- /dev/null
++++ b/docs/PHASE4B_5_SUMMARY.md
+@@ -0,0 +1,41 @@
++# Phase 4B-5 Summary — Chart notes backend (+ CI prisma-generate fix)
++
++Built by Claude Code against `main` (on top of 4B-4). Two commits:
++1. `fix(ci): generate prisma client in CI + let documents.ts infer real types`
++2. `feat(backend): Phase 4B-5 chart notes`
++
++## ⚠️ DEPLOY ACTION REQUIRED (Ryan) — run the migration
++
++This adds a new table. After the push deploys to staging, **the `chart_notes` table is NOT created until the migration runs.** Per DEPLOY.md, migrations do **not** auto-apply — run the CodeBuild project manually from CloudShell:
++
++```
++aws codebuild start-build --project-name compact-emr-staging-prisma-migrate-deploy --region us-east-1
++```
++
++Use **"Start build"** (from the project page), NOT "Retry build" (the Phase-2 hard lesson). Local AWS creds are dead on this laptop, so I can't run it. Verify `chart_notes` exists afterward.
++
++## Chart notes — new / modified files
++
++- `backend/prisma/schema.prisma` — new `ChartNote` model (uuid id, `created_by`, `body`, `version`, `onDelete: Cascade` to `Veteran`) + `chartNotes ChartNote[]` on `Veteran`. `prisma generate` confirms the schema is valid.
++- `backend/prisma/migrations/20260525120000_chart_notes/migration.sql` — idempotent `CREATE TABLE chart_notes` + indexes (veteran_id, created_at) + FK cascade + the `compact_emr_touch_version` BEFORE-UPDATE trigger (matches every other versioned table).
++- `backend/src/services/db-types.ts` — `ChartNoteRecord` + `ChartNoteDelegate` (first delegate to need a real `delete`) + `chartNote` on `AppDbTransaction`.
++- `backend/src/services/chart-note-validation.ts` — body required, trimmed, 1–5000 chars. **No PHI-pattern rejection** (notes are PHI by nature).
++- `backend/src/routes/chart-notes.ts` — `GET`/`POST /veterans/:veteranId/chart-notes` (admin, ops_staff); `PATCH /chart-notes/:id` (admin any; **ops_staff own-only** via `createdBy === req.user.sub`; optimistic lock → 409); `DELETE /chart-notes/:id` (admin only, 204). `createdBy` is set server-side from `req.user.sub` (matches the actorUserId convention). Activity log writes `chart_note_{created,updated,deleted}` with `{ noteId, veteranId }` only — never body content.
++- `backend/src/server.ts` — additive `createChartNotesRouter(db)` mount.
++- `backend/src/__tests__/chart-notes-routes.test.ts` — 11 tests: 401, 403 (physician), list, create (createdBy=sub + activity), empty-body 400, ops edits own, ops blocked on others', admin edits any, stale 409, admin delete 204, ops delete 403.
++
++## CI prisma-generate fix (root cause of the remaining red)
++
++The full `ci.yml` (steps beyond what the 4B-1 fix saw) runs `npm test` (all workspaces, **incl. backend**) and `npm run typecheck` (root) — but had **no `prisma generate` step**. So CI ran in the *un-generated* state: backend tests that import the real client died with "@prisma/client did not initialize", and the type of Prisma calls was loose. Fixes:
++- `.github/workflows/ci.yml` — added `- run: npm run db:generate` right after `npm ci`, so typecheck + tests run against the real generated client (the same state as deploy).
++- `backend/src/routes/documents.ts` — **reverted** the 4B-1 stub-state annotations (`tx: PrismaClient`, the `doc` cast). With the client generated, `$transaction`'s `tx` and the `findMany` `doc` infer correctly; the explicit `PrismaClient` annotation was actually wrong for the real `Prisma.TransactionClient` overload.
++
++## Verification (local, generated state = CI state)
++
++- `npm run db:generate` → 0 (schema valid) · `npm run lint` (root) → 0 · `npm run typecheck` (root) → 0
++- `npm test` (root) → frontend **17 pass**, backend **50 pass** (chart-notes 11, cases 15, + the rest)
++- `migrate:check` / `migrate:diff-check` → pass once committed (schema + migration committed together)
++
++## Known / not addressed
++
++- `cdk:synth:staging` (last CI step) fails **only on local Windows** — CDK's bundling fallback runs `cmd.exe /c mkdir -p`, which Windows `mkdir` rejects. On CI's Linux runner this works. Not changed.
+diff --git a/docs/verification/phase4B-5-evidence/test-output.txt b/docs/verification/phase4B-5-evidence/test-output.txt
+new file mode 100644
+index 0000000..151dc7b
+--- /dev/null
++++ b/docs/verification/phase4B-5-evidence/test-output.txt
+@@ -0,0 +1,16 @@
++## prisma generate (validates schema incl. ChartNote)
++Start by importing your Prisma Client (See: https://pris.ly/d/importing-client)
++
++Tip: Want to turn off tips and other hints? https://pris.ly/tip-4-nohints
++
++
++## root typecheck
++> tsc -p tsconfig.json --noEmit
++
++exit 0
++
++## npm test (root: frontend 17, backend 50)
++[2m Test Files [22m [1m[32m10 passed[39m[22m[90m (10)[39m
++[2m      Tests [22m [1m[32m17 passed[39m[22m[90m (17)[39m
++ Test Files  7 passed (7)
++      Tests  50 passed (50)

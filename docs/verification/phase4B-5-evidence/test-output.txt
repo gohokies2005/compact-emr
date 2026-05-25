@@ -1,0 +1,16 @@
+## prisma generate (validates schema incl. ChartNote)
+Start by importing your Prisma Client (See: https://pris.ly/d/importing-client)
+
+Tip: Want to turn off tips and other hints? https://pris.ly/tip-4-nohints
+
+
+## root typecheck
+> tsc -p tsconfig.json --noEmit
+
+exit 0
+
+## npm test (root: frontend 17, backend 50)
+[2m Test Files [22m [1m[32m10 passed[39m[22m[90m (10)[39m
+[2m      Tests [22m [1m[32m17 passed[39m[22m[90m (17)[39m
+ Test Files  7 passed (7)
+      Tests  50 passed (50)

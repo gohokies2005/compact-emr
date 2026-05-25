@@ -1,16 +1,8 @@
-import { HttpError } from '../http/errors.js';
+import { badRequest, isRecord } from './validation-helpers.js';
 
 const MAX_QUESTION_KEY_LEN = 100;
 const MAX_NOTES_LEN = 500;
 const MAX_ANSWER_COUNT = 10;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function badRequest(message: string, details?: Record<string, unknown>): never {
-  throw new HttpError(400, 'bad_request', message, details);
-}
 
 export interface ParsedSignOff {
   answers: Record<string, boolean>;

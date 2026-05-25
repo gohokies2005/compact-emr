@@ -3,7 +3,7 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createClarificationsRouter } from '../routes/clarifications.js';
 import { isHttpError, sendError } from '../http/errors.js';
-import type { AppDb, CaseRecord, ClarificationRecord, Role } from '../services/db-types.js';
+import type { AppDb, CaseRecord, ClarificationRecord, PhysicianRecord, Role } from '../services/db-types.js';
 
 interface MockUser { readonly sub: string; readonly roles: Role[]; }
 let mockUser: MockUser | undefined;
@@ -31,12 +31,33 @@ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
   };
 }
 
-function makeDb(c: CaseRecord = baseCase()) {
+function buildPhysician(overrides: Partial<PhysicianRecord> = {}): PhysicianRecord {
+  const now = new Date('2026-05-25T00:00:00.000Z');
+  return {
+    id: 'PHYS-001', cognitoSub: 'PHYS-SUB', fullName: 'Dr. T, DO', npi: '1', specialty: 'FM', medicalLicense: 'NV-1',
+    email: 'p@x.test', phone: null, signatureImageS3Key: null, active: true,
+    createdAt: now, updatedAt: now, version: 1, ...overrides,
+  };
+}
+
+function makeDb(c: CaseRecord = baseCase(), opts: { physiciansBySub?: Record<string, PhysicianRecord> } = {}) {
   const store = new Map<string, ClarificationRecord>();
   let seq = 1;
+  const physiciansBySub = opts.physiciansBySub ?? {};
 
   const tx = {
     case: { findFirst: vi.fn(async () => c), findUnique: vi.fn(async () => c), findMany: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn() },
+    physician: {
+      findUnique: vi.fn(async (args: { where?: { cognitoSub?: string } }) => {
+        const sub = args.where?.cognitoSub;
+        if (!sub) return null;
+        return physiciansBySub[sub] ?? null;
+      }),
+      findFirst: vi.fn(async () => null),
+      findMany: vi.fn(async () => []),
+      create: vi.fn(),
+      update: vi.fn(),
+    },
     activityLog: { create: vi.fn(async () => ({})) },
     clarification: {
       findUnique: vi.fn(async (args: { where: { id: string } }) => store.get(args.where.id) ?? null),
@@ -133,7 +154,9 @@ describe('clarifications routes', () => {
   });
 
   it('PATCH /clarifications/:id/resolve flips status to resolved and records resolver', async () => {
-    const { db, store, tx } = makeDb();
+    const { db, store, tx } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-001' }), {
+      physiciansBySub: { 'PHYS-SUB': buildPhysician({ id: 'PHYS-001', cognitoSub: 'PHYS-SUB' }) },
+    });
     const post = await request(appFor(db)).post('/api/v1/cases/CASE-1/clarifications').send({ audience: 'physician', question: 'q' });
     const id = post.body.data.id;
     mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
@@ -168,5 +191,52 @@ describe('clarifications routes', () => {
     const { db } = makeDb();
     const res = await request(appFor(db)).patch('/api/v1/clarifications/NOPE/resolve').send({ status: 'resolved' });
     expect(res.status).toBe(404);
+  });
+
+  // ===== Phase 5.1 auth-gap closure (architect QA REVIEW.md ¶4 finding 3) =====
+
+  it('POST is forbidden for physician not assigned to the case (403)', async () => {
+    mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+    const { db } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-OTHER' }), {
+      physiciansBySub: { 'PHYS-SUB': buildPhysician({ id: 'PHYS-001', cognitoSub: 'PHYS-SUB' }) },
+    });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/clarifications').send({ audience: 'physician', question: 'q' });
+    expect(res.status).toBe(403);
+  });
+
+  it('GET is forbidden for physician not assigned to the case (403)', async () => {
+    mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+    const { db } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-OTHER' }), {
+      physiciansBySub: { 'PHYS-SUB': buildPhysician({ id: 'PHYS-001', cognitoSub: 'PHYS-SUB' }) },
+    });
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/clarifications');
+    expect(res.status).toBe(403);
+  });
+
+  it('PATCH resolve is forbidden for physician not assigned to the case (403)', async () => {
+    // First raise a clarification as ops_staff so the row exists.
+    const { db } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-OTHER' }), {
+      physiciansBySub: { 'PHYS-SUB': buildPhysician({ id: 'PHYS-001', cognitoSub: 'PHYS-SUB' }) },
+    });
+    mockUser = { sub: 'OPS-SUB', roles: ['ops_staff'] };
+    const post = await request(appFor(db)).post('/api/v1/cases/CASE-1/clarifications').send({ audience: 'physician', question: 'q' });
+    const id = post.body.data.id;
+
+    // Now an unrelated physician (mapped to PHYS-001 but case assigned to PHYS-OTHER) tries to resolve.
+    mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+    const res = await request(appFor(db)).patch(`/api/v1/clarifications/${id}/resolve`).send({ status: 'resolved' });
+    expect(res.status).toBe(403);
+  });
+
+  it('admin and ops_staff retain unrestricted access regardless of physician assignment', async () => {
+    const { db } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-OTHER' }));
+
+    mockUser = { sub: 'ADMIN-SUB', roles: ['admin'] };
+    const adminRes = await request(appFor(db)).post('/api/v1/cases/CASE-1/clarifications').send({ audience: 'physician', question: 'admin sees all' });
+    expect(adminRes.status).toBe(201);
+
+    mockUser = { sub: 'OPS-SUB', roles: ['ops_staff'] };
+    const opsRes = await request(appFor(db)).get('/api/v1/cases/CASE-1/clarifications');
+    expect(opsRes.status).toBe(200);
   });
 });

@@ -1,18 +1,10 @@
-import { HttpError } from '../http/errors.js';
+import { badRequest, isRecord } from './validation-helpers.js';
 import type { ClarificationAudience, ClarificationStatus } from './db-types.js';
 
 const AUDIENCES: readonly ClarificationAudience[] = ['physician', 'ops_staff', 'veteran'];
 const RESOLVE_STATUSES: readonly ClarificationStatus[] = ['resolved', 'dismissed'];
 const MAX_QUESTION_LEN = 800;
 const MAX_RESOLUTION_LEN = 800;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function badRequest(message: string, details?: Record<string, unknown>): never {
-  throw new HttpError(400, 'bad_request', message, details);
-}
 
 export interface ParsedClarificationCreate {
   audience: ClarificationAudience;

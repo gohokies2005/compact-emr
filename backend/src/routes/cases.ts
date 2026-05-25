@@ -15,6 +15,7 @@ import {
   requiredRolesForCaseStatusTransition,
 } from '../services/case-status-transitions.js';
 import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
+import { currentActor, type RequestActor } from '../services/request-actor.js';
 
 const CASE_LITE_SELECT = {
   id: true,
@@ -46,16 +47,11 @@ const CASE_LITE_SELECT = {
   },
 };
 
-interface RequestActor { readonly sub: string; readonly email?: string | undefined; readonly roles: readonly Role[]; readonly role: Role; readonly id: string; }
-
-function currentUser(req: Request): RequestActor {
-  const u = (req as Request & { user?: { sub: string; email?: string; roles: readonly Role[] } }).user;
-  if (u === undefined) throw new HttpError(401, 'unauthorized', 'Authentication required');
-  const priority: readonly Role[] = ['admin', 'physician', 'ops_staff'];
-  const role = priority.find((r) => u.roles.includes(r));
-  if (role === undefined) throw new HttpError(403, 'forbidden', 'No valid role found in JWT');
-  return { sub: u.sub, email: u.email, roles: u.roles, role, id: u.sub };
-}
+/**
+ * Phase 5.1: extracted to `services/request-actor.ts`. Local alias preserved so call sites
+ * inside this file (`const user = currentUser(req)`) stay readable.
+ */
+const currentUser: (req: Request) => RequestActor = currentActor;
 
 function parsePositiveQueryInt(value: unknown, defaultValue: number, maxValue: number): number {
   if (typeof value !== 'string') return defaultValue;

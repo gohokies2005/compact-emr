@@ -4,16 +4,8 @@ import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import { resolveCurrentPhysician } from '../services/physician-resolver.js';
-import type { AppDb, Role } from '../services/db-types.js';
-
-function currentUser(req: Request): { sub: string; role: Role } {
-  const u = (req as Request & { user?: { sub: string; roles: readonly Role[] } }).user;
-  if (u === undefined) throw new HttpError(401, 'unauthorized', 'Authentication required');
-  const priority: readonly Role[] = ['admin', 'physician', 'ops_staff'];
-  const role = priority.find((r) => u.roles.includes(r));
-  if (role === undefined) throw new HttpError(403, 'forbidden', 'No valid role found in JWT');
-  return { sub: u.sub, role };
-}
+import { currentActor } from '../services/request-actor.js';
+import type { AppDb } from '../services/db-types.js';
 
 export function createSignOffsRouter(db: AppDb): Router {
   const router = Router();
@@ -32,7 +24,7 @@ export function createSignOffsRouter(db: AppDb): Router {
     '/cases/:id/sign-off',
     requireRole(['admin', 'physician']),
     asyncHandler(async (req: Request, res: Response) => {
-      const user = currentUser(req);
+      const user = currentActor(req);
       const caseId = String(req.params.id);
       const parsed = parseSignOffCreate(req.body);
 
@@ -94,7 +86,7 @@ export function createSignOffsRouter(db: AppDb): Router {
     '/cases/:id/sign-offs',
     requireRole(['admin', 'ops_staff', 'physician']),
     asyncHandler(async (req: Request, res: Response) => {
-      const user = currentUser(req);
+      const user = currentActor(req);
       const caseId = String(req.params.id);
 
       // For physicians, gate on assignment to match the rest of /cases/:id-style endpoints.

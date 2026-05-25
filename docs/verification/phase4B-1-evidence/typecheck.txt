@@ -1,0 +1,10 @@
+## frontend typecheck (tsc --noEmit)
+exit: 0
+## root typecheck (all workspaces)
+> tsc -p tsconfig.json --noEmit
+
+
+> infra@0.0.0 typecheck
+> tsc -p tsconfig.json --noEmit
+
+root typecheck exit: 0

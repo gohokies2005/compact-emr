@@ -109,7 +109,7 @@ export class ApiStack extends Stack {
         cloneDepth: 1,
       }),
       environment: {
-        buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
+        buildImage: codebuild.LinuxBuildImage.AMAZON_LINUX_2023_5,
         computeType: codebuild.ComputeType.SMALL,
         privileged: false,
       },

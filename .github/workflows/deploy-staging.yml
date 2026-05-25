@@ -27,6 +27,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
       - run: npm ci
+      - run: npm run db:generate -w backend
       - run: npm run cdk:synth:staging
       - run: npm run cdk -w infra -- deploy --all --require-approval never --context env=staging
 
@@ -46,3 +47,22 @@ jobs:
           echo "distribution_id=$DISTRIBUTION_ID" >> "$GITHUB_OUTPUT"
       - run: aws s3 sync frontend/dist s3://${{ steps.frontend_outputs.outputs.frontend_bucket }} --delete
       - run: aws cloudfront create-invalidation --distribution-id ${{ steps.frontend_outputs.outputs.distribution_id }} --paths "/*"
+      - name: Smoke test - Lambda cold start
+        run: |
+          set -e
+          FN_NAME=$(aws cloudformation describe-stack-resources --stack-name compact-emr-staging-api --query "StackResources[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" --output text)
+          echo "Lambda function: $FN_NAME"
+          PAYLOAD='{"version":"2.0","routeKey":"GET /api/v1/health","rawPath":"/api/v1/health","headers":{},"requestContext":{"http":{"method":"GET","path":"/api/v1/health"}},"isBase64Encoded":false}'
+          aws lambda invoke --function-name "$FN_NAME" --payload "$PAYLOAD" --cli-binary-format raw-in-base64-out /tmp/lambda-out.json > /tmp/lambda-invoke-meta.json
+          echo "Invoke metadata:"
+          cat /tmp/lambda-invoke-meta.json
+          echo ""
+          echo "Lambda response:"
+          cat /tmp/lambda-out.json
+          echo ""
+          # Pass if no errorType in response (init crash); statusCode present means handler executed
+          if grep -q 'errorType' /tmp/lambda-out.json; then
+            echo "::error::Lambda init error - check logs"
+            exit 1
+          fi
+          echo "::notice::Lambda boots cleanly (no init error)"

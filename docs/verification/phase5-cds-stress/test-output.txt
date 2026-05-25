@@ -1,0 +1,410 @@
+
+> backend@0.0.0 test
+> vitest run --run --reporter=verbose
+
+
+ RUN  v4.1.7 C:/Users/ryank/compact-emr-work/backend
+
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_89 (imo=89%, tier…' 6ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_80 (imo=80%, tier…' 5ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_71 (imo=71%, tier…' 5ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_70 (imo=70%, tier…' 5ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_69 (imo=69%, tier…' 5ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_65 (imo=65%, tier…' 2ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_60 (imo=60%, tier…' 2ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_55 (imo=55%, tier…' 2ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_51 (imo=51%, tier…' 2ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_50 (imo=50%, tier…' 2ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_49 (imo=49%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_40 (imo=40%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_30 (imo=30%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_10 (imo=10%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_a -> claim_0 (imo=0%, tier h…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_89 (imo=89%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_80 (imo=80%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_71 (imo=71%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_70 (imo=70%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_69 (imo=69%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_65 (imo=65%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_60 (imo=60%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_55 (imo=55%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_51 (imo=51%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_50 (imo=50%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_49 (imo=49%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_40 (imo=40%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_30 (imo=30%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_10 (imo=10%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_b -> claim_0 (imo=0%, tier h…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_89 (imo=89%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_80 (imo=80%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_71 (imo=71%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_70 (imo=70%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_69 (imo=69%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_65 (imo=65%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_60 (imo=60%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_55 (imo=55%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_51 (imo=51%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_50 (imo=50%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_49 (imo=49%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_40 (imo=40%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_30 (imo=30%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_10 (imo=10%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_c -> claim_0 (imo=0%, tier h…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_89 (imo=89%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_80 (imo=80%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_71 (imo=71%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_70 (imo=70%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_69 (imo=69%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_65 (imo=65%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_60 (imo=60%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_55 (imo=55%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_51 (imo=51%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_50 (imo=50%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_49 (imo=49%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_40 (imo=40%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_30 (imo=30%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_10 (imo=10%, tier…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | synthetic atlas, tier=high boundaries > 'upstream_d -> claim_0 (imo=0%, tier h…' 1ms
+ ✓ src/__tests__/cdsEngine.thresholds.test.ts > CDS thresholds | tier=low never accepts even at high odds > tier=low + odds>=70 contract documented in stress suite (see PTSD->Wrist case) 0ms
+stdout | src/__tests__/cds-stress.test.ts > CDS stress > runs 250+ cases: no crashes, near-zero false non-viables
+CDS stress: 722 cases | dist {"accept":256,"caution":457,"reject":9} | crashes 0 | false-non-viable 0
+
+ ✓ src/__tests__/cds-stress.test.ts > CDS stress > runs 250+ cases: no crashes, near-zero false non-viables 37ms
+ ✓ src/__tests__/cds-engine.test.ts > cdsEngine > accepts a strong BVA pair (PTSD -> OSA, imo_win_pct 89.2) 8ms
+ ✓ src/__tests__/cds-engine.test.ts > cdsEngine > matches condition aliases (post-traumatic stress disorder, sleep apnea) 1ms
+ ✓ src/__tests__/cds-engine.test.ts > cdsEngine > hard-rejects when no diagnosis is on file 1ms
+ ✓ src/__tests__/cds-engine.test.ts > cdsEngine > hard-rejects a secondary claim with no service-connected anchor 1ms
+ ✓ src/__tests__/cds-engine.test.ts > cdsEngine > hard-rejects a barred direct tobacco-causation theory 1ms
+ ✓ src/__tests__/cds-engine.test.ts > cdsEngine > cautions a direct claim with no BVA pair (odds model covers secondary) 1ms
+ ✓ src/__tests__/cds-engine.test.ts > cdsEngine > is reproducible (same input -> same verdict/odds) 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "COPD from in-serv…' 13ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "COPD from in-serv…' 11ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "COPD from in-serv…' 11ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Lung cancer secon…' 11ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Lung cancer secon…' 11ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Lung cancer secon…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Bronchitis from n…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Bronchitis from n…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Bronchitis from n…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Emphysema, tobacc…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Emphysema, tobacc…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Emphysema, tobacc…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "COPD from cigaret…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "COPD from cigaret…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "COPD from cigaret…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Chronic bronchiti…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Chronic bronchiti…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Chronic bronchiti…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Tobacco-related l…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Tobacco-related l…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Tobacco-related l…' 14ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Nicotine-induced …' 14ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Nicotine-induced …' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Nicotine-induced …' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Asthma due to in-…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Asthma due to in-…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Asthma due to in-…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Cigarette-related…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Cigarette-related…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Cigarette-related…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Smoking-related C…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Smoking-related C…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "Smoking-related C…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "COPD - tobacco et…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "COPD - tobacco et…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A1 tobacco direct: "COPD - tobacco et…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A2 tobacco-as-secondary not barred (n…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A3 tobacco with upstream-SC bypasses …' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A4 no diagnosis: OSA' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A4 no diagnosis: PTSD' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A4 no diagnosis: Hypertension' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A4 no diagnosis: GERD' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A4 no diagnosis: Tinnitus' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A4 no diagnosis: Migraines' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A4 no diagnosis: Lumbar back' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A4 no diagnosis: Knee' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A5 no SC anchor: PTSD->OSA (SC=[Tinni…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A5 no SC anchor: PTSD->OSA (SC=[Right…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A5 no SC anchor: PTSD->OSA (SC=[Heari…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A5 no SC anchor: Diabetes type 2->Per…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A5 no SC anchor: Diabetes type 2->Hyp…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A5 no SC anchor: Lumbar back->Radicul…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A5 no SC anchor: Obesity->OSA (SC=[Mi…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A6 barred-tobacco + no-diagnosis coll…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A6 no-diagnosis + no-SC-anchor collis…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A6 tobacco-claim + upstream-set + no-…' 0ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket A: Layer-A hard gates > 'A7 tobacco + framing=secondary + no u…' 0ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary PTSD -> Knee @ 100% (…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary PTSD -> Tinnitus @ 10…' 2ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Knee -> Cervical / ne…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Obesity -> Obstructiv…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary PTSD -> Hearing loss …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Tinnitus -> Migraines…' 4ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Hearing loss -> Tinni…' 4ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Lumbar / back -> Hear…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary PTSD -> Obstructive s…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Lumbar / back -> Obst…' 3ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Diabetes type 2 -> Pe…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary MDD / Depression -> O…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary PTSD -> Hypertension …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Lumbar / back -> Knee…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Ankle -> Knee @ 78.4%…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Knee -> Lumbar / back…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Lumbar / back -> Hip …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Lumbar / back -> Cerv…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Diabetes type 2 -> Ob…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Tinnitus -> Obstructi…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary GERD -> Obstructive s…' 4ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Hypertension -> Strok…' 4ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Lumbar / back -> Ankl…' 4ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Knee -> PTSD @ 91.7% …' 4ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Cervical / neck -> Ob…' 4ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Lumbar / back -> Peri…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary TBI -> Obstructive sl…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Hypertension -> Obstr…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Tinnitus -> Vertigo /…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Ischemic heart diseas…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Diabetes type 2 -> Hy…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Hip -> Knee @ 60% (ti…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Hypertension -> Ische…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary PTSD -> Wrist @ 92.3%…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary PTSD -> Hip @ 100% (t…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary PTSD -> Plantar fasci…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary PTSD -> Diabetes type…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary PTSD -> Asthma @ 64.3…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Hip -> Cervical / nec…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Shoulder -> Tinnitus …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B real-boundary Peripheral neuropathy…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant ptsd -> sleep apnea' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant POST-TRAUMATIC STR…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant   PTSD   ->   Obst…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant Post traumatic str…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant Hypertension -> Is…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant HTN -> ischemic he…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant High blood pressur…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant diabetes -> periph…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant dm2 -> peripheral …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant type 2 diabetes ->…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant low back -> radicu…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant lumbar -> radiculo…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket B: Layer-B threshold coverage (real pairs) > 'B phrasing variant lumbar spine -> ra…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Obstructive s…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Knee -> Lumbar / back…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Lumbar / back -> Radi…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Hypertension …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Lumbar / back -> Knee…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage MDD / Depression -> O…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Sinusitis / rhinitis …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Hearing loss -> Tinni…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Knee -> Hip (expect a…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Obesity -> Obstructiv…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Lumbar / back -> Cerv…' 19ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Migraines / h…' 19ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Ankle -> Knee (expect…' 19ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Lumbar / back -> Obst…' 19ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Lumbar / back -> Hip …' 19ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Ankle -> Lumbar / bac…' 9ms
+stdout | src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket count guard > asserts 250+ distinct cases across buckets
+CDS stress bucket counts: { A: 57, B: 54, C: 50, D: 30, E: 41, F: 20 } total 252
+
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Diabetes type 2 -> Pe…' 9ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Tinnitus -> Migraines…' 9ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage GERD -> Obstructive s…' 9ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Obstructive sleep apn…' 9ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage MDD / Depression -> H…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Hypertension -> Strok…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Lumbar / back -> Migr…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Lumbar / back -> Ankl…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Plantar fasciitis / f…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Knee -> Acquired psyc…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Hip -> Knee (expect c…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage MDD / Depression -> M…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage TBI -> Obstructive sl…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Knee -> PTSD (expect …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> MDD / Depress…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Ischemic hear…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> TBI (expect a…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Peripheral ne…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Shoulder (exp…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Asthma (expec…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Diabetes type…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Wrist (expect…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Hip (expect c…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage PTSD -> Plantar fasci…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Shoulder -> Tinnitus …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Hip -> Cervical / nec…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Peripheral neuropathy…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Lumbar / back -> Peri…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Diabetes type 2 -> Hy…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Tinnitus -> Vertigo /…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Ischemic heart diseas…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Hypertension -> Obstr…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Hypertension -> Ische…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket C: BVA pair coverage (50 real pairs) > 'C pair-coverage Cervical / neck -> Ra…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D1 no-pair: PTSD -> Glaucoma (PTSD ha…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D1 no-pair: PTSD -> Cataract (no PTSD…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D1 no-pair: Tinnitus -> COPD (no Tinn…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D1 no-pair: Knee -> Asthma (no Knee->…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D1 no-pair: Lumbar / back -> COPD (no…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D1 no-pair: Diabetes type 2 -> Migrai…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D1 no-pair: Hearing loss -> Hypertens…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D1 no-pair: Tinnitus -> Glaucoma (no …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "Tinnitus" (framing=…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "PTSD" (framing="dir…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "Hearing loss" (fram…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "Asthma" (framing="d…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "Lumbar / back" (fra…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "Knee" (framing="ini…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "Type 2 diabetes" (f…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "Ischemic heart dise…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "Hypertension" (fram…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "GERD" (framing="ser…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "Migraines / headach…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "Tinnitus" (framing=…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D2 non-secondary "PTSD" (framing="in …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D3 unknown upstream "Vitiligo" -> Obs…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D3 unknown upstream "Rosacea" -> PTSD' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D3 unknown upstream "Bunion" -> Knee' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D3 unknown upstream "Lipoma" -> Lumba…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D3 unknown upstream "Costochondritis"…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D3 unknown upstream "Pseudofolliculit…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D3 unknown upstream "Verruca" -> Tinn…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D3 unknown upstream "Anosmia" -> Migr…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket D: No-match / non-secondary > 'D3 unknown upstream "Synovitis" -> Pl…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E1 case/whitespace "ptsd" -> "obstruc…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E1 case/whitespace "PTSD" -> "OBSTRUC…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E1 case/whitespace " Ptsd " -> " Obst…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E1 case/whitespace "pTsD" -> "obstruc…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E2 empty claimedCondition + empty act…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E2 whitespace claimedCondition + empt…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E2 empty claimedCondition + populated…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E3 whitespace upstreamScCondition + S…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E4 1500-char upstream and claimed (no…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E5 emoji-laden claimedCondition' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E5 unicode-only claimedCondition (CJK)' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E6 alias resolution: "major depressiv…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E6 alias resolution: "mdd"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E6 alias resolution: "high blood pres…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E6 alias resolution: "generalized anx…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E6 alias resolution: "a fib"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E6 alias resolution: "coronary artery…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E6 alias resolution: "traumatic brain…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E6 alias resolution: "migraine"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E6 alias resolution: "irritable bowel…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E7 null upstream + framing=secondary …' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E8 framing aggravation + null upstream' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E9 secondary + upstream populated + S…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E10 punctuation: "Obstructive sleep a…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E10 punctuation: "...obstructive slee…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E10 punctuation: "(obstructive) sleep…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E10 punctuation: "obstructive_sleep_a…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E10 punctuation: "obstructive-sleep-a…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E10 punctuation: "obstructive/sleep/a…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E10 punctuation: "obstructive,sleep,a…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E11 nonsense claimed: "12345"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E11 nonsense claimed: "???"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E11 nonsense claimed: "null"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E11 nonsense claimed: "undefined"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E11 nonsense claimed: "NaN"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E11 nonsense claimed: "0"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E11 nonsense claimed: "foo bar baz"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E11 nonsense claimed: "XXX YYY ZZZ"' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E12 large SC list (15 entries)' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E13 SC list all-stopwords + real upst…' 1ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket E: Edge / malformed input > 'E14 upstream all-stopwords + SC nonem…' 0ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: PTSD->OSA accept' 6ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: Hypertension->IHD ca…' 6ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: Hip->Cervical reject' 6ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: no diagnosis reject' 6ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: tobacco direct reject' 6ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: no-anchor reject' 11ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: direct no-pair cauti…' 11ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: alias OSA accept' 11ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: low-tier high-odds c…' 11ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: no-pair caution' 11ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: PTSD->OSA ALLCAPS' 12ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: PTSD->OSA lower' 12ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: PTSD->OSA mixed casi…' 12ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: alias HTN->IHD' 12ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: noisy real-world phr…' 12ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: long upstream' 7ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: framing=aggravation' 7ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: empty framing' 7ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: null framing' 7ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket F: Determinism / idempotency (N=10) > 'F deterministic: trailing punctuation…' 7ms
+ ✓ src/__tests__/cdsEngine.stress.test.ts > CDS stress | Bucket count guard > asserts 250+ distinct cases across buckets 2ms
+ ✓ src/__tests__/physician-resolver.test.ts > resolveCurrentPhysician > returns null when cognitoSub is undefined 2ms
+ ✓ src/__tests__/physician-resolver.test.ts > resolveCurrentPhysician > returns null when cognitoSub is empty string 0ms
+ ✓ src/__tests__/physician-resolver.test.ts > resolveCurrentPhysician > returns null when no physician matches the cognitoSub 0ms
+ ✓ src/__tests__/physician-resolver.test.ts > resolveCurrentPhysician > returns the physician when a match exists 1ms
+ ✓ src/__tests__/physician-resolver.test.ts > resolveCurrentPhysician > returns null when the matched physician is inactive 0ms
+ ✓ src/__tests__/physician-resolver.test.ts > isAssignedPhysicianForCase > returns false when assignedPhysicianId is null 0ms
+ ✓ src/__tests__/physician-resolver.test.ts > isAssignedPhysicianForCase > returns false when cognito user has no physician mapping 0ms
+ ✓ src/__tests__/physician-resolver.test.ts > isAssignedPhysicianForCase > returns false when physician id does not match assigned id 0ms
+ ✓ src/__tests__/physician-resolver.test.ts > isAssignedPhysicianForCase > returns true when physician id matches assigned id 0ms
+ ✓ src/__tests__/physician-resolver.test.ts > isAssignedPhysicianForCase > returns false when physician matches id but is inactive 0ms
+ ✓ src/__tests__/optimistic-locking.test.ts > optimistic locking > increments version when the expected version matches 3ms
+ ✓ src/__tests__/optimistic-locking.test.ts > optimistic locking > throws when the expected version is stale 0ms
+ ✓ src/__tests__/cds-routes.test.ts > cds routes > returns 401 unauthenticated 26ms
+ ✓ src/__tests__/cds-routes.test.ts > cds routes > returns 403 for physician 6ms
+ ✓ src/__tests__/cds-routes.test.ts > cds routes > returns 404 for an unknown case 8ms
+ ✓ src/__tests__/cds-routes.test.ts > cds routes > runs CDS, returns accept, persists verdict + writes activity 10ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > returns 401 unauthenticated 20ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > returns 403 for physician (not admin/ops_staff) 5ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > lists notes for a veteran 5ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > creates a note with createdBy from the JWT sub and writes activity 18ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > rejects empty body with 400 11ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > lets the author (ops_staff) edit their own note 8ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > forbids ops_staff editing another user's note 8ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > lets an admin edit any note 4ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > rejects a stale version with 409 4ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > lets an admin delete a note (204) and writes activity 5ms
+ ✓ src/__tests__/chart-notes-routes.test.ts > chart-notes routes > forbids ops_staff from deleting 6ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > returns 401 unauthenticated 28ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > returns empty list when physician has no Physician row mapping 8ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > creates a case and writes activity row 20ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > lists paginated cases with veteran lite info 6ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > gets a single case with relations 8ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > patches fields, bumps version, and writes activity row 8ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > rejects PATCH stale version with 409 11ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > soft deletes as rejected (204) with distinct activity action, admin only 7ms
+ ✓ src/__tests__/case-status-transitions.test.ts > case status transitions > terminal states accept zero outgoing transitions 2ms
+ ✓ src/__tests__/case-status-transitions.test.ts > case status transitions > matches the full non-terminal transition table 0ms
+ ✓ src/__tests__/case-status-transitions.test.ts > case status transitions > rejects ops_staff attempting physician_review to delivered 0ms
+ ✓ src/__tests__/case-status-transitions.test.ts > case status transitions > allows admin on any transition 0ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > performs valid status transition without touching draft jobs 9ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > rejects invalid status transition with 400 4ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > allows physician_review to delivered for assigned physician but not ops_staff 11ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > denies physician_review to delivered when physician is not assigned to the case 8ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > lets assigned physician GET /cases/:id and scopes list to their assigned cases 11ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > blocks physician from GET /cases/:id when not assigned (403) 7ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > blocks PATCH /cases/:id by physician when not assigned (403) 6ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > blocks inactive physician from case access even when sub matches assignment 6ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > rejects stale status transition with 409 6ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > rejects PHI-shaped transitionReason 123-45-6789 7ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > rejects PHI-shaped transitionReason call 555-123-4567 back 6ms
+ ✓ src/__tests__/cases-routes.test.ts > cases routes > rejects PHI-shaped transitionReason veteran@example.com confirmed 5ms
+ ✓ src/__tests__/documents.test.ts > document routes > rejects unauthenticated requests before document handlers 27ms
+ ✓ src/__tests__/documents.test.ts > document routes > lists documents for a veteran 8ms
+ ✓ src/__tests__/documents.test.ts > document routes > creates a 5-minute KMS-enforced presigned PUT URL 13ms
+ ✓ src/__tests__/documents.test.ts > document routes > rejects presign when file exceeds 5 MB 4ms
+ ✓ src/__tests__/documents.test.ts > document routes > records uploaded document metadata and activity log in one transaction 4ms
+ ✓ src/__tests__/documents.test.ts > document routes > requires admin role to delete documents 8ms
+ ✓ src/__tests__/auth.test.ts > auth middleware > allows a valid JWT and populates req.user 29ms
+ ✓ src/__tests__/auth.test.ts > auth middleware > rejects an expired JWT 6ms
+ ✓ src/__tests__/auth.test.ts > auth middleware > rejects a JWT with no permitted route role 5ms
+ ✓ src/__tests__/auth.test.ts > auth middleware > rejects a missing JWT 4ms
+ ✓ src/__tests__/veterans-routes.test.ts > Phase 3A-1 veteran routes > GET /api/v1/me returns the authenticated user envelope 28ms
+ ✓ src/__tests__/veterans-routes.test.ts > Phase 3A-1 veteran routes > POST /api/v1/veterans creates a veteran and writes an activity row 14ms
+ ✓ src/__tests__/veterans-routes.test.ts > Phase 3A-1 veteran routes > GET /api/v1/veterans rejects missing JWT with 401 4ms
+ ✓ src/__tests__/veterans-routes.test.ts > Phase 3A-1 veteran routes > GET /api/v1/veterans rejects physician role with 403 4ms
+ ✓ src/__tests__/veterans-routes.test.ts > Phase 3A-1 veteran routes > PATCH /api/v1/veterans/:id increments version and writes fields-only activity details 6ms
+ ✓ src/__tests__/veterans-routes.test.ts > Phase 3A-1 veteran routes > PATCH /api/v1/veterans/:id returns 409 on stale version 6ms
+ ✓ src/__tests__/veterans-routes.test.ts > Phase 3A-1 veteran routes > PATCH /api/v1/veterans/:id blocks ops staff from changing name or DOB 4ms
+ ✓ src/__tests__/veterans-routes.test.ts > Phase 3A-1 veteran routes > DELETE /api/v1/veterans/:id is admin-only and soft deletes 5ms
+
+ Test Files  13 passed (13)
+      Tests  391 passed (391)
+   Start at  14:26:15
+   Duration  7.50s (transform 2.57s, setup 0ms, import 9.98s, tests 771ms, environment 4ms)
+

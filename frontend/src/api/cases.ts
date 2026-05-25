@@ -1,4 +1,4 @@
-import { apiGet } from './client';
+import { apiGet, apiPost } from './client';
 import type { CaseStatus, ClaimType } from '../types/prisma';
 
 export interface CaseVeteranLite { readonly id: string; readonly firstName: string; readonly lastName: string; readonly email: string; }
@@ -48,4 +48,18 @@ export async function listCases(params: ListCasesParams = {}): Promise<CaseListR
   if (params.pageSize) sp.set('pageSize', String(params.pageSize));
   const qs = sp.toString();
   return apiGet<CaseListResult>(`/api/v1/cases${qs ? `?${qs}` : ''}`);
+}
+
+export interface CreateCaseInput {
+  readonly id: string;
+  readonly claimedCondition: string;
+  readonly claimType: ClaimType;
+  readonly framingChoice?: string;
+  readonly upstreamScCondition?: string;
+  readonly veteranStatement?: string;
+  readonly inServiceEvent?: string;
+}
+
+export async function createCase(veteranId: string, input: CreateCaseInput): Promise<{ data: CaseLite }> {
+  return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/cases`, input);
 }

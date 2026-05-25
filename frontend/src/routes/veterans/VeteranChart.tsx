@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { addMedication, addProblem, addScCondition, deleteMedication, deleteProblem, deleteScCondition, downloadDocument, getVeteran, listDocuments, presignDocument, recordDocument, uploadToPresignedUrl } from '../../api/veterans';
+import { createCase, type CreateCaseInput } from '../../api/cases';
+import { NewClaimModal } from '../cases/NewClaimModal';
 import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition } from '../../types/prisma';
 
 const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
@@ -15,7 +17,10 @@ export function VeteranChart() {
   const { id } = useParams();
   const veteranId = id ?? '';
   const [tab, setTab] = useState<'conditions' | 'problems' | 'medications'>('conditions');
+  const [claimModalOpen, setClaimModalOpen] = useState(false);
   const qc = useQueryClient();
+  const navigate = useNavigate();
+  const createClaim = useMutation({ mutationFn: (input: CreateCaseInput) => createCase(veteranId, input), onSuccess: async (res) => { setClaimModalOpen(false); await qc.invalidateQueries({ queryKey: ['veteran', veteranId] }); navigate(`/cases/${encodeURIComponent(res.data.id)}`); } });
   const veteran = useQuery({ queryKey: ['veteran', veteranId], queryFn: () => getVeteran(veteranId), enabled: veteranId.length > 0 });
   const documents = useQuery({ queryKey: ['documents', veteranId], queryFn: () => listDocuments(veteranId), enabled: veteranId.length > 0 });
   const invalidate = async () => { await Promise.all([qc.invalidateQueries({ queryKey: ['veteran', veteranId] }), qc.invalidateQueries({ queryKey: ['documents', veteranId] })]); };
@@ -24,10 +29,11 @@ export function VeteranChart() {
   if (!veteran.data) return <AppShell><EmptyState title="Veteran not found" message="The requested veteran could not be loaded." /></AppShell>;
   const v = veteran.data.data;
   return <AppShell><div className="space-y-6">
-    <div className="rounded-lg border border-slate-200 bg-white p-6"><div className="flex flex-col justify-between gap-3 sm:flex-row"><div><h1 className="text-2xl font-semibold text-slate-900">{v.id}</h1><p className="text-sm text-slate-500">DOB {v.dob} · {v.branch} · {v.serviceStartYear}–{v.serviceEndYear}</p></div><Link className="text-sm text-indigo-600" to="/veterans">Back to veterans</Link></div></div>
+    <div className="rounded-lg border border-slate-200 bg-white p-6"><div className="flex flex-col justify-between gap-3 sm:flex-row"><div><h1 className="text-2xl font-semibold text-slate-900">{v.id}</h1><p className="text-sm text-slate-500">DOB {v.dob} · {v.branch} · {v.serviceStartYear}–{v.serviceEndYear}</p></div><div className="flex items-center gap-3"><Button size="sm" onClick={() => setClaimModalOpen(true)}>+ New claim</Button><Link className="text-sm text-indigo-600" to="/veterans">Back to veterans</Link></div></div></div>
     <div className="rounded-lg border border-slate-200 bg-white"><div className="flex border-b border-slate-200 text-sm">{(['conditions','problems','medications'] as const).map((t) => <button key={t} className={`px-4 py-3 ${tab === t ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-slate-500'}`} onClick={() => setTab(t)}>{t === 'conditions' ? 'Service-connected conditions' : t === 'problems' ? 'Active problems' : 'Medications'}</button>)}</div><div className="p-4">{tab === 'conditions' ? <ConditionsPanel veteranId={veteranId} rows={v.scConditions} onChange={invalidate} /> : null}{tab === 'problems' ? <ProblemsPanel veteranId={veteranId} rows={v.activeProblems} onChange={invalidate} /> : null}{tab === 'medications' ? <MedicationsPanel veteranId={veteranId} rows={v.activeMedications} onChange={invalidate} /> : null}</div></div>
     <DocumentsPanel veteranId={veteranId} cases={v.cases} documents={documents.data?.data ?? []} onChange={invalidate} />
     <CasesPanel rows={v.cases} />
+    <NewClaimModal open={claimModalOpen} onClose={() => setClaimModalOpen(false)} onSubmit={(input) => createClaim.mutateAsync(input).then(() => undefined)} saving={createClaim.isPending} />
   </div></AppShell>;
 }
 

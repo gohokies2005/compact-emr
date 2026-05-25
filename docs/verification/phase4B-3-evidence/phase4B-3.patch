@@ -1,0 +1,202 @@
+diff --git a/docs/PHASE4B_3_SUMMARY.md b/docs/PHASE4B_3_SUMMARY.md
+new file mode 100644
+index 0000000..52ea16f
+--- /dev/null
++++ b/docs/PHASE4B_3_SUMMARY.md
+@@ -0,0 +1,14 @@
++# Phase 4B-3 Summary — New Claim modal on VeteranChart
++
++Built by Claude Code against `main` (on top of 4B-2). Frontend-only; no backend changes.
++
++## New / modified files
++
++- `frontend/src/api/cases.ts` (modified) — added `CreateCaseInput` + `createCase(veteranId, input)` → `POST /api/v1/veterans/:veteranId/cases`.
++- `frontend/src/routes/cases/NewClaimModal.tsx` (new) — React Hook Form + Zod, matching the `NewVeteranModal` pattern. Fields: `id` (required), `claimedCondition` (required), `claimType` (select: initial/supplemental/hlr/appeal_bva, default initial), `framingChoice` (≤80), `upstreamScCondition` (≤200), `veteranStatement` (textarea ≤2000), `inServiceEvent` (textarea ≤2000). Empty optionals are omitted from the payload via conditional spread (avoids `exactOptionalPropertyTypes` friction). `assignedPhysicianId` intentionally skipped (Phase 7).
++- `frontend/src/routes/veterans/VeteranChart.tsx` (modified, additive) — `+ New claim` button in the header card; `createCase` mutation that, on success, closes the modal, invalidates `['veteran', veteranId]`, and redirects to `/cases/:newId`.
++- `frontend/src/__tests__/NewClaimModal.test.tsx` (new) — closed renders nothing; filling required fields + submit calls `onSubmit` with the parsed input (empty optionals omitted).
++
++## Verification (local; evidence under `docs/verification/phase4B-3-evidence/`)
++
++- `lint -w frontend` → 0 · `typecheck -w frontend` → 0 · `test -w frontend` → **9 files / 16 tests pass**
+diff --git a/docs/verification/phase4B-3-evidence/test-output.txt b/docs/verification/phase4B-3-evidence/test-output.txt
+new file mode 100644
+index 0000000..c87f63e
+--- /dev/null
++++ b/docs/verification/phase4B-3-evidence/test-output.txt
+@@ -0,0 +1,5 @@
++[2m Test Files [22m [1m[32m9 passed[39m[22m[90m (9)[39m
++[2m      Tests [22m [1m[32m16 passed[39m[22m[90m (16)[39m
++[2m   Start at [22m 10:21:29
++[2m   Duration [22m 16.56s[2m (transform 5.86s, setup 2.16s, collect 22.27s, tests 1.11s, environment 12.73s, prepare 2.21s)[22m
++
+diff --git a/docs/verification/phase4B-3-evidence/typecheck.txt b/docs/verification/phase4B-3-evidence/typecheck.txt
+new file mode 100644
+index 0000000..eec00c1
+--- /dev/null
++++ b/docs/verification/phase4B-3-evidence/typecheck.txt
+@@ -0,0 +1 @@
++frontend tsc exit: 0
+diff --git a/frontend/src/__tests__/NewClaimModal.test.tsx b/frontend/src/__tests__/NewClaimModal.test.tsx
+new file mode 100644
+index 0000000..b0d1911
+--- /dev/null
++++ b/frontend/src/__tests__/NewClaimModal.test.tsx
+@@ -0,0 +1,19 @@
++import { fireEvent, render, screen, waitFor } from '@testing-library/react';
++import { describe, expect, it, vi } from 'vitest';
++import { NewClaimModal } from '../routes/cases/NewClaimModal';
++
++describe('NewClaimModal', () => {
++  it('renders nothing when closed', () => {
++    const { container } = render(<NewClaimModal open={false} onClose={() => {}} onSubmit={async () => {}} saving={false} />);
++    expect(container.firstChild).toBeNull();
++  });
++
++  it('submits the entered claim fields (omitting empty optionals)', async () => {
++    const onSubmit = vi.fn(async () => {});
++    render(<NewClaimModal open onClose={() => {}} onSubmit={onSubmit} saving={false} />);
++    fireEvent.change(screen.getByLabelText('Case ID / claim number'), { target: { value: 'CASE-9' } });
++    fireEvent.change(screen.getByLabelText('Claimed condition'), { target: { value: 'Obstructive sleep apnea' } });
++    fireEvent.click(screen.getByRole('button', { name: 'Create claim' }));
++    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({ id: 'CASE-9', claimedCondition: 'Obstructive sleep apnea', claimType: 'initial' }));
++  });
++});
+diff --git a/frontend/src/api/cases.ts b/frontend/src/api/cases.ts
+index fd9cbe1..e21305a 100644
+--- a/frontend/src/api/cases.ts
++++ b/frontend/src/api/cases.ts
+@@ -1,4 +1,4 @@
+-import { apiGet } from './client';
++import { apiGet, apiPost } from './client';
+ import type { CaseStatus, ClaimType } from '../types/prisma';
+ 
+ export interface CaseVeteranLite { readonly id: string; readonly firstName: string; readonly lastName: string; readonly email: string; }
+@@ -49,3 +49,17 @@ export async function listCases(params: ListCasesParams = {}): Promise<CaseListR
+   const qs = sp.toString();
+   return apiGet<CaseListResult>(`/api/v1/cases${qs ? `?${qs}` : ''}`);
+ }
++
++export interface CreateCaseInput {
++  readonly id: string;
++  readonly claimedCondition: string;
++  readonly claimType: ClaimType;
++  readonly framingChoice?: string;
++  readonly upstreamScCondition?: string;
++  readonly veteranStatement?: string;
++  readonly inServiceEvent?: string;
++}
++
++export async function createCase(veteranId: string, input: CreateCaseInput): Promise<{ data: CaseLite }> {
++  return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/cases`, input);
++}
+diff --git a/frontend/src/routes/cases/NewClaimModal.tsx b/frontend/src/routes/cases/NewClaimModal.tsx
+new file mode 100644
+index 0000000..abd0825
+--- /dev/null
++++ b/frontend/src/routes/cases/NewClaimModal.tsx
+@@ -0,0 +1,63 @@
++import type { ReactNode } from 'react';
++import { useForm } from 'react-hook-form';
++import { z } from 'zod';
++import { Button } from '../../components/ui/Button';
++import type { CreateCaseInput } from '../../api/cases';
++
++const schema = z.object({
++  id: z.string().min(1, 'Case ID is required'),
++  claimedCondition: z.string().min(1, 'Condition is required'),
++  claimType: z.enum(['initial', 'supplemental', 'hlr', 'appeal_bva']),
++  framingChoice: z.string().max(80).optional(),
++  upstreamScCondition: z.string().max(200).optional(),
++  veteranStatement: z.string().max(2000).optional(),
++  inServiceEvent: z.string().max(2000).optional(),
++});
++
++type FormValues = z.infer<typeof schema>;
++
++interface Props { readonly open: boolean; readonly onClose: () => void; readonly onSubmit: (input: CreateCaseInput) => Promise<void>; readonly saving: boolean; }
++
++const CLAIM_TYPES: readonly { readonly value: FormValues['claimType']; readonly label: string }[] = [
++  { value: 'initial', label: 'Initial' },
++  { value: 'supplemental', label: 'Supplemental' },
++  { value: 'hlr', label: 'Higher-level review' },
++  { value: 'appeal_bva', label: 'Board appeal' },
++];
++
++export function NewClaimModal({ open, onClose, onSubmit, saving }: Props) {
++  const { register, handleSubmit, formState: { errors } } = useForm<FormValues>({ defaultValues: { claimType: 'initial' } });
++  if (!open) return null;
++
++  async function submit(values: FormValues) {
++    const parsed = schema.parse(values);
++    const input: CreateCaseInput = {
++      id: parsed.id,
++      claimedCondition: parsed.claimedCondition,
++      claimType: parsed.claimType,
++      ...(parsed.framingChoice && { framingChoice: parsed.framingChoice }),
++      ...(parsed.upstreamScCondition && { upstreamScCondition: parsed.upstreamScCondition }),
++      ...(parsed.veteranStatement && { veteranStatement: parsed.veteranStatement }),
++      ...(parsed.inServiceEvent && { inServiceEvent: parsed.inServiceEvent }),
++    };
++    await onSubmit(input);
++  }
++
++  return <div className="fixed inset-0 z-50 bg-slate-900/40 p-6"><div className="mx-auto max-h-[calc(100vh-3rem)] max-w-2xl overflow-auto rounded-lg bg-white p-6 shadow-xl">
++    <div className="mb-4 flex items-center justify-between"><h2 className="text-lg font-semibold text-slate-900">New claim</h2><button type="button" className="text-slate-500" onClick={onClose}>×</button></div>
++    <form className="grid grid-cols-1 gap-4 md:grid-cols-2" onSubmit={handleSubmit(submit)}>
++      <Field label="Case ID / claim number" error={errors.id?.message}><input className="input" {...register('id')} /></Field>
++      <Field label="Claim type" error={errors.claimType?.message}><select className="input" {...register('claimType')}>{CLAIM_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</select></Field>
++      <Field label="Claimed condition" error={errors.claimedCondition?.message}><input className="input" {...register('claimedCondition')} /></Field>
++      <Field label="Framing (optional)" error={errors.framingChoice?.message}><input className="input" placeholder="e.g., aggravation, secondary, direct, presumptive" {...register('framingChoice')} /></Field>
++      <Field label="Upstream SC condition (optional)" error={errors.upstreamScCondition?.message}><input className="input" placeholder="if this is secondary to a known SC condition" {...register('upstreamScCondition')} /></Field>
++      <div className="md:col-span-2"><Field label="Veteran's account / statement (optional, paste from intake)" error={errors.veteranStatement?.message}><textarea className="input min-h-24" {...register('veteranStatement')} /></Field></div>
++      <div className="md:col-span-2"><Field label="Documented in-service event or exposure (optional)" error={errors.inServiceEvent?.message}><textarea className="input min-h-24" {...register('inServiceEvent')} /></Field></div>
++      <div className="md:col-span-2 flex justify-end gap-2"><Button type="button" variant="secondary" onClick={onClose}>Cancel</Button><Button type="submit" loading={saving}>Create claim</Button></div>
++    </form>
++  </div></div>;
++}
++
++function Field({ label, error, children }: { readonly label: string; readonly error?: string | undefined; readonly children: ReactNode }) {
++  return <label className="block text-sm"><span className="mb-1 block font-medium text-slate-700">{label}</span>{children}{error ? <span className="mt-1 block text-xs text-rose-600">{error}</span> : null}</label>;
++}
+diff --git a/frontend/src/routes/veterans/VeteranChart.tsx b/frontend/src/routes/veterans/VeteranChart.tsx
+index 0f0eeb4..a4b67aa 100644
+--- a/frontend/src/routes/veterans/VeteranChart.tsx
++++ b/frontend/src/routes/veterans/VeteranChart.tsx
+@@ -1,10 +1,12 @@
+ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+ import { useState } from 'react';
+-import { Link, useParams } from 'react-router-dom';
++import { Link, useNavigate, useParams } from 'react-router-dom';
+ import { AppShell } from '../../layout/AppShell';
+ import { Button } from '../../components/ui/Button';
+ import { EmptyState } from '../../components/ui/EmptyState';
+ import { addMedication, addProblem, addScCondition, deleteMedication, deleteProblem, deleteScCondition, downloadDocument, getVeteran, listDocuments, presignDocument, recordDocument, uploadToPresignedUrl } from '../../api/veterans';
++import { createCase, type CreateCaseInput } from '../../api/cases';
++import { NewClaimModal } from '../cases/NewClaimModal';
+ import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition } from '../../types/prisma';
+ 
+ const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
+@@ -15,7 +17,10 @@ export function VeteranChart() {
+   const { id } = useParams();
+   const veteranId = id ?? '';
+   const [tab, setTab] = useState<'conditions' | 'problems' | 'medications'>('conditions');
++  const [claimModalOpen, setClaimModalOpen] = useState(false);
+   const qc = useQueryClient();
++  const navigate = useNavigate();
++  const createClaim = useMutation({ mutationFn: (input: CreateCaseInput) => createCase(veteranId, input), onSuccess: async (res) => { setClaimModalOpen(false); await qc.invalidateQueries({ queryKey: ['veteran', veteranId] }); navigate(`/cases/${encodeURIComponent(res.data.id)}`); } });
+   const veteran = useQuery({ queryKey: ['veteran', veteranId], queryFn: () => getVeteran(veteranId), enabled: veteranId.length > 0 });
+   const documents = useQuery({ queryKey: ['documents', veteranId], queryFn: () => listDocuments(veteranId), enabled: veteranId.length > 0 });
+   const invalidate = async () => { await Promise.all([qc.invalidateQueries({ queryKey: ['veteran', veteranId] }), qc.invalidateQueries({ queryKey: ['documents', veteranId] })]); };
+@@ -24,10 +29,11 @@ export function VeteranChart() {
+   if (!veteran.data) return <AppShell><EmptyState title="Veteran not found" message="The requested veteran could not be loaded." /></AppShell>;
+   const v = veteran.data.data;
+   return <AppShell><div className="space-y-6">
+-    <div className="rounded-lg border border-slate-200 bg-white p-6"><div className="flex flex-col justify-between gap-3 sm:flex-row"><div><h1 className="text-2xl font-semibold text-slate-900">{v.id}</h1><p className="text-sm text-slate-500">DOB {v.dob} · {v.branch} · {v.serviceStartYear}–{v.serviceEndYear}</p></div><Link className="text-sm text-indigo-600" to="/veterans">Back to veterans</Link></div></div>
++    <div className="rounded-lg border border-slate-200 bg-white p-6"><div className="flex flex-col justify-between gap-3 sm:flex-row"><div><h1 className="text-2xl font-semibold text-slate-900">{v.id}</h1><p className="text-sm text-slate-500">DOB {v.dob} · {v.branch} · {v.serviceStartYear}–{v.serviceEndYear}</p></div><div className="flex items-center gap-3"><Button size="sm" onClick={() => setClaimModalOpen(true)}>+ New claim</Button><Link className="text-sm text-indigo-600" to="/veterans">Back to veterans</Link></div></div></div>
+     <div className="rounded-lg border border-slate-200 bg-white"><div className="flex border-b border-slate-200 text-sm">{(['conditions','problems','medications'] as const).map((t) => <button key={t} className={`px-4 py-3 ${tab === t ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-slate-500'}`} onClick={() => setTab(t)}>{t === 'conditions' ? 'Service-connected conditions' : t === 'problems' ? 'Active problems' : 'Medications'}</button>)}</div><div className="p-4">{tab === 'conditions' ? <ConditionsPanel veteranId={veteranId} rows={v.scConditions} onChange={invalidate} /> : null}{tab === 'problems' ? <ProblemsPanel veteranId={veteranId} rows={v.activeProblems} onChange={invalidate} /> : null}{tab === 'medications' ? <MedicationsPanel veteranId={veteranId} rows={v.activeMedications} onChange={invalidate} /> : null}</div></div>
+     <DocumentsPanel veteranId={veteranId} cases={v.cases} documents={documents.data?.data ?? []} onChange={invalidate} />
+     <CasesPanel rows={v.cases} />
++    <NewClaimModal open={claimModalOpen} onClose={() => setClaimModalOpen(false)} onSubmit={(input) => createClaim.mutateAsync(input).then(() => undefined)} saving={createClaim.isPending} />
+   </div></AppShell>;
+ }
+ 

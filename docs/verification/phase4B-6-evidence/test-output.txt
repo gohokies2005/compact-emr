@@ -1,0 +1,7 @@
+## frontend tsc
+exit 0
+## frontend vitest
+[2m      Tests [22m [1m[32m18 passed[39m[22m[90m (18)[39m
+[2m   Start at [22m 10:58:48
+[2m   Duration [22m 18.10s[2m (transform 5.57s, setup 3.00s, collect 34.02s, tests 1.81s, environment 16.86s, prepare 3.05s)[22m
+

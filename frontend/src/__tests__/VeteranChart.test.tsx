@@ -10,6 +10,8 @@ vi.mock('../api/veterans', () => ({
   listDocuments: vi.fn(async () => ({ data: [] })), addScCondition: vi.fn(), addProblem: vi.fn(), addMedication: vi.fn(), deleteScCondition: vi.fn(), deleteProblem: vi.fn(), deleteMedication: vi.fn(), presignDocument: vi.fn(), recordDocument: vi.fn(), uploadToPresignedUrl: vi.fn(), downloadDocument: vi.fn(),
 }));
 vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
+vi.mock('../auth/useAuth', () => ({ useAuth: () => ({ user: { sub: 'u', email: 'a@x.com', roles: ['admin'], role: 'admin' } }) }));
+vi.mock('../api/chart-notes', () => ({ listChartNotes: vi.fn(async () => ({ data: [] })), createChartNote: vi.fn(), patchChartNote: vi.fn(), deleteChartNote: vi.fn() }));
 
 describe('VeteranChart', () => {
   it('renders veteran chart panels', async () => {

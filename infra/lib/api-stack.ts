@@ -117,7 +117,7 @@ export class ApiStack extends Stack {
         DATABASE_URL_SECRET_ARN: { value: props.databaseSecret.secretArn },
         ENV_NAME: { value: props.config.envName },
       },
-      buildSpec: codebuild.BuildSpec.fromObject({
+      buildSpec: codebuild.BuildSpec.fromObjectToYaml({
         version: '0.2',
         phases: {
           install: {

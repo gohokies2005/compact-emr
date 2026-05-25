@@ -1,0 +1,4 @@
+## frontend tsc --noEmit
+exit 0
+## backend tsc --noEmit
+backend tsc exit 0

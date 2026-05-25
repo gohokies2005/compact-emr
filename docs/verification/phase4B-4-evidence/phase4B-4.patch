@@ -1,0 +1,715 @@
+diff --git a/backend/src/__tests__/cases-routes.test.ts b/backend/src/__tests__/cases-routes.test.ts
+index 5cca517..67e2542 100644
+--- a/backend/src/__tests__/cases-routes.test.ts
++++ b/backend/src/__tests__/cases-routes.test.ts
+@@ -1,85 +1,44 @@
+-// @ts-nocheck -- heavy Prisma-shape mocks intentionally diverge from strict AppDb typing; suite is skipped (describe.skip) pending the Phase 4B-4 test rewrite
+ import express from 'express';
+ import request from 'supertest';
+ import { beforeEach, describe, expect, it, vi } from 'vitest';
+ import { createCasesRouter } from '../routes/cases.js';
+-import type { AppDb, AppDbTransaction, AppUserRecord, CaseRecord } from '../services/db-types.js';
++import type { AppDb, CaseRecord, Role } from '../services/db-types.js';
+ 
+-let mockUser: AppUserRecord | undefined;
+-
+-vi.mock('../middleware/auth', () => ({
+-  authenticateJwt: (req: express.Request, res: express.Response, next: express.NextFunction) => {
+-    if (mockUser === undefined) {
+-      res.status(401).json({ error: { code: 'unauthorized', message: 'Authentication required' } });
+-      return;
+-    }
+-    (req as express.Request & { user?: AppUserRecord }).user = mockUser;
+-    next();
+-  },
+-}));
++// The request user shape the routes actually read off req.user (Cognito JWT claims).
++interface MockUser { readonly sub: string; readonly email?: string; readonly roles: Role[]; }
++let mockUser: MockUser | undefined;
+ 
+ vi.mock('../auth/roles', () => ({
+   requireRole:
+-    (roles: readonly string[]) =>
++    (allowed: readonly string[]) =>
+     (req: express.Request, res: express.Response, next: express.NextFunction) => {
+-      const user = (req as express.Request & { user?: AppUserRecord }).user;
+-      if (user === undefined) {
+-        res.status(401).json({ error: { code: 'unauthorized', message: 'Authentication required' } });
+-        return;
+-      }
+-      if (!roles.includes(user.role)) {
+-        res.status(403).json({ error: { code: 'forbidden', message: 'Forbidden' } });
+-        return;
+-      }
++      const user = (req as express.Request & { user?: MockUser }).user;
++      if (user === undefined) { res.status(401).json({ error: { code: 'unauthorized', message: 'Authentication required' } }); return; }
++      if (!user.roles.some((r) => allowed.includes(r))) { res.status(403).json({ error: { code: 'forbidden', message: 'Forbidden' } }); return; }
+       next();
+     },
+ }));
+ 
+-vi.mock('../http/errors', () => {
+-  class HttpError extends Error {
+-    status: number;
+-    code: string;
+-    details?: Record<string, unknown>;
+-
+-    constructor(status: number, code: string, message: string, details?: Record<string, unknown>) {
+-      super(message);
+-      this.status = status;
+-      this.code = code;
+-      if (details !== undefined) this.details = details;
+-    }
+-  }
+-
+-  return {
+-    HttpError,
+-    isHttpError: (err: unknown): err is InstanceType<typeof HttpError> => err instanceof HttpError,
+-    sendError: (
+-      res: express.Response,
+-      status: number,
+-      code: string,
+-      message: string,
+-      details?: Record<string, unknown>,
+-    ) => res.status(status).json({ error: { code, message, ...(details !== undefined && { details }) } }),
+-  };
+-});
+-
+-vi.mock('../http/async-handler', () => ({
+-  asyncHandler:
+-    (handler: express.RequestHandler): express.RequestHandler =>
+-    (req, res, next) => {
+-      Promise.resolve(handler(req, res, next)).catch(next);
+-    },
+-}));
+-
+ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
+   return {
+     id: 'CASE-1',
+     veteranId: 'VET-1',
+     claimedCondition: 'condition field not asserted',
+     claimType: 'initial',
++    framingChoice: null,
++    upstreamScCondition: null,
++    veteranStatement: null,
++    inServiceEvent: null,
+     status: 'intake',
+-    version: 1,
++    cdsVerdict: 'not_yet_run',
++    cdsOddsPct: null,
++    cdsRationale: null,
+     assignedPhysicianId: null,
+     refundEligible: false,
++    currentVersion: 0,
++    createdAt: new Date('2026-05-24T00:00:00.000Z'),
++    updatedAt: new Date('2026-05-24T00:00:00.000Z'),
++    version: 1,
+     ...overrides,
+   };
+ }
+@@ -90,63 +49,35 @@ function makeDb(initialCase: CaseRecord = baseCase()) {
+   const caseFindFirst = vi.fn(async () => current);
+   const caseFindMany = vi.fn(async () => [current]);
+   const caseCount = vi.fn(async () => 1);
+-  const caseCreate = vi.fn(async (args: Record<string, unknown>) => {
+-    const data = args.data as Partial<CaseRecord>;
+-    current = baseCase({ ...data, version: 1, status: 'intake' });
+-    return current;
+-  });
+-  const caseUpdate = vi.fn(async (args: Record<string, unknown>) => {
+-    const data = args.data as Record<string, unknown>;
+-    current = {
+-      ...current,
+-      ...data,
+-      version: current.version + 1,
+-    };
+-    return current;
+-  });
+-
+-  const tx: AppDbTransaction = {
+-    case: {
+-      findMany: caseFindMany,
+-      findFirst: caseFindFirst,
+-      findUnique: caseFindFirst,
+-      count: caseCount,
+-      create: caseCreate,
+-      update: caseUpdate,
+-    },
+-    veteran: {
+-      findUnique: vi.fn(async () => ({ id: 'VET-1' })),
+-    },
+-    draftJob: {
+-      findMany: vi.fn(async () => [{ id: 'DJ-1', version: 1 }]),
+-    },
+-    correction: {
+-      findMany: vi.fn(async () => [{ id: 'CORR-1' }]),
+-    },
+-    activityLog: {
+-      create: activityLogCreate,
+-    },
++  const caseCreate = vi.fn(async (args: { data: Partial<CaseRecord> }) => { current = baseCase({ ...args.data, version: 1, status: 'intake' }); return current; });
++  const caseUpdate = vi.fn(async (args: { data: Record<string, unknown> }) => { current = { ...current, ...args.data, version: current.version + 1 } as CaseRecord; return current; });
++  const draftJobFindMany = vi.fn(async () => [{ id: 'DJ-1', version: 1 }]);
++  const correctionFindMany = vi.fn(async () => [{ id: 'CORR-1' }]);
++  const veteranFindUnique = vi.fn(async () => ({ id: 'VET-1' }));
++
++  const tx = {
++    case: { findMany: caseFindMany, findFirst: caseFindFirst, findUnique: caseFindFirst, count: caseCount, create: caseCreate, update: caseUpdate },
++    veteran: { findUnique: veteranFindUnique },
++    draftJob: { findMany: draftJobFindMany },
++    correction: { findMany: correctionFindMany },
++    activityLog: { create: activityLogCreate },
+   };
++  const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
+ 
+-  const db: AppDb = {
+-    ...tx,
+-    $transaction: vi.fn(async <T,>(fn: (innerTx: AppDbTransaction) => Promise<T>) => fn(tx)),
+-  };
+-
+-  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate } };
++  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, draftJobFindMany } };
+ }
+ 
+ function appFor(db: AppDb) {
+   const app = express();
+   app.use(express.json());
++  // Stand in for authenticateJwt: populate req.user from the current mock user (or leave it unset for 401 paths).
++  app.use((req, _res, next) => { if (mockUser) (req as express.Request & { user?: MockUser }).user = mockUser; next(); });
+   app.use('/api/v1', createCasesRouter(db));
+   return app;
+ }
+ 
+-describe.skip('cases routes', () => {
+-  beforeEach(() => {
+-    mockUser = { id: 'USER-1', cognitoSub: 'sub', email: 'a@example.com', roles: ['admin'] as const };
+-  });
++describe('cases routes', () => {
++  beforeEach(() => { mockUser = { sub: 'USER-1', email: 'a@example.com', roles: ['admin'] }; });
+ 
+   it('returns 401 unauthenticated', async () => {
+     mockUser = undefined;
+@@ -156,7 +87,7 @@ describe.skip('cases routes', () => {
+   });
+ 
+   it('returns 403 wrong role for case list', async () => {
+-    mockUser = { id: 'USER-1', cognitoSub: 'sub', email: 'phys@example.com', roles: ['physician'] as const };
++    mockUser = { sub: 'USER-1', email: 'phys@example.com', roles: ['physician'] };
+     const { db } = makeDb();
+     const res = await request(appFor(db)).get('/api/v1/cases');
+     expect(res.status).toBe(403);
+@@ -164,20 +95,14 @@ describe.skip('cases routes', () => {
+ 
+   it('creates a case and writes activity row', async () => {
+     const { db, spies } = makeDb();
+-    const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/cases').send({
+-      id: 'CASE-2',
+-      claimedCondition: 'redacted test condition',
+-      claimType: 'initial',
+-    });
++    const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/cases').send({ id: 'CASE-2', claimedCondition: 'redacted test condition', claimType: 'initial' });
+     expect(res.status).toBe(201);
+     expect(spies.caseCreate).toHaveBeenCalled();
+-    expect(spies.activityLogCreate).toHaveBeenCalledWith(
+-      expect.objectContaining({ data: expect.objectContaining({ action: 'case_created' }) }),
+-    );
++    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'case_created' }) }));
+   });
+ 
+   it('lists paginated cases with veteran lite info', async () => {
+-    const { db, spies } = makeDb(baseCase({ veteran: { id: 'VET-1', firstName: 'A', lastName: 'B' } }));
++    const { db, spies } = makeDb();
+     const res = await request(appFor(db)).get('/api/v1/cases?page=1&pageSize=10');
+     expect(res.status).toBe(200);
+     expect(res.body.total).toBe(1);
+@@ -185,127 +110,69 @@ describe.skip('cases routes', () => {
+   });
+ 
+   it('gets a single case with relations', async () => {
+-    const { db, spies } = makeDb(baseCase({ draftJobs: [], corrections: [], emails: [], payments: [] }));
++    const { db, spies } = makeDb();
+     const res = await request(appFor(db)).get('/api/v1/cases/CASE-1');
+     expect(res.status).toBe(200);
+-    expect(spies.caseFindFirst).toHaveBeenCalledWith(
+-      expect.objectContaining({ include: expect.objectContaining({ draftJobs: expect.any(Object) }) }),
+-    );
++    expect(spies.caseFindFirst).toHaveBeenCalledWith(expect.objectContaining({ include: expect.objectContaining({ draftJobs: expect.any(Object) }) }));
+   });
+ 
+   it('patches fields, bumps version, and writes activity row', async () => {
+     const { db, spies } = makeDb();
+-    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({
+-      version: 1,
+-      framingChoice: 'redacted framing',
+-    });
++    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, framingChoice: 'redacted framing' });
+     expect(res.status).toBe(200);
+-    expect(spies.caseUpdate).toHaveBeenCalledWith(
+-      expect.objectContaining({ data: expect.objectContaining({ version: { increment: 1 } }) }),
+-    );
+-    expect(spies.activityLogCreate).toHaveBeenCalledWith(
+-      expect.objectContaining({ data: expect.objectContaining({ action: 'case_updated' }) }),
+-    );
++    expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ version: { increment: 1 } }) }));
++    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'case_updated' }) }));
+   });
+ 
+   it('rejects PATCH stale version with 409', async () => {
+     const { db } = makeDb(baseCase({ version: 2 }));
+-    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({
+-      version: 1,
+-      framingChoice: 'redacted framing',
+-    });
++    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, framingChoice: 'redacted framing' });
+     expect(res.status).toBe(409);
+   });
+ 
+-  it('soft deletes as rejected with distinct activity action, admin only', async () => {
++  it('soft deletes as rejected (204) with distinct activity action, admin only', async () => {
+     const { db, spies } = makeDb(baseCase({ status: 'records' }));
+     const res = await request(appFor(db)).delete('/api/v1/cases/CASE-1');
+-    expect(res.status).toBe(200);
+-    expect(spies.caseUpdate).toHaveBeenCalledWith(
+-      expect.objectContaining({ data: expect.objectContaining({ status: 'rejected' }) }),
+-    );
+-    expect(spies.activityLogCreate).toHaveBeenCalledWith(
+-      expect.objectContaining({
+-        data: expect.objectContaining({
+-          action: 'case_soft_deleted',
+-          detailsJson: expect.objectContaining({ previousStatus: 'records' }),
+-        }),
+-      }),
+-    );
++    expect(res.status).toBe(204);
++    expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'rejected' }) }));
++    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'case_soft_deleted', detailsJson: expect.objectContaining({ previousStatus: 'records' }) }) }));
+   });
+ 
+   it('performs valid status transition without touching draft jobs', async () => {
+     const { db, tx, spies } = makeDb(baseCase({ status: 'intake', version: 1 }));
+-    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
+-      from: 'intake',
+-      to: 'records',
+-      version: 1,
+-      transitionReason: 'per supervisor approval',
+-    });
++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({ from: 'intake', to: 'records', version: 1, transitionReason: 'per supervisor approval' });
+     expect(res.status).toBe(200);
+     expect(tx.draftJob.findMany).not.toHaveBeenCalled();
+-    expect(spies.activityLogCreate).toHaveBeenCalledWith(
+-      expect.objectContaining({
+-        data: expect.objectContaining({
+-          action: 'case_status_changed',
+-          detailsJson: expect.objectContaining({ transitionReason: 'per supervisor approval' }),
+-        }),
+-      }),
+-    );
++    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'case_status_changed', detailsJson: expect.objectContaining({ transitionReason: 'per supervisor approval' }) }) }));
+   });
+ 
+   it('rejects invalid status transition with 400', async () => {
+     const { db } = makeDb(baseCase({ status: 'intake', version: 1 }));
+-    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
+-      from: 'intake',
+-      to: 'delivered',
+-      version: 1,
+-    });
++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({ from: 'intake', to: 'delivered', version: 1 });
+     expect(res.status).toBe(400);
+   });
+ 
+   it('allows physician_review to delivered for physician but not ops_staff', async () => {
+-    mockUser = { id: 'PHYS-USER', cognitoSub: 'sub', email: 'phys@example.com', roles: ['physician'] as const };
++    mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+     const allowed = makeDb(baseCase({ status: 'physician_review', version: 1 }));
+-    const allowedRes = await request(appFor(allowed.db)).post('/api/v1/cases/CASE-1/status').send({
+-      from: 'physician_review',
+-      to: 'delivered',
+-      version: 1,
+-    });
++    const allowedRes = await request(appFor(allowed.db)).post('/api/v1/cases/CASE-1/status').send({ from: 'physician_review', to: 'delivered', version: 1 });
+     expect(allowedRes.status).toBe(200);
+ 
+-    mockUser = { id: 'OPS-USER', cognitoSub: 'sub', email: 'ops@example.com', roles: ['ops_staff'] as const };
++    mockUser = { sub: 'OPS-USER', email: 'ops@example.com', roles: ['ops_staff'] };
+     const denied = makeDb(baseCase({ status: 'physician_review', version: 1 }));
+-    const deniedRes = await request(appFor(denied.db)).post('/api/v1/cases/CASE-1/status').send({
+-      from: 'physician_review',
+-      to: 'delivered',
+-      version: 1,
+-    });
++    const deniedRes = await request(appFor(denied.db)).post('/api/v1/cases/CASE-1/status').send({ from: 'physician_review', to: 'delivered', version: 1 });
+     expect(deniedRes.status).toBe(403);
+   });
+ 
+   it('rejects stale status transition with 409', async () => {
+     const { db } = makeDb(baseCase({ status: 'intake', version: 2 }));
+-    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
+-      from: 'intake',
+-      to: 'records',
+-      version: 1,
+-    });
++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({ from: 'intake', to: 'records', version: 1 });
+     expect(res.status).toBe(409);
+   });
+ 
+-  it.each([
+-    ['123-45-6789'],
+-    ['call 555-123-4567 back'],
+-    ['veteran@example.com confirmed'],
+-  ])('rejects PHI-shaped transitionReason %s', async (transitionReason) => {
++  it.each([['123-45-6789'], ['call 555-123-4567 back'], ['veteran@example.com confirmed']])('rejects PHI-shaped transitionReason %s', async (transitionReason) => {
+     const { db } = makeDb(baseCase({ status: 'intake', version: 1 }));
+-    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({
+-      from: 'intake',
+-      to: 'records',
+-      version: 1,
+-      transitionReason,
+-    });
++    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({ from: 'intake', to: 'records', version: 1, transitionReason });
+     expect(res.status).toBe(400);
+   });
+ });
+diff --git a/docs/PHASE4B_4_SUMMARY.md b/docs/PHASE4B_4_SUMMARY.md
+new file mode 100644
+index 0000000..30d1882
+--- /dev/null
++++ b/docs/PHASE4B_4_SUMMARY.md
+@@ -0,0 +1,26 @@
++# Phase 4B-4 Summary — `/cases/:id` Case Detail page (+ un-skip the cases backend test)
++
++Built by Claude Code against `main` (on top of 4B-3).
++
++## New / modified files
++
++- `frontend/src/api/cases.ts` (modified) — added `getCase`, `patchCase`, `transitionCaseStatus`, `deleteCase`, `listDraftJobs`, `listCorrections`, plus `CaseDetail` / `PatchCaseInput` / `TransitionInput` types.
++- `frontend/src/routes/cases/CaseDetailPage.tsx` (replaces the 4B-1 placeholder) — full page:
++  - Header card: condition + `<CaseStatusBadge>`, case id, claim type, veteran link, relative updatedAt, row version.
++  - **Role-filtered** status transition buttons via `allowedNextStatusesForRole(role, status)` — mirrors the backend role gate, so an ops_staff user on a `physician_review` case sees only `Move to rejected`; an admin sees delivered/correction_requested too.
++  - Transition modal: optional `transitionReason` (audit-note placeholder), Confirm/Cancel. On **409** → "modified, retry"; on **400 PHI rejection** → inline server message.
++  - Admin-only `Reject + soft delete` (DELETE → 204) behind a confirm dialog.
++  - Tabs (shared `<TabBar>`): **Overview** (inline-edit rows for framingChoice / upstreamScCondition / veteranStatement / inServiceEvent, optimistic-lock via `version`, 409 → refetch + alert), **Draft jobs** (read-only), **Corrections** (read-only; maps `correctionReason`/`billingTier`), **Documents** (card linking to `/veterans/:id#documents`, no embedded panel), **Activity** (placeholder).
++- `frontend/src/__tests__/CaseDetailPage.test.tsx` (new) — admin sees header + `Move to delivered` + `Reject + soft delete`.
++- `backend/src/__tests__/cases-routes.test.ts` (rewritten) — **un-skipped** (`describe.skip` → `describe`) and made type-correct: removed the `@ts-nocheck`, fixed the `req.user` mock shape (JWT claims `{ sub, email?, roles }` — the old mock used `AppUserRecord`, which lacks `sub` and types `roles` as `{role}[]`), completed `baseCase` to a full `CaseRecord`, injected `req.user` in `appFor` (the suite never set it before), and **corrected the stale DELETE assertion (was `200`, route returns `204`)**. Now **15 tests pass**.
++
++## Verification (local; evidence under `docs/verification/phase4B-4-evidence/`)
++
++- `lint` (root) → 0 · `typecheck` (root) → 0
++- `test -w frontend` → **17 pass** · `test -w backend` → **21 pass** (cases suite now runs)
++- frontend + backend `tsc --noEmit` → exit 0
++
++## Notes
++
++- The DELETE/`Reject + soft delete` button is shown only to admins; it sets `status = rejected` (the case stays visible). The status-transition `Move to rejected` reaches the same end state via the transition endpoint — both are intentionally present (the brief specifies the admin destructive action; transition-to-rejected is the role-gated path for the rest).
++- Physicians still cannot reach this page (route is admin + ops_staff per the 4A retro); physician sign-off in-UI lands in Phase 5.
+diff --git a/docs/verification/phase4B-4-evidence/test-output.txt b/docs/verification/phase4B-4-evidence/test-output.txt
+new file mode 100644
+index 0000000..a9cd77e
+--- /dev/null
++++ b/docs/verification/phase4B-4-evidence/test-output.txt
+@@ -0,0 +1,10 @@
++## frontend vitest
++[2m      Tests [22m [1m[32m17 passed[39m[22m[90m (17)[39m
++[2m   Start at [22m 10:33:08
++[2m   Duration [22m 71.51s[2m (transform 26.11s, setup 41.69s, collect 142.51s, tests 20.27s, environment 228.65s, prepare 38.00s)[22m
++
++## backend vitest (cases suite now un-skipped)
++      Tests  21 passed (21)
++   Start at  10:34:26
++   Duration  12.13s (transform 8.41s, setup 0ms, import 8.42s, tests 1.53s, environment 3ms)
++
+diff --git a/docs/verification/phase4B-4-evidence/typecheck.txt b/docs/verification/phase4B-4-evidence/typecheck.txt
+new file mode 100644
+index 0000000..3586e0e
+--- /dev/null
++++ b/docs/verification/phase4B-4-evidence/typecheck.txt
+@@ -0,0 +1,4 @@
++## frontend tsc --noEmit
++exit 0
++## backend tsc --noEmit
++backend tsc exit 0
+diff --git a/frontend/src/__tests__/CaseDetailPage.test.tsx b/frontend/src/__tests__/CaseDetailPage.test.tsx
+new file mode 100644
+index 0000000..65e9d73
+--- /dev/null
++++ b/frontend/src/__tests__/CaseDetailPage.test.tsx
+@@ -0,0 +1,39 @@
++import type { ReactNode } from 'react';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { render, screen } from '@testing-library/react';
++import { MemoryRouter, Route, Routes } from 'react-router-dom';
++import { describe, expect, it, vi } from 'vitest';
++import { CaseDetailPage } from '../routes/cases/CaseDetailPage';
++
++vi.mock('../auth/useAuth', () => ({ useAuth: () => ({ user: { sub: 's', email: 'a@x.com', roles: ['admin'], role: 'admin' } }) }));
++vi.mock('../api/cases', () => ({
++  getCase: vi.fn(async () => ({ data: {
++    id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'Hypertension', claimType: 'initial',
++    status: 'physician_review', cdsVerdict: 'not_yet_run', refundEligible: false, currentVersion: 1,
++    framingChoice: 'secondary', upstreamScCondition: 'PTSD', veteranStatement: '', inServiceEvent: '',
++    createdAt: '2026-05-01T00:00:00Z', updatedAt: new Date(Date.now() - 3_600_000).toISOString(), version: 2,
++    veteran: { id: 'VET-1', firstName: 'Jane', lastName: 'Doe', email: 'j@x.com' }, assignedPhysician: null,
++    documents: [], draftJobs: [], corrections: [], emails: [], payments: [],
++  } })),
++  patchCase: vi.fn(), transitionCaseStatus: vi.fn(), deleteCase: vi.fn(),
++  listDraftJobs: vi.fn(async () => ({ data: [] })), listCorrections: vi.fn(async () => ({ data: [] })),
++}));
++vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
++
++describe('CaseDetailPage', () => {
++  it('renders the case header and admin transition controls', async () => {
++    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++    render(
++      <QueryClientProvider client={client}>
++        <MemoryRouter initialEntries={['/cases/CASE-1']}>
++          <Routes><Route path="/cases/:id" element={<CaseDetailPage />} /></Routes>
++        </MemoryRouter>
++      </QueryClientProvider>,
++    );
++    expect(await screen.findByText('Hypertension')).toBeInTheDocument();
++    expect(screen.getByText('Physician review')).toBeInTheDocument(); // status badge
++    // From physician_review, an admin may move to delivered / correction_requested / rejected.
++    expect(screen.getByRole('button', { name: /move to delivered/i })).toBeInTheDocument();
++    expect(screen.getByRole('button', { name: /reject \+ soft delete/i })).toBeInTheDocument();
++  });
++});
+diff --git a/frontend/src/api/cases.ts b/frontend/src/api/cases.ts
+index e21305a..23361ef 100644
+--- a/frontend/src/api/cases.ts
++++ b/frontend/src/api/cases.ts
+@@ -1,5 +1,5 @@
+-import { apiGet, apiPost } from './client';
+-import type { CaseStatus, ClaimType } from '../types/prisma';
++import { apiDelete, apiGet, apiPatch, apiPost } from './client';
++import type { Case, CaseStatus, ClaimType, Correction, Document, DraftJob, Email, Payment } from '../types/prisma';
+ 
+ export interface CaseVeteranLite { readonly id: string; readonly firstName: string; readonly lastName: string; readonly email: string; }
+ export interface CasePhysicianLite { readonly id: string; readonly fullName: string; readonly email: string; }
+@@ -63,3 +63,54 @@ export interface CreateCaseInput {
+ export async function createCase(veteranId: string, input: CreateCaseInput): Promise<{ data: CaseLite }> {
+   return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/cases`, input);
+ }
++
++export interface CaseDetail extends Case {
++  readonly veteran?: CaseVeteranLite | null;
++  readonly assignedPhysician?: CasePhysicianLite | null;
++  readonly documents?: readonly Document[];
++  readonly draftJobs?: readonly DraftJob[];
++  readonly corrections?: readonly Correction[];
++  readonly emails?: readonly Email[];
++  readonly payments?: readonly Payment[];
++  readonly _count?: { readonly documents: number; readonly draftJobs: number; readonly corrections: number; readonly emails: number; readonly payments: number };
++}
++
++export interface PatchCaseInput {
++  readonly version: number;
++  readonly claimedCondition?: string;
++  readonly framingChoice?: string | null;
++  readonly upstreamScCondition?: string | null;
++  readonly veteranStatement?: string | null;
++  readonly inServiceEvent?: string | null;
++}
++
++export interface TransitionInput {
++  readonly from: CaseStatus;
++  readonly to: CaseStatus;
++  readonly version: number;
++  readonly transitionReason?: string;
++}
++
++export async function getCase(id: string): Promise<{ data: CaseDetail }> {
++  return apiGet(`/api/v1/cases/${encodeURIComponent(id)}`);
++}
++
++export async function patchCase(id: string, input: PatchCaseInput): Promise<{ data: CaseLite }> {
++  return apiPatch(`/api/v1/cases/${encodeURIComponent(id)}`, input);
++}
++
++export async function transitionCaseStatus(id: string, input: TransitionInput): Promise<{ data: CaseLite }> {
++  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/status`, input);
++}
++
++export async function deleteCase(id: string): Promise<void> {
++  return apiDelete(`/api/v1/cases/${encodeURIComponent(id)}`);
++}
++
++export async function listDraftJobs(id: string): Promise<{ data: readonly DraftJob[] }> {
++  return apiGet(`/api/v1/cases/${encodeURIComponent(id)}/draft-jobs`);
++}
++
++export async function listCorrections(id: string): Promise<{ data: readonly Correction[] }> {
++  return apiGet(`/api/v1/cases/${encodeURIComponent(id)}/corrections`);
++}
+diff --git a/frontend/src/routes/cases/CaseDetailPage.tsx b/frontend/src/routes/cases/CaseDetailPage.tsx
+index de20566..73907a6 100644
+--- a/frontend/src/routes/cases/CaseDetailPage.tsx
++++ b/frontend/src/routes/cases/CaseDetailPage.tsx
+@@ -1,10 +1,164 @@
+-import { useParams } from 'react-router-dom';
++import { useState } from 'react';
++import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
++import { Link, useParams } from 'react-router-dom';
+ import { AppShell } from '../../layout/AppShell';
++import { Button } from '../../components/ui/Button';
+ import { EmptyState } from '../../components/ui/EmptyState';
++import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
++import { TabBar, type TabItem } from '../../components/ui/TabBar';
++import { useAuth } from '../../auth/useAuth';
++import { ConflictError } from '../../api/client';
++import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
++import { formatRelativeTime } from '../../lib/date';
++import {
++  deleteCase, getCase, listCorrections, listDraftJobs, patchCase, transitionCaseStatus,
++  type CaseDetail, type PatchCaseInput, type TransitionInput,
++} from '../../api/cases';
++import type { CaseStatus, Role } from '../../types/prisma';
++
++type TabId = 'overview' | 'drafts' | 'corrections' | 'documents' | 'activity';
++const TABS: readonly TabItem<TabId>[] = [
++  { id: 'overview', label: 'Overview' },
++  { id: 'drafts', label: 'Draft jobs' },
++  { id: 'corrections', label: 'Corrections' },
++  { id: 'documents', label: 'Documents' },
++  { id: 'activity', label: 'Activity' },
++];
++
++function serverErrorMessage(err: unknown): string | undefined {
++  return (err as { response?: { data?: { error?: { message?: string } } } })?.response?.data?.error?.message;
++}
+ 
+-// Placeholder route target wired in Phase 4B-1 so /cases/:id navigation does not 404.
+-// The full Case Detail page ships in Phase 4B-4.
+ export function CaseDetailPage() {
+   const { id } = useParams();
+-  return <AppShell><EmptyState title={`Case ${id ?? ''}`} message="Case detail ships in Phase 4B-4." /></AppShell>;
++  const caseId = id ?? '';
++  const { user } = useAuth();
++  const role: Role = user?.role ?? 'ops_staff';
++  const qc = useQueryClient();
++  const [tab, setTab] = useState<TabId>('overview');
++  const [pendingTo, setPendingTo] = useState<CaseStatus | null>(null);
++
++  const caseQuery = useQuery({ queryKey: ['case', caseId], queryFn: () => getCase(caseId), enabled: caseId.length > 0 });
++  const refetch = () => qc.invalidateQueries({ queryKey: ['case', caseId] });
++
++  const patch = useMutation({
++    mutationFn: (input: PatchCaseInput) => patchCase(caseId, input),
++    onSuccess: () => refetch(),
++    onError: async (err) => { if (err instanceof ConflictError) { await refetch(); window.alert('This case was modified elsewhere. Reloaded the latest version — please retry your edit.'); } },
++  });
++
++  const del = useMutation({ mutationFn: () => deleteCase(caseId), onSuccess: () => refetch() });
++
++  if (caseQuery.isLoading) return <AppShell><div className="text-sm text-slate-500">Loading case…</div></AppShell>;
++  if (!caseQuery.data) return <AppShell><EmptyState title="Case not found" message="The requested case could not be loaded." /></AppShell>;
++  const c = caseQuery.data.data;
++  const nextStatuses = allowedNextStatusesForRole(role, c.status);
++
++  return <AppShell><div className="space-y-6">
++    <div className="rounded-lg border border-slate-200 bg-white p-6">
++      <div className="flex flex-col justify-between gap-4 lg:flex-row">
++        <div>
++          <div className="flex items-center gap-3"><h1 className="text-2xl font-semibold text-slate-900">{c.claimedCondition}</h1><CaseStatusBadge status={c.status} /></div>
++          <p className="mt-1 text-sm text-slate-500">
++            Case {c.id} · {c.claimType} · <Link className="text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</Link>
++          </p>
++          <p className="mt-1 text-xs text-slate-400">Updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
++        </div>
++        <div className="flex flex-wrap items-start gap-2">
++          {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>Move to {CASE_STATUS_LABELS[to].toLowerCase()}</Button>)}
++          {role === 'admin' ? <Button variant="destructive" size="sm" onClick={() => { if (window.confirm('Reject and soft-delete this case? It will be marked rejected.')) del.mutate(); }} loading={del.isPending}>Reject + soft delete</Button> : null}
++        </div>
++      </div>
++    </div>
++
++    <div className="rounded-lg border border-slate-200 bg-white">
++      <TabBar tabs={TABS} active={tab} onChange={setTab} />
++      <div className="p-4">
++        {tab === 'overview' ? <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} /> : null}
++        {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
++        {tab === 'corrections' ? <CorrectionsTab caseId={caseId} /> : null}
++        {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} /> : null}
++        {tab === 'activity' ? <EmptyState title="Activity" message="The per-case activity log ships in a later phase." /> : null}
++      </div>
++    </div>
++
++    {pendingTo ? <TransitionModal caseId={caseId} from={c.status} to={pendingTo} version={c.version} onClose={() => setPendingTo(null)} onDone={async () => { setPendingTo(null); await refetch(); }} /> : null}
++  </div></AppShell>;
++}
++
++type EditableField = 'framingChoice' | 'upstreamScCondition' | 'veteranStatement' | 'inServiceEvent';
++
++function OverviewTab({ c, onSave, saving }: { readonly c: CaseDetail; readonly onSave: (field: EditableField, value: string) => void; readonly saving: boolean }) {
++  return <div className="divide-y divide-slate-100">
++    <InlineEditRow label="Framing" value={c.framingChoice ?? ''} saving={saving} onSave={(v) => onSave('framingChoice', v)} />
++    <InlineEditRow label="Upstream SC condition" value={c.upstreamScCondition ?? ''} saving={saving} onSave={(v) => onSave('upstreamScCondition', v)} />
++    <InlineEditRow label="Veteran statement" value={c.veteranStatement ?? ''} multiline saving={saving} onSave={(v) => onSave('veteranStatement', v)} />
++    <InlineEditRow label="In-service event" value={c.inServiceEvent ?? ''} multiline saving={saving} onSave={(v) => onSave('inServiceEvent', v)} />
++  </div>;
++}
++
++function InlineEditRow({ label, value, multiline = false, saving, onSave }: { readonly label: string; readonly value: string; readonly multiline?: boolean; readonly saving: boolean; readonly onSave: (value: string) => void }) {
++  const [editing, setEditing] = useState(false);
++  const [draft, setDraft] = useState(value);
++  function start() { setDraft(value); setEditing(true); }
++  function save() { onSave(draft); setEditing(false); }
++  return <div className="py-3">
++    <div className="flex items-start justify-between gap-4">
++      <span className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</span>
++      {editing
++        ? <div className="flex gap-2"><button type="button" className="text-xs text-slate-500" onClick={() => setEditing(false)}>Cancel</button><button type="button" className="text-xs text-indigo-600" onClick={save} disabled={saving}>Save</button></div>
++        : <button type="button" aria-label={`Edit ${label}`} className="text-xs text-indigo-600" onClick={start}>Edit</button>}
++    </div>
++    {editing
++      ? (multiline
++          ? <textarea className="input mt-2 min-h-24" value={draft} onChange={(e) => setDraft(e.target.value)} />
++          : <input className="input mt-2" value={draft} onChange={(e) => setDraft(e.target.value)} />)
++      : <p className="mt-1 whitespace-pre-wrap text-sm text-slate-800">{value || <span className="text-slate-400">—</span>}</p>}
++  </div>;
++}
++
++function TransitionModal({ caseId, from, to, version, onClose, onDone }: { readonly caseId: string; readonly from: CaseStatus; readonly to: CaseStatus; readonly version: number; readonly onClose: () => void; readonly onDone: () => void }) {
++  const [reason, setReason] = useState('');
++  const [err, setErr] = useState<string | null>(null);
++  const mut = useMutation({
++    mutationFn: (): Promise<unknown> => {
++      const input: TransitionInput = { from, to, version, ...(reason.trim() && { transitionReason: reason.trim() }) };
++      return transitionCaseStatus(caseId, input);
++    },
++    onSuccess: () => onDone(),
++    onError: (e) => {
++      if (e instanceof ConflictError) { setErr('This case was modified since you loaded it. Close this dialog and retry.'); return; }
++      setErr(serverErrorMessage(e) ?? 'The status change could not be saved.');
++    },
++  });
++  return <div className="fixed inset-0 z-50 bg-slate-900/40 p-6"><div className="mx-auto mt-24 max-w-md rounded-lg bg-white p-6 shadow-xl">
++    <h2 className="text-lg font-semibold text-slate-900">Move to {CASE_STATUS_LABELS[to].toLowerCase()}</h2>
++    <p className="mt-1 text-sm text-slate-500">From {CASE_STATUS_LABELS[from].toLowerCase()}.</p>
++    <label className="mt-4 block text-sm"><span className="mb-1 block font-medium text-slate-700">Audit note (optional)</span><input className="input" placeholder="Audit note — no PHI, e.g., 'per supervisor approval'" value={reason} onChange={(e) => { setReason(e.target.value); setErr(null); }} /></label>
++    {err ? <p className="mt-2 text-sm text-rose-600">{err}</p> : null}
++    <div className="mt-5 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={() => mut.mutate()} loading={mut.isPending}>Confirm</Button></div>
++  </div></div>;
++}
++
++function DraftJobsTab({ caseId }: { readonly caseId: string }) {
++  const q = useQuery({ queryKey: ['case', caseId, 'draft-jobs'], queryFn: () => listDraftJobs(caseId) });
++  if (q.isLoading) return <div className="text-sm text-slate-500">Loading draft jobs…</div>;
++  const rows = q.data?.data ?? [];
++  if (!rows.length) return <EmptyState title="No draft jobs" message="No drafting runs have been enqueued for this case." />;
++  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Version</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d) => <tr key={d.id}><td className="px-4 py-2">{d.version}</td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td></tr>)}</tbody></table></div>;
++}
++
++function CorrectionsTab({ caseId }: { readonly caseId: string }) {
++  const q = useQuery({ queryKey: ['case', caseId, 'corrections'], queryFn: () => listCorrections(caseId) });
++  if (q.isLoading) return <div className="text-sm text-slate-500">Loading corrections…</div>;
++  const rows = q.data?.data ?? [];
++  if (!rows.length) return <EmptyState title="No corrections" message="No correction history for this case." />;
++  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">From</th><th className="px-4 py-2">To</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2">Requested by</th><th className="px-4 py-2">Approved by</th><th className="px-4 py-2">Billing</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((r) => <tr key={r.id}><td className="px-4 py-2">{r.fromVersion}</td><td className="px-4 py-2">{r.toVersion ?? '—'}</td><td className="px-4 py-2">{r.correctionReason}</td><td className="px-4 py-2 text-slate-500">{r.requestedBy}</td><td className="px-4 py-2 text-slate-500">{r.approvedBy ?? '—'}</td><td className="px-4 py-2 text-slate-500">{r.billingTier}</td></tr>)}</tbody></table></div>;
++}
++
++function DocumentsTab({ veteranId }: { readonly veteranId: string }) {
++  return <div className="rounded-lg border border-dashed border-slate-300 bg-white p-6 text-center">
++    <p className="text-sm text-slate-600">Documents are managed at the veteran chart level.</p>
++    <div className="mt-3"><Link to={`/veterans/${encodeURIComponent(veteranId)}#documents`}><Button variant="secondary" size="sm">Open veteran documents</Button></Link></div>
++  </div>;
+ }

@@ -1,5 +1,5 @@
-import { apiGet, apiPost } from './client';
-import type { CaseStatus, ClaimType } from '../types/prisma';
+import { apiDelete, apiGet, apiPatch, apiPost } from './client';
+import type { Case, CaseStatus, ClaimType, Correction, Document, DraftJob, Email, Payment } from '../types/prisma';
 
 export interface CaseVeteranLite { readonly id: string; readonly firstName: string; readonly lastName: string; readonly email: string; }
 export interface CasePhysicianLite { readonly id: string; readonly fullName: string; readonly email: string; }
@@ -62,4 +62,55 @@ export interface CreateCaseInput {
 
 export async function createCase(veteranId: string, input: CreateCaseInput): Promise<{ data: CaseLite }> {
   return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/cases`, input);
+}
+
+export interface CaseDetail extends Case {
+  readonly veteran?: CaseVeteranLite | null;
+  readonly assignedPhysician?: CasePhysicianLite | null;
+  readonly documents?: readonly Document[];
+  readonly draftJobs?: readonly DraftJob[];
+  readonly corrections?: readonly Correction[];
+  readonly emails?: readonly Email[];
+  readonly payments?: readonly Payment[];
+  readonly _count?: { readonly documents: number; readonly draftJobs: number; readonly corrections: number; readonly emails: number; readonly payments: number };
+}
+
+export interface PatchCaseInput {
+  readonly version: number;
+  readonly claimedCondition?: string;
+  readonly framingChoice?: string | null;
+  readonly upstreamScCondition?: string | null;
+  readonly veteranStatement?: string | null;
+  readonly inServiceEvent?: string | null;
+}
+
+export interface TransitionInput {
+  readonly from: CaseStatus;
+  readonly to: CaseStatus;
+  readonly version: number;
+  readonly transitionReason?: string;
+}
+
+export async function getCase(id: string): Promise<{ data: CaseDetail }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(id)}`);
+}
+
+export async function patchCase(id: string, input: PatchCaseInput): Promise<{ data: CaseLite }> {
+  return apiPatch(`/api/v1/cases/${encodeURIComponent(id)}`, input);
+}
+
+export async function transitionCaseStatus(id: string, input: TransitionInput): Promise<{ data: CaseLite }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/status`, input);
+}
+
+export async function deleteCase(id: string): Promise<void> {
+  return apiDelete(`/api/v1/cases/${encodeURIComponent(id)}`);
+}
+
+export async function listDraftJobs(id: string): Promise<{ data: readonly DraftJob[] }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(id)}/draft-jobs`);
+}
+
+export async function listCorrections(id: string): Promise<{ data: readonly Correction[] }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(id)}/corrections`);
 }

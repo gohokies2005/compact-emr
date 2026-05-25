@@ -1,0 +1,10 @@
+## frontend vitest
+[2m      Tests [22m [1m[32m17 passed[39m[22m[90m (17)[39m
+[2m   Start at [22m 10:33:08
+[2m   Duration [22m 71.51s[2m (transform 26.11s, setup 41.69s, collect 142.51s, tests 20.27s, environment 228.65s, prepare 38.00s)[22m
+
+## backend vitest (cases suite now un-skipped)
+      Tests  21 passed (21)
+   Start at  10:34:26
+   Duration  12.13s (transform 8.41s, setup 0ms, import 8.42s, tests 1.53s, environment 3ms)
+

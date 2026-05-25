@@ -1,10 +1,164 @@
-import { useParams } from 'react-router-dom';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link, useParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
+import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
+import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
+import { TabBar, type TabItem } from '../../components/ui/TabBar';
+import { useAuth } from '../../auth/useAuth';
+import { ConflictError } from '../../api/client';
+import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
+import { formatRelativeTime } from '../../lib/date';
+import {
+  deleteCase, getCase, listCorrections, listDraftJobs, patchCase, transitionCaseStatus,
+  type CaseDetail, type PatchCaseInput, type TransitionInput,
+} from '../../api/cases';
+import type { CaseStatus, Role } from '../../types/prisma';
 
-// Placeholder route target wired in Phase 4B-1 so /cases/:id navigation does not 404.
-// The full Case Detail page ships in Phase 4B-4.
+type TabId = 'overview' | 'drafts' | 'corrections' | 'documents' | 'activity';
+const TABS: readonly TabItem<TabId>[] = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'drafts', label: 'Draft jobs' },
+  { id: 'corrections', label: 'Corrections' },
+  { id: 'documents', label: 'Documents' },
+  { id: 'activity', label: 'Activity' },
+];
+
+function serverErrorMessage(err: unknown): string | undefined {
+  return (err as { response?: { data?: { error?: { message?: string } } } })?.response?.data?.error?.message;
+}
+
 export function CaseDetailPage() {
   const { id } = useParams();
-  return <AppShell><EmptyState title={`Case ${id ?? ''}`} message="Case detail ships in Phase 4B-4." /></AppShell>;
+  const caseId = id ?? '';
+  const { user } = useAuth();
+  const role: Role = user?.role ?? 'ops_staff';
+  const qc = useQueryClient();
+  const [tab, setTab] = useState<TabId>('overview');
+  const [pendingTo, setPendingTo] = useState<CaseStatus | null>(null);
+
+  const caseQuery = useQuery({ queryKey: ['case', caseId], queryFn: () => getCase(caseId), enabled: caseId.length > 0 });
+  const refetch = () => qc.invalidateQueries({ queryKey: ['case', caseId] });
+
+  const patch = useMutation({
+    mutationFn: (input: PatchCaseInput) => patchCase(caseId, input),
+    onSuccess: () => refetch(),
+    onError: async (err) => { if (err instanceof ConflictError) { await refetch(); window.alert('This case was modified elsewhere. Reloaded the latest version — please retry your edit.'); } },
+  });
+
+  const del = useMutation({ mutationFn: () => deleteCase(caseId), onSuccess: () => refetch() });
+
+  if (caseQuery.isLoading) return <AppShell><div className="text-sm text-slate-500">Loading case…</div></AppShell>;
+  if (!caseQuery.data) return <AppShell><EmptyState title="Case not found" message="The requested case could not be loaded." /></AppShell>;
+  const c = caseQuery.data.data;
+  const nextStatuses = allowedNextStatusesForRole(role, c.status);
+
+  return <AppShell><div className="space-y-6">
+    <div className="rounded-lg border border-slate-200 bg-white p-6">
+      <div className="flex flex-col justify-between gap-4 lg:flex-row">
+        <div>
+          <div className="flex items-center gap-3"><h1 className="text-2xl font-semibold text-slate-900">{c.claimedCondition}</h1><CaseStatusBadge status={c.status} /></div>
+          <p className="mt-1 text-sm text-slate-500">
+            Case {c.id} · {c.claimType} · <Link className="text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</Link>
+          </p>
+          <p className="mt-1 text-xs text-slate-400">Updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
+        </div>
+        <div className="flex flex-wrap items-start gap-2">
+          {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>Move to {CASE_STATUS_LABELS[to].toLowerCase()}</Button>)}
+          {role === 'admin' ? <Button variant="destructive" size="sm" onClick={() => { if (window.confirm('Reject and soft-delete this case? It will be marked rejected.')) del.mutate(); }} loading={del.isPending}>Reject + soft delete</Button> : null}
+        </div>
+      </div>
+    </div>
+
+    <div className="rounded-lg border border-slate-200 bg-white">
+      <TabBar tabs={TABS} active={tab} onChange={setTab} />
+      <div className="p-4">
+        {tab === 'overview' ? <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} /> : null}
+        {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
+        {tab === 'corrections' ? <CorrectionsTab caseId={caseId} /> : null}
+        {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} /> : null}
+        {tab === 'activity' ? <EmptyState title="Activity" message="The per-case activity log ships in a later phase." /> : null}
+      </div>
+    </div>
+
+    {pendingTo ? <TransitionModal caseId={caseId} from={c.status} to={pendingTo} version={c.version} onClose={() => setPendingTo(null)} onDone={async () => { setPendingTo(null); await refetch(); }} /> : null}
+  </div></AppShell>;
+}
+
+type EditableField = 'framingChoice' | 'upstreamScCondition' | 'veteranStatement' | 'inServiceEvent';
+
+function OverviewTab({ c, onSave, saving }: { readonly c: CaseDetail; readonly onSave: (field: EditableField, value: string) => void; readonly saving: boolean }) {
+  return <div className="divide-y divide-slate-100">
+    <InlineEditRow label="Framing" value={c.framingChoice ?? ''} saving={saving} onSave={(v) => onSave('framingChoice', v)} />
+    <InlineEditRow label="Upstream SC condition" value={c.upstreamScCondition ?? ''} saving={saving} onSave={(v) => onSave('upstreamScCondition', v)} />
+    <InlineEditRow label="Veteran statement" value={c.veteranStatement ?? ''} multiline saving={saving} onSave={(v) => onSave('veteranStatement', v)} />
+    <InlineEditRow label="In-service event" value={c.inServiceEvent ?? ''} multiline saving={saving} onSave={(v) => onSave('inServiceEvent', v)} />
+  </div>;
+}
+
+function InlineEditRow({ label, value, multiline = false, saving, onSave }: { readonly label: string; readonly value: string; readonly multiline?: boolean; readonly saving: boolean; readonly onSave: (value: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  function start() { setDraft(value); setEditing(true); }
+  function save() { onSave(draft); setEditing(false); }
+  return <div className="py-3">
+    <div className="flex items-start justify-between gap-4">
+      <span className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</span>
+      {editing
+        ? <div className="flex gap-2"><button type="button" className="text-xs text-slate-500" onClick={() => setEditing(false)}>Cancel</button><button type="button" className="text-xs text-indigo-600" onClick={save} disabled={saving}>Save</button></div>
+        : <button type="button" aria-label={`Edit ${label}`} className="text-xs text-indigo-600" onClick={start}>Edit</button>}
+    </div>
+    {editing
+      ? (multiline
+          ? <textarea className="input mt-2 min-h-24" value={draft} onChange={(e) => setDraft(e.target.value)} />
+          : <input className="input mt-2" value={draft} onChange={(e) => setDraft(e.target.value)} />)
+      : <p className="mt-1 whitespace-pre-wrap text-sm text-slate-800">{value || <span className="text-slate-400">—</span>}</p>}
+  </div>;
+}
+
+function TransitionModal({ caseId, from, to, version, onClose, onDone }: { readonly caseId: string; readonly from: CaseStatus; readonly to: CaseStatus; readonly version: number; readonly onClose: () => void; readonly onDone: () => void }) {
+  const [reason, setReason] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const mut = useMutation({
+    mutationFn: (): Promise<unknown> => {
+      const input: TransitionInput = { from, to, version, ...(reason.trim() && { transitionReason: reason.trim() }) };
+      return transitionCaseStatus(caseId, input);
+    },
+    onSuccess: () => onDone(),
+    onError: (e) => {
+      if (e instanceof ConflictError) { setErr('This case was modified since you loaded it. Close this dialog and retry.'); return; }
+      setErr(serverErrorMessage(e) ?? 'The status change could not be saved.');
+    },
+  });
+  return <div className="fixed inset-0 z-50 bg-slate-900/40 p-6"><div className="mx-auto mt-24 max-w-md rounded-lg bg-white p-6 shadow-xl">
+    <h2 className="text-lg font-semibold text-slate-900">Move to {CASE_STATUS_LABELS[to].toLowerCase()}</h2>
+    <p className="mt-1 text-sm text-slate-500">From {CASE_STATUS_LABELS[from].toLowerCase()}.</p>
+    <label className="mt-4 block text-sm"><span className="mb-1 block font-medium text-slate-700">Audit note (optional)</span><input className="input" placeholder="Audit note — no PHI, e.g., 'per supervisor approval'" value={reason} onChange={(e) => { setReason(e.target.value); setErr(null); }} /></label>
+    {err ? <p className="mt-2 text-sm text-rose-600">{err}</p> : null}
+    <div className="mt-5 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={() => mut.mutate()} loading={mut.isPending}>Confirm</Button></div>
+  </div></div>;
+}
+
+function DraftJobsTab({ caseId }: { readonly caseId: string }) {
+  const q = useQuery({ queryKey: ['case', caseId, 'draft-jobs'], queryFn: () => listDraftJobs(caseId) });
+  if (q.isLoading) return <div className="text-sm text-slate-500">Loading draft jobs…</div>;
+  const rows = q.data?.data ?? [];
+  if (!rows.length) return <EmptyState title="No draft jobs" message="No drafting runs have been enqueued for this case." />;
+  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Version</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d) => <tr key={d.id}><td className="px-4 py-2">{d.version}</td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td></tr>)}</tbody></table></div>;
+}
+
+function CorrectionsTab({ caseId }: { readonly caseId: string }) {
+  const q = useQuery({ queryKey: ['case', caseId, 'corrections'], queryFn: () => listCorrections(caseId) });
+  if (q.isLoading) return <div className="text-sm text-slate-500">Loading corrections…</div>;
+  const rows = q.data?.data ?? [];
+  if (!rows.length) return <EmptyState title="No corrections" message="No correction history for this case." />;
+  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">From</th><th className="px-4 py-2">To</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2">Requested by</th><th className="px-4 py-2">Approved by</th><th className="px-4 py-2">Billing</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((r) => <tr key={r.id}><td className="px-4 py-2">{r.fromVersion}</td><td className="px-4 py-2">{r.toVersion ?? '—'}</td><td className="px-4 py-2">{r.correctionReason}</td><td className="px-4 py-2 text-slate-500">{r.requestedBy}</td><td className="px-4 py-2 text-slate-500">{r.approvedBy ?? '—'}</td><td className="px-4 py-2 text-slate-500">{r.billingTier}</td></tr>)}</tbody></table></div>;
+}
+
+function DocumentsTab({ veteranId }: { readonly veteranId: string }) {
+  return <div className="rounded-lg border border-dashed border-slate-300 bg-white p-6 text-center">
+    <p className="text-sm text-slate-600">Documents are managed at the veteran chart level.</p>
+    <div className="mt-3"><Link to={`/veterans/${encodeURIComponent(veteranId)}#documents`}><Button variant="secondary" size="sm">Open veteran documents</Button></Link></div>
+  </div>;
 }

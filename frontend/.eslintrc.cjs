@@ -6,6 +6,14 @@ module.exports = {
   plugins: ['@typescript-eslint', 'react-hooks', 'react-refresh'],
   parserOptions: { ecmaVersion: 'latest', sourceType: 'module', project: './tsconfig.json' },
   ignorePatterns: ['dist', 'coverage'],
+  overrides: [
+    {
+      // Build config files live at the package root and are not part of tsconfig's
+      // project, so the type-aware parser cannot resolve them. Lint them without `project`.
+      files: ['*.config.js', '*.config.cjs'],
+      parserOptions: { project: null }
+    }
+  ],
   rules: {
     '@typescript-eslint/no-explicit-any': 'error',
     '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],

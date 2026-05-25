@@ -1,6 +1,4 @@
-// @ts-nocheck
-// Test file uses heavy Prisma-shape mocks that fight strict AppDb typing.
-// Functional behavior validated at runtime; types pending Phase 4B cleanup.
+// @ts-nocheck -- heavy Prisma-shape mocks intentionally diverge from strict AppDb typing; suite is skipped (describe.skip) pending the Phase 4B-4 test rewrite
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';

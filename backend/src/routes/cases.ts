@@ -1,8 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { requireRole } from '../auth/roles.js';
-import { authenticateJwt } from '../middleware/auth.js';
 import { asyncHandler } from '../http/async-handler.js';
-import { HttpError, isHttpError, sendError } from '../http/errors.js';
+import { HttpError } from '../http/errors.js';
 import type { AppDb, CaseStatus, Role } from '../services/db-types.js';
 import {
   parseAssignPhysician,
@@ -262,7 +261,7 @@ export function createCasesRouter(db: AppDb): Router {
       const user = currentUser(req);
       const id = String(req.params.id);
 
-      const updated = await db.$transaction(async (tx) => {
+      await db.$transaction(async (tx) => {
         const existing = await tx.case.findFirst({
           where: { id },
           select: { id: true, veteranId: true, status: true, version: true },

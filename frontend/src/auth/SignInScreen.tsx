@@ -1,5 +1,6 @@
-import { FormEvent, useState } from 'react';
+﻿import { FormEvent, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import { Button } from '../components/ui/Button';
 import { useAuth } from './useAuth';
 
@@ -34,7 +35,7 @@ export function SignInScreen() {
         {challengeStep === 'new_password_required' ? (
           <form onSubmit={onNewPasswordSubmit} className="space-y-4"><Field label="Permanent password" type="password" value={newPassword} onChange={setNewPassword} /><Button className="w-full" loading={submitting}>Set password</Button></form>
         ) : challengeStep === 'mfa_setup' ? (
-          <form onSubmit={onTotpSubmit} className="space-y-4"><p className="text-sm text-slate-600">Enroll TOTP in Authy, 1Password, or an authenticator app, then enter the 6-digit code.</p>{totpSetupDetails?.uri ? <div className="break-all rounded-md bg-slate-100 p-3 text-xs text-slate-600">{totpSetupDetails.uri}</div> : null}{totpSetupDetails?.sharedSecret ? <div className="rounded-md bg-slate-100 p-3 text-sm text-slate-600">Manual key: {totpSetupDetails.sharedSecret}</div> : null}<Field label="6-digit code" value={code} onChange={setCode} /><Button className="w-full" loading={submitting}>Verify TOTP</Button></form>
+          <form onSubmit={onTotpSubmit} className="space-y-4"><p className="text-sm text-slate-600">Enroll TOTP in Authy, 1Password, or an authenticator app, then enter the 6-digit code.</p>{totpSetupDetails?.uri ? <div className="flex flex-col items-center gap-3 rounded-md bg-white p-4 border border-slate-200"><QRCodeSVG value={totpSetupDetails.uri} size={192} level="M" /><span className="text-xs text-slate-500">Scan with Authy, 1Password, or Google Authenticator</span></div> : null}{totpSetupDetails?.sharedSecret ? <div className="rounded-md bg-slate-100 p-3 text-sm text-slate-600">Manual key: {totpSetupDetails.sharedSecret}</div> : null}<Field label="6-digit code" value={code} onChange={setCode} /><Button className="w-full" loading={submitting}>Verify TOTP</Button></form>
         ) : challengeStep === 'software_token_mfa' ? (
           <form onSubmit={onMfaSubmit} className="space-y-4"><Field label="6-digit code" value={code} onChange={setCode} /><Button className="w-full" loading={submitting}>Verify</Button></form>
         ) : (

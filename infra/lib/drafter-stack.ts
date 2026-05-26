@@ -126,7 +126,7 @@ export class DrafterStack extends Stack {
     const securityGroup = new ec2.SecurityGroup(this, 'DrafterSecurityGroup', {
       vpc,
       allowAllOutbound: false,
-      description: 'Drafter Fargate task — outbound 443 only (Anthropic + AWS APIs).',
+      description: 'Drafter Fargate task - outbound 443 only (Anthropic + AWS APIs).',
     });
     securityGroup.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'HTTPS egress to Anthropic and AWS service endpoints');
 

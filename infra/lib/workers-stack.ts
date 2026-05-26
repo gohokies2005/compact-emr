@@ -86,7 +86,7 @@ export class WorkersStack extends Stack {
     // Anthropic spend / mutation of the legal letter artifact. Rotate independently.
     const drafterInvokeTokenSecret = new secretsmanager.Secret(this, 'DrafterInvokeToken', {
       secretName: `compact-emr-${config.envName}/drafter-invoke-token`,
-      description: 'Bearer token for /api/v1/internal/drafter/* routes. Higher privilege than INTERNAL_WORKER_TOKEN — rotate quarterly.',
+      description: 'Bearer token for /api/v1/internal/drafter/* routes. Higher privilege than INTERNAL_WORKER_TOKEN - rotate quarterly.',
       generateSecretString: {
         passwordLength: 48,
         excludePunctuation: true,
@@ -362,7 +362,7 @@ export class WorkersStack extends Stack {
 
     new cloudwatch.Alarm(this, 'StuckJobsSweptAlarm', {
       alarmName: `compact-emr-${config.envName}-stuck-jobs-swept-high`,
-      alarmDescription: 'Drafter Fargate tasks are repeatedly crashing — watcher swept >3 stuck jobs in 1 hour. Investigate Fargate task logs.',
+      alarmDescription: 'Drafter Fargate tasks are repeatedly crashing - watcher swept >3 stuck jobs in 1 hour. Investigate Fargate task logs.',
       metric: sweptMetricFilter.metric({
         statistic: 'Sum',
         period: Duration.hours(1),
@@ -457,7 +457,7 @@ export class WorkersStack extends Stack {
 
     new cloudwatch.Alarm(this, 'DoctorPacksSweptAlarm', {
       alarmName: `compact-emr-${config.envName}-doctor-packs-swept-high`,
-      alarmDescription: 'Doctor Pack assembler is repeatedly crashing — watcher swept >2 stuck generating rows in 1 hour. Investigate assembler Lambda logs.',
+      alarmDescription: 'Doctor Pack assembler is repeatedly crashing - watcher swept >2 stuck generating rows in 1 hour. Investigate assembler Lambda logs.',
       metric: dpSweptMetricFilter.metric({
         statistic: 'Sum',
         period: Duration.hours(1),

@@ -152,6 +152,32 @@ export function createChartReadinessRouter(db: AppDb): Router {
   );
 
   /**
+   * GET /api/v1/rn/files-pending-manual
+   *
+   * Phase 7B-revised Build 2: cross-case queue for the RN. Returns all FileReadStatus rows in
+   * 'manual_summary_required' state across every case, oldest first (FIFO — files waiting
+   * longest get RN attention first). Optionally accepts a `?limit=N` query (default 50,
+   * max 200) so the queue stays bounded.
+   */
+  router.get(
+    '/rn/files-pending-manual',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const limitRaw = req.query['limit'];
+      let limit = 50;
+      if (typeof limitRaw === 'string') {
+        const parsed = Number.parseInt(limitRaw, 10);
+        if (Number.isInteger(parsed) && parsed > 0) limit = Math.min(parsed, 200);
+      }
+      const rows = await db.fileReadStatus.findMany({
+        where: { terminalStatus: 'manual_summary_required' },
+        orderBy: { lastCheckedAt: 'asc' },
+      });
+      res.json({ data: rows.slice(0, limit), total: rows.length });
+    }),
+  );
+
+  /**
    * POST /api/v1/cases/:id/files/:fileReadStatusId/manual-summary
    *
    * RN-facing endpoint to clear a blocking file. The summary MUST be >= 40 chars (FRN HARD

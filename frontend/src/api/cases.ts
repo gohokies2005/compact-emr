@@ -229,3 +229,53 @@ export async function resolveClarification(
 ): Promise<{ data: Clarification }> {
   return apiPatch(`/api/v1/clarifications/${encodeURIComponent(id)}/resolve`, input);
 }
+
+// === Phase 7B-revised Build 2: RN manual-summary queue ===
+
+export interface FileReadAttemptSummary {
+  readonly method: string;
+  readonly wordCount: number;
+  readonly corruptedTokenRatio: number;
+  readonly attemptedAt: string;
+  readonly note: string | null;
+}
+
+export interface FileReadStatus {
+  readonly id: string;
+  readonly caseId: string;
+  readonly filePath: string;
+  readonly fileSha256: string;
+  readonly terminalStatus: 'read' | 'manual_summary_required' | 'manual_summary_provided';
+  readonly attemptsJson: readonly FileReadAttemptSummary[];
+  readonly manualSummary: string | null;
+  readonly manualSummaryAt: string | null;
+  readonly manualSummaryBy: string | null;
+  readonly lastCheckedAt: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly version: number;
+}
+
+export async function listFilesPendingManualForCase(caseId: string): Promise<{ data: readonly FileReadStatus[] }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/files-pending-manual`);
+}
+
+export async function listFilesPendingManualGlobal(limit?: number): Promise<{ data: readonly FileReadStatus[]; total: number }> {
+  const qs = typeof limit === 'number' ? `?limit=${encodeURIComponent(String(limit))}` : '';
+  return apiGet(`/api/v1/rn/files-pending-manual${qs}`);
+}
+
+export interface ManualSummaryInput {
+  readonly summary: string;
+}
+
+export async function postManualSummary(
+  caseId: string,
+  fileReadStatusId: string,
+  input: ManualSummaryInput,
+): Promise<{ data: FileReadStatus }> {
+  return apiPost(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/files/${encodeURIComponent(fileReadStatusId)}/manual-summary`,
+    input,
+  );
+}

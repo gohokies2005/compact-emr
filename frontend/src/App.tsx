@@ -19,6 +19,7 @@ import { MetricsPage } from './routes/stubs/MetricsPage';
 import { PQueuePage } from './routes/stubs/PQueuePage';
 import { PReviewPage } from './routes/stubs/PReviewPage';
 import { PLettersPage } from './routes/stubs/PLettersPage';
+import { RnQueuePage } from './routes/rn/RnQueuePage';
 
 const queryClient = new QueryClient();
 
@@ -39,6 +40,7 @@ export function App() {
     <Route path="/p/queue" element={<ProtectedRoute requiredRole={['physician']}><PQueuePage /></ProtectedRoute>} />
     <Route path="/p/review/:caseId" element={<ProtectedRoute requiredRole={['physician']}><PReviewPage /></ProtectedRoute>} />
     <Route path="/p/letters" element={<ProtectedRoute requiredRole={['physician']}><PLettersPage /></ProtectedRoute>} />
+    <Route path="/rn" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><RnQueuePage /></ProtectedRoute>} />
     <Route path="/403" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><NoAccessPage /></ProtectedRoute>} />
     <Route path="/not-found" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><NotFoundPage /></ProtectedRoute>} />
     <Route path="*" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><NotFoundPage /></ProtectedRoute>} />

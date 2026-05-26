@@ -105,12 +105,20 @@ export class ApiStack extends Stack {
         commandHooks: {
           beforeBundling: () => [],
           beforeInstall: () => [],
-          afterBundling: (inputDir, outputDir) => [
-            'mkdir -p ' + outputDir + '/node_modules',
-            'cp -R ' + inputDir + '/backend/node_modules/@prisma ' + outputDir + '/node_modules/',
-            'cp -R ' + inputDir + '/backend/node_modules/.prisma ' + outputDir + '/node_modules/',
-            'cp -R ' + inputDir + '/backend/prisma ' + outputDir + '/',
-          ],
+          afterBundling: (inputDir: string, outputDir: string) => {
+            // Cross-platform bundling via Node fs.cpSync. Prior code used POSIX `mkdir -p` +
+            // `cp -R` which Windows cmd.exe rejects; the xcopy fallback exhausted memory on
+            // the @prisma engine binaries. The helper script handles both platforms.
+            // Use plain `node` (from PATH) — cmd.exe /c strips outer quotes so a full path
+            // with spaces (e.g. "C:\Program Files\nodejs\node.exe") breaks the command.
+            const helper = path.join(__dirname, '..', 'scripts', 'bundle-copy.cjs');
+            const q = (s: string) => `"${s}"`;
+            return [
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/@prisma')} ${q(outputDir + '/node_modules/@prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/.prisma')} ${q(outputDir + '/node_modules/.prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/prisma')} ${q(outputDir + '/prisma')}`,
+            ];
+          },
         },
       }
     });

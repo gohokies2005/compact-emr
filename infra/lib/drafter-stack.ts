@@ -1,4 +1,4 @@
-import { Duration, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
+import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import {
   aws_ec2 as ec2,
@@ -44,9 +44,9 @@ export interface DrafterStackProps extends StackProps {
  *
  * Deploy flow:
  *   1. cdk deploy compact-emr-staging-drafter            (scaffold lands; service idle)
- *   2. operator fills DRAFTER_ANTHROPIC_API_KEY secret value via AWS Console
+ *   2. operator fills compact-emr-${env}/drafter-anthropic-api-key secret value via AWS Console
  *   3. drafter window: docker build + docker push to the ECR repo URI (CFN output)
- *   4. update task def imageTag in this file + redeploy + bump desiredCount
+ *   4. set env var DRAFTER_IMAGE_TAG=<git-sha> (or cdk.context.json) + bump desiredCount + redeploy
  *   5. Fargate task starts pulling from DraftJobQueue
  */
 export class DrafterStack extends Stack {
@@ -144,15 +144,28 @@ export class DrafterStack extends Stack {
       ephemeralStorageGiB: 30, // S3-materialize-to-/tmp per Ryan's answer #2
     });
 
-    // Placeholder image. The drafter wrapper window builds and pushes the real image to
-    // ecrRepository. Until then we use a trivial busybox-equivalent so CFN can synthesize
-    // a valid task def. Service desiredCount stays at 0 until the operator updates this.
-    // Switch this line to `ecs.ContainerImage.fromEcrRepository(ecrRepository, '<git sha>')`
-    // after first docker push.
+    // Architect QA F5: parameterize the image tag so deploys don't require a source edit.
+    // Resolution order:
+    //   1. Env var DRAFTER_IMAGE_TAG          (operator one-shot override)
+    //   2. CDK context  drafter_image_tag     (cdk.context.json / --context)
+    //   3. fallback to 'placeholder'          (first deploy before any docker push)
+    // When the tag is 'placeholder' (or empty), use a public busybox image so CFN can
+    // synthesize a valid task def before the drafter window's first push. desiredCount stays
+    // at 0 — nothing actually tries to pull the placeholder. After first push the operator
+    // runs (or sets cdk.context.json to):
+    //   $env:DRAFTER_IMAGE_TAG = '<git-sha>'
+    //   npx cdk deploy compact-emr-staging-drafter --context env=staging
+    // No source edit needed.
+    const imageTag = process.env['DRAFTER_IMAGE_TAG']
+      ?? (this.node.tryGetContext('drafter_image_tag') as string | undefined)
+      ?? 'placeholder';
+    const isPlaceholder = imageTag === 'placeholder' || imageTag.length === 0;
+    const drafterImage = isPlaceholder
+      ? ecs.ContainerImage.fromRegistry('public.ecr.aws/docker/library/busybox:latest')
+      : ecs.ContainerImage.fromEcrRepository(ecrRepository, imageTag);
+
     taskDefinition.addContainer('drafter', {
-      // First-deploy placeholder. Replace after the drafter wrapper image is pushed:
-      //   image: ecs.ContainerImage.fromEcrRepository(ecrRepository, '<tag>'),
-      image: ecs.ContainerImage.fromRegistry('public.ecr.aws/docker/library/busybox:latest'),
+      image: drafterImage,
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'drafter',
         logGroup,
@@ -174,7 +187,10 @@ export class DrafterStack extends Stack {
     });
 
     // ===== Fargate service =====
-    // Desired count = 0 on first deploy. Operator bumps to 1 after pushing the real image.
+    // DO NOT bump desiredCount above 0 until a REAL drafter image (not the busybox
+    // placeholder) is pushed to ECR AND referenced via DRAFTER_IMAGE_TAG / cdk context.
+    // The placeholder busybox image is pullable but has no entrypoint matching the wrapper
+    // contract — bumping desiredCount with placeholder == crash-loop until manually stopped.
     // Scaling: not auto-scaled yet — start with 1 task, add queue-depth-based scaling later
     // once we have throughput data.
     const service = new ecs.FargateService(this, 'DrafterService', {
@@ -192,5 +208,20 @@ export class DrafterStack extends Stack {
       circuitBreaker: { rollback: true },
     });
     this.service = service;
+
+    // ===== Outputs the drafter window needs =====
+    // ECR repo URI — drafter window runs `docker push <uri>:<git-sha>` against this.
+    new CfnOutput(this, 'DrafterImageRepoUri', {
+      value: ecrRepository.repositoryUri,
+      description: 'ECR repository URI for drafter image. Tag and push: docker push <this>:<sha>',
+      exportName: `compact-emr-${config.envName}-drafter-image-repo-uri`,
+    });
+    // Resolved image tag — operator can confirm at-a-glance whether the deploy used the
+    // placeholder or a real sha. Lights up "placeholder" until first real DRAFTER_IMAGE_TAG.
+    new CfnOutput(this, 'DrafterResolvedImageTag', {
+      value: imageTag,
+      description: 'Image tag currently referenced by the task definition. "placeholder" = busybox.',
+      exportName: `compact-emr-${config.envName}-drafter-resolved-image-tag`,
+    });
   }
 }

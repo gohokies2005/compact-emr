@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { timingSafeEqual } from 'node:crypto';
 import { sendError } from '../http/errors.js';
+import { SERVICE_ACTORS } from '../services/service-actors.js';
 
 /**
  * Phase 7B-revised Build 3: service-principal auth for worker callbacks.
@@ -53,7 +54,7 @@ export function requireServicePrincipal() {
     }
     // Stamp a sentinel user so activity_log rows have an actor.
     (req as Request & { user?: { sub: string; email?: string; roles: readonly ('admin' | 'physician' | 'ops_staff')[] } }).user = {
-      sub: 'service:worker',
+      sub: SERVICE_ACTORS.WORKER,
       email: 'worker@compact-emr.internal',
       roles: ['ops_staff'],
     };

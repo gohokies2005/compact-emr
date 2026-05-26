@@ -11,10 +11,13 @@ import {
   buildDrafterBundle,
   buildJobBundleS3Key,
   buildManualBundleS3Key,
+  CaseNotFoundError,
   presignBundleUrl,
+  VeteranNotFoundError,
   writeBundleToS3,
 } from '../services/drafter-bundle.js';
 import { isDrafterArtifactS3Key } from '../services/s3-key-safety.js';
+import { SERVICE_ACTORS } from '../services/service-actors.js';
 import type { AppDb } from '../services/db-types.js';
 
 /**
@@ -258,17 +261,17 @@ export function createDrafterClientRouter(db: AppDb): Router {
       }
 
       const bundle = await buildDrafterBundle(db, caseId).catch((err: unknown) => {
-        if (err instanceof Error && err.message.startsWith('Case not found')) {
-          throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+        if (err instanceof CaseNotFoundError) {
+          throw new HttpError(404, 'not_found', 'Case not found', { caseId: err.caseId });
         }
-        if (err instanceof Error && err.message.startsWith('Veteran not found')) {
-          throw new HttpError(404, 'not_found', 'Veteran not found', { caseId });
+        if (err instanceof VeteranNotFoundError) {
+          throw new HttpError(404, 'not_found', 'Veteran not found', { veteranId: err.veteranId });
         }
         throw err;
       });
 
       const s3Key = buildManualBundleS3Key(caseId);
-      const upload = await writeBundleToS3(bucket, s3Key, bundle);
+      const upload = await writeBundleToS3(bucket, s3Key, bundle, 'manual');
       const presigned = await presignBundleUrl(bucket, s3Key);
 
       res.json({
@@ -349,13 +352,27 @@ export function createDrafterClientRouter(db: AppDb): Router {
         throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured');
       }
       const bundle = await buildDrafterBundle(db, caseId).catch((err: unknown) => {
-        if (err instanceof Error && err.message.startsWith('Veteran not found')) {
-          throw new HttpError(404, 'not_found', 'Veteran not found', { caseId });
+        if (err instanceof CaseNotFoundError) {
+          throw new HttpError(404, 'not_found', 'Case not found', { caseId: err.caseId });
+        }
+        if (err instanceof VeteranNotFoundError) {
+          throw new HttpError(404, 'not_found', 'Veteran not found', { veteranId: err.veteranId });
         }
         throw err;
       });
       const bundleS3Key = buildJobBundleS3Key(caseId, jobId);
-      const upload = await writeBundleToS3(bucket, bundleS3Key, bundle);
+      const upload = await writeBundleToS3(bucket, bundleS3Key, bundle, 'job');
+      // F1c bundle-size CloudWatch signal (Ryan 2026-05-26): structured log per /draft so
+      // ops can track when bundles approach the soft cap. Independent of the warn-line
+      // which only fires above threshold.
+      console.log(JSON.stringify({
+        msg: 'drafter-bundle: job export uploaded',
+        caseId,
+        jobId,
+        bundleS3Key,
+        sizeBytes: upload.sizeBytes,
+        warnedLargeBundle: upload.warnedLargeBundle,
+      }));
 
       let created;
       try {
@@ -524,6 +541,14 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
             shipRecommendation: parsed.shipRecommendation,
             operatorState: parsed.operatorState,
             runComplete: parsed.runComplete,
+            // F4 semantics (Ryan, 2026-05-26): currentVersion = last *attempted* version,
+            // advances on ANY terminal /complete call — ship or fail. The "current" pointer
+            // is "what's the newest artifact set we produced" (regardless of whether it was
+            // shippable). The physician-routing gate is enforced separately via
+            // (runComplete && shipRecommendation==='ship') at write time + read time, NOT
+            // via currentVersion. Failed runs still bump currentVersion so the operator UI
+            // can show "v3 failed; you can retry as v4" rather than mysteriously still
+            // showing v2.
             currentVersion: existing.version,
             status: nextCaseStatus,
             version: { increment: 1 },
@@ -532,7 +557,7 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
 
         await tx.activityLog.create({
           data: {
-            actorUserId: 'service:drafter',
+            actorUserId: SERVICE_ACTORS.DRAFTER,
             caseId: existing.caseId,
             action: 'draft_job_completed',
             detailsJson: {

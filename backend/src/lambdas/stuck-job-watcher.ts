@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { SERVICE_ACTORS } from '../services/service-actors.js';
 
 /**
  * Architect QA F6: stuck-Fargate-task watcher.
@@ -93,7 +94,7 @@ export async function handler(): Promise<StuckJobWatcherResult> {
         }),
         prisma.activityLog.create({
           data: {
-            actorUserId: 'service:stuck-job-watcher',
+            actorUserId: SERVICE_ACTORS.STUCK_JOB_WATCHER,
             caseId: job.caseId,
             action: 'draft_job_swept_stale',
             detailsJson: {

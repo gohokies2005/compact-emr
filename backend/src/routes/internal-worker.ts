@@ -3,6 +3,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { isDoctorPackS3Key } from '../services/s3-key-safety.js';
+import { SERVICE_ACTORS } from '../services/service-actors.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
 
 /**
@@ -188,7 +189,7 @@ export function createInternalWorkerRouter(db: AppDb): Router {
 
         await tx.activityLog.create({
           data: {
-            actorUserId: 'service:worker',
+            actorUserId: SERVICE_ACTORS.WORKER,
             action: 'document_pages_extracted',
             detailsJson: {
               documentId,
@@ -277,7 +278,7 @@ export function createInternalWorkerRouter(db: AppDb): Router {
         });
         await tx.activityLog.create({
           data: {
-            actorUserId: 'service:worker',
+            actorUserId: SERVICE_ACTORS.WORKER,
             action: 'doctor_pack_state_changed',
             caseId: existing.caseId,
             detailsJson: {
@@ -376,7 +377,7 @@ export function createInternalWorkerRouter(db: AppDb): Router {
 
         await tx.activityLog.create({
           data: {
-            actorUserId: 'service:worker',
+            actorUserId: SERVICE_ACTORS.WORKER,
             action: 'file_read_textract_failed',
             caseId: doc.caseId,
             detailsJson: {

@@ -4,6 +4,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Duration, Stack, type StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import {
+  aws_cloudwatch as cloudwatch,
   aws_ec2 as ec2,
   aws_events as events,
   aws_events_targets as targets,
@@ -339,6 +340,37 @@ export class WorkersStack extends Stack {
       description: 'Every 5 min, sweep DraftJob rows with stale heartbeats to state=failed.',
       schedule: events.Schedule.rate(Duration.minutes(5)),
       targets: [new targets.LambdaFunction(stuckJobWatcher, { retryAttempts: 2 })],
+    });
+
+    // ===== F6b: CloudWatch metric filter + alarm on watcher "swept" log lines =====
+    // The watcher silently fixes stuck jobs — but if it's sweeping at >3/hr, drafter
+    // Fargate is recurring-crashing upstream and we need a human to investigate.
+    // (Per RN-self-service rule: alarm goes to ops/Ryan, NOT to RN UI — RNs see the
+    // already-handled failed state via their normal queue. This alarm is for "something
+    // upstream is wrong" detection, not RN-facing.)
+    const sweptMetricFilter = new logs.MetricFilter(this, 'StuckJobWatcherSweptMetric', {
+      logGroup: watcherLogGroup,
+      // Match the structured log line emitted on each sweep:
+      //   { "msg": "stuck-job-watcher: swept", "jobId": ..., ... }
+      // Exclude the "no stale jobs" / "summary" logs — only count real sweeps.
+      filterPattern: logs.FilterPattern.literal('{ $.msg = "stuck-job-watcher: swept" }'),
+      metricNamespace: `compact-emr/${config.envName}/drafter`,
+      metricName: 'StuckJobsSwept',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    new cloudwatch.Alarm(this, 'StuckJobsSweptAlarm', {
+      alarmName: `compact-emr-${config.envName}-stuck-jobs-swept-high`,
+      alarmDescription: 'Drafter Fargate tasks are repeatedly crashing — watcher swept >3 stuck jobs in 1 hour. Investigate Fargate task logs.',
+      metric: sweptMetricFilter.metric({
+        statistic: 'Sum',
+        period: Duration.hours(1),
+      }),
+      threshold: 3,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
   }
 }

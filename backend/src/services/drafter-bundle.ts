@@ -17,6 +17,26 @@ import type { AppDb } from './db-types.js';
  */
 
 const DEFAULT_SIGNED_URL_TTL_SECONDS = 15 * 60; // 15 min — plenty for the wrapper to grab
+const BUNDLE_SIZE_WARN_BYTES = 150 * 1024 * 1024; // 150 MB soft cap (Ryan, 2026-05-26)
+
+/**
+ * F1a typed errors (architect followup). Replaces string-prefix matching in routes —
+ * `err instanceof CaseNotFoundError` is contract; `err.message.startsWith('Case not found')`
+ * silently breaks if the message wording changes.
+ */
+export class CaseNotFoundError extends Error {
+  constructor(public readonly caseId: string) {
+    super(`Case not found: ${caseId}`);
+    this.name = 'CaseNotFoundError';
+  }
+}
+
+export class VeteranNotFoundError extends Error {
+  constructor(public readonly veteranId: string) {
+    super(`Veteran not found: ${veteranId}`);
+    this.name = 'VeteranNotFoundError';
+  }
+}
 
 let cachedClient: S3Client | null = null;
 
@@ -53,13 +73,13 @@ export interface DrafterBundle {
  */
 export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<DrafterBundle> {
   const c = await db.case.findFirst({ where: { id: caseId } });
-  if (c === null) throw new Error(`Case not found: ${caseId}`);
+  if (c === null) throw new CaseNotFoundError(caseId);
   const cw = c as typeof c & { veteranId: string };
 
   const veteran = await (db as unknown as {
     veteran: { findUnique: (args: { where: { id: string } }) => Promise<unknown> };
   }).veteran.findUnique({ where: { id: cw.veteranId } });
-  if (veteran === null) throw new Error(`Veteran not found: ${cw.veteranId}`);
+  if (veteran === null) throw new VeteranNotFoundError(cw.veteranId);
 
   const [
     scConditions,
@@ -160,23 +180,47 @@ export function buildManualBundleS3Key(caseId: string): string {
   return `drafter-exports/${safeCaseId}/manual-${ts}.json`;
 }
 
+/**
+ * F1b S3 lifecycle tagging (Ryan 2026-05-26): manual exports get bundle-kind=manual which
+ * the PhiBucket's lifecycle rule auto-deletes after 14 days. Per-job exports get
+ * bundle-kind=job (no expiry — kept indefinitely as medical-legal audit evidence per
+ * Ryan's retention policy).
+ */
+export type BundleKind = 'job' | 'manual';
+
 export async function writeBundleToS3(
   bucket: string,
   s3Key: string,
   bundle: DrafterBundle,
+  kind: BundleKind,
   client?: S3Client,
-): Promise<{ s3Key: string; sizeBytes: number }> {
+): Promise<{ s3Key: string; sizeBytes: number; warnedLargeBundle: boolean }> {
   const s3 = client ?? getS3Client();
   const body = JSON.stringify(bundle);
   const sizeBytes = Buffer.byteLength(body, 'utf8');
+  // F1c soft-cap warning (Ryan 2026-05-26): non-rejecting visibility — large bundles still
+  // upload (S3 PutObject single-shot caps at 5 GB) but we want CloudWatch signal before a
+  // case hits a real problem. Threshold 150 MB per Ryan's recall of seeing file sizes that
+  // large on actual cases.
+  const warnedLargeBundle = sizeBytes > BUNDLE_SIZE_WARN_BYTES;
+  if (warnedLargeBundle) {
+    console.warn(JSON.stringify({
+      msg: 'drafter-bundle: large bundle warning',
+      s3Key,
+      sizeBytes,
+      thresholdBytes: BUNDLE_SIZE_WARN_BYTES,
+      kind,
+    }));
+  }
   await s3.send(new PutObjectCommand({
     Bucket: bucket,
     Key: s3Key,
     Body: body,
     ContentType: 'application/json',
     ServerSideEncryption: 'aws:kms',
+    Tagging: `bundle-kind=${kind}`,
   }));
-  return { s3Key, sizeBytes };
+  return { s3Key, sizeBytes, warnedLargeBundle };
 }
 
 export async function presignBundleUrl(

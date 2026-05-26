@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { timingSafeEqual } from 'node:crypto';
 import { sendError } from '../http/errors.js';
+import { SERVICE_ACTORS } from '../services/service-actors.js';
 
 /**
  * Drafter integration: service-principal auth for the long-running drafter Fargate task.
@@ -43,7 +44,7 @@ export function requireDrafterPrincipal() {
       return sendError(res, 401, 'unauthorized', 'Drafter-principal token rejected.');
     }
     (req as Request & { user?: { sub: string; email?: string; roles: readonly ('admin' | 'physician' | 'ops_staff')[] } }).user = {
-      sub: 'service:drafter',
+      sub: SERVICE_ACTORS.DRAFTER,
       email: 'drafter@compact-emr.internal',
       roles: ['ops_staff'],
     };

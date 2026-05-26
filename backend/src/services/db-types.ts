@@ -144,6 +144,7 @@ export interface AppDbTransaction {
   fileReadStatus: FileReadStatusDelegate;
   keyDoc: KeyDocDelegate;
   doctorPack: DoctorPackDelegate;
+  documentPage: DocumentPageDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -433,6 +434,10 @@ export interface KeyDocRecord {
   importance: number;
   pageRanges: readonly KeyDocPageRange[];
   notes: string | null;
+  physicianIncludeAllPages: boolean;
+  needsRnReview: boolean;
+  selectorVersion: string | null;
+  selectorRationale: string | null;
   createdAt: Date;
   updatedAt: Date;
   version: number;
@@ -466,7 +471,9 @@ export interface DoctorPackRecord {
   pdfS3Key: string | null;
   pageCount: number | null;
   keyDocCount: number | null;
-  manifestJson: { entries: readonly DoctorPackManifestEntry[]; engineVersion: string } | null;
+  // manifestJson optionally carries a coverPage block (chart-summary snapshot the assembler
+  // renders as PDF page 1) — Phase 7B-revised Build 1.
+  manifestJson: { entries: readonly DoctorPackManifestEntry[]; engineVersion: string; coverPage?: unknown } | null;
   errorMessage: string | null;
   generatedAt: Date | null;
   generatedBy: string | null;
@@ -481,4 +488,25 @@ export interface DoctorPackDelegate {
   findMany(args: unknown): Promise<readonly DoctorPackRecord[]>;
   create(args: unknown): Promise<DoctorPackRecord>;
   update(args: unknown): Promise<DoctorPackRecord>;
+}
+
+// ====================== Phase 7B-revised Build 1: DocumentPage ======================
+
+export interface DocumentPageRecord {
+  id: string;
+  documentId: string;
+  pageNumber: number;
+  text: string;
+  confidence: number | null;
+  extractedAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface DocumentPageDelegate {
+  findMany(args: unknown): Promise<readonly DocumentPageRecord[]>;
+  findFirst(args: unknown): Promise<DocumentPageRecord | null>;
+  create(args: unknown): Promise<DocumentPageRecord>;
+  upsert(args: unknown): Promise<DocumentPageRecord>;
+  deleteMany(args: unknown): Promise<{ count: number }>;
 }

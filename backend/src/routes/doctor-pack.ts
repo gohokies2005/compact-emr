@@ -9,7 +9,9 @@ import {
   DOCTOR_PACK_ENGINE_VERSION,
 } from '../services/doctor-pack.js';
 import { classifyFile } from '../services/key-docs-classifier.js';
-import type { AppDb, DoctorPackManifestEntry, KeyDocClassification, KeyDocType } from '../services/db-types.js';
+import { selectPages, type PageSelectorInputPage } from '../services/page-selector.js';
+import { aggregateChartSummary } from '../services/chart-summary-aggregator.js';
+import type { AppDb, DocumentPageRecord, KeyDocClassification, KeyDocType } from '../services/db-types.js';
 
 // Path-traversal guard. The Doctor Pack PDF lives at a deterministic S3 key derived from the
 // caseId + caseVersion + doctorPackId. We construct the key server-side and refuse to honor
@@ -30,6 +32,45 @@ function buildDoctorPackS3Key(caseId: string, caseVersion: number, doctorPackId:
     throw new HttpError(500, 'internal_error', 'Constructed Doctor Pack S3 key failed safety check.', { caseId, caseVersion, doctorPackId });
   }
   return key;
+}
+
+// Helper: fetch the full CaseRecord shape the cover-page aggregator needs. The list query
+// used by `/generate` selects a narrower projection; re-fetch with the columns the
+// aggregator's input type requires.
+async function fetchCaseRowForCover(db: AppDb, caseId: string, veteranId: string) {
+  const c = await db.case.findFirst({ where: { id: caseId } });
+  if (c === null) {
+    // Fall back to a minimal shape sourced from the route's prior lookup. Shouldn't happen in
+    // practice because the route already verified the case exists; this is type-belt-and-suspenders.
+    return {
+      id: caseId,
+      claimedCondition: '',
+      claimType: 'initial' as const,
+      framingChoice: null,
+      upstreamScCondition: null,
+      status: 'intake' as const,
+      veteranId,
+      cdsVerdict: 'not_yet_run' as const,
+      cdsOddsPct: null,
+      cdsRationale: null,
+      veteranStatement: null,
+      inServiceEvent: null,
+    };
+  }
+  return {
+    id: c.id,
+    claimedCondition: c.claimedCondition,
+    claimType: c.claimType,
+    framingChoice: c.framingChoice,
+    upstreamScCondition: c.upstreamScCondition,
+    status: c.status,
+    veteranId: c.veteranId,
+    cdsVerdict: c.cdsVerdict,
+    cdsOddsPct: c.cdsOddsPct,
+    cdsRationale: c.cdsRationale,
+    veteranStatement: c.veteranStatement,
+    inServiceEvent: c.inServiceEvent,
+  };
 }
 
 export function createDoctorPackRouter(db: AppDb): Router {
@@ -104,14 +145,19 @@ export function createDoctorPackRouter(db: AppDb): Router {
         });
       }
 
-      // Document.pageCount is populated by the ingest worker when Textract returns the page
+      // Document.pageCount is populated by the OCR worker when Textract returns the page
       // total. Until the worker is shipped, page_count stays null and the assembler treats
       // null as "include from page 1 onward; worker discovers exact bound at extraction".
-      const docList = caseWithDocs.documents;
+      // We also pull existing KeyDoc rows to preserve per-doc physician overrides + notes.
+      const docList = caseWithDocs.documents as readonly { id: string; s3Key: string; pageCount: number | null }[];
+      const existingKeyDocs = await db.keyDoc.findMany({ where: { caseId } });
+      const existingByPath = new Map(existingKeyDocs.map((kd) => [kd.filePath, kd]));
+
       const classifiedFiles = docList
         .map((d) => {
           const readStatus = readStatuses.find((r) => r.filePath === d.s3Key);
           return {
+            documentId: d.id,
             filePath: d.s3Key,
             fileSha256: readStatus?.fileSha256 ?? '',
             pageCount: d.pageCount ?? null,
@@ -123,7 +169,66 @@ export function createDoctorPackRouter(db: AppDb): Router {
         throw new HttpError(409, 'conflict', 'No documents on this case yet; upload records before generating a Doctor Pack.', { caseId });
       }
 
+      // Phase 7B-revised Build 1: load per-page extracted text for each Document so the
+      // page-selector can apply doc-type-aware rules. Until the OCR worker is shipped, the
+      // documentPage delegate returns empty arrays — page-selector returns empty ranges
+      // (forward-compatible: the assembler's old "whole document" path is unchanged when
+      // page-selector returns []).
+      const pagesByDocumentId = new Map<string, readonly DocumentPageRecord[]>();
+      const allDocumentIds = classifiedFiles.map((f) => f.documentId).filter((id) => id.length > 0);
+      if (allDocumentIds.length > 0) {
+        const pageRows = await db.documentPage.findMany({
+          where: { documentId: { in: allDocumentIds } },
+          orderBy: [{ documentId: 'asc' }, { pageNumber: 'asc' }],
+        });
+        for (const row of pageRows) {
+          const existing = pagesByDocumentId.get(row.documentId) ?? [];
+          pagesByDocumentId.set(row.documentId, [...existing, row]);
+        }
+      }
+
+      // Page-selector pass: for each classified file, decide which pages go in the pack.
+      const perFileSelection = classifiedFiles.map((f) => {
+        const cls = classifyFile(f.filePath);
+        const pageRows = pagesByDocumentId.get(f.documentId) ?? [];
+        const pagesInput: readonly PageSelectorInputPage[] = pageRows.map((p) => ({
+          pageNumber: p.pageNumber,
+          text: p.text,
+          confidence: p.confidence,
+        }));
+        const existing = existingByPath.get(f.filePath);
+        const selection = selectPages({
+          filePath: f.filePath,
+          docType: cls.docType,
+          classification: cls.classification,
+          pageCount: f.pageCount ?? pageRows.length ?? 0,
+          pages: pagesInput,
+          physicianIncludeAllPages: existing?.physicianIncludeAllPages ?? false,
+        });
+        return { file: f, classification: cls, selection };
+      });
+
+      // Assemble manifest: legacy whole-doc path for files with no per-page data; page-selected
+      // for files with at least one DocumentPage row. The selection.pageRanges may be empty
+      // (no_per_page_text_available) — the legacy assembler handles empty by including the
+      // whole file at extraction time.
       const manifest = assembleDoctorPackManifest({ classifiedFiles, readStatuses });
+      // Override the manifest entries' pageRanges with selector output when present.
+      const refinedEntries = manifest.entries.map((entry) => {
+        const sel = perFileSelection.find((s) => s.file.filePath === entry.filePath);
+        if (!sel) return entry;
+        const ranges = sel.selection.pageRanges;
+        if (ranges.length === 0) return entry;
+        const pageCount = ranges.reduce((sum, r) => sum + Math.max(0, r.to - r.from + 1), 0);
+        return { ...entry, pageRanges: ranges, pageCount };
+      });
+      const refinedTotalPageCount = refinedEntries.reduce((sum, e) => sum + e.pageCount, 0);
+
+      // Cover-page summary (architect plan: lives in DoctorPack.manifestJson.coverPage).
+      const coverPage = await aggregateChartSummary({
+        db,
+        caseRow: await fetchCaseRowForCover(db, caseId, c.veteranId),
+      });
 
       const result = await db.$transaction(async (tx) => {
         // Architect REVIEW.md b99de30 finding: the prior implementation did
@@ -135,9 +240,10 @@ export function createDoctorPackRouter(db: AppDb): Router {
         if (currentFilePaths.length > 0) {
           await tx.keyDoc.deleteMany({ where: { caseId, filePath: { notIn: currentFilePaths } } });
         }
-        for (const f of classifiedFiles) {
-          const cls = classifyFile(f.filePath);
-          const manifestEntry: DoctorPackManifestEntry | undefined = manifest.entries.find((e) => e.filePath === f.filePath);
+        for (const sel of perFileSelection) {
+          const f = sel.file;
+          const cls = sel.classification;
+          const refinedEntry = refinedEntries.find((e) => e.filePath === f.filePath);
           await tx.keyDoc.upsert({
             where: { caseId_filePath: { caseId, filePath: f.filePath } },
             create: {
@@ -147,17 +253,24 @@ export function createDoctorPackRouter(db: AppDb): Router {
               classification: cls.classification,
               docType: cls.docType,
               importance: cls.importance,
-              pageRanges: manifestEntry?.pageRanges ?? [],
+              pageRanges: refinedEntry?.pageRanges ?? sel.selection.pageRanges,
+              needsRnReview: sel.selection.needsRnReview,
+              selectorVersion: sel.selection.selectorVersion,
+              selectorRationale: sel.selection.selectorRationale,
             },
             update: {
               fileSha256: f.fileSha256,
               classification: cls.classification,
               docType: cls.docType,
               importance: cls.importance,
-              pageRanges: manifestEntry?.pageRanges ?? [],
+              pageRanges: refinedEntry?.pageRanges ?? sel.selection.pageRanges,
+              needsRnReview: sel.selection.needsRnReview,
+              selectorVersion: sel.selection.selectorVersion,
+              selectorRationale: sel.selection.selectorRationale,
               version: { increment: 1 },
-              // NOTE: `notes` is intentionally NOT in the update payload — RN-authored notes
-              // survive re-generation of the Doctor Pack manifest.
+              // NOTE: `notes` and `physicianIncludeAllPages` intentionally NOT in the update
+              // payload — RN-authored notes and per-doc physician overrides survive
+              // re-generation of the Doctor Pack manifest.
             },
           });
         }
@@ -167,9 +280,17 @@ export function createDoctorPackRouter(db: AppDb): Router {
             caseId,
             caseVersion: c.version,
             state: 'queued',
-            keyDocCount: manifest.keyDocCount,
-            pageCount: manifest.totalPageCount,
-            manifestJson: { entries: manifest.entries, engineVersion: DOCTOR_PACK_ENGINE_VERSION },
+            keyDocCount: refinedEntries.length,
+            pageCount: refinedTotalPageCount,
+            // Phase 7B-revised Build 1: manifestJson carries entries (with refined page ranges)
+            // + cover-page summary (the chart-state snapshot the assembler renders as PDF page 1).
+            // The page-selector's per-file rationale lives on each KeyDoc row (selectorRationale)
+            // for audit replay; the cover page surfaces top-line state only.
+            manifestJson: {
+              entries: refinedEntries,
+              engineVersion: DOCTOR_PACK_ENGINE_VERSION,
+              ...(coverPage ? { coverPage } : {}),
+            },
             generatedBy: actor.sub,
           },
         });

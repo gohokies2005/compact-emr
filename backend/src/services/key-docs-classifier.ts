@@ -117,6 +117,49 @@ export function classifyFile(filePath: string): ClassificationResult {
   return { classification: 'normal', docType: 'unspecified', importance: 50, matchedPattern: null };
 }
 
+/**
+ * INGEST_OCR_SPEC requirement #6 (2026-05-25): classify documents by CONTENT, not filename.
+ * Veterans name files arbitrarily — "back pages for va letters.pdf" can be a rating decision;
+ * filename-based classification gets these wrong.
+ *
+ * Resolution path:
+ *   1. If the worker provides a content-derived `contentHint` (from Textract/BDA classification
+ *      of the extracted text), use it. Importance gets a +5 boost over the filename heuristic
+ *      because content-based labels are more trustworthy.
+ *   2. Otherwise fall back to filename classification (the LEGACY path; still useful when
+ *      content classification is unavailable or low-confidence).
+ *
+ * The contentHint shape is `{ docType, classification, confidence }`; the worker decides
+ * when to omit it (low Textract/BDA confidence -> trust filename instead).
+ */
+export interface ContentClassificationHint {
+  readonly docType: KeyDocType;
+  readonly classification: KeyDocClassification;
+  readonly confidence: number; // 0..1; treat <0.6 as "use filename instead"
+}
+
+const CONTENT_HINT_MIN_CONFIDENCE = 0.6;
+
+export function classifyFileWithContentHint(
+  filePath: string,
+  contentHint: ContentClassificationHint | null | undefined,
+): ClassificationResult {
+  if (contentHint && contentHint.confidence >= CONTENT_HINT_MIN_CONFIDENCE) {
+    const filenameResult = classifyFile(filePath);
+    // Content-derived classification supersedes filename. Importance: take whichever is higher
+    // (content-classified ones get a small +5 boost so they outrank a filename match for the
+    // same docType — meaningful for files like "back pages for va letters.pdf" where filename
+    // would yield 'normal' but content says 'rating_decision' / high_signal).
+    return {
+      classification: contentHint.classification,
+      docType: contentHint.docType,
+      importance: Math.max(filenameResult.importance, 50) + 5,
+      matchedPattern: 'content_classification',
+    };
+  }
+  return classifyFile(filePath);
+}
+
 export function isHighSignal(filePath: string): boolean {
   return classifyFile(filePath).classification === 'high_signal';
 }

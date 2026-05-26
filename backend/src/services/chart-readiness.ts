@@ -69,7 +69,7 @@ export function wordCount(text: string): number {
 // ====================== Read-attempt classifier ======================
 
 export interface ReadAttemptInput {
-  readonly method: 'native_pdf_text' | 'tesseract_ocr' | 'claude_vision';
+  readonly method: 'native_pdf_text' | 'tesseract_ocr' | 'textract' | 'bedrock_data_automation' | 'claude_vision';
   readonly extractedText: string;
 }
 

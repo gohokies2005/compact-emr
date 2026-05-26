@@ -340,8 +340,22 @@ export interface ClarificationDelegate {
 
 export type FileTerminalStatus = 'read' | 'manual_summary_required' | 'manual_summary_provided';
 
+/**
+ * Read-attempt method. Compact-EMR INGEST_OCR_SPEC (2026-05-25, FRN-window-authored) HARD
+ * REQUIREMENT #1: raw OCR/text extraction MUST go through Textract or Bedrock Data Automation,
+ * never an LLM. `claude_vision` is retained as a transition value (the legacy FRN pipeline used
+ * it) but is DEPRECATED — workers SHOULD post extractions via 'textract' or
+ * 'bedrock_data_automation' going forward.
+ */
+export type FileReadMethod =
+  | 'native_pdf_text'
+  | 'tesseract_ocr'
+  | 'textract'
+  | 'bedrock_data_automation'
+  | 'claude_vision';
+
 export interface FileReadAttempt {
-  readonly method: 'native_pdf_text' | 'tesseract_ocr' | 'claude_vision';
+  readonly method: FileReadMethod;
   readonly wordCount: number;
   readonly corruptedTokenRatio: number;
   readonly attemptedAt: string;

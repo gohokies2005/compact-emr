@@ -1,7 +1,10 @@
 import { badRequest, isRecord, optionalString, requiredNonEmptyString } from './validation-helpers.js';
 import type { FileReadAttempt } from './db-types.js';
 
-const VALID_METHODS = ['native_pdf_text', 'tesseract_ocr', 'claude_vision'] as const;
+// INGEST_OCR_SPEC requirement #1: Textract / BDA are the supported production OCR methods.
+// claude_vision is retained for transition compatibility with FRN's legacy pipeline; new
+// workers should use textract or bedrock_data_automation.
+const VALID_METHODS = ['native_pdf_text', 'tesseract_ocr', 'textract', 'bedrock_data_automation', 'claude_vision'] as const;
 type ReadMethod = (typeof VALID_METHODS)[number];
 
 const MAX_FILE_PATH_LEN = 500;

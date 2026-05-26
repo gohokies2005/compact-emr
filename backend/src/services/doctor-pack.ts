@@ -1,6 +1,5 @@
 import type {
   DoctorPackManifestEntry,
-  DoctorPackRecord,
   DoctorPackState,
   FileReadStatusRecord,
   KeyDocPageRange,

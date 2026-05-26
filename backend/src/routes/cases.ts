@@ -96,6 +96,18 @@ function buildCaseListWhere(query: Request['query']): Record<string, unknown> {
   if (veteranId !== undefined) where.veteranId = veteranId;
   if (assignedPhysicianId !== undefined) where.assignedPhysicianId = assignedPhysicianId;
 
+  // Drafter integration belt-and-suspenders: when filtering for physician_review (i.e. the
+  // physician inbox), the write-side enforcement in /internal/drafter/jobs/:id/complete
+  // sets status only when runComplete && shipRecommendation==='ship'. A future code path
+  // that bypasses /complete (manual PATCH /status, SQL fixup, legacy data) could leave a
+  // non-shippable case in physician_review status. Read-side filter rejects those. Uses
+  // "not false" / "not revise" instead of strict equality so legacy cases (runComplete=null,
+  // shipRecommendation=null from before this integration) remain visible.
+  if (status === 'physician_review') {
+    where.runComplete = { not: false };
+    where.shipRecommendation = { not: 'revise' };
+  }
+
   return where;
 }
 

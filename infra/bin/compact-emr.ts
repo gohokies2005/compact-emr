@@ -10,6 +10,7 @@ import { QueueStack } from '../lib/queue-stack.js';
 import { ApiStack } from '../lib/api-stack.js';
 import { FrontendStack } from '../lib/frontend-stack.js';
 import { WorkersStack } from '../lib/workers-stack.js';
+import { DrafterStack } from '../lib/drafter-stack.js';
 
 const app = new App();
 const config = getConfig(app);
@@ -44,7 +45,23 @@ new ApiStack(app, stackName(config, 'api'), {
   documentsKey: storage.documentsKey,
   doctorPackQueue: workers.doctorPackQueue,
   workerTokenSecret: workers.workerTokenSecret,
+  draftJobQueue: workers.draftJobQueue,
+  drafterInvokeTokenSecret: workers.drafterInvokeTokenSecret,
   env: config.awsEnv,
 });
 
 new FrontendStack(app, stackName(config, 'frontend'), { config, env: config.awsEnv });
+
+// Drafter Fargate stack — runs the FRN drafter pipeline as a long-running ECS service.
+// Scaffold-only on first deploy (desiredCount=0); operator pushes the drafter image to ECR
+// and bumps desiredCount in a follow-up cdk deploy.
+new DrafterStack(app, stackName(config, 'drafter'), {
+  config,
+  vpc: network.vpc,
+  draftJobQueue: workers.draftJobQueue,
+  drafterInvokeTokenSecret: workers.drafterInvokeTokenSecret,
+  phiBucket: storage.phiBucket,
+  doctorPacksBucket: storage.doctorPacksBucket,
+  documentsKey: storage.documentsKey,
+  env: config.awsEnv,
+});

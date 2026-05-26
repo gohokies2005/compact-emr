@@ -15,7 +15,9 @@ import { createViabilityRouter } from './routes/viability.js';
 import { createChartReadinessRouter } from './routes/chart-readiness.js';
 import { createDoctorPackRouter } from './routes/doctor-pack.js';
 import { createInternalWorkerRouter } from './routes/internal-worker.js';
+import { createDrafterClientRouter, createDrafterWorkerRouter } from './routes/drafter.js';
 import { requireServicePrincipal } from './middleware/service-principal.js';
+import { requireDrafterPrincipal } from './middleware/drafter-principal.js';
 import type { AppDb } from './services/db-types.js';
 
 export interface CreateAppOptions {
@@ -43,9 +45,14 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createViabilityRouter(db));
   app.use('/api/v1', authenticateJwt(), createChartReadinessRouter(db));
   app.use('/api/v1', authenticateJwt(), createDoctorPackRouter(db));
+  // Drafter client routes (Cognito-authenticated): drafter-export + POST /draft.
+  app.use('/api/v1', authenticateJwt(), createDrafterClientRouter(db));
   // Service-principal routes for OCR + Doctor Pack assembler workers (Phase 7B-revised Build 3).
   // Mounted at /api/v1/internal/* with a shared-secret token guard — NOT Cognito-authenticated.
   app.use('/api/v1', requireServicePrincipal(), createInternalWorkerRouter(db));
+  // Drafter worker routes: SEPARATE token (DRAFTER_INVOKE_TOKEN) so a worker-token leak can't
+  // mutate the legal letter artifact or trigger metered Anthropic spend.
+  app.use('/api/v1', requireDrafterPrincipal(), createDrafterWorkerRouter(db));
 
   app.use((req, res) => {
     sendError(res, 404, 'not_found', 'Route was not found.');

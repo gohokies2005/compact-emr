@@ -190,8 +190,40 @@ export interface CaseDelegate {
   update(args: unknown): Promise<CaseRecord>;
 }
 
+// DraftJobRecord covers both the original Phase 4 shape and the drafter-integration fields
+// added in 20260529000000_drafter_integration_fields. All new fields are nullable — they only
+// populate as the drafter pipeline advances.
+export interface DraftJobRecord {
+  id: string;
+  caseId: string;
+  version: number;
+  sqsMessageId: string | null;
+  state: 'queued' | 'running' | 'done' | 'failed';
+  enqueuedAt: Date;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  errorMessage: string | null;
+  manifestSnapshot: unknown;
+  currentPhase: string | null;
+  nextRetryInS: number | null;
+  failureClass: string | null;
+  gradeSidecarJson: unknown;
+  artifactPdfS3Key: string | null;
+  artifactTxtS3Key: string | null;
+  artifactDocxS3Key: string | null;
+  strategyOverride: string | null;
+  parentVersion: number | null;
+  workerId: string | null;
+  lastHeartbeatAt: Date | null;
+  updatedAt: Date;
+}
+
 export interface DraftJobDelegate {
-  findMany(args: unknown): Promise<readonly unknown[]>;
+  findMany(args: unknown): Promise<readonly DraftJobRecord[]>;
+  findFirst(args: unknown): Promise<DraftJobRecord | null>;
+  findUnique(args: unknown): Promise<DraftJobRecord | null>;
+  create(args: unknown): Promise<DraftJobRecord>;
+  update(args: unknown): Promise<DraftJobRecord>;
 }
 
 export interface CorrectionDelegate {

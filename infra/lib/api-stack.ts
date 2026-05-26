@@ -38,6 +38,8 @@ export interface ApiStackProps extends StackProps {
   documentsKey: kms.IKey;
   doctorPackQueue: sqs.IQueue;
   workerTokenSecret: secretsmanager.ISecret;
+  draftJobQueue: sqs.IQueue;
+  drafterInvokeTokenSecret: secretsmanager.ISecret;
 }
 
 export class ApiStack extends Stack {
@@ -90,11 +92,15 @@ export class ApiStack extends Stack {
         DOCTOR_PACKS_BUCKET_NAME: props.doctorPacksBucket.bucketName,
         DRAFT_QUEUE_URL: props.draftQueue.queueUrl,
         DOCTOR_PACK_QUEUE_URL: props.doctorPackQueue.queueUrl,
+        DRAFT_JOB_QUEUE_URL: props.draftJobQueue.queueUrl,
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue
         // in the API + workers code.
         INTERNAL_WORKER_TOKEN: props.workerTokenSecret.secretValue.unsafeUnwrap(),
+        // Drafter integration: separate higher-privilege token. Token check happens inside
+        // the API process via requireDrafterPrincipal middleware on /internal/drafter/* routes.
+        DRAFTER_INVOKE_TOKEN: props.drafterInvokeTokenSecret.secretValue.unsafeUnwrap(),
         COGNITO_ISSUER: `https://cognito-idp.${Stack.of(this).region}.amazonaws.com/${props.userPool.userPoolId}`,
         COGNITO_CLIENT_ID: props.userPoolClient.userPoolClientId,
         DATABASE_URL: databaseUrl,
@@ -129,6 +135,7 @@ export class ApiStack extends Stack {
     props.databaseSecret.grantRead(handler);
     props.draftQueue.grantSendMessages(handler);
     props.doctorPackQueue.grantSendMessages(handler);
+    props.draftJobQueue.grantSendMessages(handler);
 
 
     const migrationProject = new codebuild.Project(this, 'PrismaMigrateDeployProject', {

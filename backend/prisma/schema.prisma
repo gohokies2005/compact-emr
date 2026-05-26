@@ -242,6 +242,14 @@ model Case {
   assignedPhysicianId String?    @map("assigned_physician_id")
   refundEligible      Boolean    @default(false) @map("refund_eligible")
   currentVersion      Int        @default(0) @map("current_version")
+  // Drafter integration: terminal-state snapshot mirrored from v<N>_qa_grade.json + final
+  // pipeline_manifest.json. Triage filter for physician inbox is
+  // (runComplete=true AND shipRecommendation='ship') — anything else stays in the ops queue.
+  probativeScore      Int?       @map("probative_score")
+  grade               String?    @db.VarChar(8)
+  shipRecommendation  String?    @map("ship_recommendation") @db.VarChar(8)
+  operatorState       String?    @map("operator_state") @db.VarChar(24)
+  runComplete         Boolean?   @map("run_complete")
   createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
   version             Int        @default(1)
@@ -261,6 +269,7 @@ model Case {
   @@index([claimedCondition])
   @@index([status, updatedAt])
   @@index([veteranId, status])
+  @@index([assignedPhysicianId, runComplete, shipRecommendation], map: "cases_physician_inbox_idx")
   @@map("cases")
 }
 
@@ -296,12 +305,29 @@ model DraftJob {
   startedAt   DateTime?     @map("started_at") @db.Timestamptz(6)
   completedAt DateTime?     @map("completed_at") @db.Timestamptz(6)
   errorMessage String?      @map("error_message")
+  // Drafter integration: the wrapper running the FRN Node drafter posts progress here
+  // (manifestSnapshot updates every phase transition) and final on terminal
+  // (gradeSidecarJson + artifact*S3Key). Fields mirror pipeline_manifest.json +
+  // v<N>_qa_grade.json shapes exactly — no impedance at the wire.
+  manifestSnapshot  Json?      @map("manifest_snapshot")
+  currentPhase      String?    @map("current_phase") @db.VarChar(40)
+  nextRetryInS      Int?       @map("next_retry_in_s")
+  failureClass      String?    @map("failure_class") @db.VarChar(20)
+  gradeSidecarJson  Json?      @map("grade_sidecar_json")
+  artifactPdfS3Key  String?    @map("artifact_pdf_s3_key") @db.VarChar(500)
+  artifactTxtS3Key  String?    @map("artifact_txt_s3_key") @db.VarChar(500)
+  artifactDocxS3Key String?    @map("artifact_docx_s3_key") @db.VarChar(500)
+  strategyOverride  String?    @map("strategy_override")
+  parentVersion     Int?       @map("parent_version")
+  workerId          String?    @map("worker_id") @db.VarChar(80)
+  lastHeartbeatAt   DateTime?  @map("last_heartbeat_at") @db.Timestamptz(6)
   updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
   case        Case          @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
   @@index([caseId])
   @@index([state])
   @@index([caseId, version])
+  @@index([lastHeartbeatAt])
   @@map("draft_jobs")
 }
 

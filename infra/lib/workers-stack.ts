@@ -52,6 +52,9 @@ export class WorkersStack extends Stack {
   public readonly doctorPackQueue: sqs.IQueue;
   public readonly doctorPackQueueUrl: string;
   public readonly workerTokenSecret: secretsmanager.ISecret;
+  public readonly draftJobQueue: sqs.IQueue;
+  public readonly draftJobQueueUrl: string;
+  public readonly drafterInvokeTokenSecret: secretsmanager.ISecret;
 
   constructor(scope: Construct, id: string, props: WorkersStackProps) {
     super(scope, id, props);
@@ -67,6 +70,19 @@ export class WorkersStack extends Stack {
         excludePunctuation: true,
       },
     });
+
+    // ===== DRAFTER_INVOKE_TOKEN (higher-privilege; drafter-only route /api/v1/internal/drafter/*) =====
+    // Distinct from workerTokenSecret so a worker-token leak can't trigger drafting / metered
+    // Anthropic spend / mutation of the legal letter artifact. Rotate independently.
+    const drafterInvokeTokenSecret = new secretsmanager.Secret(this, 'DrafterInvokeToken', {
+      secretName: `compact-emr-${config.envName}/drafter-invoke-token`,
+      description: 'Bearer token for /api/v1/internal/drafter/* routes. Higher privilege than INTERNAL_WORKER_TOKEN — rotate quarterly.',
+      generateSecretString: {
+        passwordLength: 48,
+        excludePunctuation: true,
+      },
+    });
+    this.drafterInvokeTokenSecret = drafterInvokeTokenSecret;
 
     // ===== Doctor Pack assembler SQS queue (FIFO, content-based dedup) =====
     const dpDlq = new sqs.Queue(this, 'DoctorPackAssemblerDlq', {
@@ -85,6 +101,30 @@ export class WorkersStack extends Stack {
     });
     this.doctorPackQueue = doctorPackQueue;
     this.doctorPackQueueUrl = doctorPackQueue.queueUrl;
+
+    // ===== Drafter job SQS queue (FIFO) =====
+    // ApiStack publishes here when ops_staff hits "Send to drafter"; the long-running Fargate
+    // task in this stack (scaffolded separately) consumes one job at a time. Each FRN drafter
+    // run is 15-20 min — past Lambda's 15-min ceiling, hence Fargate. Visibility timeout
+    // generous (45 min) so a slow run doesn't get redelivered while still in flight.
+    // Group ID = caseId (serializes same-case redrafts). Dedup ID = jobId (idempotent enqueue).
+    const draftJobDlq = new sqs.Queue(this, 'DraftJobDlq', {
+      queueName: `compact-emr-${config.envName}-draft-job-dlq.fifo`,
+      fifo: true,
+      retentionPeriod: Duration.days(14),
+    });
+
+    const draftJobQueue = new sqs.Queue(this, 'DraftJobQueue', {
+      queueName: `compact-emr-${config.envName}-draft-job.fifo`,
+      fifo: true,
+      contentBasedDeduplication: false, // explicit MessageDeduplicationId = jobId
+      visibilityTimeout: Duration.minutes(45),
+      // 3 attempts then DLQ — transient failures get retried by the spine internally; once
+      // the wrapper bubbles a failure to SQS-level, repeated SQS redelivery is unlikely to help.
+      deadLetterQueue: { queue: draftJobDlq, maxReceiveCount: 3 },
+    });
+    this.draftJobQueue = draftJobQueue;
+    this.draftJobQueueUrl = draftJobQueue.queueUrl;
 
     // ===== Textract async completion SNS topic =====
     const textractCompletionTopic = new sns.Topic(this, 'TextractCompletionTopic', {

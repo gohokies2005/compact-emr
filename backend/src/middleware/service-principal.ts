@@ -33,6 +33,12 @@ function constantTimeStringEqual(a: string, b: string): boolean {
 
 export function requireServicePrincipal() {
   return (req: Request, res: Response, next: NextFunction) => {
+    // Path-aware skip: this guard owns /internal/* EXCEPT /internal/drafter/* (which has its
+    // own higher-privilege token via requireDrafterPrincipal). Without these skips, the
+    // middleware would 401 non-internal Cognito traffic AND mis-claim drafter requests.
+    if (!req.path.startsWith('/internal/')) return next();
+    if (req.path.startsWith('/internal/drafter/')) return next();
+
     const expected = process.env['INTERNAL_WORKER_TOKEN'];
     if (typeof expected !== 'string' || expected.length < 16) {
       // Fail closed when the secret isn't configured. Better to 503 than to accept anything.

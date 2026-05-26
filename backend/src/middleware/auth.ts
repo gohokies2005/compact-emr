@@ -40,6 +40,13 @@ async function verifyPayload(token: string): Promise<JWTPayload> {
 
 export function authenticateJwt() {
   return async (req: Request, res: Response, next: NextFunction) => {
+    // /internal/* routes use service-principal token guards (requireServicePrincipal,
+    // requireDrafterPrincipal), not Cognito JWT. authenticateJwt is registered at the
+    // /api/v1 prefix on every Cognito-bearing route, so without this skip it would 401
+    // every internal-worker request before its real guard could run. Belt-and-suspenders
+    // is at API Gateway (authorizer) — this middleware is local defense-in-depth.
+    if (req.path.startsWith('/internal/')) return next();
+
     const token = getBearerToken(req);
     if (!token) {
       return sendError(res, 401, 'unauthorized', 'Missing bearer token.');

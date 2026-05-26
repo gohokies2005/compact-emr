@@ -438,6 +438,8 @@ export interface KeyDocRecord {
   needsRnReview: boolean;
   selectorVersion: string | null;
   selectorRationale: string | null;
+  selectorAcknowledgedAt: Date | null;
+  selectorAcknowledgedBy: string | null;
   createdAt: Date;
   updatedAt: Date;
   version: number;

@@ -528,6 +528,8 @@ model KeyDoc {
   needsRnReview            Boolean  @default(false) @map("needs_rn_review")
   selectorVersion          String?  @map("selector_version") @db.VarChar(50)
   selectorRationale        String?  @map("selector_rationale")
+  selectorAcknowledgedAt   DateTime? @map("selector_acknowledged_at") @db.Timestamptz(6)
+  selectorAcknowledgedBy   String?  @map("selector_acknowledged_by")
   createdAt                DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version                  Int      @default(1)

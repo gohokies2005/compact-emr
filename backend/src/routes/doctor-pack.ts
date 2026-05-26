@@ -244,6 +244,16 @@ export function createDoctorPackRouter(db: AppDb): Router {
           const f = sel.file;
           const cls = sel.classification;
           const refinedEntry = refinedEntries.find((e) => e.filePath === f.filePath);
+          const existing = existingByPath.get(f.filePath);
+
+          // Architect QA finding #1 (REVIEW.md 0cd4df0): durable RN acknowledgement.
+          // If an RN previously cleared `needsRnReview` for this file (selectorAcknowledgedAt
+          // is set), preserve that decision across regeneration. Otherwise use the fresh
+          // selector verdict.
+          const needsRnReviewToWrite = existing?.selectorAcknowledgedAt
+            ? false
+            : sel.selection.needsRnReview;
+
           await tx.keyDoc.upsert({
             where: { caseId_filePath: { caseId, filePath: f.filePath } },
             create: {
@@ -264,12 +274,13 @@ export function createDoctorPackRouter(db: AppDb): Router {
               docType: cls.docType,
               importance: cls.importance,
               pageRanges: refinedEntry?.pageRanges ?? sel.selection.pageRanges,
-              needsRnReview: sel.selection.needsRnReview,
+              needsRnReview: needsRnReviewToWrite,
               selectorVersion: sel.selection.selectorVersion,
               selectorRationale: sel.selection.selectorRationale,
               version: { increment: 1 },
-              // NOTE: `notes` and `physicianIncludeAllPages` intentionally NOT in the update
-              // payload — RN-authored notes and per-doc physician overrides survive
+              // NOTE: `notes`, `physicianIncludeAllPages`, `selectorAcknowledgedAt`, and
+              // `selectorAcknowledgedBy` are intentionally NOT in the update payload — RN-
+              // authored notes, per-doc physician overrides, and RN acknowledgements survive
               // re-generation of the Doctor Pack manifest.
             },
           });
@@ -309,13 +320,17 @@ export function createDoctorPackRouter(db: AppDb): Router {
             action: 'doctor_pack_queued',
             caseId,
             ...(c.veteranId ? { veteranId: c.veteranId } : {}),
+            // Architect QA finding (REVIEW.md 0cd4df0): write the POST-page-selection
+            // counts in the activity log, not the pre-refinement whole-doc counts.
             detailsJson: {
               caseId,
               doctorPackId: stamped.id,
-              keyDocCount: manifest.keyDocCount,
-              pageCount: manifest.totalPageCount,
-              aboveTarget: manifest.aboveTarget,
+              keyDocCount: refinedEntries.length,
+              pageCount: refinedTotalPageCount,
+              aboveTarget: refinedTotalPageCount > 250,
               engineVersion: DOCTOR_PACK_ENGINE_VERSION,
+              preRefinementKeyDocCount: manifest.keyDocCount,
+              preRefinementPageCount: manifest.totalPageCount,
             },
           },
         });
@@ -362,6 +377,53 @@ export function createDoctorPackRouter(db: AppDb): Router {
         orderBy: [{ importance: 'desc' }, { filePath: 'asc' }],
       });
       res.json({ data: rows });
+    }),
+  );
+
+  /**
+   * POST /api/v1/key-docs/:id/acknowledge
+   *
+   * Architect QA finding (REVIEW.md 0cd4df0, Build 1 follow-up): RN-durable clearance.
+   * Marks a KeyDoc as RN-reviewed. Clears needsRnReview AND stamps selectorAcknowledgedAt
+   * so the next /generate doesn't reset the flag. Body: optional `notes` (free text).
+   */
+  router.post(
+    '/key-docs/:id/acknowledge',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const actor = currentActor(req);
+      const id = String(req.params.id);
+      const notesRaw = (req.body as { notes?: unknown })?.notes;
+      const notesUpdate = typeof notesRaw === 'string' && notesRaw.trim().length > 0
+        ? notesRaw.trim().slice(0, 2000)
+        : undefined;
+
+      const existing = await db.keyDoc.findUnique({ where: { id } });
+      if (existing === null) throw new HttpError(404, 'not_found', 'KeyDoc not found', { keyDocId: id });
+
+      const updated = await db.$transaction(async (tx) => {
+        const row = await tx.keyDoc.update({
+          where: { id },
+          data: {
+            needsRnReview: false,
+            selectorAcknowledgedAt: new Date(),
+            selectorAcknowledgedBy: actor.sub,
+            version: { increment: 1 },
+            ...(notesUpdate !== undefined ? { notes: notesUpdate } : {}),
+          },
+        });
+        await tx.activityLog.create({
+          data: {
+            actorUserId: actor.sub,
+            action: 'key_doc_rn_acknowledged',
+            caseId: existing.caseId,
+            detailsJson: { keyDocId: id, caseId: existing.caseId, filePath: existing.filePath },
+          },
+        });
+        return row;
+      });
+
+      res.json({ data: updated });
     }),
   );
 

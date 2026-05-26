@@ -34,7 +34,10 @@ export interface ApiStackProps extends StackProps {
   userPoolClient: cognito.IUserPoolClient;
   draftQueue: sqs.IQueue;
   phiBucket: s3.IBucket;
+  doctorPacksBucket: s3.IBucket;
   documentsKey: kms.IKey;
+  doctorPackQueue: sqs.IQueue;
+  workerTokenSecret: secretsmanager.ISecret;
 }
 
 export class ApiStack extends Stack {
@@ -84,7 +87,14 @@ export class ApiStack extends Stack {
       environment: {
         ENV_NAME: props.config.envName,
         PHI_BUCKET_NAME: props.phiBucket.bucketName,
+        DOCTOR_PACKS_BUCKET_NAME: props.doctorPacksBucket.bucketName,
         DRAFT_QUEUE_URL: props.draftQueue.queueUrl,
+        DOCTOR_PACK_QUEUE_URL: props.doctorPackQueue.queueUrl,
+        // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
+        // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
+        // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue
+        // in the API + workers code.
+        INTERNAL_WORKER_TOKEN: props.workerTokenSecret.secretValue.unsafeUnwrap(),
         COGNITO_ISSUER: `https://cognito-idp.${Stack.of(this).region}.amazonaws.com/${props.userPool.userPoolId}`,
         COGNITO_CLIENT_ID: props.userPoolClient.userPoolClientId,
         DATABASE_URL: databaseUrl,
@@ -106,9 +116,11 @@ export class ApiStack extends Stack {
     });
 
     props.phiBucket.grantReadWrite(handler);
+    props.doctorPacksBucket.grantRead(handler);
     props.documentsKey.grantEncryptDecrypt(handler);
     props.databaseSecret.grantRead(handler);
     props.draftQueue.grantSendMessages(handler);
+    props.doctorPackQueue.grantSendMessages(handler);
 
 
     const migrationProject = new codebuild.Project(this, 'PrismaMigrateDeployProject', {

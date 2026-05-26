@@ -25,7 +25,6 @@ export interface WorkersStackProps extends StackProps {
   phiBucket: s3.IBucket;
   doctorPacksBucket: s3.IBucket;
   documentsKey: kms.IKey;
-  apiBaseUrl: string;
 }
 
 /**
@@ -50,15 +49,18 @@ export interface WorkersStackProps extends StackProps {
  * `workers/doctor-pack-assembler/`.
  */
 export class WorkersStack extends Stack {
+  public readonly doctorPackQueue: sqs.IQueue;
   public readonly doctorPackQueueUrl: string;
+  public readonly workerTokenSecret: secretsmanager.ISecret;
 
   constructor(scope: Construct, id: string, props: WorkersStackProps) {
     super(scope, id, props);
-    const { config, phiBucket, doctorPacksBucket, documentsKey, apiBaseUrl } = props;
+    const { config, phiBucket, doctorPacksBucket, documentsKey } = props;
+    const apiBaseUrl = `https://${config.apiDomainName}`;
 
     // ===== Shared INTERNAL_WORKER_TOKEN (service-principal bearer for /internal/* routes) =====
     const workerTokenSecret = new secretsmanager.Secret(this, 'WorkerToken', {
-      secretName: `${config.namePrefix}/internal-worker-token`,
+      secretName: `compact-emr-${config.envName}/internal-worker-token`,
       description: 'Shared bearer token for /api/v1/internal/* routes. Rotate quarterly.',
       generateSecretString: {
         passwordLength: 48,
@@ -68,22 +70,25 @@ export class WorkersStack extends Stack {
 
     // ===== Doctor Pack assembler SQS queue (FIFO, content-based dedup) =====
     const dpDlq = new sqs.Queue(this, 'DoctorPackAssemblerDlq', {
-      queueName: `${config.namePrefix}-doctor-pack-assembler-dlq.fifo`,
+      queueName: `compact-emr-${config.envName}-doctor-pack-assembler-dlq.fifo`,
       fifo: true,
       retentionPeriod: Duration.days(14),
     });
+    this.workerTokenSecret = workerTokenSecret;
+
     const doctorPackQueue = new sqs.Queue(this, 'DoctorPackAssemblerQueue', {
-      queueName: `${config.namePrefix}-doctor-pack-assembler.fifo`,
+      queueName: `compact-emr-${config.envName}-doctor-pack-assembler.fifo`,
       fifo: true,
       contentBasedDeduplication: false, // we set MessageDeduplicationId explicitly to doctorPackId
       visibilityTimeout: Duration.minutes(16), // > Lambda timeout below
       deadLetterQueue: { queue: dpDlq, maxReceiveCount: 3 },
     });
+    this.doctorPackQueue = doctorPackQueue;
     this.doctorPackQueueUrl = doctorPackQueue.queueUrl;
 
     // ===== Textract async completion SNS topic =====
     const textractCompletionTopic = new sns.Topic(this, 'TextractCompletionTopic', {
-      topicName: `${config.namePrefix}-textract-completion`,
+      topicName: `compact-emr-${config.envName}-textract-completion`,
       displayName: 'Textract async job completion fan-out',
     });
 
@@ -96,7 +101,7 @@ export class WorkersStack extends Stack {
 
     // ===== OCR start handler (S3 EventBridge trigger) =====
     const ocrStart = new lambda.Function(this, 'OcrStart', {
-      functionName: `${config.namePrefix}-ocr-start`,
+      functionName: `compact-emr-${config.envName}-ocr-start`,
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'handler.start_handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'workers', 'ocr')),
@@ -123,7 +128,7 @@ export class WorkersStack extends Stack {
 
     // EventBridge rule: PUT into records/ in the PHI bucket fires the OCR start.
     new events.Rule(this, 'OcrStartRule', {
-      ruleName: `${config.namePrefix}-ocr-on-record-upload`,
+      ruleName: `compact-emr-${config.envName}-ocr-on-record-upload`,
       eventPattern: {
         source: ['aws.s3'],
         detailType: ['Object Created'],
@@ -137,7 +142,7 @@ export class WorkersStack extends Stack {
 
     // ===== OCR completion handler (SNS subscriber) =====
     const ocrCompletion = new lambda.Function(this, 'OcrCompletion', {
-      functionName: `${config.namePrefix}-ocr-completion`,
+      functionName: `compact-emr-${config.envName}-ocr-completion`,
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'handler.completion_handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'workers', 'ocr')),
@@ -167,7 +172,7 @@ export class WorkersStack extends Stack {
       : undefined;
 
     const doctorPackAssembler = new lambda.Function(this, 'DoctorPackAssembler', {
-      functionName: `${config.namePrefix}-doctor-pack-assembler`,
+      functionName: `compact-emr-${config.envName}-doctor-pack-assembler`,
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'handler.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'workers', 'doctor-pack-assembler')),

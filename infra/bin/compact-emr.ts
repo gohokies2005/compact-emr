@@ -9,6 +9,7 @@ import { AuthStack } from '../lib/auth-stack.js';
 import { QueueStack } from '../lib/queue-stack.js';
 import { ApiStack } from '../lib/api-stack.js';
 import { FrontendStack } from '../lib/frontend-stack.js';
+import { WorkersStack } from '../lib/workers-stack.js';
 
 const app = new App();
 const config = getConfig(app);
@@ -18,6 +19,16 @@ const database = new DatabaseStack(app, stackName(config, 'database'), { config,
 const storage = new StorageStack(app, stackName(config, 'storage'), { config, env: config.awsEnv });
 const auth = new AuthStack(app, stackName(config, 'auth'), { config, env: config.awsEnv });
 const queue = new QueueStack(app, stackName(config, 'queue'), { config, env: config.awsEnv });
+
+// Phase 7B Doctor Pack + OCR workers. apiDomainName from config so this doesn't depend on
+// ApiStack (would be circular: ApiStack needs WorkersStack.doctorPackQueue + workerToken).
+const workers = new WorkersStack(app, stackName(config, 'workers'), {
+  config,
+  phiBucket: storage.phiBucket,
+  doctorPacksBucket: storage.doctorPacksBucket,
+  documentsKey: storage.documentsKey,
+  env: config.awsEnv,
+});
 
 new ApiStack(app, stackName(config, 'api'), {
   config,
@@ -29,7 +40,10 @@ new ApiStack(app, stackName(config, 'api'), {
   userPoolClient: auth.userPoolClient,
   draftQueue: queue.draftQueue,
   phiBucket: storage.phiBucket,
+  doctorPacksBucket: storage.doctorPacksBucket,
   documentsKey: storage.documentsKey,
+  doctorPackQueue: workers.doctorPackQueue,
+  workerTokenSecret: workers.workerTokenSecret,
   env: config.awsEnv,
 });
 

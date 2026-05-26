@@ -321,6 +321,10 @@ model DraftJob {
   parentVersion     Int?       @map("parent_version")
   workerId          String?    @map("worker_id") @db.VarChar(80)
   lastHeartbeatAt   DateTime?  @map("last_heartbeat_at") @db.Timestamptz(6)
+  // Architect QA F1: drafter-export materialization bundle lives in S3 so HttpApi/Lambda
+  // payload limits don't bite on big charts. POST /draft writes the bundle once and the
+  // wrapper reads from S3 using its Fargate task role's phiBucket read grant.
+  bundleS3Key       String?    @map("bundle_s3_key") @db.VarChar(500)
   updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
   case        Case          @relation(fields: [caseId], references: [id], onDelete: Cascade)
 

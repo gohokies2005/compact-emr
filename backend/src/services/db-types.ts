@@ -215,6 +215,7 @@ export interface DraftJobRecord {
   parentVersion: number | null;
   workerId: string | null;
   lastHeartbeatAt: Date | null;
+  bundleS3Key: string | null;
   updatedAt: Date;
 }
 

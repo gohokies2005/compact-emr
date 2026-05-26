@@ -7,6 +7,13 @@ import { currentActor } from '../services/request-actor.js';
 import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import { publishDraftJobQueued } from '../services/draft-job-queue.js';
+import {
+  buildDrafterBundle,
+  buildJobBundleS3Key,
+  buildManualBundleS3Key,
+  presignBundleUrl,
+  writeBundleToS3,
+} from '../services/drafter-bundle.js';
 import type { AppDb } from '../services/db-types.js';
 
 /**
@@ -212,13 +219,17 @@ export function createDrafterClientRouter(db: AppDb): Router {
   /**
    * GET /api/v1/cases/:id/drafter-export
    *
-   * Materialization bundle the drafter wrapper pulls after dequeuing a job. Includes the
-   * case, veteran, granted SC list, problems, meds, chart notes, key-doc index, per-document
-   * extracted text (OCR'd page text — NOT raw PDFs; the FRN drafter reads the .pdftext.txt
-   * sidecars), and the latest Doctor Pack manifest. The wrapper restructures into the
-   * `cases/<folder>/` layout the drafter pipeline expects and runs unchanged.
+   * Architect QA F1: returns a presigned S3 URL for the materialization bundle (NOT the
+   * inline JSON). The drafter wrapper running on Fargate fetches the bundle straight from
+   * S3 using its phiBucket read grant — bypassing API Gateway / Lambda payload limits
+   * (~6-10 MB hard cap) that the inline JSON would exceed on 100+ doc cases.
    *
-   * 100% read-only.
+   * This endpoint is primarily for human ops/debug. The drafter wrapper itself doesn't
+   * need to call it — the bundleS3Key is in the SQS message body it consumes.
+   *
+   * On each call: builds a fresh bundle, writes to s3://<phi-bucket>/drafter-exports/
+   * <caseId>/manual-<timestamp>.json, returns a 15-min presigned GET URL. Manual bundles
+   * accumulate; rely on an S3 lifecycle policy on drafter-exports/ for cleanup (followup).
    */
   router.get(
     '/cases/:id/drafter-export',
@@ -226,89 +237,32 @@ export function createDrafterClientRouter(db: AppDb): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const caseId = String(req.params.id);
 
-      const c = await db.case.findFirst({ where: { id: caseId } });
-      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
-      const cw = c as typeof c & { veteranId: string };
+      const bucket = process.env['PHI_BUCKET_NAME'];
+      if (typeof bucket !== 'string' || bucket.length === 0) {
+        throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured');
+      }
 
-      const veteran = await (db as unknown as {
-        veteran: { findUnique: (args: { where: { id: string } }) => Promise<unknown> };
-      }).veteran.findUnique({ where: { id: cw.veteranId } });
-      if (veteran === null) throw new HttpError(404, 'not_found', 'Veteran not found', { veteranId: cw.veteranId });
+      const bundle = await buildDrafterBundle(db, caseId).catch((err: unknown) => {
+        if (err instanceof Error && err.message.startsWith('Case not found')) {
+          throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+        }
+        if (err instanceof Error && err.message.startsWith('Veteran not found')) {
+          throw new HttpError(404, 'not_found', 'Veteran not found', { caseId });
+        }
+        throw err;
+      });
 
-      const [
-        scConditions,
-        activeProblems,
-        activeMedications,
-        chartNotes,
-        keyDocs,
-        fileReadStatuses,
-        documents,
-        latestDoctorPack,
-        activeJob,
-      ] = await Promise.all([
-        (db as unknown as { scCondition: { findMany: (args: { where: { veteranId: string } }) => Promise<unknown[]> } })
-          .scCondition.findMany({ where: { veteranId: cw.veteranId } }),
-        db.activeProblem.findMany({ where: { veteranId: cw.veteranId } }),
-        (db as unknown as { activeMedication: { findMany: (args: { where: { veteranId: string } }) => Promise<unknown[]> } })
-          .activeMedication.findMany({ where: { veteranId: cw.veteranId } }),
-        (db as unknown as { chartNote: { findMany: (args: { where: { veteranId: string }; orderBy: { createdAt: 'asc' } }) => Promise<unknown[]> } })
-          .chartNote.findMany({ where: { veteranId: cw.veteranId }, orderBy: { createdAt: 'asc' } }),
-        (db as unknown as { keyDoc: { findMany: (args: { where: { caseId: string } }) => Promise<unknown[]> } })
-          .keyDoc.findMany({ where: { caseId } }),
-        db.fileReadStatus.findMany({ where: { caseId } }),
-        (db as unknown as {
-          document: {
-            findMany: (args: {
-              where: { caseId: string };
-              include: { pages: { orderBy: { pageNumber: 'asc' } } };
-            }) => Promise<unknown[]>;
-          };
-        }).document.findMany({
-          where: { caseId },
-          include: { pages: { orderBy: { pageNumber: 'asc' } } },
-        }),
-        db.doctorPack.findFirst({
-          where: { caseId, state: 'ready' },
-          orderBy: { generatedAt: 'desc' },
-        }),
-        db.draftJob.findFirst({
-          where: { caseId, state: { in: ['queued', 'running'] as const } },
-          orderBy: { enqueuedAt: 'desc' },
-        }),
-      ]);
-
-      const chartReadiness = evaluateChartReadiness(fileReadStatuses);
+      const s3Key = buildManualBundleS3Key(caseId);
+      const upload = await writeBundleToS3(bucket, s3Key, bundle);
+      const presigned = await presignBundleUrl(bucket, s3Key);
 
       res.json({
         data: {
-          case: {
-            id: c.id,
-            veteranId: cw.veteranId,
-            claimedCondition: c.claimedCondition,
-            claimType: c.claimType,
-            framingChoice: c.framingChoice,
-            upstreamScCondition: c.upstreamScCondition,
-            veteranStatement: c.veteranStatement,
-            inServiceEvent: c.inServiceEvent,
-            status: c.status,
-            currentVersion: c.currentVersion,
-            cdsVerdict: c.cdsVerdict,
-            cdsRationale: c.cdsRationale,
-          },
-          veteran,
-          scConditions,
-          activeProblems,
-          activeMedications,
-          chartNotes,
-          keyDocs,
-          fileReadStatuses,
-          documents,
-          chartReadiness: {
-            ready: chartReadiness.ready,
-            manualSummaryRequired: chartReadiness.manualSummaryRequired,
-          },
-          doctorPack: latestDoctorPack,
-          activeJob,
+          bundleS3Key: upload.s3Key,
+          bundleSizeBytes: upload.sizeBytes,
+          presignedUrl: presigned.url,
+          expiresAt: presigned.expiresAt,
+          ttlSeconds: presigned.ttlSeconds,
         },
       });
     }),
@@ -371,6 +325,23 @@ export function createDrafterClientRouter(db: AppDb): Router {
 
       const jobId = randomUUID();
 
+      // Architect QA F1: write the materialization bundle to S3 BEFORE creating the
+      // DraftJob row + enqueueing. If S3 write fails we abort cleanly without leaving a
+      // queued row that has no bundle. The wrapper reads from bundleS3Key via its
+      // Fargate task role's phiBucket read grant — never via API GET.
+      const bucket = process.env['PHI_BUCKET_NAME'];
+      if (typeof bucket !== 'string' || bucket.length === 0) {
+        throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured');
+      }
+      const bundle = await buildDrafterBundle(db, caseId).catch((err: unknown) => {
+        if (err instanceof Error && err.message.startsWith('Veteran not found')) {
+          throw new HttpError(404, 'not_found', 'Veteran not found', { caseId });
+        }
+        throw err;
+      });
+      const bundleS3Key = buildJobBundleS3Key(caseId, jobId);
+      const upload = await writeBundleToS3(bucket, bundleS3Key, bundle);
+
       let created;
       try {
         created = await db.$transaction(async (tx) => {
@@ -380,6 +351,7 @@ export function createDrafterClientRouter(db: AppDb): Router {
               caseId,
               version: nextVersion,
               state: 'queued',
+              bundleS3Key,
               ...(parsed.strategyOverride !== undefined ? { strategyOverride: parsed.strategyOverride } : {}),
               ...(parsed.parentVersion !== undefined ? { parentVersion: parsed.parentVersion } : {}),
             },
@@ -392,6 +364,8 @@ export function createDrafterClientRouter(db: AppDb): Router {
               detailsJson: {
                 jobId,
                 version: nextVersion,
+                bundleS3Key,
+                bundleSizeBytes: upload.sizeBytes,
                 ...(parsed.strategyOverride !== undefined && { strategyOverride: parsed.strategyOverride }),
                 ...(parsed.parentVersion !== undefined && { parentVersion: parsed.parentVersion }),
               },
@@ -404,6 +378,8 @@ export function createDrafterClientRouter(db: AppDb): Router {
         // the race between the pre-flight in-flight check and this insert. Prisma surfaces
         // a P2002 unique-constraint violation when a concurrent request beats us to the row.
         if (typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === 'P2002') {
+          // The bundle we just uploaded is orphaned (no DraftJob references it). Acceptable —
+          // S3 lifecycle policy on drafter-exports/ will reap it; concurrent /draft is rare.
           throw new HttpError(409, 'conflict', 'Another draft job for this case was queued concurrently.', { caseId });
         }
         throw err;
@@ -413,11 +389,12 @@ export function createDrafterClientRouter(db: AppDb): Router {
         jobId,
         caseId,
         version: nextVersion,
+        bundleS3Key,
         strategyOverride: parsed.strategyOverride ?? null,
         parentVersion: parsed.parentVersion ?? null,
       });
 
-      res.status(201).json({ data: { job: created, publish: publishResult } });
+      res.status(201).json({ data: { job: created, publish: publishResult, bundle: { s3Key: bundleS3Key, sizeBytes: upload.sizeBytes } } });
     }),
   );
 

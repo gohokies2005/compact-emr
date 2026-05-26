@@ -18,6 +18,10 @@ interface DraftJobQueueMessage {
   readonly jobId: string;
   readonly caseId: string;
   readonly version: number;
+  // Architect QA F1: bundleS3Key points at the materialization bundle in
+  // s3://<phi-bucket>/drafter-exports/<caseId>/<jobId>.json. The Fargate wrapper reads
+  // it directly using its phiBucket task role grant — no API round-trip needed.
+  readonly bundleS3Key: string;
   readonly strategyOverride?: string | null;
   readonly parentVersion?: number | null;
 }
@@ -45,6 +49,7 @@ export async function publishDraftJobQueued(message: DraftJobQueueMessage): Prom
     jobId: message.jobId,
     caseId: message.caseId,
     version: message.version,
+    bundleS3Key: message.bundleS3Key,
   };
   if (message.strategyOverride !== undefined && message.strategyOverride !== null) {
     body['strategyOverride'] = message.strategyOverride;

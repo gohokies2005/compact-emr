@@ -18,6 +18,16 @@ import {
 } from '../services/drafter-bundle.js';
 import { isDrafterArtifactS3Key } from '../services/s3-key-safety.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
+let cachedS3Client: S3Client | null = null;
+function getS3ForArtifacts(): S3Client {
+  if (cachedS3Client !== null) return cachedS3Client;
+  cachedS3Client = new S3Client({});
+  return cachedS3Client;
+}
+const ARTIFACT_PDF_TTL_SECONDS = 5 * 60;
 import type { AppDb } from '../services/db-types.js';
 
 /**
@@ -427,6 +437,53 @@ export function createDrafterClientRouter(db: AppDb): Router {
       });
 
       res.status(201).json({ data: { job: created, publish: publishResult, bundle: { s3Key: bundleS3Key, sizeBytes: upload.sizeBytes } } });
+    }),
+  );
+
+  /**
+   * GET /api/v1/cases/:id/draft-jobs/:jobId/artifact-pdf-url
+   *
+   * Returns a 5-min presigned GET URL for the DraftJob's artifactPdfS3Key. Used by the
+   * Phase 8 physician "Open PDF" button (PhysicianLetterReadyPanel.onOpenPdf callback).
+   *
+   * Access: admin / ops_staff / the assigned physician for this case.
+   * Validates: the DraftJob exists, belongs to the URL case, has artifactPdfS3Key set,
+   * and the key passes our drafter-artifacts path-traversal validator (server-side belt
+   * before generating a signed URL).
+   */
+  router.get(
+    '/cases/:id/draft-jobs/:jobId/artifact-pdf-url',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const jobId = String(req.params.jobId);
+
+      const bucket = process.env['PHI_BUCKET_NAME'];
+      if (typeof bucket !== 'string' || bucket.length === 0) {
+        throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured');
+      }
+
+      const job = await db.draftJob.findUnique({ where: { id: jobId } });
+      if (job === null || job.caseId !== caseId) {
+        throw new HttpError(404, 'not_found', 'DraftJob not found for this case', { caseId, jobId });
+      }
+      if (job.artifactPdfS3Key === null || job.artifactPdfS3Key === '') {
+        throw new HttpError(409, 'conflict', 'DraftJob has no PDF artifact yet', { caseId, jobId });
+      }
+      // Defensive: re-validate the stored key matches the safe pattern. The /complete
+      // route already validated on write, but a corrupted row shouldn't be used to sign
+      // an arbitrary URL.
+      if (!isDrafterArtifactS3Key(job.artifactPdfS3Key)) {
+        throw new HttpError(500, 'internal_error', 'Stored artifactPdfS3Key fails safety check', { caseId, jobId });
+      }
+
+      const s3 = getS3ForArtifacts();
+      const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: job.artifactPdfS3Key }), {
+        expiresIn: ARTIFACT_PDF_TTL_SECONDS,
+      });
+      const expiresAt = new Date(Date.now() + ARTIFACT_PDF_TTL_SECONDS * 1000).toISOString();
+
+      res.json({ data: { url, expiresAt, ttlSeconds: ARTIFACT_PDF_TTL_SECONDS } });
     }),
   );
 

@@ -18,9 +18,43 @@ export interface Veteran extends VersionedRecord { readonly id: string; readonly
 export interface ScCondition extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly condition: string; readonly dcCode?: string; readonly ratingPct?: number; readonly grantedDate?: string; readonly createdAt: string; }
 export interface ActiveProblem extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly problem: string; readonly notes?: string; readonly createdAt: string; }
 export interface ActiveMedication extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly drugName: string; readonly dose?: string; readonly frequency?: string; readonly indication?: string; readonly createdAt: string; }
-export interface Case extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly claimedCondition: string; readonly claimType: ClaimType; readonly framingChoice?: string; readonly upstreamScCondition?: string; readonly veteranStatement?: string; readonly inServiceEvent?: string; readonly status: CaseStatus; readonly cdsVerdict: CdsVerdict; readonly cdsOddsPct?: number; readonly cdsRationale?: Record<string, unknown>; readonly assignedPhysicianId?: string; readonly refundEligible: boolean; readonly currentVersion: number; readonly createdAt: string; }
+export type OperatorState = 'ready' | 'ready_with_notes' | 'needs_one_thing' | 'paused';
+export type ShipRecommendation = 'ship' | 'revise';
+export type Grade = 'A' | 'A-' | 'B+' | 'B' | 'B-' | 'C+' | 'C';
+export type FailureClass = 'transient' | 'degrade' | 'needs_human' | 'system';
+
+export interface Case extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly claimedCondition: string; readonly claimType: ClaimType; readonly framingChoice?: string; readonly upstreamScCondition?: string; readonly veteranStatement?: string; readonly inServiceEvent?: string; readonly status: CaseStatus; readonly cdsVerdict: CdsVerdict; readonly cdsOddsPct?: number; readonly cdsRationale?: Record<string, unknown>; readonly assignedPhysicianId?: string; readonly refundEligible: boolean; readonly currentVersion: number; readonly createdAt: string;
+  // Phase 8 drafter integration: terminal-state snapshot from v<N>_qa_grade.json + final manifest.
+  // Triage rule: case routes to physician_review only when (runComplete === true && shipRecommendation === 'ship').
+  readonly probativeScore?: number | null;
+  readonly grade?: Grade | null;
+  readonly shipRecommendation?: ShipRecommendation | null;
+  readonly operatorState?: OperatorState | null;
+  readonly runComplete?: boolean | null;
+  // G8: RN-friendly message accompanying operatorState (populated by /complete + by stuck-job watcher on sweep).
+  readonly operatorMessage?: string | null;
+}
 export interface Document extends VersionedRecord { readonly id: string; readonly caseId: string; readonly filename: string; readonly sizeBytes: string; readonly contentType: string; readonly docTag?: string; readonly s3Key: string; readonly uploadedAt: string; readonly uploadedBy: string; }
-export interface DraftJob { readonly id: string; readonly caseId: string; readonly version: number; readonly sqsMessageId?: string; readonly state: DraftJobState; readonly enqueuedAt: string; readonly startedAt?: string; readonly completedAt?: string; readonly errorMessage?: string; readonly updatedAt: string; }
+export interface DraftJob { readonly id: string; readonly caseId: string; readonly version: number; readonly sqsMessageId?: string; readonly state: DraftJobState; readonly enqueuedAt: string; readonly startedAt?: string; readonly completedAt?: string; readonly errorMessage?: string; readonly updatedAt: string;
+  // Phase 8 drafter integration: progress + terminal fields populated by drafter wrapper
+  // via /internal/drafter/jobs/:id/{progress,complete}.
+  // manifestSnapshot + gradeSidecarJson are typed `unknown` so consumer components can
+  // declare their own narrow shape (e.g. ManifestSnapshot, GradeSidecarJson) and extend
+  // DraftJob without an index-signature incompatibility.
+  readonly manifestSnapshot?: unknown;
+  readonly currentPhase?: string | null;
+  readonly nextRetryInS?: number | null;
+  readonly failureClass?: FailureClass | null;
+  readonly gradeSidecarJson?: unknown;
+  readonly artifactPdfS3Key?: string | null;
+  readonly artifactTxtS3Key?: string | null;
+  readonly artifactDocxS3Key?: string | null;
+  readonly strategyOverride?: string | null;
+  readonly parentVersion?: number | null;
+  readonly workerId?: string | null;
+  readonly lastHeartbeatAt?: string | null;
+  readonly bundleS3Key?: string | null;
+}
 export interface Correction extends VersionedRecord { readonly id: string; readonly caseId: string; readonly fromVersion: number; readonly toVersion?: number; readonly correctionReason: CorrectionReason; readonly correctionNote: string; readonly affectsSections: readonly unknown[]; readonly billingTier: BillingTier; readonly requestedBy: string; readonly requestedAt: string; readonly approvedBy?: string; readonly approvedAt?: string; }
 export interface Physician extends VersionedRecord { readonly id: string; readonly fullName: string; readonly npi: string; readonly specialty: string; readonly medicalLicense: string; readonly email: string; readonly phone?: string; readonly signatureImageS3Key?: string; readonly active: boolean; readonly createdAt: string; }
 export interface PhysicianCompensation extends VersionedRecord { readonly id: string; readonly physicianId: string; readonly caseId: string; readonly activity: PhysicianActivity; readonly amountCents: number; readonly accruedAt: string; readonly paidAt?: string; readonly payrollBatchId?: string; }

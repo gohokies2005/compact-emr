@@ -9,6 +9,10 @@ import { TabBar, type TabItem } from '../../components/ui/TabBar';
 import { CdsPanelForCase } from '../../components/CdsPanel';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { ClarificationsPanel } from '../../components/ClarificationsPanel';
+import { InFlightDrafterPanel, type InFlightDraftJob } from '../../components/InFlightDrafterPanel';
+import { PhysicianLetterReadyPanel, type ReadyDraftJob } from '../../components/PhysicianLetterReadyPanel';
+import { OpsHeldPanel, type OpsDraftJob } from '../../components/OpsHeldPanel';
+import { getArtifactPdfUrl } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
 import { useAuth } from '../../auth/useAuth';
 import { ConflictError } from '../../api/client';
@@ -92,6 +96,73 @@ export function CaseDetailPage() {
     </div>
 
     <CdsPanelForCase c={c} />
+
+    {(() => {
+      // Phase 8: physician/ops drafter panels. Derived from latest DraftJob + Case state.
+      const latestDraftJob = c.draftJobs?.[0] as InFlightDraftJob | undefined;
+      const inFlightDraft =
+        latestDraftJob?.state === 'queued' || latestDraftJob?.state === 'running';
+
+      const canSeePhysicianReadyPanel =
+        c.runComplete === true &&
+        c.shipRecommendation === 'ship' &&
+        c.status === 'physician_review' &&
+        (role === 'admin' || role === 'physician');
+
+      const canSeeOpsHeldPanel =
+        (role === 'admin' || role === 'ops_staff') &&
+        (c.runComplete === false ||
+          c.shipRecommendation === 'revise' ||
+          (c.operatorState !== undefined &&
+            c.operatorState !== null &&
+            c.operatorState !== 'ready' &&
+            c.operatorState !== 'ready_with_notes'));
+
+      const handleOpenPdf = async () => {
+        if (!latestDraftJob) return;
+        try {
+          const { data } = await getArtifactPdfUrl(c.id, latestDraftJob.id);
+          window.open(data.url, '_blank', 'noopener,noreferrer');
+        } catch {
+          window.alert('Could not open the PDF. Please try again — if it keeps failing, flag this case to Dr. Ryan.');
+        }
+      };
+
+      return (
+        <>
+          {inFlightDraft && latestDraftJob ? (
+            <InFlightDrafterPanel job={latestDraftJob} />
+          ) : null}
+
+          {!inFlightDraft && canSeePhysicianReadyPanel && latestDraftJob ? (
+            // The panel narrows `manifestSnapshot` / `gradeSidecarJson` via its own local
+            // interfaces (ReadyDraftJob); backend guarantees the shape but TS can't narrow
+            // `unknown` to a specific shape. The `as unknown as ReadyDraftJob` two-step is
+            // the standard escape hatch — runtime data matches.
+            <PhysicianLetterReadyPanel
+              c={c}
+              job={latestDraftJob as unknown as ReadyDraftJob}
+              canSendBack={role === 'admin' || role === 'physician'}
+              onOpenPdf={handleOpenPdf}
+              onOpenSignOff={() => setSignOffOpen(true)}
+              onChanged={async () => { await refetch(); }}
+            />
+          ) : null}
+
+          {!inFlightDraft && canSeeOpsHeldPanel ? (
+            // OpsHeldPanel.job is optional under exactOptionalPropertyTypes — spread it only
+            // when present (TS rejects passing explicit undefined to an optional prop).
+            <OpsHeldPanel
+              c={c}
+              {...(latestDraftJob
+                ? { job: latestDraftJob as unknown as OpsDraftJob }
+                : {})}
+              isAdmin={role === 'admin'}
+            />
+          ) : null}
+        </>
+      );
+    })()}
 
     <div className="rounded-lg border border-slate-200 bg-white">
       <TabBar tabs={tabsWithBadge} active={tab} onChange={setTab} />

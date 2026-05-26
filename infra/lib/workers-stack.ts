@@ -372,5 +372,100 @@ export class WorkersStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+
+    // ===== G1 + G6: Stuck-DoctorPack watcher Lambda =====
+    // Sweeps DoctorPack rows in two stuck states the existing pipeline doesn't recover from:
+    //   QUEUED > 5 min (G6: SQS publish failed silently) -> re-publish to SQS
+    //   GENERATING > 15 min (G1: assembler crashed) -> flip to 'failed' with RN-friendly msg
+    // Same VPC + DB SG pattern as the stuck-job watcher.
+    const dpWatcherSg = new ec2.SecurityGroup(this, 'StuckDoctorPackWatcherSecurityGroup', {
+      vpc: props.vpc,
+      allowAllOutbound: true,
+      description: 'Compact EMR stuck-doctor-pack watcher Lambda egress + DB + SQS access.',
+    });
+    new ec2.CfnSecurityGroupIngress(this, 'DatabaseIngressFromStuckDoctorPackWatcher', {
+      groupId: props.databaseSecurityGroup.securityGroupId,
+      ipProtocol: 'tcp',
+      fromPort: 5432,
+      toPort: 5432,
+      sourceSecurityGroupId: dpWatcherSg.securityGroupId,
+      description: 'Compact EMR stuck-doctor-pack watcher Lambda to Postgres',
+    });
+
+    const dpWatcherLogGroup = new logs.LogGroup(this, 'StuckDoctorPackWatcherLogGroup', {
+      logGroupName: `/aws/lambda/compact-emr-${config.envName}-stuck-doctor-pack-watcher`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: config.envName === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const stuckDoctorPackWatcher = new nodejs.NodejsFunction(this, 'StuckDoctorPackWatcher', {
+      functionName: `compact-emr-${config.envName}-stuck-doctor-pack-watcher`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.resolve(__dirname, '..', '..', 'backend', 'src', 'lambdas', 'stuck-doctor-pack-watcher.ts'),
+      handler: 'handler',
+      timeout: Duration.minutes(2),
+      memorySize: 512,
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [dpWatcherSg],
+      logGroup: dpWatcherLogGroup,
+      environment: {
+        ENV_NAME: config.envName,
+        DATABASE_URL: watcherDatabaseUrl,
+        DATABASE_URL_SECRET_ARN: props.databaseSecret.secretArn,
+        // Re-publish path needs the DoctorPack queue URL.
+        DOCTOR_PACK_QUEUE_URL: doctorPackQueue.queueUrl,
+      },
+      bundling: {
+        externalModules: ['@prisma/client', '@prisma/engines'],
+        commandHooks: {
+          beforeBundling: () => [],
+          beforeInstall: () => [],
+          afterBundling: (inputDir: string, outputDir: string) => {
+            const helper = path.join(__dirname, '..', 'scripts', 'bundle-copy.cjs');
+            const q = (s: string) => `"${s}"`;
+            return [
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/@prisma')} ${q(outputDir + '/node_modules/@prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/.prisma')} ${q(outputDir + '/node_modules/.prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/prisma')} ${q(outputDir + '/prisma')}`,
+            ];
+          },
+        },
+      },
+    });
+    props.databaseSecret.grantRead(stuckDoctorPackWatcher);
+    doctorPackQueue.grantSendMessages(stuckDoctorPackWatcher);
+
+    new events.Rule(this, 'StuckDoctorPackWatcherSchedule', {
+      ruleName: `compact-emr-${config.envName}-stuck-doctor-pack-watcher-schedule`,
+      description: 'Every 5 min, sweep stuck DoctorPack rows (queued -> republish; generating -> fail).',
+      schedule: events.Schedule.rate(Duration.minutes(5)),
+      targets: [new targets.LambdaFunction(stuckDoctorPackWatcher, { retryAttempts: 2 })],
+    });
+
+    // Mirror the F6b CloudWatch alarm pattern: if doctor-pack assembler is recurring-crashing,
+    // we want an ops signal. Threshold 2/hr (lower than drafter's 3/hr because doctor-pack
+    // failures are rarer in normal operation).
+    const dpSweptMetricFilter = new logs.MetricFilter(this, 'StuckDoctorPackSweptMetric', {
+      logGroup: dpWatcherLogGroup,
+      filterPattern: logs.FilterPattern.literal('{ $.msg = "stuck-doctor-pack-watcher: swept stale generating row" }'),
+      metricNamespace: `compact-emr/${config.envName}/drafter`,
+      metricName: 'DoctorPacksSweptGenerating',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    new cloudwatch.Alarm(this, 'DoctorPacksSweptAlarm', {
+      alarmName: `compact-emr-${config.envName}-doctor-packs-swept-high`,
+      alarmDescription: 'Doctor Pack assembler is repeatedly crashing — watcher swept >2 stuck generating rows in 1 hour. Investigate assembler Lambda logs.',
+      metric: dpSweptMetricFilter.metric({
+        statistic: 'Sum',
+        period: Duration.hours(1),
+      }),
+      threshold: 2,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
   }
 }

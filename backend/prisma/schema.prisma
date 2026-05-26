@@ -250,6 +250,12 @@ model Case {
   shipRecommendation  String?    @map("ship_recommendation") @db.VarChar(8)
   operatorState       String?    @map("operator_state") @db.VarChar(24)
   runComplete         Boolean?   @map("run_complete")
+  // G8: RN-facing message accompanying operatorState. The spine's summarizeForOperator()
+  // emits {state, message}; we store the message verbatim so the RN/physician UI can render
+  // it without making the UI rebuild the message from state. Also populated by the
+  // stuck-job watcher when it sweeps stale jobs (so RN sees "We had a problem and gave up
+  // after 10 minutes — click Retry" instead of "system error").
+  operatorMessage     String?    @map("operator_message")
   createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
   version             Int        @default(1)

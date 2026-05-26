@@ -79,6 +79,12 @@ export async function handler(): Promise<StuckJobWatcherResult> {
   }
 
   let swept = 0;
+  // G8: RN-friendly message we set on Case.operatorMessage so the EMR UI can render a clear
+  // next-action prompt instead of leaving the RN to interpret "system error". No infra
+  // jargon (no "Lambda", "Fargate", "heartbeat" etc.) — just what happened plus what to do.
+  const sweptCaseMessage =
+    'We had a problem and couldn’t finish drafting this letter after 10 minutes. Please click Send to Drafter again. If it keeps failing, flag this case to Dr. Ryan.';
+
   for (const job of stuckJobs) {
     try {
       await prisma.$transaction([
@@ -90,6 +96,22 @@ export async function handler(): Promise<StuckJobWatcherResult> {
             errorMessage: 'Heartbeat stale; Fargate task assumed crashed. Watcher swept.',
             completedAt: now,
             lastHeartbeatAt: now,
+          },
+        }),
+        // G8: populate Case.operatorMessage so the RN/physician UI shows the friendly
+        // explanation. Also flip Case.operatorState to 'paused' (matches the spine's
+        // summarizeForOperator() vocabulary for "we had to stop") so the UI's existing
+        // state-driven rendering catches this without special-casing.
+        // Architect QA: bump version so TanStack-Query-driven UI (G2 8s polling) and any
+        // optimistic-lock consumer detects the watcher's mutation. All other Case writers
+        // do this; the watcher must too.
+        prisma.case.update({
+          where: { id: job.caseId },
+          data: {
+            operatorState: 'paused',
+            operatorMessage: sweptCaseMessage,
+            runComplete: false,
+            version: { increment: 1 },
           },
         }),
         prisma.activityLog.create({

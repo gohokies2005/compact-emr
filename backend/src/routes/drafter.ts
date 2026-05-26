@@ -540,6 +540,9 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
             grade: parsed.grade,
             shipRecommendation: parsed.shipRecommendation,
             operatorState: parsed.operatorState,
+            // G8: previously parsed but discarded; now wired so the RN/physician UI can render
+            // summarizeForOperator()'s message verbatim without rebuilding from state.
+            operatorMessage: parsed.operatorMessage,
             runComplete: parsed.runComplete,
             // F4 semantics (Ryan, 2026-05-26): currentVersion = last *attempted* version,
             // advances on ANY terminal /complete call — ship or fail. The "current" pointer

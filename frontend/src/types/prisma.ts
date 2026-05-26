@@ -18,10 +18,53 @@ export interface Veteran extends VersionedRecord { readonly id: string; readonly
 export interface ScCondition extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly condition: string; readonly dcCode?: string; readonly ratingPct?: number; readonly grantedDate?: string; readonly createdAt: string; }
 export interface ActiveProblem extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly problem: string; readonly notes?: string; readonly createdAt: string; }
 export interface ActiveMedication extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly drugName: string; readonly dose?: string; readonly frequency?: string; readonly indication?: string; readonly createdAt: string; }
-export type OperatorState = 'ready' | 'ready_with_notes' | 'needs_one_thing' | 'paused';
-export type ShipRecommendation = 'ship' | 'revise';
+// 'blocked' added for the condition-not-in-library feature (task #155). 'hold' added on
+// ShipRecommendation as a third option distinct from ship/revise.
+export type OperatorState = 'ready' | 'ready_with_notes' | 'needs_one_thing' | 'paused' | 'blocked';
+export type ShipRecommendation = 'ship' | 'revise' | 'hold';
 export type Grade = 'A' | 'A-' | 'B+' | 'B' | 'B-' | 'C+' | 'C';
 export type FailureClass = 'transient' | 'degrade' | 'needs_human' | 'system';
+
+// Phase 8 drafter manifest + grade sidecar shapes. The 15 named phases mirror the spine's
+// pipeline_manifest.json. Exported so consumer components share a single source of truth
+// (Chunk 1 panels defined narrow inline; Chunk 2 promotes them).
+export type DraftJobPhase =
+  | 'preflight'
+  | 'index_consult'
+  | 'source_lock'
+  | 'framing_gate'
+  | 'drafter'
+  | 'adversary_panel'
+  | 'specialist_gate'
+  | 'refine_loop'
+  | 'surgical_edit'
+  | 'citation_scoring'
+  | 'pmid_verify'
+  | 'linter'
+  | 'qa_report'
+  | 'grader'
+  | 'render';
+
+export interface TargetedRevisionHint {
+  readonly section?: string | null;
+  readonly issue?: string | null;
+  readonly suggested_fix?: string | null;
+}
+
+export interface DraftGradeSidecarJson {
+  readonly targeted_revision_hints?: readonly TargetedRevisionHint[];
+  readonly detail_phase?: string | null;
+}
+
+export interface DraftManifestPhase {
+  readonly operator_message?: string | null;
+  readonly summary?: string | null;
+  readonly status?: string | null;
+}
+
+export interface DraftManifestSnapshot {
+  readonly phases?: Record<string, DraftManifestPhase>;
+}
 
 export interface Case extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly claimedCondition: string; readonly claimType: ClaimType; readonly framingChoice?: string; readonly upstreamScCondition?: string; readonly veteranStatement?: string; readonly inServiceEvent?: string; readonly status: CaseStatus; readonly cdsVerdict: CdsVerdict; readonly cdsOddsPct?: number; readonly cdsRationale?: Record<string, unknown>; readonly assignedPhysicianId?: string; readonly refundEligible: boolean; readonly currentVersion: number; readonly createdAt: string;
   // Phase 8 drafter integration: terminal-state snapshot from v<N>_qa_grade.json + final manifest.
@@ -37,15 +80,13 @@ export interface Case extends VersionedRecord { readonly id: string; readonly ve
 export interface Document extends VersionedRecord { readonly id: string; readonly caseId: string; readonly filename: string; readonly sizeBytes: string; readonly contentType: string; readonly docTag?: string; readonly s3Key: string; readonly uploadedAt: string; readonly uploadedBy: string; }
 export interface DraftJob { readonly id: string; readonly caseId: string; readonly version: number; readonly sqsMessageId?: string; readonly state: DraftJobState; readonly enqueuedAt: string; readonly startedAt?: string; readonly completedAt?: string; readonly errorMessage?: string; readonly updatedAt: string;
   // Phase 8 drafter integration: progress + terminal fields populated by drafter wrapper
-  // via /internal/drafter/jobs/:id/{progress,complete}.
-  // manifestSnapshot + gradeSidecarJson are typed `unknown` so consumer components can
-  // declare their own narrow shape (e.g. ManifestSnapshot, GradeSidecarJson) and extend
-  // DraftJob without an index-signature incompatibility.
-  readonly manifestSnapshot?: unknown;
-  readonly currentPhase?: string | null;
+  // via /internal/drafter/jobs/:id/{progress,complete}. Chunk 2 promoted the manifest +
+  // grade sidecar shapes to shared exported interfaces so panels don't redefine inline.
+  readonly manifestSnapshot?: DraftManifestSnapshot | null;
+  readonly currentPhase?: DraftJobPhase | string | null;
   readonly nextRetryInS?: number | null;
   readonly failureClass?: FailureClass | null;
-  readonly gradeSidecarJson?: unknown;
+  readonly gradeSidecarJson?: DraftGradeSidecarJson | null;
   readonly artifactPdfS3Key?: string | null;
   readonly artifactTxtS3Key?: string | null;
   readonly artifactDocxS3Key?: string | null;

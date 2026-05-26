@@ -10,8 +10,8 @@ import { CdsPanelForCase } from '../../components/CdsPanel';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { ClarificationsPanel } from '../../components/ClarificationsPanel';
 import { InFlightDrafterPanel, type InFlightDraftJob } from '../../components/InFlightDrafterPanel';
-import { PhysicianLetterReadyPanel, type ReadyDraftJob } from '../../components/PhysicianLetterReadyPanel';
-import { OpsHeldPanel, type OpsDraftJob } from '../../components/OpsHeldPanel';
+import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
+import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { getArtifactPdfUrl } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
 import { useAuth } from '../../auth/useAuth';
@@ -48,7 +48,21 @@ export function CaseDetailPage() {
   const [pendingTo, setPendingTo] = useState<CaseStatus | null>(null);
   const [signOffOpen, setSignOffOpen] = useState(false);
 
-  const caseQuery = useQuery({ queryKey: ['case', caseId], queryFn: () => getCase(caseId), enabled: caseId.length > 0 });
+  // Phase 8.1 G2 (Ryan's RN-self-service audit): poll the main case query every 8s while
+  // the case is in pre-draft states so Textract OCR callbacks (FileReadStatus flips to
+  // manual_summary_required) and DraftJob state changes surface without manual refresh.
+  // refetchIntervalInBackground=false so hidden tabs don't burn API.
+  const caseQuery = useQuery({
+    queryKey: ['case', caseId],
+    queryFn: () => getCase(caseId),
+    enabled: caseId.length > 0,
+    refetchInterval: (query) => {
+      const status = query.state.data?.data?.status;
+      if (status === 'records' || status === 'viability' || status === 'drafting') return 8000;
+      return false;
+    },
+    refetchIntervalInBackground: false,
+  });
   const openClarificationsQuery = useQuery({
     queryKey: ['case', caseId, 'clarifications', 'open'],
     queryFn: () => listClarifications(caseId, 'open'),
@@ -135,17 +149,20 @@ export function CaseDetailPage() {
           ) : null}
 
           {!inFlightDraft && canSeePhysicianReadyPanel && latestDraftJob ? (
-            // The panel narrows `manifestSnapshot` / `gradeSidecarJson` via its own local
-            // interfaces (ReadyDraftJob); backend guarantees the shape but TS can't narrow
-            // `unknown` to a specific shape. The `as unknown as ReadyDraftJob` two-step is
-            // the standard escape hatch — runtime data matches.
             <PhysicianLetterReadyPanel
               c={c}
-              job={latestDraftJob as unknown as ReadyDraftJob}
+              job={latestDraftJob}
               canSendBack={role === 'admin' || role === 'physician'}
               onOpenPdf={handleOpenPdf}
               onOpenSignOff={() => setSignOffOpen(true)}
-              onChanged={async () => { await refetch(); }}
+              // GPT chunk 2: invalidate both queries on case-changing mutations so the
+              // panel + the draft-jobs tab both refetch.
+              onChanged={async () => {
+                await Promise.all([
+                  refetch(),
+                  qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }),
+                ]);
+              }}
             />
           ) : null}
 
@@ -154,9 +171,7 @@ export function CaseDetailPage() {
             // when present (TS rejects passing explicit undefined to an optional prop).
             <OpsHeldPanel
               c={c}
-              {...(latestDraftJob
-                ? { job: latestDraftJob as unknown as OpsDraftJob }
-                : {})}
+              {...(latestDraftJob ? { job: latestDraftJob } : {})}
               isAdmin={role === 'admin'}
             />
           ) : null}

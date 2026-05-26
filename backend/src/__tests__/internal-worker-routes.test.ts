@@ -41,6 +41,11 @@ function makeDb(initialDoctorPack: DoctorPackRecord | null = null) {
       }),
     },
     activityLog: { create: vi.fn(async () => ({})) },
+    // Mock the document delegate so the new tx.document.update path (architect QA finding #1)
+    // doesn't crash on the page-count write.
+    document: {
+      update: vi.fn(async (args: { where: { id: string }; data: { pageCount: number } }) => ({ id: args.where.id, pageCount: args.data.pageCount })),
+    },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
   return { db, pages, getDoctorPack: () => doctorPack, tx };

@@ -142,6 +142,16 @@ export function createInternalWorkerRouter(db: AppDb): Router {
           });
         }
 
+        // Architect final QA finding #1 (REVIEW.md 0f8b64a): patch Document.pageCount so the
+        // page-selector's per-file caps work meaningfully. The worker is the source of truth
+        // for page count; the route's manifest builder reads from documents.page_count.
+        if (parsed.documentPageCount !== null) {
+          await (tx as unknown as { document: { update: (args: { where: { id: string }; data: { pageCount: number } }) => Promise<unknown> } }).document.update({
+            where: { id: documentId },
+            data: { pageCount: parsed.documentPageCount },
+          });
+        }
+
         await tx.activityLog.create({
           data: {
             actorUserId: 'service:worker',

@@ -137,6 +137,26 @@ def _post_pages_to_api(document_id: str, pages: list[dict[str, Any]], document_p
             raise RuntimeError(f"API rejected pages upsert: {response.status}")
 
 
+def _post_failed_read_attempt(document_id: str, textract_status: str, job_id: str) -> None:
+    """Post a synthetic failed read-attempt to /api/v1/cases/:caseId/files/read-attempts so the
+    chart-readiness gate flags this file as manual_summary_required and the RN queue picks it
+    up. Without this, a Textract failure (status != SUCCEEDED) leaves the file in
+    file_read_status as unknown/missing and the pipeline silently halts.
+
+    Note: this endpoint expects (caseId, filePath, fileSha256, method, extractedText). The
+    worker's start_handler stamps documentId from the S3 key path, but the failed-attempt
+    POST needs the caseId — which we don't have here without re-fetching the Document row.
+
+    For now we route through the /internal route once part 3 ships
+    POST /internal/documents/:id/read-attempt-failed which the API resolves to caseId server-
+    side. Until then this is a TODO: log only.
+    """
+    print(
+        f"FAILED_READ_ATTEMPT_PLACEHOLDER: document_id={document_id} textract_status={textract_status} "
+        f"job_id={job_id} — needs /internal/documents/:id/read-attempt-failed endpoint (phase7a-part3)"
+    )
+
+
 def completion_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     """SNS-triggered handler. Textract notifies us when an async job is done. Pull the
     blocks, group by page, POST to the API."""
@@ -154,8 +174,15 @@ def completion_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         document_id = message.get("JobTag")  # we stamped this on StartDocumentTextDetection
 
         if status != "SUCCEEDED":
-            print(f"textract job {job_id} status={status} document_id={document_id} — skipping")
-            processed.append({"jobId": job_id, "documentId": document_id, "status": status, "posted": False})
+            # Architect final QA finding #3 (REVIEW.md 0f8b64a): on Textract failure, POST a
+            # synthetic failed read-attempt so the chart-readiness gate sees this file as
+            # 'manual_summary_required' and the RN queue picks it up. Otherwise the file
+            # silently disappears from the pipeline and no human ever knows it failed.
+            try:
+                _post_failed_read_attempt(document_id, status, job_id)
+            except Exception as post_exc:
+                print(f"could not post failed read-attempt for {document_id} (status={status}): {post_exc}")
+            processed.append({"jobId": job_id, "documentId": document_id, "status": status, "posted": False, "flaggedForRn": True})
             continue
 
         blocks = _fetch_all_pages(job_id)

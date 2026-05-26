@@ -208,21 +208,39 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
 
             writer = PdfWriter()
 
-            # Cover page
-            cover = manifest.get("coverPage")
-            if cover:
-                cover_bytes = _render_cover_page(cover)
-                cover_reader = PdfReader(io.BytesIO(cover_bytes))
-                for page in cover_reader.pages:
-                    writer.add_page(page)
+            # Cover page + TOC. Both depend on WeasyPrint (HTML -> PDF), which requires the
+            # cairo/pango/gobject Lambda layer. If the layer isn't attached (e.g. staging
+            # deploy without DOCTOR_PACK_WEASYPRINT_LAYER_ARN), gracefully skip both pages —
+            # the core page-selected source-PDF concatenation still produces a usable pack.
+            # The DoctorPack row records `coverPageSkipped: true` so the UI can flag it.
+            weasyprint_available = False
+            try:
+                import weasyprint  # noqa: F401  (probe only)
+                weasyprint_available = True
+            except ImportError as imp_err:
+                print(f"weasyprint not available; skipping cover + TOC ({imp_err})")
 
-            # TOC page
             entries = manifest.get("entries") or []
-            if entries:
-                toc_bytes = _render_toc_page(entries)
-                toc_reader = PdfReader(io.BytesIO(toc_bytes))
-                for page in toc_reader.pages:
-                    writer.add_page(page)
+
+            if weasyprint_available:
+                cover = manifest.get("coverPage")
+                if cover:
+                    try:
+                        cover_bytes = _render_cover_page(cover)
+                        cover_reader = PdfReader(io.BytesIO(cover_bytes))
+                        for page in cover_reader.pages:
+                            writer.add_page(page)
+                    except Exception as cover_err:
+                        print(f"cover-page render failed (continuing without): {cover_err}")
+
+                if entries:
+                    try:
+                        toc_bytes = _render_toc_page(entries)
+                        toc_reader = PdfReader(io.BytesIO(toc_bytes))
+                        for page in toc_reader.pages:
+                            writer.add_page(page)
+                    except Exception as toc_err:
+                        print(f"TOC render failed (continuing without): {toc_err}")
 
             # Source-doc page extraction
             for entry in entries:

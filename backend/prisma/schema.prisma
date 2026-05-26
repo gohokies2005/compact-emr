@@ -512,3 +512,47 @@ model FileReadStatus {
   @@index([terminalStatus])
   @@map("file_read_status")
 }
+
+model KeyDoc {
+  id             String   @id @default(uuid())
+  caseId         String   @map("case_id")
+  filePath       String   @map("file_path") @db.VarChar(500)
+  fileSha256     String   @map("file_sha256") @db.VarChar(64)
+  classification String   @db.VarChar(20)
+  docType        String   @map("doc_type") @db.VarChar(40)
+  importance     Int      @default(0)
+  pageRanges     Json     @map("page_ranges")
+  notes          String?
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version        Int      @default(1)
+
+  @@unique([caseId, filePath], map: "key_docs_case_file_uq")
+  @@index([caseId])
+  @@index([classification])
+  @@index([docType])
+  @@index([importance])
+  @@map("key_docs")
+}
+
+model DoctorPack {
+  id             String    @id @default(uuid())
+  caseId         String    @map("case_id")
+  caseVersion    Int       @map("case_version")
+  state          String    @default("queued") @db.VarChar(20)
+  pdfS3Key       String?   @map("pdf_s3_key") @db.VarChar(500)
+  pageCount      Int?      @map("page_count")
+  keyDocCount    Int?      @map("key_doc_count")
+  manifestJson   Json?     @map("manifest_json")
+  errorMessage   String?   @map("error_message")
+  generatedAt    DateTime? @map("generated_at") @db.Timestamptz(6)
+  generatedBy    String?   @map("generated_by")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  version        Int       @default(1)
+
+  @@index([caseId])
+  @@index([state])
+  @@index([caseId, caseVersion])
+  @@map("doctor_packs")
+}

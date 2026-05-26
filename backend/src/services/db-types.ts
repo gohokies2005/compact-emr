@@ -142,6 +142,8 @@ export interface AppDbTransaction {
   signOff: SignOffDelegate;
   clarification: ClarificationDelegate;
   fileReadStatus: FileReadStatusDelegate;
+  keyDoc: KeyDocDelegate;
+  doctorPack: DoctorPackDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -369,4 +371,100 @@ export interface FileReadStatusDelegate {
   create(args: unknown): Promise<FileReadStatusRecord>;
   update(args: unknown): Promise<FileReadStatusRecord>;
   upsert(args: unknown): Promise<FileReadStatusRecord>;
+}
+
+// ====================== Phase 7B: KeyDoc + DoctorPack ======================
+
+export type KeyDocClassification = 'high_signal' | 'bulk' | 'normal';
+
+export type KeyDocType =
+  | 'dd_214'
+  | 'rating_decision'
+  | 'denial_letter'
+  | 'supplemental_decision'
+  | 'rated_disabilities_view'
+  | 'benefit_summary'
+  | 'dbq'
+  | 'c_and_p_exam'
+  | 'tera_memo'
+  | 'individual_exposure_summary'
+  | 'nexus_letter_prior'
+  | 'medical_opinion'
+  | 'audiogram'
+  | 'sleep_study'
+  | 'pulmonary_function_test'
+  | 'service_treatment_record_summary'
+  | 'separation_exam'
+  | 'entrance_exam'
+  | 'personnel_record'
+  | 'statement_in_support'
+  | 'lay_statement'
+  | 'buddy_statement'
+  | 'blue_button'
+  | 'progress_notes'
+  | 'unspecified';
+
+export interface KeyDocPageRange {
+  readonly from: number;
+  readonly to: number;
+}
+
+export interface KeyDocRecord {
+  id: string;
+  caseId: string;
+  filePath: string;
+  fileSha256: string;
+  classification: KeyDocClassification;
+  docType: KeyDocType;
+  importance: number;
+  pageRanges: readonly KeyDocPageRange[];
+  notes: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface KeyDocDelegate {
+  findUnique(args: unknown): Promise<KeyDocRecord | null>;
+  findFirst(args: unknown): Promise<KeyDocRecord | null>;
+  findMany(args: unknown): Promise<readonly KeyDocRecord[]>;
+  create(args: unknown): Promise<KeyDocRecord>;
+  update(args: unknown): Promise<KeyDocRecord>;
+  upsert(args: unknown): Promise<KeyDocRecord>;
+  deleteMany(args: unknown): Promise<{ count: number }>;
+}
+
+export type DoctorPackState = 'queued' | 'generating' | 'ready' | 'failed';
+
+export interface DoctorPackManifestEntry {
+  readonly filePath: string;
+  readonly docType: KeyDocType;
+  readonly classification: KeyDocClassification;
+  readonly pageRanges: readonly KeyDocPageRange[];
+  readonly pageCount: number;
+}
+
+export interface DoctorPackRecord {
+  id: string;
+  caseId: string;
+  caseVersion: number;
+  state: DoctorPackState;
+  pdfS3Key: string | null;
+  pageCount: number | null;
+  keyDocCount: number | null;
+  manifestJson: { entries: readonly DoctorPackManifestEntry[]; engineVersion: string } | null;
+  errorMessage: string | null;
+  generatedAt: Date | null;
+  generatedBy: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface DoctorPackDelegate {
+  findUnique(args: unknown): Promise<DoctorPackRecord | null>;
+  findFirst(args: unknown): Promise<DoctorPackRecord | null>;
+  findMany(args: unknown): Promise<readonly DoctorPackRecord[]>;
+  create(args: unknown): Promise<DoctorPackRecord>;
+  update(args: unknown): Promise<DoctorPackRecord>;
 }

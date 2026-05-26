@@ -24,6 +24,13 @@ import {
 } from '../../api/cases';
 import type { CaseStatus, Role } from '../../types/prisma';
 
+// Phase 8.1 G2: extracted as a pure function so the polling decision is unit-testable
+// without fighting React Query + fake timers in component tests.
+export function decidePollIntervalMs(status: CaseStatus | undefined): number | false {
+  if (status === 'records' || status === 'viability' || status === 'drafting') return 8000;
+  return false;
+}
+
 type TabId = 'overview' | 'drafts' | 'corrections' | 'clarifications' | 'documents' | 'activity';
 const TABS: readonly TabItem<TabId>[] = [
   { id: 'overview', label: 'Overview' },
@@ -56,11 +63,7 @@ export function CaseDetailPage() {
     queryKey: ['case', caseId],
     queryFn: () => getCase(caseId),
     enabled: caseId.length > 0,
-    refetchInterval: (query) => {
-      const status = query.state.data?.data?.status;
-      if (status === 'records' || status === 'viability' || status === 'drafting') return 8000;
-      return false;
-    },
+    refetchInterval: (query) => decidePollIntervalMs(query.state.data?.data?.status),
     refetchIntervalInBackground: false,
   });
   const openClarificationsQuery = useQuery({

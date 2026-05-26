@@ -87,7 +87,23 @@ describe('OpsHeldPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     postDraftMock.mockResolvedValue({ data: { job: {}, publish: {} } });
-    transitionCaseStatusMock.mockResolvedValue({ data: heldCase });
+    // transitionCaseStatus returns { data: CaseLite } not CaseDetail — use the slimmer
+    // shape so the mock's return type matches.
+    transitionCaseStatusMock.mockResolvedValue({
+      data: {
+        id: heldCase.id,
+        veteranId: heldCase.veteranId,
+        claimedCondition: heldCase.claimedCondition,
+        claimType: heldCase.claimType,
+        status: 'physician_review',
+        version: heldCase.version + 1,
+        currentVersion: heldCase.currentVersion,
+        assignedPhysicianId: null,
+        refundEligible: heldCase.refundEligible,
+        createdAt: heldCase.createdAt,
+        updatedAt: heldCase.updatedAt,
+      },
+    });
   });
 
   it('renders the ops hold and re-run button', () => {

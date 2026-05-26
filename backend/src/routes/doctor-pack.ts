@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
@@ -11,6 +12,7 @@ import {
 import { classifyFile } from '../services/key-docs-classifier.js';
 import { selectPages, type PageSelectorInputPage } from '../services/page-selector.js';
 import { aggregateChartSummary } from '../services/chart-summary-aggregator.js';
+import { publishDoctorPackQueued } from '../services/doctor-pack-queue.js';
 import type { AppDb, DocumentPageRecord, KeyDocClassification, KeyDocType } from '../services/db-types.js';
 
 // Path-traversal guard. The Doctor Pack PDF lives at a deterministic S3 key derived from the
@@ -293,11 +295,18 @@ export function createDoctorPackRouter(db: AppDb): Router {
           });
         }
 
-        const doctorPackRow = await tx.doctorPack.create({
+        // Architect QA finding #2 (REVIEW.md 0f8b64a): generate the row id client-side so the
+        // deterministic S3 key can be computed in the same single .create call — kills the
+        // prior create + update double-write.
+        const doctorPackId = randomUUID();
+        const s3Key = buildDoctorPackS3Key(caseId, c.version, doctorPackId);
+        const stamped = await tx.doctorPack.create({
           data: {
+            id: doctorPackId,
             caseId,
             caseVersion: c.version,
             state: 'queued',
+            pdfS3Key: s3Key,
             keyDocCount: refinedEntries.length,
             pageCount: refinedTotalPageCount,
             // Phase 7B-revised Build 1: manifestJson carries entries (with refined page ranges)
@@ -311,14 +320,6 @@ export function createDoctorPackRouter(db: AppDb): Router {
             },
             generatedBy: actor.sub,
           },
-        });
-
-        // Stamp the deterministic S3 key now that we have the row id. The worker reads this
-        // field, not a client-supplied path, when it uploads the assembled PDF.
-        const s3Key = buildDoctorPackS3Key(caseId, c.version, doctorPackRow.id);
-        const stamped = await tx.doctorPack.update({
-          where: { id: doctorPackRow.id },
-          data: { pdfS3Key: s3Key, version: { increment: 1 } },
         });
 
         await tx.activityLog.create({
@@ -344,6 +345,22 @@ export function createDoctorPackRouter(db: AppDb): Router {
 
         return stamped;
       });
+
+      // Architect closeout #2: SQS publish to the Doctor Pack assembler worker queue.
+      // Done OUTSIDE the transaction — if SQS fails, the row stays queued and the request
+      // still succeeds (the row is the source of truth; a worker retry path can pick up
+      // orphan queued rows later). In test mode this is a no-op (DOCTOR_PACK_QUEUE_URL unset).
+      try {
+        await publishDoctorPackQueued({
+          doctorPackId: result.id,
+          caseId,
+          pdfS3Key: result.pdfS3Key ?? '',
+          manifest: result.manifestJson,
+        });
+      } catch (sqsErr) {
+        // Log but don't fail the request — the worker can be backfilled.
+        console.warn('doctor-pack SQS publish failed (row queued; manual retry available):', sqsErr);
+      }
 
       res.status(201).json({ data: result });
     }),
@@ -384,6 +401,32 @@ export function createDoctorPackRouter(db: AppDb): Router {
         orderBy: [{ importance: 'desc' }, { filePath: 'asc' }],
       });
       res.json({ data: rows });
+    }),
+  );
+
+  /**
+   * GET /api/v1/rn/key-docs-needing-review
+   *
+   * Closeout item #5: cross-case queue of KeyDocs the page-selector flagged for RN review
+   * (needsRnReview=true). Oldest first (FIFO). Optional ?limit (default 50, max 200).
+   * admin + ops_staff only. The RN page surfaces this alongside the manual-summary queue;
+   * RNs ack via POST /api/v1/key-docs/:id/acknowledge.
+   */
+  router.get(
+    '/rn/key-docs-needing-review',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const limitRaw = req.query['limit'];
+      let limit = 50;
+      if (typeof limitRaw === 'string') {
+        const parsed = Number.parseInt(limitRaw, 10);
+        if (Number.isInteger(parsed) && parsed > 0) limit = Math.min(parsed, 200);
+      }
+      const rows = await db.keyDoc.findMany({
+        where: { needsRnReview: true },
+        orderBy: { updatedAt: 'asc' },
+      });
+      res.json({ data: rows.slice(0, limit), total: rows.length });
     }),
   );
 

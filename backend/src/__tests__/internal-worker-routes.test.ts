@@ -8,9 +8,11 @@ import type { AppDb, DocumentPageRecord, DoctorPackRecord } from '../services/db
 
 const TEST_TOKEN = 'phase7b-test-worker-token-must-be-16+chars';
 
-function makeDb(initialDoctorPack: DoctorPackRecord | null = null) {
+function makeDb(initialDoctorPack: DoctorPackRecord | null = null, initialDocument: { id: string; caseId: string; s3Key: string } | null = null) {
   const pages = new Map<string, DocumentPageRecord>();
   let doctorPack: DoctorPackRecord | null = initialDoctorPack;
+  const fileReadStatuses = new Map<string, { id: string; caseId: string; filePath: string; terminalStatus: string; attemptsJson: unknown[]; lastCheckedAt: Date; version: number }>();
+  let nextFrsId = 1;
 
   const tx = {
     documentPage: {
@@ -42,9 +44,32 @@ function makeDb(initialDoctorPack: DoctorPackRecord | null = null) {
     },
     activityLog: { create: vi.fn(async () => ({})) },
     // Mock the document delegate so the new tx.document.update path (architect QA finding #1)
-    // doesn't crash on the page-count write.
+    // doesn't crash on the page-count write. Also support findUnique for the closeout #3
+    // read-attempt-failed route.
     document: {
       update: vi.fn(async (args: { where: { id: string }; data: { pageCount: number } }) => ({ id: args.where.id, pageCount: args.data.pageCount })),
+      findUnique: vi.fn(async (args: { where: { id: string } }) => initialDocument && initialDocument.id === args.where.id ? initialDocument : null),
+    },
+    fileReadStatus: {
+      findFirst: vi.fn(async (args: { where: { caseId: string; filePath: string } }) => {
+        for (const r of fileReadStatuses.values()) {
+          if (r.caseId === args.where.caseId && r.filePath === args.where.filePath) return r;
+        }
+        return null;
+      }),
+      create: vi.fn(async (args: { data: { caseId: string; filePath: string; terminalStatus: string; attemptsJson: unknown[]; lastCheckedAt: Date } }) => {
+        const id = `FRS-${nextFrsId++}`;
+        const row = { id, ...args.data, version: 1 };
+        fileReadStatuses.set(id, row);
+        return row;
+      }),
+      update: vi.fn(async (args: { where: { id: string }; data: Partial<{ terminalStatus: string; attemptsJson: unknown[]; lastCheckedAt: Date }> & { version?: { increment: number } } }) => {
+        const cur = fileReadStatuses.get(args.where.id);
+        if (!cur) throw new Error('missing FRS');
+        const next = { ...cur, ...args.data, version: typeof args.data.version === 'object' ? cur.version + 1 : cur.version };
+        fileReadStatuses.set(args.where.id, next as typeof cur);
+        return next;
+      }),
     },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
@@ -244,6 +269,38 @@ describe('PATCH /internal/doctor-packs/:id', () => {
       .patch('/api/v1/internal/doctor-packs/NOPE')
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
       .send({ state: 'generating' });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /internal/documents/:id/read-attempt-failed', () => {
+  it('upserts a manual_summary_required FileReadStatus when Textract fails', async () => {
+    const { db } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'records/garbled.pdf' });
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/documents/DOC-1/read-attempt-failed')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ textractStatus: 'FAILED', jobId: 'tex-job-123', errorMessage: 'unsupported page format' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.terminalStatus).toBe('manual_summary_required');
+    expect(res.body.data.caseId).toBe('CASE-1');
+    expect(res.body.data.filePath).toBe('records/garbled.pdf');
+  });
+
+  it('rejects missing textractStatus (400)', async () => {
+    const { db } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'records/x.pdf' });
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/documents/DOC-1/read-attempt-failed')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ jobId: 'tex-job-123' });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 when document does not exist', async () => {
+    const { db } = makeDb(null, null);
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/documents/MISSING/read-attempt-failed')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ textractStatus: 'FAILED', jobId: 'tex-job-123' });
     expect(res.status).toBe(404);
   });
 });

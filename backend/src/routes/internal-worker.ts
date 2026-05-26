@@ -102,6 +102,32 @@ function parseDoctorPackPatchBody(body: unknown): ParsedDoctorPackPatch {
   return result;
 }
 
+interface ParsedFailedReadAttempt {
+  textractStatus: string;
+  jobId: string;
+  errorMessage?: string;
+}
+
+function parseFailedReadAttemptBody(body: unknown): ParsedFailedReadAttempt {
+  if (!isRecord(body)) badRequest('Request body must be an object');
+  const textractStatus = body['textractStatus'];
+  const jobId = body['jobId'];
+  if (typeof textractStatus !== 'string' || textractStatus.length === 0 || textractStatus.length > 50) {
+    badRequest('textractStatus is required (string, <=50 chars)', { field: 'textractStatus' });
+  }
+  if (typeof jobId !== 'string' || jobId.length === 0 || jobId.length > 200) {
+    badRequest('jobId is required (string, <=200 chars)', { field: 'jobId' });
+  }
+  const result: ParsedFailedReadAttempt = { textractStatus: textractStatus as string, jobId: jobId as string };
+  const errorMessage = body['errorMessage'];
+  if (errorMessage !== undefined && errorMessage !== null) {
+    if (typeof errorMessage !== 'string') badRequest('errorMessage must be a string', { field: 'errorMessage' });
+    if ((errorMessage as string).length > 2000) badRequest('errorMessage exceeds 2000 chars', { field: 'errorMessage' });
+    result.errorMessage = errorMessage as string;
+  }
+  return result;
+}
+
 export function createInternalWorkerRouter(db: AppDb): Router {
   const router = Router();
 
@@ -246,6 +272,108 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       });
 
       res.json({ data: updated });
+    }),
+  );
+
+  /**
+   * POST /api/v1/internal/documents/:id/read-attempt-failed
+   *
+   * Architect final QA finding #3 (REVIEW.md 0f8b64a): when Textract returns
+   * status != SUCCEEDED, the OCR worker calls this so the file lands in
+   * file_read_status with terminalStatus='manual_summary_required'. Without this,
+   * Textract failures silently stall the pipeline because no FileReadStatus row
+   * ever gets the failed-attempt note.
+   *
+   * Body: { textractStatus, jobId, errorMessage? }
+   *
+   * The route resolves the documentId → its parent caseId server-side (the worker
+   * doesn't have the caseId without a round-trip; this saves the trip). On success,
+   * upserts/creates a FileReadStatus row keyed by (caseId, filePath) where filePath
+   * is the document's s3Key. terminalStatus = 'manual_summary_required'.
+   */
+  router.post(
+    '/internal/documents/:id/read-attempt-failed',
+    asyncHandler(async (req: Request, res: Response) => {
+      const documentId = String(req.params.id);
+      const parsed = parseFailedReadAttemptBody(req.body);
+
+      // Resolve documentId → caseId + s3Key + sha256-if-present. Cast through unknown
+      // because the Document delegate is not declared on the AppDb interface (it's
+      // accessed read-side through Case.documents in other routes).
+      const doc = await (db as unknown as {
+        document: { findUnique: (args: { where: { id: string }; select?: Record<string, true> }) => Promise<{ id: string; caseId: string; s3Key: string } | null> };
+      }).document.findUnique({
+        where: { id: documentId },
+        select: { id: true, caseId: true, s3Key: true },
+      });
+      if (doc === null) {
+        throw new HttpError(404, 'not_found', 'Document not found', { documentId });
+      }
+
+      const now = new Date();
+      const noteText = parsed.errorMessage
+        ? `Textract ${parsed.textractStatus} (job ${parsed.jobId}): ${parsed.errorMessage.slice(0, 500)}`
+        : `Textract ${parsed.textractStatus} (job ${parsed.jobId})`;
+
+      const result = await db.$transaction(async (tx) => {
+        const existing = await tx.fileReadStatus.findFirst({ where: { caseId: doc.caseId, filePath: doc.s3Key } });
+        const newAttempt = {
+          method: 'textract' as const,
+          wordCount: 0,
+          corruptedTokenRatio: 0,
+          attemptedAt: now.toISOString(),
+          note: noteText,
+        };
+        const prior: readonly unknown[] = (existing?.attemptsJson as readonly unknown[] | undefined) ?? [];
+        const attempts = [...prior, newAttempt];
+
+        // Don't overwrite a manual_summary_provided state — that's the RN's clearance.
+        const terminalStatus =
+          existing?.terminalStatus === 'manual_summary_provided'
+            ? 'manual_summary_provided'
+            : 'manual_summary_required';
+
+        const row = existing
+          ? await tx.fileReadStatus.update({
+              where: { id: existing.id },
+              data: {
+                terminalStatus,
+                attemptsJson: attempts,
+                lastCheckedAt: now,
+                version: { increment: 1 },
+              },
+            })
+          : await tx.fileReadStatus.create({
+              data: {
+                caseId: doc.caseId,
+                filePath: doc.s3Key,
+                fileSha256: '',
+                terminalStatus,
+                attemptsJson: attempts,
+                lastCheckedAt: now,
+              },
+            });
+
+        await tx.activityLog.create({
+          data: {
+            actorUserId: 'service:worker',
+            action: 'file_read_textract_failed',
+            caseId: doc.caseId,
+            detailsJson: {
+              documentId,
+              caseId: doc.caseId,
+              filePath: doc.s3Key,
+              textractStatus: parsed.textractStatus,
+              jobId: parsed.jobId,
+              ...(parsed.errorMessage !== undefined && { errorMessage: parsed.errorMessage }),
+            },
+          },
+        });
+
+        return row;
+      });
+
+      res.status(201).json({ data: result });
     }),
   );
 

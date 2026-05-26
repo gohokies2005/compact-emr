@@ -7,9 +7,12 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import { ConflictError } from '../../api/client';
 import {
+  acknowledgeKeyDoc,
   listFilesPendingManualGlobal,
+  listKeyDocsNeedingReview,
   postManualSummary,
   type FileReadStatus,
+  type KeyDocReviewRow,
 } from '../../api/cases';
 import { formatRelativeTime } from '../../lib/date';
 
@@ -111,15 +114,81 @@ function ManualSummaryForm({ row, onResolved }: ManualSummaryFormProps) {
   );
 }
 
+function KeyDocReviewQueue() {
+  const queryClient = useQueryClient();
+  const reviewQuery = useQuery({
+    queryKey: ['rn', 'key-docs-needing-review'],
+    queryFn: () => listKeyDocsNeedingReview(50),
+  });
+
+  const ackMutation = useMutation({
+    mutationFn: (keyDocId: string) => acknowledgeKeyDoc(keyDocId, {}),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['rn', 'key-docs-needing-review'] });
+    },
+  });
+
+  if (reviewQuery.isLoading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-slate-500">
+        <Spinner /> Loading review queue
+      </div>
+    );
+  }
+
+  const rows = reviewQuery.data?.data ?? [];
+  const total = reviewQuery.data?.total ?? 0;
+
+  if (rows.length === 0) {
+    return <EmptyState title="Nothing to review" message="The page-selector ran clean on every Doctor Pack — no docs flagged for human verification." />;
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-slate-400">{total} doc(s) flagged for RN selection review across all cases.</p>
+      {rows.map((row) => (
+        <Card key={row.id}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">{row.docType}</span>
+                <span className="font-mono text-xs text-slate-500">case {row.caseId}</span>
+                <span className="text-xs text-slate-500">updated {formatRelativeTime(row.updatedAt)}</span>
+              </div>
+              <p className="mt-2 break-words text-sm text-slate-800">{row.filePath}</p>
+              {row.selectorRationale ? (
+                <p className="mt-2 text-xs italic text-slate-500">Selector rationale: {row.selectorRationale}</p>
+              ) : null}
+            </div>
+            <Button
+              type="button"
+              variant="primary"
+              loading={ackMutation.isPending && ackMutation.variables === row.id}
+              disabled={ackMutation.isPending}
+              onClick={() => ackMutation.mutate(row.id)}
+            >
+              Mark reviewed
+            </Button>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+type QueueTab = 'manual_summary' | 'doc_review';
+
 export function RnQueuePage() {
+  const [tab, setTab] = useState<QueueTab>('manual_summary');
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const queueQuery = useQuery({
     queryKey: ['rn', 'files-pending-manual'],
     queryFn: () => listFilesPendingManualGlobal(50),
+    enabled: tab === 'manual_summary',
   });
 
-  if (queueQuery.isLoading) {
+  if (queueQuery.isLoading && tab === 'manual_summary') {
     return (
       <AppShell>
         <div className="flex items-center gap-2 text-sm text-slate-500">
@@ -137,15 +206,43 @@ export function RnQueuePage() {
     <AppShell>
       <div className="space-y-6">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Manual-summary queue</h1>
+          <h1 className="text-2xl font-semibold text-slate-900">RN queue</h1>
           <p className="mt-1 text-sm text-slate-500">
-            Files that no OCR method could read. Each row blocks downstream work for its case
-            until an RN provides a manual summary of at least 40 characters.
+            Two streams of work waiting on RN attention. Pick a tab; both run independently.
           </p>
-          <p className="mt-2 text-xs text-slate-400">{total} file(s) pending across all cases.</p>
         </div>
 
-        {rows.length === 0 ? (
+        <div className="flex gap-2 border-b border-slate-200">
+          <button
+            type="button"
+            onClick={() => setTab('manual_summary')}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === 'manual_summary' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          >
+            Manual summary{tab === 'manual_summary' && total > 0 ? ` (${total})` : ''}
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('doc_review')}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === 'doc_review' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          >
+            Doc selection review
+          </button>
+        </div>
+
+        {tab === 'doc_review' ? (
+          <KeyDocReviewQueue />
+        ) : null}
+
+        {tab === 'manual_summary' ? (
+          <>
+            <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-600">
+              <p className="font-medium text-slate-800">Files that no OCR method could read.</p>
+              <p className="mt-1 text-sm text-slate-500">
+                Each row blocks downstream work for its case until an RN provides a manual summary of at least 40 characters.
+              </p>
+              <p className="mt-2 text-xs text-slate-400">{total} file(s) pending across all cases.</p>
+            </div>
+            {rows.length === 0 ? (
           <EmptyState title="Queue is clear" message="No files are currently awaiting manual interpretation. The OCR worker has successfully read every uploaded record." />
         ) : (
           <div className="grid gap-6 lg:grid-cols-3">
@@ -194,6 +291,8 @@ export function RnQueuePage() {
             </Card>
           </div>
         )}
+          </>
+        ) : null}
       </div>
     </AppShell>
   );

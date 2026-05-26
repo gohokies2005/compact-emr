@@ -279,3 +279,36 @@ export async function postManualSummary(
     input,
   );
 }
+
+// === Phase 7B-revised closeout: KeyDoc RN acknowledgement ===
+
+export interface KeyDocAckInput {
+  readonly notes?: string;
+}
+
+export async function acknowledgeKeyDoc(
+  keyDocId: string,
+  input: KeyDocAckInput = {},
+): Promise<{ data: { id: string; needsRnReview: boolean; selectorAcknowledgedAt: string | null } }> {
+  return apiPost(`/api/v1/key-docs/${encodeURIComponent(keyDocId)}/acknowledge`, input);
+}
+
+export interface KeyDocReviewRow {
+  readonly id: string;
+  readonly caseId: string;
+  readonly filePath: string;
+  readonly docType: string;
+  readonly classification: string;
+  readonly importance: number;
+  readonly needsRnReview: boolean;
+  readonly selectorVersion: string | null;
+  readonly selectorRationale: string | null;
+  readonly notes: string | null;
+  readonly updatedAt: string;
+  readonly version: number;
+}
+
+export async function listKeyDocsNeedingReview(limit?: number): Promise<{ data: readonly KeyDocReviewRow[]; total: number }> {
+  const qs = typeof limit === 'number' ? `?limit=${encodeURIComponent(String(limit))}` : '';
+  return apiGet(`/api/v1/rn/key-docs-needing-review${qs}`);
+}

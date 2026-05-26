@@ -138,23 +138,31 @@ def _post_pages_to_api(document_id: str, pages: list[dict[str, Any]], document_p
 
 
 def _post_failed_read_attempt(document_id: str, textract_status: str, job_id: str) -> None:
-    """Post a synthetic failed read-attempt to /api/v1/cases/:caseId/files/read-attempts so the
-    chart-readiness gate flags this file as manual_summary_required and the RN queue picks it
-    up. Without this, a Textract failure (status != SUCCEEDED) leaves the file in
-    file_read_status as unknown/missing and the pipeline silently halts.
+    """POST a synthetic failed read-attempt to /api/v1/internal/documents/:id/read-attempt-
+    failed so the file lands in file_read_status with terminalStatus='manual_summary_required'
+    and the RN queue picks it up.
 
-    Note: this endpoint expects (caseId, filePath, fileSha256, method, extractedText). The
-    worker's start_handler stamps documentId from the S3 key path, but the failed-attempt
-    POST needs the caseId — which we don't have here without re-fetching the Document row.
-
-    For now we route through the /internal route once part 3 ships
-    POST /internal/documents/:id/read-attempt-failed which the API resolves to caseId server-
-    side. Until then this is a TODO: log only.
+    Without this, a Textract failure (status != SUCCEEDED) leaves the file invisible to the
+    chart-readiness gate and the pipeline silently halts. The route resolves documentId →
+    caseId + s3Key server-side so the worker doesn't have to round-trip for the caseId.
     """
-    print(
-        f"FAILED_READ_ATTEMPT_PLACEHOLDER: document_id={document_id} textract_status={textract_status} "
-        f"job_id={job_id} — needs /internal/documents/:id/read-attempt-failed endpoint (phase7a-part3)"
+    url = f"{_api_base_url()}/api/v1/internal/documents/{document_id}/read-attempt-failed"
+    body = json.dumps({
+        "textractStatus": textract_status,
+        "jobId": job_id,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Internal-Worker-Token": _worker_token(),
+        },
     )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        if response.status >= 300:
+            raise RuntimeError(f"API rejected failed-read-attempt POST: {response.status}")
 
 
 def completion_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:

@@ -14,6 +14,8 @@ import { createClarificationsRouter } from './routes/clarifications.js';
 import { createViabilityRouter } from './routes/viability.js';
 import { createChartReadinessRouter } from './routes/chart-readiness.js';
 import { createDoctorPackRouter } from './routes/doctor-pack.js';
+import { createInternalWorkerRouter } from './routes/internal-worker.js';
+import { requireServicePrincipal } from './middleware/service-principal.js';
 import type { AppDb } from './services/db-types.js';
 
 export interface CreateAppOptions {
@@ -41,6 +43,9 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createViabilityRouter(db));
   app.use('/api/v1', authenticateJwt(), createChartReadinessRouter(db));
   app.use('/api/v1', authenticateJwt(), createDoctorPackRouter(db));
+  // Service-principal routes for OCR + Doctor Pack assembler workers (Phase 7B-revised Build 3).
+  // Mounted at /api/v1/internal/* with a shared-secret token guard — NOT Cognito-authenticated.
+  app.use('/api/v1', requireServicePrincipal(), createInternalWorkerRouter(db));
 
   app.use((req, res) => {
     sendError(res, 404, 'not_found', 'Route was not found.');

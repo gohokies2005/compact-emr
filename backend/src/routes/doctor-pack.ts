@@ -250,7 +250,11 @@ export function createDoctorPackRouter(db: AppDb): Router {
           // If an RN previously cleared `needsRnReview` for this file (selectorAcknowledgedAt
           // is set), preserve that decision across regeneration. Otherwise use the fresh
           // selector verdict.
-          const needsRnReviewToWrite = existing?.selectorAcknowledgedAt
+          // Architect QA Build 2 finding #2 (REVIEW.md 8344668): clear the ack when the
+          // doc_type changes — the RN cleared the file under different semantics. A re-
+          // classified file needs a fresh review.
+          const docTypeChanged = existing !== undefined && existing.docType !== cls.docType;
+          const needsRnReviewToWrite = existing?.selectorAcknowledgedAt && !docTypeChanged
             ? false
             : sel.selection.needsRnReview;
 
@@ -278,10 +282,13 @@ export function createDoctorPackRouter(db: AppDb): Router {
               selectorVersion: sel.selection.selectorVersion,
               selectorRationale: sel.selection.selectorRationale,
               version: { increment: 1 },
-              // NOTE: `notes`, `physicianIncludeAllPages`, `selectorAcknowledgedAt`, and
-              // `selectorAcknowledgedBy` are intentionally NOT in the update payload — RN-
-              // authored notes, per-doc physician overrides, and RN acknowledgements survive
-              // re-generation of the Doctor Pack manifest.
+              // When docType changes (classifier upgrade or content re-classification), wipe
+              // the stale RN acknowledgement — the file means something different now.
+              ...(docTypeChanged ? { selectorAcknowledgedAt: null, selectorAcknowledgedBy: null } : {}),
+              // NOTE: `notes` and `physicianIncludeAllPages` are intentionally NOT in the
+              // update payload — RN-authored notes + per-doc physician overrides survive
+              // re-generation of the Doctor Pack manifest. RN acknowledgements survive too
+              // except on docType change (above).
             },
           });
         }

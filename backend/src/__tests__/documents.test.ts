@@ -63,7 +63,7 @@ describe('document routes', () => {
       activityLog: { create: vi.fn(async () => ({})) },
     };
     const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1' })) }, $transaction: vi.fn(async (fn) => fn(tx)) };
-    const res = await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents').send({ caseId: 'CASE-1', filename: 'record.pdf', contentType: 'application/pdf', sizeBytes: 33, s3Key: 'cases/CASE-1/record.pdf', docTag: 'STR' }).expect(201);
+    const res = await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents').send({ caseId: 'CASE-1', filename: 'record.pdf', contentType: 'application/pdf', sizeBytes: 33, s3Key: 'cases/CASE-1/a1b2c3d4-e5f6-7890-abcd-ef1234567890-record.pdf', docTag: 'STR' }).expect(201);
     expect(res.body.data.id).toBe('doc-1');
     expect(tx.activityLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'document_created' }) }));
   });

@@ -13,16 +13,15 @@ import { classifyFile } from '../services/key-docs-classifier.js';
 import { selectPages, type PageSelectorInputPage } from '../services/page-selector.js';
 import { aggregateChartSummary } from '../services/chart-summary-aggregator.js';
 import { publishDoctorPackQueued } from '../services/doctor-pack-queue.js';
+import { isDoctorPackS3Key } from '../services/s3-key-safety.js';
 import type { AppDb, DocumentPageRecord, KeyDocClassification, KeyDocType } from '../services/db-types.js';
 
 // Path-traversal guard. The Doctor Pack PDF lives at a deterministic S3 key derived from the
 // caseId + caseVersion + doctorPackId. We construct the key server-side and refuse to honor
-// any client-supplied key. This closes the security hole flagged in Task #107.
+// any client-supplied key. Task #107a (later) extracted the validator into a shared module
+// so the worker-callback path (PATCH /internal/doctor-packs/:id) uses the same check.
 function isSafeS3Key(s3Key: string): boolean {
-  if (typeof s3Key !== 'string') return false;
-  if (s3Key.includes('..')) return false;
-  if (s3Key.startsWith('/')) return false;
-  return /^doctor-packs\/[a-zA-Z0-9_-]+\/v\d+\/[a-f0-9-]+\.pdf$/.test(s3Key);
+  return isDoctorPackS3Key(s3Key);
 }
 
 function buildDoctorPackS3Key(caseId: string, caseVersion: number, doctorPackId: string): string {

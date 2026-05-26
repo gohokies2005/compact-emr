@@ -95,7 +95,7 @@ function sampleDoctorPack(overrides: Partial<DoctorPackRecord> = {}): DoctorPack
     caseId: 'CASE-1',
     caseVersion: 1,
     state: 'queued',
-    pdfS3Key: 'doctor-packs/CASE-1/v1/DP-1.pdf',
+    pdfS3Key: 'doctor-packs/CASE-1/v1/a1b2c3d4-e5f6-7890-abcd-ef1234567890.pdf',
     pageCount: null,
     keyDocCount: 5,
     manifestJson: { entries: [], engineVersion: 'doctor-pack-1.0.0' },
@@ -220,7 +220,7 @@ describe('PATCH /internal/doctor-packs/:id', () => {
     const res = await request(appFor(db))
       .patch('/api/v1/internal/doctor-packs/DP-1')
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
-      .send({ state: 'ready', pdfS3Key: 'doctor-packs/CASE-1/v1/DP-1.pdf', pageCount: 14 });
+      .send({ state: 'ready', pdfS3Key: 'doctor-packs/CASE-1/v1/a1b2c3d4-e5f6-7890-abcd-ef1234567890.pdf', pageCount: 14 });
     expect(res.status).toBe(200);
     expect(getDoctorPack()?.state).toBe('ready');
     expect(getDoctorPack()?.generatedAt).toBeTruthy();
@@ -250,7 +250,8 @@ describe('PATCH /internal/doctor-packs/:id', () => {
     const res = await request(appFor(db))
       .patch('/api/v1/internal/doctor-packs/DP-1')
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
-      .send({ state: 'ready', pdfS3Key: 'x' });
+      // Valid-shape pdfS3Key so the transition check fires, not the path-traversal guard.
+      .send({ state: 'ready', pdfS3Key: 'doctor-packs/CASE-1/v1/a1b2c3d4-e5f6-7890-abcd-ef1234567890.pdf' });
     expect(res.status).toBe(409);
   });
 
@@ -270,6 +271,37 @@ describe('PATCH /internal/doctor-packs/:id', () => {
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
       .send({ state: 'generating' });
     expect(res.status).toBe(404);
+  });
+
+  // Task #107a regression: path-traversal in pdfS3Key body.
+  it('rejects pdfS3Key with path-traversal (400)', async () => {
+    const { db } = makeDb(sampleDoctorPack({ state: 'generating' }));
+    const res = await request(appFor(db))
+      .patch('/api/v1/internal/doctor-packs/DP-1')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ state: 'ready', pdfS3Key: 'doctor-packs/../etc/passwd.pdf' });
+    expect(res.status).toBe(400);
+  });
+
+  // Task #107a regression: wrong-prefix pdfS3Key body.
+  it('rejects pdfS3Key outside the doctor-packs/ subtree (400)', async () => {
+    const { db } = makeDb(sampleDoctorPack({ state: 'generating' }));
+    const res = await request(appFor(db))
+      .patch('/api/v1/internal/doctor-packs/DP-1')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ state: 'ready', pdfS3Key: 'records/CASE-1/something.pdf' });
+    expect(res.status).toBe(400);
+  });
+
+  // Task #107a regression: confirm-only / no-redirect.
+  it('rejects pdfS3Key that differs from the server-computed value (409)', async () => {
+    const { db } = makeDb(sampleDoctorPack({ state: 'generating', pdfS3Key: 'doctor-packs/CASE-1/v1/a1b2c3d4-e5f6-7890-abcd-ef1234567890.pdf' }));
+    const res = await request(appFor(db))
+      .patch('/api/v1/internal/doctor-packs/DP-1')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      // Valid pattern but different from existing — worker can't redirect the row.
+      .send({ state: 'ready', pdfS3Key: 'doctor-packs/CASE-1/v1/ffffffff-ffff-ffff-ffff-ffffffffffff.pdf' });
+    expect(res.status).toBe(409);
   });
 });
 

@@ -14,6 +14,7 @@ import {
   presignBundleUrl,
   writeBundleToS3,
 } from '../services/drafter-bundle.js';
+import { isDrafterArtifactS3Key } from '../services/s3-key-safety.js';
 import type { AppDb } from '../services/db-types.js';
 
 /**
@@ -154,6 +155,20 @@ function parseCompleteBody(body: unknown): ParsedComplete {
   const artifactPdfS3Key = requireString('artifactPdfS3Key', 500) as string;
   const artifactTxtS3Key = requireString('artifactTxtS3Key', 500) as string;
   const artifactDocxS3Key = requireString('artifactDocxS3Key', 500, true);
+
+  // Task #107a: path-traversal guard on the worker callback. Compromised drafter wrapper
+  // could redirect artifact pointers to arbitrary S3 keys (cross-case read, exfil, etc.).
+  // Validator rejects '..', leading '/', and anything outside the
+  // drafter-artifacts/<caseId>/v<N>/<filename>.<ext> pattern.
+  if (!isDrafterArtifactS3Key(artifactPdfS3Key)) {
+    badRequest('artifactPdfS3Key does not match the safe drafter-artifacts/<caseId>/v<N>/*.pdf pattern', { field: 'artifactPdfS3Key' });
+  }
+  if (!isDrafterArtifactS3Key(artifactTxtS3Key)) {
+    badRequest('artifactTxtS3Key does not match the safe drafter-artifacts/<caseId>/v<N>/*.txt pattern', { field: 'artifactTxtS3Key' });
+  }
+  if (artifactDocxS3Key !== undefined && !isDrafterArtifactS3Key(artifactDocxS3Key)) {
+    badRequest('artifactDocxS3Key does not match the safe drafter-artifacts/<caseId>/v<N>/*.docx pattern', { field: 'artifactDocxS3Key' });
+  }
   const gradeSidecar = requireObject('gradeSidecar');
   const manifest = requireObject('manifest');
 

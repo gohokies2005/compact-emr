@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { badRequest, isRecord } from '../services/validation-helpers.js';
+import { isDoctorPackS3Key } from '../services/s3-key-safety.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
 
 /**
@@ -83,6 +84,13 @@ function parseDoctorPackPatchBody(body: unknown): ParsedDoctorPackPatch {
   if (pdfS3Key !== undefined && pdfS3Key !== null) {
     if (typeof pdfS3Key !== 'string' || pdfS3Key.length === 0 || pdfS3Key.length > 500) {
       badRequest('pdfS3Key must be a non-empty string under 500 chars', { field: 'pdfS3Key' });
+    }
+    // Task #107a: path-traversal guard on worker callback. Without this, a compromised
+    // assembler could redirect the DoctorPack row to an arbitrary S3 key (cross-case
+    // read, exfil, or DoS via dangling pointer). Validator rejects '..', leading '/',
+    // and anything outside the doctor-packs/<caseId>/v<N>/<uuid>.pdf pattern.
+    if (!isDoctorPackS3Key(pdfS3Key)) {
+      badRequest('pdfS3Key does not match the safe doctor-packs/<caseId>/v<N>/<uuid>.pdf pattern', { field: 'pdfS3Key' });
     }
     result.pdfS3Key = pdfS3Key as string;
   }
@@ -241,6 +249,18 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       }
       if (parsed.state === 'failed' && parsed.errorMessage === undefined) {
         throw new HttpError(400, 'bad_request', 'state=failed requires errorMessage', { field: 'errorMessage' });
+      }
+
+      // Task #107a: confirm-only, no-redirect. At POST /generate the server computed the
+      // canonical s3Key and wrote it to the row + the SQS body. The worker's PATCH should
+      // pass that SAME key back as a sanity check. If it doesn't match, treat as tampering
+      // and reject — never let a worker repoint the row at an arbitrary key.
+      if (parsed.pdfS3Key !== undefined && existing.pdfS3Key !== null && existing.pdfS3Key !== '' && parsed.pdfS3Key !== existing.pdfS3Key) {
+        throw new HttpError(409, 'conflict', 'Worker pdfS3Key does not match the server-computed key on the DoctorPack row.', {
+          doctorPackId: id,
+          expected: existing.pdfS3Key,
+          provided: parsed.pdfS3Key,
+        });
       }
 
       const updated = await db.$transaction(async (tx) => {

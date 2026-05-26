@@ -5,6 +5,7 @@ import { Router, type Request, type Response } from 'express';
 import type { PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../db/client.js';
 import { requireRole } from '../auth/roles.js';
+import { isCaseDocumentS3Key } from '../services/s3-key-safety.js';
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const UPLOAD_TTL_SECONDS = 5 * 60;
@@ -129,6 +130,14 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
 
     if (!filename || !contentType || !s3Key || !caseId || sizeBytes === undefined) {
       return error(res, 400, 'invalid_document_request', 'filename, contentType, sizeBytes, s3Key, and caseId are required.');
+    }
+    // Task #107a: path-traversal guard on document-registration callback. The presign
+    // endpoint computes a canonical key `cases/<caseId>/<uuid>-<filename>`; the client
+    // must echo the SAME key back. Without this check, a compromised admin/ops_staff
+    // client (or leaked token) could register a Document row pointing at any phiBucket
+    // key and then download/delete it via /documents/:id/{download,DELETE}.
+    if (!isCaseDocumentS3Key(s3Key)) {
+      return error(res, 400, 'invalid_s3_key', 's3Key does not match the safe cases/<caseId>/<uuid>-<filename> pattern.');
     }
     const owningCase = await assertCaseBelongsToVeteran(prisma, caseId, veteranId);
     if (!owningCase) return error(res, 404, 'case_not_found', 'Case was not found for this veteran.');

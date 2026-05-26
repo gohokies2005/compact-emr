@@ -28,6 +28,11 @@ const workers = new WorkersStack(app, stackName(config, 'workers'), {
   phiBucket: storage.phiBucket,
   doctorPacksBucket: storage.doctorPacksBucket,
   documentsKey: storage.documentsKey,
+  // F6 — stuck-job watcher Lambda needs RDS access.
+  vpc: network.vpc,
+  database: database.database,
+  databaseSecurityGroup: database.databaseSecurityGroup,
+  databaseSecret: database.database.secret!,
   env: config.awsEnv,
 });
 

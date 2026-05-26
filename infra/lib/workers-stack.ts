@@ -1,15 +1,19 @@
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as cdk from 'aws-cdk-lib';
 import { Duration, Stack, type StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import {
+  aws_ec2 as ec2,
   aws_events as events,
   aws_events_targets as targets,
   aws_iam as iam,
   aws_kms as kms,
   aws_lambda as lambda,
   aws_lambda_event_sources as eventSources,
+  aws_lambda_nodejs as nodejs,
   aws_logs as logs,
+  aws_rds as rds,
   aws_s3 as s3,
   aws_secretsmanager as secretsmanager,
   aws_sns as sns,
@@ -25,6 +29,11 @@ export interface WorkersStackProps extends StackProps {
   phiBucket: s3.IBucket;
   doctorPacksBucket: s3.IBucket;
   documentsKey: kms.IKey;
+  // F6 — stuck-job watcher Lambda needs RDS access via VPC + secret.
+  vpc: ec2.IVpc;
+  database: rds.IDatabaseInstance;
+  databaseSecurityGroup: ec2.ISecurityGroup;
+  databaseSecret: secretsmanager.ISecret;
 }
 
 /**
@@ -252,6 +261,84 @@ export class WorkersStack extends Stack {
           },
         ],
       },
+    });
+
+    // ===== F6: Stuck-Fargate-task watcher Lambda =====
+    // Every 5 min: scan DraftJob WHERE state IN ('queued','running') AND heartbeat stale > 10 min,
+    // flip to state='failed', failureClass='system'. Without this, a crashed Fargate task
+    // leaves the job invisible for 45 min (SQS visibility timeout).
+    const watcherSg = new ec2.SecurityGroup(this, 'StuckJobWatcherSecurityGroup', {
+      vpc: props.vpc,
+      allowAllOutbound: true,
+      description: 'Compact EMR stuck-job watcher Lambda egress + DB access.',
+    });
+    new ec2.CfnSecurityGroupIngress(this, 'DatabaseIngressFromStuckJobWatcher', {
+      groupId: props.databaseSecurityGroup.securityGroupId,
+      ipProtocol: 'tcp',
+      fromPort: 5432,
+      toPort: 5432,
+      sourceSecurityGroupId: watcherSg.securityGroupId,
+      description: 'Compact EMR stuck-job watcher Lambda to Postgres',
+    });
+
+    const watcherLogGroup = new logs.LogGroup(this, 'StuckJobWatcherLogGroup', {
+      logGroupName: `/aws/lambda/compact-emr-${config.envName}-stuck-job-watcher`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: config.envName === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // DATABASE_URL identical construction to ApiStack — both Lambdas read the same DB.
+    const watcherDatabaseUrl = cdk.Fn.sub(
+      'postgresql://{{resolve:secretsmanager:${secretArn}:SecretString:username}}:{{resolve:secretsmanager:${secretArn}:SecretString:password}}@${host}:${port}/compact_emr?schema=public',
+      {
+        secretArn: props.databaseSecret.secretArn,
+        host: props.database.dbInstanceEndpointAddress,
+        port: props.database.dbInstanceEndpointPort,
+      },
+    );
+
+    const stuckJobWatcher = new nodejs.NodejsFunction(this, 'StuckJobWatcher', {
+      functionName: `compact-emr-${config.envName}-stuck-job-watcher`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.resolve(__dirname, '..', '..', 'backend', 'src', 'lambdas', 'stuck-job-watcher.ts'),
+      handler: 'handler',
+      timeout: Duration.minutes(2),
+      memorySize: 512,
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [watcherSg],
+      logGroup: watcherLogGroup,
+      environment: {
+        ENV_NAME: config.envName,
+        DATABASE_URL: watcherDatabaseUrl,
+        DATABASE_URL_SECRET_ARN: props.databaseSecret.secretArn,
+      },
+      bundling: {
+        externalModules: ['@prisma/client', '@prisma/engines'],
+        commandHooks: {
+          beforeBundling: () => [],
+          beforeInstall: () => [],
+          afterBundling: (inputDir: string, outputDir: string) => {
+            // Same Prisma-binary copy pattern as ApiStack — Node fs.cpSync helper handles
+            // POSIX + Windows without xcopy's memory ceiling on @prisma engines.
+            const helper = path.join(__dirname, '..', 'scripts', 'bundle-copy.cjs');
+            const q = (s: string) => `"${s}"`;
+            return [
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/@prisma')} ${q(outputDir + '/node_modules/@prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/.prisma')} ${q(outputDir + '/node_modules/.prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/prisma')} ${q(outputDir + '/prisma')}`,
+            ];
+          },
+        },
+      },
+    });
+    props.databaseSecret.grantRead(stuckJobWatcher);
+
+    new events.Rule(this, 'StuckJobWatcherSchedule', {
+      ruleName: `compact-emr-${config.envName}-stuck-job-watcher-schedule`,
+      description: 'Every 5 min, sweep DraftJob rows with stale heartbeats to state=failed.',
+      schedule: events.Schedule.rate(Duration.minutes(5)),
+      targets: [new targets.LambdaFunction(stuckJobWatcher, { retryAttempts: 2 })],
     });
   }
 }

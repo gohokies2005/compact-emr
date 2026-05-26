@@ -59,8 +59,40 @@ export function createDoctorPackRouter(db: AppDb): Router {
       const actor = currentActor(req);
       const caseId = String(req.params.id);
 
-      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true, version: true } });
-      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      // Phase 7B-fix (architect REVIEW.md b99de30 finding #1): documents are case-scoped
+      // (`Case.documents Document[]`), not veteran-scoped. The prior `db.veteran.findUnique`
+      // call would have crashed at runtime because Veteran has no `documents` relation.
+      // Delegate's `findFirst` returns CaseRecord without the include — cast through unknown
+      // to expose the included documents array.
+      const caseWithDocs = (await db.case.findFirst({
+        where: { id: caseId },
+        select: {
+          id: true,
+          veteranId: true,
+          version: true,
+          documents: {
+            select: { s3Key: true, pageCount: true },
+            orderBy: { uploadedAt: 'asc' },
+          },
+        },
+      })) as unknown as { id: string; veteranId: string; version: number; documents: readonly { s3Key: string; pageCount: number | null }[] } | null;
+      if (caseWithDocs === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      const c = { id: caseWithDocs.id, veteranId: caseWithDocs.veteranId, version: caseWithDocs.version };
+
+      // Architect REVIEW.md finding #2: preempt double-click-Generate with a 409 before the
+       // partial-unique index would fire as a 500. Returns the in-flight row so the UI can
+       // poll it instead of starting a new one.
+      const inFlight = await db.doctorPack.findFirst({
+        where: { caseId, caseVersion: caseWithDocs.version, state: { in: ['queued', 'generating'] } },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (inFlight !== null) {
+        throw new HttpError(409, 'conflict', 'A Doctor Pack assembly is already in flight for this case version.', {
+          caseId,
+          inFlightDoctorPackId: inFlight.id,
+          state: inFlight.state,
+        });
+      }
 
       const readStatuses = await db.fileReadStatus.findMany({ where: { caseId } });
       const readiness = evaluateChartReadiness(readStatuses);
@@ -72,15 +104,10 @@ export function createDoctorPackRouter(db: AppDb): Router {
         });
       }
 
-      // Pull docs from veteran documents (where uploads live in the current schema).
-      // pageCount is sourced from the read-status attempts when available; otherwise null,
-      // which the assembler treats as "include all pages up to MAX_PAGES_PER_FILE".
-      const documents = await db.veteran.findUnique({
-        where: { id: (c as { veteranId: string }).veteranId },
-        include: { documents: true },
-      });
-      if (documents === null) throw new HttpError(404, 'not_found', 'Veteran not found for case', { caseId });
-      const docList = ((documents as { documents?: readonly { s3Key: string; pageCount?: number | null }[] }).documents ?? []);
+      // Document.pageCount is populated by the ingest worker when Textract returns the page
+      // total. Until the worker is shipped, page_count stays null and the assembler treats
+      // null as "include from page 1 onward; worker discovers exact bound at extraction".
+      const docList = caseWithDocs.documents;
       const classifiedFiles = docList
         .map((d) => {
           const readStatus = readStatuses.find((r) => r.filePath === d.s3Key);
@@ -99,9 +126,15 @@ export function createDoctorPackRouter(db: AppDb): Router {
       const manifest = assembleDoctorPackManifest({ classifiedFiles, readStatuses });
 
       const result = await db.$transaction(async (tx) => {
-        // Refresh KeyDoc rows: upsert one row per classified file. Stale rows for files no
-        // longer on the case are removed (deleteMany then upsert each).
-        await tx.keyDoc.deleteMany({ where: { caseId } });
+        // Architect REVIEW.md b99de30 finding: the prior implementation did
+        // `deleteMany({ where: { caseId } })` then `upsert`, which destroyed RN-authored
+        // `notes` on every re-generation. Switch to per-row upsert WITHOUT wipe so notes
+        // survive. Stale rows for files no longer on the case are removed by selective
+        // deleteMany scoped to NOT IN the current file set.
+        const currentFilePaths = classifiedFiles.map((f) => f.filePath);
+        if (currentFilePaths.length > 0) {
+          await tx.keyDoc.deleteMany({ where: { caseId, filePath: { notIn: currentFilePaths } } });
+        }
         for (const f of classifiedFiles) {
           const cls = classifyFile(f.filePath);
           const manifestEntry: DoctorPackManifestEntry | undefined = manifest.entries.find((e) => e.filePath === f.filePath);
@@ -123,6 +156,8 @@ export function createDoctorPackRouter(db: AppDb): Router {
               importance: cls.importance,
               pageRanges: manifestEntry?.pageRanges ?? [],
               version: { increment: 1 },
+              // NOTE: `notes` is intentionally NOT in the update payload — RN-authored notes
+              // survive re-generation of the Doctor Pack manifest.
             },
           });
         }

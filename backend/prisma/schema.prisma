@@ -271,6 +271,7 @@ model Document {
   sizeBytes   BigInt   @map("size_bytes")
   contentType String   @map("content_type")
   docTag      String?  @map("doc_tag")
+  pageCount   Int?     @map("page_count")
   s3Key       String   @unique @map("s3_key")
   uploadedAt  DateTime @default(now()) @map("uploaded_at") @db.Timestamptz(6)
   uploadedBy  String   @map("uploaded_by")

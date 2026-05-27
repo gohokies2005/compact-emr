@@ -8,8 +8,8 @@
 -- (median ~2 KB, worst ~30 KB) and PostgreSQL TOAST compresses transparently.
 
 CREATE TABLE IF NOT EXISTS "document_pages" (
-  "id"           UUID NOT NULL DEFAULT gen_random_uuid(),
-  "document_id"  UUID NOT NULL,
+  "id"           TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+  "document_id"  TEXT NOT NULL,
   "page_number"  INTEGER NOT NULL,
   "text"         TEXT NOT NULL,
   "confidence"   REAL,

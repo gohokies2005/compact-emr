@@ -24,6 +24,7 @@ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
     id: 'CASE-1',
     veteranId: 'VET-1',
     claimedCondition: 'condition field not asserted',
+    claimedConditions: ['condition field not asserted'],
     claimType: 'initial',
     framingChoice: null,
     upstreamScCondition: null,
@@ -109,7 +110,31 @@ describe('cases routes', () => {
     const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/cases').send({ id: 'CASE-2', claimedCondition: 'redacted test condition', claimType: 'initial' });
     expect(res.status).toBe(201);
     expect(spies.caseCreate).toHaveBeenCalled();
+    // Single-condition create derives claimedConditions from the singular field.
+    expect(spies.caseCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ claimedConditions: ['redacted test condition'], claimedCondition: 'redacted test condition' }) }));
     expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'case_created' }) }));
+  });
+
+  it('creates a clustered claim: primary = first condition, both columns persisted', async () => {
+    const { db, spies } = makeDb();
+    // Hip + Lumbar / back — both Musculoskeletal, so same-system guard passes.
+    const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/cases').send({ id: 'CASE-3', claimedConditions: ['Hip', 'Lumbar / back'], claimType: 'initial' });
+    expect(res.status).toBe(201);
+    expect(spies.caseCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ claimedCondition: 'Hip', claimedConditions: ['Hip', 'Lumbar / back'] }) }));
+  });
+
+  it('rejects a cross-body-system clustered claim with 400', async () => {
+    const { db } = makeDb();
+    // Lumbar / back (Musculoskeletal) + Obstructive sleep apnea (Respiratory / Sleep) => different systems.
+    const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/cases').send({ id: 'CASE-4', claimedConditions: ['Lumbar / back', 'Obstructive sleep apnea'], claimType: 'initial' });
+    expect(res.status).toBe(400);
+  });
+
+  it('allows a clustered claim mixing a known condition with free-text (free-text exempt)', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/cases').send({ id: 'CASE-5', claimedConditions: ['Lumbar / back', 'Some rare unlisted thing'], claimType: 'initial' });
+    expect(res.status).toBe(201);
+    expect(spies.caseCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ claimedConditions: ['Lumbar / back', 'Some rare unlisted thing'] }) }));
   });
 
   it('lists paginated cases with veteran lite info', async () => {

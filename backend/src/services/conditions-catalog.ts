@@ -16,6 +16,10 @@ import bvaData from '../data/bva_secondary_pairs.json' with { type: 'json' };
 export interface ConditionOption {
   readonly value: string;
   readonly label: string;
+  // True for SUPPLEMENTAL conditions that are NOT in the BVA atlas — the CDS engine has no pair
+  // odds for them so it returns caution/no-odds (correct + acceptable). The frontend may show a
+  // "no BVA data" hint. Omitted (undefined) for atlas-backed conditions.
+  readonly noBvaData?: boolean;
 }
 
 export interface ConditionGroup {
@@ -114,33 +118,92 @@ const SYSTEM_BY_CONDITION: Record<string, string> = {
   'Tinnitus': 'Auditory',
 };
 
+// SUPPLEMENTAL canonical conditions that are NOT in the BVA atlas. RNs need to claim these even
+// though the CDS engine has no pair odds for them (it returns caution/no-odds, which is correct).
+// Each carries its body system. The "Unspecified <system> condition" entries are catch-alls pinned
+// LAST within their group (an RN should reach for a specific condition first). One per system that
+// has real atlas members.
+interface SupplementalCondition {
+  readonly label: string;
+  readonly system: string;
+  // true => render as the pinned-last "Unspecified …" catch-all within its group.
+  readonly unspecified?: boolean;
+}
+
+const SUPPLEMENTAL_CONDITIONS: readonly SupplementalCondition[] = [
+  { label: 'CHF / congestive heart failure', system: 'Cardiovascular' },
+  { label: 'Unspecified musculoskeletal condition', system: 'Musculoskeletal', unspecified: true },
+  { label: 'Unspecified respiratory / sleep condition', system: 'Respiratory / Sleep', unspecified: true },
+  { label: 'Unspecified mental health condition', system: 'Mental health', unspecified: true },
+  { label: 'Unspecified cardiovascular condition', system: 'Cardiovascular', unspecified: true },
+  { label: 'Unspecified endocrine condition', system: 'Endocrine', unspecified: true },
+  { label: 'Unspecified neurological condition', system: 'Neurological', unspecified: true },
+  { label: 'Unspecified GI condition', system: 'GI', unspecified: true },
+  { label: 'Unspecified GU condition', system: 'GU', unspecified: true },
+  { label: 'Unspecified skin condition', system: 'Skin', unspecified: true },
+  { label: 'Unspecified auditory condition', system: 'Auditory', unspecified: true },
+];
+
+const SUPPLEMENTAL_BY_LABEL: Record<string, SupplementalCondition> = Object.fromEntries(
+  SUPPLEMENTAL_CONDITIONS.map((s) => [s.label, s]),
+);
+
 function systemFor(condition: string): string {
   return SYSTEM_BY_CONDITION[condition] ?? 'Other';
 }
 
-// The list of canonical labels (sorted), exposed for tests/diagnostics.
+// The body system for a catalog label (atlas OR supplemental), or null for unknown/free-text. The
+// case-create same-system guard and the CDS multi-eval both use this to classify a claimed
+// condition. Returns null (not 'Other') for labels we can't classify so callers can treat unknown
+// free-text as exempt from the same-system check.
+export function systemForCondition(label: string): string | null {
+  const trimmed = label.trim();
+  if (trimmed.length === 0) return null;
+  if (trimmed in SYSTEM_BY_CONDITION) return SYSTEM_BY_CONDITION[trimmed] ?? null;
+  const supplemental = SUPPLEMENTAL_BY_LABEL[trimmed];
+  if (supplemental) return supplemental.system;
+  return null;
+}
+
+// The list of canonical labels (sorted), exposed for tests/diagnostics. Includes supplementals.
 export function canonicalConditionLabels(): readonly string[] {
-  return canonicalConditions();
+  return [...canonicalConditions(), ...SUPPLEMENTAL_CONDITIONS.map((s) => s.label)].sort((a, b) =>
+    a.localeCompare(b),
+  );
 }
 
 // Build the grouped catalog: conditions sorted alphabetically within each system, systems in the
 // SYSTEM_ORDER above, empty systems omitted.
+interface CatalogEntry {
+  readonly option: ConditionOption;
+  readonly unspecified: boolean;
+}
+
 export function buildConditionsCatalog(): ConditionsCatalog {
-  const bySystem = new Map<string, ConditionOption[]>();
-  for (const condition of canonicalConditions()) {
-    const system = systemFor(condition);
-    const option: ConditionOption = { value: condition, label: condition };
+  const bySystem = new Map<string, CatalogEntry[]>();
+  const push = (system: string, entry: CatalogEntry): void => {
     const list = bySystem.get(system);
-    if (list) list.push(option);
-    else bySystem.set(system, [option]);
+    if (list) list.push(entry);
+    else bySystem.set(system, [entry]);
+  };
+
+  for (const condition of canonicalConditions()) {
+    push(systemFor(condition), { option: { value: condition, label: condition }, unspecified: false });
+  }
+  for (const s of SUPPLEMENTAL_CONDITIONS) {
+    push(s.system, { option: { value: s.label, label: s.label, noBvaData: true }, unspecified: s.unspecified === true });
   }
 
   const groups: ConditionGroup[] = [];
   for (const system of SYSTEM_ORDER) {
-    const conditions = bySystem.get(system);
-    if (conditions && conditions.length > 0) {
-      conditions.sort((a, b) => a.label.localeCompare(b.label));
-      groups.push({ system, conditions });
+    const entries = bySystem.get(system);
+    if (entries && entries.length > 0) {
+      // Specific conditions alphabetically first; "Unspecified …" catch-alls pinned LAST.
+      entries.sort((a, b) => {
+        if (a.unspecified !== b.unspecified) return a.unspecified ? 1 : -1;
+        return a.option.label.localeCompare(b.option.label);
+      });
+      groups.push({ system, conditions: entries.map((e) => e.option) });
     }
   }
   return { groups };

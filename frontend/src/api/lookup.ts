@@ -4,6 +4,8 @@ import type { Envelope } from './veterans';
 export interface ConditionOption {
   readonly value: string;
   readonly label: string;
+  // True for supplemental conditions not in the BVA atlas (CDS returns caution/no-odds). Optional.
+  readonly noBvaData?: boolean;
 }
 export interface ConditionGroup {
   readonly system: string;

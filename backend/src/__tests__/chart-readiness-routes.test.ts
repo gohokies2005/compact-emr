@@ -22,7 +22,7 @@ vi.mock('../auth/roles', () => ({
 function baseCase(): CaseRecord {
   const now = new Date('2026-05-26T00:00:00.000Z');
   return {
-    id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'OSA', claimType: 'initial',
+    id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'OSA', claimedConditions: ['OSA'], claimType: 'initial',
     framingChoice: 'secondary', upstreamScCondition: 'PTSD', veteranStatement: null, inServiceEvent: null,
     status: 'records', cdsVerdict: 'not_yet_run', cdsOddsPct: null, cdsRationale: null,
     assignedPhysicianId: null, refundEligible: false, currentVersion: 0,

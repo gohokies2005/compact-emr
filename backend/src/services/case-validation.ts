@@ -1,6 +1,10 @@
 import { HttpError } from '../http/errors.js';
 import type { CaseStatus, ClaimType } from './db-types.js';
 import { isCaseStatus } from './case-status-transitions.js';
+import { systemForCondition } from './conditions-catalog.js';
+
+const MAX_CLAIMED_CONDITIONS = 10;
+const MAX_CONDITION_LENGTH = 200;
 
 const CLAIM_TYPES: readonly ClaimType[] = ['initial', 'supplemental', 'hlr', 'appeal_bva'] as const;
 const PHI_PATTERN_REJECTIONS: readonly RegExp[] = [
@@ -12,6 +16,7 @@ const PHI_PATTERN_REJECTIONS: readonly RegExp[] = [
 export interface ParsedCaseCreate {
   id: string;
   claimedCondition: string;
+  claimedConditions?: string[];
   claimType: ClaimType;
   framingChoice?: string;
   upstreamScCondition?: string;
@@ -97,12 +102,69 @@ function positiveInteger(body: Record<string, unknown>, field: string): number {
   return value;
 }
 
+// Parse an optional claimedConditions[] (clustered claim). Each entry is a non-empty trimmed
+// string (max MAX_CONDITION_LENGTH); the array holds at most MAX_CLAIMED_CONDITIONS entries.
+// Returns undefined when the field is absent/null so callers can fall back to the single condition.
+function optionalConditionArray(body: Record<string, unknown>, field: string): string[] | undefined {
+  const value = body[field];
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) badRequest(`${field} must be an array of strings`, { field });
+  if (value.length === 0) badRequest(`${field} must not be empty when provided`, { field });
+  if (value.length > MAX_CLAIMED_CONDITIONS) {
+    badRequest(`${field} has too many entries`, { field, max: MAX_CLAIMED_CONDITIONS });
+  }
+  const parsed: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.trim().length === 0) {
+      badRequest(`each entry in ${field} must be a non-empty string`, { field });
+    }
+    const trimmed = entry.trim();
+    if (trimmed.length > MAX_CONDITION_LENGTH) {
+      badRequest(`an entry in ${field} is too long`, { field, maxLength: MAX_CONDITION_LENGTH });
+    }
+    parsed.push(trimmed);
+  }
+  return parsed;
+}
+
+// SAME-SYSTEM GUARD: among the claimed conditions that are KNOWN catalog labels, they must all map
+// to one body system (one letter argues only conditions within a single body system; a different
+// system needs a separate claim). Free-text / unknown-system entries are exempt — we can't classify
+// them, and an RN's escape-hatch free-text must never be blocked by this guard.
+function assertSameBodySystem(conditions: readonly string[]): void {
+  const systems = new Set<string>();
+  for (const c of conditions) {
+    const system = systemForCondition(c);
+    if (system !== null) systems.add(system);
+  }
+  if (systems.size > 1) {
+    badRequest(
+      'All claimed conditions in one letter must be in the same body system; a different system needs a separate claim',
+      { field: 'claimedConditions', systems: [...systems] },
+    );
+  }
+}
+
 export function parseCaseCreate(body: unknown): ParsedCaseCreate {
   if (!isRecord(body)) badRequest('Request body must be an object');
   if ('veteranId' in body) badRequest('veteranId comes from the URL, not the request body', { field: 'veteranId' });
 
   const id = requiredNonEmptyString(body, 'id');
-  const claimedCondition = requiredNonEmptyString(body, 'claimedCondition');
+  const claimedConditionsInput = optionalConditionArray(body, 'claimedConditions');
+
+  // Primary (singular) = first claimedConditions entry when provided, else the single field.
+  // claimedConditions is ALWAYS populated in the output (derived from the single field if absent).
+  let claimedCondition: string;
+  let claimedConditions: string[];
+  if (claimedConditionsInput !== undefined) {
+    claimedConditions = claimedConditionsInput;
+    claimedCondition = claimedConditionsInput[0]!;
+    assertSameBodySystem(claimedConditions);
+  } else {
+    claimedCondition = requiredNonEmptyString(body, 'claimedCondition');
+    claimedConditions = [claimedCondition];
+  }
+
   const claimType = body.claimType;
   if (typeof claimType !== 'string' || !CLAIM_TYPES.includes(claimType as ClaimType)) {
     badRequest('claimType is invalid', { field: 'claimType', allowedValues: CLAIM_TYPES });
@@ -111,6 +173,7 @@ export function parseCaseCreate(body: unknown): ParsedCaseCreate {
   return {
     id,
     claimedCondition,
+    claimedConditions,
     claimType: claimType as ClaimType,
     ...(optionalString(body, 'framingChoice', 80) !== undefined && { framingChoice: optionalString(body, 'framingChoice', 80) }),
     ...(optionalString(body, 'upstreamScCondition', 200) !== undefined && { upstreamScCondition: optionalString(body, 'upstreamScCondition', 200) }),

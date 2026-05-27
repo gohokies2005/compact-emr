@@ -164,6 +164,9 @@ export interface CaseRecord {
   id: string;
   veteranId: string;
   claimedCondition: string;
+  // Multi-condition clustered claim: the full set of claimed conditions (all in one body system).
+  // `claimedCondition` (singular) remains the PRIMARY (RN's first pick) for display/back-compat.
+  claimedConditions: readonly string[];
   claimType: ClaimType;
   framingChoice: string | null;
   upstreamScCondition: string | null;

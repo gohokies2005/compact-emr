@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildConditionsCatalog, canonicalConditionLabels, SYSTEM_ORDER } from '../services/conditions-catalog.js';
+import { buildConditionsCatalog, canonicalConditionLabels, systemForCondition, SYSTEM_ORDER } from '../services/conditions-catalog.js';
 import { evaluateCds } from '../services/cdsEngine.js';
 
 describe('conditions-catalog', () => {
@@ -49,11 +49,62 @@ describe('conditions-catalog', () => {
     expect(result.bva.matched).toBe(true);
   });
 
-  it('sorts conditions alphabetically within each group', () => {
+  it('sorts conditions alphabetically within each group, but pins "Unspecified …" last', () => {
     const catalog = buildConditionsCatalog();
     for (const g of catalog.groups) {
       const labels = g.conditions.map((c) => c.label);
-      expect(labels).toEqual([...labels].sort((a, b) => a.localeCompare(b)));
+      const specific = labels.filter((l) => !l.startsWith('Unspecified'));
+      const unspecified = labels.filter((l) => l.startsWith('Unspecified'));
+      // Specifics come first and are alphabetical; any "Unspecified …" entries are pinned last.
+      expect(labels).toEqual([...specific, ...unspecified]);
+      expect(specific).toEqual([...specific].sort((a, b) => a.localeCompare(b)));
+    }
+  });
+
+  it('includes supplemental conditions (CHF + an "Unspecified …" catch-all)', () => {
+    const catalog = buildConditionsCatalog();
+    const all = catalog.groups.flatMap((g) => g.conditions);
+    const chf = all.find((c) => c.value === 'CHF / congestive heart failure');
+    expect(chf).toBeDefined();
+    expect(chf?.noBvaData).toBe(true);
+    const unspecMsk = all.find((c) => c.value === 'Unspecified musculoskeletal condition');
+    expect(unspecMsk).toBeDefined();
+    expect(unspecMsk?.noBvaData).toBe(true);
+  });
+
+  it('places CHF in the Cardiovascular group and pins "Unspecified cardiovascular condition" last there', () => {
+    const catalog = buildConditionsCatalog();
+    const cardio = catalog.groups.find((g) => g.system === 'Cardiovascular');
+    expect(cardio).toBeDefined();
+    const values = cardio!.conditions.map((c) => c.value);
+    expect(values).toContain('CHF / congestive heart failure');
+    expect(values[values.length - 1]).toBe('Unspecified cardiovascular condition');
+  });
+
+  it('systemForCondition maps atlas labels, supplementals, and returns null for free-text', () => {
+    // Atlas labels
+    expect(systemForCondition('PTSD')).toBe('Mental health');
+    expect(systemForCondition('Obstructive sleep apnea')).toBe('Respiratory / Sleep');
+    expect(systemForCondition('Lumbar / back')).toBe('Musculoskeletal');
+    // Supplementals
+    expect(systemForCondition('CHF / congestive heart failure')).toBe('Cardiovascular');
+    expect(systemForCondition('Unspecified mental health condition')).toBe('Mental health');
+    // Free-text / unknown => null (exempt from the same-system guard)
+    expect(systemForCondition('Some rare unlisted thing')).toBeNull();
+    expect(systemForCondition('')).toBeNull();
+    expect(systemForCondition('   ')).toBeNull();
+  });
+
+  it('every supplemental condition resolves to a real (non-null) body system', () => {
+    const catalog = buildConditionsCatalog();
+    const supplementals = catalog.groups
+      .flatMap((g) => g.conditions)
+      .filter((c) => c.noBvaData === true);
+    expect(supplementals.length).toBeGreaterThan(0);
+    for (const s of supplementals) {
+      const system = systemForCondition(s.value);
+      expect(system, `${s.value} should map to a body system`).not.toBeNull();
+      expect(SYSTEM_ORDER).toContain(system as string);
     }
   });
 });

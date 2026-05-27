@@ -3,11 +3,12 @@ import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { Button } from '../../components/ui/Button';
 import { ConditionSelect } from '../../components/ConditionSelect';
+import { ConditionMultiSelect } from '../../components/ConditionMultiSelect';
 import type { CreateCaseInput } from '../../api/cases';
 
 const schema = z.object({
   id: z.string().optional(),
-  claimedCondition: z.string().min(1, 'Condition is required'),
+  claimedConditions: z.array(z.string().min(1)).min(1, 'At least one condition is required'),
   claimType: z.enum(['initial', 'supplemental', 'hlr', 'appeal_bva']),
   framingChoice: z.string().max(80).optional(),
   upstreamScCondition: z.string().max(200).optional(),
@@ -27,14 +28,16 @@ const CLAIM_TYPES: readonly { readonly value: FormValues['claimType']; readonly 
 ];
 
 export function NewClaimModal({ open, onClose, onSubmit, saving }: Props) {
-  const { register, handleSubmit, control, formState: { errors } } = useForm<FormValues>({ defaultValues: { claimType: 'initial', claimedCondition: '' } });
+  const { register, handleSubmit, control, formState: { errors } } = useForm<FormValues>({ defaultValues: { claimType: 'initial', claimedConditions: [] } });
   if (!open) return null;
 
   async function submit(values: FormValues) {
     const parsed = schema.parse(values);
     const input: CreateCaseInput = {
       id: 'CLM-' + crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase(),
-      claimedCondition: parsed.claimedCondition,
+      // claimedCondition (singular) = the RN's first pick (primary); claimedConditions = full set.
+      claimedCondition: parsed.claimedConditions[0]!,
+      claimedConditions: parsed.claimedConditions,
       claimType: parsed.claimType,
       ...(parsed.framingChoice && { framingChoice: parsed.framingChoice }),
       ...(parsed.upstreamScCondition && { upstreamScCondition: parsed.upstreamScCondition }),
@@ -48,9 +51,9 @@ export function NewClaimModal({ open, onClose, onSubmit, saving }: Props) {
     <div className="mb-4 flex items-center justify-between"><h2 className="text-lg font-semibold text-slate-900">New claim</h2><button type="button" className="text-slate-500" onClick={onClose}>×</button></div>
     <form className="grid grid-cols-1 gap-4 md:grid-cols-2" onSubmit={handleSubmit(submit)}>
       <Field label="Claim type" error={errors.claimType?.message}><select className="input" {...register('claimType')}>{CLAIM_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</select></Field>
-      <Field label="Claimed condition" error={errors.claimedCondition?.message}><Controller name="claimedCondition" control={control} rules={{ required: 'Condition is required' }} render={({ field }) => <ConditionSelect label="Claimed condition" value={field.value ?? ''} onChange={field.onChange} />} /></Field>
+      <div className="md:col-span-2"><Field label="Claimed condition(s)" error={errors.claimedConditions?.message}><Controller name="claimedConditions" control={control} rules={{ validate: (v) => (v && v.length > 0) || 'At least one condition is required' }} render={({ field }) => <ConditionMultiSelect label="Claimed condition(s)" value={field.value ?? []} onChange={field.onChange} />} /></Field></div>
       <Field label="Framing (optional)" error={errors.framingChoice?.message}><input className="input" placeholder="e.g., aggravation, secondary, direct, presumptive" {...register('framingChoice')} /></Field>
-      <Field label="Upstream SC condition (optional)" error={errors.upstreamScCondition?.message}><input className="input" placeholder="if this is secondary to a known SC condition" {...register('upstreamScCondition')} /></Field>
+      <Field label="Upstream SC condition (optional)" error={errors.upstreamScCondition?.message}><Controller name="upstreamScCondition" control={control} render={({ field }) => <ConditionSelect label="Upstream SC condition" value={field.value ?? ''} onChange={field.onChange} placeholder="if secondary to a known SC condition…" />} /></Field>
       <div className="md:col-span-2"><Field label="Veteran's account / statement (optional, paste from intake)" error={errors.veteranStatement?.message}><textarea className="input min-h-24" {...register('veteranStatement')} /></Field></div>
       <div className="md:col-span-2"><Field label="Documented in-service event or exposure (optional)" error={errors.inServiceEvent?.message}><textarea className="input min-h-24" {...register('inServiceEvent')} /></Field></div>
       <div className="md:col-span-2 flex justify-end gap-2"><Button type="button" variant="secondary" onClick={onClose}>Cancel</Button><Button type="submit" loading={saving}>Create claim</Button></div>

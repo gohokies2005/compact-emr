@@ -76,6 +76,36 @@ export function CdsPanel({ caseId, verdict, oddsPct, rationale }: CdsPanelProps)
 
               <p className="text-sm text-slate-700">{result.summary}</p>
 
+              {result.perCondition && result.perCondition.length > 1 ? (
+                <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <div className="mb-1 text-xs font-semibold text-slate-600">
+                    Clustered claim — {result.perCondition.length} conditions (overall follows the best odds)
+                  </div>
+                  <ul className="space-y-1 text-sm">
+                    {result.perCondition.map((pc) => {
+                      const isDriver = pc.condition === result.driverCondition;
+                      const pcBadge = VERDICT_BADGE[pc.result.verdict];
+                      return (
+                        <li key={pc.condition} className="flex items-center justify-between gap-3">
+                          <span className={clsx('truncate', isDriver ? 'font-semibold text-slate-900' : 'text-slate-700')}>
+                            {pc.condition}
+                            {isDriver ? <span className="ml-1 text-xs font-normal text-indigo-600">(driver)</span> : null}
+                          </span>
+                          <span className="flex shrink-0 items-center gap-2">
+                            {typeof pc.result.oddsPct === 'number' ? (
+                              <span className="text-xs text-slate-500">{Math.round(pc.result.oddsPct)}%</span>
+                            ) : null}
+                            <span className={clsx('inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium', pcBadge.tone)}>
+                              {pcBadge.label}
+                            </span>
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ) : null}
+
               {result.hardGate.triggered ? (
                 <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
                   <div className="font-semibold">{result.hardGate.rule ?? 'Hard gate triggered'}</div>

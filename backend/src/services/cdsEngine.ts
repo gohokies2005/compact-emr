@@ -183,3 +183,79 @@ export function evaluateCds(input: CdsEngineInput): CdsResult {
 
   return { ...base, verdict, oddsPct, summary, hardGate, bva };
 }
+
+// ============================================================================
+// Multi-condition (clustered claim) evaluation
+// ============================================================================
+
+export interface CdsMultiInput {
+  readonly claimedConditions: readonly string[];
+  readonly claimType: string;
+  readonly framingChoice: string | null;
+  readonly upstreamScCondition: string | null;
+  readonly serviceConnectedConditions: readonly string[];
+  readonly activeProblems: readonly string[];
+}
+
+export interface CdsMultiResult {
+  overall: CdsResult;
+  perCondition: { condition: string; result: CdsResult }[];
+  driverCondition: string;
+}
+
+// Verdict ranking used ONLY as the tie-break when two members have equal oddsPct (or both null):
+// accept > caution > reject.
+const VERDICT_RANK: Record<CdsEngineVerdict, number> = { accept: 2, caution: 1, reject: 0 };
+
+/**
+ * Evaluate every claimed condition (clustered single-letter claim) and pick the OVERALL verdict
+ * from the best-odds member. All conditions share the same upstream / framing / SC / problems —
+ * the drafter (separate repo) argues every condition in one letter; CDS just needs the overall
+ * recommendation plus a per-condition breakdown.
+ *
+ * Overall-pick ranking (best member wins):
+ *   (1) highest oddsPct  — any numeric oddsPct outranks a null oddsPct;
+ *   (2) tie-break: verdict rank accept > caution > reject.
+ * The first claimed condition is used as the FINAL tie-break (stable: it's the RN's primary), so a
+ * fully-tied set resolves to the primary.
+ *
+ * Hard gates (no_diagnosis, no_sc_anchor, barred_theory) depend only on the shared inputs, so they
+ * fire identically for every member — an all-reject set stays reject. "Unspecified …" supplemental
+ * conditions have no atlas pair, so they fall to caution naturally (no special-casing).
+ */
+export function evaluateCdsMulti(input: CdsMultiInput): CdsMultiResult {
+  const conditions = input.claimedConditions.length > 0 ? input.claimedConditions : [''];
+
+  const perCondition = conditions.map((condition) => ({
+    condition,
+    result: evaluateCds({
+      claimedCondition: condition,
+      claimType: input.claimType,
+      framingChoice: input.framingChoice,
+      upstreamScCondition: input.upstreamScCondition,
+      serviceConnectedConditions: input.serviceConnectedConditions,
+      activeProblems: input.activeProblems,
+    }),
+  }));
+
+  // Pick the best member. `better(a, b)` returns true when a is strictly better than b.
+  const better = (a: CdsResult, b: CdsResult): boolean => {
+    const aOdds = a.oddsPct;
+    const bOdds = b.oddsPct;
+    if (aOdds !== bOdds) {
+      if (aOdds === null) return false; // null < any number
+      if (bOdds === null) return true; // any number > null
+      return aOdds > bOdds;
+    }
+    return VERDICT_RANK[a.verdict] > VERDICT_RANK[b.verdict];
+  };
+
+  let best = perCondition[0]!;
+  for (let i = 1; i < perCondition.length; i++) {
+    const candidate = perCondition[i]!;
+    // Strictly-better wins; ties keep the earlier member (primary-first stability).
+    if (better(candidate.result, best.result)) best = candidate;
+  }
+
+  return { overall: best.result, perCondition, driverCondition: best.condition };
+}

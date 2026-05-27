@@ -64,7 +64,7 @@ export interface DrafterBundle {
   readonly activeJob: unknown;
   readonly bundleMeta: {
     readonly generatedAt: string;
-    readonly schemaVersion: '1';
+    readonly schemaVersion: '2';
   };
 }
 
@@ -130,6 +130,9 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
       id: c.id,
       veteranId: cw.veteranId,
       claimedCondition: c.claimedCondition,
+      // Full clustered-claim set (schemaVersion 2). The drafter argues every condition in one
+      // letter; claimedCondition (singular) stays the primary for the drafter's primary section.
+      claimedConditions: c.claimedConditions,
       claimType: c.claimType,
       framingChoice: c.framingChoice,
       upstreamScCondition: c.upstreamScCondition,
@@ -156,7 +159,7 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
     activeJob,
     bundleMeta: {
       generatedAt: new Date().toISOString(),
-      schemaVersion: '1',
+      schemaVersion: '2',
     },
   };
 }

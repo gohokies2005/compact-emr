@@ -53,6 +53,8 @@ export async function listCases(params: ListCasesParams = {}): Promise<CaseListR
 export interface CreateCaseInput {
   readonly id: string;
   readonly claimedCondition: string;
+  // Multi-condition clustered claim (all in one body system). claimedCondition stays the primary.
+  readonly claimedConditions?: string[];
   readonly claimType: ClaimType;
   readonly framingChoice?: string;
   readonly upstreamScCondition?: string;
@@ -137,6 +139,10 @@ export interface CdsResult {
   };
   readonly checkedAt: string;
   readonly engineVersion: string;
+  // Clustered-claim enrichment (present when cdsRationale was built by evaluateCdsMulti). The
+  // overall verdict/odds above belong to the driver condition; perCondition lists every member.
+  readonly driverCondition?: string;
+  readonly perCondition?: readonly { readonly condition: string; readonly result: CdsResult }[];
 }
 
 export async function runCds(id: string): Promise<{ data: CdsResult }> {

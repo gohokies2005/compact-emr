@@ -262,7 +262,7 @@ export function createCasesRouter(db: AppDb): Router {
             action: 'case_created',
             caseId: row.id,
             veteranId,
-            detailsJson: { caseId: row.id, veteranId, fields: ['id', 'claimedCondition', 'claimType'] },
+            detailsJson: { caseId: row.id, veteranId, fields: ['id', 'claimedCondition', 'claimedConditions', 'claimType'] },
           },
         });
 

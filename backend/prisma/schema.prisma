@@ -230,6 +230,10 @@ model Case {
   id                  String     @id
   veteranId           String     @map("veteran_id")
   claimedCondition    String     @map("claimed_condition")
+  // Multi-condition clustered claims: the full set of same-body-system conditions argued in
+  // ONE letter. claimedCondition stays the primary (RN's first pick / display / drafter primary);
+  // claimedConditions is the complete set CDS scores (verdict follows the best-odds member).
+  claimedConditions   String[]   @default([]) @map("claimed_conditions")
   claimType           ClaimType  @map("claim_type")
   framingChoice       String?    @map("framing_choice")
   upstreamScCondition String?    @map("upstream_sc_condition")

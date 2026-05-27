@@ -25,6 +25,7 @@ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
     id: 'CASE-1',
     veteranId: 'VET-1',
     claimedCondition: 'Obstructive sleep apnea',
+    claimedConditions: ['Obstructive sleep apnea'],
     claimType: 'initial',
     framingChoice: 'secondary',
     upstreamScCondition: 'PTSD',

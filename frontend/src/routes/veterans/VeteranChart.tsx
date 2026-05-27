@@ -8,11 +8,11 @@ import { addMedication, addProblem, addScCondition, deleteMedication, deleteProb
 import { createCase, type CreateCaseInput } from '../../api/cases';
 import { NewClaimModal } from '../cases/NewClaimModal';
 import { ChartNotesPanel } from './ChartNotesPanel';
+import { ConditionSelect } from '../../components/ConditionSelect';
+import { classifyEntry, isZip, type CandidateResult } from './documentUpload';
 import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition } from '../../types/prisma';
 
 const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
-const ALLOWED_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
-const MAX_BYTES = 50 * 1024 * 1024;
 
 export function VeteranChart() {
   const { id } = useParams();
@@ -42,7 +42,7 @@ function ConditionsPanel({ veteranId, rows, onChange }: { readonly veteranId: st
   const [condition, setCondition] = useState(''); const [dcCode, setDcCode] = useState('');
   const add = useMutation({ mutationFn: () => addScCondition(veteranId, { condition, ...(dcCode && { dcCode }) }), onSuccess: async () => { setCondition(''); setDcCode(''); await onChange(); } });
   const del = useMutation({ mutationFn: deleteScCondition, onSuccess: onChange });
-  return <div className="space-y-4"><div className="flex gap-2"><input className="input" placeholder="Condition" value={condition} onChange={(e) => setCondition(e.target.value)} /><input className="input" placeholder="DC code" value={dcCode} onChange={(e) => setDcCode(e.target.value)} /><Button size="sm" onClick={() => add.mutate()} disabled={!condition}>Add</Button></div><Rows rows={rows.map((r) => ({ id: r.id, cols: [r.condition, r.dcCode ?? '—', r.ratingPct?.toString() ?? '—'], onDelete: () => { if (window.confirm('Remove this SC condition?')) del.mutate(r.id); } }))} /></div>;
+  return <div className="space-y-4"><div className="flex flex-col gap-2 sm:flex-row sm:items-start"><div className="sm:flex-1"><ConditionSelect label="Condition" value={condition} onChange={setCondition} /></div><input className="input sm:w-40" placeholder="DC code" value={dcCode} onChange={(e) => setDcCode(e.target.value)} /><Button size="sm" onClick={() => add.mutate()} disabled={!condition}>Add</Button></div><Rows rows={rows.map((r) => ({ id: r.id, cols: [r.condition, r.dcCode ?? '—', r.ratingPct?.toString() ?? '—'], onDelete: () => { if (window.confirm('Remove this SC condition?')) del.mutate(r.id); } }))} /></div>;
 }
 function ProblemsPanel({ veteranId, rows, onChange }: { readonly veteranId: string; readonly rows: readonly ActiveProblem[]; readonly onChange: () => Promise<void> }) {
   const [problem, setProblem] = useState(''); const add = useMutation({ mutationFn: () => addProblem(veteranId, { problem }), onSuccess: async () => { setProblem(''); await onChange(); } }); const del = useMutation({ mutationFn: deleteProblem, onSuccess: onChange });
@@ -54,10 +54,84 @@ function MedicationsPanel({ veteranId, rows, onChange }: { readonly veteranId: s
 }
 function Rows({ rows }: { readonly rows: readonly { readonly id: string; readonly cols: readonly string[]; readonly onDelete: () => void }[] }) { if (!rows.length) return <EmptyState title="Nothing recorded yet" message="Add the first item above." />; return <div className="divide-y divide-slate-100">{rows.map((r) => <div className="flex items-center justify-between py-3 text-sm" key={r.id}><div className="flex gap-6 text-slate-700">{r.cols.map((c, i) => <span key={`${r.id}-${i}`}>{c}</span>)}</div><button className="text-rose-600" onClick={r.onDelete}>Delete</button></div>)}</div>; }
 
+interface UploadItem { readonly filename: string; readonly contentType: string; readonly sizeBytes: number; readonly blob: Blob; }
+
 function DocumentsPanel({ veteranId, cases, documents, onChange }: { readonly veteranId: string; readonly cases: readonly Case[]; readonly documents: readonly Document[]; readonly onChange: () => Promise<void> }) {
   const [caseId, setCaseId] = useState(cases[0]?.id ?? ''); const [docTag, setDocTag] = useState('Other'); const [status, setStatus] = useState('');
-  async function onFile(file: File | undefined) { if (!file) return; if (!ALLOWED_TYPES.includes(file.type)) { setStatus('Unsupported file type.'); return; } if (file.size > MAX_BYTES) { setStatus('File exceeds 50 MB.'); return; } if (!caseId) { setStatus('Create or select a case before uploading.'); return; } setStatus('Preparing upload…'); const presigned = await presignDocument(veteranId, { caseId, filename: file.name, contentType: file.type, sizeBytes: file.size }); setStatus('Uploading…'); await uploadToPresignedUrl(presigned.data.uploadUrl, file, presigned.data.requiredHeaders); await recordDocument(veteranId, { caseId, filename: file.name, contentType: file.type, sizeBytes: file.size, s3Key: presigned.data.s3Key, docTag }); setStatus('Uploaded.'); await onChange(); }
+  const [busy, setBusy] = useState(false);
+
+  // Upload one already-classified item via the existing presign -> upload -> record flow.
+  // Throws on failure so the batch driver can record a per-file error without aborting the batch.
+  async function uploadOne(item: UploadItem) {
+    const presigned = await presignDocument(veteranId, { caseId, filename: item.filename, contentType: item.contentType, sizeBytes: item.sizeBytes });
+    await uploadToPresignedUrl(presigned.data.uploadUrl, new File([item.blob], item.filename, { type: item.contentType }), presigned.data.requiredHeaders);
+    await recordDocument(veteranId, { caseId, filename: item.filename, contentType: item.contentType, sizeBytes: item.sizeBytes, s3Key: presigned.data.s3Key, docTag });
+  }
+
+  // Expand the user's selection into upload candidates: zips are unpacked client-side, plain
+  // files pass through. Returns { items, skipped } where skipped carries the reason per file.
+  async function expandSelection(files: readonly File[]): Promise<{ items: UploadItem[]; skipped: { name: string; reason: string }[] }> {
+    const items: UploadItem[] = [];
+    const skipped: { name: string; reason: string }[] = [];
+    const reasonText: Record<string, string> = { directory_or_junk: 'skipped (folder/system file)', unsupported_type: 'unsupported type', too_large: 'over 50 MB' };
+    const note = (r: CandidateResult & { ok: false }) => skipped.push({ name: r.path.split('/').pop() ?? r.path, reason: reasonText[r.reason] ?? 'skipped' });
+
+    for (const file of files) {
+      if (isZip(file)) {
+        const { default: JSZip } = await import('jszip');
+        const zip = await JSZip.loadAsync(file);
+        const entries = Object.values(zip.files);
+        for (const entry of entries) {
+          const metaSize = (entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0;
+          const cls = classifyEntry({ path: entry.name, sizeBytes: metaSize, isDir: entry.dir });
+          if (!cls.ok) { note(cls); continue; }
+          // Realize the blob, then re-check size against the true byte length (zip metadata can be
+          // missing/zero in some JSZip builds).
+          const blob = await entry.async('blob');
+          const recheck = classifyEntry({ path: entry.name, sizeBytes: blob.size, isDir: entry.dir });
+          if (!recheck.ok) { note(recheck); continue; }
+          items.push({ filename: recheck.candidate.path, contentType: recheck.candidate.contentType, sizeBytes: blob.size, blob });
+        }
+      } else {
+        const cls = classifyEntry({ path: file.name, sizeBytes: file.size, explicitType: file.type });
+        if (!cls.ok) { note(cls); continue; }
+        items.push({ filename: cls.candidate.path, contentType: cls.candidate.contentType, sizeBytes: file.size, blob: file });
+      }
+    }
+    return { items, skipped };
+  }
+
+  // Batch driver: validate the case, expand the selection, then upload sequentially with progress.
+  async function onFiles(fileList: FileList | null) {
+    const files = fileList ? Array.from(fileList) : [];
+    if (files.length === 0) return;
+    if (!caseId) { setStatus('Create or select a case before uploading.'); return; }
+    setBusy(true);
+    try {
+      setStatus('Reading selection…');
+      const { items, skipped } = await expandSelection(files);
+      if (items.length === 0) { setStatus(`Nothing to upload — ${skipped.length} skipped (unsupported/too large).`); return; }
+      let uploaded = 0; const failed: string[] = [];
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
+        if (!item) continue;
+        setStatus(`Uploading ${i + 1} of ${items.length}… (${item.filename})`);
+        try { await uploadOne(item); uploaded += 1; }
+        catch { failed.push(item.filename); }
+      }
+      const skippedCount = skipped.length + failed.length;
+      const parts = [`${uploaded} uploaded`];
+      if (skippedCount > 0) parts.push(`${skippedCount} skipped (unsupported/too large/failed)`);
+      setStatus(parts.join(', ') + '.');
+      await onChange();
+    } catch (err) {
+      setStatus(`Upload failed: ${err instanceof Error ? err.message : 'unexpected error'}.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function openDocument(id: string) { const res = await downloadDocument(id); window.open(res.data.downloadUrl, '_blank', 'noopener,noreferrer'); }
-  return <section id="documents" className="rounded-lg border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold text-slate-900">Documents</h2><div className="mt-4 flex flex-col gap-3 sm:flex-row"><select className="input" value={caseId} onChange={(e) => setCaseId(e.target.value)}>{cases.map((c) => <option key={c.id} value={c.id}>{c.id} — {c.claimedCondition}</option>)}</select><select className="input" value={docTag} onChange={(e) => setDocTag(e.target.value)}>{DOC_TAGS.map((t) => <option key={t}>{t}</option>)}</select><input className="text-sm" type="file" onChange={(e) => void onFile(e.target.files?.[0])} /></div>{status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}<div className="mt-4 divide-y divide-slate-100">{documents.map((d) => <button key={d.id} className="flex w-full justify-between py-3 text-left text-sm hover:bg-slate-50" onClick={() => void openDocument(d.id)}><span>{d.filename}</span><span className="text-slate-500">{d.docTag ?? 'Other'} · {d.uploadedAt}</span></button>)}</div></section>;
+  return <section id="documents" className="rounded-lg border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold text-slate-900">Documents</h2><p className="mt-1 text-sm text-slate-500">Upload one or more files, or a .zip — PDF, JPG, PNG, DOC, DOCX (max 50 MB each).</p><div className="mt-4 flex flex-col gap-3 sm:flex-row"><select className="input" value={caseId} onChange={(e) => setCaseId(e.target.value)}>{cases.map((c) => <option key={c.id} value={c.id}>{c.id} — {c.claimedCondition}</option>)}</select><select className="input" value={docTag} onChange={(e) => setDocTag(e.target.value)}>{DOC_TAGS.map((t) => <option key={t}>{t}</option>)}</select><input className="text-sm" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.zip,application/pdf,image/jpeg,image/png,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,application/x-zip-compressed" disabled={busy} onChange={(e) => { void onFiles(e.target.files); e.target.value = ''; }} /></div>{status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}<div className="mt-4 divide-y divide-slate-100">{documents.map((d) => <button key={d.id} className="flex w-full justify-between py-3 text-left text-sm hover:bg-slate-50" onClick={() => void openDocument(d.id)}><span>{d.filename}</span><span className="text-slate-500">{d.docTag ?? 'Other'} · {d.uploadedAt}</span></button>)}</div></section>;
 }
 function CasesPanel({ rows }: { readonly rows: readonly Case[] }) { return <section className="rounded-lg border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold text-slate-900">Cases</h2><div className="mt-4 divide-y divide-slate-100">{rows.map((c) => <Link key={c.id} className="flex justify-between py-3 text-sm hover:bg-slate-50" to={`/cases/${encodeURIComponent(c.id)}`}><span>{c.claimedCondition}</span><span className="text-slate-500">{c.status} · {c.claimType}</span></Link>)}</div>{!rows.length ? <EmptyState title="No cases yet" message="Case detail ships in Phase 4." /> : null}</section>; }

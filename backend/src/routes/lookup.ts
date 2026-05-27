@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
 import { searchIcd10, searchMedications, lookupDatasetSizes } from '../services/lookup-service.js';
+import { buildConditionsCatalog } from '../services/conditions-catalog.js';
 
 const PARSED_LIMIT_MAX = 50;
 
@@ -38,6 +39,18 @@ export function createLookupRouter(): Router {
       const limit = parseLimit(req.query.limit);
       const result = searchMedications(q, limit);
       res.json({ data: result });
+    }),
+  );
+
+  // Canonical condition catalog for the chart/claim condition dropdowns. Sourced from the BVA
+  // pair atlas (same dataset the CDS engine matches against) so a dropdown pick always resolves
+  // to a CDS-recognized key. Grouped by body system; non-PHI; static per deploy (no caching
+  // headers needed for this small payload).
+  router.get(
+    '/lookup/conditions',
+    allowAllStaff,
+    asyncHandler(async (_req: Request, res: Response) => {
+      res.json({ data: buildConditionsCatalog() });
     }),
   );
 

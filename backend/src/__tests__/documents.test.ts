@@ -52,9 +52,9 @@ describe('document routes', () => {
     expect(res.body.data.requiredHeaders['x-amz-server-side-encryption']).toBe('aws:kms');
   });
 
-  it('rejects presign when file exceeds 5 MB', async () => {
+  it('rejects presign when file exceeds 50 MB', async () => {
     const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1' })) } };
-    await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents/presign').send({ caseId: 'CASE-1', filename: 'big.pdf', contentType: 'application/pdf', sizeBytes: 6 * 1024 * 1024 }).expect(400);
+    await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents/presign').send({ caseId: 'CASE-1', filename: 'big.pdf', contentType: 'application/pdf', sizeBytes: 51 * 1024 * 1024 }).expect(400);
   });
 
   it('records uploaded document metadata and activity log in one transaction', async () => {

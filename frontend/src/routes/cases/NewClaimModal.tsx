@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
-import { useForm } from 'react-hook-form';
+import { Controller, useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { Button } from '../../components/ui/Button';
+import { ConditionSelect } from '../../components/ConditionSelect';
 import type { CreateCaseInput } from '../../api/cases';
 
 const schema = z.object({
@@ -26,7 +27,7 @@ const CLAIM_TYPES: readonly { readonly value: FormValues['claimType']; readonly 
 ];
 
 export function NewClaimModal({ open, onClose, onSubmit, saving }: Props) {
-  const { register, handleSubmit, formState: { errors } } = useForm<FormValues>({ defaultValues: { claimType: 'initial' } });
+  const { register, handleSubmit, control, formState: { errors } } = useForm<FormValues>({ defaultValues: { claimType: 'initial', claimedCondition: '' } });
   if (!open) return null;
 
   async function submit(values: FormValues) {
@@ -47,7 +48,7 @@ export function NewClaimModal({ open, onClose, onSubmit, saving }: Props) {
     <div className="mb-4 flex items-center justify-between"><h2 className="text-lg font-semibold text-slate-900">New claim</h2><button type="button" className="text-slate-500" onClick={onClose}>×</button></div>
     <form className="grid grid-cols-1 gap-4 md:grid-cols-2" onSubmit={handleSubmit(submit)}>
       <Field label="Claim type" error={errors.claimType?.message}><select className="input" {...register('claimType')}>{CLAIM_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</select></Field>
-      <Field label="Claimed condition" error={errors.claimedCondition?.message}><input className="input" {...register('claimedCondition')} /></Field>
+      <Field label="Claimed condition" error={errors.claimedCondition?.message}><Controller name="claimedCondition" control={control} rules={{ required: 'Condition is required' }} render={({ field }) => <ConditionSelect label="Claimed condition" value={field.value ?? ''} onChange={field.onChange} />} /></Field>
       <Field label="Framing (optional)" error={errors.framingChoice?.message}><input className="input" placeholder="e.g., aggravation, secondary, direct, presumptive" {...register('framingChoice')} /></Field>
       <Field label="Upstream SC condition (optional)" error={errors.upstreamScCondition?.message}><input className="input" placeholder="if this is secondary to a known SC condition" {...register('upstreamScCondition')} /></Field>
       <div className="md:col-span-2"><Field label="Veteran's account / statement (optional, paste from intake)" error={errors.veteranStatement?.message}><textarea className="input min-h-24" {...register('veteranStatement')} /></Field></div>

@@ -12,6 +12,7 @@ vi.mock('../api/veterans', () => ({
 vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 vi.mock('../auth/useAuth', () => ({ useAuth: () => ({ user: { sub: 'u', email: 'a@x.com', roles: ['admin'], role: 'admin' } }) }));
 vi.mock('../api/chart-notes', () => ({ listChartNotes: vi.fn(async () => ({ data: [] })), createChartNote: vi.fn(), patchChartNote: vi.fn(), deleteChartNote: vi.fn() }));
+vi.mock('../api/lookup', () => ({ getConditions: vi.fn(async () => ({ groups: [{ system: 'Mental health', conditions: [{ value: 'PTSD', label: 'PTSD' }] }] })) }));
 
 describe('VeteranChart', () => {
   it('renders veteran chart panels', async () => {

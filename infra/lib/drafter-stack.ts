@@ -10,6 +10,8 @@ import {
   aws_s3 as s3,
   aws_secretsmanager as secretsmanager,
   aws_sqs as sqs,
+  aws_cloudwatch as cloudwatch,
+  aws_applicationautoscaling as appscaling,
 } from 'aws-cdk-lib';
 import type { CompactEmrConfig } from './config.js';
 
@@ -201,7 +203,7 @@ export class DrafterStack extends Stack {
       serviceName: `compact-emr-${config.envName}-drafter`,
       cluster,
       taskDefinition,
-      desiredCount: 1, // smoke-test: one always-on worker. SWITCH to queue-depth scale-to-zero (min 0/max 1) after first E2E pass to kill ~$145/mo idle cost.
+      desiredCount: 0, // scale-to-zero: the autoscaler (below) runs 1 task only when the queue has work, 0 when idle (~$0 idle cost).
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [securityGroup],
       // Long-running tasks: when a deploy rolls out a new image, drain in-flight jobs first.
@@ -212,6 +214,37 @@ export class DrafterStack extends Stack {
       circuitBreaker: { rollback: true },
     });
     this.service = service;
+
+    // ===== Queue-depth scale-to-zero (min 0 / max 1) =====
+    // Run exactly one worker when there is work, none when idle. The scaling metric is
+    // (visible + in-flight) messages so a task is NOT killed mid-job: while the worker holds a
+    // message (in-flight / NotVisible) the depth stays >= 1, keeping the task alive until it
+    // deletes the message on /complete. Cold start adds ~2-4 min before a queued job is picked up
+    // (alarm period + image pull) — fine for the 15-20 min async drafting run.
+    const scaling = service.autoScaleTaskCount({ minCapacity: 0, maxCapacity: 1 });
+    const queueDepth = new cloudwatch.MathExpression({
+      expression: 'visible + inflight',
+      label: 'DraftJobQueueDepth',
+      usingMetrics: {
+        // Explicit AWS/SQS metric (dimensioned by queue NAME) — avoids a cross-stack export from
+        // the workers stack that draftJobQueue.metric() would create (which breaks a drafter-only
+        // --exclusively deploy with "No export named ... found").
+        visible: new cloudwatch.Metric({ namespace: 'AWS/SQS', metricName: 'ApproximateNumberOfMessagesVisible', dimensionsMap: { QueueName: `compact-emr-${config.envName}-draft-job.fifo` }, period: Duration.minutes(1), statistic: 'Maximum' }),
+        inflight: new cloudwatch.Metric({ namespace: 'AWS/SQS', metricName: 'ApproximateNumberOfMessagesNotVisible', dimensionsMap: { QueueName: `compact-emr-${config.envName}-draft-job.fifo` }, period: Duration.minutes(1), statistic: 'Maximum' }),
+      },
+      period: Duration.minutes(1),
+    });
+    scaling.scaleOnMetric('DrafterQueueDepthScaling', {
+      metric: queueDepth,
+      adjustmentType: appscaling.AdjustmentType.EXACT_CAPACITY,
+      scalingSteps: [
+        { upper: 0, change: 0 }, // no messages -> 0 tasks
+        { lower: 1, change: 1 }, // any visible or in-flight message -> 1 task
+      ],
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      cooldown: Duration.minutes(1),
+    });
 
     // ===== Outputs the drafter window needs =====
     // ECR repo URI — drafter window runs `docker push <uri>:<git-sha>` against this.

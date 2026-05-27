@@ -16,9 +16,9 @@ import { ActivityPage } from './routes/stubs/ActivityPage';
 import { RefundsPage } from './routes/stubs/RefundsPage';
 import { CompensationPage } from './routes/stubs/CompensationPage';
 import { MetricsPage } from './routes/stubs/MetricsPage';
-import { PQueuePage } from './routes/stubs/PQueuePage';
-import { PReviewPage } from './routes/stubs/PReviewPage';
-import { PLettersPage } from './routes/stubs/PLettersPage';
+import { PhysicianQueuePage } from './routes/physician/PhysicianQueuePage';
+import { PhysicianReviewPage } from './routes/physician/PhysicianReviewPage';
+import { PhysicianLettersPage } from './routes/physician/PhysicianLettersPage';
 import { RnQueuePage } from './routes/rn/RnQueuePage';
 
 const queryClient = new QueryClient();
@@ -37,9 +37,9 @@ export function App() {
     <Route path="/refunds" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><RefundsPage /></ProtectedRoute>} />
     <Route path="/compensation" element={<ProtectedRoute requiredRole={['admin']}><CompensationPage /></ProtectedRoute>} />
     <Route path="/metrics" element={<ProtectedRoute requiredRole={['admin']}><MetricsPage /></ProtectedRoute>} />
-    <Route path="/p/queue" element={<ProtectedRoute requiredRole={['physician']}><PQueuePage /></ProtectedRoute>} />
-    <Route path="/p/review/:caseId" element={<ProtectedRoute requiredRole={['physician']}><PReviewPage /></ProtectedRoute>} />
-    <Route path="/p/letters" element={<ProtectedRoute requiredRole={['physician']}><PLettersPage /></ProtectedRoute>} />
+    <Route path="/p/queue" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianQueuePage /></ProtectedRoute>} />
+    <Route path="/p/review/:caseId" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianReviewPage /></ProtectedRoute>} />
+    <Route path="/p/letters" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianLettersPage /></ProtectedRoute>} />
     <Route path="/rn" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><RnQueuePage /></ProtectedRoute>} />
     <Route path="/403" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><NoAccessPage /></ProtectedRoute>} />
     <Route path="/not-found" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><NotFoundPage /></ProtectedRoute>} />

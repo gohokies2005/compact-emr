@@ -10,6 +10,7 @@ import { CdsPanelForCase } from '../../components/CdsPanel';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { ClarificationsPanel } from '../../components/ClarificationsPanel';
 import { InFlightDrafterPanel, type InFlightDraftJob } from '../../components/InFlightDrafterPanel';
+import { SendToDrafterPanel } from '../../components/SendToDrafterPanel';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { getArtifactPdfUrl } from '../../api/drafter';
@@ -120,6 +121,12 @@ export function CaseDetailPage() {
       const inFlightDraft =
         latestDraftJob?.state === 'queued' || latestDraftJob?.state === 'running';
 
+      // Gap 1: first-draft trigger. RN/admin can kick off the drafter when no run is in
+      // flight and none has completed yet. Chart-readiness is enforced inside the panel.
+      const hasCompletedDraft = (c.draftJobs ?? []).some((job) => job.state === 'done');
+      const canSendFirstDraft =
+        (role === 'admin' || role === 'ops_staff') && !inFlightDraft && !hasCompletedDraft;
+
       const canSeePhysicianReadyPanel =
         c.runComplete === true &&
         c.shipRecommendation === 'ship' &&
@@ -150,6 +157,8 @@ export function CaseDetailPage() {
           {inFlightDraft && latestDraftJob ? (
             <InFlightDrafterPanel job={latestDraftJob} />
           ) : null}
+
+          {canSendFirstDraft ? <SendToDrafterPanel caseId={caseId} /> : null}
 
           {!inFlightDraft && canSeePhysicianReadyPanel && latestDraftJob ? (
             <PhysicianLetterReadyPanel

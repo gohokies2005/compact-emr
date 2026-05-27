@@ -5,7 +5,7 @@ const envSchema = z.object({
   VITE_COGNITO_USER_POOL_ID: z.string().min(1),
   VITE_COGNITO_CLIENT_ID: z.string().min(1),
   VITE_API_BASE_URL: z.string().url(),
-  VITE_USE_MOCK_API: z.enum(['true', 'false']).default('true')
+  VITE_USE_MOCK_API: z.enum(['true', 'false']).default('false')
 });
 
 const parsed = envSchema.safeParse(import.meta.env);

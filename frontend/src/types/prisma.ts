@@ -95,6 +95,9 @@ export interface DraftJob { readonly id: string; readonly caseId: string; readon
   readonly workerId?: string | null;
   readonly lastHeartbeatAt?: string | null;
   readonly bundleS3Key?: string | null;
+  // Per-claim drafting cost in US dollars for this run (serialized as a number by the API; 0 when
+  // no metered LLM spend, null/absent for pre-2026-06-02 jobs). Summed per case for the cost report.
+  readonly costUsd?: number | null;
 }
 export interface Correction extends VersionedRecord { readonly id: string; readonly caseId: string; readonly fromVersion: number; readonly toVersion?: number; readonly correctionReason: CorrectionReason; readonly correctionNote: string; readonly affectsSections: readonly unknown[]; readonly billingTier: BillingTier; readonly requestedBy: string; readonly requestedAt: string; readonly approvedBy?: string; readonly approvedAt?: string; }
 export interface Physician extends VersionedRecord { readonly id: string; readonly fullName: string; readonly npi: string; readonly specialty: string; readonly medicalLicense: string; readonly email: string; readonly phone?: string; readonly signatureImageS3Key?: string; readonly active: boolean; readonly createdAt: string; }

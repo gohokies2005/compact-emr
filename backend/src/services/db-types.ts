@@ -216,6 +216,10 @@ export interface DraftJobRecord {
   workerId: string | null;
   lastHeartbeatAt: Date | null;
   bundleS3Key: string | null;
+  // Per-claim drafting cost in US dollars. Prisma returns Decimal as a Prisma.Decimal object at
+  // runtime; we type it loosely here (the hand-written delegates use `unknown` args) and convert
+  // to a number with Number(x) wherever it crosses an API boundary.
+  costUsd: unknown;
   updatedAt: Date;
 }
 

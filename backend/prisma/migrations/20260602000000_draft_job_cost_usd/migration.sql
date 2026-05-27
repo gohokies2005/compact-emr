@@ -1,0 +1,1 @@
+ALTER TABLE "draft_jobs" ADD COLUMN IF NOT EXISTS "cost_usd" DECIMAL(10,4);

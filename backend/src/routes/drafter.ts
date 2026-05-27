@@ -144,6 +144,9 @@ interface ParsedComplete {
   probativeScore: number;
   grade: Grade;
   shipRecommendation: ShipRecommendation;
+  // Per-claim drafting cost in US dollars (e.g. 3.42; 0 when no metered LLM spend). Optional —
+  // ignored if absent or invalid (not a finite number >= 0). Persisted to DraftJob.costUsd.
+  costUsd?: number;
 }
 
 function parseCompleteBody(body: unknown): ParsedComplete {
@@ -218,6 +221,16 @@ function parseCompleteBody(body: unknown): ParsedComplete {
     badRequest(`gradeSidecar.ship_recommendation must be one of: ${SHIP_RECOMMENDATIONS.join(', ')}`, { field: 'gradeSidecar.ship_recommendation' });
   }
 
+  // Per-claim drafting cost (US dollars). Optional + lenient: silently ignore anything that
+  // isn't a finite non-negative number rather than rejecting the whole terminal callback over
+  // a cost-telemetry field. The contract guarantees a JS number, but we never want a malformed
+  // cost value to block persisting a completed legal letter.
+  const costUsdRaw = (body as Record<string, unknown>)['costUsd'];
+  let costUsdParsed: number | undefined;
+  if (typeof costUsdRaw === 'number' && Number.isFinite(costUsdRaw) && costUsdRaw >= 0) {
+    costUsdParsed = costUsdRaw;
+  }
+
   const out: ParsedComplete = {
     artifactPdfS3Key,
     artifactTxtS3Key,
@@ -233,6 +246,7 @@ function parseCompleteBody(body: unknown): ParsedComplete {
   if (artifactDocxS3Key !== undefined) out.artifactDocxS3Key = artifactDocxS3Key;
   if (operatorDetailPhase !== undefined) out.operatorDetailPhase = operatorDetailPhase;
   if (failureClassParsed !== undefined) out.failureClass = failureClassParsed;
+  if (costUsdParsed !== undefined) out.costUsd = costUsdParsed;
   return out;
 }
 
@@ -584,6 +598,8 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
             artifactTxtS3Key: parsed.artifactTxtS3Key,
             ...(parsed.artifactDocxS3Key !== undefined ? { artifactDocxS3Key: parsed.artifactDocxS3Key } : {}),
             ...(parsed.failureClass !== undefined ? { failureClass: parsed.failureClass } : {}),
+            // Prisma Decimal accepts a number or string — pass the validated number through.
+            ...(parsed.costUsd !== undefined ? { costUsd: parsed.costUsd } : {}),
             completedAt: now,
             lastHeartbeatAt: now,
             ...(parsed.runComplete ? {} : { errorMessage: parsed.operatorMessage.slice(0, 2000) }),

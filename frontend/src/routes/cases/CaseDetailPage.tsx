@@ -210,12 +210,34 @@ export function CaseDetailPage() {
 
 type EditableField = 'framingChoice' | 'upstreamScCondition' | 'veteranStatement' | 'inServiceEvent';
 
+// Per-claim drafting cost = sum of the case's DraftJob.costUsd (US-dollar LLM spend posted by
+// the drafter worker). Returns null when no job carries a recorded cost so the UI can show "—".
+function sumDraftingCostUsd(c: CaseDetail): number | null {
+  const jobs = c.draftJobs ?? [];
+  let hasAny = false;
+  let total = 0;
+  for (const j of jobs) {
+    if (typeof j.costUsd === 'number' && Number.isFinite(j.costUsd)) {
+      hasAny = true;
+      total += j.costUsd;
+    }
+  }
+  return hasAny ? total : null;
+}
+
 function OverviewTab({ c, onSave, saving }: { readonly c: CaseDetail; readonly onSave: (field: EditableField, value: string) => void; readonly saving: boolean }) {
+  const draftingCost = sumDraftingCostUsd(c);
   return <div className="divide-y divide-slate-100">
     <InlineEditRow label="Framing" value={c.framingChoice ?? ''} saving={saving} onSave={(v) => onSave('framingChoice', v)} />
     <InlineEditRow label="Upstream SC condition" value={c.upstreamScCondition ?? ''} saving={saving} onSave={(v) => onSave('upstreamScCondition', v)} />
     <InlineEditRow label="Veteran statement" value={c.veteranStatement ?? ''} multiline saving={saving} onSave={(v) => onSave('veteranStatement', v)} />
     <InlineEditRow label="In-service event" value={c.inServiceEvent ?? ''} multiline saving={saving} onSave={(v) => onSave('inServiceEvent', v)} />
+    <div className="py-3">
+      <div className="flex items-center justify-between gap-4">
+        <span className="text-xs font-medium uppercase tracking-wide text-slate-500">Drafting cost (API)</span>
+        <span className="text-sm font-medium text-slate-800">{draftingCost === null ? '—' : `$${draftingCost.toFixed(2)}`}</span>
+      </div>
+    </div>
   </div>;
 }
 

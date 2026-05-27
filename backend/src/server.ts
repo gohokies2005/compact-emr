@@ -14,6 +14,7 @@ import { createClarificationsRouter } from './routes/clarifications.js';
 import { createViabilityRouter } from './routes/viability.js';
 import { createChartReadinessRouter } from './routes/chart-readiness.js';
 import { createDoctorPackRouter } from './routes/doctor-pack.js';
+import { createReportsRouter } from './routes/reports.js';
 import { createInternalWorkerRouter } from './routes/internal-worker.js';
 import { createDrafterClientRouter, createDrafterWorkerRouter } from './routes/drafter.js';
 import { requireServicePrincipal } from './middleware/service-principal.js';
@@ -45,6 +46,8 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createViabilityRouter(db));
   app.use('/api/v1', authenticateJwt(), createChartReadinessRouter(db));
   app.use('/api/v1', authenticateJwt(), createDoctorPackRouter(db));
+  // Admin-only drafting-cost report (per-claim LLM spend aggregated from DraftJob.costUsd).
+  app.use('/api/v1', authenticateJwt(), createReportsRouter(db));
   // Drafter client routes (Cognito-authenticated): drafter-export + POST /draft.
   app.use('/api/v1', authenticateJwt(), createDrafterClientRouter(db));
   // Service-principal routes for OCR + Doctor Pack assembler workers (Phase 7B-revised Build 3).

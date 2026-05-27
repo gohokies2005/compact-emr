@@ -16,6 +16,7 @@ import { ActivityPage } from './routes/stubs/ActivityPage';
 import { RefundsPage } from './routes/stubs/RefundsPage';
 import { CompensationPage } from './routes/stubs/CompensationPage';
 import { MetricsPage } from './routes/stubs/MetricsPage';
+import { CostsPage } from './routes/CostsPage';
 import { PhysicianQueuePage } from './routes/physician/PhysicianQueuePage';
 import { PhysicianReviewPage } from './routes/physician/PhysicianReviewPage';
 import { PhysicianLettersPage } from './routes/physician/PhysicianLettersPage';
@@ -37,6 +38,7 @@ export function App() {
     <Route path="/refunds" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><RefundsPage /></ProtectedRoute>} />
     <Route path="/compensation" element={<ProtectedRoute requiredRole={['admin']}><CompensationPage /></ProtectedRoute>} />
     <Route path="/metrics" element={<ProtectedRoute requiredRole={['admin']}><MetricsPage /></ProtectedRoute>} />
+    <Route path="/costs" element={<ProtectedRoute requiredRole={['admin']}><CostsPage /></ProtectedRoute>} />
     <Route path="/p/queue" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianQueuePage /></ProtectedRoute>} />
     <Route path="/p/review/:caseId" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianReviewPage /></ProtectedRoute>} />
     <Route path="/p/letters" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianLettersPage /></ProtectedRoute>} />

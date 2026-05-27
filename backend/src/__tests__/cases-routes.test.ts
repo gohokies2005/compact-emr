@@ -1,3 +1,4 @@
+import '../bootstrap/bigint-serialization.js'; // installs BigInt->string JSON (prod loads it via server.ts)
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -88,6 +89,19 @@ function appFor(db: AppDb) {
 
 describe('cases routes', () => {
   beforeEach(() => { mockUser = { sub: 'USER-1', email: 'a@example.com', roles: ['admin'] }; });
+
+  // Regression for the 2026-05-27 claim-load crash: a case WITH documents carries a BigInt
+  // sizeBytes; without the BigInt->string serializer res.json throws and GET /cases/:id 500s
+  // (every case with uploads). The bootstrap import above is what makes this pass.
+  it('serializes a case that has documents (BigInt sizeBytes) as 200, not a 500', async () => {
+    const caseWithDocs = { ...baseCase(), documents: [
+      { id: 'DOC-1', caseId: 'CASE-1', filename: 'Claim Final.pdf', sizeBytes: BigInt(837639), contentType: 'application/pdf', docTag: 'Other', s3Key: 'cases/CASE-1/uuid-Claim-Final.pdf', uploadedAt: new Date('2026-05-27T00:00:00.000Z'), uploadedBy: 'u', updatedAt: new Date('2026-05-27T00:00:00.000Z'), version: 1 },
+    ] } as unknown as CaseRecord;
+    const { db } = makeDb(caseWithDocs);
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1');
+    expect(res.status).toBe(200);
+    expect(res.body.data.documents[0].sizeBytes).toBe('837639');
+  });
 
   it('returns 401 unauthenticated', async () => {
     mockUser = undefined;

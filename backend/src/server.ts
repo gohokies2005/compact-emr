@@ -1,3 +1,4 @@
+import './bootstrap/bigint-serialization.js'; // side-effect: BigInt -> string in JSON (must load first)
 import express from 'express';
 import { authenticateJwt } from './middleware/auth.js';
 import { requireRole } from './auth/roles.js';
@@ -61,10 +62,20 @@ export function createApp(options: CreateAppOptions = {}) {
     sendError(res, 404, 'not_found', 'Route was not found.');
   });
 
-  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (isHttpError(error)) {
       return sendError(res, error.status, error.code, error.message, error.details);
     }
+    // P0-2 (live-path sweep): non-HttpError 500s were mapped silently — every live 500 (CORS,
+    // the BigInt serialize, the orderBy bug) was invisible in CloudWatch, forcing hand-diagnosis
+    // one bug per step. Log method + path + stack so the NEXT unexpected 500 is greppable.
+    console.error(JSON.stringify({
+      msg: 'unhandled_error',
+      method: req.method,
+      path: req.originalUrl,
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    }));
     return sendError(res, 500, 'internal_error', 'Unexpected server error.');
   });
 

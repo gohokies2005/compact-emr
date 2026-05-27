@@ -137,6 +137,7 @@ export interface AppDbTransaction {
   draftJob: DraftJobDelegate;
   correction: CorrectionDelegate;
   chartNote: ChartNoteDelegate;
+  scCondition: ScConditionDelegate;
   activeProblem: ActiveProblemDelegate;
   activeMedication: ActiveMedicationDelegate;
   signOff: SignOffDelegate;
@@ -285,7 +286,28 @@ export interface PhysicianDelegate {
   update(args: unknown): Promise<PhysicianRecord>;
 }
 
-// ====================== Phase 5: ActiveProblem / ActiveMedication ======================
+// ====================== Phase 5: ScCondition / ActiveProblem / ActiveMedication ======================
+
+export interface ScConditionRecord {
+  id: string;
+  veteranId: string;
+  condition: string;
+  dcCode: string | null;
+  ratingPct: number | null;
+  grantedDate: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface ScConditionDelegate {
+  findUnique(args: unknown): Promise<ScConditionRecord | null>;
+  findFirst(args: unknown): Promise<ScConditionRecord | null>;
+  findMany(args: unknown): Promise<readonly ScConditionRecord[]>;
+  create(args: unknown): Promise<ScConditionRecord>;
+  update(args: unknown): Promise<ScConditionRecord>;
+  delete(args: unknown): Promise<ScConditionRecord>;
+}
 
 export interface ActiveProblemRecord {
   id: string;

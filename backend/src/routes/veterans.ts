@@ -3,9 +3,24 @@ import express from 'express';
 import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
-import type { AppDb, AppDbTransaction, AppUserRecord, VeteranRecord } from '../services/db-types.js';
+import type {
+  ActiveMedicationRecord,
+  ActiveProblemRecord,
+  AppDb,
+  AppDbTransaction,
+  AppUserRecord,
+  ScConditionRecord,
+  VeteranRecord,
+} from '../services/db-types.js';
 import { assertPatchAllowedForRoles, parseVeteranCreate, parseVeteranPatch } from '../services/veteran-validation.js';
-import { parseActiveMedicationCreate, parseActiveProblemCreate } from '../services/chart-entry-validation.js';
+import {
+  parseActiveMedicationCreate,
+  parseActiveMedicationPatch,
+  parseActiveProblemCreate,
+  parseActiveProblemPatch,
+  parseScConditionCreate,
+  parseScConditionPatch,
+} from '../services/chart-entry-validation.js';
 
 const OPS_ROLES = ['admin', 'ops_staff'] as const;
 
@@ -50,6 +65,16 @@ async function writeActivity(
 }
 
 function conflictDetails(current: VeteranRecord): Record<string, unknown> {
+  return {
+    id: current.id,
+    version: current.version,
+    updatedAt: current.updatedAt.toISOString(),
+  };
+}
+
+// Conflict-details for chart-entry rows (ScCondition / ActiveProblem / ActiveMedication), which
+// carry the same {id, version, updatedAt} optimistic-concurrency shape as VeteranRecord.
+function rowConflictDetails(current: { id: string; version: number; updatedAt: Date }): Record<string, unknown> {
   return {
     id: current.id,
     version: current.version,
@@ -243,6 +268,43 @@ export function createVeteransRouter(db: AppDb): Router {
   // ====================== Phase 5: chart entry CRUD ======================
 
   router.post(
+    '/veterans/:id/conditions',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const veteranId = String(req.params.id);
+      if (!veteranId) throw new HttpError(400, 'bad_request', 'Veteran id is required.');
+      const parsed = parseScConditionCreate(req.body);
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      const created = await db.$transaction(async (tx) => {
+        const veteran = await tx.veteran.findFirst({ where: { id: veteranId, inactive: false } });
+        if (!veteran) throw new HttpError(404, 'not_found', 'Veteran was not found.');
+
+        const row = await tx.scCondition.create({
+          data: {
+            veteranId,
+            condition: parsed.condition,
+            dcCode: parsed.dcCode,
+            ratingPct: parsed.ratingPct,
+            grantedDate: parsed.grantedDate,
+          },
+        });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'sc_condition_created',
+          veteranId,
+          detailsJson: { veteranId, fields: ['condition', 'dcCode', 'ratingPct'] },
+        });
+        return row;
+      });
+
+      res.status(201).json({ data: created });
+    }),
+  );
+
+  router.post(
     '/veterans/:id/problems',
     requireRole([...OPS_ROLES]),
     asyncHandler(async (req, res) => {
@@ -360,6 +422,197 @@ export function createVeteransRouter(db: AppDb): Router {
           action: 'active_medication_deleted',
           veteranId,
           detailsJson: { veteranId, medicationId },
+        });
+      });
+
+      res.status(204).send();
+    }),
+  );
+
+  // ============ Phase 5: flat-id chart-entry update/delete (frontend uses flat ids) ============
+  //
+  // The frontend api/veterans.ts calls PATCH/DELETE /conditions/:id, /problems/:id and
+  // /medications/:id (flat ids, no veteranId in the path). PATCH uses the same optimistic-
+  // concurrency contract as the veteran PATCH (required `version`, 409 on mismatch). DELETE resolves
+  // the row to recover its veteranId for the activity row. The nested /veterans/:vid/... deletes
+  // above are kept for back-compat.
+
+  // ---- ScCondition ----
+  router.patch(
+    '/conditions/:id',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const id = String(req.params.id);
+      if (!id) throw new HttpError(400, 'bad_request', 'Condition id is required.');
+      const { version, data, changedFields } = parseScConditionPatch(req.body);
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      const updated = await db.$transaction(async (tx) => {
+        const current = (await tx.scCondition.findFirst({ where: { id } })) as ScConditionRecord | null;
+        if (!current) throw new HttpError(404, 'not_found', 'Service-connected condition was not found.');
+        if (current.version !== version) {
+          throw new HttpError(409, 'conflict', 'Condition was modified by another user.', rowConflictDetails(current));
+        }
+        const row = await tx.scCondition.update({
+          where: { id },
+          data: { ...data, version: { increment: 1 } },
+        });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'sc_condition_updated',
+          veteranId: current.veteranId,
+          detailsJson: { veteranId: current.veteranId, conditionId: id, fields: changedFields },
+        });
+        return row;
+      });
+
+      res.json({ data: updated });
+    }),
+  );
+
+  router.delete(
+    '/conditions/:id',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const id = String(req.params.id);
+      if (!id) throw new HttpError(400, 'bad_request', 'Condition id is required.');
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      await db.$transaction(async (tx) => {
+        const current = (await tx.scCondition.findFirst({ where: { id } })) as ScConditionRecord | null;
+        if (!current) throw new HttpError(404, 'not_found', 'Service-connected condition was not found.');
+        await tx.scCondition.delete({ where: { id } });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'sc_condition_deleted',
+          veteranId: current.veteranId,
+          detailsJson: { veteranId: current.veteranId, conditionId: id },
+        });
+      });
+
+      res.status(204).send();
+    }),
+  );
+
+  // ---- ActiveProblem ----
+  router.patch(
+    '/problems/:id',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const id = String(req.params.id);
+      if (!id) throw new HttpError(400, 'bad_request', 'Problem id is required.');
+      const { version, data, changedFields } = parseActiveProblemPatch(req.body);
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      const updated = await db.$transaction(async (tx) => {
+        const current = (await tx.activeProblem.findFirst({ where: { id } })) as ActiveProblemRecord | null;
+        if (!current) throw new HttpError(404, 'not_found', 'Active problem was not found.');
+        if (current.version !== version) {
+          throw new HttpError(409, 'conflict', 'Active problem was modified by another user.', rowConflictDetails(current));
+        }
+        const row = await tx.activeProblem.update({
+          where: { id },
+          data: { ...data, version: { increment: 1 } },
+        });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'active_problem_updated',
+          veteranId: current.veteranId,
+          detailsJson: { veteranId: current.veteranId, problemId: id, fields: changedFields },
+        });
+        return row;
+      });
+
+      res.json({ data: updated });
+    }),
+  );
+
+  router.delete(
+    '/problems/:id',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const id = String(req.params.id);
+      if (!id) throw new HttpError(400, 'bad_request', 'Problem id is required.');
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      await db.$transaction(async (tx) => {
+        const current = (await tx.activeProblem.findFirst({ where: { id } })) as ActiveProblemRecord | null;
+        if (!current) throw new HttpError(404, 'not_found', 'Active problem was not found.');
+        await tx.activeProblem.delete({ where: { id } });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'active_problem_deleted',
+          veteranId: current.veteranId,
+          detailsJson: { veteranId: current.veteranId, problemId: id },
+        });
+      });
+
+      res.status(204).send();
+    }),
+  );
+
+  // ---- ActiveMedication ----
+  router.patch(
+    '/medications/:id',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const id = String(req.params.id);
+      if (!id) throw new HttpError(400, 'bad_request', 'Medication id is required.');
+      const { version, data, changedFields } = parseActiveMedicationPatch(req.body);
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      const updated = await db.$transaction(async (tx) => {
+        const current = (await tx.activeMedication.findFirst({ where: { id } })) as ActiveMedicationRecord | null;
+        if (!current) throw new HttpError(404, 'not_found', 'Active medication was not found.');
+        if (current.version !== version) {
+          throw new HttpError(409, 'conflict', 'Active medication was modified by another user.', rowConflictDetails(current));
+        }
+        const row = await tx.activeMedication.update({
+          where: { id },
+          data: { ...data, version: { increment: 1 } },
+        });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'active_medication_updated',
+          veteranId: current.veteranId,
+          detailsJson: { veteranId: current.veteranId, medicationId: id, fields: changedFields },
+        });
+        return row;
+      });
+
+      res.json({ data: updated });
+    }),
+  );
+
+  router.delete(
+    '/medications/:id',
+    requireRole([...OPS_ROLES]),
+    asyncHandler(async (req, res) => {
+      if (!req.user) throw new HttpError(401, 'unauthorized', 'Authentication is required.');
+      const id = String(req.params.id);
+      if (!id) throw new HttpError(400, 'bad_request', 'Medication id is required.');
+      const appUser = await resolveAppUser(db, req.user.sub);
+      const actor = actorId(appUser, req.user.sub);
+
+      await db.$transaction(async (tx) => {
+        const current = (await tx.activeMedication.findFirst({ where: { id } })) as ActiveMedicationRecord | null;
+        if (!current) throw new HttpError(404, 'not_found', 'Active medication was not found.');
+        await tx.activeMedication.delete({ where: { id } });
+        await writeActivity(tx, {
+          actorUserId: actor,
+          action: 'active_medication_deleted',
+          veteranId: current.veteranId,
+          detailsJson: { veteranId: current.veteranId, medicationId: id },
         });
       });
 

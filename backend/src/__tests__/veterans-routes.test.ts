@@ -2,7 +2,7 @@ import { SignJWT } from 'jose';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../server.js';
-import type { AppDb, AppDbTransaction, AppUserRecord, VeteranRecord, ActiveProblemRecord, ActiveMedicationRecord } from '../services/db-types.js';
+import type { AppDb, AppDbTransaction, AppUserRecord, VeteranRecord, ActiveProblemRecord, ActiveMedicationRecord, ScConditionRecord } from '../services/db-types.js';
 
 const secret = new TextEncoder().encode('phase3a-test-secret');
 
@@ -93,10 +93,52 @@ class MockDb {
     },
   };
 
+  public conditions = new Map<string, ScConditionRecord>();
   public problems = new Map<string, ActiveProblemRecord>();
   public medications = new Map<string, ActiveMedicationRecord>();
+  private nextConditionSeq = 1;
   private nextProblemSeq = 1;
   private nextMedicationSeq = 1;
+
+  public scCondition = {
+    findUnique: async (args: unknown): Promise<ScConditionRecord | null> => {
+      const id = this.extractId(args);
+      return this.conditions.get(id) ?? null;
+    },
+    findFirst: async (args: unknown): Promise<ScConditionRecord | null> => {
+      if (typeof args !== 'object' || args === null) return null;
+      const where = (args as { where?: Record<string, string> }).where ?? {};
+      for (const row of this.conditions.values()) {
+        if (where.id !== undefined && row.id !== where.id) continue;
+        if (where.veteranId !== undefined && row.veteranId !== where.veteranId) continue;
+        return row;
+      }
+      return null;
+    },
+    findMany: async (): Promise<readonly ScConditionRecord[]> => [...this.conditions.values()],
+    create: async (args: { data: Omit<ScConditionRecord, 'id' | 'createdAt' | 'updatedAt' | 'version'> }): Promise<ScConditionRecord> => {
+      const id = `COND-${this.nextConditionSeq++}`;
+      const now = new Date('2026-05-25T12:00:00.000Z');
+      const row: ScConditionRecord = { id, ...args.data, createdAt: now, updatedAt: now, version: 1 };
+      this.conditions.set(id, row);
+      return row;
+    },
+    update: async (args: { where: { id: string }; data: Record<string, unknown> }): Promise<ScConditionRecord> => {
+      const current = this.conditions.get(args.where.id);
+      if (!current) throw new Error('missing condition in mock');
+      const nextVersion = typeof args.data.version === 'object' && args.data.version !== null ? current.version + 1 : current.version;
+      const { version: _version, ...rest } = args.data;
+      const updated = { ...current, ...rest, version: nextVersion, updatedAt: new Date('2026-05-25T13:00:00.000Z') } as ScConditionRecord;
+      this.conditions.set(args.where.id, updated);
+      return updated;
+    },
+    delete: async (args: { where: { id: string } }): Promise<ScConditionRecord> => {
+      const current = this.conditions.get(args.where.id);
+      if (!current) throw new Error('missing condition in mock');
+      this.conditions.delete(args.where.id);
+      return current;
+    },
+  };
 
   public activeProblem = {
     findUnique: async (args: unknown): Promise<ActiveProblemRecord | null> => {
@@ -121,10 +163,12 @@ class MockDb {
       this.problems.set(id, row);
       return row;
     },
-    update: async (args: { where: { id: string }; data: Partial<ActiveProblemRecord> }): Promise<ActiveProblemRecord> => {
+    update: async (args: { where: { id: string }; data: Record<string, unknown> }): Promise<ActiveProblemRecord> => {
       const current = this.problems.get(args.where.id);
       if (!current) throw new Error('missing problem in mock');
-      const updated: ActiveProblemRecord = { ...current, ...args.data };
+      const nextVersion = typeof args.data.version === 'object' && args.data.version !== null ? current.version + 1 : current.version;
+      const { version: _version, ...rest } = args.data;
+      const updated = { ...current, ...rest, version: nextVersion } as ActiveProblemRecord;
       this.problems.set(args.where.id, updated);
       return updated;
     },
@@ -159,10 +203,12 @@ class MockDb {
       this.medications.set(id, row);
       return row;
     },
-    update: async (args: { where: { id: string }; data: Partial<ActiveMedicationRecord> }): Promise<ActiveMedicationRecord> => {
+    update: async (args: { where: { id: string }; data: Record<string, unknown> }): Promise<ActiveMedicationRecord> => {
       const current = this.medications.get(args.where.id);
       if (!current) throw new Error('missing medication in mock');
-      const updated: ActiveMedicationRecord = { ...current, ...args.data };
+      const nextVersion = typeof args.data.version === 'object' && args.data.version !== null ? current.version + 1 : current.version;
+      const { version: _version, ...rest } = args.data;
+      const updated = { ...current, ...rest, version: nextVersion } as ActiveMedicationRecord;
       this.medications.set(args.where.id, updated);
       return updated;
     },
@@ -421,5 +467,197 @@ describe('Phase 5 chart entry routes (problems + medications)', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ drugName: 'Sertraline' });
     expect(medRes.status).toBe(403);
+  });
+});
+
+describe('Phase 5 flat-id chart-entry CRUD (conditions + problems + medications)', () => {
+  it('POST /veterans/:id/conditions creates an SC condition + writes activity', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .post('/api/v1/veterans/TEST-001/conditions')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ condition: 'PTSD', dcCode: '9411', ratingPct: 70, grantedDate: '2020-03-15' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data).toMatchObject({ condition: 'PTSD', dcCode: '9411', ratingPct: 70, veteranId: 'TEST-001' });
+    expect(db.activities[0]?.data).toMatchObject({ action: 'sc_condition_created', veteranId: 'TEST-001' });
+  });
+
+  it('POST /veterans/:id/conditions accepts a bare condition (no dcCode/ratingPct/grantedDate)', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .post('/api/v1/veterans/TEST-001/conditions')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ condition: 'Tinnitus' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data).toMatchObject({ condition: 'Tinnitus', dcCode: null, ratingPct: null, grantedDate: null });
+  });
+
+  it('POST /veterans/:id/conditions rejects ratingPct out of range with 400', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .post('/api/v1/veterans/TEST-001/conditions')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ condition: 'PTSD', ratingPct: 150 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('bad_request');
+  });
+
+  it('POST /veterans/:id/conditions returns 404 when veteran is missing', async () => {
+    const db = new MockDb();
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .post('/api/v1/veterans/NOPE/conditions')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ condition: 'PTSD' });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('PATCH /conditions/:id updates fields, increments version, writes activity', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: '9411', ratingPct: 50, grantedDate: null } });
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .patch('/api/v1/conditions/COND-1')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ version: 1, ratingPct: 70 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.version).toBe(2);
+    expect(res.body.data.ratingPct).toBe(70);
+    expect(db.activities[0]?.data).toMatchObject({
+      action: 'sc_condition_updated',
+      veteranId: 'TEST-001',
+      detailsJson: { veteranId: 'TEST-001', conditionId: 'COND-1', fields: ['ratingPct'] },
+    });
+  });
+
+  it('PATCH /conditions/:id returns 409 on stale version', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, grantedDate: null } });
+    const stale = db.conditions.get('COND-1')!;
+    db.conditions.set('COND-1', { ...stale, version: 3 });
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .patch('/api/v1/conditions/COND-1')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ version: 1, condition: 'PTSD with depression' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('conflict');
+    expect(res.body.error.details).toMatchObject({ id: 'COND-1', version: 3 });
+  });
+
+  it('PATCH /conditions/:id returns 404 when condition is missing', async () => {
+    const db = new MockDb();
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .patch('/api/v1/conditions/NOPE')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ version: 1, ratingPct: 30 });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('DELETE /conditions/:id removes the row, resolves veteranId for activity', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, grantedDate: null } });
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .delete('/api/v1/conditions/COND-1')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(204);
+    expect(db.conditions.size).toBe(0);
+    expect(db.activities[0]?.data).toMatchObject({ action: 'sc_condition_deleted', veteranId: 'TEST-001', detailsJson: { conditionId: 'COND-1' } });
+  });
+
+  it('PATCH /problems/:id (flat) updates and increments version', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    await db.activeProblem.create({ data: { veteranId: 'TEST-001', problem: 'GERD', icd10: 'K21.9', notes: null } });
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .patch('/api/v1/problems/PROB-1')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ version: 1, notes: 'On omeprazole' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.version).toBe(2);
+    expect(res.body.data.notes).toBe('On omeprazole');
+    expect(db.activities[0]?.data).toMatchObject({ action: 'active_problem_updated', veteranId: 'TEST-001' });
+  });
+
+  it('DELETE /problems/:id (flat) removes the row and resolves veteranId', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    await db.activeProblem.create({ data: { veteranId: 'TEST-001', problem: 'GERD', icd10: 'K21.9', notes: null } });
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .delete('/api/v1/problems/PROB-1')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(204);
+    expect(db.problems.size).toBe(0);
+    expect(db.activities[0]?.data).toMatchObject({ action: 'active_problem_deleted', veteranId: 'TEST-001', detailsJson: { problemId: 'PROB-1' } });
+  });
+
+  it('PATCH /medications/:id (flat) updates and increments version', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    await db.activeMedication.create({ data: { veteranId: 'TEST-001', drugName: 'Amlodipine', dose: '5 mg', frequency: null, indication: null } });
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .patch('/api/v1/medications/MED-1')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ version: 1, dose: '10 mg' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.version).toBe(2);
+    expect(res.body.data.dose).toBe('10 mg');
+    expect(db.activities[0]?.data).toMatchObject({ action: 'active_medication_updated', veteranId: 'TEST-001' });
+  });
+
+  it('DELETE /medications/:id (flat) removes the row', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    await db.activeMedication.create({ data: { veteranId: 'TEST-001', drugName: 'Tadalafil', dose: null, frequency: null, indication: null } });
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .delete('/api/v1/medications/MED-1')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(204);
+    expect(db.medications.size).toBe(0);
+    expect(db.activities[0]?.data).toMatchObject({ action: 'active_medication_deleted', veteranId: 'TEST-001' });
+  });
+
+  it('flat-id PATCH/DELETE reject physician role with 403', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, grantedDate: null } });
+    const token = await makeJwt(['physician']);
+    const patchRes = await request(createApp({ db: db as unknown as AppDb }))
+      .patch('/api/v1/conditions/COND-1')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ version: 1, ratingPct: 30 });
+    expect(patchRes.status).toBe(403);
+
+    const delRes = await request(createApp({ db: db as unknown as AppDb }))
+      .delete('/api/v1/conditions/COND-1')
+      .set('Authorization', `Bearer ${token}`);
+    expect(delRes.status).toBe(403);
   });
 });

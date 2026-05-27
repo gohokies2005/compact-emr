@@ -7,7 +7,7 @@ import { prisma as defaultPrisma } from '../db/client.js';
 import { requireRole } from '../auth/roles.js';
 import { isCaseDocumentS3Key } from '../services/s3-key-safety.js';
 
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const UPLOAD_TTL_SECONDS = 5 * 60;
 const DOWNLOAD_TTL_SECONDS = 5 * 60;
 const ALLOWED_CONTENT_TYPES = new Set([
@@ -91,7 +91,7 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
       return error(res, 400, 'unsupported_content_type', 'Only PDF, JPG, PNG, DOC, and DOCX uploads are supported.');
     }
     if (sizeBytes <= 0 || sizeBytes > MAX_UPLOAD_BYTES) {
-      return error(res, 400, 'file_too_large', 'Uploads must be greater than 0 bytes and no larger than 5 MB.', { maxBytes: MAX_UPLOAD_BYTES });
+      return error(res, 400, 'file_too_large', 'Uploads must be greater than 0 bytes and no larger than 50 MB.', { maxBytes: MAX_UPLOAD_BYTES });
     }
     const owningCase = await assertCaseBelongsToVeteran(prisma, caseId, veteranId);
     if (!owningCase) return error(res, 404, 'case_not_found', 'Case was not found for this veteran.');

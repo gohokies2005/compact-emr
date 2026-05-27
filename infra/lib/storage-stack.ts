@@ -25,6 +25,21 @@ export class StorageStack extends Stack {
       enforceSSL: true,
       versioned: true,
       eventBridgeEnabled: true,
+      // Browser direct-to-S3 presigned PUT (document upload) + GET (download) from the EMR SPA.
+      // Without a CORS rule, every cross-origin PUT from emr.flatratenexus.com is blocked by the
+      // browser, so uploads silently fail and nothing ever reaches the bucket. The bucket shipped
+      // with NO cors — caught 2026-05-27 in the Flagg e2e ("0 uploaded, 8 skipped"). Allowed headers
+      // must be permissive enough to cover the signed content-type + x-amz-server-side-encryption
+      // (KMS) headers the presign requires.
+      cors: [
+        {
+          allowedMethods: [s3.HttpMethods.PUT, s3.HttpMethods.GET, s3.HttpMethods.HEAD],
+          allowedOrigins: [`https://${props.config.domainName}`, 'http://localhost:5173'],
+          allowedHeaders: ['*'],
+          exposedHeaders: ['ETag'],
+          maxAge: 3000,
+        },
+      ],
       // Per HIPAA + AWS BAA: PHI buckets are never auto-deleted by stack destroy.
       // Use a documented quarterly purge script with CloudTrail logging.
       removalPolicy: RemovalPolicy.RETAIN,

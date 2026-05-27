@@ -1,7 +1,7 @@
 {
   "app": "npx tsx bin/compact-emr.ts",
   "context": {
-    "drafter_image_tag": "6fbbf50-drafter6",
+    "drafter_image_tag": "e038ab4-drafter7",
     "staging": {
       "domainName": "emr.flatratenexus.com",
       "apiDomainName": "api.emr.flatratenexus.com",

@@ -89,10 +89,11 @@ export function createDoctorPackRouter(db: AppDb): Router {
    * On success: writes one KeyDoc row per file (idempotent upsert on caseId+filePath), creates
    * a DoctorPack row in state='queued' with the manifest, returns the row to the caller.
    *
-   * The actual PDF assembly is a downstream Lambda worker that polls for queued rows, pulls
-   * source PDFs from S3, extracts the manifest's page ranges, concatenates, uploads to the
-   * computed s3 key, and PATCHes the row to state='ready' + page_count. Not in this commit;
-   * the worker is part of Phase 7A (OCR + Doctor Pack workers ship together).
+   * The actual PDF assembly is a downstream SQS-triggered Lambda worker (deployed via
+   * workers-stack.ts as compact-emr-<env>-doctor-pack-assembler) that reads the manifest from
+   * the SQS message body, pulls source PDFs from S3, extracts the manifest's page ranges,
+   * concatenates, uploads to the computed s3 key, and PATCHes the row to state='ready' +
+   * page_count.
    */
   router.post(
     '/cases/:id/doctor-pack/generate',
@@ -113,11 +114,15 @@ export function createDoctorPackRouter(db: AppDb): Router {
           veteranId: true,
           version: true,
           documents: {
-            select: { s3Key: true, pageCount: true },
+            // H1 (audit 2026-05-27): `id` MUST be selected. classifiedFiles maps
+            // documentId: d.id, and the page-selector queries document_pages by that id.
+            // Omitting it made documentId undefined => allDocumentIds empty => page text
+            // never loaded => page selection inert.
+            select: { id: true, s3Key: true, pageCount: true },
             orderBy: { uploadedAt: 'asc' },
           },
         },
-      })) as unknown as { id: string; veteranId: string; version: number; documents: readonly { s3Key: string; pageCount: number | null }[] } | null;
+      })) as unknown as { id: string; veteranId: string; version: number; documents: readonly { id: string; s3Key: string; pageCount: number | null }[] } | null;
       if (caseWithDocs === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
       const c = { id: caseWithDocs.id, veteranId: caseWithDocs.veteranId, version: caseWithDocs.version };
 

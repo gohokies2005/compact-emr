@@ -69,7 +69,11 @@ export class WorkersStack extends Stack {
   constructor(scope: Construct, id: string, props: WorkersStackProps) {
     super(scope, id, props);
     const { config, phiBucket, doctorPacksBucket, documentsKey } = props;
-    const apiBaseUrl = `https://${config.apiDomainName}`;
+    // C4: the workers' COMPACT_EMR_API_URL must resolve. `https://${config.apiDomainName}`
+    // points at api.emr.flatratenexus.com, which is NXDOMAIN (the custom domain was never
+    // stood up). Mirror drafter-stack.ts:181's workaround and use the resolving raw
+    // execute-api endpoint until the api.emr custom domain (H5) lands as the proper fix.
+    const apiBaseUrl = 'https://nypr790pq7.execute-api.us-east-1.amazonaws.com';
 
     // ===== Shared INTERNAL_WORKER_TOKEN (service-principal bearer for /internal/* routes) =====
     const workerTokenSecret = new secretsmanager.Secret(this, 'WorkerToken', {
@@ -176,7 +180,10 @@ export class WorkersStack extends Stack {
     phiBucket.grantRead(ocrStart);
     documentsKey.grantDecrypt(ocrStart);
 
-    // EventBridge rule: PUT into records/ in the PHI bucket fires the OCR start.
+    // EventBridge rule: PUT into cases/ in the PHI bucket fires the OCR start.
+    // C2: uploads write `cases/<caseId>/<uuid>-<filename>` (documents.ts:99 /
+    // s3-key-safety.ts isCaseDocumentS3Key). The prior `records/` prefix never matched
+    // any produced key, so ocr-start was never triggered.
     new events.Rule(this, 'OcrStartRule', {
       ruleName: `compact-emr-${config.envName}-ocr-on-record-upload`,
       eventPattern: {
@@ -184,7 +191,7 @@ export class WorkersStack extends Stack {
         detailType: ['Object Created'],
         detail: {
           bucket: { name: [phiBucket.bucketName] },
-          object: { key: [{ prefix: 'records/' }] },
+          object: { key: [{ prefix: 'cases/' }] },
         },
       },
       targets: [new targets.LambdaFunction(ocrStart, { retryAttempts: 2 })],
@@ -245,10 +252,9 @@ export class WorkersStack extends Stack {
     doctorPacksBucket.grantPutAcl(doctorPackAssembler);
     documentsKey.grantDecrypt(doctorPackAssembler);
 
-    // ===== Wire the queue URL + worker token into outputs the API stack consumes =====
-    // The API stack reads DOCTOR_PACK_QUEUE_URL + INTERNAL_WORKER_TOKEN from env; pass via
-    // SSM parameters in the operator's bin/* file (out of scope here — keeps the layer
-    // composition explicit).
+    // ===== Doctor Pack queue access policy =====
+    // The API stack reads DOCTOR_PACK_QUEUE_URL / DRAFT_JOB_QUEUE_URL / tokens directly from
+    // CDK props (api-stack.ts, fed from bin/compact-emr.ts) — no SSM round-trip involved.
     new sqs.CfnQueuePolicy(this, 'DoctorPackQueuePolicy', {
       queues: [doctorPackQueue.queueUrl],
       policyDocument: {

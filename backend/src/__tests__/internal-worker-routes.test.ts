@@ -49,6 +49,8 @@ function makeDb(initialDoctorPack: DoctorPackRecord | null = null, initialDocume
     document: {
       update: vi.fn(async (args: { where: { id: string }; data: { pageCount: number } }) => ({ id: args.where.id, pageCount: args.data.pageCount })),
       findUnique: vi.fn(async (args: { where: { id: string } }) => initialDocument && initialDocument.id === args.where.id ? initialDocument : null),
+      // by-s3-key route + C1 success-bridge both resolve the Document; key off s3Key here.
+      findFirst: vi.fn(async (args: { where: { s3Key: string } }) => initialDocument && initialDocument.s3Key === args.where.s3Key ? initialDocument : null),
     },
     fileReadStatus: {
       findFirst: vi.fn(async (args: { where: { caseId: string; filePath: string } }) => {
@@ -73,7 +75,7 @@ function makeDb(initialDoctorPack: DoctorPackRecord | null = null, initialDocume
     },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
-  return { db, pages, getDoctorPack: () => doctorPack, tx };
+  return { db, pages, getDoctorPack: () => doctorPack, fileReadStatuses, tx };
 }
 
 function appFor(db: AppDb) {
@@ -200,6 +202,102 @@ describe('POST /internal/documents/:id/pages', () => {
       .post('/api/v1/internal/documents/DOC-1/pages')
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
       .send({ pages: tooMany });
+    expect(res.status).toBe(400);
+  });
+
+  // C1 (audit 2026-05-27): a successful /pages call must ALSO register the file with the
+  // chart-readiness gate via a file_read_status row — not only document_pages.
+  it('creates a file_read_status row with terminalStatus=read on a clean OCR success', async () => {
+    const { db, fileReadStatuses } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-records.pdf' });
+    // A realistic clean medical page: well over 40 words, no garble.
+    const cleanText = ('The veteran presents with chronic lower back pain following an in-service injury sustained during active duty. '
+      + 'Physical examination reveals limited range of motion and tenderness over the lumbar paraspinal muscles. '
+      + 'Imaging demonstrates degenerative disc disease at the L4 L5 level consistent with the reported mechanism of injury and onset.');
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/documents/DOC-1/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ pages: [{ pageNumber: 1, text: cleanText, confidence: 0.97 }], documentPageCount: 1 });
+    expect(res.status).toBe(201);
+    expect(res.body.data.readTerminalStatus).toBe('read');
+    const rows = [...fileReadStatuses.values()];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.caseId).toBe('CASE-1');
+    expect(rows[0]?.filePath).toBe('cases/CASE-1/abc-records.pdf');
+    expect(rows[0]?.terminalStatus).toBe('read');
+  });
+
+  it('lands manual_summary_required when OCR success returns too few words', async () => {
+    const { db, fileReadStatuses } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-short.pdf' });
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/documents/DOC-1/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ pages: [{ pageNumber: 1, text: 'only a handful of words here total', confidence: 0.6 }], documentPageCount: 1 });
+    expect(res.status).toBe(201);
+    expect(res.body.data.readTerminalStatus).toBe('manual_summary_required');
+    const rows = [...fileReadStatuses.values()];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.terminalStatus).toBe('manual_summary_required');
+  });
+
+  it('lands manual_summary_required when OCR success returns garbled text', async () => {
+    const { db, fileReadStatuses } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-garbled.pdf' });
+    // 60+ tokens but heavily garbled (embedded symbols between letters) => ratio > 0.08.
+    const garbled = Array.from({ length: 60 }, () => 'th!s i$ g@rbl#d t0x@t').join(' ');
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/documents/DOC-1/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ pages: [{ pageNumber: 1, text: garbled, confidence: 0.4 }], documentPageCount: 1 });
+    expect(res.status).toBe(201);
+    expect(res.body.data.readTerminalStatus).toBe('manual_summary_required');
+    const rows = [...fileReadStatuses.values()];
+    expect(rows[0]?.terminalStatus).toBe('manual_summary_required');
+  });
+
+  it('does not overwrite an RN manual_summary_provided clearance on OCR success', async () => {
+    const { db, fileReadStatuses, tx } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-cleared.pdf' });
+    // Seed a pre-existing provided clearance.
+    await tx.fileReadStatus.create({
+      data: { caseId: 'CASE-1', filePath: 'cases/CASE-1/abc-cleared.pdf', terminalStatus: 'manual_summary_provided', attemptsJson: [], lastCheckedAt: new Date() },
+    });
+    const cleanText = ('The veteran presents with chronic lower back pain following an in-service injury sustained during active duty. '
+      + 'Physical examination reveals limited range of motion and tenderness over the lumbar paraspinal muscles consistently.');
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/documents/DOC-1/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ pages: [{ pageNumber: 1, text: cleanText, confidence: 0.95 }], documentPageCount: 1 });
+    expect(res.status).toBe(201);
+    expect(res.body.data.readTerminalStatus).toBe('manual_summary_provided');
+    const rows = [...fileReadStatuses.values()];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.terminalStatus).toBe('manual_summary_provided');
+  });
+});
+
+describe('GET /internal/documents/by-s3-key', () => {
+  it('resolves documentId + caseId by s3Key', async () => {
+    const { db } = makeDb(null, { id: 'DOC-42', caseId: 'CASE-9', s3Key: 'cases/CASE-9/uuid-records.pdf' });
+    const res = await request(appFor(db))
+      .get('/api/v1/internal/documents/by-s3-key')
+      .query({ key: 'cases/CASE-9/uuid-records.pdf' })
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ documentId: 'DOC-42', caseId: 'CASE-9', s3Key: 'cases/CASE-9/uuid-records.pdf' });
+  });
+
+  it('returns 404 when no document has that s3Key', async () => {
+    const { db } = makeDb(null, { id: 'DOC-42', caseId: 'CASE-9', s3Key: 'cases/CASE-9/uuid-records.pdf' });
+    const res = await request(appFor(db))
+      .get('/api/v1/internal/documents/by-s3-key')
+      .query({ key: 'cases/CASE-9/does-not-exist.pdf' })
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN);
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects a missing key query param (400)', async () => {
+    const { db } = makeDb(null, { id: 'DOC-42', caseId: 'CASE-9', s3Key: 'cases/CASE-9/uuid-records.pdf' });
+    const res = await request(appFor(db))
+      .get('/api/v1/internal/documents/by-s3-key')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN);
     expect(res.status).toBe(400);
   });
 });

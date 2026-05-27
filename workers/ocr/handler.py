@@ -1,10 +1,12 @@
 """
 Phase 7B-revised Build 3: OCR worker — Textract async extraction.
 
-Trigger: S3 EventBridge "Object Created" on the records bucket prefix `records/`.
+Trigger: S3 EventBridge "Object Created" on the PHI bucket prefix `cases/`.
 On invocation:
-  1. Parse the S3 event for the bucket + key + documentId (encoded in the key path:
-     records/<caseId>/<documentId>/<filename>.pdf).
+  1. Read the EventBridge event for the bucket + key (detail.bucket.name /
+     detail.object.key). The upload key is `cases/<caseId>/<uuid>-<filename>` and embeds NO
+     documentId, so resolve the real documentId via the API
+     (GET /api/v1/internal/documents/by-s3-key?key=...).
   2. Start a Textract async StartDocumentTextDetection job pointing at the S3 object.
      Provide an SNS topic ARN (env COMPLETION_SNS_TOPIC_ARN) so Textract notifies the
      completion handler when done. Job tag = documentId (so we can find it on completion).
@@ -17,12 +19,14 @@ in pages, groups blocks by Page, and POSTs to the API:
 Per FRN ingest spec (HARD requirement #1): we NEVER use Claude as OCR. Textract is the
 single OCR provider on this path.
 
-NOT YET DEPLOYED. This file is the Lambda source the CDK stack (workers-stack.ts, follow-up
-commit) will package and deploy. To run locally, see the README at workers/README.md.
+DEPLOYED via workers-stack.ts (compact-emr-<env>-ocr-start / -ocr-completion Lambdas). To run
+locally, see the README at workers/README.md.
 """
 
 import json
 import os
+import urllib.error
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from typing import Any
@@ -41,38 +45,64 @@ def _worker_token() -> str:
     return os.environ["INTERNAL_WORKER_TOKEN"]
 
 
-def _document_id_from_s3_key(key: str) -> str | None:
-    # Convention: records/<caseId>/<documentId>/<filename>
-    parts = key.split("/")
-    if len(parts) < 4 or parts[0] != "records":
+def _resolve_document_id(s3_key: str) -> str | None:
+    """Resolve the Document row id from its S3 key via the internal API.
+
+    The upload key (`cases/<caseId>/<uuid>-<filename>`) carries no documentId — the Document
+    row id is minted after the key is chosen — so the worker must look it up. Returns the
+    documentId, or None if the API has no Document for that key (404) or the call fails.
+    """
+    query = urllib.parse.urlencode({"key": s3_key})
+    url = f"{_api_base_url()}/api/v1/internal/documents/by-s3-key?{query}"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"X-Internal-Worker-Token": _worker_token()},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return payload.get("data", {}).get("documentId")
+    except urllib.error.HTTPError as http_err:
+        if http_err.code == 404:
+            print(f"no document for s3 key {s3_key} (404); skipping")
+            return None
+        print(f"document lookup failed for {s3_key}: HTTP {http_err.code}")
         return None
-    return parts[2]
+    except Exception as exc:
+        print(f"document lookup failed for {s3_key}: {exc}")
+        return None
 
 
 def start_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
-    """S3 EventBridge trigger. Kicks off Textract async job."""
-    records = event.get("Records") or []
-    started: list[dict[str, Any]] = []
+    """S3 EventBridge trigger. Kicks off a Textract async job.
+
+    EventBridge delivers a single "Object Created" event (NOT an S3-direct Records[] list):
+    the bucket + key live at event["detail"]["bucket"]["name"] / ["object"]["key"]. The key
+    is URL-encoded in the event, so decode it before use.
+    """
+    detail = event.get("detail", {})
+    bucket = detail.get("bucket", {}).get("name")
+    raw_key = detail.get("object", {}).get("key")
+    if not bucket or not raw_key:
+        print(f"skipping event with no bucket/key in detail: {event.get('detail')}")
+        return {"started": []}
+
+    key = urllib.parse.unquote_plus(raw_key)
+    document_id = _resolve_document_id(key)
+    if not document_id:
+        print(f"skipping key with no resolvable document: {key}")
+        return {"started": []}
+
     sns_topic = os.environ["COMPLETION_SNS_TOPIC_ARN"]
     sns_role_arn = os.environ["TEXTRACT_SNS_ROLE_ARN"]
 
-    for record in records:
-        s3 = record.get("s3", {})
-        bucket = s3.get("bucket", {}).get("name")
-        key = s3.get("object", {}).get("key")
-        if not bucket or not key:
-            continue
-        document_id = _document_id_from_s3_key(key)
-        if not document_id:
-            print(f"skipping non-records key: {key}")
-            continue
-
-        response = textract.start_document_text_detection(
-            DocumentLocation={"S3Object": {"Bucket": bucket, "Name": key}},
-            NotificationChannel={"SNSTopicArn": sns_topic, "RoleArn": sns_role_arn},
-            JobTag=document_id,
-        )
-        started.append({"documentId": document_id, "jobId": response["JobId"]})
+    response = textract.start_document_text_detection(
+        DocumentLocation={"S3Object": {"Bucket": bucket, "Name": key}},
+        NotificationChannel={"SNSTopicArn": sns_topic, "RoleArn": sns_role_arn},
+        JobTag=document_id,
+    )
+    started = [{"documentId": document_id, "jobId": response["JobId"]}]
 
     return {"started": started}
 

@@ -18,9 +18,10 @@ On invocation:
   7. PATCH state='ready' with pdfS3Key + pageCount. On any failure: PATCH state='failed'
      with errorMessage.
 
-NOT YET DEPLOYED. The PDF concatenation library (pypdf), the HTML→PDF library (WeasyPrint),
-and the IAM role for cross-bucket S3 reads need to be wired in the CDK stack. This file is
-the source the stack will package.
+DEPLOYED via workers-stack.ts (compact-emr-<env>-doctor-pack-assembler Lambda, SQS-triggered).
+Note: the WeasyPrint layer (HTML→PDF for the cover page + TOC) is attached only when
+DOCTOR_PACK_WEASYPRINT_LAYER_ARN is set at synth time; without it the worker gracefully skips
+cover + TOC and still produces the source-PDF concatenation (see H3 in the port audit).
 
 A 250-page pack assembles in ~20-40 seconds; well under Lambda's 15-min ceiling.
 """
@@ -246,12 +247,21 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             for entry in entries:
                 file_path = entry.get("filePath")
                 page_ranges = entry.get("pageRanges") or []
-                if not file_path or not page_ranges:
+                if not file_path:
+                    # Only skip when there's no source to read. (H2: empty page_ranges does
+                    # NOT mean skip — see below.)
                     continue
                 # filePath is the source S3 key (relative to records bucket)
                 obj = s3.get_object(Bucket=_records_bucket(), Key=file_path)
                 pdf_bytes = obj["Body"].read()
-                pages = _select_pages(pdf_bytes, page_ranges)
+                if page_ranges:
+                    pages = _select_pages(pdf_bytes, page_ranges)
+                else:
+                    # H2 (audit 2026-05-27): per the route contract (doctor-pack.ts),
+                    # empty pageRanges = include the WHOLE source PDF. The prior `continue`
+                    # silently dropped every such entry, yielding a cover+TOC-only pack.
+                    reader = PdfReader(io.BytesIO(pdf_bytes))
+                    pages = list(reader.pages)
                 for page in pages:
                     writer.add_page(page)
 

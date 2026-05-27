@@ -3,6 +3,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { isDoctorPackS3Key } from '../services/s3-key-safety.js';
+import { classifyReadAttempt } from '../services/chart-readiness.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
 
@@ -159,6 +160,8 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       const documentId = String(req.params.id);
       const parsed = parsePageUpsertBody(req.body);
 
+      const now = new Date();
+
       const result = await db.$transaction(async (tx) => {
         for (const page of parsed.pages) {
           await tx.documentPage.upsert({
@@ -187,22 +190,132 @@ export function createInternalWorkerRouter(db: AppDb): Router {
           });
         }
 
+        // C1 (audit 2026-05-27): bridge the Textract success path into the chart-readiness
+        // gate. Before this, a successful OCR wrote ONLY document_pages — never a
+        // file_read_status row — so evaluateChartReadiness() never saw the file as read
+        // (the gate reads file_read_status exclusively). The only writer of
+        // terminalStatus='read' was POST /cases/:id/files/read-attempts, which nothing in
+        // the cloud tree calls. Result: OCR failure blocked correctly, OCR success was
+        // invisible (empty set => ready=true). Here we resolve the document's caseId + s3Key
+        // (same join as the read-attempt-failed route below), run the concatenated page text
+        // through classifyReadAttempt so a "successful" Textract job with garbled / too-few
+        // words still lands as manual_summary_required (NOT a false 'read'), and upsert the
+        // file_read_status row keyed (caseId, s3Key) in the SAME transaction.
+        const doc = await (tx as unknown as {
+          document: { findUnique: (args: { where: { id: string }; select?: Record<string, true> }) => Promise<{ id: string; caseId: string; s3Key: string } | null> };
+        }).document.findUnique({
+          where: { id: documentId },
+          select: { id: true, caseId: true, s3Key: true },
+        });
+
+        let readStatus: { terminalStatus: string; wordCount: number; corruptedTokenRatio: number } | null = null;
+        if (doc !== null) {
+          const concatenatedText = parsed.pages.map((p) => p.text).join('\n');
+          const outcome = classifyReadAttempt({ method: 'textract', extractedText: concatenatedText });
+
+          const existing = await tx.fileReadStatus.findFirst({ where: { caseId: doc.caseId, filePath: doc.s3Key } });
+          const newAttempt = {
+            method: 'textract' as const,
+            wordCount: outcome.wordCount,
+            corruptedTokenRatio: outcome.corruptedTokenRatio,
+            attemptedAt: now.toISOString(),
+            note: outcome.succeeded
+              ? `Textract read OK (${outcome.wordCount} words)`
+              : `Textract read insufficient: ${outcome.reason}`,
+          };
+          const prior: readonly unknown[] = (existing?.attemptsJson as readonly unknown[] | undefined) ?? [];
+          const attempts = [...prior, newAttempt];
+
+          // Don't overwrite an RN's manual_summary_provided clearance (mirror the
+          // read-attempt-failed route's guard). Otherwise: read on success, else
+          // manual_summary_required (garbled / too-few-words).
+          const terminalStatus =
+            existing?.terminalStatus === 'manual_summary_provided'
+              ? 'manual_summary_provided'
+              : outcome.succeeded
+                ? 'read'
+                : 'manual_summary_required';
+
+          if (existing) {
+            await tx.fileReadStatus.update({
+              where: { id: existing.id },
+              data: {
+                terminalStatus,
+                attemptsJson: attempts,
+                lastCheckedAt: now,
+                version: { increment: 1 },
+              },
+            });
+          } else {
+            await tx.fileReadStatus.create({
+              data: {
+                caseId: doc.caseId,
+                filePath: doc.s3Key,
+                fileSha256: '',
+                terminalStatus,
+                attemptsJson: attempts,
+                lastCheckedAt: now,
+              },
+            });
+          }
+          readStatus = { terminalStatus, wordCount: outcome.wordCount, corruptedTokenRatio: outcome.corruptedTokenRatio };
+        }
+
         await tx.activityLog.create({
           data: {
             actorUserId: SERVICE_ACTORS.WORKER,
             action: 'document_pages_extracted',
+            ...(doc !== null ? { caseId: doc.caseId } : {}),
             detailsJson: {
               documentId,
               pageCount: parsed.pages.length,
               ...(parsed.documentPageCount !== null && { documentPageCount: parsed.documentPageCount }),
+              ...(readStatus !== null && { readTerminalStatus: readStatus.terminalStatus, readWordCount: readStatus.wordCount }),
             },
           },
         });
 
-        return { documentId, pagesUpserted: parsed.pages.length, documentPageCount: parsed.documentPageCount };
+        return {
+          documentId,
+          pagesUpserted: parsed.pages.length,
+          documentPageCount: parsed.documentPageCount,
+          ...(readStatus !== null && { readTerminalStatus: readStatus.terminalStatus }),
+        };
       });
 
       res.status(201).json({ data: result });
+    }),
+  );
+
+  /**
+   * GET /api/v1/internal/documents/by-s3-key?key=<urlencoded s3Key>
+   *
+   * The OCR worker (start_handler) only has the S3 object key from the EventBridge event —
+   * the upload key `cases/<caseId>/<uuid>-<filename>` embeds NO documentId (the Document row
+   * id is minted after the key is chosen). The worker calls this to resolve the real
+   * documentId, which it then stamps as the Textract JobTag so the completion callback can
+   * post pages/failures to the right document.
+   *
+   * Returns { data: { documentId, caseId, s3Key } } or 404 if no Document has that s3Key.
+   */
+  router.get(
+    '/internal/documents/by-s3-key',
+    asyncHandler(async (req: Request, res: Response) => {
+      const key = req.query['key'];
+      if (typeof key !== 'string' || key.length === 0) {
+        badRequest('key query parameter is required', { field: 'key' });
+        return;
+      }
+      const doc = await (db as unknown as {
+        document: { findFirst: (args: { where: { s3Key: string }; select?: Record<string, true> }) => Promise<{ id: string; caseId: string; s3Key: string } | null> };
+      }).document.findFirst({
+        where: { s3Key: key },
+        select: { id: true, caseId: true, s3Key: true },
+      });
+      if (doc === null) {
+        throw new HttpError(404, 'not_found', 'No document found for that s3Key', { s3Key: key });
+      }
+      res.json({ data: { documentId: doc.id, caseId: doc.caseId, s3Key: doc.s3Key } });
     }),
   );
 

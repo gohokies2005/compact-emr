@@ -13,3 +13,9 @@ infra/cdk.context.json
 .vscode/
 .idea/
 *.tsbuildinfo
+
+# Playwright E2E
+playwright-report/
+test-results/
+.auth/
+e2e/.cache/

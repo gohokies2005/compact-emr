@@ -238,5 +238,20 @@ export class ApiStack extends Stack {
       integration: new integrations.HttpLambdaIntegration('ApiProxyIntegration', handler),
       authorizer,
     });
+
+    // Worker callbacks (/api/v1/internal/drafter/*) authenticate via X-Drafter-Invoke-Token in the
+    // requireDrafterPrincipal middleware, NOT Cognito. They MUST bypass the Cognito JWT authorizer,
+    // or the Fargate worker's /progress + /complete posts get a gateway 401. HttpApi matches the
+    // more-specific route first, so this takes precedence over /api/v1/{proxy+} for internal paths.
+    httpApi.addRoutes({
+      path: '/api/v1/internal/{proxy+}',
+      methods: [
+        apigwv2.HttpMethod.GET,
+        apigwv2.HttpMethod.POST,
+        apigwv2.HttpMethod.PATCH,
+      ],
+      integration: new integrations.HttpLambdaIntegration('InternalApiProxyIntegration', handler),
+      // no authorizer — token auth enforced in-app by requireDrafterPrincipal
+    });
   }
 }

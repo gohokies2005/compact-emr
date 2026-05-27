@@ -172,7 +172,11 @@ export class DrafterStack extends Stack {
       }),
       environment: {
         ENV_NAME: config.envName,
-        COMPACT_EMR_API_URL: `https://${config.apiDomainName}`,
+        // api.emr.flatratenexus.com custom domain is NOT set up yet (NXDOMAIN) — the worker must
+        // reach the raw API Gateway endpoint or every /progress + /complete callback fails DNS.
+        // TODO: wire ApiStack.httpApi.apiEndpoint as a prop (or stand up the api custom domain),
+        // then revert to `https://${config.apiDomainName}`.
+        COMPACT_EMR_API_URL: 'https://nypr790pq7.execute-api.us-east-1.amazonaws.com',
         DRAFT_JOB_QUEUE_URL: draftJobQueue.queueUrl,
         DRAFTER_ARTIFACTS_S3_BUCKET: phiBucket.bucketName,
         DRAFTER_ARTIFACTS_S3_PREFIX: 'drafter-artifacts/',
@@ -197,7 +201,7 @@ export class DrafterStack extends Stack {
       serviceName: `compact-emr-${config.envName}-drafter`,
       cluster,
       taskDefinition,
-      desiredCount: 0,
+      desiredCount: 1, // smoke-test: one always-on worker. SWITCH to queue-depth scale-to-zero (min 0/max 1) after first E2E pass to kill ~$145/mo idle cost.
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [securityGroup],
       // Long-running tasks: when a deploy rolls out a new image, drain in-flight jobs first.

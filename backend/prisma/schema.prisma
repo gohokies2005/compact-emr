@@ -293,6 +293,7 @@ model Document {
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version     Int      @default(1)
   case        Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  pages       DocumentPage[]
 
   @@index([caseId])
   @@index([caseId, docTag])
@@ -588,6 +589,7 @@ model DocumentPage {
   extractedAt DateTime @default(now()) @map("extracted_at") @db.Timestamptz(6)
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@unique([documentId, pageNumber], map: "document_pages_doc_page_uq")
   @@index([documentId])

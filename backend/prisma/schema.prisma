@@ -145,12 +145,12 @@ model Veteran {
   email            String
   phone            String?
   address          String?
-  branch           String
-  serviceStartYear Int          @map("service_start_year")
-  serviceEndYear   Int          @map("service_end_year")
-  combatVeteran    YesNoUnknown @map("combat_veteran")
-  pactArea         YesNoUnknown @map("pact_area")
-  teraConceded     YesNoUnknown @map("tera_conceded")
+  branch           String?
+  serviceStartYear Int?         @map("service_start_year")
+  serviceEndYear   Int?         @map("service_end_year")
+  combatVeteran    YesNoUnknown? @map("combat_veteran")
+  pactArea         YesNoUnknown? @map("pact_area")
+  teraConceded     YesNoUnknown? @map("tera_conceded")
   heightIn         Int?         @map("height_in")
   weightLb         Int?         @map("weight_lb")
   inactive         Boolean      @default(false)

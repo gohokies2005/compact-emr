@@ -25,12 +25,12 @@ export interface VeteranRecord {
   email: string;
   phone: string | null;
   address: string | null;
-  branch: string;
-  serviceStartYear: number;
-  serviceEndYear: number;
-  combatVeteran: YesNoUnknown;
-  pactArea: YesNoUnknown;
-  teraConceded: YesNoUnknown;
+  branch: string | null;
+  serviceStartYear: number | null;
+  serviceEndYear: number | null;
+  combatVeteran: YesNoUnknown | null;
+  pactArea: YesNoUnknown | null;
+  teraConceded: YesNoUnknown | null;
   heightIn: number | null;
   weightLb: number | null;
   inactive: boolean;
@@ -84,12 +84,12 @@ export interface VeteranCreateInput {
   email: string;
   phone?: string;
   address?: string;
-  branch: string;
-  serviceStartYear: number;
-  serviceEndYear: number;
-  combatVeteran: YesNoUnknown;
-  pactArea: YesNoUnknown;
-  teraConceded: YesNoUnknown;
+  branch?: string;
+  serviceStartYear?: number;
+  serviceEndYear?: number;
+  combatVeteran?: YesNoUnknown;
+  pactArea?: YesNoUnknown;
+  teraConceded?: YesNoUnknown;
   heightIn?: number;
   weightLb?: number;
 }

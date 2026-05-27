@@ -17,6 +17,7 @@ describe('VeteransPage', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><MemoryRouter><VeteransPage /></MemoryRouter></QueryClientProvider>);
     expect(screen.getByRole('textbox', { name: /search veterans/i })).toBeInTheDocument();
-    expect(await screen.findByText('TEST-001')).toBeInTheDocument();
+    expect(await screen.findByText('John Smith')).toBeInTheDocument();
+    expect(screen.getByText('MRN TEST-001')).toBeInTheDocument();
   });
 });

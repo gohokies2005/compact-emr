@@ -14,8 +14,8 @@ export interface VeteranDetail extends Veteran {
 
 export interface CreateVeteranInput {
   readonly id: string; readonly firstName: string; readonly lastName: string; readonly dob: string; readonly email: string;
-  readonly phone?: string; readonly address?: string; readonly branch: string; readonly serviceStartYear: number; readonly serviceEndYear: number;
-  readonly combatVeteran: YesNoUnknown; readonly pactArea: YesNoUnknown; readonly teraConceded: YesNoUnknown; readonly heightIn?: number; readonly weightLb?: number;
+  readonly phone?: string; readonly address?: string; readonly branch?: string; readonly serviceStartYear?: number; readonly serviceEndYear?: number;
+  readonly combatVeteran?: YesNoUnknown; readonly pactArea?: YesNoUnknown; readonly teraConceded?: YesNoUnknown; readonly heightIn?: number; readonly weightLb?: number;
 }
 export type UpdateVeteranInput = Partial<Omit<CreateVeteranInput, 'id'>> & { readonly version: number };
 

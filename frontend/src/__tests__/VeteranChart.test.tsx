@@ -17,7 +17,8 @@ describe('VeteranChart', () => {
   it('renders veteran chart panels', async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/veterans/TEST-001']}><Routes><Route path="/veterans/:id" element={<VeteranChart />} /></Routes></MemoryRouter></QueryClientProvider>);
-    expect(await screen.findByText('TEST-001')).toBeInTheDocument();
+    expect(await screen.findByText('John Smith')).toBeInTheDocument();
+    expect(screen.getByText((text) => text.includes('MRN TEST-001'))).toBeInTheDocument();
     expect(screen.getByText('Documents')).toBeInTheDocument();
     expect(screen.getByText('Cases')).toBeInTheDocument();
   });

@@ -109,6 +109,14 @@ function optionalVersion(input: Record<string, unknown>): number {
 
 export function parseVeteranCreate(body: unknown): VeteranCreateInput {
   if (!isObject(body)) throw new HttpError(400, 'bad_request', 'Request body must be an object.');
+  const branch = optionalString(body, 'branch');
+  const serviceStartYear = optionalNullableInt(body, 'serviceStartYear');
+  const serviceEndYear = optionalNullableInt(body, 'serviceEndYear');
+  const combatVeteran = optionalEnum(body, 'combatVeteran');
+  const pactArea = optionalEnum(body, 'pactArea');
+  const teraConceded = optionalEnum(body, 'teraConceded');
+  const phone = optionalString(body, 'phone');
+  const address = optionalString(body, 'address');
   const heightIn = optionalNullableInt(body, 'heightIn');
   const weightLb = optionalNullableInt(body, 'weightLb');
   return {
@@ -117,14 +125,14 @@ export function parseVeteranCreate(body: unknown): VeteranCreateInput {
     firstName: requiredString(body, 'firstName'),
     dob: parseDate(body.dob, 'dob'),
     email: requiredString(body, 'email'),
-    ...(optionalString(body, 'phone') !== undefined ? { phone: optionalString(body, 'phone') } : {}),
-    ...(optionalString(body, 'address') !== undefined ? { address: optionalString(body, 'address') } : {}),
-    branch: requiredString(body, 'branch'),
-    serviceStartYear: requiredInt(body, 'serviceStartYear'),
-    serviceEndYear: requiredInt(body, 'serviceEndYear'),
-    combatVeteran: requiredEnum(body, 'combatVeteran'),
-    pactArea: requiredEnum(body, 'pactArea'),
-    teraConceded: requiredEnum(body, 'teraConceded'),
+    ...(phone !== undefined ? { phone } : {}),
+    ...(address !== undefined ? { address } : {}),
+    ...(branch !== undefined ? { branch } : {}),
+    ...(serviceStartYear !== undefined && serviceStartYear !== null ? { serviceStartYear } : {}),
+    ...(serviceEndYear !== undefined && serviceEndYear !== null ? { serviceEndYear } : {}),
+    ...(combatVeteran !== undefined ? { combatVeteran } : {}),
+    ...(pactArea !== undefined ? { pactArea } : {}),
+    ...(teraConceded !== undefined ? { teraConceded } : {}),
     ...(heightIn !== undefined && heightIn !== null ? { heightIn } : {}),
     ...(weightLb !== undefined && weightLb !== null ? { weightLb } : {}),
   };

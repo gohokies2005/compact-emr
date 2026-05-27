@@ -58,7 +58,7 @@ function formatServiceDates(start: number | null, end: number | null): string {
   return `${start}–${end}`;
 }
 
-function yesNoUnknownLabel(value: string): string {
+function yesNoUnknownLabel(value: string | null): string {
   if (value === 'yes') return 'Yes';
   if (value === 'no') return 'No';
   return 'Unknown';
@@ -87,12 +87,12 @@ export async function aggregateChartSummary(input: AggregateInput): Promise<Char
         firstName: string;
         lastName: string;
         dob: Date | null;
-        branch: string;
+        branch: string | null;
         serviceStartYear: number | null;
         serviceEndYear: number | null;
-        combatVeteran: string;
-        pactArea: string;
-        teraConceded: string;
+        combatVeteran: string | null;
+        pactArea: string | null;
+        teraConceded: string | null;
         scConditions: readonly { condition: string }[];
         activeProblems: readonly { problem: string }[];
         activeMedications: readonly { drugName: string; dose: string | null; indication: string | null }[];
@@ -104,7 +104,7 @@ export async function aggregateChartSummary(input: AggregateInput): Promise<Char
     veteran: {
       fullName: `${veteranWithChart.firstName} ${veteranWithChart.lastName}`.trim(),
       dob: veteranWithChart.dob ? veteranWithChart.dob.toISOString().slice(0, 10) : null,
-      branch: veteranWithChart.branch,
+      branch: veteranWithChart.branch ?? 'Unknown',
       serviceDates: formatServiceDates(veteranWithChart.serviceStartYear, veteranWithChart.serviceEndYear),
       combatVeteran: yesNoUnknownLabel(veteranWithChart.combatVeteran),
       pactArea: yesNoUnknownLabel(veteranWithChart.pactArea),

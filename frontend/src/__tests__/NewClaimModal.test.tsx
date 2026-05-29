@@ -56,6 +56,19 @@ describe('NewClaimModal', () => {
     })));
   });
 
+  it('passes the selected framing choice through to onSubmit', async () => {
+    const onSubmit = vi.fn(async () => {});
+    render(wrap(<NewClaimModal open onClose={() => {}} onSubmit={onSubmit} saving={false} />));
+    const claimed = await screen.findByLabelText('Claimed condition(s)');
+    await within(claimed).findByRole('option', { name: 'Obstructive sleep apnea' });
+    fireEvent.change(claimed, { target: { value: 'Obstructive sleep apnea' } });
+    fireEvent.change(screen.getByLabelText('Framing (optional)'), { target: { value: 'secondary' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create claim' }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      framingChoice: 'secondary',
+    })));
+  });
+
   it('supports free-text via the "Other (type manually)" escape hatch (single condition)', async () => {
     const onSubmit = vi.fn(async () => {});
     render(wrap(<NewClaimModal open onClose={() => {}} onSubmit={onSubmit} saving={false} />));

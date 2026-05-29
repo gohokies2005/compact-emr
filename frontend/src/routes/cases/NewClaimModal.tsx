@@ -27,6 +27,14 @@ const CLAIM_TYPES: readonly { readonly value: FormValues['claimType']; readonly 
   { value: 'appeal_bva', label: 'Board appeal' },
 ];
 
+const FRAMING_CHOICES: readonly { readonly value: string; readonly label: string }[] = [
+  { value: '', label: '— Auto (let the drafter decide) —' },
+  { value: 'direct', label: 'Direct' },
+  { value: 'secondary', label: 'Secondary' },
+  { value: 'aggravation', label: 'Aggravation' },
+  { value: 'presumptive', label: 'Presumptive' },
+];
+
 export function NewClaimModal({ open, onClose, onSubmit, saving }: Props) {
   const { register, handleSubmit, control, formState: { errors } } = useForm<FormValues>({ defaultValues: { claimType: 'initial', claimedConditions: [] } });
   if (!open) return null;
@@ -52,7 +60,7 @@ export function NewClaimModal({ open, onClose, onSubmit, saving }: Props) {
     <form className="grid grid-cols-1 gap-4 md:grid-cols-2" onSubmit={handleSubmit(submit)}>
       <Field label="Claim type" error={errors.claimType?.message}><select className="input" {...register('claimType')}>{CLAIM_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</select></Field>
       <div className="md:col-span-2"><Field label="Claimed condition(s)" error={errors.claimedConditions?.message}><Controller name="claimedConditions" control={control} rules={{ validate: (v) => (v && v.length > 0) || 'At least one condition is required' }} render={({ field }) => <ConditionMultiSelect label="Claimed condition(s)" value={field.value ?? []} onChange={field.onChange} />} /></Field></div>
-      <Field label="Framing (optional)" error={errors.framingChoice?.message}><input className="input" placeholder="e.g., aggravation, secondary, direct, presumptive" {...register('framingChoice')} /></Field>
+      <Field label="Framing (optional)" error={errors.framingChoice?.message}><select className="input" {...register('framingChoice')}>{FRAMING_CHOICES.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}</select></Field>
       <Field label="Upstream SC condition (optional)" error={errors.upstreamScCondition?.message}><Controller name="upstreamScCondition" control={control} render={({ field }) => <ConditionSelect label="Upstream SC condition" value={field.value ?? ''} onChange={field.onChange} placeholder="if secondary to a known SC condition…" />} /></Field>
       <div className="md:col-span-2"><Field label="Veteran's account / statement (optional, paste from intake)" error={errors.veteranStatement?.message}><textarea className="input min-h-24" {...register('veteranStatement')} /></Field></div>
       <div className="md:col-span-2"><Field label="Documented in-service event or exposure (optional)" error={errors.inServiceEvent?.message}><textarea className="input min-h-24" {...register('inServiceEvent')} /></Field></div>

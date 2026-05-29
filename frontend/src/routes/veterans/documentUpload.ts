@@ -79,3 +79,30 @@ export function isZip(file: { name: string; type?: string }): boolean {
   if (file.type === 'application/zip' || file.type === 'application/x-zip-compressed') return true;
   return extensionOf(file.name) === 'zip';
 }
+
+// Turn an upload failure into a human reason the RN can act on. The per-file upload
+// (presign -> S3 PUT -> record) can reject in three shapes, and the chart used to swallow
+// all of them into a generic "skipped" — leaving the RN with an invisible failure and no
+// way to know WHY a file never appeared. Recover the real reason:
+//   - API 400 (presign/record): AxiosError carrying { error: { code, message } } in the body
+//   - 403: the client maps it to a ForbiddenError (name only, no body)
+//   - S3 PUT network/CORS failure: AxiosError with no response (code ERR_NETWORK)
+// Kept structural (no axios import) so this stays framework-free and unit-testable.
+export function uploadErrorReason(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as {
+      name?: unknown;
+      message?: unknown;
+      code?: unknown;
+      response?: { status?: unknown; data?: { error?: { code?: unknown; message?: unknown } } };
+    };
+    const apiMessage = e.response?.data?.error?.message;
+    if (typeof apiMessage === 'string' && apiMessage.trim().length > 0) return apiMessage.trim();
+    if (e.name === 'ForbiddenError') return 'permission denied — your account may lack document-upload rights';
+    if (e.code === 'ERR_NETWORK') return 'network/CORS error reaching storage (upload blocked before it left the browser)';
+    const status = e.response?.status;
+    if (typeof status === 'number') return `server returned HTTP ${status}`;
+    if (typeof e.message === 'string' && e.message.trim().length > 0) return e.message.trim();
+  }
+  return 'unexpected error';
+}

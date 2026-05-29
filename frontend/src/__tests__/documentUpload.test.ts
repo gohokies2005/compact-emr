@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyEntry, inferContentType, isJunkPath, isZip, extensionOf, MAX_BYTES } from '../routes/veterans/documentUpload';
+import { classifyEntry, inferContentType, isJunkPath, isZip, extensionOf, MAX_BYTES, uploadErrorReason } from '../routes/veterans/documentUpload';
 
 describe('documentUpload helpers', () => {
   it('infers contentType from extension when MIME is empty', () => {
@@ -47,6 +47,22 @@ describe('documentUpload helpers', () => {
     expect(classifyEntry({ path: '__MACOSX/x.pdf', sizeBytes: 1 })).toMatchObject({ ok: false, reason: 'directory_or_junk' });
     expect(classifyEntry({ path: 'virus.exe', sizeBytes: 1 })).toMatchObject({ ok: false, reason: 'unsupported_type' });
     expect(classifyEntry({ path: 'huge.pdf', sizeBytes: MAX_BYTES + 1 })).toMatchObject({ ok: false, reason: 'too_large' });
+  });
+
+  it('surfaces the real upload failure reason instead of a generic message', () => {
+    // API 400 from presign/record (the most common silent failure: unsupported type, too large, bad key)
+    expect(uploadErrorReason({ response: { status: 400, data: { error: { code: 'unsupported_content_type', message: 'Only PDF, JPG, PNG, DOC, and DOCX uploads are supported.' } } } }))
+      .toBe('Only PDF, JPG, PNG, DOC, and DOCX uploads are supported.');
+    // 403 mapped to ForbiddenError (no body)
+    expect(uploadErrorReason({ name: 'ForbiddenError', message: 'Forbidden' }))
+      .toMatch(/permission denied/i);
+    // S3 PUT network/CORS failure (no response)
+    expect(uploadErrorReason({ code: 'ERR_NETWORK', message: 'Network Error' }))
+      .toMatch(/network\/CORS/i);
+    // bare Error fallback
+    expect(uploadErrorReason(new Error('boom'))).toBe('boom');
+    // last-resort fallback
+    expect(uploadErrorReason(undefined)).toBe('unexpected error');
   });
 
   it('detects zip files by MIME or extension', () => {

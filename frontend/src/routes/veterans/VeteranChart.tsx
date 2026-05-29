@@ -9,7 +9,7 @@ import { createCase, type CreateCaseInput } from '../../api/cases';
 import { NewClaimModal } from '../cases/NewClaimModal';
 import { ChartNotesPanel } from './ChartNotesPanel';
 import { ConditionSelect } from '../../components/ConditionSelect';
-import { classifyEntry, isZip, type CandidateResult } from './documentUpload';
+import { classifyEntry, isZip, uploadErrorReason, type CandidateResult } from './documentUpload';
 import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition } from '../../types/prisma';
 
 const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
@@ -111,17 +111,19 @@ function DocumentsPanel({ veteranId, cases, documents, onChange }: { readonly ve
       setStatus('Reading selection…');
       const { items, skipped } = await expandSelection(files);
       if (items.length === 0) { setStatus(`Nothing to upload — ${skipped.length} skipped (unsupported/too large).`); return; }
-      let uploaded = 0; const failed: string[] = [];
+      let uploaded = 0; const failed: { name: string; reason: string }[] = [];
       for (let i = 0; i < items.length; i += 1) {
         const item = items[i];
         if (!item) continue;
         setStatus(`Uploading ${i + 1} of ${items.length}… (${item.filename})`);
         try { await uploadOne(item); uploaded += 1; }
-        catch { failed.push(item.filename); }
+        catch (err) { failed.push({ name: item.filename, reason: uploadErrorReason(err) }); }
       }
-      const skippedCount = skipped.length + failed.length;
       const parts = [`${uploaded} uploaded`];
-      if (skippedCount > 0) parts.push(`${skippedCount} skipped (unsupported/too large/failed)`);
+      if (skipped.length > 0) parts.push(`${skipped.length} skipped (unsupported/too large)`);
+      // Surface the actual per-file failure reason — an upload that fails silently is the same
+      // as "I uploaded but see nothing." Show the real cause so the RN can act on it.
+      if (failed.length > 0) parts.push(`${failed.length} failed — ${failed.map((f) => `${f.name}: ${f.reason}`).join('; ')}`);
       setStatus(parts.join(', ') + '.');
       await onChange();
     } catch (err) {

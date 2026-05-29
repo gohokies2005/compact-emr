@@ -576,14 +576,70 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
 
       const existing = await db.draftJob.findUnique({ where: { id: jobId } });
       if (existing === null) throw new HttpError(404, 'not_found', 'DraftJob not found', { jobId });
-      if (existing.state === 'done' || existing.state === 'failed') {
-        throw new HttpError(409, 'conflict', `DraftJob is already in terminal state '${existing.state}'`, {
-          jobId,
-          state: existing.state,
-        });
-      }
 
       const now = new Date();
+
+      // Late-artifact recovery. The stuck-job watcher flips a stale job to 'failed' at the
+      // ~10-min mark BEFORE the worker's SIGTERM handler POSTs /complete with the real S3
+      // artifact keys it just uploaded. Without this branch the terminal-state guard 409-rejects
+      // that body and the keys never land — artifactPdfS3Key stays null and the RN's "Open as-is"
+      // / Open PDF affordance is dead even though v<N>.{txt,pdf,docx} exist in S3. Here we MERGE
+      // the incoming artifact keys onto the already-terminal row (state stays as-is). We do NOT
+      // bump case.version / currentVersion / status — the watcher already settled those; this is
+      // a pure artifact-attachment, not a second terminal transition.
+      if (existing.state === 'done' || existing.state === 'failed') {
+        const hasArtifacts =
+          typeof existing.artifactPdfS3Key === 'string' &&
+          existing.artifactPdfS3Key.length > 0 &&
+          typeof existing.artifactTxtS3Key === 'string' &&
+          existing.artifactTxtS3Key.length > 0;
+        if (hasArtifacts) {
+          // Genuine duplicate terminal callback — the row already carries artifacts. Reject.
+          throw new HttpError(409, 'conflict', `DraftJob is already in terminal state '${existing.state}'`, {
+            jobId,
+            state: existing.state,
+          });
+        }
+
+        const recovered = await db.$transaction(async (tx) => {
+          const job = await tx.draftJob.update({
+            where: { id: jobId },
+            data: {
+              artifactPdfS3Key: parsed.artifactPdfS3Key,
+              artifactTxtS3Key: parsed.artifactTxtS3Key,
+              ...(parsed.artifactDocxS3Key !== undefined ? { artifactDocxS3Key: parsed.artifactDocxS3Key } : {}),
+              manifestSnapshot: parsed.manifest,
+              gradeSidecarJson: parsed.gradeSidecar,
+              lastHeartbeatAt: now,
+              errorMessage: parsed.operatorMessage.slice(0, 2000),
+            },
+          });
+          const caseUpdated = await tx.case.update({
+            where: { id: existing.caseId },
+            data: { operatorMessage: parsed.operatorMessage },
+          });
+          await tx.activityLog.create({
+            data: {
+              actorUserId: SERVICE_ACTORS.DRAFTER,
+              caseId: existing.caseId,
+              action: 'draft_job_artifacts_recovered',
+              detailsJson: {
+                jobId,
+                version: existing.version,
+                state: existing.state,
+                artifactPdfS3Key: parsed.artifactPdfS3Key,
+                artifactTxtS3Key: parsed.artifactTxtS3Key,
+                note: 'Late SIGTERM artifact callback merged onto a watcher-swept terminal job; case version/currentVersion/status left untouched.',
+              },
+            },
+          });
+          return { job, case: caseUpdated };
+        });
+
+        res.json({ data: recovered, recovered: true });
+        return;
+      }
+
       const triageToPhysician = parsed.runComplete && parsed.shipRecommendation === 'ship';
       const nextCaseStatus = triageToPhysician ? 'physician_review' : 'drafting';
 

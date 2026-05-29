@@ -1,0 +1,206 @@
+import express from 'express';
+import request from 'supertest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDrafterWorkerRouter } from '../routes/drafter.js';
+import { isHttpError, sendError } from '../http/errors.js';
+import type { AppDb } from '../services/db-types.js';
+
+/**
+ * Regression coverage for the late-artifact-recovery branch on
+ * POST /api/v1/internal/drafter/jobs/:id/complete.
+ *
+ * The stuck-job watcher flips a stale DraftJob to state='failed' at the ~10-min mark BEFORE the
+ * worker's SIGTERM handler POSTs /complete with the real S3 artifact keys it just uploaded. The
+ * old terminal-state guard 409-rejected that body before the artifact-key write, so the keys
+ * never landed and the RN's "Open as-is" / Open PDF affordance stayed dead even though the
+ * partial v<N>.{txt,pdf} existed in S3. The fix MERGES incoming keys onto an already-terminal row
+ * that has NULL artifact keys, while preserving 409 for genuine duplicates (terminal + has keys).
+ */
+
+interface DraftJobRow {
+  id: string;
+  caseId: string;
+  version: number;
+  state: string;
+  artifactPdfS3Key: string | null;
+  artifactTxtS3Key: string | null;
+  artifactDocxS3Key: string | null;
+  manifestSnapshot: unknown;
+  gradeSidecarJson: unknown;
+  errorMessage: string | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  lastHeartbeatAt: Date | null;
+}
+
+interface CaseRow {
+  id: string;
+  version: number;
+  currentVersion: number | null;
+  status: string;
+  operatorState: string | null;
+  operatorMessage: string | null;
+  runComplete: boolean | null;
+}
+
+function makeDb(job: DraftJobRow, caseRow: CaseRow) {
+  const tx = {
+    draftJob: {
+      findUnique: vi.fn(async (args: { where: { id: string } }) => (args.where.id === job.id ? job : null)),
+      update: vi.fn(async (args: { where: { id: string }; data: Partial<DraftJobRow> }) => {
+        Object.assign(job, args.data);
+        return job;
+      }),
+    },
+    case: {
+      update: vi.fn(async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+        const d = args.data;
+        if (typeof d['version'] === 'object' && d['version'] !== null) {
+          caseRow.version += (d['version'] as { increment: number }).increment;
+        }
+        for (const k of ['currentVersion', 'status', 'operatorState', 'operatorMessage', 'runComplete'] as const) {
+          if (d[k] !== undefined) (caseRow as unknown as Record<string, unknown>)[k] = d[k];
+        }
+        return caseRow;
+      }),
+    },
+    activityLog: { create: vi.fn(async (_args: { data: { action: string; [k: string]: unknown } }) => ({})) },
+  };
+  const db = { ...tx, $transaction: vi.fn(async (fn: (inner: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
+  return { db, tx, job, caseRow };
+}
+
+function appFor(db: AppDb) {
+  const app = express();
+  app.use(express.json({ limit: '10mb' }));
+  app.use('/api/v1', createDrafterWorkerRouter(db));
+  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (isHttpError(error)) return sendError(res, error.status, error.code, error.message, error.details);
+    return sendError(res, 500, 'internal_error', 'Unexpected server error.');
+  });
+  return app;
+}
+
+function jobRow(overrides: Partial<DraftJobRow> = {}): DraftJobRow {
+  return {
+    id: 'JOB-1',
+    caseId: 'CASE-1',
+    version: 15,
+    state: 'running',
+    artifactPdfS3Key: null,
+    artifactTxtS3Key: null,
+    artifactDocxS3Key: null,
+    manifestSnapshot: null,
+    gradeSidecarJson: null,
+    errorMessage: null,
+    startedAt: new Date('2026-05-28T00:00:00.000Z'),
+    completedAt: null,
+    lastHeartbeatAt: new Date('2026-05-28T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function caseRow(overrides: Partial<CaseRow> = {}): CaseRow {
+  return {
+    id: 'CASE-1',
+    version: 17,
+    currentVersion: 14,
+    status: 'drafting',
+    operatorState: null,
+    operatorMessage: 'Draft failed: timed out and was swept by the watcher.',
+    runComplete: false,
+    ...overrides,
+  };
+}
+
+function completeBody(overrides: Record<string, unknown> = {}) {
+  return {
+    artifactPdfS3Key: 'drafter-artifacts/CASE-1/v15/v15.pdf',
+    artifactTxtS3Key: 'drafter-artifacts/CASE-1/v15/v15.txt',
+    artifactDocxS3Key: 'drafter-artifacts/CASE-1/v15/v15.docx',
+    gradeSidecar: { probative_score: 7, grade: 'B', ship_recommendation: 'revise' },
+    manifest: { phases: [] },
+    operatorState: 'ready_with_notes',
+    operatorMessage: 'Run did not complete (swept at SIGTERM). A partial letter is available — open as-is.',
+    runComplete: false,
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+describe('POST /internal/drafter/jobs/:id/complete — late-artifact recovery', () => {
+  it('merges artifact keys onto a watcher-swept failed job with NULL keys (200, no version bump)', async () => {
+    const { db, tx, job, caseRow: cr } = makeDb(
+      jobRow({ state: 'failed', completedAt: new Date('2026-05-28T00:10:00.000Z') }),
+      caseRow(),
+    );
+    const caseVersionBefore = cr.version;
+
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send(completeBody());
+
+    expect(res.status).toBe(200);
+    expect(res.body.recovered).toBe(true);
+    // Artifact keys now on the row → "Open as-is" works.
+    expect(job.artifactPdfS3Key).toBe('drafter-artifacts/CASE-1/v15/v15.pdf');
+    expect(job.artifactTxtS3Key).toBe('drafter-artifacts/CASE-1/v15/v15.txt');
+    expect(job.artifactDocxS3Key).toBe('drafter-artifacts/CASE-1/v15/v15.docx');
+    // State stays terminal 'failed' — recovery is not a second terminal transition.
+    expect(job.state).toBe('failed');
+    // The watcher already settled case version/currentVersion/status — recovery must NOT touch them.
+    expect(cr.version).toBe(caseVersionBefore);
+    expect(cr.currentVersion).toBe(14);
+    expect(cr.status).toBe('drafting');
+    // Operator message updated so the RN sees the "partial letter, open as-is" guidance.
+    expect(cr.operatorMessage).toContain('open as-is');
+    // An audit row is written for the recovery.
+    expect(tx.activityLog.create).toHaveBeenCalledTimes(1);
+    expect(tx.activityLog.create.mock.calls[0]?.[0]?.data?.action).toBe('draft_job_artifacts_recovered');
+  });
+
+  it('rejects a genuine duplicate terminal callback (terminal + already has artifacts → 409)', async () => {
+    const { db, tx } = makeDb(
+      jobRow({
+        state: 'done',
+        artifactPdfS3Key: 'drafter-artifacts/CASE-1/v15/v15.pdf',
+        artifactTxtS3Key: 'drafter-artifacts/CASE-1/v15/v15.txt',
+        completedAt: new Date('2026-05-28T00:08:00.000Z'),
+      }),
+      caseRow({ status: 'physician_review' }),
+    );
+
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send(completeBody({ runComplete: true, operatorState: 'ready', gradeSidecar: { probative_score: 9, grade: 'A', ship_recommendation: 'ship' } }));
+
+    expect(res.status).toBe(409);
+    expect(tx.activityLog.create).not.toHaveBeenCalled();
+  });
+
+  it('completes a non-terminal running job normally (200, bumps case version, ship → physician_review)', async () => {
+    const { db, job, caseRow: cr } = makeDb(jobRow({ state: 'running' }), caseRow());
+    const caseVersionBefore = cr.version;
+
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send(completeBody({ runComplete: true, operatorState: 'ready', gradeSidecar: { probative_score: 9, grade: 'A', ship_recommendation: 'ship' } }));
+
+    expect(res.status).toBe(200);
+    expect(res.body.recovered).toBeUndefined();
+    expect(job.state).toBe('done');
+    expect(cr.version).toBe(caseVersionBefore + 1);
+    expect(cr.status).toBe('physician_review');
+  });
+
+  it('returns 404 for an unknown job', async () => {
+    const { db } = makeDb(jobRow(), caseRow());
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/drafter/jobs/NOPE/complete')
+      .send(completeBody());
+    expect(res.status).toBe(404);
+  });
+});

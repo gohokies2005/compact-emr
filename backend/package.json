@@ -19,27 +19,29 @@
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
+    "@aws-sdk/client-lambda": "^3.1057.0",
     "@aws-sdk/client-s3": "latest",
+    "@aws-sdk/client-secrets-manager": "latest",
     "@aws-sdk/client-sqs": "latest",
+    "@aws-sdk/s3-request-presigner": "latest",
     "@prisma/client": "latest",
     "express": "latest",
     "jose": "latest",
-    "serverless-http": "latest",
-    "@aws-sdk/client-secrets-manager": "latest",
-    "@aws-sdk/s3-request-presigner": "latest"
+    "serverless-http": "latest"
   },
   "devDependencies": {
+    "@eslint/js": "latest",
     "@types/aws-lambda": "latest",
     "@types/express": "latest",
     "@types/node": "latest",
     "@types/supertest": "latest",
     "eslint": "latest",
-    "@eslint/js": "latest",
+    "prisma": "latest",
+    "supertest": "latest",
+    "tsx": "latest",
     "typescript": "latest",
     "typescript-eslint": "latest",
-    "tsx": "latest",
-    "vitest": "latest",
-    "prisma": "latest",
-    "supertest": "latest"
+    "vitest": "latest"
   }
 }

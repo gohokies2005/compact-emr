@@ -5,9 +5,12 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
-import { isAssignedPhysicianForCase } from '../services/physician-resolver.js';
+import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { buildLetterRevisionKey } from '../services/s3-key-safety.js';
 import { cleanProseForSave, sanityCheckLetterText, computeLockedRanges, type SanityFinding } from '../services/letter-sanity.js';
+import { applyStructuredEdit, type EditProposal } from '../services/letter-edit-apply.js';
+import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from '../services/case-status-transitions.js';
+import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import type { AppDb } from '../services/db-types.js';
 
 /**
@@ -42,8 +45,17 @@ export interface RenderInvokeResult {
  *  concrete sync-invoke impl (letter-render-invoke.ts) is wired at mount in server.ts. */
 export type RenderInvoker = (input: RenderInvokeInput) => Promise<RenderInvokeResult>;
 
+/** Surgical-AI proposer — the LLM (Opus 4.8) call, injected so it's a deterministic stub in
+ *  unit tests (same pattern as renderLetter). It returns a STRUCTURED edit + the metered cost;
+ *  the deterministic applyStructuredEdit applies it. The concrete impl (Anthropic SDK + the
+ *  bounded-edit prompt) is wired at mount. Cloud meters the key (no free Claude-Max lane). */
+export interface SurgicalProposeInput { instruction: string; letterText: string; }
+export interface SurgicalProposeOutput { proposal: EditProposal; costUsd: number; model: string; }
+export type SurgicalProposer = (input: SurgicalProposeInput) => Promise<SurgicalProposeOutput>;
+
 export interface LetterRouterDeps {
   renderLetter: RenderInvoker;
+  proposeSurgicalEdit?: SurgicalProposer;
   s3?: S3Client;
   bucketName?: string;
 }
@@ -213,6 +225,173 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       }
 
       res.json({ data: { version: newVersion, rendered: { pdf: rendered.ok, docx: rendered.ok }, warnings } });
+    }),
+  );
+
+  // ── POST surgical-ai — physician-only bounded LLM edit (propose, or apply a proposal) ──
+  // Body: { instruction } to PROPOSE (returns proposal + preview + metered cost, no save), or
+  // { apply: true, proposal } to APPLY a previewed proposal via the save path. The LLM only
+  // runs on PROPOSE; APPLY is deterministic (applyStructuredEdit re-validates against the
+  // current text). Cost is logged at propose time (the spend happens there).
+  router.post(
+    '/cases/:id/letter/surgical-ai',
+    requireRole(['admin', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      const body = (req.body ?? {}) as { instruction?: unknown; apply?: unknown; proposal?: EditProposal };
+
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      await enforcePhysicianAssignment(caseId, user.role, user.sub, c.assignedPhysicianId);
+      if (!EDITABLE_STATUSES.has(c.status)) throw new HttpError(409, 'conflict', `Letter is not editable in status '${c.status}'.`, { reason: 'not_editable', caseId, status: c.status });
+
+      const bucketName = bucket();
+      if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
+      const cur = await resolveCurrent(caseId, c.currentVersion);
+      if (cur === null) throw new HttpError(409, 'conflict', 'No current letter to edit.', { reason: 'no_letter', caseId });
+      const oldText = await readTxtFromS3(bucketName, cur.txtKey);
+
+      // ── APPLY a previewed proposal (deterministic, no LLM) ──
+      if (body.apply === true) {
+        if (body.proposal === undefined) throw new HttpError(400, 'bad_request', 'apply:true requires proposal', { caseId });
+        const applied = applyStructuredEdit(oldText, body.proposal);
+        if (!applied.ok) throw new HttpError(422, 'conflict', `surgical edit no longer applies: ${applied.error}`, { reason: 'edit_unappliable', caseId });
+        const warnings: SanityFinding[] = sanityCheckLetterText(oldText, applied.newText);
+        const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
+        if (veteran === null) throw new HttpError(409, 'conflict', 'Veteran not found for case.', { caseId });
+        const newVersion = c.currentVersion + 1;
+        const keys = {
+          txtKey: buildLetterRevisionKey(caseId, newVersion, 'txt'),
+          pdfKey: buildLetterRevisionKey(caseId, newVersion, 'pdf'),
+          docxKey: buildLetterRevisionKey(caseId, newVersion, 'docx'),
+        };
+        const caseData = { id: caseId, veteran_name: `${veteran.firstName} ${veteran.lastName}`.trim(), veteran_last: veteran.lastName, claimed_condition: c.claimedCondition };
+        const rendered = await deps.renderLetter({ caseData, letterText: applied.newText, version: newVersion, draft: true, bucket: bucketName, keys });
+        if (!rendered.ok) throw new HttpError(502, 'internal_error', 'Render failed; nothing saved.', { reason: 'render_failed', caseId });
+        try {
+          await db.$transaction(async (tx) => {
+            await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: c.currentVersion, source: 'surgical_ai', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: warnings } });
+            await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, version: { increment: 1 } } });
+            await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_surgical_ai_applied', caseId, veteranId: c.veteranId, detailsJson: { version: newVersion, anchor_fallback: applied.anchor_fallback, warnings: warnings.map((w) => w.rule) } } });
+          });
+        } catch (e: unknown) {
+          if ((e as { code?: string }).code === 'P2002') throw new HttpError(409, 'conflict', 'Another save advanced the version; reload and re-propose.', { reason: 'concurrent_save', caseId });
+          throw e;
+        }
+        res.json({ data: { version: newVersion, warnings } });
+        return;
+      }
+
+      // ── PROPOSE (LLM runs here; metered) ──
+      if (typeof body.instruction !== 'string' || body.instruction.trim() === '') throw new HttpError(400, 'bad_request', 'instruction (non-empty string) is required to propose', { caseId });
+      if (deps.proposeSurgicalEdit === undefined) throw new HttpError(503, 'internal_error', 'Surgical-AI is not configured (no proposer wired).', { reason: 'surgical_ai_not_configured', caseId });
+      const out = await deps.proposeSurgicalEdit({ instruction: body.instruction, letterText: oldText });
+      // Dry-run the proposal so the physician previews a deterministically-appliable edit.
+      const dry = applyStructuredEdit(oldText, out.proposal);
+      await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_surgical_ai_proposed', caseId, veteranId: c.veteranId, detailsJson: { instruction: body.instruction.slice(0, 500), model: out.model, costUsd: out.costUsd, appliable: dry.ok } } });
+      if (!dry.ok) {
+        res.status(422).json({ error: { code: 'conflict', message: `proposed edit does not apply: ${dry.error}`, details: { reason: 'edit_unappliable', proposal: out.proposal, costUsd: out.costUsd } } });
+        return;
+      }
+      res.json({ data: { proposal: out.proposal, preview: dry.newText, warnings: sanityCheckLetterText(oldText, dry.newText), costUsd: out.costUsd, model: out.model } });
+    }),
+  );
+
+  // ── POST approve — physician finalize: chart-readiness + version-match + final render ──
+  router.post(
+    '/cases/:id/letter/approve',
+    requireRole(['admin', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      // Physician must be the assigned physician (admin may act). Resolve identity.
+      if (user.role === 'physician') {
+        const physician = await resolveCurrentPhysician(db, user.sub);
+        if (physician === null || c.assignedPhysicianId !== physician.id) {
+          throw new HttpError(403, 'forbidden', 'Physician is not assigned to this case.', { caseId });
+        }
+      }
+      // Chart-readiness gate (unbypassable — mirrors sign-offs.ts).
+      const readiness = evaluateChartReadiness(await db.fileReadStatus.findMany({ where: { caseId } }));
+      if (!readiness.ready) throw new HttpError(409, 'chart_not_ready', 'Approve blocked: chart-readiness gate failed.', { caseId, blockingFiles: readiness.blockingFiles });
+      // A formal sign-off must already exist (recorded via POST /cases/:id/sign-off). Approve
+      // finalizes; it does not replace the sign-off questionnaire.
+      const signOffs = await db.signOff.findMany({ where: { caseId } });
+      if (signOffs.length === 0) throw new HttpError(409, 'conflict', 'Record the physician sign-off before approving.', { reason: 'sign_off_required', caseId });
+      // Status transition must be legal + role-permitted (physician_review → delivered).
+      if (!isValidCaseStatusTransition(c.status, 'delivered') || !canRolePerformCaseStatusTransition(user.role, c.status, 'delivered')) {
+        throw new HttpError(409, 'conflict', `Cannot approve from status '${c.status}'.`, { reason: 'bad_transition', caseId, status: c.status });
+      }
+
+      const bucketName = bucket();
+      if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
+      const cur = await resolveCurrent(caseId, c.currentVersion);
+      if (cur === null) throw new HttpError(409, 'conflict', 'No current letter to approve.', { reason: 'no_letter', caseId });
+      const text = await readTxtFromS3(bucketName, cur.txtKey);
+
+      const newVersion = c.currentVersion + 1;
+      const keys = {
+        txtKey: buildLetterRevisionKey(caseId, newVersion, 'txt'),
+        pdfKey: buildLetterRevisionKey(caseId, newVersion, 'pdf'),
+        docxKey: buildLetterRevisionKey(caseId, newVersion, 'docx'),
+      };
+      const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
+      if (veteran === null) throw new HttpError(409, 'conflict', 'Veteran not found for case.', { caseId });
+      const caseData = { id: caseId, veteran_name: `${veteran.firstName} ${veteran.lastName}`.trim(), veteran_last: veteran.lastName, claimed_condition: c.claimedCondition };
+
+      // Render FINAL (no DRAFT watermark) at the new version.
+      const rendered = await deps.renderLetter({ caseData, letterText: text, version: newVersion, draft: false, bucket: bucketName, keys });
+      if (!rendered.ok) throw new HttpError(502, 'internal_error', 'Final render failed; not approved.', { reason: 'render_failed', caseId });
+      // Version-match guard (Ryan's safety requirement): the final artifact MUST be the version
+      // we're advancing to — never a stale one.
+      if (rendered.version !== newVersion) throw new HttpError(500, 'internal_error', 'Render version mismatch; refusing to approve.', { caseId, expected: newVersion, got: rendered.version });
+
+      try {
+        await db.$transaction(async (tx) => {
+          await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: c.currentVersion, source: 'approved_final', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: null } });
+          await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, status: 'delivered', version: { increment: 1 } } });
+          await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_approved', caseId, veteranId: c.veteranId, detailsJson: { version: newVersion, finalArtifact: keys.pdfKey } } });
+        });
+      } catch (e: unknown) {
+        if ((e as { code?: string }).code === 'P2002') throw new HttpError(409, 'conflict', 'Another change advanced the version; reload and re-approve.', { reason: 'concurrent_save', caseId });
+        throw e;
+      }
+      res.json({ data: { version: newVersion, status: 'delivered', finalPdfKey: keys.pdfKey } });
+    }),
+  );
+
+  // ── POST decline — physician sends the letter back to the RN with a reason ──
+  router.post(
+    '/cases/:id/letter/decline',
+    requireRole(['admin', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      const body = (req.body ?? {}) as { reason?: unknown };
+      if (typeof body.reason !== 'string' || body.reason.trim() === '') throw new HttpError(400, 'bad_request', 'reason (non-empty string) is required', { caseId });
+
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      if (user.role === 'physician') {
+        const physician = await resolveCurrentPhysician(db, user.sub);
+        if (physician === null || c.assignedPhysicianId !== physician.id) {
+          throw new HttpError(403, 'forbidden', 'Physician is not assigned to this case.', { caseId });
+        }
+      }
+      if (!isValidCaseStatusTransition(c.status, 'correction_requested') || !canRolePerformCaseStatusTransition(user.role, c.status, 'correction_requested')) {
+        throw new HttpError(409, 'conflict', `Cannot decline from status '${c.status}'.`, { reason: 'bad_transition', caseId, status: c.status });
+      }
+
+      await db.$transaction(async (tx) => {
+        // operatorMessage is the existing RN-facing channel (rendered in the ops UI).
+        await tx.case.update({ where: { id: caseId }, data: { status: 'correction_requested', operatorMessage: body.reason as string, version: { increment: 1 } } });
+        await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_declined', caseId, veteranId: c.veteranId, detailsJson: { reason: (body.reason as string).slice(0, 1000) } } });
+      });
+      res.json({ data: { status: 'correction_requested' } });
     }),
   );
 

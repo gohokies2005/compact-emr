@@ -525,7 +525,7 @@ describe('Phase 5 flat-id chart-entry CRUD (conditions + problems + medications)
   it('PATCH /conditions/:id updates fields, increments version, writes activity', async () => {
     const db = new MockDb();
     db.veterans.set('TEST-001', sampleVeteran());
-    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: '9411', ratingPct: 50, grantedDate: null } });
+    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: '9411', ratingPct: 50, status: 'service_connected', grantedDate: null } });
     const token = await makeJwt(['ops_staff']);
     const res = await request(createApp({ db: db as unknown as AppDb }))
       .patch('/api/v1/conditions/COND-1')
@@ -545,7 +545,7 @@ describe('Phase 5 flat-id chart-entry CRUD (conditions + problems + medications)
   it('PATCH /conditions/:id returns 409 on stale version', async () => {
     const db = new MockDb();
     db.veterans.set('TEST-001', sampleVeteran());
-    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, grantedDate: null } });
+    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, status: 'service_connected', grantedDate: null } });
     const stale = db.conditions.get('COND-1')!;
     db.conditions.set('COND-1', { ...stale, version: 3 });
     const token = await makeJwt(['ops_staff']);
@@ -573,7 +573,7 @@ describe('Phase 5 flat-id chart-entry CRUD (conditions + problems + medications)
   it('DELETE /conditions/:id removes the row, resolves veteranId for activity', async () => {
     const db = new MockDb();
     db.veterans.set('TEST-001', sampleVeteran());
-    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, grantedDate: null } });
+    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, status: 'service_connected', grantedDate: null } });
     const token = await makeJwt(['ops_staff']);
     const res = await request(createApp({ db: db as unknown as AppDb }))
       .delete('/api/v1/conditions/COND-1')
@@ -582,6 +582,51 @@ describe('Phase 5 flat-id chart-entry CRUD (conditions + problems + medications)
     expect(res.status).toBe(204);
     expect(db.conditions.size).toBe(0);
     expect(db.activities[0]?.data).toMatchObject({ action: 'sc_condition_deleted', veteranId: 'TEST-001', detailsJson: { conditionId: 'COND-1' } });
+  });
+
+  it('POST /veterans/:id/conditions defaults status to service_connected and accepts an explicit status', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    const token = await makeJwt(['ops_staff']);
+    const app = createApp({ db: db as unknown as AppDb });
+
+    const def = await request(app).post('/api/v1/veterans/TEST-001/conditions').set('Authorization', `Bearer ${token}`).send({ condition: 'PTSD' });
+    expect(def.status).toBe(201);
+    expect(def.body.data.status).toBe('service_connected');
+
+    const pending = await request(app).post('/api/v1/veterans/TEST-001/conditions').set('Authorization', `Bearer ${token}`).send({ condition: 'Sleep apnea', status: 'pending' });
+    expect(pending.status).toBe(201);
+    expect(pending.body.data.status).toBe('pending');
+  });
+
+  it('PATCH /conditions/:id flips claim status (service_connected -> denied) and logs the field', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, status: 'service_connected', grantedDate: null } });
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .patch('/api/v1/conditions/COND-1')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ version: 1, status: 'denied' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('denied');
+    expect(res.body.data.version).toBe(2);
+    expect(db.activities[0]?.data).toMatchObject({ action: 'sc_condition_updated', detailsJson: { fields: ['status'] } });
+  });
+
+  it('PATCH /conditions/:id rejects an invalid claim status with 400', async () => {
+    const db = new MockDb();
+    db.veterans.set('TEST-001', sampleVeteran());
+    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, status: 'service_connected', grantedDate: null } });
+    const token = await makeJwt(['ops_staff']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .patch('/api/v1/conditions/COND-1')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ version: 1, status: 'granted' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('bad_request');
   });
 
   it('PATCH /problems/:id (flat) updates and increments version', async () => {
@@ -647,7 +692,7 @@ describe('Phase 5 flat-id chart-entry CRUD (conditions + problems + medications)
   it('flat-id PATCH/DELETE reject physician role with 403', async () => {
     const db = new MockDb();
     db.veterans.set('TEST-001', sampleVeteran());
-    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, grantedDate: null } });
+    await db.scCondition.create({ data: { veteranId: 'TEST-001', condition: 'PTSD', dcCode: null, ratingPct: null, status: 'service_connected', grantedDate: null } });
     const token = await makeJwt(['physician']);
     const patchRes = await request(createApp({ db: db as unknown as AppDb }))
       .patch('/api/v1/conditions/COND-1')

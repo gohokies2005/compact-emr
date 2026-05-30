@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { apiDelete, apiGet, apiPatch, apiPost } from './client';
-import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition, Veteran, YesNoUnknown } from '../types/prisma';
+import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition, ScConditionStatus, Veteran, YesNoUnknown } from '../types/prisma';
 
 export interface Envelope<T> { readonly data: T; }
 export interface Paginated<T> { readonly data: readonly T[]; readonly nextCursor?: string; }
@@ -28,8 +28,8 @@ export async function createVeteran(input: CreateVeteranInput): Promise<Envelope
 export async function getVeteran(id: string): Promise<Envelope<VeteranDetail>> { return apiGet(`/api/v1/veterans/${encodeURIComponent(id)}`); }
 export async function updateVeteran(id: string, input: UpdateVeteranInput): Promise<Envelope<Veteran>> { return apiPatch(`/api/v1/veterans/${encodeURIComponent(id)}`, input); }
 
-export async function addScCondition(veteranId: string, body: { condition: string; dcCode?: string; ratingPct?: number; grantedDate?: string }): Promise<Envelope<ScCondition>> { return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/conditions`, body); }
-export async function updateScCondition(id: string, body: Partial<{ condition: string; dcCode: string; ratingPct: number; grantedDate: string }> & { version: number }): Promise<Envelope<ScCondition>> { return apiPatch(`/api/v1/conditions/${encodeURIComponent(id)}`, body); }
+export async function addScCondition(veteranId: string, body: { condition: string; dcCode?: string; ratingPct?: number; status?: ScConditionStatus; grantedDate?: string }): Promise<Envelope<ScCondition>> { return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/conditions`, body); }
+export async function updateScCondition(id: string, body: Partial<{ condition: string; dcCode: string; ratingPct: number; status: ScConditionStatus; grantedDate: string }> & { version: number }): Promise<Envelope<ScCondition>> { return apiPatch(`/api/v1/conditions/${encodeURIComponent(id)}`, body); }
 export async function deleteScCondition(id: string): Promise<void> { return apiDelete(`/api/v1/conditions/${encodeURIComponent(id)}`); }
 
 export async function addProblem(veteranId: string, body: { problem: string; notes?: string }): Promise<Envelope<ActiveProblem>> { return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/problems`, body); }

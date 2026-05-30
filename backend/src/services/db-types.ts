@@ -314,12 +314,15 @@ export interface PhysicianDelegate {
 
 // ====================== Phase 5: ScCondition / ActiveProblem / ActiveMedication ======================
 
+export type ScConditionStatus = 'service_connected' | 'pending' | 'denied';
+
 export interface ScConditionRecord {
   id: string;
   veteranId: string;
   condition: string;
   dcCode: string | null;
   ratingPct: number | null;
+  status: ScConditionStatus;
   grantedDate: Date | null;
   createdAt: Date;
   updatedAt: Date;

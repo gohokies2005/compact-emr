@@ -1,4 +1,15 @@
+import type { ScConditionStatus } from './db-types.js';
 import { badRequest, isRecord, optionalString, requiredNonEmptyString } from './validation-helpers.js';
+
+const SC_CONDITION_STATUSES: readonly ScConditionStatus[] = ['service_connected', 'pending', 'denied'];
+
+/** Validate an SC-condition VA claim status against the enum. */
+function parseScConditionStatus(value: unknown): ScConditionStatus {
+  if (typeof value !== 'string' || !SC_CONDITION_STATUSES.includes(value as ScConditionStatus)) {
+    badRequest("status must be one of 'service_connected', 'pending', 'denied'", { field: 'status', value });
+  }
+  return value as ScConditionStatus;
+}
 
 const ICD10_PATTERN = /^[A-Z][0-9]{2}(?:\.[A-Z0-9]{1,4})?[A-Z0-9]?$/i;
 const MAX_PROBLEM_LEN = 200;
@@ -89,6 +100,7 @@ export interface ParsedScConditionCreate {
   condition: string;
   dcCode: string | null;
   ratingPct: number | null;
+  status: ScConditionStatus;
   grantedDate: Date | null;
 }
 
@@ -98,6 +110,7 @@ export function parseScConditionCreate(body: unknown): ParsedScConditionCreate {
     condition: requiredNonEmptyString(body, 'condition', MAX_CONDITION_LEN),
     dcCode: optionalString(body, 'dcCode', MAX_DC_CODE_LEN),
     ratingPct: optionalRatingPct(body),
+    status: body.status === undefined ? 'service_connected' : parseScConditionStatus(body.status),
     grantedDate: dateStringToDate(optionalDateString(body, 'grantedDate')),
   };
 }
@@ -110,7 +123,7 @@ export function parseScConditionCreate(body: unknown): ParsedScConditionCreate {
 
 export interface ParsedScConditionPatch {
   version: number;
-  data: { condition?: string; dcCode?: string | null; ratingPct?: number | null; grantedDate?: Date | null };
+  data: { condition?: string; dcCode?: string | null; ratingPct?: number | null; status?: ScConditionStatus; grantedDate?: Date | null };
   changedFields: string[];
 }
 
@@ -131,6 +144,10 @@ export function parseScConditionPatch(body: unknown): ParsedScConditionPatch {
   if (body.ratingPct !== undefined) {
     data.ratingPct = optionalRatingPct(body);
     changedFields.push('ratingPct');
+  }
+  if (body.status !== undefined) {
+    data.status = parseScConditionStatus(body.status);
+    changedFields.push('status');
   }
   if (body.grantedDate !== undefined) {
     data.grantedDate = dateStringToDate(optionalDateString(body, 'grantedDate'));

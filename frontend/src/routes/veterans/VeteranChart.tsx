@@ -5,13 +5,14 @@ import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { TabBar, type TabItem } from '../../components/ui/TabBar';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { addMedication, addProblem, addScCondition, deleteMedication, deleteProblem, deleteScCondition, downloadDocument, getVeteran, listDocuments, presignDocument, recordDocument, uploadToPresignedUrl } from '../../api/veterans';
+import { addMedication, addProblem, addScCondition, deleteMedication, deleteProblem, deleteScCondition, downloadDocument, getVeteran, listDocuments, presignDocument, recordDocument, updateScCondition, uploadToPresignedUrl } from '../../api/veterans';
+import { ConflictError } from '../../api/client';
 import { createCase, type CreateCaseInput } from '../../api/cases';
 import { NewClaimModal } from '../cases/NewClaimModal';
 import { ChartNotesPanel } from './ChartNotesPanel';
 import { ConditionSelect } from '../../components/ConditionSelect';
 import { classifyEntry, isZip, uploadErrorReason, type CandidateResult } from './documentUpload';
-import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition } from '../../types/prisma';
+import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition, ScConditionStatus } from '../../types/prisma';
 
 const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
 
@@ -20,13 +21,26 @@ const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
 // stacked below the chart and hard to find), then the clinical chart tabs.
 type ChartTab = 'claims' | 'notes' | 'documents' | 'conditions' | 'problems' | 'medications';
 const CHART_TABS: readonly TabItem<ChartTab>[] = [
-  { id: 'claims', label: 'Pending Claims' },
+  { id: 'claims', label: 'FRN Claims' },
   { id: 'notes', label: 'Staff Notes' },
   { id: 'documents', label: 'Documents' },
   { id: 'conditions', label: 'Established Service Connected Conditions' },
   { id: 'problems', label: 'Active Problems' },
   { id: 'medications', label: 'Medications' },
 ];
+
+// VA claim status per SC-condition row — lets the chart hold the veteran's full claim history
+// (granted/established, awaiting a decision, or denied), not just already-service-connected ones.
+const SC_STATUS_OPTIONS: readonly { readonly value: ScConditionStatus; readonly label: string }[] = [
+  { value: 'service_connected', label: 'Service-connected' },
+  { value: 'pending', label: 'Pending' },
+  { value: 'denied', label: 'Denied' },
+];
+function scStatusClass(status: ScConditionStatus): string {
+  if (status === 'pending') return 'text-amber-700';
+  if (status === 'denied') return 'text-rose-700';
+  return 'text-emerald-700';
+}
 
 export function VeteranChart() {
   const { id } = useParams();
@@ -64,10 +78,37 @@ export function VeteranChart() {
 }
 
 function ConditionsPanel({ veteranId, rows, onChange }: { readonly veteranId: string; readonly rows: readonly ScCondition[]; readonly onChange: () => Promise<void> }) {
-  const [condition, setCondition] = useState(''); const [dcCode, setDcCode] = useState('');
-  const add = useMutation({ mutationFn: () => addScCondition(veteranId, { condition, ...(dcCode && { dcCode }) }), onSuccess: async () => { setCondition(''); setDcCode(''); await onChange(); } });
+  const [condition, setCondition] = useState(''); const [dcCode, setDcCode] = useState(''); const [status, setStatus] = useState<ScConditionStatus>('service_connected');
+  const add = useMutation({ mutationFn: () => addScCondition(veteranId, { condition, ...(dcCode && { dcCode }), status }), onSuccess: async () => { setCondition(''); setDcCode(''); setStatus('service_connected'); await onChange(); } });
   const del = useMutation({ mutationFn: deleteScCondition, onSuccess: onChange });
-  return <div className="space-y-4"><div className="flex flex-col gap-2 sm:flex-row sm:items-start"><div className="sm:flex-1"><ConditionSelect label="Condition" value={condition} onChange={setCondition} /></div><input className="input sm:w-40" placeholder="DC code" value={dcCode} onChange={(e) => setDcCode(e.target.value)} /><Button size="sm" onClick={() => add.mutate()} disabled={!condition}>Add</Button></div><Rows rows={rows.map((r) => ({ id: r.id, cols: [r.condition, r.dcCode ?? '—', r.ratingPct?.toString() ?? '—'], onDelete: () => { if (window.confirm('Remove this SC condition?')) del.mutate(r.id); } }))} /></div>;
+  return <div className="space-y-4">
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+      <div className="sm:flex-1"><ConditionSelect label="Condition" value={condition} onChange={setCondition} /></div>
+      <input className="input sm:w-32" placeholder="DC code" value={dcCode} onChange={(e) => setDcCode(e.target.value)} />
+      <select className="input sm:w-44" value={status} onChange={(e) => setStatus(e.target.value as ScConditionStatus)} aria-label="Claim status">{SC_STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
+      <Button size="sm" onClick={() => add.mutate()} disabled={!condition}>Add</Button>
+    </div>
+    {rows.length === 0
+      ? <EmptyState title="Nothing recorded yet" message="Add the first condition above." />
+      : <div className="divide-y divide-slate-100">{rows.map((r) => <ScConditionRow key={r.id} row={r} onChange={onChange} onDelete={() => { if (window.confirm('Remove this SC condition?')) del.mutate(r.id); }} />)}</div>}
+  </div>;
+}
+
+// One SC-condition row. The status <select> is editable in place: changing it PATCHes the row
+// (optimistic-concurrency via row.version) so the chart's full claim history stays current.
+function ScConditionRow({ row, onChange, onDelete }: { readonly row: ScCondition; readonly onChange: () => Promise<void>; readonly onDelete: () => void }) {
+  const update = useMutation({
+    mutationFn: (next: ScConditionStatus) => updateScCondition(row.id, { version: row.version, status: next }),
+    onSuccess: () => onChange(),
+    onError: async (err) => { if (err instanceof ConflictError) { await onChange(); window.alert('This condition was updated elsewhere. Reloaded — please retry.'); } },
+  });
+  return <div className="flex items-center justify-between py-3 text-sm">
+    <div className="flex gap-6 text-slate-700"><span>{row.condition}</span><span className="text-slate-500">{row.dcCode ?? '—'}</span><span className="text-slate-500">{row.ratingPct != null ? `${row.ratingPct}%` : '—'}</span></div>
+    <div className="flex items-center gap-4">
+      <select className={`input h-8 w-40 py-0 text-xs font-medium ${scStatusClass(row.status)}`} value={row.status} disabled={update.isPending} onChange={(e) => update.mutate(e.target.value as ScConditionStatus)} aria-label={`Claim status for ${row.condition}`}>{SC_STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
+      <button className="text-rose-600" onClick={onDelete}>Delete</button>
+    </div>
+  </div>;
 }
 function ProblemsPanel({ veteranId, rows, onChange }: { readonly veteranId: string; readonly rows: readonly ActiveProblem[]; readonly onChange: () => Promise<void> }) {
   const [problem, setProblem] = useState(''); const add = useMutation({ mutationFn: () => addProblem(veteranId, { problem }), onSuccess: async () => { setProblem(''); await onChange(); } }); const del = useMutation({ mutationFn: deleteProblem, onSuccess: onChange });

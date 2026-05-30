@@ -173,12 +173,24 @@ model Veteran {
   @@map("veterans")
 }
 
+// VA claim status of a charted condition: service_connected (granted/established — the default
+// and the historical meaning of this table), pending (claim filed, awaiting decision), or denied.
+// Lets the chart capture the veteran's full claim history, not just already-granted conditions.
+enum ScConditionStatus {
+  service_connected
+  pending
+  denied
+
+  @@map("sc_condition_status")
+}
+
 model ScCondition {
   id          String   @id @default(uuid())
   veteranId   String   @map("veteran_id")
   condition   String
   dcCode      String?  @map("dc_code")
   ratingPct   Int?     @map("rating_pct")
+  status      ScConditionStatus @default(service_connected)
   grantedDate DateTime? @map("granted_date") @db.Date
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)

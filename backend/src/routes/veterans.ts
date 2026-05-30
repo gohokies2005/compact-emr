@@ -288,6 +288,7 @@ export function createVeteransRouter(db: AppDb): Router {
             condition: parsed.condition,
             dcCode: parsed.dcCode,
             ratingPct: parsed.ratingPct,
+            status: parsed.status,
             grantedDate: parsed.grantedDate,
           },
         });
@@ -295,7 +296,7 @@ export function createVeteransRouter(db: AppDb): Router {
           actorUserId: actor,
           action: 'sc_condition_created',
           veteranId,
-          detailsJson: { veteranId, fields: ['condition', 'dcCode', 'ratingPct'] },
+          detailsJson: { veteranId, fields: ['condition', 'dcCode', 'ratingPct', 'status'] },
         });
         return row;
       });

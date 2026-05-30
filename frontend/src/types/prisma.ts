@@ -15,7 +15,8 @@ export interface AppUser extends VersionedRecord { readonly id: string; readonly
 export interface CognitoGroup { readonly name: Role; readonly createdAt: string; }
 export interface AppUserRole { readonly userId: string; readonly role: Role; }
 export interface Veteran extends VersionedRecord { readonly id: string; readonly lastName: string; readonly firstName: string; readonly dob: string; readonly email: string; readonly phone?: string; readonly address?: string; readonly branch: string; readonly serviceStartYear: number; readonly serviceEndYear: number; readonly combatVeteran: YesNoUnknown; readonly pactArea: YesNoUnknown; readonly teraConceded: YesNoUnknown; readonly heightIn?: number; readonly weightLb?: number; readonly createdAt: string; }
-export interface ScCondition extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly condition: string; readonly dcCode?: string; readonly ratingPct?: number; readonly grantedDate?: string; readonly createdAt: string; }
+export type ScConditionStatus = 'service_connected' | 'pending' | 'denied';
+export interface ScCondition extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly condition: string; readonly dcCode?: string; readonly ratingPct?: number; readonly status: ScConditionStatus; readonly grantedDate?: string; readonly createdAt: string; }
 export interface ActiveProblem extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly problem: string; readonly notes?: string; readonly createdAt: string; }
 export interface ActiveMedication extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly drugName: string; readonly dose?: string; readonly frequency?: string; readonly indication?: string; readonly createdAt: string; }
 // 'blocked' added for the condition-not-in-library feature (task #155). 'hold' added on

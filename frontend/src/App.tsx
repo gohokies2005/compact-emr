@@ -10,6 +10,7 @@ import { VeteransPage } from './routes/veterans/VeteransPage';
 import { VeteranChart } from './routes/veterans/VeteranChart';
 import { CasesPage } from './routes/cases/CasesPage';
 import { CaseDetailPage } from './routes/cases/CaseDetailPage';
+import { LetterEditorPage } from './routes/cases/LetterEditorPage';
 import { TemplatesPage } from './routes/stubs/TemplatesPage';
 import { PhysiciansPage } from './routes/stubs/PhysiciansPage';
 import { ActivityPage } from './routes/stubs/ActivityPage';
@@ -32,6 +33,7 @@ export function App() {
     <Route path="/veterans/:id" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><VeteranChart /></ProtectedRoute>} />
     <Route path="/cases" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><CasesPage /></ProtectedRoute>} />
     <Route path="/cases/:id" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><CaseDetailPage /></ProtectedRoute>} />
+    <Route path="/cases/:id/letter" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><LetterEditorPage /></ProtectedRoute>} />
     <Route path="/templates" element={<ProtectedRoute requiredRole={['admin']}><TemplatesPage /></ProtectedRoute>} />
     <Route path="/physicians" element={<ProtectedRoute requiredRole={['admin']}><PhysiciansPage /></ProtectedRoute>} />
     <Route path="/activity" element={<ProtectedRoute requiredRole={['admin']}><ActivityPage /></ProtectedRoute>} />

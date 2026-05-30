@@ -76,4 +76,8 @@ export async function apiPatch<TResponse, TBody = unknown>(path: string, body: T
   const response = await apiClient.patch<TResponse>(path, body);
   return response.data;
 }
+export async function apiPut<TResponse, TBody = unknown>(path: string, body: TBody): Promise<TResponse> {
+  const response = await apiClient.put<TResponse>(path, body);
+  return response.data;
+}
 export async function apiDelete(path: string): Promise<void> { await apiClient.delete(path); }

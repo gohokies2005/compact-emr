@@ -19,6 +19,7 @@ import {
   aws_codebuild as codebuild,
   aws_iam as iam,
   aws_sqs as sqs,
+  aws_ecr as ecr,
 } from 'aws-cdk-lib';
 import type { CompactEmrConfig } from './config.js';
 
@@ -75,6 +76,23 @@ export class ApiStack extends Stack {
       },
     );
 
+    // ── Letter editor: render Lambda repo + surgical-AI secret ──────────────────────────
+    // The render Lambda image is built + pushed by the deploy window (drafter-style); the ECR
+    // repo exists from first deploy so they have somewhere to push. The Lambda itself is only
+    // created once `render_image_tag` is set (a DockerImageFunction needs its image to exist at
+    // deploy — so the first deploy is clean and render-less until the image is pushed).
+    const renderRepo = new ecr.Repository(this, 'LetterRenderRepo', {
+      repositoryName: `compact-emr-${props.config.envName}-render`,
+      removalPolicy: props.config.envName === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+    const renderImageTag = this.node.tryGetContext('render_image_tag') as string | undefined;
+    const renderFnName = `compact-emr-${props.config.envName}-letter-render`;
+    // Anthropic key for surgical-AI (Opus 4.8). Operator fills it post-deploy (like the drafter
+    // key); the API reads it at RUNTIME from this ARN, so filling needs no redeploy.
+    const apiAnthropicSecret = new secretsmanager.Secret(this, 'ApiAnthropicKey', {
+      secretName: `compact-emr-${props.config.envName}/api-anthropic-api-key`,
+    });
+
     const handler = new nodejs.NodejsFunction(this, 'PlaceholderApiLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: path.resolve(__dirname, '../../backend/src/placeholder-lambda.ts'),
@@ -105,6 +123,10 @@ export class ApiStack extends Stack {
         COGNITO_CLIENT_ID: props.userPoolClient.userPoolClientId,
         DATABASE_URL: databaseUrl,
         DATABASE_URL_SECRET_ARN: props.databaseSecret.secretArn,
+        // Letter editor: surgical-AI key (runtime-fetched from this ARN) + render Lambda name
+        // (only set once the render image exists, so the mount wires the invoker only then).
+        API_ANTHROPIC_KEY_SECRET_ARN: apiAnthropicSecret.secretArn,
+        ...(renderImageTag ? { RENDER_LAMBDA_NAME: renderFnName } : {}),
       },
       bundling: {
         externalModules: ['@prisma/client', '@prisma/engines'],
@@ -136,6 +158,25 @@ export class ApiStack extends Stack {
     props.draftQueue.grantSendMessages(handler);
     props.doctorPackQueue.grantSendMessages(handler);
     props.draftJobQueue.grantSendMessages(handler);
+
+    // ── Letter editor grants ──────────────────────────────────────────────────────────
+    // API Lambda reads the surgical-AI key at runtime. (phiBucket RW + documentsKey already
+    // granted above cover the letter-revisions/* artifacts.)
+    apiAnthropicSecret.grantRead(handler);
+    if (renderImageTag) {
+      const renderLambda = new lambda.DockerImageFunction(this, 'LetterRenderLambda', {
+        functionName: renderFnName,
+        code: lambda.DockerImageCode.fromEcr(renderRepo, { tagOrDigest: renderImageTag }),
+        timeout: Duration.seconds(60),
+        memorySize: 1024,
+        tracing: lambda.Tracing.ACTIVE,
+        environment: { ENV_NAME: props.config.envName },
+        // No VPC: touches only S3 + KMS, not RDS — avoids the NAT/ENI cold-start tax.
+      });
+      props.phiBucket.grantReadWrite(renderLambda);        // read the txt + write letter-revisions/*
+      props.documentsKey.grantEncryptDecrypt(renderLambda); // phiBucket is KMS-encrypted
+      renderLambda.grantInvoke(handler);                    // API Lambda invokes it synchronously
+    }
 
 
     const migrationProject = new codebuild.Project(this, 'PrismaMigrateDeployProject', {

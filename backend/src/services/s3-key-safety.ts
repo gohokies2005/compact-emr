@@ -71,3 +71,31 @@ export function isCaseDocumentS3Key(s3Key: unknown): s3Key is string {
   if (!isPathTraversalSafe(s3Key)) return false;
   return /^cases\/[a-zA-Z0-9_-]+\/[a-f0-9-]+-[a-zA-Z0-9._-]+$/.test(s3Key);
 }
+
+/**
+ * letter-revisions/<caseId>/v<N>/letter.{txt,pdf,docx} — the in-EMR letter editor's
+ * versioned source TXT + rendered pair. Distinct prefix from drafter-artifacts/ (the
+ * Fargate drafter's write grant) and cases/ (veteran document uploads), so the editor's
+ * IAM grant is scoped to its own subtree. Server-computed per save via
+ * buildLetterRevisionKey; this validator guards any inbound key (e.g. from the render
+ * Lambda callback) before it is persisted on a LetterRevision row or dereferenced by a
+ * signed-URL endpoint. Immutable per version (matches the "version advances, never
+ * overwrite in place" rule).
+ */
+export function isLetterRevisionS3Key(s3Key: unknown): s3Key is string {
+  if (!isPathTraversalSafe(s3Key)) return false;
+  return /^letter-revisions\/[a-zA-Z0-9_-]+\/v\d+\/letter\.(txt|pdf|docx)$/.test(s3Key);
+}
+
+/**
+ * Build the canonical letter-revision key for a (caseId, version, ext). Throws if the
+ * inputs would produce an unsafe/invalid key — defense-in-depth so a malformed caseId can
+ * never silently escape the letter-revisions/ subtree.
+ */
+export function buildLetterRevisionKey(caseId: string, version: number, ext: 'txt' | 'pdf' | 'docx'): string {
+  const key = `letter-revisions/${caseId}/v${version}/letter.${ext}`;
+  if (!isLetterRevisionS3Key(key)) {
+    throw new Error(`buildLetterRevisionKey produced an invalid key for caseId=${JSON.stringify(caseId)} version=${version}`);
+  }
+  return key;
+}

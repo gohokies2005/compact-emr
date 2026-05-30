@@ -273,6 +273,7 @@ model Case {
   emails            Email[]
   activityLogs      ActivityLog[]
   payments          Payment[]
+  letterRevisions   LetterRevision[]
 
   @@index([veteranId])
   @@index([assignedPhysicianId])
@@ -281,6 +282,47 @@ model Case {
   @@index([veteranId, status])
   @@index([assignedPhysicianId, runComplete, shipRecommendation], map: "cases_physician_inbox_idx")
   @@map("cases")
+}
+
+enum LetterRevisionSource {
+  drafter_run     // mirror of a completed DraftJob (optional; unified-timeline mode)
+  editor_save     // RN/physician full-text WYSIWYG save
+  surgical_ai     // physician surgical-AI limited-scope edit (Phase 2)
+  approved_final  // physician approve -> final render (no DRAFT watermark)
+
+  @@map("letter_revision_source")
+}
+
+// In-EMR letter-editor revision timeline. Every content change is a NEW row + a new
+// immutable S3 v<N> key — the cloud equivalent of the FRN "version advances on any
+// content change; never overwrite in place" HARD RULE. Deliberately separate from
+// DraftJob (pipeline runs, with grade/cost/heartbeat/state semantics + a stuck-job
+// watcher that would sweep a fake row) and from Correction (billable VA-feedback
+// corrections) — an editor save is neither. Source of truth for "latest letter" is
+// max(version) across DraftJob + LetterRevision until/unless drafter completions are
+// mirrored in (the optional unified-timeline mode).
+model LetterRevision {
+  id                String               @id @default(uuid())
+  caseId            String               @map("case_id")
+  version           Int                  // = parentVersion + 1
+  parentVersion     Int                  @map("parent_version")
+  source            LetterRevisionSource
+  artifactTxtS3Key  String               @map("artifact_txt_s3_key")  @db.VarChar(500)
+  artifactPdfS3Key  String?              @map("artifact_pdf_s3_key")  @db.VarChar(500)
+  artifactDocxS3Key String?              @map("artifact_docx_s3_key") @db.VarChar(500)
+  editedBy          String               @map("edited_by")   // cognito sub of the editor
+  editorRole        String               @map("editor_role") // cognito group: physician|ops_staff|admin
+  sanityJson        Json?                @map("sanity_json")  // warn-only sanity findings snapshot
+  createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  case              Case                 @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  // Optimistic-concurrency backstop: two saves against the same base_version both compute
+  // the same new version; the second INSERT hits this unique constraint -> 409 (same
+  // proven pattern as draft_jobs_case_id_in_flight_uq).
+  @@unique([caseId, version], map: "letter_revisions_case_version_uq")
+  @@index([caseId])
+  @@index([caseId, version])
+  @@map("letter_revisions")
 }
 
 model Document {

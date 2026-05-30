@@ -40,6 +40,7 @@ function buildDb(physiciansByCognitoSub: Record<string, PhysicianRecord>): AppDb
     activityLog: {} as never,
     case: {} as never,
     draftJob: {} as never,
+    letterRevision: {} as never,
     correction: {} as never,
     chartNote: {} as never,
     appUser: {} as never,

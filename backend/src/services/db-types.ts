@@ -146,6 +146,7 @@ export interface AppDbTransaction {
   keyDoc: KeyDocDelegate;
   doctorPack: DoctorPackDelegate;
   documentPage: DocumentPageDelegate;
+  letterRevision: LetterRevisionDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -233,6 +234,31 @@ export interface DraftJobDelegate {
   findUnique(args: unknown): Promise<DraftJobRecord | null>;
   create(args: unknown): Promise<DraftJobRecord>;
   update(args: unknown): Promise<DraftJobRecord>;
+}
+
+// LetterRevision — the UNIFIED letter-version timeline (the single source of truth, alongside
+// Case.currentVersion). Every version lands here: editor saves write directly; the drafter
+// mirrors its completions in (source:'drafter_run'). Reads resolve the current letter via
+// Case.currentVersion → the LetterRevision row at that version. See LETTER_EDITOR_BACKEND_PLAN.md.
+export interface LetterRevisionRecord {
+  id: string;
+  caseId: string;
+  version: number;
+  parentVersion: number;
+  source: 'drafter_run' | 'editor_save' | 'surgical_ai' | 'approved_final';
+  artifactTxtS3Key: string;
+  artifactPdfS3Key: string | null;
+  artifactDocxS3Key: string | null;
+  editedBy: string;
+  editorRole: string;
+  sanityJson: unknown;
+  createdAt: Date;
+}
+
+export interface LetterRevisionDelegate {
+  findMany(args: unknown): Promise<readonly LetterRevisionRecord[]>;
+  findFirst(args: unknown): Promise<LetterRevisionRecord | null>;
+  create(args: unknown): Promise<LetterRevisionRecord>;
 }
 
 export interface CorrectionDelegate {

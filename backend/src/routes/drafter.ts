@@ -706,6 +706,29 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
           },
         });
 
+        // Unified letter timeline (LETTER_EDITOR_BACKEND_PLAN.md): mirror this completed
+        // drafter version into LetterRevision so the in-EMR editor resolves the current
+        // letter from ONE table by Case.currentVersion (no DraftJob fallback). Idempotent
+        // find-then-create — re-delivery / late SIGTERM callbacks must not duplicate (the
+        // row carries @@unique([caseId,version])).
+        const existingRev = await tx.letterRevision.findFirst({ where: { caseId: existing.caseId, version: existing.version } });
+        if (existingRev === null) {
+          await tx.letterRevision.create({
+            data: {
+              caseId: existing.caseId,
+              version: existing.version,
+              parentVersion: existing.parentVersion ?? existing.version,
+              source: 'drafter_run',
+              artifactTxtS3Key: parsed.artifactTxtS3Key,
+              artifactPdfS3Key: parsed.artifactPdfS3Key ?? null,
+              artifactDocxS3Key: parsed.artifactDocxS3Key ?? null,
+              editedBy: SERVICE_ACTORS.DRAFTER,
+              editorRole: 'drafter',
+              sanityJson: null,
+            },
+          });
+        }
+
         return { job, case: caseUpdated };
       });
 

@@ -65,6 +65,12 @@ function makeDb(job: DraftJobRow, caseRow: CaseRow) {
       }),
     },
     activityLog: { create: vi.fn(async (_args: { data: { action: string; [k: string]: unknown } }) => ({})) },
+    // Unified-timeline mirror (LetterRevision) written on /complete — findFirst returns null
+    // so the idempotent create path runs; create is a no-op for the test.
+    letterRevision: {
+      findFirst: vi.fn(async () => null),
+      create: vi.fn(async (_args: { data: Record<string, unknown> }) => ({})),
+    },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (inner: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
   return { db, tx, job, caseRow };

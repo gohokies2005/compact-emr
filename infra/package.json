@@ -11,7 +11,10 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
-    "cdk": "cdk"
+    "cdk": "cdk",
+    "preflight:drafter": "node scripts/preflight-drafter-gate.js",
+    "predeploy:drafter:staging": "npm run preflight:drafter",
+    "deploy:drafter:staging": "cdk deploy compact-emr-staging-drafter --context env=staging"
   },
   "dependencies": {
     "aws-cdk-lib": "latest",

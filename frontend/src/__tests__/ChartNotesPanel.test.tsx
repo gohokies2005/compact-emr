@@ -13,7 +13,7 @@ describe('ChartNotesPanel', () => {
   it('renders existing notes with author + the add box', async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><ChartNotesPanel veteranId="VET-1" /></QueryClientProvider>);
-    expect(screen.getByText('Chart notes')).toBeInTheDocument();
+    // The panel is now headless — the "Staff Notes" heading is the parent tab label, not an <h2> here.
     expect(screen.getByRole('button', { name: 'Save note' })).toBeInTheDocument();
     expect(await screen.findByText('Spoke with the veteran today')).toBeInTheDocument();
     expect(screen.getByText(/Added by ops-sub/)).toBeInTheDocument();

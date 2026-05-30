@@ -19,9 +19,8 @@ export function ChartNotesPanel({ veteranId }: { readonly veteranId: string }) {
 
   const notes = notesQuery.data?.data ?? [];
 
-  return <section className="rounded-lg border border-slate-200 bg-white p-6">
-    <h2 className="text-lg font-semibold text-slate-900">Chart notes</h2>
-    <div className="mt-4 space-y-2">
+  return <div>
+    <div className="space-y-2">
       <textarea className="input min-h-20" maxLength={MAX} placeholder="Add a note anyone with chart access can see…" value={draft} onChange={(e) => setDraft(e.target.value)} />
       <div className="flex justify-end"><Button size="sm" onClick={() => create.mutate(draft.trim())} disabled={!draft.trim()} loading={create.isPending}>Save note</Button></div>
     </div>
@@ -30,7 +29,7 @@ export function ChartNotesPanel({ veteranId }: { readonly veteranId: string }) {
       {!notesQuery.isLoading && notes.length === 0 ? <EmptyState title="No notes yet" message="No notes yet. Add the first one above." /> : null}
       <div className="divide-y divide-slate-100">{notes.map((n) => <NoteRow key={n.id} note={n} canEdit={user?.role === 'admin' || n.createdBy === user?.sub} canDelete={user?.role === 'admin'} onChanged={invalidate} />)}</div>
     </div>
-  </section>;
+  </div>;
 }
 
 function NoteRow({ note, canEdit, canDelete, onChanged }: { readonly note: ChartNote; readonly canEdit: boolean; readonly canDelete: boolean; readonly onChanged: () => Promise<void> }) {

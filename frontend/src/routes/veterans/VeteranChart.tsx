@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
+import { TabBar, type TabItem } from '../../components/ui/TabBar';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { addMedication, addProblem, addScCondition, deleteMedication, deleteProblem, deleteScCondition, downloadDocument, getVeteran, listDocuments, presignDocument, recordDocument, uploadToPresignedUrl } from '../../api/veterans';
 import { createCase, type CreateCaseInput } from '../../api/cases';
@@ -14,10 +15,23 @@ import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition } fro
 
 const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
 
+// All six chart sections are top-level tabs. Order is owner-specified (2026-05-30): the
+// previously-buried Pending Claims / Staff Notes / Documents tables come FIRST (they were
+// stacked below the chart and hard to find), then the clinical chart tabs.
+type ChartTab = 'claims' | 'notes' | 'documents' | 'conditions' | 'problems' | 'medications';
+const CHART_TABS: readonly TabItem<ChartTab>[] = [
+  { id: 'claims', label: 'Pending Claims' },
+  { id: 'notes', label: 'Staff Notes' },
+  { id: 'documents', label: 'Documents' },
+  { id: 'conditions', label: 'Established Service Connected Conditions' },
+  { id: 'problems', label: 'Active Problems' },
+  { id: 'medications', label: 'Medications' },
+];
+
 export function VeteranChart() {
   const { id } = useParams();
   const veteranId = id ?? '';
-  const [tab, setTab] = useState<'conditions' | 'problems' | 'medications'>('conditions');
+  const [tab, setTab] = useState<ChartTab>('claims');
   const [claimModalOpen, setClaimModalOpen] = useState(false);
   const qc = useQueryClient();
   const createClaim = useMutation({ mutationFn: (input: CreateCaseInput) => createCase(veteranId, input), onSuccess: async () => { setClaimModalOpen(false); await Promise.all([qc.invalidateQueries({ queryKey: ['veteran', veteranId] }), qc.invalidateQueries({ queryKey: ['documents', veteranId] })]); } });
@@ -30,10 +44,21 @@ export function VeteranChart() {
   const v = veteran.data.data;
   return <AppShell><div className="space-y-6">
     <div className="rounded-lg border border-slate-200 bg-white p-6"><div className="flex flex-col justify-between gap-3 sm:flex-row"><div><h1 className="text-2xl font-semibold text-slate-900">{v.firstName} {v.lastName}</h1><p className="text-sm text-slate-500">{[`MRN ${v.id}`, `DOB ${v.dob}`, v.branch, (v.serviceStartYear ?? v.serviceEndYear) != null ? `${v.serviceStartYear ?? '—'}–${v.serviceEndYear ?? '—'}` : null].filter(Boolean).join(' · ')}</p></div><div className="flex items-center gap-3"><Button size="sm" onClick={() => setClaimModalOpen(true)}>+ New claim</Button><Link className="text-sm text-indigo-600" to="/veterans">Back to veterans</Link></div></div></div>
-    <div className="rounded-lg border border-slate-200 bg-white"><div className="flex border-b border-slate-200 text-sm">{(['conditions','problems','medications'] as const).map((t) => <button key={t} className={`px-4 py-3 ${tab === t ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-slate-500'}`} onClick={() => setTab(t)}>{t === 'conditions' ? 'Service-connected conditions' : t === 'problems' ? 'Active problems' : 'Medications'}</button>)}</div><div className="p-4">{tab === 'conditions' ? <ConditionsPanel veteranId={veteranId} rows={v.scConditions} onChange={invalidate} /> : null}{tab === 'problems' ? <ProblemsPanel veteranId={veteranId} rows={v.activeProblems} onChange={invalidate} /> : null}{tab === 'medications' ? <MedicationsPanel veteranId={veteranId} rows={v.activeMedications} onChange={invalidate} /> : null}</div></div>
-    <DocumentsPanel veteranId={veteranId} cases={v.cases} documents={documents.data?.data ?? []} onChange={invalidate} />
-    <ChartNotesPanel veteranId={veteranId} />
-    <CasesPanel rows={v.cases} />
+    <div className="rounded-lg border border-slate-200 bg-white">
+      <TabBar tabs={CHART_TABS} active={tab} onChange={setTab} className="flex-wrap" />
+      {/* All six panels stay mounted; we toggle visibility with `hidden` rather than
+          conditionally mounting. Conditional mount would unmount DocumentsPanel on a tab
+          switch and silently drop an in-flight upload's status/error line — the upload path
+          was hardened specifically to surface that reason, so we must not lose it. */}
+      <div className="p-4">
+        <div role="tabpanel" hidden={tab !== 'claims'}><CasesPanel rows={v.cases} /></div>
+        <div role="tabpanel" hidden={tab !== 'notes'}><ChartNotesPanel veteranId={veteranId} /></div>
+        <div role="tabpanel" hidden={tab !== 'documents'}><DocumentsPanel veteranId={veteranId} cases={v.cases} documents={documents.data?.data ?? []} onChange={invalidate} /></div>
+        <div role="tabpanel" hidden={tab !== 'conditions'}><ConditionsPanel veteranId={veteranId} rows={v.scConditions} onChange={invalidate} /></div>
+        <div role="tabpanel" hidden={tab !== 'problems'}><ProblemsPanel veteranId={veteranId} rows={v.activeProblems} onChange={invalidate} /></div>
+        <div role="tabpanel" hidden={tab !== 'medications'}><MedicationsPanel veteranId={veteranId} rows={v.activeMedications} onChange={invalidate} /></div>
+      </div>
+    </div>
     <NewClaimModal open={claimModalOpen} onClose={() => setClaimModalOpen(false)} onSubmit={(input) => createClaim.mutateAsync(input).then(() => undefined)} saving={createClaim.isPending} />
   </div></AppShell>;
 }
@@ -134,6 +159,6 @@ function DocumentsPanel({ veteranId, cases, documents, onChange }: { readonly ve
   }
 
   async function openDocument(id: string) { const res = await downloadDocument(id); window.open(res.data.downloadUrl, '_blank', 'noopener,noreferrer'); }
-  return <section id="documents" className="rounded-lg border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold text-slate-900">Documents</h2><p className="mt-1 text-sm text-slate-500">Upload one or more files, or a .zip — PDF, JPG, PNG, DOC, DOCX (max 50 MB each).</p><div className="mt-4 flex flex-col gap-3 sm:flex-row"><select className="input" value={caseId} onChange={(e) => setCaseId(e.target.value)}>{cases.map((c) => <option key={c.id} value={c.id}>{c.id} — {c.claimedCondition}</option>)}</select><select className="input" value={docTag} onChange={(e) => setDocTag(e.target.value)}>{DOC_TAGS.map((t) => <option key={t}>{t}</option>)}</select><input className="text-sm" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.zip,application/pdf,image/jpeg,image/png,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,application/x-zip-compressed" disabled={busy} onChange={(e) => { void onFiles(e.target.files); e.target.value = ''; }} /></div>{status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}<div className="mt-4 divide-y divide-slate-100">{documents.map((d) => <button key={d.id} className="flex w-full justify-between py-3 text-left text-sm hover:bg-slate-50" onClick={() => void openDocument(d.id)}><span>{d.filename}</span><span className="text-slate-500">{d.docTag ?? 'Other'} · {d.uploadedAt}</span></button>)}</div></section>;
+  return <div id="documents"><p className="text-sm text-slate-500">Upload one or more files, or a .zip — PDF, JPG, PNG, DOC, DOCX (max 50 MB each).</p><div className="mt-4 flex flex-col gap-3 sm:flex-row"><select className="input" value={caseId} onChange={(e) => setCaseId(e.target.value)}>{cases.map((c) => <option key={c.id} value={c.id}>{c.id} — {c.claimedCondition}</option>)}</select><select className="input" value={docTag} onChange={(e) => setDocTag(e.target.value)}>{DOC_TAGS.map((t) => <option key={t}>{t}</option>)}</select><input className="text-sm" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.zip,application/pdf,image/jpeg,image/png,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,application/x-zip-compressed" disabled={busy} onChange={(e) => { void onFiles(e.target.files); e.target.value = ''; }} /></div>{status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}<div className="mt-4 divide-y divide-slate-100">{documents.map((d) => <button key={d.id} className="flex w-full justify-between py-3 text-left text-sm hover:bg-slate-50" onClick={() => void openDocument(d.id)}><span>{d.filename}</span><span className="text-slate-500">{d.docTag ?? 'Other'} · {d.uploadedAt}</span></button>)}</div></div>;
 }
-function CasesPanel({ rows }: { readonly rows: readonly Case[] }) { return <section className="rounded-lg border border-slate-200 bg-white p-6"><h2 className="text-lg font-semibold text-slate-900">Cases</h2><div className="mt-4 divide-y divide-slate-100">{rows.map((c) => <Link key={c.id} className="flex justify-between py-3 text-sm hover:bg-slate-50" to={`/cases/${encodeURIComponent(c.id)}`}><span>{c.claimedCondition}</span><span className="text-slate-500">{c.status} · {c.claimType}</span></Link>)}</div>{!rows.length ? <EmptyState title="No cases yet" message="Case detail ships in Phase 4." /> : null}</section>; }
+function CasesPanel({ rows }: { readonly rows: readonly Case[] }) { return <div><div className="divide-y divide-slate-100">{rows.map((c) => <Link key={c.id} className="flex justify-between py-3 text-sm hover:bg-slate-50" to={`/cases/${encodeURIComponent(c.id)}`}><span>{c.claimedCondition}</span><span className="text-slate-500">{c.status} · {c.claimType}</span></Link>)}</div>{!rows.length ? <EmptyState title="No claims yet" message="This veteran has no claims on file yet. Use “+ New claim” above to start one." /> : null}</div>; }

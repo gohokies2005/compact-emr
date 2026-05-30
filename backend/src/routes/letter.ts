@@ -224,7 +224,9 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         throw e;
       }
 
-      res.json({ data: { version: newVersion, rendered: { pdf: rendered.ok, docx: rendered.ok }, warnings } });
+      // Return the canonical saved text — cleanProseForSave may have altered it (em dashes →
+      // commas, smart quotes, etc.), so the editor must re-sync to what was actually stored.
+      res.json({ data: { version: newVersion, txt: cleaned, rendered: { pdf: rendered.ok, docx: rendered.ok }, warnings } });
     }),
   );
 
@@ -279,7 +281,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           if ((e as { code?: string }).code === 'P2002') throw new HttpError(409, 'conflict', 'Another save advanced the version; reload and re-propose.', { reason: 'concurrent_save', caseId });
           throw e;
         }
-        res.json({ data: { version: newVersion, warnings } });
+        res.json({ data: { version: newVersion, txt: applied.newText, warnings } });
         return;
       }
 

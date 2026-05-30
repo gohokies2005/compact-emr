@@ -24,7 +24,7 @@ describe('VeteranChart', () => {
     expect(screen.getByRole('tab', { name: 'FRN Claims' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Staff Notes' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Documents' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Established Service Connected Conditions' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Service Connected Conditions' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Active Problems' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Medications' })).toBeInTheDocument();
   });

@@ -24,7 +24,7 @@ const CHART_TABS: readonly TabItem<ChartTab>[] = [
   { id: 'claims', label: 'FRN Claims' },
   { id: 'notes', label: 'Staff Notes' },
   { id: 'documents', label: 'Documents' },
-  { id: 'conditions', label: 'Established Service Connected Conditions' },
+  { id: 'conditions', label: 'Service Connected Conditions' },
   { id: 'problems', label: 'Active Problems' },
   { id: 'medications', label: 'Medications' },
 ];

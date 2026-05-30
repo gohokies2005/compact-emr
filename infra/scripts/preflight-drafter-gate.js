@@ -40,6 +40,10 @@ export const FUTURE_SKEW_MS = 60 * 60 * 1000; // 1h
  * Gated fileset — FINAL per locked contract v1.0 §Redline-1. Order is load-bearing for the
  * single-hash path: code modules first (in this order), then runtime-read data files.
  */
+// v1.1 LOCKED (2026-05-30) — must byte-match the producer's app/scripts/_c0-fileset.js
+// GATED_FILESET (path list AND order). Order is load-bearing: computeFilesetHash concatenates
+// raw Buffers in THIS order. Code modules first (original 10, then the 14 output-determining
+// promotions), data file LAST. Per shared/outbox/2026-05-30_C0_GATED_FILESET_v1.1_LOCKED.md.
 export const GATED_FILESET = [
   'app/scripts/run-letter-pipeline.js',
   'app/scripts/drafter-worker.js',
@@ -51,6 +55,20 @@ export const GATED_FILESET = [
   'app/services/framingGate.js',
   'app/services/templatePicker.js',
   'app/services/routingResolver.js',
+  'app/services/aggravationTriggers.js',
+  'app/services/authorsDecisions.js',
+  'app/services/cavcRegistry.js',
+  'app/services/citationAuditor.js',
+  'app/services/citationRegistry.js',
+  'app/services/conditionFormat.js',
+  'app/services/conditionTemplates.js',
+  'app/services/deprecatedPhrases.js',
+  'app/services/linter.js',
+  'app/services/llm/client.js',
+  'app/services/pipelineCheck.js',
+  'app/services/roleRunnerApi.js',
+  'app/services/sectionAssembler.js',
+  'app/services/veteranFactLedger.js',
   'references/medical_literature/curated/routing.json',
 ];
 
@@ -446,9 +464,11 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   const config = {
     gateMajor: ENFORCER_GATE_MAJOR,
     stalenessMs: STALENESS_BACKSTOP_MS,
+    // Pinned to 2 (v1.1 BUNDLE_SCHEMA_VERSION) so H3 hard-blocks a stale-schema artifact.
+    // env override remains for future bumps. Per the producer's locked fileset note.
     expectedFixtureSchemaVersion: env.EXPECTED_FIXTURE_SCHEMA_VERSION
       ? parseInt(env.EXPECTED_FIXTURE_SCHEMA_VERSION, 10)
-      : null,
+      : 2,
   };
 
   const result = evaluateGate(artifact, observed, config);

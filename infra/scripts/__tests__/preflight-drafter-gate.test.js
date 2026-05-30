@@ -328,10 +328,11 @@ describe('unit: helpers', () => {
     expect(validateSchema(artifact)).toEqual([]);
   });
 
-  it('GATED_FILESET is the locked 11 in order', () => {
-    expect(GATED_FILESET).toHaveLength(11);
+  it('GATED_FILESET is the locked v1.1 set (25) in order', () => {
+    expect(GATED_FILESET).toHaveLength(25);
     expect(GATED_FILESET[0]).toBe('app/scripts/run-letter-pipeline.js');
-    expect(GATED_FILESET[10]).toBe('references/medical_literature/curated/routing.json');
+    expect(GATED_FILESET[9]).toBe('app/services/routingResolver.js'); // last of the original 10
+    expect(GATED_FILESET[24]).toBe('references/medical_literature/curated/routing.json'); // data file LAST
   });
 
   it('ENFORCER_GATE_MAJOR is 1', () => {

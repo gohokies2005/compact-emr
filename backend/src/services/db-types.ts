@@ -130,6 +130,25 @@ export interface ActivityLogDelegate {
   create(args: { data: ActivityCreateInput }): Promise<unknown>;
 }
 
+export interface CaseMessageRecord {
+  id: string;
+  caseId: string;
+  senderSub: string;
+  senderRole: string;
+  body: string;
+  readAt: Date | null;
+  readBySub: string | null;
+  createdAt: Date;
+}
+
+export interface CaseMessageDelegate {
+  findMany(args: unknown): Promise<readonly CaseMessageRecord[]>;
+  findFirst(args: unknown): Promise<CaseMessageRecord | null>;
+  count(args: unknown): Promise<number>;
+  create(args: unknown): Promise<CaseMessageRecord>;
+  updateMany(args: unknown): Promise<{ count: number }>;
+}
+
 export interface AppDbTransaction {
   veteran: VeteranDelegate;
   activityLog: ActivityLogDelegate;
@@ -147,6 +166,7 @@ export interface AppDbTransaction {
   doctorPack: DoctorPackDelegate;
   documentPage: DocumentPageDelegate;
   letterRevision: LetterRevisionDelegate;
+  caseMessage: CaseMessageDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {

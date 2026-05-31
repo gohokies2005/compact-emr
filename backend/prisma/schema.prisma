@@ -289,6 +289,7 @@ model Case {
   activityLogs      ActivityLog[]
   payments          Payment[]
   letterRevisions   LetterRevision[]
+  caseMessages      CaseMessage[]
 
   @@index([veteranId])
   @@index([assignedPhysicianId])
@@ -339,6 +340,27 @@ model LetterRevision {
   @@index([caseId])
   @@index([caseId, version])
   @@map("letter_revisions")
+}
+
+// Per-case RN<->physician message thread, distinct from veteran-scoped ChartNotes. Read-state is
+// single readAt/readBySub per message (strictly a 2-party thread + admin observer): a message is
+// "unread for me" until the counterparty (senderSub != me) marks it read. PHI is expected in the
+// body (clinical back-and-forth) — validated for length only, never PHI-stripped.
+model CaseMessage {
+  id          String    @id @default(uuid())
+  caseId      String    @map("case_id")
+  senderSub   String    @map("sender_sub")
+  senderRole  String    @map("sender_role") @db.VarChar(16)
+  body        String
+  readAt      DateTime? @map("read_at") @db.Timestamptz(6)
+  readBySub   String?   @map("read_by_sub")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  case        Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+  @@index([caseId, createdAt])
+  @@index([caseId, readAt])
+  @@map("case_messages")
 }
 
 model Document {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
@@ -56,8 +56,14 @@ export function CaseMessagesPanel({ caseId }: CaseMessagesPanelProps) {
     onError: () => { setErrorMessage('Message could not be sent. Please retry.'); },
   });
 
+  // Mark a given latest message read at most once — otherwise the post-success refetch (which
+  // still reports it unread until the server catches up) would re-fire mark-read in a loop.
+  const markedUpToRef = useRef<string | null>(null);
   useEffect(() => {
-    if (unreadCount > 0 && latestMessageId && !markReadPending) markReadMutate(latestMessageId);
+    if (unreadCount > 0 && latestMessageId && markedUpToRef.current !== latestMessageId && !markReadPending) {
+      markedUpToRef.current = latestMessageId;
+      markReadMutate(latestMessageId);
+    }
   }, [latestMessageId, markReadMutate, markReadPending, unreadCount]);
 
   if (messagesQuery.isError && messagesQuery.error instanceof ForbiddenError) {

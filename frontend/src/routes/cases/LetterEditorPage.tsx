@@ -7,7 +7,7 @@ import { Card } from '../../components/ui/Card';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import { LetterEditor } from '../../components/LetterEditor';
-import { ConflictError } from '../../api/client';
+import { ConflictError, ServiceUnavailableError } from '../../api/client';
 import {
   applySurgicalAi,
   approveLetter,
@@ -83,6 +83,7 @@ export function LetterEditorPage() {
         await letterQuery.refetch();
         return;
       }
+      if (error instanceof ServiceUnavailableError) { setMessage('Letter service is not available in this environment.'); return; }
       setMessage('Letter could not be saved. Please retry.');
     },
   });
@@ -95,8 +96,9 @@ export function LetterEditorPage() {
       setProposalCostUsd(res.data.costUsd);
       setMessage('Limited scope edit preview is ready.');
     },
-    onError: () => {
+    onError: (error: unknown) => {
       // 422 (unappliable — cost still incurred), 503 (surgical-AI not configured), or other.
+      if (error instanceof ServiceUnavailableError) { setMessage('Surgical AI is not available in this environment.'); return; }
       setMessage('Limited scope edit could not be generated (try rephrasing, or it may not be enabled yet).');
     },
   });
@@ -117,7 +119,7 @@ export function LetterEditorPage() {
       setMessage(`Applied limited scope edit. Current version ${res.data.version}.`);
       void qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] });
     },
-    onError: () => setMessage('Limited scope edit could not be applied.'),
+    onError: (error: unknown) => setMessage(error instanceof ServiceUnavailableError ? 'Surgical AI is not available in this environment.' : 'Limited scope edit could not be applied.'),
   });
 
   const approveMutation = useMutation({
@@ -129,7 +131,7 @@ export function LetterEditorPage() {
         qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] }),
       ]);
     },
-    onError: () => setMessage('Letter could not be approved (a sign-off + a ready chart are required). Please retry.'),
+    onError: (error: unknown) => setMessage(error instanceof ServiceUnavailableError ? 'Letter render is not available in this environment.' : 'Letter could not be approved (a sign-off + a ready chart are required). Please retry.'),
   });
 
   const declineMutation = useMutation({

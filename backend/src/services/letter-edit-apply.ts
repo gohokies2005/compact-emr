@@ -10,14 +10,7 @@
  */
 
 import { cleanProseForSave } from './letter-sanity.js';
-
-// Mirrors letter-sanity's LOCKED_FRAGMENTS (the survive-verbatim sentences). Kept here as
-// strings so the applier can refuse edits that delete/mutate a locked block.
-const LOCKED_FRAGMENTS: readonly string[] = [
-  'I, Ryan J. Kasky, DO, am board-certified',
-  'Nieves-Rodriguez v. Peake',
-  'I have no treatment relationship with this veteran',
-];
+import { LOCKED_FRAGMENT_STRINGS as LOCKED_FRAGMENTS } from './letter-locked-blocks.js';
 
 const PLACEHOLDER_RE = /\[\s*(?:VERIFY|TODO|PLACEHOLDER|FIXME|NEEDS|INSERT|FILL[ _]IN|CITATION NEEDED|TBD|XXX|FIX_ME)\b[^\]]*\]/i;
 

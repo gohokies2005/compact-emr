@@ -8,6 +8,7 @@
  * saved version. The diff-SIZE rules from the local surgical-edit path are intentionally NOT
  * ported: a full-document editor save legitimately changes many lines.
  */
+import { LOCKED_FRAGMENTS } from './letter-locked-blocks.js';
 
 export interface SanityFinding {
   readonly rule: string;
@@ -19,12 +20,6 @@ export interface LockedRange {
   readonly end: number;
   readonly label: string;
 }
-
-const LOCKED_FRAGMENTS: readonly { readonly frag: string; readonly label: string }[] = [
-  { frag: 'I, Ryan J. Kasky, DO, am board-certified', label: 'Section I — physician credentials' },
-  { frag: 'Nieves-Rodriguez v. Peake', label: 'Section II — Nieves-Rodriguez methodology' },
-  { frag: 'I have no treatment relationship with this veteran', label: 'Section I — no treatment relationship' },
-];
 
 const JARGON_WORDS: readonly string[] = [
   'sidecar', 'drainer', 'outbox', 'endpoint', 'payload', 'linter', 'JSON', 'API', 'REST', 'HTTP', 'HTTPS',

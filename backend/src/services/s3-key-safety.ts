@@ -88,6 +88,27 @@ export function isLetterRevisionS3Key(s3Key: unknown): s3Key is string {
 }
 
 /**
+ * physician-signatures/<physicianId>/<uuid>-signature.png — a physician's signature image,
+ * composited onto rendered letters. Distinct, non-case prefix so it never collides with the
+ * cases/<caseId>/... namespace guarded by isCaseDocumentS3Key. PNG only (transparency). The
+ * presign endpoint computes the key server-side; this guards the inbound key on the register
+ * callback before it is persisted on the Physician row or dereferenced by a signed-URL endpoint.
+ */
+export function isPhysicianSignatureS3Key(s3Key: unknown): s3Key is string {
+  if (!isPathTraversalSafe(s3Key)) return false;
+  return /^physician-signatures\/[a-zA-Z0-9_-]+\/[a-f0-9-]+-signature\.png$/.test(s3Key);
+}
+
+/** Build the canonical physician-signature key. Throws if inputs would produce an unsafe key. */
+export function buildPhysicianSignatureKey(physicianId: string, uuid: string): string {
+  const key = `physician-signatures/${physicianId}/${uuid}-signature.png`;
+  if (!isPhysicianSignatureS3Key(key)) {
+    throw new Error(`buildPhysicianSignatureKey produced an invalid key for physicianId=${JSON.stringify(physicianId)}`);
+  }
+  return key;
+}
+
+/**
  * Build the canonical letter-revision key for a (caseId, version, ext). Throws if the
  * inputs would produce an unsafe/invalid key — defense-in-depth so a malformed caseId can
  * never silently escape the letter-revisions/ subtree.

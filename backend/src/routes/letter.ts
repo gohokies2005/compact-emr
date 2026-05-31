@@ -15,6 +15,7 @@ import {
   parseCredentialBlock,
   substituteSignerSentinels,
   findForeignSignerNames,
+  signerNameAppears,
 } from '../services/credential-block.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -385,8 +386,8 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // veteran-pronoun field exists yet) and is irrelevant to no-sentinel letters.
       const finalText = substituteSignerSentinels(text, signerCreds, 'their');
 
-      // Positive identity check: the assigned signer's exact credentialed name must appear.
-      if (!finalText.includes(signerCreds.fullNameWithCredential)) {
+      // Positive identity check: the assigned signer's credentialed name must appear (whole-name).
+      if (!signerNameAppears(finalText, signerCreds.fullNameWithCredential)) {
         throw new HttpError(409, 'conflict', `Cannot approve: the letter does not name the assigned signing physician (${signerCreds.fullNameWithCredential}). Regenerate or correct the letter so it is authored under the assigned physician, then approve.`, { reason: 'signer_name_absent', caseId, physicianId: signer.id });
       }
       // Anti-fraud: no OTHER known physician's credentialed name may appear in the letter body.

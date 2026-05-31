@@ -102,23 +102,72 @@ export function substituteSignerSentinels(
   return out;
 }
 
+const WORD_CHAR = /[A-Za-z]/;
+
+/**
+ * True if `name` appears in `haystack` bounded by a non-letter on each side (or a string edge).
+ * Whole-name rather than bare substring so "Doe, MD" can't match inside "Doelan, MD", and the
+ * credentialed name (which ends in a post-nominal like ", DO"/", MD") only counts when it's not
+ * glued to surrounding letters. Checks every occurrence; returns true on the first bounded one.
+ */
+function nameAppearsAsWhole(haystack: string, name: string): boolean {
+  if (name.length === 0) return false;
+  let from = 0;
+  for (;;) {
+    const i = haystack.indexOf(name, from);
+    if (i < 0) return false;
+    const before = i === 0 ? '' : haystack[i - 1];
+    const after = haystack[i + name.length] ?? '';
+    if (!WORD_CHAR.test(before) && !WORD_CHAR.test(after)) return true;
+    from = i + 1;
+  }
+}
+
+/** Blank out whole-name occurrences of `name` so a shorter roster name that is a substring of it
+ *  (e.g. "Jane Doe, MD" inside "Mary Jane Doe, MD") is not later mis-detected as foreign. */
+function maskWholeName(text: string, name: string): string {
+  if (name.length === 0) return text;
+  let out = '';
+  let from = 0;
+  for (;;) {
+    const i = text.indexOf(name, from);
+    if (i < 0) return out + text.slice(from);
+    const before = i === 0 ? '' : text[i - 1];
+    const after = text[i + name.length] ?? '';
+    const bounded = !WORD_CHAR.test(before) && !WORD_CHAR.test(after);
+    out += text.slice(from, i) + (bounded ? ' ' : name);
+    from = i + name.length;
+  }
+}
+
+/**
+ * The positive identity check: does the letter name the assigned signer (whole-name match)?
+ * The approve gate blocks when this is false ("the letter is not authored under the assigned
+ * physician"). Exported so the gate and its tests share one definition.
+ */
+export function signerNameAppears(letterText: string, signerName: string): boolean {
+  return nameAppearsAsWhole(letterText, signerName);
+}
+
 /**
  * The anti-fraud assertion: which OTHER known physicians' credentialed names appear in this
  * letter. The approve gate blocks if this returns anything non-empty — it means the letter body
  * names a physician who is not the assigned signer (e.g. physician #2 assigned to a letter whose
- * body still says "Ryan J. Kasky, DO"). Exact substring match on the full credentialed name; no
- * fuzzy matching (a false positive here is a dead-end the operator cannot fix). The caller passes
- * the active-physician roster's credentialed names and the assigned signer's own name to exclude.
+ * body still says "Ryan J. Kasky, DO"). Whole-name match, and the assigned signer's own name is
+ * masked out first so a roster name that is a substring of the signer's name does not produce an
+ * operator-unfixable false block. No fuzzy matching. The caller passes the active-physician
+ * roster's credentialed names and the assigned signer's own name to exclude.
  */
 export function findForeignSignerNames(
   letterText: string,
   rosterCredentialNames: readonly string[],
   selfName: string,
 ): string[] {
+  const masked = maskWholeName(letterText, selfName);
   const found: string[] = [];
   for (const name of rosterCredentialNames) {
     if (name === selfName || name.trim().length === 0) continue;
-    if (letterText.includes(name) && !found.includes(name)) found.push(name);
+    if (nameAppearsAsWhole(masked, name) && !found.includes(name)) found.push(name);
   }
   return found;
 }

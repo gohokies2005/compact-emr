@@ -8,6 +8,7 @@ import {
   parseCredentialBlock,
   substituteSignerSentinels,
   findForeignSignerNames,
+  signerNameAppears,
   SECTION1_CREDENTIALS_SENTINEL,
   SIGNATURE_BLOCK_SENTINEL,
   KASKY_CREDENTIALS,
@@ -135,5 +136,30 @@ describe('credential-block — findForeignSignerNames (the anti-fraud assertion)
   it('never flags the assigned signer themselves and de-dupes', () => {
     const twice = `${kaskyLetter}\n\nRyan J. Kasky, DO`;
     expect(findForeignSignerNames(twice, roster, JANE.fullNameWithCredential)).toEqual(['Ryan J. Kasky, DO']);
+  });
+
+  // Hardening: whole-name matching + self-name masking (substring-name physicians).
+  it('does NOT flag a roster name that is a substring of the assigned signer name', () => {
+    // Assigned "Mary Jane Doe, MD"; roster also has "Jane Doe, MD"; letter names only the signer.
+    const self = 'Mary Jane Doe, MD';
+    const body = 'I, Mary Jane Doe, MD, am board-certified.\n\nMary Jane Doe, MD';
+    expect(findForeignSignerNames(body, [self, 'Jane Doe, MD'], self)).toEqual([]);
+  });
+
+  it('does NOT match a name glued inside a longer word', () => {
+    // "Doe, MD" must not match inside "Doelan, MD".
+    expect(findForeignSignerNames('Reviewed by Sam Doelan, MD.', ['Doe, MD', 'Sam Doelan, MD'], 'Sam Doelan, MD')).toEqual([]);
+  });
+});
+
+describe('credential-block — signerNameAppears (whole-name positive check)', () => {
+  it('matches a credentialed name bounded by punctuation/whitespace/edges', () => {
+    expect(signerNameAppears('I, Ryan J. Kasky, DO, am board-certified.', 'Ryan J. Kasky, DO')).toBe(true);
+    expect(signerNameAppears('...\n\nRyan J. Kasky, DO', 'Ryan J. Kasky, DO')).toBe(true);
+  });
+
+  it('does not match when the name is glued to surrounding letters or absent', () => {
+    expect(signerNameAppears('Ryan J. Kasky, DOx is here', 'Ryan J. Kasky, DO')).toBe(false);
+    expect(signerNameAppears('The veteran has a back condition.', 'Ryan J. Kasky, DO')).toBe(false);
   });
 });

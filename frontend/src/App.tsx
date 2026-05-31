@@ -12,7 +12,7 @@ import { CasesPage } from './routes/cases/CasesPage';
 import { CaseDetailPage } from './routes/cases/CaseDetailPage';
 import { LetterEditorPage } from './routes/cases/LetterEditorPage';
 import { TemplatesPage } from './routes/stubs/TemplatesPage';
-import { PhysiciansPage } from './routes/stubs/PhysiciansPage';
+import { PhysiciansPage } from './routes/admin/PhysiciansPage';
 import { ActivityPage } from './routes/stubs/ActivityPage';
 import { RefundsPage } from './routes/stubs/RefundsPage';
 import { CompensationPage } from './routes/stubs/CompensationPage';

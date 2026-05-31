@@ -449,8 +449,9 @@ model Physician {
   @@index([fullName])
   @@index([npi])
   @@index([email])
-    @@index([cognitoSub])
+  @@index([cognitoSub])
 
+  @@map("physicians")
 }
 
 model PhysicianCompensation {

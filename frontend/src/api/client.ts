@@ -8,6 +8,19 @@ export class ConflictError<T = unknown> extends Error { constructor(readonly cur
 // Anthropic key isn't configured in this environment). Lets the UI show a calm "not available
 // in this environment" instead of a generic failure.
 export class ServiceUnavailableError extends Error { readonly status = 503; constructor(readonly details?: unknown) { super('Service unavailable'); this.name = 'ServiceUnavailableError'; } }
+// 422 from the surgical-AI PROPOSE path: the LLM ran (its cost was metered) but its proposed edit
+// does not apply to the current draft. Distinct from a 409/conflict because the physician WAS
+// charged — the UI must say so ("the AI ran but its edit didn't fit; try rephrasing") rather than
+// show a generic failure. details carries { reason: 'edit_unappliable', costUsd, proposal }.
+export class SurgicalEditUnappliableError extends Error {
+  readonly status = 422;
+  readonly costUsd: number | undefined;
+  constructor(readonly details?: { reason?: string; costUsd?: number; proposal?: unknown }) {
+    super('Proposed AI edit does not apply');
+    this.name = 'SurgicalEditUnappliableError';
+    this.costUsd = typeof details?.costUsd === 'number' ? details.costUsd : undefined;
+  }
+}
 
 // Phase 8.1 G3: when an S3-signed URL has expired (5-min TTL on Doctor Pack / drafter
 // artifact downloads), axios sees a 403 from AWS with a specific XML body. The generic
@@ -71,6 +84,7 @@ apiClient.interceptors.response.use((response) => response, async (error: AxiosE
   if (error.response?.status === 401 && !env.demoMode) { await signOut(); window.location.assign('/'); }
   if (error.response?.status === 403) throw new ForbiddenError();
   if (error.response?.status === 409) throw new ConflictError(error.response.data?.error?.details);
+  if (error.response?.status === 422) throw new SurgicalEditUnappliableError(error.response.data?.error?.details as { reason?: string; costUsd?: number; proposal?: unknown } | undefined);
   if (error.response?.status === 503) throw new ServiceUnavailableError(error.response.data?.error?.details);
   throw error;
 });

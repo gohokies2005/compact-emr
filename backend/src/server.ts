@@ -23,6 +23,7 @@ import { makeRenderInvoker } from './services/letter-render-invoke.js';
 import { makeSurgicalProposer } from './services/letter-surgical-propose.js';
 import { createPhysiciansRouter } from './routes/physicians.js';
 import { createCaseMessagesRouter } from './routes/case-messages.js';
+import { createUsersRouter } from './routes/users.js';
 import { S3Client } from '@aws-sdk/client-s3';
 import { requireServicePrincipal } from './middleware/service-principal.js';
 import { requireDrafterPrincipal } from './middleware/drafter-principal.js';
@@ -56,6 +57,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
   app.use('/api/v1', authenticateJwt(), createDocumentsRouter());
   app.use('/api/v1', authenticateJwt(), createCasesRouter(db));
+  app.use('/api/v1', authenticateJwt(), createUsersRouter(db));
   app.use('/api/v1', authenticateJwt(), createPhysiciansRouter(db, { bucketName: process.env.PHI_BUCKET_NAME, s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) }));
   app.use('/api/v1', authenticateJwt(), createChartNotesRouter(db));
   app.use('/api/v1', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), createCaseMessagesRouter(db));

@@ -99,6 +99,7 @@ describe('OpsHeldPanel', () => {
         version: heldCase.version + 1,
         currentVersion: heldCase.currentVersion,
         assignedPhysicianId: null,
+        assignedRnId: null,
         refundEligible: heldCase.refundEligible,
         createdAt: heldCase.createdAt,
         updatedAt: heldCase.updatedAt,

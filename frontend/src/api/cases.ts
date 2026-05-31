@@ -15,11 +15,13 @@ export interface CaseLite {
   readonly version: number;
   readonly currentVersion: number;
   readonly assignedPhysicianId: string | null;
+  readonly assignedRnId: string | null;
   readonly refundEligible: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly veteran?: CaseVeteranLite | null;
   readonly assignedPhysician?: CasePhysicianLite | null;
+  readonly assignedRn?: AssignedRnLite | null;
 }
 
 // Offset-paginated envelope (cases list uses page/pageSize/total, not cursor).

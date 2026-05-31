@@ -7,7 +7,7 @@ import { Card } from '../../components/ui/Card';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import { LetterEditor } from '../../components/LetterEditor';
-import { ConflictError, ServiceUnavailableError } from '../../api/client';
+import { ConflictError, ServiceUnavailableError, SurgicalEditUnappliableError } from '../../api/client';
 import {
   applySurgicalAi,
   approveLetter,
@@ -99,6 +99,11 @@ export function LetterEditorPage() {
     onError: (error: unknown) => {
       // 422 (unappliable — cost still incurred), 503 (surgical-AI not configured), or other.
       if (error instanceof ServiceUnavailableError) { setMessage('Surgical AI is not available in this environment.'); return; }
+      if (error instanceof SurgicalEditUnappliableError) {
+        const cost = typeof error.costUsd === 'number' ? ` (AI cost of $${error.costUsd.toFixed(2)} was still incurred)` : '';
+        setMessage(`The AI ran but its proposed edit did not fit the current draft${cost}. Rephrase the instruction and try again.`);
+        return;
+      }
       setMessage('Limited scope edit could not be generated (try rephrasing, or it may not be enabled yet).');
     },
   });

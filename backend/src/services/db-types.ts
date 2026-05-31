@@ -124,6 +124,7 @@ export interface VeteranDelegate {
 
 export interface AppUserDelegate {
   findUnique(args: unknown): Promise<AppUserRecord | null>;
+  findMany(args: unknown): Promise<readonly AppUserRecord[]>;
 }
 
 export interface ActivityLogDelegate {

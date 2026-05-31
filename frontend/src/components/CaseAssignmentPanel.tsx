@@ -4,8 +4,9 @@ import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { Spinner } from './ui/Spinner';
 import { ConflictError } from '../api/client';
-import { assignCasePhysician } from '../api/cases';
+import { assignCasePhysician, assignCaseRn } from '../api/cases';
 import { listPhysicians, type PhysicianPublic } from '../api/physicians';
+import { listUsers } from '../api/users';
 
 interface CaseAssignmentPanelProps {
   readonly caseId: string;
@@ -21,29 +22,43 @@ function activePhysicians(physicians: readonly PhysicianPublic[]): readonly Phys
 export function CaseAssignmentPanel({ caseId, version, assignedPhysician, assignedRn }: CaseAssignmentPanelProps) {
   const qc = useQueryClient();
   const [selectedPhysicianId, setSelectedPhysicianId] = useState(assignedPhysician?.id ?? '');
+  const [selectedRnId, setSelectedRnId] = useState(assignedRn?.id ?? '');
   const [message, setMessage] = useState<string | null>(null);
 
   const physiciansQuery = useQuery({ queryKey: ['physicians'], queryFn: listPhysicians });
   const physicians = useMemo(() => activePhysicians(physiciansQuery.data?.data ?? []), [physiciansQuery.data]);
 
+  const rnsQuery = useQuery({ queryKey: ['users', 'ops_staff'], queryFn: () => listUsers({ role: 'ops_staff' }) });
+  const rns = useMemo(() => rnsQuery.data?.data ?? [], [rnsQuery.data]);
+
+  const invalidateCase = async () => {
+    await Promise.all([qc.invalidateQueries({ queryKey: ['case', caseId] }), qc.invalidateQueries({ queryKey: ['cases'] })]);
+  };
+
   const assignPhysicianMutation = useMutation({
     mutationFn: () => assignCasePhysician(caseId, { physicianId: selectedPhysicianId, version }),
-    onSuccess: async () => {
-      setMessage('Physician assignment updated.');
-      await Promise.all([qc.invalidateQueries({ queryKey: ['case', caseId] }), qc.invalidateQueries({ queryKey: ['cases'] })]);
-    },
+    onSuccess: async () => { setMessage('Physician assignment updated.'); await invalidateCase(); },
     onError: (error: unknown) => {
       setMessage(error instanceof ConflictError ? 'This case changed elsewhere. Reload and try the assignment again.' : 'Physician could not be assigned. Please retry.');
     },
   });
 
+  const assignRnMutation = useMutation({
+    mutationFn: () => assignCaseRn(caseId, { rnUserId: selectedRnId, version }),
+    onSuccess: async () => { setMessage('RN liaison assignment updated.'); await invalidateCase(); },
+    onError: (error: unknown) => {
+      setMessage(error instanceof ConflictError ? 'This case changed elsewhere. Reload and try the assignment again.' : 'RN liaison could not be assigned. Please retry.');
+    },
+  });
+
   const canAssignPhysician = selectedPhysicianId.length > 0 && selectedPhysicianId !== assignedPhysician?.id && !assignPhysicianMutation.isPending;
+  const canAssignRn = selectedRnId.length > 0 && selectedRnId !== assignedRn?.id && !assignRnMutation.isPending;
 
   return (
     <Card>
       <div>
         <h2 className="text-base font-semibold text-slate-900">Assignments</h2>
-        <p className="mt-1 text-sm text-slate-600">Assign the physician reviewer. RN assignment will be available after the users endpoint ships.</p>
+        <p className="mt-1 text-sm text-slate-600">Assign the physician reviewer and the RN liaison for this case.</p>
       </div>
 
       {message ? <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">{message}</div> : null}
@@ -67,16 +82,22 @@ export function CaseAssignmentPanel({ caseId, version, assignedPhysician, assign
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 opacity-80">
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
           <div className="text-sm font-semibold text-slate-900">Assigned RN liaison</div>
           <p className="mt-1 text-sm text-slate-600">{assignedRn ? assignedRn.email : 'No RN liaison assigned.'}</p>
           <label className="mt-4 block">
             <span className="text-sm font-medium text-slate-800">Assign or reassign RN</span>
-            <select disabled aria-label="Assign or reassign RN" className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500 shadow-sm">
-              <option>RN picker pending users endpoint</option>
+            <select value={selectedRnId} aria-label="Assign or reassign RN" onChange={(e) => { setSelectedRnId(e.target.value); setMessage(null); }} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200">
+              <option value="">Select RN liaison</option>
+              {rns.map((u) => <option key={u.id} value={u.id}>{u.email}</option>)}
             </select>
           </label>
-          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">The users-list endpoint is not available yet. This control is intentionally disabled.</div>
+          {rnsQuery.isLoading ? <div className="mt-3 flex items-center gap-2 text-sm text-slate-500"><Spinner />Loading staff</div> : null}
+          <div className="mt-4">
+            <Button type="button" variant="primary" loading={assignRnMutation.isPending} disabled={!canAssignRn} onClick={() => assignRnMutation.mutate()}>
+              {assignedRn ? 'Reassign RN' : 'Assign RN'}
+            </Button>
+          </div>
         </div>
       </div>
     </Card>

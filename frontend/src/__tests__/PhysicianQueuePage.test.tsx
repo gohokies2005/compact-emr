@@ -26,6 +26,7 @@ const row: CaseLite = {
   version: 3,
   currentVersion: 2,
   assignedPhysicianId: null,
+  assignedRnId: null,
   refundEligible: false,
   createdAt: '2026-05-25T12:00:00.000Z',
   updatedAt: '2026-05-25T12:00:00.000Z',

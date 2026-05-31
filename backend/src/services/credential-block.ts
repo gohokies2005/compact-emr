@@ -1,0 +1,120 @@
+/**
+ * Per-signer credential blocks for the IMO letter (D2 — the text half of the fraud gate).
+ *
+ * Today the drafter bakes "Ryan J. Kasky, DO" into Section I + the signature block. With
+ * multiple signing physicians that is a fraud risk: the named/credentialed physician must
+ * always be the one who actually signed. The fix is sentinels — the drafter emits a stable
+ * [[SIGNER_CREDENTIALS]] / [[SIGNER_BLOCK]] marker where the signer's credentials go, and
+ * compact-EMR substitutes the ASSIGNED physician's rendered blocks (built here) before the
+ * text reaches the render Lambda.
+ *
+ * These two builders are the single source of the canonical prose. The round-trip test
+ * (credential-block.test.ts) pins them byte-for-byte against prisma/demo-letter.txt (the Kasky
+ * reference letter), so any wording drift fails CI rather than silently shipping a malformed
+ * credential line.
+ *
+ * Scope note: this module is pure (no Prisma, no I/O) so it is trivially unit-testable. The
+ * render-time threading (parse the assigned physician's block, substitute the sentinels,
+ * fail-closed if a sentinel survives) lands in the approve/render path in D2 commit 3.
+ */
+
+/**
+ * The render-authoritative credential facts for one signing physician. Persisted on
+ * Physician.credentialBlockJson (stored as JSON, not columns, because these fields exist only
+ * to render letter prose; the model's own fullName/npi/specialty columns drive listing/search).
+ */
+export interface SignerCredentials {
+  /** Name with post-nominal exactly as printed, e.g. "Ryan J. Kasky, DO". */
+  readonly fullNameWithCredential: string;
+  /** Board specialty, e.g. "Family Medicine". */
+  readonly specialty: string;
+  /** Certifying board spelled out, e.g. "American Board of Osteopathic Family Physicians". */
+  readonly boardName: string;
+  /** Board abbreviation, e.g. "ABOFP". */
+  readonly boardAbbreviation: string;
+  /** License state spelled out, e.g. "Nevada". */
+  readonly licenseState: string;
+  /** License number only (no state prefix), e.g. "DO2996". */
+  readonly licenseNumber: string;
+  /** 10-digit NPI, e.g. "1073018958". */
+  readonly npi: string;
+}
+
+/** Sentinel the drafter emits where Section I credentials belong. */
+export const SECTION1_CREDENTIALS_SENTINEL = '[[SIGNER_CREDENTIALS]]';
+/** Sentinel the drafter emits where the closing signature block belongs. */
+export const SIGNATURE_BLOCK_SENTINEL = '[[SIGNER_BLOCK]]';
+
+const CREDENTIAL_FIELDS: readonly (keyof SignerCredentials)[] = [
+  'fullNameWithCredential',
+  'specialty',
+  'boardName',
+  'boardAbbreviation',
+  'licenseState',
+  'licenseNumber',
+  'npi',
+];
+
+/**
+ * Section I qualifications sentence. The veteran's possessive pronoun ("his"/"her"/"their") is
+ * veteran-specific, not signer-specific, so the caller supplies it.
+ */
+export function renderSection1Credentials(c: SignerCredentials, veteranPossessivePronoun: string): string {
+  return (
+    `I, ${c.fullNameWithCredential}, am board-certified in ${c.specialty} through the ` +
+    `${c.boardName} (${c.boardAbbreviation}). I hold an active medical license in ` +
+    `${c.licenseState} (License #${c.licenseNumber}) with NPI ${c.npi}. I have no treatment ` +
+    `relationship with this veteran. This letter is an independent medical opinion prepared ` +
+    `for the purpose of ${veteranPossessivePronoun} VA disability claim.`
+  );
+}
+
+/** Closing signature block (4 lines, newline-joined, no trailing newline). */
+export function renderSignatureBlock(c: SignerCredentials): string {
+  return [
+    c.fullNameWithCredential,
+    `Board-Certified in ${c.specialty}, ${c.boardAbbreviation}`,
+    `${c.licenseState} Medical License #${c.licenseNumber}`,
+    `NPI: ${c.npi}`,
+  ].join('\n');
+}
+
+/**
+ * Validate + narrow an untrusted JSON value (Physician.credentialBlockJson out of the DB) to
+ * SignerCredentials. Returns null if any field is missing or non-string-or-blank — the render
+ * path treats null as "this physician cannot sign yet" and fails closed (D2 commit 3), so a
+ * half-filled profile can never produce a malformed credential line.
+ */
+export function parseCredentialBlock(value: unknown): SignerCredentials | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  for (const field of CREDENTIAL_FIELDS) {
+    const fieldValue = v[field];
+    if (typeof fieldValue !== 'string' || fieldValue.trim().length === 0) return null;
+  }
+  return {
+    fullNameWithCredential: v.fullNameWithCredential as string,
+    specialty: v.specialty as string,
+    boardName: v.boardName as string,
+    boardAbbreviation: v.boardAbbreviation as string,
+    licenseState: v.licenseState as string,
+    licenseNumber: v.licenseNumber as string,
+    npi: v.npi as string,
+  };
+}
+
+/**
+ * Kasky's canonical credentials — the reference signer the demo letter was built around. Used
+ * by the round-trip test (the spec lock) and by the migration backfill (writes this onto the
+ * Kasky Physician row keyed by NPI). Keep this in sync with prisma/demo-letter.txt; the
+ * round-trip test enforces it.
+ */
+export const KASKY_CREDENTIALS: SignerCredentials = {
+  fullNameWithCredential: 'Ryan J. Kasky, DO',
+  specialty: 'Family Medicine',
+  boardName: 'American Board of Osteopathic Family Physicians',
+  boardAbbreviation: 'ABOFP',
+  licenseState: 'Nevada',
+  licenseNumber: 'DO2996',
+  npi: '1073018958',
+};

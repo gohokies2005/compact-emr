@@ -13,6 +13,8 @@ import { InFlightDrafterPanel, type InFlightDraftJob } from '../../components/In
 import { SendToDrafterPanel } from '../../components/SendToDrafterPanel';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
+import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
+import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { getArtifactPdfUrl } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
 import { useAuth } from '../../auth/useAuth';
@@ -32,13 +34,14 @@ export function decidePollIntervalMs(status: CaseStatus | undefined): number | f
   return false;
 }
 
-type TabId = 'overview' | 'drafts' | 'corrections' | 'clarifications' | 'documents' | 'activity';
+type TabId = 'overview' | 'drafts' | 'corrections' | 'clarifications' | 'documents' | 'messages' | 'activity';
 const TABS: readonly TabItem<TabId>[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'drafts', label: 'Draft jobs' },
   { id: 'corrections', label: 'Corrections' },
   { id: 'clarifications', label: 'Clarifications' },
   { id: 'documents', label: 'Documents' },
+  { id: 'messages', label: 'Messages' },
   { id: 'activity', label: 'Activity' },
 ];
 
@@ -194,11 +197,19 @@ export function CaseDetailPage() {
     <div className="rounded-lg border border-slate-200 bg-white">
       <TabBar tabs={tabsWithBadge} active={tab} onChange={setTab} />
       <div className="p-4">
-        {tab === 'overview' ? <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} /> : null}
+        {tab === 'overview' ? (
+          <>
+            <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
+            {role === 'admin' || role === 'ops_staff' ? (
+              <div className="mt-4"><CaseAssignmentPanel caseId={c.id} version={c.version} assignedPhysician={c.assignedPhysician ?? null} assignedRn={c.assignedRn ?? null} /></div>
+            ) : null}
+          </>
+        ) : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
         {tab === 'corrections' ? <CorrectionsTab caseId={caseId} /> : null}
         {tab === 'clarifications' ? <ClarificationsPanel caseId={caseId} /> : null}
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} /> : null}
+        {tab === 'messages' ? <CaseMessagesPanel caseId={caseId} /> : null}
         {tab === 'activity' ? <EmptyState title="Activity" message="The per-case activity log ships in a later phase." /> : null}
       </div>
     </div>

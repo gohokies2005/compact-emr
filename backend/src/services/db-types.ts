@@ -319,6 +319,9 @@ export interface PhysicianRecord {
   email: string;
   phone: string | null;
   signatureImageS3Key: string | null;
+  // Prisma Json? — render-authoritative per-signer credential facts (D2). Untrusted at this
+  // boundary; narrow with credential-block.parseCredentialBlock before use.
+  credentialBlockJson: unknown;
   active: boolean;
   createdAt: Date;
   updatedAt: Date;

@@ -44,7 +44,7 @@ function makeDb(opts: { inFlight?: number } = {}) {
         id: d.id as string, cognitoSub: (d.cognitoSub as string | null) ?? null, fullName: d.fullName as string,
         npi: d.npi as string, specialty: d.specialty as string, medicalLicense: d.medicalLicense as string,
         email: d.email as string, phone: (d.phone as string | null) ?? null, signatureImageS3Key: null,
-        active: true, createdAt: now, updatedAt: now, version: 1,
+        credentialBlockJson: null, active: true, createdAt: now, updatedAt: now, version: 1,
       };
       store.set(row.id, row);
       return row;

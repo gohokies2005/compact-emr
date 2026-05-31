@@ -3,6 +3,7 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLetterRouter, type LetterRouterDeps } from '../routes/letter.js';
 import { isHttpError, sendError } from '../http/errors.js';
+import { KASKY_CREDENTIALS, type SignerCredentials } from '../services/credential-block.js';
 import type { AppDb, CaseRecord, LetterRevisionRecord, PhysicianRecord, Role } from '../services/db-types.js';
 
 interface MockUser { readonly sub: string; readonly email?: string; readonly roles: Role[]; }
@@ -37,13 +38,26 @@ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
   };
 }
 
-function physician(): PhysicianRecord {
+// Default signer = Kasky, fully provisioned (credential block + signature on file) so the
+// happy-path approve reaches 200. fullNameWithCredential matches LETTER_TXT ("Ryan J. Kasky, DO").
+function physician(overrides: Partial<PhysicianRecord> = {}): PhysicianRecord {
   const now = new Date('2026-05-30T00:00:00.000Z');
   return {
-    id: 'PHYS-001', cognitoSub: 'PHYS-SUB', fullName: 'Dr. Test, DO', npi: '1111111111',
-    specialty: 'Family Medicine', medicalLicense: 'NV-DO0001', email: 'p@x.test', phone: null,
-    signatureImageS3Key: null, active: true, createdAt: now, updatedAt: now, version: 1,
+    id: 'PHYS-001', cognitoSub: 'PHYS-SUB', fullName: 'Ryan J. Kasky, DO', npi: '1073018958',
+    specialty: 'Family Medicine', medicalLicense: 'NV-DO2996', email: 'p@x.test', phone: null,
+    signatureImageS3Key: 'physician-signatures/PHYS-001/abc-signature.png',
+    credentialBlockJson: { ...KASKY_CREDENTIALS },
+    active: true, createdAt: now, updatedAt: now, version: 1, ...overrides,
   };
+}
+
+const JANE_CREDS: SignerCredentials = {
+  fullNameWithCredential: 'Jane A. Doe, MD', specialty: 'Internal Medicine',
+  boardName: 'American Board of Internal Medicine', boardAbbreviation: 'ABIM',
+  licenseState: 'Texas', licenseNumber: 'MD55512', npi: '1999999999',
+};
+function janePhysician(overrides: Partial<PhysicianRecord> = {}): PhysicianRecord {
+  return physician({ id: 'PHYS-002', cognitoSub: 'JANE-SUB', fullName: 'Jane A. Doe, MD', npi: '1999999999', credentialBlockJson: { ...JANE_CREDS }, ...overrides });
 }
 
 function currentRevision(version = 1): LetterRevisionRecord {
@@ -56,8 +70,16 @@ function currentRevision(version = 1): LetterRevisionRecord {
   };
 }
 
-function makeDb(initialCase: CaseRecord = baseCase(), opts: { signOffs?: unknown[] } = {}) {
+function makeDb(
+  initialCase: CaseRecord = baseCase(),
+  opts: { signOffs?: unknown[]; signer?: PhysicianRecord; self?: PhysicianRecord; roster?: PhysicianRecord[] } = {},
+) {
   const signOffs = opts.signOffs ?? [{ id: 'SO-1' }];
+  // signer = the assigned physician resolved by id (the fraud gate). self = resolved by
+  // cognitoSub for the physician-self auth check. roster = active physicians for foreign-name.
+  const signer = opts.signer ?? physician();
+  const self = opts.self ?? physician();
+  const roster = opts.roster ?? [physician()];
   const tx = {
     case: { findFirst: vi.fn(async () => initialCase), findUnique: vi.fn(async () => initialCase), findMany: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn(async () => initialCase) },
     veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
@@ -66,7 +88,12 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { signOffs?: unknown
     activityLog: { create: vi.fn(async () => ({})) },
     signOff: { findMany: vi.fn(async () => signOffs), findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn() },
     fileReadStatus: { findMany: vi.fn(async () => []), findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), upsert: vi.fn() },
-    physician: { findUnique: vi.fn(async (a: { where?: { cognitoSub?: string } }) => (a.where?.cognitoSub === 'PHYS-SUB' ? physician() : null)), findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
+    physician: {
+      findUnique: vi.fn(async (a: { where?: { cognitoSub?: string } }) => (a.where?.cognitoSub === self.cognitoSub ? self : null)),
+      findFirst: vi.fn(async (a: { where?: { id?: string } }) => (a.where?.id === signer.id ? signer : null)),
+      findMany: vi.fn(async () => roster),
+      create: vi.fn(), update: vi.fn(),
+    },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (t: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
   return { db, tx };
@@ -137,9 +164,100 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     expect(res.body.data.status).toBe('delivered');
     expect(res.body.data.version).toBe(2);
     // final render must be draft:false
-    expect((d.renderLetter as ReturnType<typeof vi.fn>).mock.calls[0][0].draft).toBe(false);
+    const renderArg = (d.renderLetter as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(renderArg.draft).toBe(false);
+    // D2: signer name + signature key threaded into the render payload.
+    expect(renderArg.caseData.signer_name).toBe('Ryan J. Kasky, DO');
+    expect(renderArg.caseData.signature_image_s3_key).toBe('physician-signatures/PHYS-001/abc-signature.png');
     const caseUpdate = (tx.case.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(caseUpdate.data.status).toBe('delivered');
+  });
+
+  // ── D2 fraud gate ──────────────────────────────────────────────────────────
+  it('approve 409 when no physician is assigned', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const { db } = makeDb(baseCase({ assignedPhysicianId: null }));
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('no_assigned_physician');
+  });
+
+  it('approve 409 when the assigned physician record is not found', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const { db } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-999' }));
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('assigned_physician_not_found');
+  });
+
+  it('approve 409 when the assigned physician is inactive', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const { db } = makeDb(baseCase(), { signer: physician({ active: false }) });
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('assigned_physician_inactive');
+  });
+
+  it('approve 409 when the signer credential block is incomplete', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const { db } = makeDb(baseCase(), { signer: physician({ credentialBlockJson: null }) });
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('signer_credentials_incomplete');
+  });
+
+  it('approve 409 when the signer has no signature on file', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const { db } = makeDb(baseCase(), { signer: physician({ signatureImageS3Key: null }) });
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('signer_signature_missing');
+  });
+
+  it('approve 409 (signer_name_absent) when the letter does not name the assigned signer', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const txt = 'The veteran has a chronic back condition documented in the record.';
+    const { db } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-002' }), { signer: janePhysician(), roster: [physician(), janePhysician()] });
+    const d = deps({ s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => txt } })) } as unknown as LetterRouterDeps['s3'] });
+    const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('signer_name_absent');
+  });
+
+  it('approve 409 (foreign_signer_name) when the letter names another physician', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    // Jane is assigned + named (positive check passes), but the body also names Kasky -> fraud.
+    const txt = 'I, Jane A. Doe, MD, am board-certified.\n\nCo-reviewed with Ryan J. Kasky, DO.';
+    const { db } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-002' }), { signer: janePhysician(), roster: [physician(), janePhysician()] });
+    const d = deps({ s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => txt } })) } as unknown as LetterRouterDeps['s3'] });
+    const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('foreign_signer_name');
+    expect(res.body.error.details.foreignNames).toEqual(['Ryan J. Kasky, DO']);
+  });
+
+  it('approve substitutes signer sentinels before render (no [[SIGNER_ survives)', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const txt = '[[SIGNER_CREDENTIALS]]\n\nThe veteran has a back condition.\n\n[[SIGNER_BLOCK]]';
+    const { db } = makeDb();
+    const d = deps({ s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => txt } })) } as unknown as LetterRouterDeps['s3'] });
+    const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(200);
+    const sentText = (d.renderLetter as ReturnType<typeof vi.fn>).mock.calls[0][0].letterText as string;
+    expect(sentText).not.toContain('[[SIGNER_');
+    expect(sentText).toContain('Ryan J. Kasky, DO');
+    expect(sentText).toContain('Board-Certified in Family Medicine, ABOFP');
+  });
+
+  it('approve 502 (fail closed) when an unresolved signer sentinel survives', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    // A malformed sentinel the substitutor will not match; assigned signer is still named.
+    const txt = 'I, Ryan J. Kasky, DO, am board-certified.\n\n[[SIGNER_FOOTER]]';
+    const { db } = makeDb();
+    const d = deps({ s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => txt } })) } as unknown as LetterRouterDeps['s3'] });
+    const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(502);
+    expect(res.body.error.details.reason).toBe('signer_sentinel_unresolved');
   });
 
   it('approve HARD-FAILS (500) the version-match guard if render returns a stale version', async () => {

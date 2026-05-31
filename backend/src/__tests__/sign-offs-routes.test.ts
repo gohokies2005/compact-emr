@@ -58,6 +58,7 @@ function buildPhysician(overrides: Partial<PhysicianRecord> = {}): PhysicianReco
     email: 'phys@example.test',
     phone: null,
     signatureImageS3Key: null,
+    credentialBlockJson: null,
     active: true,
     createdAt: now,
     updatedAt: now,

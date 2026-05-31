@@ -35,7 +35,7 @@ function buildPhysician(overrides: Partial<PhysicianRecord> = {}): PhysicianReco
   const now = new Date('2026-05-25T00:00:00.000Z');
   return {
     id: 'PHYS-001', cognitoSub: 'PHYS-SUB', fullName: 'Dr. T, DO', npi: '1', specialty: 'FM', medicalLicense: 'NV-1',
-    email: 'p@x.test', phone: null, signatureImageS3Key: null, active: true,
+    email: 'p@x.test', phone: null, signatureImageS3Key: null, credentialBlockJson: null, active: true,
     createdAt: now, updatedAt: now, version: 1, ...overrides,
   };
 }

@@ -80,6 +80,50 @@ export function renderSignatureBlock(c: SignerCredentials): string {
 }
 
 /**
+ * Replace the signer sentinels in a letter with the assigned physician's rendered blocks. A
+ * no-op when no sentinel is present (the legacy hardcoded-credential letters that exist today
+ * pass through byte-identical). Idempotent. split().join() rather than replaceAll so a `$` in a
+ * credential string can never be read as a replacement pattern, and so every occurrence is
+ * replaced deterministically. The veteran's possessive pronoun is veteran-specific (see
+ * renderSection1Credentials) so the caller supplies it.
+ */
+export function substituteSignerSentinels(
+  letterText: string,
+  c: SignerCredentials,
+  veteranPossessivePronoun: string,
+): string {
+  let out = letterText;
+  if (out.includes(SECTION1_CREDENTIALS_SENTINEL)) {
+    out = out.split(SECTION1_CREDENTIALS_SENTINEL).join(renderSection1Credentials(c, veteranPossessivePronoun));
+  }
+  if (out.includes(SIGNATURE_BLOCK_SENTINEL)) {
+    out = out.split(SIGNATURE_BLOCK_SENTINEL).join(renderSignatureBlock(c));
+  }
+  return out;
+}
+
+/**
+ * The anti-fraud assertion: which OTHER known physicians' credentialed names appear in this
+ * letter. The approve gate blocks if this returns anything non-empty — it means the letter body
+ * names a physician who is not the assigned signer (e.g. physician #2 assigned to a letter whose
+ * body still says "Ryan J. Kasky, DO"). Exact substring match on the full credentialed name; no
+ * fuzzy matching (a false positive here is a dead-end the operator cannot fix). The caller passes
+ * the active-physician roster's credentialed names and the assigned signer's own name to exclude.
+ */
+export function findForeignSignerNames(
+  letterText: string,
+  rosterCredentialNames: readonly string[],
+  selfName: string,
+): string[] {
+  const found: string[] = [];
+  for (const name of rosterCredentialNames) {
+    if (name === selfName || name.trim().length === 0) continue;
+    if (letterText.includes(name) && !found.includes(name)) found.push(name);
+  }
+  return found;
+}
+
+/**
  * Validate + narrow an untrusted JSON value (Physician.credentialBlockJson out of the DB) to
  * SignerCredentials. Returns null if any field is missing or non-string-or-blank — the render
  * path treats null as "this physician cannot sign yet" and fails closed (D2 commit 3), so a

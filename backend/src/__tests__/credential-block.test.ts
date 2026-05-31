@@ -6,9 +6,23 @@ import {
   renderSection1Credentials,
   renderSignatureBlock,
   parseCredentialBlock,
+  substituteSignerSentinels,
+  findForeignSignerNames,
+  SECTION1_CREDENTIALS_SENTINEL,
+  SIGNATURE_BLOCK_SENTINEL,
   KASKY_CREDENTIALS,
   type SignerCredentials,
 } from '../services/credential-block.js';
+
+const JANE: SignerCredentials = {
+  fullNameWithCredential: 'Jane A. Doe, MD',
+  specialty: 'Internal Medicine',
+  boardName: 'American Board of Internal Medicine',
+  boardAbbreviation: 'ABIM',
+  licenseState: 'Texas',
+  licenseNumber: 'MD55512',
+  npi: '1999999999',
+};
 
 // Resolve the reference letter relative to this test file: src/__tests__ -> ../../prisma.
 const here = dirname(fileURLToPath(import.meta.url));
@@ -71,5 +85,55 @@ describe('credential-block — parseCredentialBlock validation', () => {
   it('rejects a block with a blank or non-string field', () => {
     expect(parseCredentialBlock({ ...KASKY_CREDENTIALS, licenseNumber: '   ' })).toBeNull();
     expect(parseCredentialBlock({ ...KASKY_CREDENTIALS, npi: 1073018958 })).toBeNull();
+  });
+});
+
+describe('credential-block — substituteSignerSentinels', () => {
+  it('replaces both sentinels with the rendered blocks', () => {
+    const body = `${SECTION1_CREDENTIALS_SENTINEL}\n\nMiddle.\n\n${SIGNATURE_BLOCK_SENTINEL}`;
+    const out = substituteSignerSentinels(body, KASKY_CREDENTIALS, 'his');
+    expect(out).toContain(renderSection1Credentials(KASKY_CREDENTIALS, 'his'));
+    expect(out).toContain(renderSignatureBlock(KASKY_CREDENTIALS));
+    expect(out).not.toContain('[[SIGNER_');
+  });
+
+  it('is a no-op on a legacy letter with no sentinel (byte-identical pass-through)', () => {
+    const legacy = 'I, Ryan J. Kasky, DO, am board-certified in Family Medicine.\n\nRyan J. Kasky, DO';
+    expect(substituteSignerSentinels(legacy, JANE, 'their')).toBe(legacy);
+  });
+
+  it('is idempotent — running twice equals running once', () => {
+    const body = `${SECTION1_CREDENTIALS_SENTINEL}\n\n${SIGNATURE_BLOCK_SENTINEL}`;
+    const once = substituteSignerSentinels(body, KASKY_CREDENTIALS, 'their');
+    expect(substituteSignerSentinels(once, KASKY_CREDENTIALS, 'their')).toBe(once);
+  });
+
+  it('replaces every occurrence of a sentinel', () => {
+    const body = `${SIGNATURE_BLOCK_SENTINEL} and again ${SIGNATURE_BLOCK_SENTINEL}`;
+    const out = substituteSignerSentinels(body, KASKY_CREDENTIALS, 'their');
+    expect(out).not.toContain('[[SIGNER_');
+    expect(out.split(renderSignatureBlock(KASKY_CREDENTIALS)).length - 1).toBe(2);
+  });
+});
+
+describe('credential-block — findForeignSignerNames (the anti-fraud assertion)', () => {
+  const kaskyLetter = 'I, Ryan J. Kasky, DO, am board-certified.\n\nRyan J. Kasky, DO';
+  const roster = [KASKY_CREDENTIALS.fullNameWithCredential, JANE.fullNameWithCredential];
+
+  it('returns empty when the assigned signer is the only name present', () => {
+    // Assigned = Kasky, letter names Kasky -> no foreign name.
+    expect(findForeignSignerNames(kaskyLetter, roster, KASKY_CREDENTIALS.fullNameWithCredential)).toEqual([]);
+  });
+
+  it('flags the foreign name when a different physician is assigned to a Kasky-bodied letter', () => {
+    // Assigned = Jane, letter still says Kasky -> Kasky is foreign.
+    expect(findForeignSignerNames(kaskyLetter, roster, JANE.fullNameWithCredential)).toEqual([
+      'Ryan J. Kasky, DO',
+    ]);
+  });
+
+  it('never flags the assigned signer themselves and de-dupes', () => {
+    const twice = `${kaskyLetter}\n\nRyan J. Kasky, DO`;
+    expect(findForeignSignerNames(twice, roster, JANE.fullNameWithCredential)).toEqual(['Ryan J. Kasky, DO']);
   });
 });

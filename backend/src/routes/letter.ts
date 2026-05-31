@@ -11,6 +11,11 @@ import { cleanProseForSave, sanityCheckLetterText, computeLockedRanges, type San
 import { applyStructuredEdit, type EditProposal } from '../services/letter-edit-apply.js';
 import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from '../services/case-status-transitions.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
+import {
+  parseCredentialBlock,
+  substituteSignerSentinels,
+  findForeignSignerNames,
+} from '../services/credential-block.js';
 import type { AppDb } from '../services/db-types.js';
 
 /**
@@ -28,7 +33,14 @@ const PRESIGN_TTL_SECONDS = 300;
 const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'physician_review', 'correction_review']);
 
 export interface RenderInvokeInput {
-  caseData: { id: string; veteran_name: string; veteran_last: string; claimed_condition: string };
+  caseData: {
+    id: string; veteran_name: string; veteran_last: string; claimed_condition: string;
+    // D2 signer fields — optional + additive so an older render Lambda ignores them. The
+    // credential PROSE is already substituted into letterText; the Lambda needs only the
+    // signature PNG key (to composite the image) and the signer name (artifact metadata).
+    signer_name?: string;
+    signature_image_s3_key?: string;
+  };
   letterText: string;
   version: number;
   draft: boolean;
@@ -345,8 +357,54 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       if (veteran === null) throw new HttpError(409, 'conflict', 'Veteran not found for case.', { caseId });
       const caseData = { id: caseId, veteran_name: `${veteran.firstName} ${veteran.lastName}`.trim(), veteran_last: veteran.lastName, claimed_condition: c.claimedCondition };
 
+      // ── D2 FRAUD GATE ── The named/credentialed physician must be the assigned signer. The
+      // signer is whoever is ASSIGNED (c.assignedPhysicianId), never whoever clicks approve —
+      // an admin acting on a case still finalizes the assigned physician's signature. All checks
+      // run before the transaction so a blocked approve never advances the version.
+      if (c.assignedPhysicianId === null) {
+        throw new HttpError(409, 'conflict', 'Cannot approve: no physician is assigned to this case. Assign a signing physician, then approve.', { reason: 'no_assigned_physician', caseId });
+      }
+      const signer = await db.physician.findFirst({ where: { id: c.assignedPhysicianId } });
+      if (signer === null) {
+        throw new HttpError(409, 'conflict', 'Cannot approve: the assigned physician record was not found. Reassign the case to a current physician, then approve.', { reason: 'assigned_physician_not_found', caseId, physicianId: c.assignedPhysicianId });
+      }
+      if (!signer.active) {
+        throw new HttpError(409, 'conflict', `Cannot approve: ${signer.fullName} is inactive. Reactivate the physician or reassign the case, then approve.`, { reason: 'assigned_physician_inactive', caseId, physicianId: signer.id });
+      }
+      const signerCreds = parseCredentialBlock(signer.credentialBlockJson);
+      if (signerCreds === null) {
+        throw new HttpError(409, 'conflict', `Cannot approve: ${signer.fullName}'s credential profile is incomplete. An administrator must complete the credential block (name, specialty, board, license, NPI) on the Physicians admin page, then re-approve.`, { reason: 'signer_credentials_incomplete', caseId, physicianId: signer.id });
+      }
+      const signatureKey = signer.signatureImageS3Key;
+      if (signatureKey === null || signatureKey.trim() === '') {
+        throw new HttpError(409, 'conflict', `Cannot approve: ${signer.fullName} has no signature image on file. An administrator must upload the physician's signature on the Physicians admin page, then re-approve.`, { reason: 'signer_signature_missing', caseId, physicianId: signer.id });
+      }
+
+      // Substitute any signer sentinels with the assigned signer's rendered blocks (no-op on the
+      // legacy hardcoded-credential letters). Pronoun defaults to "their" (gender-neutral; no
+      // veteran-pronoun field exists yet) and is irrelevant to no-sentinel letters.
+      const finalText = substituteSignerSentinels(text, signerCreds, 'their');
+
+      // Positive identity check: the assigned signer's exact credentialed name must appear.
+      if (!finalText.includes(signerCreds.fullNameWithCredential)) {
+        throw new HttpError(409, 'conflict', `Cannot approve: the letter does not name the assigned signing physician (${signerCreds.fullNameWithCredential}). Regenerate or correct the letter so it is authored under the assigned physician, then approve.`, { reason: 'signer_name_absent', caseId, physicianId: signer.id });
+      }
+      // Anti-fraud: no OTHER known physician's credentialed name may appear in the letter body.
+      const roster = await db.physician.findMany({ where: { active: true } });
+      const rosterNames = roster
+        .map((p) => parseCredentialBlock(p.credentialBlockJson)?.fullNameWithCredential)
+        .filter((n): n is string => typeof n === 'string');
+      const foreign = findForeignSignerNames(finalText, rosterNames, signerCreds.fullNameWithCredential);
+      if (foreign.length > 0) {
+        throw new HttpError(409, 'conflict', `Cannot approve: the letter names ${foreign.join(', ')} but the assigned signing physician is ${signerCreds.fullNameWithCredential}. A letter must be signed by the physician it is authored under. Reassign the case to the named physician or regenerate the letter, then approve.`, { reason: 'foreign_signer_name', caseId, physicianId: signer.id, foreignNames: foreign });
+      }
+      // Fail closed: an unresolved signer sentinel must never reach the renderer / S3.
+      if (finalText.includes('[[SIGNER_')) {
+        throw new HttpError(502, 'internal_error', 'Refusing to render: an unresolved signer sentinel survived substitution.', { reason: 'signer_sentinel_unresolved', caseId });
+      }
+
       // Render FINAL (no DRAFT watermark) at the new version.
-      const rendered = await deps.renderLetter({ caseData, letterText: text, version: newVersion, draft: false, bucket: bucketName, keys });
+      const rendered = await deps.renderLetter({ caseData: { ...caseData, signer_name: signerCreds.fullNameWithCredential, signature_image_s3_key: signatureKey }, letterText: finalText, version: newVersion, draft: false, bucket: bucketName, keys });
       if (!rendered.ok) throw new HttpError(502, 'internal_error', 'Final render failed; not approved.', { reason: 'render_failed', caseId });
       // Version-match guard (Ryan's safety requirement): the final artifact MUST be the version
       // we're advancing to — never a stale one.

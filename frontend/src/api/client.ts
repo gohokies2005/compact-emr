@@ -4,6 +4,10 @@ import { env } from '../env';
 
 export class ForbiddenError extends Error { constructor(message = 'Forbidden') { super(message); this.name = 'ForbiddenError'; } }
 export class ConflictError<T = unknown> extends Error { constructor(readonly current?: T) { super('Optimistic locking conflict'); this.name = 'ConflictError'; } }
+// 503 from the API (e.g. the letter editor's render/surgical-AI when the render Lambda or
+// Anthropic key isn't configured in this environment). Lets the UI show a calm "not available
+// in this environment" instead of a generic failure.
+export class ServiceUnavailableError extends Error { readonly status = 503; constructor(readonly details?: unknown) { super('Service unavailable'); this.name = 'ServiceUnavailableError'; } }
 
 // Phase 8.1 G3: when an S3-signed URL has expired (5-min TTL on Doctor Pack / drafter
 // artifact downloads), axios sees a 403 from AWS with a specific XML body. The generic
@@ -48,6 +52,11 @@ function isLikelyExpiredPresignedUrlError(error: unknown): boolean {
 export const apiClient: AxiosInstance = axios.create({ baseURL: env.apiBaseUrl, timeout: 30000 });
 
 apiClient.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
+  // DEV/DEMO ONLY: send the locally minted bypass token, skip Amplify entirely.
+  if (env.demoMode && env.devBypassToken) {
+    config.headers.Authorization = `Bearer ${env.devBypassToken}`;
+    return config;
+  }
   const session = await fetchAuthSession();
   const token = session.tokens?.idToken?.toString();
   if (token) config.headers.Authorization = `Bearer ${token}`;
@@ -58,9 +67,11 @@ apiClient.interceptors.response.use((response) => response, async (error: AxiosE
   // Phase 8.1 G3: detect expired S3-signed URLs BEFORE the generic 403 -> ForbiddenError
   // path so the DownloadButton can show "click Download again" instead of "Forbidden."
   if (isLikelyExpiredPresignedUrlError(error)) throw new PresignedUrlExpiredError(error);
-  if (error.response?.status === 401) { await signOut(); window.location.assign('/'); }
+  // DEV/DEMO ONLY: a 401 in demo mode must not trigger the Amplify sign-out + redirect loop.
+  if (error.response?.status === 401 && !env.demoMode) { await signOut(); window.location.assign('/'); }
   if (error.response?.status === 403) throw new ForbiddenError();
   if (error.response?.status === 409) throw new ConflictError(error.response.data?.error?.details);
+  if (error.response?.status === 503) throw new ServiceUnavailableError(error.response.data?.error?.details);
   throw error;
 });
 

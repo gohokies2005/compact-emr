@@ -3,6 +3,7 @@ import type { Case, CaseStatus, ClaimType, Correction, Document, DraftJob, Email
 
 export interface CaseVeteranLite { readonly id: string; readonly firstName: string; readonly lastName: string; readonly email: string; }
 export interface CasePhysicianLite { readonly id: string; readonly fullName: string; readonly email: string; }
+export interface AssignedRnLite { readonly id: string; readonly email: string; }
 
 // Matches the backend CASE_LITE_SELECT shape returned by GET /cases and the list rows.
 export interface CaseLite {
@@ -69,6 +70,7 @@ export async function createCase(veteranId: string, input: CreateCaseInput): Pro
 export interface CaseDetail extends Case {
   readonly veteran?: CaseVeteranLite | null;
   readonly assignedPhysician?: CasePhysicianLite | null;
+  readonly assignedRn?: AssignedRnLite | null;
   readonly documents?: readonly Document[];
   readonly draftJobs?: readonly DraftJob[];
   readonly corrections?: readonly Correction[];
@@ -103,6 +105,17 @@ export async function patchCase(id: string, input: PatchCaseInput): Promise<{ da
 
 export async function transitionCaseStatus(id: string, input: TransitionInput): Promise<{ data: CaseLite }> {
   return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/status`, input);
+}
+
+export interface AssignPhysicianInput { readonly physicianId: string; readonly version: number }
+export interface AssignRnInput { readonly rnUserId: string; readonly version: number }
+
+export async function assignCasePhysician(id: string, input: AssignPhysicianInput): Promise<{ data: CaseLite }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/assign-physician`, input);
+}
+
+export async function assignCaseRn(id: string, input: AssignRnInput): Promise<{ data: CaseLite }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/assign-rn`, input);
 }
 
 export async function deleteCase(id: string): Promise<void> {

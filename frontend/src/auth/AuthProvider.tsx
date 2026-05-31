@@ -1,6 +1,11 @@
 import { createContext, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { confirmSignIn as amplifyConfirmSignIn, fetchAuthSession, fetchUserAttributes, getCurrentUser, signIn as amplifySignIn, signOut as amplifySignOut } from 'aws-amplify/auth';
 import type { Role } from '../types/prisma';
+import { env } from '../env';
+
+// DEV/DEMO ONLY: fixed physician identity used when VITE_DEMO_MODE=true (skips Amplify/Cognito).
+// `sub` matches the demo-seed physician app-user + the dev bypass token's subject.
+const DEMO_PHYSICIAN: AuthUser = { sub: 'demo-physician-sub', email: 'dr.physician@flatratenexus.local', roles: ['physician'], role: 'physician' };
 
 export interface AuthUser { readonly sub: string; readonly email: string; readonly roles: readonly Role[]; readonly role: Role; }
 export type AuthStep = 'idle' | 'new_password_required' | 'mfa_setup' | 'software_token_mfa' | 'signed_in';
@@ -73,6 +78,13 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
   const [totpSetupDetails, setTotpSetupDetails] = useState<TotpSetupDetails | null>(null);
 
   const refreshUser = useCallback(async () => {
+    // DEV/DEMO ONLY: bypass Amplify and present a fixed signed-in physician.
+    if (env.demoMode) {
+      setUser(DEMO_PHYSICIAN);
+      setLoading(false);
+      setChallengeStep('signed_in');
+      return;
+    }
     setLoading(true);
     const current = await readCurrentAuthUser();
     setUser(current);

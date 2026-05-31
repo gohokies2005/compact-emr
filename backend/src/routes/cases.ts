@@ -235,6 +235,7 @@ export function createCasesRouter(db: AppDb): Router {
         include: {
           veteran: { select: { id: true, firstName: true, lastName: true, email: true } },
           assignedPhysician: { select: { id: true, fullName: true, email: true } },
+          assignedRn: { select: { id: true, email: true } },
           documents: { orderBy: { uploadedAt: 'desc' }, take: 5 },
           draftJobs: { orderBy: { enqueuedAt: 'desc' }, take: 5 },
           corrections: { orderBy: { requestedAt: 'desc' }, take: 5 },

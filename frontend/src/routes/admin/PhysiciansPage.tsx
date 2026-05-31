@@ -96,6 +96,25 @@ function isCreateValid(form: PhysicianFormState): boolean {
   );
 }
 
+// The 4 credential fields are all-or-nothing: a half-filled set composes an incomplete block the
+// server rejects (400). Block that submit client-side so the admin gets a clear inline hint
+// instead of a dead-end. All-empty is allowed on edit (a legacy profile left untouched).
+function credentialGroupComplete(form: PhysicianFormState): boolean {
+  const filled = [form.boardName, form.boardAbbreviation, form.licenseState, form.licenseNumber].filter((v) => v.trim().length > 0).length;
+  return filled === 0 || filled === 4;
+}
+
+function isEditValid(form: PhysicianFormState): boolean {
+  return (
+    form.fullName.trim().length > 0 &&
+    /^\d{10}$/.test(form.npi.trim()) &&
+    form.specialty.trim().length > 0 &&
+    form.medicalLicense.trim().length > 0 &&
+    form.email.trim().length > 0 &&
+    credentialGroupComplete(form)
+  );
+}
+
 function conflictMessage(error: unknown): string {
   if (!(error instanceof ConflictError)) return 'Request could not be completed. Please retry.';
   const current = error.current;
@@ -152,7 +171,7 @@ export function PhysiciansPage() {
   function updateEditField<K extends keyof PhysicianFormState>(key: K, value: PhysicianFormState[K]) { setEditForm((current) => ({ ...current, [key]: value })); setMessage(null); }
   function openEdit(physician: PhysicianPublic) { setEditing(physician); setEditForm(toEditForm(physician)); setMessage(null); }
   function handleCreate(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (isCreateValid(createForm)) createMutation.mutate(); }
-  function handleEdit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); editMutation.mutate(); }
+  function handleEdit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (isEditValid(editForm)) editMutation.mutate(); }
 
   return (
     <AppShell>
@@ -242,9 +261,10 @@ export function PhysiciansPage() {
                 <Field label="License number" value={editForm.licenseNumber} onChange={(v) => updateEditField('licenseNumber', v)} placeholder="e.g. DO2996" />
                 <Field label="Cognito subject" value={editForm.cognitoSub} onChange={(v) => updateEditField('cognitoSub', v)} />
                 <PhysicianSignatureControl physician={editing} />
+                {!credentialGroupComplete(editForm) ? <p className="text-sm text-amber-700">All four credential fields (board, abbreviation, license state, license number) must be filled together, or all left blank.</p> : null}
                 <div className="flex justify-end gap-2 border-t border-slate-200 pt-4">
                   <Button type="button" variant="secondary" onClick={() => setEditing(null)}>Cancel</Button>
-                  <Button type="submit" variant="primary" loading={editMutation.isPending} disabled={editMutation.isPending}>Save changes</Button>
+                  <Button type="submit" variant="primary" loading={editMutation.isPending} disabled={editMutation.isPending || !isEditValid(editForm)}>Save changes</Button>
                 </div>
               </form>
             </div>

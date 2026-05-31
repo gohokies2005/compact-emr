@@ -122,6 +122,25 @@ describe('physician profile routes (D1)', () => {
     expect(res.body.data.boardAbbreviation).toBe('ABFM');
   });
 
+  it('PATCH fullName refreshes the block fullNameWithCredential (column<->block never drift)', async () => {
+    const { db, store } = makeDb();
+    const app = appFor(db);
+    const created = (await request(app).post('/api/v1/physicians').send(VALID)).body.data;
+    await request(app).patch(`/api/v1/physicians/${created.id}`).send({ version: 1, fields: { fullName: 'Dr. Jane A. Doe, MD' } });
+    const block = store.get(created.id)!.credentialBlockJson as { fullNameWithCredential: string; boardAbbreviation: string };
+    expect(block.fullNameWithCredential).toBe('Dr. Jane A. Doe, MD');
+    expect(block.boardAbbreviation).toBe('ABFM'); // unchanged fields survive
+  });
+
+  it('PATCH an unrelated field on a no-block profile leaves credentialBlockJson untouched (no half-build)', async () => {
+    const { db, store } = makeDb();
+    const now = new Date('2026-06-01T00:00:00.000Z');
+    store.set('LEGACY', { id: 'LEGACY', cognitoSub: null, fullName: 'Dr. Old, MD', npi: '5555555555', specialty: 'FM', medicalLicense: 'NV-9', email: 'old@x.test', phone: null, signatureImageS3Key: null, credentialBlockJson: null, active: true, createdAt: now, updatedAt: now, version: 1 });
+    const res = await request(appFor(db)).patch('/api/v1/physicians/LEGACY').send({ version: 1, fields: { email: 'new@x.test' } });
+    expect(res.status).toBe(200);
+    expect(store.get('LEGACY')!.credentialBlockJson).toBeNull();
+  });
+
   it('ops_staff can LIST but cannot CREATE', async () => {
     const { db } = makeDb();
     mockUser = { sub: 'ops-sub', roles: ['ops_staff'] };

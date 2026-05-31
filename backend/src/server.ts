@@ -58,7 +58,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createCasesRouter(db));
   app.use('/api/v1', authenticateJwt(), createPhysiciansRouter(db, { bucketName: process.env.PHI_BUCKET_NAME, s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) }));
   app.use('/api/v1', authenticateJwt(), createChartNotesRouter(db));
-  app.use('/api/v1', authenticateJwt(), createCaseMessagesRouter(db));
+  app.use('/api/v1', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), createCaseMessagesRouter(db));
   app.use('/api/v1', authenticateJwt(), createCdsRouter(db));
   app.use('/api/v1', authenticateJwt(), createLookupRouter());
   app.use('/api/v1', authenticateJwt(), createSignOffsRouter(db));

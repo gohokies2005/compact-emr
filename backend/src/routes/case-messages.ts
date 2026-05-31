@@ -66,6 +66,9 @@ export function createCaseMessagesRouter(db: AppDb): Router {
       if (target === null) throw new HttpError(404, 'not_found', 'Message not found', { messageId: upToMessageId });
       createdAtCutoff = target.createdAt;
     }
+    // The cutoff is by created_at at microsecond granularity (TIMESTAMPTZ(6)); for a human
+    // 2-party thread that's exact. Read-state is advisory — a missed mark-read just shows one
+    // stale unread that self-heals on the next un-capped mark-read — so ties are harmless here.
     const result = await db.caseMessage.updateMany({
       where: { caseId, senderSub: { not: user.sub }, readAt: null, ...(createdAtCutoff ? { createdAt: { lte: createdAtCutoff } } : {}) },
       data: { readAt: new Date(), readBySub: user.sub },

@@ -24,9 +24,13 @@ interface PhysicianFormState {
   readonly email: string;
   readonly phone: string;
   readonly cognitoSub: string;
+  readonly boardName: string;
+  readonly boardAbbreviation: string;
+  readonly licenseState: string;
+  readonly licenseNumber: string;
 }
 
-const EMPTY_FORM: PhysicianFormState = { fullName: '', npi: '', specialty: '', medicalLicense: '', email: '', phone: '', cognitoSub: '' };
+const EMPTY_FORM: PhysicianFormState = { fullName: '', npi: '', specialty: '', medicalLicense: '', email: '', phone: '', cognitoSub: '', boardName: '', boardAbbreviation: '', licenseState: '', licenseNumber: '' };
 
 function toCreateInput(form: PhysicianFormState): CreatePhysicianInput {
   return {
@@ -37,6 +41,10 @@ function toCreateInput(form: PhysicianFormState): CreatePhysicianInput {
     email: form.email.trim(),
     ...(form.phone.trim() && { phone: form.phone.trim() }),
     ...(form.cognitoSub.trim() && { cognitoSub: form.cognitoSub.trim() }),
+    boardName: form.boardName.trim(),
+    boardAbbreviation: form.boardAbbreviation.trim(),
+    licenseState: form.licenseState.trim(),
+    licenseNumber: form.licenseNumber.trim(),
   };
 }
 
@@ -49,6 +57,10 @@ function toEditForm(physician: PhysicianPublic): PhysicianFormState {
     email: physician.email,
     phone: physician.phone ?? '',
     cognitoSub: physician.cognitoSub ?? '',
+    boardName: physician.boardName ?? '',
+    boardAbbreviation: physician.boardAbbreviation ?? '',
+    licenseState: physician.licenseState ?? '',
+    licenseNumber: physician.licenseNumber ?? '',
   };
 }
 
@@ -63,6 +75,10 @@ function toUpdateFields(original: PhysicianPublic, form: PhysicianFormState): Up
   if (phone !== original.phone) fields.phone = phone;
   const cognitoSub = form.cognitoSub.trim() || null;
   if (cognitoSub !== original.cognitoSub) fields.cognitoSub = cognitoSub;
+  if (form.boardName.trim() !== (original.boardName ?? '')) fields.boardName = form.boardName.trim();
+  if (form.boardAbbreviation.trim() !== (original.boardAbbreviation ?? '')) fields.boardAbbreviation = form.boardAbbreviation.trim();
+  if (form.licenseState.trim() !== (original.licenseState ?? '')) fields.licenseState = form.licenseState.trim();
+  if (form.licenseNumber.trim() !== (original.licenseNumber ?? '')) fields.licenseNumber = form.licenseNumber.trim();
   return fields;
 }
 
@@ -72,7 +88,11 @@ function isCreateValid(form: PhysicianFormState): boolean {
     /^\d{10}$/.test(form.npi.trim()) &&
     form.specialty.trim().length > 0 &&
     form.medicalLicense.trim().length > 0 &&
-    form.email.trim().length > 0
+    form.email.trim().length > 0 &&
+    form.boardName.trim().length > 0 &&
+    form.boardAbbreviation.trim().length > 0 &&
+    form.licenseState.trim().length > 0 &&
+    form.licenseNumber.trim().length > 0
   );
 }
 
@@ -153,6 +173,14 @@ export function PhysiciansPage() {
             <Field label="Medical license" value={createForm.medicalLicense} onChange={(v) => updateCreateField('medicalLicense', v)} required />
             <Field label="Email" value={createForm.email} onChange={(v) => updateCreateField('email', v)} required />
             <Field label="Phone" value={createForm.phone} onChange={(v) => updateCreateField('phone', v)} />
+            <div className="md:col-span-2 xl:col-span-3 mt-1 border-t border-slate-200 pt-4">
+              <p className="text-sm font-semibold text-slate-900">Credentials printed on the letter</p>
+              <p className="mt-1 text-xs text-slate-500">These appear in Section I and the signature block. Enter the full name with post-nominal above (e.g. "Ryan J. Kasky, DO"); all four below are required to sign.</p>
+            </div>
+            <Field label="Certifying board" value={createForm.boardName} onChange={(v) => updateCreateField('boardName', v)} required placeholder="e.g. American Board of Osteopathic Family Physicians" />
+            <Field label="Board abbreviation" value={createForm.boardAbbreviation} onChange={(v) => updateCreateField('boardAbbreviation', v)} required placeholder="e.g. ABOFP" />
+            <Field label="License state" value={createForm.licenseState} onChange={(v) => updateCreateField('licenseState', v)} required placeholder="e.g. Nevada" />
+            <Field label="License number" value={createForm.licenseNumber} onChange={(v) => updateCreateField('licenseNumber', v)} required placeholder="e.g. DO2996" />
             <div className="md:col-span-2 xl:col-span-3">
               <Field label="Cognito subject" value={createForm.cognitoSub} onChange={(v) => updateCreateField('cognitoSub', v)} placeholder="Optional until user account is linked" />
             </div>
@@ -208,6 +236,10 @@ export function PhysiciansPage() {
                 <Field label="Medical license" value={editForm.medicalLicense} onChange={(v) => updateEditField('medicalLicense', v)} required />
                 <Field label="Email" value={editForm.email} onChange={(v) => updateEditField('email', v)} required />
                 <Field label="Phone" value={editForm.phone} onChange={(v) => updateEditField('phone', v)} />
+                <Field label="Certifying board" value={editForm.boardName} onChange={(v) => updateEditField('boardName', v)} placeholder="e.g. American Board of Osteopathic Family Physicians" />
+                <Field label="Board abbreviation" value={editForm.boardAbbreviation} onChange={(v) => updateEditField('boardAbbreviation', v)} placeholder="e.g. ABOFP" />
+                <Field label="License state" value={editForm.licenseState} onChange={(v) => updateEditField('licenseState', v)} placeholder="e.g. Nevada" />
+                <Field label="License number" value={editForm.licenseNumber} onChange={(v) => updateEditField('licenseNumber', v)} placeholder="e.g. DO2996" />
                 <Field label="Cognito subject" value={editForm.cognitoSub} onChange={(v) => updateEditField('cognitoSub', v)} />
                 <PhysicianSignatureControl physician={editing} />
                 <div className="flex justify-end gap-2 border-t border-slate-200 pt-4">

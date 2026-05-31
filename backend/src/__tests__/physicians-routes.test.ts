@@ -44,7 +44,7 @@ function makeDb(opts: { inFlight?: number } = {}) {
         id: d.id as string, cognitoSub: (d.cognitoSub as string | null) ?? null, fullName: d.fullName as string,
         npi: d.npi as string, specialty: d.specialty as string, medicalLicense: d.medicalLicense as string,
         email: d.email as string, phone: (d.phone as string | null) ?? null, signatureImageS3Key: null,
-        credentialBlockJson: null, active: true, createdAt: now, updatedAt: now, version: 1,
+        credentialBlockJson: d.credentialBlockJson ?? null, active: true, createdAt: now, updatedAt: now, version: 1,
       };
       store.set(row.id, row);
       return row;
@@ -80,7 +80,7 @@ function appFor(db: AppDb) {
   return app;
 }
 
-const VALID = { fullName: 'Dr. Jane Doe, MD', npi: '1234567890', specialty: 'Family Medicine', medicalLicense: 'NV-12345', email: 'jane@x.test', cognitoSub: 'sub-jane' };
+const VALID = { fullName: 'Dr. Jane Doe, MD', npi: '1234567890', specialty: 'Family Medicine', medicalLicense: 'NV-12345', email: 'jane@x.test', cognitoSub: 'sub-jane', boardName: 'American Board of Family Medicine', boardAbbreviation: 'ABFM', licenseState: 'Nevada', licenseNumber: '12345' };
 
 describe('physician profile routes (D1)', () => {
   beforeEach(() => { mockUser = { sub: 'admin-sub', roles: ['admin'] }; });
@@ -92,6 +92,34 @@ describe('physician profile routes (D1)', () => {
     expect(res.body.data.fullName).toBe('Dr. Jane Doe, MD');
     expect(res.body.data.hasSignature).toBe(false);
     expect(res.body.data).not.toHaveProperty('signatureImageS3Key');
+  });
+
+  it('POST composes a complete credential block from the credential fields', async () => {
+    const { db } = makeDb();
+    const res = await request(appFor(db)).post('/api/v1/physicians').send(VALID);
+    expect(res.status).toBe(201);
+    expect(res.body.data.hasCredentialBlock).toBe(true);
+    expect(res.body.data.boardAbbreviation).toBe('ABFM');
+    expect(res.body.data.licenseState).toBe('Nevada');
+  });
+
+  it('POST missing a credential field (boardName) -> 400 (cannot sign without it)', async () => {
+    const { db } = makeDb();
+    const { boardName: _omit, ...withoutBoard } = VALID;
+    const res = await request(appFor(db)).post('/api/v1/physicians').send(withoutBoard);
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH a credential field recomposes the block', async () => {
+    const { db } = makeDb();
+    const app = appFor(db);
+    const created = (await request(app).post('/api/v1/physicians').send(VALID)).body.data;
+    const res = await request(app).patch(`/api/v1/physicians/${created.id}`).send({ version: 1, fields: { licenseNumber: 'DO99999' } });
+    expect(res.status).toBe(200);
+    expect(res.body.data.licenseNumber).toBe('DO99999');
+    expect(res.body.data.hasCredentialBlock).toBe(true);
+    // unchanged credential fields survive the recompose
+    expect(res.body.data.boardAbbreviation).toBe('ABFM');
   });
 
   it('ops_staff can LIST but cannot CREATE', async () => {

@@ -15,7 +15,8 @@ const downloadMock = vi.mocked(downloadPhysicianSignature);
 const physician: PhysicianPublic = {
   id: 'physician-1', cognitoSub: null, fullName: 'Dr. Test Physician', npi: '1234567890',
   specialty: 'Internal Medicine', medicalLicense: 'AZ-12345', email: 'doctor@example.com', phone: null,
-  hasSignature: true, active: true, createdAt: '2026-05-25T12:00:00.000Z', updatedAt: '2026-05-25T12:00:00.000Z', version: 1,
+  hasSignature: true, hasCredentialBlock: true, boardName: 'American Board of Internal Medicine', boardAbbreviation: 'ABIM', licenseState: 'Arizona', licenseNumber: '12345',
+  active: true, createdAt: '2026-05-25T12:00:00.000Z', updatedAt: '2026-05-25T12:00:00.000Z', version: 1,
 };
 
 function renderControl(input: PhysicianPublic = physician) {

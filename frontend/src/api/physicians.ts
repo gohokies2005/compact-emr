@@ -11,6 +11,13 @@ export interface PhysicianPublic {
   readonly email: string;
   readonly phone: string | null;
   readonly hasSignature: boolean;
+  // Credential-block facts (printed in Section I + the signature block). null until the profile
+  // has a complete block; hasCredentialBlock false means the physician cannot sign yet.
+  readonly hasCredentialBlock: boolean;
+  readonly boardName: string | null;
+  readonly boardAbbreviation: string | null;
+  readonly licenseState: string | null;
+  readonly licenseNumber: string | null;
   readonly active: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -25,6 +32,10 @@ export interface CreatePhysicianInput {
   readonly email: string;
   readonly phone?: string;
   readonly cognitoSub?: string;
+  readonly boardName: string;
+  readonly boardAbbreviation: string;
+  readonly licenseState: string;
+  readonly licenseNumber: string;
 }
 
 export interface UpdatePhysicianFields {
@@ -36,6 +47,10 @@ export interface UpdatePhysicianFields {
   readonly phone?: string | null;
   readonly cognitoSub?: string | null;
   readonly active?: boolean;
+  readonly boardName?: string;
+  readonly boardAbbreviation?: string;
+  readonly licenseState?: string;
+  readonly licenseNumber?: string;
 }
 
 export interface UpdatePhysicianInput {

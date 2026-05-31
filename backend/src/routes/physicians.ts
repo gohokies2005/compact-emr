@@ -8,6 +8,7 @@ import { HttpError } from '../http/errors.js';
 import type { AppDb, PhysicianRecord } from '../services/db-types.js';
 import { parsePhysicianCreate, parsePhysicianPatch, parseSignaturePresign } from '../services/physician-validation.js';
 import { buildPhysicianSignatureKey, isPhysicianSignatureS3Key } from '../services/s3-key-safety.js';
+import { composeCredentialBlock, parseCredentialBlock } from '../services/credential-block.js';
 
 const SIGNATURE_TTL_SECONDS = 5 * 60;
 // Setting a physician inactive while they hold a case in one of these states would lock them
@@ -19,6 +20,7 @@ interface PhysiciansRouterDeps { s3?: S3Client; bucketName?: string }
 /** Public projection: omit the raw signature key, expose a hasSignature flag instead.
  *  NPI/license are NOT PHI — they print on every letter — so they are returned. */
 function toPublic(p: PhysicianRecord) {
+  const block = parseCredentialBlock(p.credentialBlockJson);
   return {
     id: p.id,
     cognitoSub: p.cognitoSub,
@@ -29,6 +31,13 @@ function toPublic(p: PhysicianRecord) {
     email: p.email,
     phone: p.phone,
     hasSignature: p.signatureImageS3Key !== null,
+    // Credential-block facts for the edit form (the 4 fields beyond name/specialty/npi). null when
+    // the profile has no complete block yet — the UI flags it as not-ready-to-sign.
+    hasCredentialBlock: block !== null,
+    boardName: block?.boardName ?? null,
+    boardAbbreviation: block?.boardAbbreviation ?? null,
+    licenseState: block?.licenseState ?? null,
+    licenseNumber: block?.licenseNumber ?? null,
     active: p.active,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
@@ -67,6 +76,17 @@ export function createPhysiciansRouter(db: AppDb, deps: PhysiciansRouterDeps = {
 
   router.post('/physicians', requireRole(['admin']), asyncHandler(async (req: Request, res: Response) => {
     const parsed = parsePhysicianCreate(req.body);
+    // Compose the render-authoritative credential block server-side so it can never drift from the
+    // columns. All inputs are required at create, so this is always complete (non-null).
+    const credentialBlockJson = composeCredentialBlock({
+      fullNameWithCredential: parsed.fullName,
+      specialty: parsed.specialty,
+      npi: parsed.npi,
+      boardName: parsed.boardName,
+      boardAbbreviation: parsed.boardAbbreviation,
+      licenseState: parsed.licenseState,
+      licenseNumber: parsed.licenseNumber,
+    });
     const row = await db.physician.create({
       data: {
         id: randomUUID(),
@@ -77,6 +97,7 @@ export function createPhysiciansRouter(db: AppDb, deps: PhysiciansRouterDeps = {
         email: parsed.email,
         phone: parsed.phone,
         cognitoSub: parsed.cognitoSub,
+        credentialBlockJson,
       },
     }).catch(rethrowUnique);
     res.status(201).json({ data: toPublic(row) });
@@ -97,7 +118,27 @@ export function createPhysiciansRouter(db: AppDb, deps: PhysiciansRouterDeps = {
         throw new HttpError(409, 'conflict', `Cannot deactivate: physician has ${inFlight} in-flight case(s). Reassign them first.`, { physicianId: id, inFlightCount: inFlight });
       }
     }
-    const row = await db.physician.update({ where: { id }, data: { ...data, version: { increment: 1 } } }).catch(rethrowUnique);
+    // Separate the credential-block fields (not model columns) from the column updates, then
+    // recompose the block from the resulting values so it stays in sync with name/specialty/npi.
+    const { boardName, boardAbbreviation, licenseState, licenseNumber, ...columnData } = data;
+    const currentBlock = parseCredentialBlock(current.credentialBlockJson);
+    const recomposed = composeCredentialBlock({
+      fullNameWithCredential: columnData.fullName ?? current.fullName,
+      specialty: columnData.specialty ?? current.specialty,
+      npi: columnData.npi ?? current.npi,
+      boardName: boardName ?? currentBlock?.boardName ?? '',
+      boardAbbreviation: boardAbbreviation ?? currentBlock?.boardAbbreviation ?? '',
+      licenseState: licenseState ?? currentBlock?.licenseState ?? '',
+      licenseNumber: licenseNumber ?? currentBlock?.licenseNumber ?? '',
+    });
+    const updateData: Record<string, unknown> = { ...columnData, version: { increment: 1 } };
+    const credentialFieldChanged = boardName !== undefined || boardAbbreviation !== undefined || licenseState !== undefined || licenseNumber !== undefined;
+    // Write the recomposed block when it's complete; if a credential field was edited but the
+    // profile is still incomplete, persist null (stays not-ready-to-sign). Otherwise (an unrelated
+    // edit on a profile that has no block yet) leave credentialBlockJson untouched.
+    if (recomposed !== null) updateData.credentialBlockJson = recomposed;
+    else if (credentialFieldChanged) updateData.credentialBlockJson = null;
+    const row = await db.physician.update({ where: { id }, data: updateData }).catch(rethrowUnique);
     void changedFields;
     res.json({ data: toPublic(row) });
   }));

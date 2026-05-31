@@ -9,6 +9,11 @@ const MAX_LICENSE = 60;
 const MAX_EMAIL = 200;
 const MAX_PHONE = 40;
 const MAX_SUB = 255;
+// Credential-block fields (printed in Section I + the signature block; see credential-block.ts).
+const MAX_BOARD = 160;
+const MAX_BOARD_ABBR = 24;
+const MAX_LICENSE_STATE = 60;
+const MAX_LICENSE_NUMBER = 60;
 const NPI_PATTERN = /^\d{10}$/;
 const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const MAX_SIGNATURE_BYTES = 5 * 1024 * 1024;
@@ -33,6 +38,13 @@ export interface ParsedPhysicianCreate {
   email: string;
   phone: string | null;
   cognitoSub: string | null;
+  // Credential-block facts (required at create so the physician can sign — the fraud gate blocks
+  // approve without a complete block). fullName doubles as fullNameWithCredential (e.g.
+  // "Ryan J. Kasky, DO"); the route composes the block from these + name/specialty/npi.
+  boardName: string;
+  boardAbbreviation: string;
+  licenseState: string;
+  licenseNumber: string;
 }
 
 export function parsePhysicianCreate(body: unknown): ParsedPhysicianCreate {
@@ -45,6 +57,10 @@ export function parsePhysicianCreate(body: unknown): ParsedPhysicianCreate {
     email: parseEmail(body),
     phone: optionalString(body, 'phone', MAX_PHONE),
     cognitoSub: optionalString(body, 'cognitoSub', MAX_SUB),
+    boardName: requiredNonEmptyString(body, 'boardName', MAX_BOARD),
+    boardAbbreviation: requiredNonEmptyString(body, 'boardAbbreviation', MAX_BOARD_ABBR),
+    licenseState: requiredNonEmptyString(body, 'licenseState', MAX_LICENSE_STATE),
+    licenseNumber: requiredNonEmptyString(body, 'licenseNumber', MAX_LICENSE_NUMBER),
   };
 }
 
@@ -58,7 +74,7 @@ function parseVersion(body: Record<string, unknown>): number {
 
 export interface ParsedPhysicianPatch {
   version: number;
-  data: { fullName?: string; npi?: string; specialty?: string; medicalLicense?: string; email?: string; phone?: string | null; cognitoSub?: string | null; active?: boolean };
+  data: { fullName?: string; npi?: string; specialty?: string; medicalLicense?: string; email?: string; phone?: string | null; cognitoSub?: string | null; active?: boolean; boardName?: string; boardAbbreviation?: string; licenseState?: string; licenseNumber?: string };
   changedFields: string[];
 }
 
@@ -76,6 +92,10 @@ export function parsePhysicianPatch(body: unknown): ParsedPhysicianPatch {
   if (fields.email !== undefined) { data.email = parseEmail(fields); changed.push('email'); }
   if (fields.phone !== undefined) { data.phone = optionalString(fields, 'phone', MAX_PHONE); changed.push('phone'); }
   if (fields.cognitoSub !== undefined) { data.cognitoSub = optionalString(fields, 'cognitoSub', MAX_SUB); changed.push('cognitoSub'); }
+  if (fields.boardName !== undefined) { data.boardName = requiredNonEmptyString(fields, 'boardName', MAX_BOARD); changed.push('boardName'); }
+  if (fields.boardAbbreviation !== undefined) { data.boardAbbreviation = requiredNonEmptyString(fields, 'boardAbbreviation', MAX_BOARD_ABBR); changed.push('boardAbbreviation'); }
+  if (fields.licenseState !== undefined) { data.licenseState = requiredNonEmptyString(fields, 'licenseState', MAX_LICENSE_STATE); changed.push('licenseState'); }
+  if (fields.licenseNumber !== undefined) { data.licenseNumber = requiredNonEmptyString(fields, 'licenseNumber', MAX_LICENSE_NUMBER); changed.push('licenseNumber'); }
   if (fields.active !== undefined) {
     if (typeof fields.active !== 'boolean') badRequest('active must be a boolean', { field: 'active' });
     data.active = fields.active;

@@ -197,6 +197,34 @@ export function parseCredentialBlock(value: unknown): SignerCredentials | null {
 }
 
 /**
+ * Compose a SignerCredentials from the admin-entered credential facts + the physician's existing
+ * name/specialty/NPI. Used by the physician create/patch routes so the credential block is built
+ * server-side on every write and can never drift from the model columns (the divergence risk of
+ * storing the same value twice). Returns null if any field is blank (an incomplete profile that
+ * the fraud gate will then block at approve until completed).
+ */
+export interface CredentialBlockInput {
+  readonly fullNameWithCredential: string;
+  readonly specialty: string;
+  readonly npi: string;
+  readonly boardName: string;
+  readonly boardAbbreviation: string;
+  readonly licenseState: string;
+  readonly licenseNumber: string;
+}
+export function composeCredentialBlock(input: CredentialBlockInput): SignerCredentials | null {
+  return parseCredentialBlock({
+    fullNameWithCredential: input.fullNameWithCredential,
+    specialty: input.specialty,
+    boardName: input.boardName,
+    boardAbbreviation: input.boardAbbreviation,
+    licenseState: input.licenseState,
+    licenseNumber: input.licenseNumber,
+    npi: input.npi,
+  });
+}
+
+/**
  * Kasky's canonical credentials — the reference signer the demo letter was built around. Used
  * by the round-trip test (the spec lock) and by the migration backfill (writes this onto the
  * Kasky Physician row keyed by NPI). Keep this in sync with prisma/demo-letter.txt; the

@@ -33,7 +33,7 @@ describe('CaseAssignmentPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     listPhysiciansMock.mockResolvedValue({
-      data: [{ id: 'physician-1', cognitoSub: 'sub-1', fullName: 'Dr. Test Physician', npi: '1234567890', specialty: 'Internal Medicine', medicalLicense: 'AZ-123', email: 'doctor@example.com', phone: null, hasSignature: true, active: true, createdAt: '2026-05-25T12:00:00.000Z', updatedAt: '2026-05-25T12:00:00.000Z', version: 1 }],
+      data: [{ id: 'physician-1', cognitoSub: 'sub-1', fullName: 'Dr. Test Physician', npi: '1234567890', specialty: 'Internal Medicine', medicalLicense: 'AZ-123', email: 'doctor@example.com', phone: null, hasSignature: true, hasCredentialBlock: true, boardName: 'American Board of Internal Medicine', boardAbbreviation: 'ABIM', licenseState: 'Arizona', licenseNumber: '123', active: true, createdAt: '2026-05-25T12:00:00.000Z', updatedAt: '2026-05-25T12:00:00.000Z', version: 1 }],
     });
     assignMock.mockResolvedValue({
       data: { id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'Sleep apnea', claimType: 'supplemental', status: 'physician_review', version: 4, currentVersion: 1, assignedPhysicianId: 'physician-1', assignedRnId: null, refundEligible: false, createdAt: '2026-05-25T12:00:00.000Z', updatedAt: '2026-05-25T12:00:00.000Z' },

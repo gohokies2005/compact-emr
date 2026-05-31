@@ -151,4 +151,20 @@ describe('PhysicianLetterReadyPanel', () => {
 
     expect(onOpenSignOff).toHaveBeenCalled();
   });
+
+  it('calls onEditText when Edit text is clicked', () => {
+    const onEditText = vi.fn();
+    render(withQueryClient(
+      <PhysicianLetterReadyPanel c={baseCase} job={readyJob} canSendBack={false} onOpenPdf={vi.fn()} onEditText={onEditText} onOpenSignOff={vi.fn()} onChanged={vi.fn()} />,
+    ));
+    screen.getByRole('button', { name: 'Edit text' }).click();
+    expect(onEditText).toHaveBeenCalled();
+  });
+
+  it('disables Edit text when no onEditText is provided', () => {
+    render(withQueryClient(
+      <PhysicianLetterReadyPanel c={baseCase} job={readyJob} canSendBack={false} onOpenPdf={vi.fn()} onOpenSignOff={vi.fn()} onChanged={vi.fn()} />,
+    ));
+    expect(screen.getByRole('button', { name: 'Edit text' })).toBeDisabled();
+  });
 });

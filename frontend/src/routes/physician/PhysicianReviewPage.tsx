@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Card } from '../../components/ui/Card';
 import { Spinner } from '../../components/ui/Spinner';
@@ -17,6 +17,7 @@ import { getArtifactPdfUrl } from '../../api/drafter';
 export function PhysicianReviewPage() {
   const { caseId: routeCaseId } = useParams();
   const caseId = routeCaseId ?? '';
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [signOffOpen, setSignOffOpen] = useState(false);
 
@@ -90,6 +91,7 @@ export function PhysicianReviewPage() {
             job={latestDraftJob}
             canSendBack
             onOpenPdf={openSignedDraftPdf}
+            onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
             onOpenSignOff={() => setSignOffOpen(true)}
             onChanged={onChanged}
           />

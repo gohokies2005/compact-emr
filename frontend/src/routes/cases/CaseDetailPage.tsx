@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
@@ -52,6 +52,7 @@ function serverErrorMessage(err: unknown): string | undefined {
 export function CaseDetailPage() {
   const { id } = useParams();
   const caseId = id ?? '';
+  const navigate = useNavigate();
   const { user } = useAuth();
   const role: Role = user?.role ?? 'ops_staff';
   const qc = useQueryClient();
@@ -169,6 +170,7 @@ export function CaseDetailPage() {
               job={latestDraftJob}
               canSendBack={role === 'admin' || role === 'physician'}
               onOpenPdf={handleOpenPdf}
+              onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
               onOpenSignOff={() => setSignOffOpen(true)}
               // GPT chunk 2: invalidate both queries on case-changing mutations so the
               // panel + the draft-jobs tab both refetch.

@@ -25,6 +25,7 @@ interface PhysicianLetterReadyPanelProps {
   readonly job: ReadyDraftJob;
   readonly canSendBack: boolean;
   readonly onOpenPdf: (s3Key: string) => void | Promise<void>;
+  readonly onEditText?: () => void;
   readonly onOpenSignOff: () => void;
   readonly onChanged: () => void | Promise<void>;
 }
@@ -53,6 +54,7 @@ export function PhysicianLetterReadyPanel({
   job,
   canSendBack,
   onOpenPdf,
+  onEditText,
   onOpenSignOff,
   onChanged,
 }: PhysicianLetterReadyPanelProps) {
@@ -90,7 +92,7 @@ export function PhysicianLetterReadyPanel({
           >
             Open PDF
           </Button>
-          <Button type="button" variant="secondary" disabled title="Coming soon">
+          <Button type="button" variant="secondary" disabled={!onEditText} title={onEditText ? undefined : 'Coming soon'} onClick={onEditText}>
             Edit text
           </Button>
           <Button type="button" variant="primary" onClick={onOpenSignOff}>

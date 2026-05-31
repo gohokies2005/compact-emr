@@ -20,7 +20,7 @@ import { createInternalWorkerRouter } from './routes/internal-worker.js';
 import { createDrafterClientRouter, createDrafterWorkerRouter } from './routes/drafter.js';
 import { createLetterRouter } from './routes/letter.js';
 import { makeRenderInvoker } from './services/letter-render-invoke.js';
-import { makeSurgicalProposer } from './services/letter-surgical-propose.js';
+import { makeSurgicalProposerFromEnv } from './services/letter-surgical-propose.js';
 import { createPhysiciansRouter } from './routes/physicians.js';
 import { createCaseMessagesRouter } from './routes/case-messages.js';
 import { createUsersRouter } from './routes/users.js';
@@ -73,16 +73,17 @@ export function createApp(options: CreateAppOptions = {}) {
   // Drafter client routes (Cognito-authenticated): drafter-export + POST /draft.
   app.use('/api/v1', authenticateJwt(), createDrafterClientRouter(db));
   // Letter editor (production mount). renderLetter requires the render Lambda (RENDER_LAMBDA_NAME);
-  // surgical-AI requires the Anthropic key (ANTHROPIC_API_KEY, sourced from Secrets Manager in prod).
-  // Both fail soft to a clear 503 when absent, so local dev and a render-less env stay safe and GET
-  // (view) always works. Per-signer credential wiring into the render input lands with D2.
+  // surgical-AI requires the Anthropic key — a literal ANTHROPIC_API_KEY (local dev) or, in prod,
+  // the API_ANTHROPIC_KEY_SECRET_ARN the API Lambda can read at runtime (filled post-deploy, no
+  // redeploy needed). Both fail soft to a clear 503 when absent, so local dev and a render-less env
+  // stay safe and GET (view) always works.
   const renderLambdaName = process.env.RENDER_LAMBDA_NAME;
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  const surgicalAiAvailable = Boolean(process.env.ANTHROPIC_API_KEY || process.env.API_ANTHROPIC_KEY_SECRET_ARN);
   app.use('/api/v1', authenticateJwt(), createLetterRouter(db, {
     renderLetter: renderLambdaName
       ? makeRenderInvoker(renderLambdaName)
       : async () => { throw new HttpError(503, 'internal_error', 'Letter render is not configured in this environment.', { reason: 'render_unavailable' }); },
-    ...(anthropicKey ? { proposeSurgicalEdit: makeSurgicalProposer(anthropicKey) } : {}),
+    ...(surgicalAiAvailable ? { proposeSurgicalEdit: makeSurgicalProposerFromEnv() } : {}),
     s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
     bucketName: process.env.PHI_BUCKET_NAME,
   }));

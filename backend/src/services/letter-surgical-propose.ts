@@ -10,6 +10,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import type { SurgicalProposer, SurgicalProposeInput, SurgicalProposeOutput } from '../routes/letter.js';
 import type { EditProposal, EditOperation } from './letter-edit-apply.js';
 
@@ -45,6 +46,63 @@ const PROPOSE_TOOL: Anthropic.Tool = {
     required: ['operation', 'anchor_text', 'new_text'],
   },
 };
+
+/**
+ * Extract the API key from a Secrets Manager SecretString. Accepts a RAW key (the simplest thing
+ * an operator can paste) or a JSON wrapper ({apiKey|ANTHROPIC_API_KEY|api_key}). Throws on blank.
+ * Pure (no I/O) so it is unit-testable.
+ */
+export function parseAnthropicSecretString(secretString: string): string {
+  const raw = secretString.trim();
+  if (raw.length === 0) throw new Error('Anthropic secret is empty.');
+  if (raw.startsWith('{')) {
+    try {
+      const obj = JSON.parse(raw) as Record<string, unknown>;
+      const v = obj.apiKey ?? obj.ANTHROPIC_API_KEY ?? obj.api_key;
+      if (typeof v === 'string' && v.trim().length > 0) return v.trim();
+    } catch {
+      /* not JSON; fall through to treating the whole thing as the key */
+    }
+  }
+  return raw;
+}
+
+/**
+ * Resolve the Anthropic key at runtime: prefer a literal ANTHROPIC_API_KEY, else fetch the value
+ * from API_ANTHROPIC_KEY_SECRET_ARN (Secrets Manager). Mirrors db/database-url.ts so that filling
+ * the secret needs NO redeploy — the value is read on first surgical-AI use.
+ */
+export async function resolveAnthropicApiKey(): Promise<string> {
+  const direct = process.env.ANTHROPIC_API_KEY;
+  if (direct && direct.trim().length > 0) return direct.trim();
+  const secretArn = process.env.API_ANTHROPIC_KEY_SECRET_ARN;
+  if (!secretArn) throw new Error('ANTHROPIC_API_KEY or API_ANTHROPIC_KEY_SECRET_ARN is required for surgical-AI.');
+  const client = new SecretsManagerClient({});
+  const response = await client.send(new GetSecretValueCommand({ SecretId: secretArn }));
+  if (!response.SecretString) throw new Error('Anthropic secret did not contain a SecretString value.');
+  return parseAnthropicSecretString(response.SecretString);
+}
+
+/**
+ * Lazily-resolved proposer for production: the key is fetched + the Anthropic client built on the
+ * FIRST surgical-AI call, then cached. A failed resolve (e.g. the secret not yet filled) is NOT
+ * cached, so once the operator pastes the key the next click works without a redeploy or cold
+ * start. Mount this whenever ANTHROPIC_API_KEY or API_ANTHROPIC_KEY_SECRET_ARN is set.
+ */
+export function makeSurgicalProposerFromEnv(): SurgicalProposer {
+  let delegate: SurgicalProposer | null = null;
+  let resolving: Promise<SurgicalProposer> | null = null;
+  async function ensure(): Promise<SurgicalProposer> {
+    if (delegate) return delegate;
+    if (!resolving) {
+      resolving = resolveAnthropicApiKey()
+        .then((key) => { delegate = makeSurgicalProposer(key); return delegate; })
+        .catch((e: unknown) => { resolving = null; throw e; });
+    }
+    return resolving;
+  }
+  return async (input: SurgicalProposeInput): Promise<SurgicalProposeOutput> => (await ensure())(input);
+}
 
 export function makeSurgicalProposer(apiKey: string): SurgicalProposer {
   const anthropic = new Anthropic({ apiKey });

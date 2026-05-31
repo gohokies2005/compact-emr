@@ -179,6 +179,7 @@ export interface CaseRecord {
   cdsOddsPct: number | null;
   cdsRationale: Record<string, unknown> | null;
   assignedPhysicianId: string | null;
+  assignedRnId: string | null;
   refundEligible: boolean;
   currentVersion: number;
   createdAt: Date;

@@ -32,7 +32,7 @@ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
     claimedConditions: ['Lumbosacral strain'], claimType: 'initial', framingChoice: 'direct',
     upstreamScCondition: null, veteranStatement: null, inServiceEvent: null,
     status: 'physician_review', cdsVerdict: 'accept', cdsOddsPct: 70, cdsRationale: null,
-    assignedPhysicianId: 'PHYS-001', refundEligible: false, currentVersion: 1,
+    assignedPhysicianId: 'PHYS-001', assignedRnId: null, refundEligible: false, currentVersion: 1,
     createdAt: now, updatedAt: now, version: 3, ...overrides,
   };
 }

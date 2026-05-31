@@ -36,6 +36,7 @@ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
     cdsOddsPct: null,
     cdsRationale: null,
     assignedPhysicianId: null,
+    assignedRnId: null,
     refundEligible: false,
     currentVersion: 0,
     createdAt: new Date('2026-05-24T00:00:00.000Z'),

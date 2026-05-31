@@ -112,6 +112,7 @@ model AppUser {
   cognitoSub  String   @unique @map("cognito_sub")
   email       String   @unique
   roles       AppUserRole[]
+  assignedCases Case[]  @relation("CaseAssignedRn")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version     Int      @default(1)
@@ -256,6 +257,7 @@ model Case {
   cdsOddsPct          Int?       @map("cds_odds_pct")
   cdsRationale        Json?      @map("cds_rationale")
   assignedPhysicianId String?    @map("assigned_physician_id")
+  assignedRnId        String?    @map("assigned_rn_id")
   refundEligible      Boolean    @default(false) @map("refund_eligible")
   currentVersion      Int        @default(0) @map("current_version")
   // Drafter integration: terminal-state snapshot mirrored from v<N>_qa_grade.json + final
@@ -278,6 +280,7 @@ model Case {
 
   veteran           Veteran     @relation(fields: [veteranId], references: [id], onDelete: Cascade)
   assignedPhysician Physician?  @relation(fields: [assignedPhysicianId], references: [id])
+  assignedRn        AppUser?    @relation("CaseAssignedRn", fields: [assignedRnId], references: [id], onDelete: SetNull)
   documents         Document[]
   draftJobs         DraftJob[]
   corrections       Correction[]
@@ -289,6 +292,7 @@ model Case {
 
   @@index([veteranId])
   @@index([assignedPhysicianId])
+  @@index([assignedRnId])
   @@index([claimedCondition])
   @@index([status, updatedAt])
   @@index([veteranId, status])

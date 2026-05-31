@@ -25,7 +25,7 @@ function baseCase(): CaseRecord {
     id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'OSA', claimedConditions: ['OSA'], claimType: 'initial',
     framingChoice: 'secondary', upstreamScCondition: 'PTSD', veteranStatement: null, inServiceEvent: null,
     status: 'records', cdsVerdict: 'not_yet_run', cdsOddsPct: null, cdsRationale: null,
-    assignedPhysicianId: null, refundEligible: false, currentVersion: 0,
+    assignedPhysicianId: null, assignedRnId: null, refundEligible: false, currentVersion: 0,
     createdAt: now, updatedAt: now, version: 1,
   };
 }

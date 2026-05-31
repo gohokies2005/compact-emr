@@ -255,3 +255,12 @@ export function parseAssignPhysician(body: unknown): ParsedAssignPhysician {
     version: positiveInteger(body, 'version'),
   };
 }
+
+export interface ParsedAssignRn { rnUserId: string; version: number }
+export function parseAssignRn(body: unknown): ParsedAssignRn {
+  if (!isRecord(body)) badRequest('Request body must be an object');
+  return {
+    rnUserId: requiredNonEmptyString(body, 'rnUserId'),
+    version: positiveInteger(body, 'version'),
+  };
+}

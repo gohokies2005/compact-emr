@@ -5,6 +5,7 @@ import { HttpError } from '../http/errors.js';
 import type { AppDb, CaseStatus, Role } from '../services/db-types.js';
 import {
   parseAssignPhysician,
+  parseAssignRn,
   parseCaseCreate,
   parseCasePatch,
   parseStatusTransition,
@@ -26,6 +27,7 @@ const CASE_LITE_SELECT = {
   version: true,
   currentVersion: true,
   assignedPhysicianId: true,
+  assignedRnId: true,
   refundEligible: true,
   createdAt: true,
   updatedAt: true,
@@ -41,7 +43,12 @@ const CASE_LITE_SELECT = {
     select: {
       id: true,
       fullName: true,
-      
+      email: true,
+    },
+  },
+  assignedRn: {
+    select: {
+      id: true,
       email: true,
     },
   },
@@ -90,11 +97,17 @@ function buildCaseListWhere(query: Request['query']): Record<string, unknown> {
   const claimType = optionalStringQuery(query.claimType);
   const veteranId = optionalStringQuery(query.veteranId);
   const assignedPhysicianId = optionalStringQuery(query.assignedPhysicianId);
+  const assignedRnId = optionalStringQuery(query.assignedRnId);
 
   if (status !== undefined) where.status = status;
   if (claimType !== undefined) where.claimType = claimType;
   if (veteranId !== undefined) where.veteranId = veteranId;
-  if (assignedPhysicianId !== undefined) where.assignedPhysicianId = assignedPhysicianId;
+  // '__none__' is the admin-triage sentinel for "unassigned" — a shippable-but-unassigned case
+  // must never silently vanish from every queue (RN-self-service: always reachable).
+  if (assignedPhysicianId === '__none__') where.assignedPhysicianId = null;
+  else if (assignedPhysicianId !== undefined) where.assignedPhysicianId = assignedPhysicianId;
+  if (assignedRnId === '__none__') where.assignedRnId = null;
+  else if (assignedRnId !== undefined) where.assignedRnId = assignedRnId;
 
   // Drafter integration belt-and-suspenders: when filtering for physician_review (i.e. the
   // physician inbox), the write-side enforcement in /internal/drafter/jobs/:id/complete
@@ -476,6 +489,44 @@ export function createCasesRouter(db: AppDb): Router {
   );
 
   
+
+  router.post(
+    '/cases/:id/assign-rn',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentUser(req);
+      const id = String(req.params.id);
+      const parsed = parseAssignRn(req.body);
+
+      // Validate the target is a real ops_staff/admin user — don't assign a physician-only
+      // account as the RN liaison. appUser isn't on the tx delegate, so resolve before the tx.
+      const rn = await db.appUser.findUnique({ where: { id: parsed.rnUserId }, include: { roles: true } });
+      if (rn === null) throw new HttpError(404, 'not_found', 'RN user not found', { rnUserId: parsed.rnUserId });
+      const rnRoles = rn.roles.map((r) => r.role);
+      if (!rnRoles.includes('ops_staff') && !rnRoles.includes('admin')) {
+        throw new HttpError(422, 'bad_request', 'Assigned RN must be an ops_staff or admin user.', { rnUserId: parsed.rnUserId });
+      }
+
+      const updated = await db.$transaction(async (tx) => {
+        const existing = await tx.case.findFirst({ where: { id }, select: { id: true, veteranId: true, version: true, assignedRnId: true } });
+        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+        if (existing.version !== parsed.version) {
+          throw new HttpError(409, 'conflict', 'Case version is stale', { caseId: id, expectedVersion: existing.version, receivedVersion: parsed.version });
+        }
+        const row = await tx.case.update({
+          where: { id },
+          data: { assignedRnId: parsed.rnUserId, version: { increment: 1 } },
+          select: CASE_LITE_SELECT,
+        });
+        await tx.activityLog.create({
+          data: { actorUserId: user.id, action: 'case_rn_assigned', caseId: id, veteranId: existing.veteranId, detailsJson: { caseId: id, fields: ['assignedRnId'] } },
+        });
+        return row;
+      });
+
+      res.json({ data: updated });
+    }),
+  );
 
   return router;
 }

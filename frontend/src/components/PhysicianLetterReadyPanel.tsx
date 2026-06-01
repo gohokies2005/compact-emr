@@ -3,21 +3,11 @@ import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { SendBackToRnModal } from './SendBackToRnModal';
 import type { CaseDetail } from '../api/cases';
-import type { DraftJob } from '../types/prisma';
-
-interface TargetedRevisionHint {
-  readonly section?: string | null;
-  readonly issue?: string | null;
-  readonly suggested_fix?: string | null;
-}
-
-interface GradeSidecarJson {
-  readonly targeted_revision_hints?: readonly TargetedRevisionHint[];
-}
+import type { DraftJob, TargetedRevisionHint, TemplateGateFinding, DraftGradeSidecarJson } from '../types/prisma';
 
 export interface ReadyDraftJob extends DraftJob {
   readonly artifactPdfS3Key?: string | null;
-  readonly gradeSidecarJson?: GradeSidecarJson | null;
+  readonly gradeSidecarJson?: DraftGradeSidecarJson | null;
 }
 
 interface PhysicianLetterReadyPanelProps {
@@ -49,6 +39,13 @@ function normalizedHints(job: ReadyDraftJob): readonly TargetedRevisionHint[] {
     .slice(0, 3);
 }
 
+// Anchor/template-quality findings the physician must confirm or fix at sign-off. Audit-only
+// findings are excluded (they're for the bottom-of-report audit trail, not physician action).
+function normalizedGateFindings(job: ReadyDraftJob): readonly TemplateGateFinding[] {
+  const findings = job.gradeSidecarJson?.template_gate_findings ?? [];
+  return findings.filter((f) => f.audit_only !== true && typeof f.message === 'string' && f.message.trim().length > 0);
+}
+
 export function PhysicianLetterReadyPanel({
   c,
   job,
@@ -62,6 +59,7 @@ export function PhysicianLetterReadyPanel({
   const grade = c.grade ?? null;
   const score = c.probativeScore ?? null;
   const hints = normalizedHints(job);
+  const gateFindings = normalizedGateFindings(job);
   const pdfKey = job.artifactPdfS3Key ?? null;
 
   return (
@@ -100,6 +98,26 @@ export function PhysicianLetterReadyPanel({
           </Button>
         </div>
       </div>
+
+      {gateFindings.length > 0 ? (
+        <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <h3 className="text-sm font-semibold text-amber-900">
+            Anchor and template quality - physician review (overridable)
+          </h3>
+          <p className="mt-1 text-xs text-amber-800">
+            The letter's template binding or epidemiologic anchor needs a look. Confirm or fix before signing.
+          </p>
+          <ul className="mt-3 space-y-2">
+            {gateFindings.map((finding, index) => (
+              <li key={`${finding.id ?? 'finding'}-${index}`} className="text-sm text-amber-900">
+                <span className="text-amber-500">{'• '}</span>
+                {finding.severity === 'critical' ? <span className="mr-1 rounded bg-amber-200 px-1.5 py-0.5 text-xs font-semibold text-amber-900">critical</span> : null}
+                <span>{truncate(finding.message ?? '', 200)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {hints.length > 0 ? (
         <div className="mt-6">

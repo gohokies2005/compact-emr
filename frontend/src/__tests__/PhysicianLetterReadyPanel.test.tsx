@@ -152,6 +152,33 @@ describe('PhysicianLetterReadyPanel', () => {
     expect(onOpenSignOff).toHaveBeenCalled();
   });
 
+  it('surfaces template/anchor-gate findings (qa_report criticals) at sign-off, skipping audit-only', () => {
+    const jobWithGate: DraftJob = {
+      ...readyJob,
+      gradeSidecarJson: {
+        template_gate_findings: [
+          { id: 'anchor_a1_missing_institutional', message: 'Section VI is missing an institutional anchor (A1).', severity: 'critical', physician_decision: true },
+          { id: 'epi_anchor_offtopic', message: 'The epidemiologic anchor does not match the claimed condition.', severity: 'warning', physician_decision: true },
+          { id: 'audit_only_note', message: 'Should never render to the physician.', severity: 'warning', audit_only: true },
+        ],
+      },
+    };
+    render(withQueryClient(
+      <PhysicianLetterReadyPanel c={baseCase} job={jobWithGate} canSendBack={false} onOpenPdf={vi.fn()} onOpenSignOff={vi.fn()} onChanged={vi.fn()} />,
+    ));
+    expect(screen.getByText('Anchor and template quality - physician review (overridable)')).toBeInTheDocument();
+    expect(screen.getByText('Section VI is missing an institutional anchor (A1).')).toBeInTheDocument();
+    expect(screen.getByText('The epidemiologic anchor does not match the claimed condition.')).toBeInTheDocument();
+    expect(screen.queryByText('Should never render to the physician.')).not.toBeInTheDocument();
+  });
+
+  it('renders no anchor-gate callout when there are no findings (forward-compatible)', () => {
+    render(withQueryClient(
+      <PhysicianLetterReadyPanel c={baseCase} job={readyJob} canSendBack={false} onOpenPdf={vi.fn()} onOpenSignOff={vi.fn()} onChanged={vi.fn()} />,
+    ));
+    expect(screen.queryByText('Anchor and template quality - physician review (overridable)')).not.toBeInTheDocument();
+  });
+
   it('calls onEditText when Edit text is clicked', () => {
     const onEditText = vi.fn();
     render(withQueryClient(

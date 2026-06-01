@@ -52,8 +52,21 @@ export interface TargetedRevisionHint {
   readonly suggested_fix?: string | null;
 }
 
+// Phase 6.4 template/anchor-binding gate findings. The drafter writes the same array to
+// v<N>_template_gate.json + the qa_report and includes it in the gradeSidecar posted to
+// /complete, which persists the whole object as gradeSidecarJson. Record-only + overridable:
+// the physician confirms/fixes at sign-off (e.g. "missing institutional anchor").
+export interface TemplateGateFinding {
+  readonly id?: string | null;
+  readonly message?: string | null;
+  readonly severity?: string | null;
+  readonly physician_decision?: boolean;
+  readonly audit_only?: boolean;
+}
+
 export interface DraftGradeSidecarJson {
   readonly targeted_revision_hints?: readonly TargetedRevisionHint[];
+  readonly template_gate_findings?: readonly TemplateGateFinding[];
   readonly detail_phase?: string | null;
 }
 

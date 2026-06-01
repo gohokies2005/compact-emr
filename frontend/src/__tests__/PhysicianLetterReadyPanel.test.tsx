@@ -179,6 +179,25 @@ describe('PhysicianLetterReadyPanel', () => {
     expect(screen.queryByText('Anchor and template quality - physician review (overridable)')).not.toBeInTheDocument();
   });
 
+  it('degrades gracefully on a malformed findings payload (untrusted worker) without crashing', () => {
+    // null/non-object/blank elements + a valid one mixed in — must not throw the render.
+    const malformed = { ...readyJob, gradeSidecarJson: { template_gate_findings: [null, 'x', 42, {}, { message: '  ' }, { message: 'Real finding survives.', severity: 'critical' }] } } as unknown as DraftJob;
+    render(withQueryClient(
+      <PhysicianLetterReadyPanel c={baseCase} job={malformed} canSendBack={false} onOpenPdf={vi.fn()} onOpenSignOff={vi.fn()} onChanged={vi.fn()} />,
+    ));
+    expect(screen.getByText('Real finding survives.')).toBeInTheDocument();
+    expect(screen.getByText('Letter is ready for your review')).toBeInTheDocument(); // panel rendered, no crash
+  });
+
+  it('does not crash when template_gate_findings is not an array', () => {
+    const badShape = { ...readyJob, gradeSidecarJson: { template_gate_findings: 'oops' } } as unknown as DraftJob;
+    render(withQueryClient(
+      <PhysicianLetterReadyPanel c={baseCase} job={badShape} canSendBack={false} onOpenPdf={vi.fn()} onOpenSignOff={vi.fn()} onChanged={vi.fn()} />,
+    ));
+    expect(screen.getByText('Letter is ready for your review')).toBeInTheDocument();
+    expect(screen.queryByText('Anchor and template quality - physician review (overridable)')).not.toBeInTheDocument();
+  });
+
   it('calls onEditText when Edit text is clicked', () => {
     const onEditText = vi.fn();
     render(withQueryClient(

@@ -40,10 +40,19 @@ function normalizedHints(job: ReadyDraftJob): readonly TargetedRevisionHint[] {
 }
 
 // Anchor/template-quality findings the physician must confirm or fix at sign-off. Audit-only
-// findings are excluded (they're for the bottom-of-report audit trail, not physician action).
+// findings are excluded (audit trail, not physician action). gradeSidecarJson is an untrusted
+// worker payload persisted wholesale, so guard the shape hard: a non-array or a null/non-object
+// element must NOT throw inside this render (it backs the Approve-and-sign screen). Cap at 5 so a
+// runaway payload can't bury the sign button under a wall of amber.
 function normalizedGateFindings(job: ReadyDraftJob): readonly TemplateGateFinding[] {
-  const findings = job.gradeSidecarJson?.template_gate_findings ?? [];
-  return findings.filter((f) => f.audit_only !== true && typeof f.message === 'string' && f.message.trim().length > 0);
+  const raw = job.gradeSidecarJson?.template_gate_findings;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((f): f is TemplateGateFinding =>
+      f != null && typeof f === 'object' &&
+      f.audit_only !== true &&
+      typeof f.message === 'string' && f.message.trim().length > 0)
+    .slice(0, 5);
 }
 
 export function PhysicianLetterReadyPanel({

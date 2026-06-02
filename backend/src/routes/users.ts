@@ -142,6 +142,8 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
     requireRole(['admin']),
     asyncHandler(async (req: Request, res: Response) => {
       const cognito = deps.cognito;
+      // Diagnostic (temporary): confirm the request reaches the Lambda + whether Cognito is wired.
+      console.log(JSON.stringify({ msg: 'staff_provision_attempt', cognitoConfigured: cognito !== undefined }));
       if (cognito === undefined) throw new HttpError(503, 'internal_error', 'Staff provisioning is not configured in this environment.', { reason: 'cognito_unconfigured' });
       const actor = currentActor(req);
       const parsed = parseStaffCreate(req.body);
@@ -153,7 +155,14 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
       }
 
       // Cognito FIRST (idempotent): create-or-find, add groups, set temp password if requested.
-      const { sub } = await cognito.provisionUser({ email: parsed.email, groups: parsed.roles, credential: parsed.credential });
+      let sub: string;
+      try {
+        ({ sub } = await cognito.provisionUser({ email: parsed.email, groups: parsed.roles, credential: parsed.credential }));
+      } catch (e: unknown) {
+        const err = e as { name?: string; message?: string };
+        console.error(JSON.stringify({ msg: 'staff_provision_cognito_error', name: err?.name, message: (err?.message ?? '').slice(0, 300) }));
+        throw new HttpError(502, 'internal_error', `Cognito provisioning failed: ${err?.name ?? 'error'}`, { reason: 'cognito_error' });
+      }
 
       // DB SECOND (upserts → re-runnable). AppUser keyed on cognitoSub (the natural idempotency key).
       const user = await db.appUser.upsert({

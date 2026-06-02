@@ -181,7 +181,7 @@ describe('POST /users — staff provisioning', () => {
     const { db, appUser } = makeDb();
     const cognito = makeCognito({ provisionUser: vi.fn(async () => { throw new Error('Cognito user has no sub attribute'); }) });
     const res = await request(appFor(db, cognito)).post('/api/v1/users').send(VALID_RN);
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(502);
     expect(appUser.upsert).not.toHaveBeenCalled();
   });
 });

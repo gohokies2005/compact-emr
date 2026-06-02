@@ -5,7 +5,8 @@ import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
-import { ConflictError } from '../../api/client';
+import axios from 'axios';
+import { ConflictError, ForbiddenError, ServiceUnavailableError } from '../../api/client';
 import { listUsers, createStaff, setStaffActive, type StaffRole, type CreateStaffInput, type StaffUser } from '../../api/users';
 
 const ROLE_OPTIONS: ReadonlyArray<{ value: StaffRole; label: string }> = [
@@ -63,6 +64,20 @@ function validationError(f: FormState): string | null {
   return null;
 }
 
+// Surface the ACTUAL failure so a stuck "Add staff" is diagnosable instead of a useless generic.
+function staffErrorMessage(e: unknown): string {
+  if (e instanceof ConflictError) return 'That email or NPI already exists.';
+  if (e instanceof ServiceUnavailableError) return 'Server says staff provisioning is not configured (503) — the API needs the Cognito pool wired.';
+  if (e instanceof ForbiddenError) return 'Forbidden (403): your login is not recognized as an admin by the server.';
+  if (axios.isAxiosError(e)) {
+    const status = e.response?.status;
+    const msg = (e.response?.data as { error?: { message?: string } } | undefined)?.error?.message;
+    if (status) return `Add staff failed (HTTP ${status})${msg ? `: ${msg}` : ''}.`;
+    return `Add staff failed (no response — network/CORS): ${e.message}`;
+  }
+  return 'Could not add staff. Retry — provisioning is safe to repeat.';
+}
+
 function Field({ label, value, onChange, required, placeholder, type = 'text' }: { label: string; value: string; onChange: (v: string) => void; required?: boolean; placeholder?: string; type?: string }) {
   return (
     <label className="block">
@@ -90,7 +105,7 @@ export function StaffPage() {
       setForm(EMPTY);
       await qc.invalidateQueries({ queryKey: ['users'] });
     },
-    onError: (e: unknown) => setMessage(e instanceof ConflictError ? 'That email or NPI already exists.' : 'Could not add staff. Retry — provisioning is safe to repeat.'),
+    onError: (e: unknown) => setMessage(staffErrorMessage(e)),
   });
 
   const toggleMutation = useMutation({

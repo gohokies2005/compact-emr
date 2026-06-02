@@ -13,6 +13,7 @@ import { CaseDetailPage } from './routes/cases/CaseDetailPage';
 import { LetterEditorPage } from './routes/cases/LetterEditorPage';
 import { TemplatesPage } from './routes/stubs/TemplatesPage';
 import { PhysiciansPage } from './routes/admin/PhysiciansPage';
+import { StaffPage } from './routes/admin/StaffPage';
 import { ActivityPage } from './routes/stubs/ActivityPage';
 import { RefundsPage } from './routes/stubs/RefundsPage';
 import { CompensationPage } from './routes/stubs/CompensationPage';
@@ -36,6 +37,7 @@ export function App() {
     <Route path="/cases/:id/letter" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><LetterEditorPage /></ProtectedRoute>} />
     <Route path="/templates" element={<ProtectedRoute requiredRole={['admin']}><TemplatesPage /></ProtectedRoute>} />
     <Route path="/physicians" element={<ProtectedRoute requiredRole={['admin']}><PhysiciansPage /></ProtectedRoute>} />
+    <Route path="/staff" element={<ProtectedRoute requiredRole={['admin']}><StaffPage /></ProtectedRoute>} />
     <Route path="/activity" element={<ProtectedRoute requiredRole={['admin']}><ActivityPage /></ProtectedRoute>} />
     <Route path="/refunds" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><RefundsPage /></ProtectedRoute>} />
     <Route path="/compensation" element={<ProtectedRoute requiredRole={['admin']}><CompensationPage /></ProtectedRoute>} />

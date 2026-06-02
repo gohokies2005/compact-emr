@@ -41,7 +41,7 @@ describe('CaseAssignmentPanel', () => {
     assignRnMock.mockResolvedValue({
       data: { id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'Sleep apnea', claimType: 'supplemental', status: 'physician_review', version: 4, currentVersion: 1, assignedPhysicianId: null, assignedRnId: 'user-rn', refundEligible: false, createdAt: '2026-05-25T12:00:00.000Z', updatedAt: '2026-05-25T12:00:00.000Z' },
     });
-    listUsersMock.mockResolvedValue({ data: [{ id: 'user-rn', email: 'rn@example.com', roles: ['ops_staff'] }] });
+    listUsersMock.mockResolvedValue({ data: [{ id: 'user-rn', email: 'rn@example.com', name: 'RN One', active: true, roles: ['ops_staff'], version: 1 }] });
   });
 
   it('loads physicians and assigns the selected physician', async () => {

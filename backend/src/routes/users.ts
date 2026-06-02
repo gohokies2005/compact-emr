@@ -122,8 +122,10 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
     requireRole(['admin', 'ops_staff']),
     asyncHandler(async (req: Request, res: Response) => {
       const roleParam = req.query.role;
-      // Only active staff appear in pickers — a deactivated login can't authenticate.
-      const where: Record<string, unknown> = { active: true };
+      // Pickers see active staff only (a deactivated login can't authenticate); the admin staff
+      // page passes includeInactive=true to also see/reactivate deactivated accounts.
+      const where: Record<string, unknown> = {};
+      if (req.query.includeInactive !== 'true') where.active = true;
       if (roleParam !== undefined) {
         if (typeof roleParam !== 'string' || !ASSIGNABLE_ROLES.includes(roleParam as Role)) {
           throw new HttpError(400, 'bad_request', `role must be one of: ${ASSIGNABLE_ROLES.join(', ')}`, { role: roleParam });
@@ -131,7 +133,7 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
         where.roles = { some: { role: roleParam } };
       }
       const users = await db.appUser.findMany({ where, include: { roles: true }, orderBy: { email: 'asc' } });
-      res.json({ data: users.map((u) => ({ id: u.id, email: u.email, name: u.name, active: u.active, roles: u.roles.map((r) => r.role) })) });
+      res.json({ data: users.map((u) => ({ id: u.id, email: u.email, name: u.name, active: u.active, roles: u.roles.map((r) => r.role), version: u.version })) });
     }),
   );
 
@@ -245,7 +247,7 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
       await db.activityLog.create({
         data: { actorUserId: currentActor(req).id, action: body.active ? 'staff_reactivated' : 'staff_deactivated', detailsJson: { userId: id, email: current.email } },
       });
-      res.json({ data: { id: updated.id, email: updated.email, name: updated.name, active: updated.active, roles: current.roles.map((r) => r.role) } });
+      res.json({ data: { id: updated.id, email: updated.email, name: updated.name, active: updated.active, roles: current.roles.map((r) => r.role), version: updated.version } });
     }),
   );
 

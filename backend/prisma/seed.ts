@@ -12,8 +12,8 @@ async function main() {
   const adminEmail = process.env.BOOTSTRAP_ADMIN_EMAIL ?? 'admin@flatratenexus.local';
   const admin = await prisma.appUser.upsert({
     where: { cognitoSub: adminSub },
-    update: { email: adminEmail },
-    create: { cognitoSub: adminSub, email: adminEmail },
+    update: { email: adminEmail, name: 'Bootstrap Admin', active: true },
+    create: { cognitoSub: adminSub, email: adminEmail, name: 'Bootstrap Admin', active: true },
   });
   await prisma.appUserRole.upsert({
     where: { userId_role: { userId: admin.id, role: 'admin' } },

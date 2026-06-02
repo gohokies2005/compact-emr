@@ -121,6 +121,8 @@ export class ApiStack extends Stack {
         DRAFTER_INVOKE_TOKEN: props.drafterInvokeTokenSecret.secretValue.unsafeUnwrap(),
         COGNITO_ISSUER: `https://cognito-idp.${Stack.of(this).region}.amazonaws.com/${props.userPool.userPoolId}`,
         COGNITO_CLIENT_ID: props.userPoolClient.userPoolClientId,
+        // Staff provisioning (POST /users) — the API admin-creates Cognito users in this pool.
+        COGNITO_USER_POOL_ID: props.userPool.userPoolId,
         DATABASE_URL: databaseUrl,
         DATABASE_URL_SECRET_ARN: props.databaseSecret.secretArn,
         // Letter editor: surgical-AI key (runtime-fetched from this ARN) + render Lambda name
@@ -163,6 +165,23 @@ export class ApiStack extends Stack {
     // API Lambda reads the surgical-AI key at runtime. (phiBucket RW + documentsKey already
     // granted above cover the letter-revisions/* artifacts.)
     apiAnthropicSecret.grantRead(handler);
+
+    // Staff provisioning: the API admin-creates/enables/disables Cognito users in THIS pool only
+    // (POST /users, PATCH /users/:id). Scoped to the pool ARN — not the account-wide '*'.
+    handler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'cognito-idp:AdminCreateUser',
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminAddUserToGroup',
+        'cognito-idp:AdminRemoveUserFromGroup',
+        'cognito-idp:AdminSetUserPassword',
+        'cognito-idp:AdminEnableUser',
+        'cognito-idp:AdminDisableUser',
+      ],
+      resources: [props.userPool.userPoolArn],
+    }));
+
     if (renderImageTag) {
       const renderLambda = new lambda.DockerImageFunction(this, 'LetterRenderLambda', {
         functionName: renderFnName,

@@ -65,7 +65,10 @@ export interface AppUserRecord {
   id: string;
   cognitoSub: string;
   email: string;
+  name: string | null;
+  active: boolean;
   roles: Array<{ role: string }>;
+  version: number;
 }
 
 export interface ActivityCreateInput {
@@ -125,6 +128,13 @@ export interface VeteranDelegate {
 export interface AppUserDelegate {
   findUnique(args: unknown): Promise<AppUserRecord | null>;
   findMany(args: unknown): Promise<readonly AppUserRecord[]>;
+  upsert(args: unknown): Promise<AppUserRecord>;
+  update(args: unknown): Promise<AppUserRecord>;
+}
+
+export interface AppUserRoleDelegate {
+  upsert(args: unknown): Promise<unknown>;
+  deleteMany(args: unknown): Promise<unknown>;
 }
 
 export interface ActivityLogDelegate {
@@ -172,6 +182,7 @@ export interface AppDbTransaction {
 
 export interface AppDb extends AppDbTransaction {
   appUser: AppUserDelegate;
+  appUserRole: AppUserRoleDelegate;
   physician: PhysicianDelegate;
   $transaction<T>(fn: (tx: AppDbTransaction) => Promise<T>): Promise<T>;
 }

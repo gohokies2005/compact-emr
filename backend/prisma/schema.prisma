@@ -111,6 +111,8 @@ model AppUser {
   id          String   @id @default(uuid())
   cognitoSub  String   @unique @map("cognito_sub")
   email       String   @unique
+  name        String?  @db.VarChar(120)
+  active      Boolean  @default(true)
   roles       AppUserRole[]
   assignedCases Case[]  @relation("CaseAssignedRn")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -118,6 +120,7 @@ model AppUser {
   version     Int      @default(1)
 
   @@index([email])
+  @@index([active])
   @@map("app_users")
 }
 

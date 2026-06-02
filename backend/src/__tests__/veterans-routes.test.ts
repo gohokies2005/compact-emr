@@ -50,7 +50,10 @@ class MockDb {
     id: 'app-user-1',
     cognitoSub: 'test-sub-123',
     email: 'admin@example.test',
+    name: 'Test Admin',
+    active: true,
     roles: [{ role: 'admin' }],
+    version: 1,
   };
 
   public appUser = {

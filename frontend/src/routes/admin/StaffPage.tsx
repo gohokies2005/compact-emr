@@ -88,7 +88,16 @@ export function StaffPage() {
   const toggleMutation = useMutation({
     mutationFn: (vars: { user: StaffUser; active: boolean }) => setStaffActive(vars.user.id, vars.user.version, vars.active),
     onSuccess: async () => { setMessage('Staff status updated.'); await qc.invalidateQueries({ queryKey: ['users'] }); },
-    onError: (e: unknown) => setMessage(e instanceof ConflictError ? 'This user changed elsewhere, or has in-flight cases — reassign first.' : 'Could not update status.'),
+    onError: (e: unknown) => {
+      if (e instanceof ConflictError) {
+        const d = e.current as { inFlightCount?: number } | undefined;
+        setMessage(typeof d?.inFlightCount === 'number'
+          ? `Cannot deactivate: this user is the RN liaison on ${d.inFlightCount} in-flight case(s). Reassign them first.`
+          : 'This user changed elsewhere. Reload and try again.');
+        return;
+      }
+      setMessage('Could not update status.');
+    },
   });
 
   function handleCreate(e: FormEvent<HTMLFormElement>) { e.preventDefault(); if (isValid(form)) createMutation.mutate(); }

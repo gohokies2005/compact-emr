@@ -49,13 +49,13 @@ export async function listUsers(params: { role?: StaffRole; includeInactive?: bo
   if (params.role) qs.set('role', params.role);
   if (params.includeInactive) qs.set('includeInactive', 'true');
   const query = qs.toString();
-  return apiGet<{ data: readonly StaffUser[] }>(`/users${query ? `?${query}` : ''}`);
+  return apiGet<{ data: readonly StaffUser[] }>(`/api/v1/users${query ? `?${query}` : ''}`);
 }
 
 export async function createStaff(input: CreateStaffInput): Promise<{ data: CreatedStaff }> {
-  return apiPost<{ data: CreatedStaff }, CreateStaffInput>('/users', input);
+  return apiPost<{ data: CreatedStaff }, CreateStaffInput>('/api/v1/users', input);
 }
 
 export async function setStaffActive(id: string, version: number, active: boolean): Promise<{ data: StaffUser }> {
-  return apiPatch<{ data: StaffUser }, { version: number; active: boolean }>(`/users/${id}`, { version, active });
+  return apiPatch<{ data: StaffUser }, { version: number; active: boolean }>(`/api/v1/users/${encodeURIComponent(id)}`, { version, active });
 }

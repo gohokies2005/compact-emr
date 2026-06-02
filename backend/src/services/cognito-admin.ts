@@ -71,6 +71,11 @@ export function makeCognitoAdmin(userPoolId: string): CognitoAdmin {
 
       const sub = await getSub(email);
 
+      // Ensure the login is enabled. No-op for a fresh create; the load-bearing call when
+      // re-provisioning a previously-OFFBOARDED user (Cognito DISABLED) — without this the user
+      // would be active in the DB + visible in pickers but unable to authenticate.
+      await client.send(new AdminEnableUserCommand({ UserPoolId: userPoolId, Username: email }));
+
       for (const group of groups) {
         await client.send(new AdminAddUserToGroupCommand({ UserPoolId: userPoolId, Username: email, GroupName: group }));
       }

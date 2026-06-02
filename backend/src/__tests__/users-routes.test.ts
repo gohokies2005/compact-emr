@@ -164,6 +164,14 @@ describe('POST /users — staff provisioning', () => {
     expect(res.status).toBe(409);
   });
 
+  it('reactivates an INACTIVE existing email (201, not 409) and re-provisions Cognito', async () => {
+    const inactive = u({ id: 'U-RN', email: 'zzz.nurse@x.test', active: false, roles: [{ role: 'ops_staff' }] });
+    const cognito = makeCognito();
+    const res = await request(appFor(makeDb({ existingByEmail: inactive }).db, cognito)).post('/api/v1/users').send(VALID_RN);
+    expect(res.status).toBe(201);
+    expect(cognito.provisionUser).toHaveBeenCalled(); // re-provision (which now AdminEnableUsers the login)
+  });
+
   it('400 on an invalid role value', async () => {
     const res = await request(appFor(makeDb().db, makeCognito())).post('/api/v1/users').send({ ...VALID_RN, roles: ['superuser'] });
     expect(res.status).toBe(400);

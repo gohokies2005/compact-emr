@@ -59,6 +59,18 @@ describe('StaffPage', () => {
     expect(createMock.mock.calls[0]![0]).toMatchObject({ email: 'zzz.nurse@x.test', name: 'ZZZ Nurse', roles: ['ops_staff'], credential: 'temp_password', tempPassword: 'Frn-Test-2026!' });
   });
 
+  it('explains why submit is blocked instead of silently doing nothing (weak temp password)', async () => {
+    renderPage();
+    await screen.findByText('rn@x.test');
+    fireEvent.change(screen.getByLabelText(/Full name/), { target: { value: 'ZZZ Nurse' } });
+    fireEvent.change(screen.getByLabelText(/Email/), { target: { value: 'zzz.nurse@x.test' } });
+    fireEvent.click(screen.getByLabelText('Set temporary password (test users)'));
+    fireEvent.change(screen.getByLabelText(/Temporary password/), { target: { value: 'weak' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add staff' }));
+    expect(await screen.findByText(/Temporary password must be at least 8 characters/)).toBeInTheDocument();
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
   it('deactivates a staffer with their version (OCC)', async () => {
     renderPage();
     await screen.findByText('rn@x.test');

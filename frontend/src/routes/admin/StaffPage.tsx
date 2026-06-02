@@ -45,14 +45,22 @@ function toInput(f: FormState): CreateStaffInput {
   };
 }
 
-function isValid(f: FormState): boolean {
-  if (f.name.trim().length === 0 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(f.email.trim()) || f.roles.length === 0) return false;
-  if (f.credential === 'temp_password' && !(f.tempPassword.length >= 8 && /[A-Za-z]/.test(f.tempPassword) && /[0-9]/.test(f.tempPassword) && /[^A-Za-z0-9]/.test(f.tempPassword))) return false;
-  if (f.roles.includes('physician')) {
-    if (!/^\d{10}$/.test(f.npi.trim())) return false;
-    for (const v of [f.specialty, f.medicalLicense, f.boardName, f.boardAbbreviation, f.licenseState, f.licenseNumber]) if (v.trim().length === 0) return false;
+// Returns the first reason the form can't be submitted, or null when it's valid. Surfaced on
+// click so the admin is never left with a silently-dead "Add staff" button.
+function validationError(f: FormState): string | null {
+  if (f.name.trim().length === 0) return 'Enter the full name.';
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(f.email.trim())) return 'Enter a valid email address.';
+  if (f.roles.length === 0) return 'Pick at least one role.';
+  if (f.credential === 'temp_password' && !(f.tempPassword.length >= 8 && /[A-Za-z]/.test(f.tempPassword) && /[0-9]/.test(f.tempPassword) && /[^A-Za-z0-9]/.test(f.tempPassword))) {
+    return 'Temporary password must be at least 8 characters and include a letter, a number, and a symbol (e.g. Frn-Test-2026!).';
   }
-  return true;
+  if (f.roles.includes('physician')) {
+    if (!/^\d{10}$/.test(f.npi.trim())) return 'Physician NPI must be exactly 10 digits.';
+    for (const [label, v] of [['Specialty', f.specialty], ['Medical license', f.medicalLicense], ['Certifying board', f.boardName], ['Board abbreviation', f.boardAbbreviation], ['License state', f.licenseState], ['License number', f.licenseNumber]] as const) {
+      if (v.trim().length === 0) return `Physician ${label} is required.`;
+    }
+  }
+  return null;
 }
 
 function Field({ label, value, onChange, required, placeholder, type = 'text' }: { label: string; value: string; onChange: (v: string) => void; required?: boolean; placeholder?: string; type?: string }) {
@@ -100,7 +108,12 @@ export function StaffPage() {
     },
   });
 
-  function handleCreate(e: FormEvent<HTMLFormElement>) { e.preventDefault(); if (isValid(form)) createMutation.mutate(); }
+  function handleCreate(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const err = validationError(form);
+    if (err) { setMessage(err); return; }
+    createMutation.mutate();
+  }
 
   return (
     <AppShell>
@@ -153,7 +166,7 @@ export function StaffPage() {
             ) : null}
 
             <div className="md:col-span-2 xl:col-span-3">
-              <Button type="submit" variant="primary" loading={createMutation.isPending} disabled={!isValid(form) || createMutation.isPending}>Add staff</Button>
+              <Button type="submit" variant="primary" loading={createMutation.isPending} disabled={createMutation.isPending}>Add staff</Button>
             </div>
           </form>
         </Card>

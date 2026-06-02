@@ -74,8 +74,10 @@ function parseStaffCreate(body: unknown): ParsedStaffCreate {
     credential = { kind: 'invite' };
   } else if (credKind === 'temp_password') {
     const pw = body.tempPassword;
-    if (typeof pw !== 'string' || pw.length < 8 || !/[A-Za-z]/.test(pw) || !/[0-9]/.test(pw) || !/[^A-Za-z0-9]/.test(pw)) {
-      throw new HttpError(400, 'bad_request', 'tempPassword must be >=8 chars with a letter, number, and symbol', { field: 'tempPassword' });
+    // Must satisfy the Cognito pool policy (min 12 + upper + lower + number + symbol) so we fail
+    // with a clean 400 here instead of a 502 InvalidPasswordException from Cognito.
+    if (typeof pw !== 'string' || pw.length < 12 || !/[A-Z]/.test(pw) || !/[a-z]/.test(pw) || !/[0-9]/.test(pw) || !/[^A-Za-z0-9]/.test(pw)) {
+      throw new HttpError(400, 'bad_request', 'tempPassword must be at least 12 characters with an uppercase letter, a lowercase letter, a number, and a symbol', { field: 'tempPassword' });
     }
     credential = { kind: 'temp_password', password: pw };
   } else {

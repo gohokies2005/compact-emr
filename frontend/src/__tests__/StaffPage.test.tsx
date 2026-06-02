@@ -67,7 +67,7 @@ describe('StaffPage', () => {
     fireEvent.click(screen.getByLabelText('Set temporary password (test users)'));
     fireEvent.change(screen.getByLabelText(/Temporary password/), { target: { value: 'weak' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add staff' }));
-    expect(await screen.findByText(/Temporary password must be at least 8 characters/)).toBeInTheDocument();
+    expect(await screen.findByText(/Temporary password must be at least 12 characters/)).toBeInTheDocument();
     expect(createMock).not.toHaveBeenCalled();
   });
 

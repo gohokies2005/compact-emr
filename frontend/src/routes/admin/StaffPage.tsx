@@ -52,8 +52,11 @@ function validationError(f: FormState): string | null {
   if (f.name.trim().length === 0) return 'Enter the full name.';
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(f.email.trim())) return 'Enter a valid email address.';
   if (f.roles.length === 0) return 'Pick at least one role.';
-  if (f.credential === 'temp_password' && !(f.tempPassword.length >= 8 && /[A-Za-z]/.test(f.tempPassword) && /[0-9]/.test(f.tempPassword) && /[^A-Za-z0-9]/.test(f.tempPassword))) {
-    return 'Temporary password must be at least 8 characters and include a letter, a number, and a symbol (e.g. Frn-Test-2026!).';
+  if (f.credential === 'temp_password') {
+    const p = f.tempPassword;
+    if (!(p.length >= 12 && /[A-Z]/.test(p) && /[a-z]/.test(p) && /[0-9]/.test(p) && /[^A-Za-z0-9]/.test(p))) {
+      return 'Temporary password must be at least 12 characters with an uppercase letter, a lowercase letter, a number, and a symbol (e.g. FrnTest-2026!!).';
+    }
   }
   if (f.roles.includes('physician')) {
     if (!/^\d{10}$/.test(f.npi.trim())) return 'Physician NPI must be exactly 10 digits.';
@@ -163,7 +166,7 @@ export function StaffPage() {
                 <label className="flex items-center gap-2"><input type="radio" name="cred" checked={form.credential === 'invite'} onChange={() => set('credential', 'invite')} />Send invite email</label>
                 <label className="flex items-center gap-2"><input type="radio" name="cred" checked={form.credential === 'temp_password'} onChange={() => set('credential', 'temp_password')} />Set temporary password (test users)</label>
               </div>
-              {form.credential === 'temp_password' ? <div className="mt-2 max-w-md"><Field label="Temporary password" value={form.tempPassword} onChange={(v) => set('tempPassword', v)} required type="text" placeholder=">=8 chars, a letter, number, and symbol" /></div> : null}
+              {form.credential === 'temp_password' ? <div className="mt-2 max-w-md"><Field label="Temporary password" value={form.tempPassword} onChange={(v) => set('tempPassword', v)} required type="text" placeholder="12+ chars: UPPER, lower, number, symbol (e.g. FrnTest-2026!!)" /></div> : null}
             </div>
 
             {wantsPhysician ? (

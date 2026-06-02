@@ -24,7 +24,9 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 let cachedS3Client: S3Client | null = null;
 function getS3ForArtifacts(): S3Client {
   if (cachedS3Client !== null) return cachedS3Client;
-  cachedS3Client = new S3Client({});
+  // forcePathStyle is needed for LocalStack (its virtual-host style isn't reachable from a
+  // browser on localhost). Off by default; AWS_S3_FORCE_PATH_STYLE=true only in local dev.
+  cachedS3Client = new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' });
   return cachedS3Client;
 }
 const ARTIFACT_PDF_TTL_SECONDS = 5 * 60;

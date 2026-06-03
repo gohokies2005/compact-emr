@@ -4,7 +4,10 @@ import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition, ScCo
 
 export interface Envelope<T> { readonly data: T; }
 export interface Paginated<T> { readonly data: readonly T[]; readonly nextCursor?: string; }
-export interface VeteranListItem extends Veteran { readonly caseCount?: number; readonly lastActivity?: string; }
+// The list endpoint returns `activeCases` (the veteran's case count); `updatedAt` rides on the base
+// Veteran. (Was `caseCount`/`lastActivity` — names that never matched the API, so the Veterans page
+// rendered 0 / "—" for every row. 2026-06-03.)
+export interface VeteranListItem extends Veteran { readonly activeCases?: number; }
 export interface VeteranDetail extends Veteran {
   readonly scConditions: readonly ScCondition[];
   readonly activeProblems: readonly ActiveProblem[];

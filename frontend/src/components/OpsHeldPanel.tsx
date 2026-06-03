@@ -30,6 +30,11 @@ interface OpsHeldPanelProps {
   readonly c: CaseDetail;
   readonly job?: OpsDraftJob | null;
   readonly isAdmin: boolean;
+  // A letter PDF exists for this case (on some draft-job version), so it can be opened even
+  // though the run is held/revise. Without this, a non-'ship' letter had no way to be viewed
+  // in the chart at all (2026-06-03 — Ryan "could not see the letter drafted anywhere").
+  readonly hasLetter?: boolean;
+  readonly onViewLetter?: () => void;
 }
 
 function operatorMessage(c: CaseDetail, job?: OpsDraftJob | null): string {
@@ -54,7 +59,7 @@ function operatorMessage(c: CaseDetail, job?: OpsDraftJob | null): string {
   return 'Drafter completed with concerns.';
 }
 
-export function OpsHeldPanel({ c, job, isAdmin }: OpsHeldPanelProps) {
+export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHeldPanelProps) {
   const qc = useQueryClient();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [confirmOpenAsIs, setConfirmOpenAsIs] = useState(false);
@@ -105,6 +110,12 @@ export function OpsHeldPanel({ c, job, isAdmin }: OpsHeldPanelProps) {
         </div>
 
         <div className="flex flex-wrap gap-2">
+          {hasLetter && onViewLetter ? (
+            <Button type="button" variant="primary" onClick={onViewLetter}>
+              View letter
+            </Button>
+          ) : null}
+
           <Button
             type="button"
             variant="secondary"

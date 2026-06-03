@@ -128,6 +128,16 @@ export function CaseDetailPage() {
       const inFlightDraft =
         latestDraftJob?.state === 'queued' || latestDraftJob?.state === 'running';
 
+      // The newest job that actually produced a letter PDF. draftJobs is version-desc, so the
+      // first with an artifact key is the latest viewable letter. Used so a held/revise letter
+      // (or a hollow "done" latest job with no artifact) can still be opened from the chart.
+      // (2026-06-03 — Ryan "could not see the letter drafted anywhere in the chart".)
+      const viewableLetterJob = (c.draftJobs ?? []).find(
+        (job) =>
+          typeof (job as InFlightDraftJob).artifactPdfS3Key === 'string' &&
+          ((job as InFlightDraftJob).artifactPdfS3Key as string).length > 0,
+      ) as InFlightDraftJob | undefined;
+
       // Gap 1: first-draft trigger. RN/admin can kick off the drafter when no run is in
       // flight and none has completed yet. Chart-readiness is enforced inside the panel.
       const hasCompletedDraft = (c.draftJobs ?? []).some((job) => job.state === 'done');
@@ -150,9 +160,11 @@ export function CaseDetailPage() {
             c.operatorState !== 'ready_with_notes'));
 
       const handleOpenPdf = async () => {
-        if (!latestDraftJob) return;
+        // Prefer the newest job that actually has a PDF; fall back to the latest job.
+        const target = viewableLetterJob ?? latestDraftJob;
+        if (!target) return;
         try {
-          const { data } = await getArtifactPdfUrl(c.id, latestDraftJob.id);
+          const { data } = await getArtifactPdfUrl(c.id, target.id);
           window.open(data.url, '_blank', 'noopener,noreferrer');
         } catch {
           window.alert('Could not open the PDF. Please try again — if it keeps failing, flag this case to Dr. Ryan.');
@@ -193,6 +205,8 @@ export function CaseDetailPage() {
               c={c}
               {...(latestDraftJob ? { job: latestDraftJob } : {})}
               isAdmin={role === 'admin'}
+              hasLetter={!!viewableLetterJob}
+              onViewLetter={handleOpenPdf}
             />
           ) : null}
         </>

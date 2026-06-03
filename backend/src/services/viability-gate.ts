@@ -22,6 +22,10 @@ export interface ViabilityInput {
   >;
   readonly activeProblems: readonly { problem: string }[];
   readonly chartReadiness?: { ready: boolean; manualSummaryRequired: number };
+  /** CDS is unwired by default (Ryan 2026-06-03). When false, the cdsVerdict branches are skipped
+   *  entirely — otherwise a permanently-stale 'not_yet_run' would degrade every new case to
+   *  'clarify' with a "Run CDS" recommendation pointing at a removed panel (dead-end). */
+  readonly cdsEnabled?: boolean;
 }
 
 export interface ViabilityResult {
@@ -75,7 +79,7 @@ export function evaluateViabilityGate(input: ViabilityInput): ViabilityResult {
     recommendations.push('Add the active diagnosis to the veteran chart from the records or request records via clarification queue.');
   }
 
-  if (input.caseRow.cdsVerdict === 'reject') {
+  if (input.cdsEnabled && input.caseRow.cdsVerdict === 'reject') {
     blockers.push({
       code: 'cds_reject',
       severity: 'block',
@@ -96,7 +100,7 @@ export function evaluateViabilityGate(input: ViabilityInput): ViabilityResult {
   }
 
   // Soft warnings (-> clarify)
-  if (input.caseRow.cdsVerdict === 'not_yet_run') {
+  if (input.cdsEnabled && input.caseRow.cdsVerdict === 'not_yet_run') {
     blockers.push({ code: 'cds_not_run', severity: 'warn', detail: 'CDS has not been run yet for this case.' });
     recommendations.push('Run CDS from the Case Detail panel to surface the BVA odds and any hard gates.');
   }

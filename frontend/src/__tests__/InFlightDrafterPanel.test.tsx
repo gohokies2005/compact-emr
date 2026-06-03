@@ -1,9 +1,11 @@
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InFlightDrafterPanel, type InFlightDraftJob } from '../components/InFlightDrafterPanel';
+import type { DraftJobPhase } from '../types/prisma';
 
-// Fixture matches our actual DraftJob shape (no `failedAt`; optional-not-nullable
-// completedAt/errorMessage — omit instead of passing null; updatedAt required).
+// Fixtures use the drafter's REAL phase ids (DraftJobPhase — the snake_case manifest ids it posts
+// as currentPhase), not human labels. Fixture matches the actual DraftJob shape (no `failedAt`;
+// optional-not-nullable completedAt/errorMessage omitted; updatedAt required).
 const baseJob: InFlightDraftJob = {
   id: 'draft-job-1',
   caseId: 'CASE-1',
@@ -12,7 +14,7 @@ const baseJob: InFlightDraftJob = {
   enqueuedAt: '2026-05-25T12:00:00.000Z',
   startedAt: '2026-05-25T12:01:00.000Z',
   updatedAt: '2026-05-25T12:01:00.000Z',
-  currentPhase: 'PHASE 4: REVIEW PANEL',
+  currentPhase: 'adversary_panel',
   nextRetryInS: null,
 };
 
@@ -32,19 +34,44 @@ describe('InFlightDrafterPanel', () => {
     expect(screen.getByText('This usually takes 10–20 minutes.')).toBeInTheDocument();
   });
 
-  it('maps drafting phases to Step 3 of 6', () => {
-    render(<InFlightDrafterPanel job={{ ...baseJob, currentPhase: 'PHASE 2: CITATIONS' }} />);
+  it('maps the drafter phase to Step 3 of 6 (Writing)', () => {
+    render(<InFlightDrafterPanel job={{ ...baseJob, currentPhase: 'drafter' }} />);
     expect(screen.getByText('Step 3 of 6 — Writing the draft')).toBeInTheDocument();
   });
 
-  it('maps the framing gate to Step 2 of 6', () => {
-    render(<InFlightDrafterPanel job={{ ...baseJob, currentPhase: 'PHASE 0.4: FRAMING GATE' }} />);
+  it('maps the framing gate to Step 2 of 6 (Checking)', () => {
+    render(<InFlightDrafterPanel job={{ ...baseJob, currentPhase: 'framing_gate' }} />);
     expect(screen.getByText('Step 2 of 6 — Checking the claim')).toBeInTheDocument();
+  });
+
+  it('maps citation_scoring to Step 5 (Revising) — never backward to Writing', () => {
+    render(<InFlightDrafterPanel job={{ ...baseJob, currentPhase: 'citation_scoring' }} />);
+    expect(screen.getByText('Step 5 of 6 — Revising')).toBeInTheDocument();
   });
 
   it('falls back to Step 1 of 6 when the phase is unset', () => {
     render(<InFlightDrafterPanel job={{ ...baseJob, currentPhase: null }} />);
     expect(screen.getByText('Step 1 of 6 — Reading the records')).toBeInTheDocument();
+  });
+
+  it('the step never moves BACKWARD across the real pipeline order', () => {
+    // The order the drafter advances through its phases. The bucketed step must be monotonically
+    // non-decreasing — this is the regression guard against the human-label-substring bug.
+    const order: DraftJobPhase[] = [
+      'preflight', 'index_consult', 'source_lock', 'framing_gate', 'drafter',
+      'adversary_panel', 'specialist_gate', 'refine_loop', 'surgical_edit',
+      'citation_scoring', 'pmid_verify', 'linter', 'qa_report', 'grader', 'render',
+    ];
+    let prev = 0;
+    for (const phase of order) {
+      const { unmount } = render(<InFlightDrafterPanel job={{ ...baseJob, currentPhase: phase }} />);
+      const m = screen.getByText(/Step (\d) of 6/).textContent!.match(/Step (\d) of 6/)!;
+      const stepNum = Number(m[1]);
+      expect(stepNum, `phase ${phase} should not regress below ${prev}`).toBeGreaterThanOrEqual(prev);
+      prev = stepNum;
+      unmount();
+    }
+    expect(prev).toBe(6); // render = final step
   });
 
   it('shows the longer-than-usual message for retrying jobs', () => {

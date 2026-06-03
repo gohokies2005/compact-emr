@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { Card } from './ui/Card';
-import type { DraftJob } from '../types/prisma';
+import type { DraftJob, DraftJobPhase } from '../types/prisma';
 
 export interface InFlightDraftJob extends DraftJob {
   readonly currentPhase?: string | null;
@@ -41,74 +41,32 @@ function normalizePhase(value: string | null | undefined): string {
   return (value ?? '').trim().toLowerCase();
 }
 
+// Map the drafter's CANONICAL phase ids (DraftJobPhase — the snake_case manifest ids the drafter
+// actually posts as currentPhase, NOT human labels) to the 6 friendly buckets. Exhaustive Record:
+// if the drafter adds a phase the EMR hasn't bucketed, tsc fails here — a compile error instead of
+// a silently-wrong (or backward-jumping) progress bar. (QA C1, 2026-06-03.)
+const PHASE_STEP: Record<DraftJobPhase, DraftStep['index']> = {
+  preflight: 1,
+  index_consult: 1,
+  source_lock: 1,
+  framing_gate: 2,
+  drafter: 3,
+  adversary_panel: 4,
+  specialist_gate: 4,
+  refine_loop: 5,
+  surgical_edit: 5,
+  citation_scoring: 5, // post-draft verification — NOT "Writing" (it would jump the bar backward)
+  pmid_verify: 5,
+  linter: 6,
+  qa_report: 6,
+  grader: 6,
+  render: 6,
+};
+
 function stepFromPhase(phase: string | null | undefined): DraftStep {
-  const p = normalizePhase(phase);
-
-  if (!p) return { index: 1, label: STEP_LABELS[1] };
-
-  if (
-    p.includes('phase 0.4') ||
-    p.includes('framing gate') ||
-    p.includes('viability') ||
-    p.includes('completeness')
-  ) {
-    return { index: 2, label: STEP_LABELS[2] };
-  }
-
-  if (
-    p.includes('phase 4.6') ||
-    p.includes('surgical') ||
-    p.includes('convergence') ||
-    p.includes('redraft') ||
-    p.includes('refine_loop')
-  ) {
-    return { index: 5, label: STEP_LABELS[5] };
-  }
-
-  if (
-    p.includes('phase 4') ||
-    p.includes('review panel') ||
-    p.includes('adversary') ||
-    p.includes('specialist') ||
-    p.includes('reviewing')
-  ) {
-    return { index: 4, label: STEP_LABELS[4] };
-  }
-
-  if (
-    p.includes('phase 1') ||
-    p.includes('phase 2') ||
-    p.includes('phase 3') ||
-    p.includes('draft') ||
-    p.includes('citation')
-  ) {
-    return { index: 3, label: STEP_LABELS[3] };
-  }
-
-  if (
-    p.includes('grade') ||
-    p.includes('grading') ||
-    p.includes('qa') ||
-    p.includes('render') ||
-    p.includes('complete') ||
-    p.includes('final')
-  ) {
-    return { index: 6, label: STEP_LABELS[6] };
-  }
-
-  if (
-    p.includes('phase 0') ||
-    p.includes('index') ||
-    p.includes('consult') ||
-    p.includes('parsing') ||
-    p.includes('chart prep') ||
-    p.includes('source_lock') ||
-    p.includes('source lock')
-  ) {
-    return { index: 1, label: STEP_LABELS[1] };
-  }
-
-  return { index: 1, label: STEP_LABELS[1] };
+  const id = (phase ?? '').trim() as DraftJobPhase;
+  const index = PHASE_STEP[id] ?? 1;
+  return { index, label: STEP_LABELS[index] };
 }
 
 function elapsedLabel(startedAt: string | null | undefined, enqueuedAt: string): string {
@@ -157,7 +115,14 @@ export function InFlightDrafterPanel({ job }: InFlightDrafterPanelProps) {
       </div>
 
       <div className="mt-5">
-        <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+        <div
+          className="h-3 overflow-hidden rounded-full bg-slate-100"
+          role="progressbar"
+          aria-valuenow={step.index}
+          aria-valuemin={1}
+          aria-valuemax={6}
+          aria-label={`Step ${step.index} of 6: ${step.label}`}
+        >
           <div className={`h-full rounded-full bg-slate-800 ${STEP_WIDTH_CLASSES[step.index]}`} />
         </div>
 

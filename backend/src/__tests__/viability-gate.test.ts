@@ -15,6 +15,10 @@ function buildInput(overrides: Partial<ViabilityInput['caseRow']> = {}, activePr
       ...overrides,
     },
     activeProblems,
+    // Existing tests assert CDS-on behavior; CDS is unwired by default in prod (Ryan 2026-06-03),
+    // so the route passes cdsEnabled=false there. Default true here to keep the CDS-branch tests
+    // meaningful; the flag-off behavior is covered by its own test below.
+    cdsEnabled: true,
   };
 }
 
@@ -48,6 +52,19 @@ describe('evaluateViabilityGate', () => {
   it('prefers not_viable over needs_from_vet when both fire', () => {
     const r = evaluateViabilityGate(buildInput({ status: 'records' }, []));
     expect(r.verdict).toBe('not_viable');
+  });
+
+  it('CDS OFF: a not_yet_run case is NOT degraded to clarify (no cds_not_run, no dead-end recommendation)', () => {
+    const r = evaluateViabilityGate({ ...buildInput({ cdsVerdict: 'not_yet_run' }), cdsEnabled: false });
+    expect(r.blockers.some((b) => b.code === 'cds_not_run')).toBe(false);
+    expect(r.recommendations.some((s) => s.toLowerCase().includes('cds'))).toBe(false);
+    expect(r.verdict).toBe('go');
+  });
+
+  it('CDS OFF: a stale reject verdict does NOT permanently block (no cds_reject)', () => {
+    const r = evaluateViabilityGate({ ...buildInput({ cdsVerdict: 'reject' }), cdsEnabled: false });
+    expect(r.blockers.some((b) => b.code === 'cds_reject')).toBe(false);
+    expect(r.verdict).toBe('go');
   });
 
   it('returns clarify when CDS has not been run', () => {

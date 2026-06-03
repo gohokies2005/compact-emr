@@ -60,6 +60,7 @@ export function createViabilityRouter(db: AppDb): Router {
         },
         activeProblems: activeProblems as readonly { problem: string }[],
         chartReadiness: { ready: chartReadiness.ready, manualSummaryRequired: chartReadiness.manualSummaryRequired },
+        cdsEnabled: process.env['CDS_ENABLED'] === 'on',
       });
 
       res.json({ data: result });

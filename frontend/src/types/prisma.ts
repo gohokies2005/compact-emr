@@ -32,8 +32,9 @@ export type FailureClass = 'transient' | 'degrade' | 'needs_human' | 'system';
 export type DraftJobPhase =
   | 'preflight'
   | 'index_consult'
-  | 'source_lock'
   | 'framing_gate'
+  | 'cover_memo'
+  | 'source_lock'
   | 'drafter'
   | 'adversary_panel'
   | 'specialist_gate'

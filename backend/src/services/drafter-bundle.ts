@@ -140,8 +140,12 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
       inServiceEvent: c.inServiceEvent,
       status: c.status,
       currentVersion: c.currentVersion,
-      cdsVerdict: c.cdsVerdict,
-      cdsRationale: c.cdsRationale,
+      // CDS is unwired by default (Ryan 2026-06-03). When off, a persisted verdict is STALE and
+      // unviewable/unoverridable (panel removed) — and the cloud drafter seeds letter confidence
+      // from it. Neutralize it at this read boundary so a legacy 'accept'/'reject' can't silently
+      // bias the cloud draft. Flip CDS_ENABLED='on' to carry it again. (architect MF-1)
+      cdsVerdict: process.env['CDS_ENABLED'] === 'on' ? c.cdsVerdict : 'not_yet_run',
+      cdsRationale: process.env['CDS_ENABLED'] === 'on' ? c.cdsRationale : null,
     },
     veteran,
     scConditions,

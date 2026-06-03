@@ -57,8 +57,10 @@ describe('InFlightDrafterPanel', () => {
   it('the step never moves BACKWARD across the real pipeline order', () => {
     // The order the drafter advances through its phases. The bucketed step must be monotonically
     // non-decreasing — this is the regression guard against the human-label-substring bug.
+    // The REAL execution order from run-letter-pipeline.js (currentPhase assignments), incl.
+    // cover_memo (supplemental/appeal pathway) which runs after framing_gate, before source_lock.
     const order: DraftJobPhase[] = [
-      'preflight', 'index_consult', 'source_lock', 'framing_gate', 'drafter',
+      'preflight', 'index_consult', 'framing_gate', 'cover_memo', 'source_lock', 'drafter',
       'adversary_panel', 'specialist_gate', 'refine_loop', 'surgical_edit',
       'citation_scoring', 'pmid_verify', 'linter', 'qa_report', 'grader', 'render',
     ];

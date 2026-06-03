@@ -90,8 +90,11 @@ export function CaseDetailPage() {
   if (!caseQuery.data) return <AppShell><EmptyState title="Case not found" message="The requested case could not be loaded." /></AppShell>;
   const c = caseQuery.data.data;
   const nextStatuses = allowedNextStatusesForRole(role, c.status);
+  // CDS retired from the workflow (Ryan 2026-06-03): it no longer gates sign-off. A stale
+  // cdsVerdict='reject' must NOT hide the sign-off button (the CDS panel is gone, so there'd be no
+  // explanation and no way to recover — an RN/physician dead-end). (architect MF-2)
   const canShowSignOff =
-    c.status === 'physician_review' && c.cdsVerdict !== 'reject' && (role === 'admin' || role === 'physician');
+    c.status === 'physician_review' && (role === 'admin' || role === 'physician');
   const tabsWithBadge = TABS.map((t) =>
     t.id === 'clarifications' && openClarificationCount > 0
       ? { ...t, label: `Clarifications (${openClarificationCount})` }

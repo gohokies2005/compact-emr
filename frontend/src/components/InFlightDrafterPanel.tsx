@@ -46,10 +46,14 @@ function normalizePhase(value: string | null | undefined): string {
 // if the drafter adds a phase the EMR hasn't bucketed, tsc fails here — a compile error instead of
 // a silently-wrong (or backward-jumping) progress bar. (QA C1, 2026-06-03.)
 const PHASE_STEP: Record<DraftJobPhase, DraftStep['index']> = {
+  // Bucketed by EXECUTION ORDER (run-letter-pipeline.js), NOT semantic name — so the bar never
+  // moves backward. framing_gate → cover_memo → source_lock all run BEFORE drafter, so all are
+  // step 2 even though source_lock "sounds like" reading/prep. (architect I-1, 2026-06-03.)
   preflight: 1,
   index_consult: 1,
-  source_lock: 1,
   framing_gate: 2,
+  cover_memo: 2,
+  source_lock: 2,
   drafter: 3,
   adversary_panel: 4,
   specialist_gate: 4,

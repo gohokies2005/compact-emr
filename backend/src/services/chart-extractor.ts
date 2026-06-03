@@ -54,12 +54,28 @@ export const SMALL_DOC_CHARS = 25_000;
 export const WINDOW_CAP_CHARS = 40_000;
 
 /**
- * Header anchors per category. Problem List and Medications have tight, consistent VA headers.
- * SC grants deliberately have NO Blue-Button anchor: "service-connected" appears dozens of times
- * in prose, so windowing it surfaces noise. Granted SCs come from the small rating-type docs
- * (handled in locateExtractionInputs), never from windowing the Blue Button narrative.
+ * CONTENT anchors per category. These match against document TEXT only — never the filename.
+ * Filenames have ZERO bearing on whether a document is read: a file called `image0.png` or
+ * `document1` can hold the entire VA rating breakdown (Armand 2026-06-03 — his SC ratings arrived
+ * as phone screenshots named image0-2.png and a filename gate skipped them). Every document's
+ * content is reviewed for every category.
+ *
+ * SC patterns are intentionally broad — VA rating data appears as "Service-connected ratings",
+ * "10% rating for lumbar strain", "rating decision", "combined ... evaluation", "service
+ * connection for X is denied", etc. Over-matching is safe: the per-category LLM prompt + the
+ * verbatim-quote grounding gate drop anything that isn't an actual rating entry.
  */
-const HEADER_PATTERNS: Record<Exclude<ExtractCategory, 'sc_condition'>, RegExp[]> = {
+const HEADER_PATTERNS: Record<ExtractCategory, RegExp[]> = {
+  sc_condition: [
+    /service[- ]connected/i,
+    /\b\d{1,3}\s*%\s*(?:rating|disabling|evaluation)/i,
+    /\brating\s+for\b/i,
+    /rating decision/i,
+    /combined\s+.{0,30}evaluation/i,
+    /service connection for/i,
+    /individual ratings/i,
+    /rated disabilit/i,
+  ],
   active_problem: [
     /active problems?\s*[-:]/i,
     /computerized problem list/i,
@@ -70,11 +86,6 @@ const HEADER_PATTERNS: Record<Exclude<ExtractCategory, 'sc_condition'>, RegExp[]
     /active\s+medications?\b/i,
   ],
 };
-
-/** Filename heuristics for the small rating-type docs that carry granted SC conditions. */
-const SC_SOURCE_FILENAME = /(rating\s*decision|benefit\s*summary|code\s*sheet|disabilit|award)/i;
-/** A denial doc names the CLAIMED (often denied) condition — useful context, status=denied. */
-const DENIAL_FILENAME = /(denial|denied|decision)/i;
 
 function docCharCount(doc: BundleDocument): number {
   let n = 0;
@@ -138,44 +149,41 @@ function wholeDocWindow(doc: BundleDocument, category: ExtractCategory): Section
   };
 }
 
+const CATEGORIES: readonly ExtractCategory[] = ['sc_condition', 'active_problem', 'active_medication'];
+
 /**
- * Decide, per category, which document slices to send to the LLM. Deterministic, no model.
- *   - active_problem / active_medication: header-window large docs; send small clinical docs whole.
- *   - sc_condition: send the small rating-type docs (benefit summary / rating decision / denial)
- *     whole — never window the Blue Button prose for grants.
+ * Decide which document slices to send to the LLM, per category. Deterministic, no model, and
+ * NEVER keyed on filename — only on size + content.
+ *   - SMALL docs (<= SMALL_DOC_CHARS): sent WHOLE to all three category extractors. Every small
+ *     document is reviewed for every category regardless of name or type — a screenshot, a
+ *     "document1.pdf", a benefit summary, all get read. Small docs are cheap and the per-category
+ *     prompt + grounding gate discard anything not actually present, so over-inclusion is free
+ *     insurance against ever skipping a document that holds the answer.
+ *   - LARGE docs (e.g. a 1,182-page Blue Button) can't be sent whole three times, so they are
+ *     windowed by CONTENT headers for each category. Still purely content-based.
  */
 export function locateExtractionInputs(documents: BundleDocument[]): SectionWindow[] {
   const windows: SectionWindow[] = [];
 
   for (const doc of documents) {
     if (!doc.pages || doc.pages.length === 0) continue;
-    const size = docCharCount(doc);
-    const small = size <= SMALL_DOC_CHARS;
+    const small = docCharCount(doc) <= SMALL_DOC_CHARS;
 
-    // ---- Problems + Medications ----
-    for (const category of ['active_problem', 'active_medication'] as const) {
+    for (const category of CATEGORIES) {
       if (small) {
-        // Small docs: only include if they actually mention the section (avoids feeding a DD-214
-        // into the meds parser). Cheap relevance gate.
-        const anyHeader = HEADER_PATTERNS[category].some((re) =>
-          doc.pages.some((p) => re.test(p.text)),
-        );
-        if (anyHeader) windows.push(wholeDocWindow(doc, category));
+        // Review the WHOLE small doc for this category. No filename gate, no content pre-filter —
+        // the LLM reads it and returns nothing if there's nothing of this type.
+        windows.push(wholeDocWindow(doc, category));
       } else {
+        // Large doc: window by content header for this category (first match is enough).
         for (const re of HEADER_PATTERNS[category]) {
           const w = windowFromPages(doc, category, re, re.source);
           if (w) {
             windows.push(w);
-            break; // first matching header per category per doc is enough
+            break;
           }
         }
       }
-    }
-
-    // ---- SC conditions (granted) ----
-    // Only from small rating-type / benefit-summary / denial docs, sent whole.
-    if (small && (SC_SOURCE_FILENAME.test(doc.filename) || DENIAL_FILENAME.test(doc.filename))) {
-      windows.push(wholeDocWindow(doc, 'sc_condition'));
     }
   }
 

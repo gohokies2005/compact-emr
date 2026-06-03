@@ -68,9 +68,34 @@ describe('locateExtractionInputs (deterministic section-targeting)', () => {
     expect(sc[0]!.text).toContain('70%');
   });
 
-  it('does NOT feed a DD-214 (no list sections) into the problem/med parsers', () => {
+  it('reviews EVERY small doc by content regardless of filename — a DD-214 is still read, never skipped by name', () => {
+    // New principle (Ryan 2026-06-03): filenames have zero bearing. Every small doc is sent to all
+    // three category extractors; the LLM + grounding decide emptiness, not a filename/content gate.
     const windows = locateExtractionInputs([dd214()]);
-    expect(windows).toHaveLength(0);
+    expect(windows.map((w) => w.category).sort()).toEqual(['active_medication', 'active_problem', 'sc_condition']);
+  });
+
+  it('reads SC ratings from a screenshot named image0.png — filename has ZERO bearing (Armand regression)', () => {
+    const screenshot: BundleDocument = {
+      id: 'doc-img', filename: 'image0.png', docTag: 'Other',
+      pages: [{ pageNumber: 1, text: 'Service-connected ratings\n10% rating for tinnitus\n50% rating for other specified depressive disorder' }],
+    };
+    const sc = locateExtractionInputs([screenshot]).filter((w) => w.category === 'sc_condition');
+    expect(sc).toHaveLength(1);
+    expect(sc[0]!.text).toContain('depressive disorder');
+  });
+
+  it('windows SC ratings out of a LARGE doc by content (not filename) too', () => {
+    const big: BundleDocument = {
+      id: 'doc-big', filename: 'records.pdf', docTag: 'Other',
+      pages: [
+        { pageNumber: 1, text: 'x'.repeat(26000) },
+        { pageNumber: 2, text: 'Service-connected ratings: 50% rating for PTSD; 10% rating for tinnitus' },
+      ],
+    };
+    const sc = locateExtractionInputs([big]).filter((w) => w.category === 'sc_condition');
+    expect(sc).toHaveLength(1);
+    expect(sc[0]!.pageNumbers).toContain(2);
   });
 
   it('tags every window with page markers so the model can return the source page', () => {

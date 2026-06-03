@@ -18,6 +18,7 @@ const ALLOWED_UPDATE_FIELDS = new Set([
   'teraConceded',
   'heightIn',
   'weightLb',
+  'noScConditionsConfirmed',
 ]);
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -218,6 +219,13 @@ export function parseVeteranPatch(body: unknown): { version: number; data: Veter
   if (weightLb !== undefined) {
     data.weightLb = weightLb;
     changedFields.push('weightLb');
+  }
+  if (body.noScConditionsConfirmed !== undefined) {
+    if (typeof body.noScConditionsConfirmed !== 'boolean') {
+      throw new HttpError(400, 'bad_request', 'noScConditionsConfirmed must be a boolean.');
+    }
+    data.noScConditionsConfirmed = body.noScConditionsConfirmed;
+    changedFields.push('noScConditionsConfirmed');
   }
 
   if (changedFields.length === 0) {

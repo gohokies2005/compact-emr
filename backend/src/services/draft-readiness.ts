@@ -25,11 +25,16 @@ export type ClaimType = 'initial' | 'supplemental' | 'hlr' | 'appeal_bva';
 
 export interface DraftReadinessInput {
   claimType: ClaimType;
+  /** The drafter framing: 'secondary' means the claim needs an established SC primary to attach to. */
+  framingChoice: string | null;
   claimedCondition: string;
   claimedConditions: string[];
   inServiceEvent: string | null;
   /** Count of ScCondition rows with status='service_connected' (granted). */
   grantedScCount: number;
+  /** RN-affirmed "this veteran has NO service-connected conditions" — disambiguates empty-chart
+   *  (not entered yet) from confirmed-none. */
+  noScConditionsConfirmed: boolean;
   /** ActiveProblem names for the veteran. */
   problemNames: string[];
   /** Uploaded documents (filename + classification tag). */
@@ -82,19 +87,27 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
   const items: ReadinessItem[] = [];
   const claimedAll = [input.claimedCondition, ...input.claimedConditions].filter(Boolean);
 
-  // 1. Service-connected conditions — the grants must be ON FILE (not just a rating-type doc that
-  //    was never itemized). Mirrors the drafter's granted_sc_empty_but_rating_doc_present gate.
-  {
-    const present = input.grantedScCount >= 1;
-    items.push({
-      key: 'sc_conditions',
-      label: 'Service-connected conditions',
-      present,
-      basis: `${input.grantedScCount} granted SC condition(s) on file`,
-      ...(present ? {} : {
+  // 1. Service-connected PRIMARY — required ONLY for a SECONDARY claim (it needs an established
+  //    service-connected condition to attach to). A direct/initial claim does NOT need a prior SC,
+  //    so we don't add the item at all for those (no false block). Three-way for secondary:
+  //    grants on file → present; confirmed-none → not viable as secondary; neither → upload it.
+  const isSecondary = input.framingChoice === 'secondary';
+  if (isSecondary) {
+    if (input.grantedScCount >= 1) {
+      items.push({ key: 'sc_conditions', label: 'Service-connected primary', present: true, basis: `${input.grantedScCount} granted SC condition(s) on file` });
+    } else if (input.noScConditionsConfirmed) {
+      items.push({
+        key: 'sc_conditions', label: 'Service-connected primary', present: false,
+        basis: 'RN confirmed: veteran has no service-connected conditions',
+        message: 'This is a secondary claim, but the veteran has no service-connected condition to connect it to. A secondary claim needs an established service-connected primary, add it, or refile this as a direct claim.',
+      });
+    } else {
+      items.push({
+        key: 'sc_conditions', label: 'Service-connected primary', present: false,
+        basis: 'no granted SC condition on file',
         message: 'Essential documents missing: Please upload the VA rating decision (the letter that lists each service-connected condition) and redraft.',
-      }),
-    });
+      });
+    }
   }
 
   // 2. Denial letter — only required when the claim is an appeal (supplemental / HLR / BVA).
@@ -153,6 +166,7 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
 interface CaseForReadiness {
   veteranId: string;
   claimType: ClaimType;
+  framingChoice: string | null;
   claimedCondition: string;
   claimedConditions: string[];
   inServiceEvent: string | null;
@@ -174,18 +188,25 @@ export async function getDraftReadiness(db: AppDb, caseId: string): Promise<Draf
     document: { findMany: (args: { where: { caseId: string }; select: { filename: true; docTag: true } }) => Promise<{ filename: string; docTag: string | null }[]> };
   }).document;
 
-  const [grantedSc, problems, documents] = await Promise.all([
+  const vetDelegate = (db as unknown as {
+    veteran: { findFirst: (args: { where: { id: string }; select: { noScConditionsConfirmed: true } }) => Promise<{ noScConditionsConfirmed: boolean } | null> };
+  }).veteran;
+
+  const [grantedSc, problems, documents, vet] = await Promise.all([
     scDelegate.findMany({ where: { veteranId: c.veteranId, status: 'service_connected' } }),
     db.activeProblem.findMany({ where: { veteranId: c.veteranId } }),
     docDelegate.findMany({ where: { caseId }, select: { filename: true, docTag: true } }),
+    vetDelegate.findFirst({ where: { id: c.veteranId }, select: { noScConditionsConfirmed: true } }),
   ]);
 
   return evaluateDraftReadiness({
     claimType: c.claimType,
+    framingChoice: c.framingChoice,
     claimedCondition: c.claimedCondition,
     claimedConditions: c.claimedConditions ?? [],
     inServiceEvent: c.inServiceEvent,
     grantedScCount: grantedSc.length,
+    noScConditionsConfirmed: vet?.noScConditionsConfirmed ?? false,
     problemNames: problems.map((p) => (p as { problem: string }).problem),
     documents,
   });

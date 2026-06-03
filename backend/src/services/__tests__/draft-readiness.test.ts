@@ -5,10 +5,12 @@ import type { AppDb } from '../db-types.js';
 function base(over: Partial<DraftReadinessInput> = {}): DraftReadinessInput {
   return {
     claimType: 'initial',
+    framingChoice: 'secondary', // most FRN claims are secondary; SC primary is then required
     claimedCondition: 'Obstructive sleep apnea',
     claimedConditions: [],
     inServiceEvent: 'Documented sleep complaints during service',
     grantedScCount: 1,
+    noScConditionsConfirmed: false,
     problemNames: ['Obstructive sleep apnea', 'Tinnitus'],
     documents: [{ filename: 'Armand Frank DD-214.pdf', docTag: 'Other' }],
     ...over,
@@ -70,7 +72,32 @@ describe('evaluateDraftReadiness', () => {
 
   it('produces a plain one-line summary listing what is missing', () => {
     const r = evaluateDraftReadiness(base({ grantedScCount: 0 }));
-    expect(r.summary).toBe('Essential documents missing: Service-connected conditions. Please upload and redraft.');
+    expect(r.summary).toBe('Essential documents missing: Service-connected primary. Please upload and redraft.');
+  });
+
+  // ---- framing-aware SC rule ----
+  it('does NOT require an SC primary for a DIRECT claim (zero SC is fine, no false block)', () => {
+    const r = evaluateDraftReadiness(base({ framingChoice: 'direct', grantedScCount: 0 }));
+    expect(r.items.find((i) => i.key === 'sc_conditions')).toBeUndefined();
+    expect(r.ready).toBe(true);
+  });
+
+  it('also skips the SC requirement when framing is null (treated as not-secondary)', () => {
+    const r = evaluateDraftReadiness(base({ framingChoice: null, grantedScCount: 0 }));
+    expect(r.items.find((i) => i.key === 'sc_conditions')).toBeUndefined();
+  });
+
+  it('secondary + confirmed-none → not viable as secondary (distinct message, not "upload")', () => {
+    const r = evaluateDraftReadiness(base({ framingChoice: 'secondary', grantedScCount: 0, noScConditionsConfirmed: true }));
+    const sc = r.missing.find((m) => m.key === 'sc_conditions')!;
+    expect(sc.message).toContain('no service-connected condition to connect it to');
+    expect(sc.message).toContain('refile this as a direct claim');
+    expect(sc.message).not.toContain('upload the VA rating decision');
+  });
+
+  it('secondary + grants on file → SC primary present', () => {
+    const r = evaluateDraftReadiness(base({ framingChoice: 'secondary', grantedScCount: 2 }));
+    expect(r.items.find((i) => i.key === 'sc_conditions')!.present).toBe(true);
   });
 });
 
@@ -80,9 +107,11 @@ describe('getDraftReadiness (db gather)', () => {
     granted?: unknown[];
     problems?: { problem: string }[];
     docs?: { filename: string; docTag: string | null }[];
+    noScConfirmed?: boolean;
   }): AppDb {
     return {
       case: { findFirst: async () => opts.caseRow },
+      veteran: { findFirst: async () => ({ noScConditionsConfirmed: opts.noScConfirmed ?? false }) },
       scCondition: { findMany: async () => opts.granted ?? [] },
       activeProblem: { findMany: async () => opts.problems ?? [] },
       document: { findMany: async () => opts.docs ?? [] },
@@ -96,7 +125,7 @@ describe('getDraftReadiness (db gather)', () => {
 
   it('gathers granted SC count + problems + docs and evaluates ready (Armand-shaped, complete)', async () => {
     const db = mockDb({
-      caseRow: { veteranId: 'v1', claimType: 'initial', claimedCondition: 'Obstructive sleep apnea', claimedConditions: [], inServiceEvent: null },
+      caseRow: { veteranId: 'v1', claimType: 'initial', framingChoice: 'secondary', claimedCondition: 'Obstructive sleep apnea', claimedConditions: [], inServiceEvent: null },
       granted: [{ id: 's1' }],
       problems: [{ problem: 'Obstructive sleep apnea' }],
       docs: [{ filename: 'Armand Frank DD-214.pdf', docTag: 'Other' }],
@@ -107,7 +136,7 @@ describe('getDraftReadiness (db gather)', () => {
 
   it('blocks when there are zero granted SC rows (the Armand case as it stands today)', async () => {
     const db = mockDb({
-      caseRow: { veteranId: 'v1', claimType: 'initial', claimedCondition: 'Obstructive sleep apnea', claimedConditions: [], inServiceEvent: null },
+      caseRow: { veteranId: 'v1', claimType: 'initial', framingChoice: 'secondary', claimedCondition: 'Obstructive sleep apnea', claimedConditions: [], inServiceEvent: null },
       granted: [],
       problems: [{ problem: 'Obstructive sleep apnea' }],
       docs: [{ filename: 'Armand Frank DD-214.pdf', docTag: 'Other' }],

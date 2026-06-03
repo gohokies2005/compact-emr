@@ -68,6 +68,20 @@ Buttons:
 - Never a spinner-that-never-resolves or a generic "something went wrong." This popup IS the
   resolution of what used to be a silent halt.
 
+## Service-connected primary — framing-aware (added 2026-06-03)
+The `sc_conditions` item now behaves by claim framing:
+- **Direct/initial claim** (case `framingChoice` != "secondary"): the SC item is **absent** from `items` — a direct claim needs no prior SC primary. Don't show it, don't block on it.
+- **Secondary claim with grants on file**: present (green).
+- **Secondary claim, no grants, not confirmed-none**: missing → *"…Please upload the VA rating decision…and redraft."* (the normal upload path).
+- **Secondary claim, confirmed there are NO SC conditions**: missing with a DISTINCT message → *"This is a secondary claim, but the veteran has no service-connected condition to connect it to… add it, or refile this as a direct claim."* This is a viability problem, not a missing-upload — surface it as such (no "Upload documents" CTA; instead "Edit claim framing" / "Mark as direct").
+
+### "No service-connected conditions" toggle
+On the SC-conditions tab, add a checkbox **"Veteran has no service-connected conditions (confirmed)."** It persists via the existing veteran PATCH:
+```
+PATCH /api/v1/veterans/:id   body: { version, noScConditionsConfirmed: true }
+```
+(`version` is the veteran's optimistic-concurrency version, same as other veteran edits.) Setting it disambiguates "SC chart not entered yet" from "confirmed none," which is what flips the secondary-claim message from "upload the rating decision" to "not viable as secondary." Entering any SC condition should leave it false / clear it.
+
 ## Also: handle the 409 on POST /draft
 Even outside this popup (e.g. a direct re-draft), if POST /draft returns 409
 `essential_docs_missing`, render State B from `error.details` rather than a generic error toast.

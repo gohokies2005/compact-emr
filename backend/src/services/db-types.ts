@@ -112,6 +112,7 @@ export interface VeteranUpdateInput {
   teraConceded?: YesNoUnknown;
   heightIn?: number | null;
   weightLb?: number | null;
+  noScConditionsConfirmed?: boolean;
   inactive?: boolean;
   version?: { increment: number };
 }

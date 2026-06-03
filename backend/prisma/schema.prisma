@@ -157,6 +157,10 @@ model Veteran {
   teraConceded     YesNoUnknown? @map("tera_conceded")
   heightIn         Int?         @map("height_in")
   weightLb         Int?         @map("weight_lb")
+  // RN affirmation that this veteran has NO service-connected conditions. Disambiguates an
+  // empty SC chart (not entered yet) from confirmed-none, so the draft-readiness gate can tell a
+  // secondary claim "no SC primary to attach to" instead of "go enter the rating decision".
+  noScConditionsConfirmed Boolean @default(false) @map("no_sc_conditions_confirmed")
   inactive         Boolean      @default(false)
   searchVector     Unsupported("tsvector")? @map("search_vector")
   createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)

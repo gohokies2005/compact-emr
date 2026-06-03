@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { evaluateDraftReadiness, getDraftReadiness, type DraftReadinessInput } from '../draft-readiness.js';
+import { computeTriggerHash } from '../chart-build-state.js';
 import type { AppDb } from '../db-types.js';
 
 function base(over: Partial<DraftReadinessInput> = {}): DraftReadinessInput {
@@ -108,13 +109,23 @@ describe('getDraftReadiness (db gather)', () => {
     problems?: { problem: string }[];
     docs?: { filename: string; docTag: string | null }[];
     noScConfirmed?: boolean;
+    runStatus?: string; // default 'complete' so build state is chart_ready
   }): AppDb {
+    // Give each doc an id + s3Key, mark all OCR-terminal, and (by default) a COMPLETE run whose
+    // triggerHash matches — so deriveChartBuildState returns chart_ready and the real readiness
+    // evaluation runs. (The case-not-found test passes docs through harmlessly.)
+    const rawDocs = opts.docs ?? [{ filename: 'Armand Frank DD-214.pdf', docTag: 'Other' }];
+    const docs = rawDocs.map((d, i) => ({ id: `d${i}`, s3Key: `k${i}`, filename: d.filename, docTag: d.docTag }));
+    const readStatuses = docs.map((d) => ({ filePath: d.s3Key, terminalStatus: 'read' }));
+    const run = { triggerHash: computeTriggerHash(docs, readStatuses), status: opts.runStatus ?? 'complete' };
     return {
       case: { findFirst: async () => opts.caseRow },
       veteran: { findFirst: async () => ({ noScConditionsConfirmed: opts.noScConfirmed ?? false }) },
       scCondition: { findMany: async () => opts.granted ?? [] },
       activeProblem: { findMany: async () => opts.problems ?? [] },
-      document: { findMany: async () => opts.docs ?? [] },
+      document: { findMany: async () => docs },
+      fileReadStatus: { findMany: async () => readStatuses },
+      chartExtractionRun: { findFirst: async () => run },
     } as unknown as AppDb;
   }
 
@@ -144,5 +155,17 @@ describe('getDraftReadiness (db gather)', () => {
     const r = await getDraftReadiness(db, 'CLM-1');
     expect(r!.ready).toBe(false);
     expect(r!.missing.map((m) => m.key)).toEqual(['sc_conditions']);
+  });
+
+  it('says "still building" (NOT "documents missing") while extraction is running', async () => {
+    const db = mockDb({
+      caseRow: { veteranId: 'v1', claimType: 'initial', framingChoice: 'secondary', claimedCondition: 'OSA', claimedConditions: [], inServiceEvent: null },
+      granted: [], runStatus: 'running',
+    });
+    const r = await getDraftReadiness(db, 'CLM-1');
+    expect(r!.buildState).toBe('extracting');
+    expect(r!.ready).toBe(false);
+    expect(r!.missing).toHaveLength(0); // the door does NOT cry "missing" while still building
+    expect(r!.summary).toContain('still being built');
   });
 });

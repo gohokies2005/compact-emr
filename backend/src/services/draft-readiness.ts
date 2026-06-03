@@ -19,6 +19,7 @@
  */
 
 import { normalizeName } from './chart-extractor.js';
+import { deriveChartBuildState, type ChartBuildState } from './chart-build-state.js';
 import type { AppDb } from './db-types.js';
 
 export type ClaimType = 'initial' | 'supplemental' | 'hlr' | 'appeal_bva';
@@ -59,6 +60,9 @@ export interface DraftReadinessResult {
   missing: ReadinessItem[];
   /** One-line headline for the popup when something is missing. */
   summary: string;
+  /** Where the chart-build pipeline is. Only 'chart_ready' evaluates real missing-docs; the other
+   *  states mean "still building" (or a surfaced failure), never a false "documents missing". */
+  buildState: ChartBuildState;
 }
 
 const APPEAL_TYPES: ReadonlySet<ClaimType> = new Set<ClaimType>(['supplemental', 'hlr', 'appeal_bva']);
@@ -160,7 +164,22 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
     ? 'All essential documents are on file.'
     : `Essential documents missing: ${missing.map((m) => m.label).join(', ')}. Please upload and redraft.`;
 
-  return { ready, items, missing, summary };
+  // evaluateDraftReadiness is the chart_ready evaluator; getDraftReadiness only calls it once the
+  // build state is chart_ready.
+  return { ready, items, missing, summary, buildState: 'chart_ready' };
+}
+
+/** Plain RN-facing result for a case whose chart isn't finished building yet (or failed). The door
+ *  shows these instead of a false "documents missing". */
+function buildingResult(state: ChartBuildState): DraftReadinessResult {
+  const summaryByState: Record<ChartBuildState, string> = {
+    no_documents: 'No records have been uploaded yet. Upload the veteran\'s records to begin.',
+    ocr_in_progress: 'The records are still being read. This usually takes a few minutes, check back shortly.',
+    extracting: 'The chart is still being built from the records. This usually takes a few minutes, check back shortly.',
+    extract_failed: 'We could not finish building the chart from the records automatically. Please retry the records, or enter the conditions manually.',
+    chart_ready: 'All essential documents are on file.',
+  };
+  return { ready: false, items: [], missing: [], summary: summaryByState[state], buildState: state };
 }
 
 interface CaseForReadiness {
@@ -185,19 +204,28 @@ export async function getDraftReadiness(db: AppDb, caseId: string): Promise<Draf
     scCondition: { findMany: (args: { where: { veteranId: string; status: string } }) => Promise<unknown[]> };
   }).scCondition;
   const docDelegate = (db as unknown as {
-    document: { findMany: (args: { where: { caseId: string }; select: { filename: true; docTag: true } }) => Promise<{ filename: string; docTag: string | null }[]> };
+    document: { findMany: (args: { where: { caseId: string }; select: { id: true; s3Key: true; filename: true; docTag: true } }) => Promise<{ id: string; s3Key: string; filename: string; docTag: string | null }[]> };
   }).document;
-
   const vetDelegate = (db as unknown as {
     veteran: { findFirst: (args: { where: { id: string }; select: { noScConditionsConfirmed: true } }) => Promise<{ noScConditionsConfirmed: boolean } | null> };
   }).veteran;
+  const runDelegate = (db as unknown as {
+    chartExtractionRun: { findFirst: (args: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { triggerHash: true; status: true } }) => Promise<{ triggerHash: string; status: string } | null> };
+  }).chartExtractionRun;
 
-  const [grantedSc, problems, documents, vet] = await Promise.all([
+  const [grantedSc, problems, documents, vet, readStatuses, latestRun] = await Promise.all([
     scDelegate.findMany({ where: { veteranId: c.veteranId, status: 'service_connected' } }),
     db.activeProblem.findMany({ where: { veteranId: c.veteranId } }),
-    docDelegate.findMany({ where: { caseId }, select: { filename: true, docTag: true } }),
+    docDelegate.findMany({ where: { caseId }, select: { id: true, s3Key: true, filename: true, docTag: true } }),
     vetDelegate.findFirst({ where: { id: c.veteranId }, select: { noScConditionsConfirmed: true } }),
+    db.fileReadStatus.findMany({ where: { caseId } }) as unknown as Promise<{ filePath: string; terminalStatus: string }[]>,
+    runDelegate.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true, status: true } }),
   ]);
+
+  // The door: only evaluate real missing-docs once the chart is actually built. Before that, say
+  // "still building" — never a false "documents missing" while OCR/extraction are still running.
+  const { state } = deriveChartBuildState(documents, readStatuses, latestRun);
+  if (state !== 'chart_ready') return buildingResult(state);
 
   return evaluateDraftReadiness({
     claimType: c.claimType,

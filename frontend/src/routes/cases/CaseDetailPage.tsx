@@ -6,7 +6,6 @@ import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { TabBar, type TabItem } from '../../components/ui/TabBar';
-import { CdsPanelForCase } from '../../components/CdsPanel';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { ClarificationsPanel } from '../../components/ClarificationsPanel';
 import { InFlightDrafterPanel, type InFlightDraftJob } from '../../components/InFlightDrafterPanel';
@@ -117,7 +116,8 @@ export function CaseDetailPage() {
       </div>
     </div>
 
-    <CdsPanelForCase c={c} />
+    {/* CDS panel retired from the workflow (Ryan 2026-06-03). Backend route is flag-guarded off
+        (CDS_ENABLED); the engine code is kept. Re-add this panel if CDS is re-enabled. */}
 
     {(() => {
       // Phase 8: physician/ops drafter panels. Derived from latest DraftJob + Case state.

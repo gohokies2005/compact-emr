@@ -196,6 +196,16 @@ model ScCondition {
   ratingPct   Int?     @map("rating_pct")
   status      ScConditionStatus @default(service_connected)
   grantedDate DateTime? @map("granted_date") @db.Date
+  // Provenance (chart auto-extract). source='manual' is the default, so every existing row and
+  // every row the manual POST path creates stays manual and is IMMUTABLE to the extractor.
+  source           String    @default("manual")
+  sourceDocumentId String?   @map("source_document_id")
+  sourcePage       Int?      @map("source_page")
+  sourceQuote      String?   @map("source_quote")
+  confidence       Float?
+  needsReview      Boolean   @default(false) @map("needs_review")
+  extractedAt      DateTime? @map("extracted_at") @db.Timestamptz(6)
+  extractionRunId  String?   @map("extraction_run_id")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version     Int      @default(1)
@@ -213,6 +223,15 @@ model ActiveProblem {
   problem   String
   icd10     String?  @db.VarChar(16)
   notes     String?
+  // Provenance (chart auto-extract) — see ScCondition. source defaults to 'manual'.
+  source           String    @default("manual")
+  sourceDocumentId String?   @map("source_document_id")
+  sourcePage       Int?      @map("source_page")
+  sourceQuote      String?   @map("source_quote")
+  confidence       Float?
+  needsReview      Boolean   @default(false) @map("needs_review")
+  extractedAt      DateTime? @map("extracted_at") @db.Timestamptz(6)
+  extractionRunId  String?   @map("extraction_run_id")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version   Int      @default(1)
@@ -231,6 +250,15 @@ model ActiveMedication {
   dose       String?
   frequency  String?
   indication String?
+  // Provenance (chart auto-extract) — see ScCondition. source defaults to 'manual'.
+  source           String    @default("manual")
+  sourceDocumentId String?   @map("source_document_id")
+  sourcePage       Int?      @map("source_page")
+  sourceQuote      String?   @map("source_quote")
+  confidence       Float?
+  needsReview      Boolean   @default(false) @map("needs_review")
+  extractedAt      DateTime? @map("extracted_at") @db.Timestamptz(6)
+  extractionRunId  String?   @map("extraction_run_id")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version    Int      @default(1)
@@ -240,6 +268,29 @@ model ActiveMedication {
   @@index([drugName])
   @@index([indication])
   @@map("active_medications")
+}
+
+// Chart auto-extract run ledger. The @@unique([caseId, triggerHash]) is the fire-exactly-once
+// latch: a concurrent doc-completion that also sees "all docs OCR'd" hits the unique violation
+// and skips the duplicate enqueue. triggerHash = hash of the case's (documentId, terminalStatus)
+// set, so a NEW upload finishing OCR yields a new hash -> a fresh run (merge), while a duplicate
+// completion callback for the same doc set is a no-op. Also the Phase A audit sink.
+model ChartExtractionRun {
+  id           String    @id @default(uuid())
+  caseId       String    @map("case_id")
+  veteranId    String    @map("veteran_id")
+  triggerHash  String    @map("trigger_hash") @db.VarChar(64)
+  status       String    @default("queued") // queued | running | complete | failed
+  itemsWritten Int       @default(0) @map("items_written")
+  itemsSkipped Int       @default(0) @map("items_skipped")
+  resultJson   Json?     @map("result_json") // Phase A: the full grounded extraction for eyeball review
+  errorMessage String?   @map("error_message")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt  DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  @@unique([caseId, triggerHash], map: "chart_extraction_run_case_hash_uq")
+  @@index([caseId])
+  @@map("chart_extraction_runs")
 }
 
 model Case {

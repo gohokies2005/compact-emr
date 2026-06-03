@@ -113,6 +113,10 @@ export class ApiStack extends Stack {
         DOCTOR_PACK_QUEUE_URL: props.doctorPackQueue.queueUrl,
         DRAFT_JOB_QUEUE_URL: props.draftJobQueue.queueUrl,
         CHART_EXTRACT_QUEUE_URL: props.chartExtractQueue.queueUrl,
+        // Chart auto-extract: 'on' makes the merge endpoint WRITE extracted rows into the chart
+        // (non-destructive). Controlled by cdk.json context `chart_autofill` (default off = shadow).
+        // The draft-readiness DOOR (DRAFT_READINESS_GATE) stays separate + off until the popup ships.
+        CHART_AUTOFILL: (this.node.tryGetContext('chart_autofill') as string | undefined) ?? 'off',
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue

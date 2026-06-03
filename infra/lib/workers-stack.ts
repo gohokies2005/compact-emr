@@ -65,6 +65,8 @@ export class WorkersStack extends Stack {
   public readonly draftJobQueue: sqs.IQueue;
   public readonly draftJobQueueUrl: string;
   public readonly drafterInvokeTokenSecret: secretsmanager.ISecret;
+  public readonly chartExtractQueue: sqs.IQueue;
+  public readonly chartExtractQueueUrl: string;
 
   constructor(scope: Construct, id: string, props: WorkersStackProps) {
     super(scope, id, props);
@@ -139,6 +141,54 @@ export class WorkersStack extends Stack {
     });
     this.draftJobQueue = draftJobQueue;
     this.draftJobQueueUrl = draftJobQueue.queueUrl;
+
+    // ===== Chart auto-extract SQS queue (FIFO) + worker Lambda =====
+    // When all of a case's docs finish OCR, the /pages route enqueues here; this worker reads the
+    // case's documents from the API, runs the content-based extractor, and POSTs grounded items to
+    // the merge endpoint (the single writer). Group ID = caseId (serializes re-extractions),
+    // Dedup ID = triggerHash (a duplicate enqueue for the same doc-set is a no-op).
+    const chartExtractDlq = new sqs.Queue(this, 'ChartExtractDlq', {
+      queueName: `compact-emr-${config.envName}-chart-extract-dlq.fifo`,
+      fifo: true,
+      retentionPeriod: Duration.days(14),
+    });
+    const chartExtractQueue = new sqs.Queue(this, 'ChartExtractQueue', {
+      queueName: `compact-emr-${config.envName}-chart-extract.fifo`,
+      fifo: true,
+      contentBasedDeduplication: false, // explicit MessageDeduplicationId = triggerHash
+      visibilityTimeout: Duration.minutes(6), // > worker timeout below
+      deadLetterQueue: { queue: chartExtractDlq, maxReceiveCount: 3 },
+    });
+    this.chartExtractQueue = chartExtractQueue;
+    this.chartExtractQueueUrl = chartExtractQueue.queueUrl;
+
+    // The real Anthropic key lives in the drafter's secret (the api-anthropic-api-key secret is a
+    // placeholder). Reference by NAME (it's created in DrafterStack, constructed after this stack —
+    // a cross-stack object reference would be a cycle). The worker fetches it at cold start.
+    const anthropicKeySecret = secretsmanager.Secret.fromSecretNameV2(
+      this, 'ChartExtractAnthropicKey', `compact-emr-${config.envName}/drafter-anthropic-api-key`,
+    );
+
+    // Lightweight worker: NO VPC, NO Prisma (it reaches the API + Anthropic + Secrets Manager over
+    // public endpoints, exactly like the OCR lambdas). It pulls documents from the API, so it never
+    // touches the database directly.
+    const chartExtractWorker = new nodejs.NodejsFunction(this, 'ChartExtractWorker', {
+      functionName: `compact-emr-${config.envName}-chart-extract`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.resolve(__dirname, '..', '..', 'workers', 'chart-extract', 'handler.ts'),
+      handler: 'handler',
+      timeout: Duration.minutes(5),
+      memorySize: 512,
+      environment: {
+        COMPACT_EMR_API_URL: apiBaseUrl,
+        INTERNAL_WORKER_TOKEN: workerTokenSecret.secretValue.unsafeUnwrap(),
+        ANTHROPIC_SECRET_ARN: anthropicKeySecret.secretArn,
+        CHART_EXTRACT_MAX_RECEIVE: '3',
+      },
+      logRetention: logs.RetentionDays.ONE_MONTH,
+    });
+    anthropicKeySecret.grantRead(chartExtractWorker);
+    chartExtractWorker.addEventSource(new eventSources.SqsEventSource(chartExtractQueue, { batchSize: 1 }));
 
     // ===== Textract async completion SNS topic =====
     const textractCompletionTopic = new sns.Topic(this, 'TextractCompletionTopic', {

@@ -403,13 +403,22 @@ export function createDrafterClientRouter(db: AppDb): Router {
       const gateOn = process.env.DRAFT_READINESS_GATE === 'on';
       const readiness = gateOn ? await getDraftReadiness(db, caseId) : null;
       if (readiness !== null && !readiness.ready) {
+        // Distinguish "the chart is still being built from the records" (a wait, not a fault) from
+        // a genuine missing essential. Both block, both overridable (never a dead-end).
+        const stillBuilding = readiness.buildState === 'ocr_in_progress' || readiness.buildState === 'extracting';
         if (parsed.acknowledgeMissingDocs !== true) {
-          throw new HttpError(409, 'essential_docs_missing', readiness.summary, {
-            caseId,
-            missing: readiness.missing.map((m) => ({ key: m.key, label: m.label, message: m.message })),
-            items: readiness.items.map((i) => ({ key: i.key, label: i.label, present: i.present, message: i.message })),
-            canOverride: true,
-          });
+          throw new HttpError(
+            409,
+            stillBuilding ? 'chart_not_ready' : 'essential_docs_missing',
+            readiness.summary,
+            {
+              caseId,
+              buildState: readiness.buildState,
+              missing: readiness.missing.map((m) => ({ key: m.key, label: m.label, message: m.message })),
+              items: readiness.items.map((i) => ({ key: i.key, label: i.label, present: i.present, message: i.message })),
+              canOverride: true,
+            },
+          );
         }
         await db.activityLog.create({
           data: {

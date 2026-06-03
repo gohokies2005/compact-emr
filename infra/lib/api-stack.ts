@@ -41,6 +41,7 @@ export interface ApiStackProps extends StackProps {
   workerTokenSecret: secretsmanager.ISecret;
   draftJobQueue: sqs.IQueue;
   drafterInvokeTokenSecret: secretsmanager.ISecret;
+  chartExtractQueue: sqs.IQueue;
 }
 
 export class ApiStack extends Stack {
@@ -111,6 +112,7 @@ export class ApiStack extends Stack {
         DRAFT_QUEUE_URL: props.draftQueue.queueUrl,
         DOCTOR_PACK_QUEUE_URL: props.doctorPackQueue.queueUrl,
         DRAFT_JOB_QUEUE_URL: props.draftJobQueue.queueUrl,
+        CHART_EXTRACT_QUEUE_URL: props.chartExtractQueue.queueUrl,
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue
@@ -160,6 +162,7 @@ export class ApiStack extends Stack {
     props.draftQueue.grantSendMessages(handler);
     props.doctorPackQueue.grantSendMessages(handler);
     props.draftJobQueue.grantSendMessages(handler);
+    props.chartExtractQueue.grantSendMessages(handler);
 
     // ── Letter editor grants ──────────────────────────────────────────────────────────
     // API Lambda reads the surgical-AI key at runtime. (phiBucket RW + documentsKey already

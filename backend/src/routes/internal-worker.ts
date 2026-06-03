@@ -4,8 +4,47 @@ import { HttpError } from '../http/errors.js';
 import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { isDoctorPackS3Key } from '../services/s3-key-safety.js';
 import { classifyReadAttempt } from '../services/chart-readiness.js';
+import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
+import { applyExtractionMerge } from '../services/chart-merge-apply.js';
+import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
+import type { FinalExtractedItem } from '../services/chart-extract-llm.js';
+import type { ExtractCategory } from '../services/chart-extractor.js';
+
+const EXTRACT_CATEGORIES: ReadonlySet<string> = new Set(['sc_condition', 'active_problem', 'active_medication']);
+
+/** Coerce the worker's POSTed extraction items defensively (worker is token-trusted, but validate
+ *  shape + drop malformed entries rather than trust blindly). */
+function coerceExtractedItems(raw: readonly unknown[]): FinalExtractedItem[] {
+  const out: FinalExtractedItem[] = [];
+  for (const r of raw) {
+    if (!isRecord(r)) continue;
+    if (typeof r['category'] !== 'string' || !EXTRACT_CATEGORIES.has(r['category'])) continue;
+    if (typeof r['name'] !== 'string' || (r['name'] as string).trim().length === 0) continue;
+    if (typeof r['sourceDocumentId'] !== 'string' || typeof r['sourcePage'] !== 'number' || typeof r['sourceQuote'] !== 'string') continue;
+    if (typeof r['confidence'] !== 'number') continue;
+    const disposition = r['disposition'] === 'needs_review' ? 'needs_review' : 'autofill';
+    out.push({
+      category: r['category'] as ExtractCategory,
+      name: (r['name'] as string).trim(),
+      ...(typeof r['status'] === 'string' ? { status: r['status'] as FinalExtractedItem['status'] } : {}),
+      ...(typeof r['dcCode'] === 'string' ? { dcCode: r['dcCode'] as string } : {}),
+      ...(typeof r['ratingPct'] === 'number' ? { ratingPct: r['ratingPct'] as number } : {}),
+      ...(typeof r['icd10'] === 'string' ? { icd10: r['icd10'] as string } : {}),
+      ...(typeof r['dose'] === 'string' ? { dose: r['dose'] as string } : {}),
+      ...(typeof r['frequency'] === 'string' ? { frequency: r['frequency'] as string } : {}),
+      ...(typeof r['indication'] === 'string' ? { indication: r['indication'] as string } : {}),
+      sourceDocumentId: r['sourceDocumentId'] as string,
+      sourcePage: Math.trunc(r['sourcePage'] as number),
+      sourceQuote: r['sourceQuote'] as string,
+      confidence: Math.max(0, Math.min(1, r['confidence'] as number)),
+      disposition,
+      needsReview: disposition === 'needs_review',
+    });
+  }
+  return out;
+}
 
 /**
  * Phase 7B-revised Build 3: worker callback routes.
@@ -277,6 +316,7 @@ export function createInternalWorkerRouter(db: AppDb): Router {
 
         return {
           documentId,
+          caseId: doc !== null ? doc.caseId : null,
           pagesUpserted: parsed.pages.length,
           documentPageCount: parsed.documentPageCount,
           ...(readStatus !== null && { readTerminalStatus: readStatus.terminalStatus }),
@@ -287,6 +327,22 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       // (P2028) on a big record — trading the old PayloadTooLarge for a different 500. Raise the
       // ceiling so large legitimate records commit. (2026-06-03, with the 50mb body-limit fix.)
       { timeout: 30_000, maxWait: 10_000 });
+
+      // Chart auto-extract trigger. Runs AFTER the page-write transaction has COMMITTED, in a
+      // log-only try/catch: an enqueue/latch failure can never roll back or affect the OCR write
+      // above. Fires exactly once per (case, doc-set) once all docs are OCR-terminal. (2026-06-03)
+      if (result.caseId !== null) {
+        try {
+          await maybeEnqueueChartExtract(db, result.caseId);
+        } catch (err) {
+          console.error(JSON.stringify({
+            msg: 'chart_extract_enqueue_failed',
+            documentId,
+            caseId: result.caseId,
+            error: err instanceof Error ? err.message : String(err),
+          }));
+        }
+      }
 
       res.status(201).json({ data: result });
     }),
@@ -513,6 +569,73 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       });
 
       res.status(201).json({ data: result });
+    }),
+  );
+
+  /**
+   * POST /api/v1/internal/cases/:caseId/extracted-chart-items
+   *
+   * The chart-extract worker POSTs its grounded extraction here. This is the SINGLE writer of
+   * source='extracted' chart rows. Always records the run (result_json + status=complete + counts);
+   * writes chart rows only when CHART_AUTOFILL='on' (shadow mode otherwise). Body:
+   *   { runId: string, items: FinalExtractedItem[], costUsd?: number }
+   */
+  router.post(
+    '/internal/cases/:caseId/extracted-chart-items',
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.caseId);
+      const body = req.body;
+      if (!isRecord(body)) { badRequest('Request body must be an object'); return; }
+      const runId = body['runId'];
+      if (typeof runId !== 'string' || runId.length === 0) { badRequest('runId is required', { field: 'runId' }); return; }
+      const rawItems = body['items'];
+      if (!Array.isArray(rawItems)) { badRequest('items is required (array)', { field: 'items' }); return; }
+      if (rawItems.length > 500) { badRequest('items exceeds maximum of 500', { field: 'items', max: 500 }); return; }
+      const costUsd = typeof body['costUsd'] === 'number' ? (body['costUsd'] as number) : undefined;
+
+      const c = await (db as unknown as {
+        case: { findFirst: (a: { where: { id: string }; select: { veteranId: true } }) => Promise<{ veteranId: string } | null> };
+      }).case.findFirst({ where: { id: caseId }, select: { veteranId: true } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+
+      const items = coerceExtractedItems(rawItems);
+      const result = await applyExtractionMerge(db, { caseId, veteranId: c.veteranId, runId, items, costUsd });
+      res.json({ data: result });
+    }),
+  );
+
+  /**
+   * GET /api/v1/internal/cases/:caseId/extract-documents
+   * The chart-extract worker pulls the case's documents + OCR'd pages here (so the worker needs no
+   * Prisma — it stays a lightweight HTTP+LLM Lambda), runs the extractor, and POSTs results to
+   * .../extracted-chart-items.
+   */
+  router.get(
+    '/internal/cases/:caseId/extract-documents',
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.caseId);
+      const documents = await loadBundleDocuments(db, caseId);
+      res.json({ data: { caseId, documents } });
+    }),
+  );
+
+  /**
+   * POST /api/v1/internal/cases/:caseId/chart-extract-failed  { runId, error? }
+   * Worker marks a run failed so the build-state derivation shows extract_failed (a retry message),
+   * never a stuck "still building" — no silent dead-end.
+   */
+  router.post(
+    '/internal/cases/:caseId/chart-extract-failed',
+    asyncHandler(async (req: Request, res: Response) => {
+      const body = req.body;
+      if (!isRecord(body)) { badRequest('Request body must be an object'); return; }
+      const runId = body['runId'];
+      if (typeof runId !== 'string' || runId.length === 0) { badRequest('runId is required', { field: 'runId' }); return; }
+      const errorMessage = typeof body['error'] === 'string' ? (body['error'] as string).slice(0, 2000) : 'extraction failed';
+      await (db as unknown as {
+        chartExtractionRun: { update: (a: { where: { id: string }; data: Record<string, unknown> }) => Promise<unknown> };
+      }).chartExtractionRun.update({ where: { id: runId }, data: { status: 'failed', errorMessage, completedAt: new Date() } });
+      res.json({ data: { runId, status: 'failed' } });
     }),
   );
 

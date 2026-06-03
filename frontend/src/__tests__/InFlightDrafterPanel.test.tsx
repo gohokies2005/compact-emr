@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InFlightDrafterPanel, type InFlightDraftJob } from '../components/InFlightDrafterPanel';
 import type { DraftJobPhase } from '../types/prisma';
@@ -32,6 +32,15 @@ describe('InFlightDrafterPanel', () => {
     expect(screen.getByText('Step 4/6')).toBeInTheDocument();
     expect(screen.getByText('running 4m 12s')).toBeInTheDocument();
     expect(screen.getByText('This usually takes 10–20 minutes.')).toBeInTheDocument();
+  });
+
+  it('the elapsed timer ticks up LIVE (not frozen between polls)', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-25T12:01:00.000Z')); // == startedAt → 0s
+    render(<InFlightDrafterPanel job={baseJob} />);
+    expect(screen.getByText('running 0s')).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(screen.getByText('running 5s')).toBeInTheDocument();
   });
 
   it('maps the drafter phase to Step 3 of 6 (Writing)', () => {

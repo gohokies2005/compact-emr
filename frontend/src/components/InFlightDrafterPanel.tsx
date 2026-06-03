@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card } from './ui/Card';
 import type { DraftJob, DraftJobPhase } from '../types/prisma';
 
@@ -102,6 +102,14 @@ export function InFlightDrafterPanel({ job }: InFlightDrafterPanelProps) {
   const step = useMemo(() => stepFromPhase(job.currentPhase), [job.currentPhase]);
   const takingLonger = isTakingLonger(job);
   const operatorMessage = job.operatorMessage?.trim();
+
+  // Tick every second so the elapsed timer counts up LIVE, not only when the poll re-renders the
+  // parent (otherwise it sits frozen at "running 0s" between polls). (architect I2, 2026-06-03)
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceTick((n) => (n + 1) % 1_000_000), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <Card className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">

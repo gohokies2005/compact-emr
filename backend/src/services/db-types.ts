@@ -184,7 +184,7 @@ export interface AppDb extends AppDbTransaction {
   appUser: AppUserDelegate;
   appUserRole: AppUserRoleDelegate;
   physician: PhysicianDelegate;
-  $transaction<T>(fn: (tx: AppDbTransaction) => Promise<T>): Promise<T>;
+  $transaction<T>(fn: (tx: AppDbTransaction) => Promise<T>, options?: { timeout?: number; maxWait?: number; isolationLevel?: unknown }): Promise<T>;
 }
 
 export interface RequestActor {

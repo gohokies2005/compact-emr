@@ -281,7 +281,12 @@ export function createInternalWorkerRouter(db: AppDb): Router {
           documentPageCount: parsed.documentPageCount,
           ...(readStatus !== null && { readTerminalStatus: readStatus.terminalStatus }),
         };
-      });
+      },
+      // A 1,182-page Blue Button means 1,182 sequential upserts + the readiness logic, all in one
+      // interactive transaction. Prisma's default 5s timeout would roll the whole commit back
+      // (P2028) on a big record — trading the old PayloadTooLarge for a different 500. Raise the
+      // ceiling so large legitimate records commit. (2026-06-03, with the 50mb body-limit fix.)
+      { timeout: 30_000, maxWait: 10_000 });
 
       res.status(201).json({ data: result });
     }),

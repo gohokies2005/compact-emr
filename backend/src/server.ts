@@ -49,7 +49,19 @@ export function createApp(options: CreateAppOptions = {}) {
   const app = express();
   const db = options.db ?? (prisma as unknown as AppDb);
 
-  app.use(express.json({ limit: '1mb' }));
+  // The internal worker routes carry large bodies the Cognito client routes never do: the OCR
+  // completion handler POSTs a whole document's OCR'd pages in one request (a 1,182-page Blue
+  // Button is tens of MB), and drafter callbacks can be large too. The global 1mb parser runs
+  // FIRST in mount order, so it would throw PayloadTooLargeError on those bodies before the
+  // route-scoped 50mb parsers (on the /internal/ mounts below) ever run. Make the global parser
+  // SKIP /api/v1/internal/* so the larger route-scoped limit is the one that applies there; all
+  // Cognito client routes keep the strict 1mb cap unchanged. (Found 2026-06-03 — a real veteran's
+  // 1,182-page Blue Button 500'd on POST /internal/documents/:id/pages with the 1mb global cap.)
+  const globalJson = express.json({ limit: '1mb' });
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api/v1/internal/')) return next();
+    return globalJson(req, res, next);
+  });
 
   app.get('/api/v1/health', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), (req, res) => {
     res.json({ ok: true, user: req.user });
@@ -61,8 +73,13 @@ export function createApp(options: CreateAppOptions = {}) {
   // `app.use('/api/v1', authenticateJwt(), ...)` mounts below would otherwise 401 the drafter's
   // token-only callback (`/internal/drafter/*`) before requireDrafterPrincipal ever runs. (Found
   // 2026-06-03 on the first real cloud drafter run — /complete was 401ing.)
-  app.use('/api/v1', requireServicePrincipal(), createInternalWorkerRouter(db));
-  app.use('/api/v1', requireDrafterPrincipal(), createDrafterWorkerRouter(db));
+  // Each internal mount gets its OWN 50mb JSON parser (the global parser above skips /internal/*,
+  // so without these the internal routes would have no body parser at all). 50mb covers the
+  // worst plausible OCR payload — the route already bounds input at 2000 pages x 100k chars, and
+  // real Blue Button OCR line-text is single-digit KB/page, so a 1,182-page record lands ~3-10MB.
+  const internalJson = express.json({ limit: '50mb' });
+  app.use('/api/v1', internalJson, requireServicePrincipal(), createInternalWorkerRouter(db));
+  app.use('/api/v1', internalJson, requireDrafterPrincipal(), createDrafterWorkerRouter(db));
 
   app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
   app.use('/api/v1', authenticateJwt(), createDocumentsRouter());

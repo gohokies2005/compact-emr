@@ -1,0 +1,119 @@
+import { describe, it, expect } from 'vitest';
+import { evaluateDraftReadiness, getDraftReadiness, type DraftReadinessInput } from '../draft-readiness.js';
+import type { AppDb } from '../db-types.js';
+
+function base(over: Partial<DraftReadinessInput> = {}): DraftReadinessInput {
+  return {
+    claimType: 'initial',
+    claimedCondition: 'Obstructive sleep apnea',
+    claimedConditions: [],
+    inServiceEvent: 'Documented sleep complaints during service',
+    grantedScCount: 1,
+    problemNames: ['Obstructive sleep apnea', 'Tinnitus'],
+    documents: [{ filename: 'Armand Frank DD-214.pdf', docTag: 'Other' }],
+    ...over,
+  };
+}
+
+describe('evaluateDraftReadiness', () => {
+  it('is ready when all essentials are present (initial claim, no denial required)', () => {
+    const r = evaluateDraftReadiness(base());
+    expect(r.ready).toBe(true);
+    expect(r.missing).toHaveLength(0);
+    // No denial item on an initial claim.
+    expect(r.items.find((i) => i.key === 'denial_letter')).toBeUndefined();
+  });
+
+  it('blocks with the rating-decision message when no granted SC condition is on file (Armand)', () => {
+    const r = evaluateDraftReadiness(base({ grantedScCount: 0 }));
+    expect(r.ready).toBe(false);
+    const sc = r.missing.find((m) => m.key === 'sc_conditions')!;
+    expect(sc.message).toContain('Please upload the VA rating decision');
+    expect(sc.message).toContain('redraft');
+  });
+
+  it('requires a denial letter on an appeal and flags it missing in Ryan\'s wording', () => {
+    const r = evaluateDraftReadiness(base({ claimType: 'supplemental', documents: [{ filename: 'DD-214.pdf', docTag: null }] }));
+    const denial = r.missing.find((m) => m.key === 'denial_letter')!;
+    expect(denial.message).toBe('Essential documents missing: This is an appeal. Please upload the VA denial letter being appealed and redraft.');
+  });
+
+  it('detects a denial letter by filename on an appeal', () => {
+    const r = evaluateDraftReadiness(base({ claimType: 'supplemental', documents: [
+      { filename: 'Armand Frank Sleep Apnea Denial 2026.pdf', docTag: 'Other' },
+      { filename: 'DD-214.pdf', docTag: null },
+    ] }));
+    expect(r.items.find((i) => i.key === 'denial_letter')!.present).toBe(true);
+  });
+
+  it('treats the claimed condition as diagnosed via synonym folding (OSA == Obstructive sleep apnea)', () => {
+    const r = evaluateDraftReadiness(base({ claimedCondition: 'OSA', problemNames: ['Obstructive Sleep Apnea'] }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(true);
+  });
+
+  it('flags a missing current diagnosis when the claimed condition is not in the problem list', () => {
+    const r = evaluateDraftReadiness(base({ claimedCondition: 'GERD', problemNames: ['Tinnitus'] }));
+    const dx = r.missing.find((m) => m.key === 'current_diagnosis')!;
+    expect(dx.message).toContain('A current diagnosis for GERD is not on file');
+  });
+
+  it('accepts a DD-214 as the in-service-event proxy when the event text is blank', () => {
+    const r = evaluateDraftReadiness(base({ inServiceEvent: null, documents: [{ filename: 'Armand Frank DD-214.pdf', docTag: 'Other' }] }));
+    expect(r.items.find((i) => i.key === 'in_service_event')!.present).toBe(true);
+  });
+
+  it('flags a missing in-service event when there is no event text and no service record', () => {
+    const r = evaluateDraftReadiness(base({ inServiceEvent: '', documents: [{ filename: 'Benefit Summary.pdf', docTag: null }] }));
+    const ev = r.missing.find((m) => m.key === 'in_service_event')!;
+    expect(ev.message).toContain('Please upload the DD-214 or service treatment record');
+  });
+
+  it('produces a plain one-line summary listing what is missing', () => {
+    const r = evaluateDraftReadiness(base({ grantedScCount: 0 }));
+    expect(r.summary).toBe('Essential documents missing: Service-connected conditions. Please upload and redraft.');
+  });
+});
+
+describe('getDraftReadiness (db gather)', () => {
+  function mockDb(opts: {
+    caseRow: unknown;
+    granted?: unknown[];
+    problems?: { problem: string }[];
+    docs?: { filename: string; docTag: string | null }[];
+  }): AppDb {
+    return {
+      case: { findFirst: async () => opts.caseRow },
+      scCondition: { findMany: async () => opts.granted ?? [] },
+      activeProblem: { findMany: async () => opts.problems ?? [] },
+      document: { findMany: async () => opts.docs ?? [] },
+    } as unknown as AppDb;
+  }
+
+  it('returns null when the case does not exist', async () => {
+    const r = await getDraftReadiness(mockDb({ caseRow: null }), 'nope');
+    expect(r).toBeNull();
+  });
+
+  it('gathers granted SC count + problems + docs and evaluates ready (Armand-shaped, complete)', async () => {
+    const db = mockDb({
+      caseRow: { veteranId: 'v1', claimType: 'initial', claimedCondition: 'Obstructive sleep apnea', claimedConditions: [], inServiceEvent: null },
+      granted: [{ id: 's1' }],
+      problems: [{ problem: 'Obstructive sleep apnea' }],
+      docs: [{ filename: 'Armand Frank DD-214.pdf', docTag: 'Other' }],
+    });
+    const r = await getDraftReadiness(db, 'CLM-1');
+    expect(r!.ready).toBe(true);
+  });
+
+  it('blocks when there are zero granted SC rows (the Armand case as it stands today)', async () => {
+    const db = mockDb({
+      caseRow: { veteranId: 'v1', claimType: 'initial', claimedCondition: 'Obstructive sleep apnea', claimedConditions: [], inServiceEvent: null },
+      granted: [],
+      problems: [{ problem: 'Obstructive sleep apnea' }],
+      docs: [{ filename: 'Armand Frank DD-214.pdf', docTag: 'Other' }],
+    });
+    const r = await getDraftReadiness(db, 'CLM-1');
+    expect(r!.ready).toBe(false);
+    expect(r!.missing.map((m) => m.key)).toEqual(['sc_conditions']);
+  });
+});

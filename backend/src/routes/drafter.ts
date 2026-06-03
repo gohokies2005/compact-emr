@@ -6,6 +6,7 @@ import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
 import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
+import { getDraftReadiness } from '../services/draft-readiness.js';
 import { publishDraftJobQueued } from '../services/draft-job-queue.js';
 import {
   buildDrafterBundle,
@@ -66,12 +67,28 @@ type Grade = (typeof GRADES)[number];
 interface ParsedDraftCreate {
   strategyOverride?: string;
   parentVersion?: number;
+  acknowledgeMissingDocs?: boolean;
+  overrideReason?: string;
 }
 
 function parseDraftCreateBody(body: unknown): ParsedDraftCreate {
   if (body === undefined || body === null) return {};
   if (!isRecord(body)) badRequest('Request body must be an object');
   const out: ParsedDraftCreate = {};
+  // Essential-docs gate override: the RN may proceed past a missing-doc block with a logged
+  // reason (Ryan 2026-06-03 — block + override, honors RN self-service).
+  const ack = body['acknowledgeMissingDocs'];
+  if (ack !== undefined && ack !== null) {
+    if (typeof ack !== 'boolean') badRequest('acknowledgeMissingDocs must be a boolean', { field: 'acknowledgeMissingDocs' });
+    out.acknowledgeMissingDocs = ack as boolean;
+  }
+  const reason = body['overrideReason'];
+  if (reason !== undefined && reason !== null) {
+    if (typeof reason !== 'string' || (reason as string).length > 2000) {
+      badRequest('overrideReason must be a string under 2000 chars', { field: 'overrideReason' });
+    }
+    if ((reason as string).trim().length > 0) out.overrideReason = (reason as string).trim();
+  }
   const strategyOverride = body['strategyOverride'];
   if (strategyOverride !== undefined && strategyOverride !== null) {
     if (typeof strategyOverride !== 'string') {
@@ -329,6 +346,19 @@ export function createDrafterClientRouter(db: AppDb): Router {
    *
    * Versioning: new DraftJob.version = max(existing versions) + 1.
    */
+  // Pre-draft essential-docs readiness, for the RN popup. Same deterministic check the POST /draft
+  // gate enforces — so the popup shows exactly what would block (or be overridden).
+  router.get(
+    '/cases/:id/draft-readiness',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const readiness = await getDraftReadiness(db, caseId);
+      if (readiness === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      res.json({ data: readiness });
+    }),
+  );
+
   router.post(
     '/cases/:id/draft',
     requireRole(['admin', 'ops_staff']),
@@ -357,6 +387,40 @@ export function createDrafterClientRouter(db: AppDb): Router {
         throw new HttpError(409, 'conflict', 'Chart is not ready — manual summary required on at least one file.', {
           caseId,
           manualSummaryRequired: chartReadiness.manualSummaryRequired,
+        });
+      }
+
+      // Essential-docs gate (no silent deaths, Ryan 2026-06-03): catch a missing essential
+      // document BEFORE any draft spend, with a plain RN-actionable message. The RN can override
+      // with a logged reason (block + override). The drafter's own chartCompleteness gate remains
+      // the backstop; this surfaces the same condition synchronously so it can never be a silent
+      // async death or a cryptic code.
+      //
+      // FLAG-GUARDED (default OFF): the blocking behavior activates only when DRAFT_READINESS_GATE
+      // ='on'. Until the EMR override popup ships, leaving it off preserves today's /draft behavior
+      // exactly, so a false-flag can't trap an RN with no override button. The GET
+      // /cases/:id/draft-readiness route is always live (read-only) so the UI can build against it.
+      const gateOn = process.env.DRAFT_READINESS_GATE === 'on';
+      const readiness = gateOn ? await getDraftReadiness(db, caseId) : null;
+      if (readiness !== null && !readiness.ready) {
+        if (parsed.acknowledgeMissingDocs !== true) {
+          throw new HttpError(409, 'essential_docs_missing', readiness.summary, {
+            caseId,
+            missing: readiness.missing.map((m) => ({ key: m.key, label: m.label, message: m.message })),
+            items: readiness.items.map((i) => ({ key: i.key, label: i.label, present: i.present, message: i.message })),
+            canOverride: true,
+          });
+        }
+        await db.activityLog.create({
+          data: {
+            actorUserId: actor.sub,
+            caseId,
+            action: 'draft_readiness_overridden',
+            detailsJson: {
+              missing: readiness.missing.map((m) => m.key),
+              reason: parsed.overrideReason ?? null,
+            },
+          },
         });
       }
 

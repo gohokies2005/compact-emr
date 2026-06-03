@@ -7,6 +7,7 @@ export type ErrorCode =
   | 'not_found'
   | 'conflict'
   | 'chart_not_ready'
+  | 'essential_docs_missing'
   | 'internal_error';
 
 export interface ErrorEnvelope {

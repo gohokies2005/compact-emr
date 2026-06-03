@@ -55,6 +55,15 @@ export function createApp(options: CreateAppOptions = {}) {
     res.json({ ok: true, user: req.user });
   });
 
+  // Internal worker routes are mounted FIRST. They authenticate via shared-secret tokens (NOT
+  // Cognito) and both middlewares are path-aware (they next() through non-/internal/ traffic), so
+  // mounting them ahead of the authenticateJwt client routes is safe AND necessary: the broad
+  // `app.use('/api/v1', authenticateJwt(), ...)` mounts below would otherwise 401 the drafter's
+  // token-only callback (`/internal/drafter/*`) before requireDrafterPrincipal ever runs. (Found
+  // 2026-06-03 on the first real cloud drafter run — /complete was 401ing.)
+  app.use('/api/v1', requireServicePrincipal(), createInternalWorkerRouter(db));
+  app.use('/api/v1', requireDrafterPrincipal(), createDrafterWorkerRouter(db));
+
   app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
   app.use('/api/v1', authenticateJwt(), createDocumentsRouter());
   app.use('/api/v1', authenticateJwt(), createCasesRouter(db));
@@ -89,13 +98,6 @@ export function createApp(options: CreateAppOptions = {}) {
     s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
     bucketName: process.env.PHI_BUCKET_NAME,
   }));
-  // Service-principal routes for OCR + Doctor Pack assembler workers (Phase 7B-revised Build 3).
-  // Mounted at /api/v1/internal/* with a shared-secret token guard — NOT Cognito-authenticated.
-  app.use('/api/v1', requireServicePrincipal(), createInternalWorkerRouter(db));
-  // Drafter worker routes: SEPARATE token (DRAFTER_INVOKE_TOKEN) so a worker-token leak can't
-  // mutate the legal letter artifact or trigger metered Anthropic spend.
-  app.use('/api/v1', requireDrafterPrincipal(), createDrafterWorkerRouter(db));
-
   app.use((req, res) => {
     sendError(res, 404, 'not_found', 'Route was not found.');
   });

@@ -1,6 +1,6 @@
 import express from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { createCdsRouter } from '../routes/cds.js';
 import type { AppDb, Role } from '../services/db-types.js';
 
@@ -43,7 +43,19 @@ function appFor(db: AppDb) {
 }
 
 describe('cds routes', () => {
-  beforeEach(() => { mockUser = { sub: 'USER-1', roles: ['admin'] }; });
+  // CDS is unwired by default (Ryan 2026-06-03); these engine-behavior tests run it with the flag on.
+  beforeEach(() => { mockUser = { sub: 'USER-1', roles: ['admin'] }; process.env.CDS_ENABLED = 'on'; });
+  afterEach(() => { delete process.env.CDS_ENABLED; });
+
+  it('is disabled by default (CDS_ENABLED off): no-ops with a disabled marker, runs nothing', async () => {
+    delete process.env.CDS_ENABLED;
+    const { db, caseUpdate } = makeDb();
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/cds');
+    expect(res.status).toBe(200);
+    expect(res.body.data.disabled).toBe(true);
+    expect(res.body.data.verdict).toBe('disabled');
+    expect(caseUpdate).not.toHaveBeenCalled();
+  });
 
   it('returns 401 unauthenticated', async () => {
     mockUser = undefined;

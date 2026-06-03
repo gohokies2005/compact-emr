@@ -27,6 +27,15 @@ export function createCdsRouter(db: AppDb): Router {
       const sub = actorSub(req);
       const id = String(req.params.id);
 
+      // CDS is UNWIRED by default (Ryan 2026-06-03 — removed as a workflow + error surface; the
+      // stale "not supportable" verdict confused more than it helped). All the engine code is kept
+      // intact (cdsEngine.ts); flip CDS_ENABLED='on' to restore. When off, the route no-ops with a
+      // disabled marker so the UI can hide the panel and the "Re-run CDS" button can't error.
+      if (process.env.CDS_ENABLED !== 'on') {
+        res.json({ data: { disabled: true, verdict: 'disabled', message: 'Clinical Decision Support is turned off.' } });
+        return;
+      }
+
       const caseRow = (await db.case.findFirst({
         where: { id },
         select: { id: true, veteranId: true, claimedCondition: true, claimedConditions: true, claimType: true, framingChoice: true, upstreamScCondition: true },

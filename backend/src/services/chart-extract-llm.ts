@@ -92,6 +92,7 @@ const EXTRACT_TOOL: Anthropic.Tool = {
             icd10: { type: 'string', description: 'Problems only: ICD-10 code if explicitly present.' },
             dose: { type: 'string', description: 'Medications only: dose/strength as written (e.g. "10 mg").' },
             frequency: { type: 'string', description: 'Medications only: frequency/sig as written.' },
+            indication: { type: 'string', description: 'Medications only: what the medication is for, if explicitly stated.' },
             sourcePage: { type: 'integer', description: 'The [p.N] page number this item appears on.' },
             sourceQuote: { type: 'string', description: 'A short VERBATIM substring from that page proving the item (copy exactly).' },
             confidence: { type: 'number', description: '0..1 — how clearly this is an explicit charted item (not prose mention).' },

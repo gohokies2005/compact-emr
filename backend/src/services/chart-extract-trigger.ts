@@ -49,6 +49,17 @@ export async function maybeEnqueueChartExtract(db: AppDb, caseId: string): Promi
     throw err;
   }
 
-  await publishChartExtractQueued({ runId, caseId, veteranId: c.veteranId, triggerHash });
+  try {
+    await publishChartExtractQueued({ runId, caseId, veteranId: c.veteranId, triggerHash });
+  } catch (err) {
+    // The run row committed but no message reached the queue. Don't leave it 'queued' forever —
+    // the build-state door would show "still building" with no recovery (a silent dead-end that
+    // violates RN-self-service). DELETE the row so the NEXT /pages callback for this same doc-set
+    // (triggerHash is stable) re-inserts + re-publishes cleanly. The stuck-run watcher is the
+    // durable backstop (follow-up, mirrors the DoctorPack/DraftJob watchers). (architect M1, 2026-06-03)
+    await (db as unknown as { chartExtractionRun: { delete: (a: { where: { id: string } }) => Promise<unknown> } })
+      .chartExtractionRun.delete({ where: { id: runId } }).catch(() => { /* best-effort */ });
+    throw err;
+  }
   return { enqueued: true };
 }

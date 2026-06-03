@@ -55,7 +55,8 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
   // Load existing chart rows (with source) so the merge can protect manual + prior-extracted rows.
   const [scRows, problemRows, medRows] = await Promise.all([
     scDelegate.findMany({ where: { veteranId: input.veteranId }, select: { condition: true, source: true } }) as Promise<{ condition: string; source: string }[]>,
-    db.activeProblem.findMany({ where: { veteranId: input.veteranId } }) as unknown as Promise<{ problem: string; source: string }[]>,
+    (db as unknown as { activeProblem: { findMany: (a: { where: { veteranId: string }; select: { problem: true; source: true } }) => Promise<{ problem: string; source: string }[]> } })
+      .activeProblem.findMany({ where: { veteranId: input.veteranId }, select: { problem: true, source: true } }),
     medDelegate.findMany({ where: { veteranId: input.veteranId }, select: { drugName: true, source: true } }),
   ]);
   const existing: ExistingChartRow[] = [

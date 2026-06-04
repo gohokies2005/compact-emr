@@ -655,6 +655,14 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       const existing = await db.intake.findUnique({ where: { id } });
       if (existing === null) throw new HttpError(404, 'not_found', 'Intake not found', { intakeId: id });
 
+      // Forward-only guard: only a 'pending' or previously-'failed' (retry) intake may be set to
+      // ready/failed. An SQS/DLQ replay must NEVER resurrect an 'assigned' or 'dismissed' intake
+      // back into the pool (that would double-assign / undo an RN action). (Architect P1-B.)
+      const currentStatus = (existing as { status?: string }).status;
+      if (currentStatus !== 'pending' && currentStatus !== 'failed') {
+        throw new HttpError(409, 'conflict', `Intake is '${currentStatus}', not pending/failed — refusing to overwrite.`, { intakeId: id, currentStatus });
+      }
+
       if (status === 'failed') {
         const errorMessage = typeof body['errorMessage'] === 'string' ? (body['errorMessage'] as string).slice(0, 2000) : 'ingest failed';
         const updated = await db.intake.update({ where: { id }, data: { status: 'failed', errorMessage } });

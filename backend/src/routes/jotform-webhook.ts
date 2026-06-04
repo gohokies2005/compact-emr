@@ -64,8 +64,14 @@ export function createJotformWebhookRouter(db: AppDb): Router {
     }
 
     if (intakeId.length > 0) {
-      // Best-effort enqueue — a failure leaves the row 'pending' for re-enqueue; never blocks the 200.
-      await publishJotformIngest({ intakeId, formId, submissionId }).catch(() => { /* row stays pending */ });
+      // Best-effort enqueue — never blocks the 200 — but SURFACE the reason on failure (per the
+      // "every catch must surface the reason" rule): log it + stamp errorMessage so the row is
+      // visibly stuck-pending in the pool (RN can Retry), not a silent no-op.
+      await publishJotformIngest({ intakeId, formId, submissionId }).catch(async (err: unknown) => {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.error(JSON.stringify({ msg: 'jotform-webhook: enqueue failed', intakeId, submissionId, error: reason }));
+        await db.intake.update({ where: { id: intakeId }, data: { errorMessage: `enqueue failed: ${reason}`.slice(0, 2000) } }).catch(() => { /* best-effort */ });
+      });
     }
 
     // Always 200 fast. (Jotform treats non-200/slow as failure and retries → handled idempotently.)

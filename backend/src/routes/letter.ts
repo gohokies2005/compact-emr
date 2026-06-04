@@ -243,14 +243,18 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
     }),
   );
 
-  // ── POST surgical-ai — physician-only bounded LLM edit (propose, or apply a proposal) ──
+  // ── POST surgical-ai — bounded LLM edit (propose, or apply a proposal) ──
   // Body: { instruction } to PROPOSE (returns proposal + preview + metered cost, no save), or
   // { apply: true, proposal } to APPLY a previewed proposal via the save path. The LLM only
   // runs on PROPOSE; APPLY is deterministic (applyStructuredEdit re-validates against the
   // current text). Cost is logged at propose time (the spend happens there).
+  // ops_staff (RN) has full editor parity with the physician here (Ryan 2026-06-04: "clicking
+  // edit letter should be just like what the doctor can do ... AI surgical edits"). The handler
+  // is role-safe for RNs: enforcePhysicianAssignment only restricts role==='physician', and the
+  // revision records editorRole=user.role so the audit trail shows who actually edited.
   router.post(
     '/cases/:id/letter/surgical-ai',
-    requireRole(['admin', 'physician']),
+    requireRole(['admin', 'physician', 'ops_staff']),
     asyncHandler(async (req: Request, res: Response) => {
       const user = currentActor(req);
       const caseId = String(req.params.id);

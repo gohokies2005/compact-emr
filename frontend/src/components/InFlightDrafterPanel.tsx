@@ -73,6 +73,39 @@ function stepFromPhase(phase: string | null | undefined): DraftStep {
   return { index, label: STEP_LABELS[index] };
 }
 
+// Compute the furthest step reached from the manifest's phase statuses. The manifest is ALWAYS
+// stored on every heartbeat (drafter.ts persists manifestSnapshot unconditionally), whereas the
+// currentPhase scalar is only posted while a phase is actively 'running' and is OMITTED at startup
+// and in the brief gaps between phases — leaving currentPhase null and freezing the bar at "Step
+// 1 of 6" for the whole run. (Ryan 2026-06-04: "1/6 ... it's always stuck there.") Reading the
+// manifest closes that gap entirely, EMR-side, with no drafter rebuild. We take the MAX bucketed
+// step among phases that have started (running) or finished (ran/skipped/done) so the bar reflects
+// real progress and never moves backward.
+export function stepFromManifest(snapshot: unknown): DraftStep | null {
+  if (snapshot === null || typeof snapshot !== 'object') return null;
+  const phases = (snapshot as { phases?: unknown }).phases;
+  if (phases === null || typeof phases !== 'object') return null;
+  const entries = Array.isArray(phases) ? phases : Object.values(phases as Record<string, unknown>);
+  let maxIndex = 0;
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const status = normalizePhase((entry as { status?: unknown }).status as string | undefined);
+    if (status !== 'running' && status !== 'ran' && status !== 'skipped' && status !== 'done') continue;
+    const id = normalizePhase((entry as { id?: unknown }).id as string | undefined);
+    const idx = PHASE_STEP[id as DraftJobPhase];
+    if (typeof idx === 'number' && idx > maxIndex) maxIndex = idx;
+  }
+  if (maxIndex < 1) return null;
+  const index = maxIndex as DraftStep['index'];
+  return { index, label: STEP_LABELS[index] };
+}
+
+// Manifest-first, currentPhase-fallback. (See stepFromManifest for why the manifest is the
+// reliable source.)
+function resolveStep(job: InFlightDraftJob): DraftStep {
+  return stepFromManifest((job as { manifestSnapshot?: unknown }).manifestSnapshot) ?? stepFromPhase(job.currentPhase);
+}
+
 function elapsedLabel(startedAt: string | null | undefined, enqueuedAt: string): string {
   const start = new Date(startedAt ?? enqueuedAt).getTime();
 
@@ -99,7 +132,7 @@ function isTakingLonger(job: InFlightDraftJob): boolean {
 }
 
 export function InFlightDrafterPanel({ job }: InFlightDrafterPanelProps) {
-  const step = useMemo(() => stepFromPhase(job.currentPhase), [job.currentPhase]);
+  const step = useMemo(() => resolveStep(job), [job]);
   const takingLonger = isTakingLonger(job);
   const operatorMessage = job.operatorMessage?.trim();
   // Sanity cap on the elapsed timer: a run "running" far past the normal window is almost always a

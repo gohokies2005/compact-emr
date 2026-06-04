@@ -94,7 +94,7 @@ describe('PhysicianLetterReadyPanel', () => {
     expect(screen.getByText('Letter is ready for your review')).toBeInTheDocument();
     expect(screen.getByText('Grade: A-')).toBeInTheDocument();
     expect(screen.getByText('Probative score: 8/10')).toBeInTheDocument();
-    expect(screen.getByText('3 things the system chose for you on close calls:')).toBeInTheDocument();
+    expect(screen.getByText('Top 3 things to consider:')).toBeInTheDocument();
 
     expect(
       screen.getByText('preferred pediatric-onset framing over genetic-predisposition language.'),
@@ -104,7 +104,7 @@ describe('PhysicianLetterReadyPanel', () => {
     expect(screen.queryByText('Do not show this.')).not.toBeInTheDocument();
 
     const disclosureRegion = screen
-      .getByText('3 things the system chose for you on close calls:')
+      .getByText('Top 3 things to consider:')
       .closest('div');
 
     expect(disclosureRegion).not.toBeNull();
@@ -152,41 +152,16 @@ describe('PhysicianLetterReadyPanel', () => {
     expect(onOpenSignOff).toHaveBeenCalled();
   });
 
-  it('surfaces template/anchor-gate findings (qa_report criticals) at sign-off, skipping audit-only', () => {
-    const jobWithGate: DraftJob = {
-      ...readyJob,
-      gradeSidecarJson: {
-        template_gate_findings: [
-          { id: 'anchor_a1_missing_institutional', message: 'Section VI is missing an institutional anchor (A1).', severity: 'critical', physician_decision: true },
-          { id: 'epi_anchor_offtopic', message: 'The epidemiologic anchor does not match the claimed condition.', severity: 'warning', physician_decision: true },
-          { id: 'audit_only_note', message: 'Should never render to the physician.', severity: 'warning', audit_only: true },
-        ],
-      },
-    };
-    render(withQueryClient(
-      <PhysicianLetterReadyPanel c={baseCase} job={jobWithGate} canSendBack={false} onOpenPdf={vi.fn()} onOpenSignOff={vi.fn()} onChanged={vi.fn()} />,
-    ));
-    expect(screen.getByText('Anchor and template quality - physician review (overridable)')).toBeInTheDocument();
-    expect(screen.getByText('Section VI is missing an institutional anchor (A1).')).toBeInTheDocument();
-    expect(screen.getByText('The epidemiologic anchor does not match the claimed condition.')).toBeInTheDocument();
-    expect(screen.queryByText('Should never render to the physician.')).not.toBeInTheDocument();
-  });
-
+  // NOTE (Ryan 2026-06-04): the amber "Anchor and template quality" gate-findings block was removed
+  // from this panel — "just the top 3 things to consider is all I want for now. Grade, and those
+  // things ... not truncated." The two tests that asserted that block were deleted. The guard below
+  // (no anchor-gate callout) and the not-an-array guard are kept as regression guards that the
+  // clutter stays gone.
   it('renders no anchor-gate callout when there are no findings (forward-compatible)', () => {
     render(withQueryClient(
       <PhysicianLetterReadyPanel c={baseCase} job={readyJob} canSendBack={false} onOpenPdf={vi.fn()} onOpenSignOff={vi.fn()} onChanged={vi.fn()} />,
     ));
     expect(screen.queryByText('Anchor and template quality - physician review (overridable)')).not.toBeInTheDocument();
-  });
-
-  it('degrades gracefully on a malformed findings payload (untrusted worker) without crashing', () => {
-    // null/non-object/blank elements + a valid one mixed in — must not throw the render.
-    const malformed = { ...readyJob, gradeSidecarJson: { template_gate_findings: [null, 'x', 42, {}, { message: '  ' }, { message: 'Real finding survives.', severity: 'critical' }] } } as unknown as DraftJob;
-    render(withQueryClient(
-      <PhysicianLetterReadyPanel c={baseCase} job={malformed} canSendBack={false} onOpenPdf={vi.fn()} onOpenSignOff={vi.fn()} onChanged={vi.fn()} />,
-    ));
-    expect(screen.getByText('Real finding survives.')).toBeInTheDocument();
-    expect(screen.getByText('Letter is ready for your review')).toBeInTheDocument(); // panel rendered, no crash
   });
 
   it('does not crash when template_gate_findings is not an array', () => {

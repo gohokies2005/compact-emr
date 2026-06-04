@@ -438,7 +438,14 @@ export function createDrafterClientRouter(db: AppDb): Router {
         orderBy: { version: 'desc' },
         select: { version: true },
       });
-      const nextVersion = (maxVersionRow?.version ?? 0) + 1;
+      // Redraft must win: the new draft's version has to exceed not just the highest prior draft
+      // job but also case.currentVersion, which an RN/physician hand-edit or surgical-AI edit may
+      // have advanced past the draft-job numbering (LetterRevision rows share the currentVersion
+      // pointer space). Without this, a redraft after an edit could land at a version that already
+      // has a LetterRevision — and resolveCurrent() (LetterRevision-first) would then show the doctor
+      // the STALE edit instead of the fresh redraft, or currentVersion could even regress.
+      // (Ryan 2026-06-04: "the doc would just see the newest draft right?")
+      const nextVersion = Math.max(maxVersionRow?.version ?? 0, c.currentVersion ?? 0) + 1;
 
       const jobId = randomUUID();
 

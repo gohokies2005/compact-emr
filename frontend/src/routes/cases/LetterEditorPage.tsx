@@ -204,9 +204,12 @@ export function LetterEditorPage() {
               </Card>
             ) : null}
 
-            {canPhysicianAct ? (
+            {/* AI surgical edit — available to BOTH the RN (ops_staff) and the physician, mirroring
+                the hand-edit parity (Ryan 2026-06-04: RN "edit letter" should be just like the
+                doctor's — manual OR AI surgical). Approve/Decline stays physician-only below. */}
+            {canOpsEdit || canPhysicianAct ? (
               <Card className="p-6">
-                <h2 className="text-base font-semibold text-slate-900">Physician actions</h2>
+                <h2 className="text-base font-semibold text-slate-900">AI surgical edit</h2>
                 <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">Limited scope edit, not a full redraft.</div>
                 <label className="mt-4 block">
                   <span className="text-sm font-medium text-slate-800">Surgical AI instruction</span>
@@ -225,10 +228,13 @@ export function LetterEditorPage() {
                   </div>
                 ) : null}
 
-                <div className="mt-6 flex flex-col gap-2 border-t border-slate-200 pt-4">
-                  <Button type="button" variant="primary" className="w-full" loading={approveMutation.isPending} disabled={approveMutation.isPending} onClick={() => approveMutation.mutate()}>Approve letter</Button>
-                  <Button type="button" variant="secondary" className="w-full" onClick={() => setDeclineOpen(true)}>Decline and send back to RN</Button>
-                </div>
+                {/* Approve / Decline — physician (or admin) only; an RN never signs off a letter. */}
+                {canPhysicianAct ? (
+                  <div className="mt-6 flex flex-col gap-2 border-t border-slate-200 pt-4">
+                    <Button type="button" variant="primary" className="w-full" loading={approveMutation.isPending} disabled={approveMutation.isPending} onClick={() => approveMutation.mutate()}>Approve letter</Button>
+                    <Button type="button" variant="secondary" className="w-full" onClick={() => setDeclineOpen(true)}>Decline and send back to RN</Button>
+                  </div>
+                ) : null}
               </Card>
             ) : null}
           </aside>

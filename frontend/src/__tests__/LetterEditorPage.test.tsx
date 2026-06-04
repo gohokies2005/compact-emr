@@ -50,12 +50,17 @@ beforeEach(() => {
 });
 
 describe('LetterEditorPage', () => {
-  it('loads and renders the editor (ops_staff, editable)', async () => {
+  it('loads and renders the editor (ops_staff) WITH surgical-AI parity but NO sign-off', async () => {
     renderPage();
     expect(await screen.findByText('Letter editor')).toBeInTheDocument();
     expect(screen.getByText('Version 4 · ops_staff')).toBeInTheDocument();
-    expect(screen.getByRole('textbox')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save new version' })).toBeInTheDocument();
+    // RN parity (Ryan 2026-06-04): ops_staff now gets the AI surgical-edit card...
+    expect(screen.getByText('AI surgical edit')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Preview limited edit' })).toBeInTheDocument();
+    // ...but never the physician-only sign-off actions.
+    expect(screen.queryByRole('button', { name: 'Approve letter' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Decline and send back to RN' })).not.toBeInTheDocument();
   });
 
   it('saves a new version and shows rule/detail warnings', async () => {
@@ -87,7 +92,7 @@ describe('LetterEditorPage', () => {
   it('physician previews + applies surgical AI (opaque proposal + string preview)', async () => {
     getLetterMock.mockResolvedValueOnce({ data: physicianLetter });
     renderPage();
-    await screen.findByText('Physician actions');
+    await screen.findByText('AI surgical edit');
     fireEvent.change(screen.getByPlaceholderText('Example: remove the second alternative-etiology sentence.'), { target: { value: 'Tighten rationale.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Preview limited edit' }));
     expect(await screen.findByText('Proposed edit · $0.42')).toBeInTheDocument();
@@ -100,7 +105,7 @@ describe('LetterEditorPage', () => {
     getLetterMock.mockResolvedValueOnce({ data: physicianLetter });
     previewMock.mockRejectedValueOnce(new ServiceUnavailableError());
     renderPage();
-    await screen.findByText('Physician actions');
+    await screen.findByText('AI surgical edit');
     fireEvent.change(screen.getByPlaceholderText('Example: remove the second alternative-etiology sentence.'), { target: { value: 'Tighten rationale.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Preview limited edit' }));
     expect(await screen.findByText('Surgical AI is not available in this environment.')).toBeInTheDocument();
@@ -109,7 +114,7 @@ describe('LetterEditorPage', () => {
   it('physician approves the letter', async () => {
     getLetterMock.mockResolvedValueOnce({ data: physicianLetter });
     renderPage();
-    await screen.findByText('Physician actions');
+    await screen.findByText('AI surgical edit');
     fireEvent.click(screen.getByRole('button', { name: 'Approve letter' }));
     await waitFor(() => { expect(approveMock).toHaveBeenCalledWith('CASE-1'); });
   });
@@ -117,7 +122,7 @@ describe('LetterEditorPage', () => {
   it('physician declines and sends back to RN', async () => {
     getLetterMock.mockResolvedValueOnce({ data: physicianLetter });
     renderPage();
-    await screen.findByText('Physician actions');
+    await screen.findByText('AI surgical edit');
     fireEvent.click(screen.getByRole('button', { name: 'Decline and send back to RN' }));
     fireEvent.change(screen.getByPlaceholderText('Tell the RN what needs to change.'), { target: { value: 'Needs a different approach.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send back' }));

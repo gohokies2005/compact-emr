@@ -251,6 +251,28 @@ export function CaseDetailPage() {
               onViewLetter={openLetterPdf}
             />
           ) : null}
+
+          {/* RN letter-edit entry. The physician/admin reach the editor via the ready panel above;
+              an RN (ops_staff) otherwise has no entry to it. Ryan 2026-06-04: "RNs need the ability
+              to edit letters too ... by hand or AI surgically before sending to doc." Shown when a
+              letter exists, the run is not in flight, and the status is editable (drafting /
+              physician_review / correction_review — matches the backend EDITABLE_STATUSES). Editing
+              creates a NEW version; the version-safety in /draft + currentVersion pointer ensure the
+              doctor always reviews the newest version. */}
+          {!inFlightDraft && role === 'ops_staff' && viewableLetterJob &&
+            (c.status === 'drafting' || c.status === 'physician_review' || c.status === 'correction_review') ? (
+            <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-base font-semibold text-slate-900">Edit the letter</h2>
+              <p className="mt-1 text-sm text-slate-600">
+                Revise the letter by hand or with an AI surgical edit — same tools the physician has.
+                Save creates a new version, and the doctor reviews the newest version.
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button>
+                <Button variant="primary" size="sm" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}>Open letter editor</Button>
+              </div>
+            </div>
+          ) : null}
         </>
       );
     })()}

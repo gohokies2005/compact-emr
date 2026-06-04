@@ -14,7 +14,10 @@ describe('case status transitions', () => {
     expect(CASE_STATUS_TRANSITIONS.intake).toEqual(['records', 'rejected']);
     expect(CASE_STATUS_TRANSITIONS.records).toEqual(['viability', 'rejected']);
     expect(CASE_STATUS_TRANSITIONS.viability).toEqual(['drafting', 'rejected']);
-    expect(CASE_STATUS_TRANSITIONS.drafting).toEqual(['physician_review', 'rejected']);
+    // A completed draft lands in rn_review (RN reviews/edits, then sends to the doctor). No
+    // auto-route to the physician. (Ryan 2026-06-04.)
+    expect(CASE_STATUS_TRANSITIONS.drafting).toEqual(['rn_review', 'physician_review', 'rejected']);
+    expect(CASE_STATUS_TRANSITIONS.rn_review).toEqual(['physician_review', 'drafting', 'rejected']);
     expect(CASE_STATUS_TRANSITIONS.physician_review).toEqual([
       'correction_requested',
       'delivered',
@@ -27,6 +30,10 @@ describe('case status transitions', () => {
 
   it('rejects ops_staff attempting physician_review to delivered', () => {
     expect(canRolePerformCaseStatusTransition('ops_staff', 'physician_review', 'delivered')).toBe(false);
+  });
+
+  it('lets the RN (ops_staff) send rn_review to the doctor (physician_review)', () => {
+    expect(canRolePerformCaseStatusTransition('ops_staff', 'rn_review', 'physician_review')).toBe(true);
   });
 
   it('allows admin on any transition', () => {

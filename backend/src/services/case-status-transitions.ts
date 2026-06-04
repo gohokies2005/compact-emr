@@ -5,6 +5,7 @@ export const CASE_STATUSES: readonly CaseStatus[] = [
   'records',
   'viability',
   'drafting',
+  'rn_review',
   'physician_review',
   'correction_requested',
   'correction_review',
@@ -17,7 +18,12 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   intake: ['records', 'rejected'],
   records: ['viability', 'rejected'],
   viability: ['drafting', 'rejected'],
-  drafting: ['physician_review', 'rejected'],
+  // A completed draft lands in rn_review (set by the drafter /complete handler). The RN reviews/
+  // edits, then sends to the doctor. drafting->physician_review is kept for back-compat/manual use.
+  drafting: ['rn_review', 'physician_review', 'rejected'],
+  // RN review: "Send to doctor for review" -> physician_review; a redraft drops back to drafting;
+  // or reject. (Ryan 2026-06-04: no auto-route to the doctor.)
+  rn_review: ['physician_review', 'drafting', 'rejected'],
   physician_review: ['correction_requested', 'delivered', 'rejected'],
   correction_requested: ['correction_review'],
   correction_review: ['delivered', 'rejected'],

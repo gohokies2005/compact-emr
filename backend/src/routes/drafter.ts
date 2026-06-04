@@ -736,8 +736,14 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
         return;
       }
 
+      // shipRecommendation is now ADVISORY — it no longer routes the case. A completed draft (ship
+      // or not) lands in 'rn_review' so the RN reviews/edits and then explicitly sends it to the
+      // doctor; failed runs stay in 'drafting' (held for retry). NEVER auto-route to the physician.
+      // (Ryan 2026-06-04: "once a draft is complete it should not route to the doctor automatically
+      // ... they ... click a button to send to doctor for review.") triageToPhysician is retained
+      // only as an informational field in the activity log below (what the OLD rule would have done).
       const triageToPhysician = parsed.runComplete && parsed.shipRecommendation === 'ship';
-      const nextCaseStatus = triageToPhysician ? 'physician_review' : 'drafting';
+      const nextCaseStatus = parsed.runComplete ? 'rn_review' : 'drafting';
 
       const updated = await db.$transaction(async (tx) => {
         const job = await tx.draftJob.update({

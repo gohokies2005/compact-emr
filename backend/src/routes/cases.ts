@@ -109,17 +109,12 @@ function buildCaseListWhere(query: Request['query']): Record<string, unknown> {
   if (assignedRnId === '__none__') where.assignedRnId = null;
   else if (assignedRnId !== undefined) where.assignedRnId = assignedRnId;
 
-  // Drafter integration belt-and-suspenders: when filtering for physician_review (i.e. the
-  // physician inbox), the write-side enforcement in /internal/drafter/jobs/:id/complete
-  // sets status only when runComplete && shipRecommendation==='ship'. A future code path
-  // that bypasses /complete (manual PATCH /status, SQL fixup, legacy data) could leave a
-  // non-shippable case in physician_review status. Read-side filter rejects those. Uses
-  // "not false" / "not revise" instead of strict equality so legacy cases (runComplete=null,
-  // shipRecommendation=null from before this integration) remain visible.
-  if (status === 'physician_review') {
-    where.runComplete = { not: false };
-    where.shipRecommendation = { not: 'revise' };
-  }
+  // NOTE (Ryan 2026-06-04): the old ship/runComplete read-filter on physician_review was removed.
+  // Completed drafts no longer auto-route to the doctor — they land in 'rn_review' and reach
+  // physician_review ONLY when the RN explicitly clicks "Send to doctor for review". That deliberate
+  // human send is the gate, so a case in physician_review is legitimately the RN's choice even if
+  // the grader flagged it 'revise' (the RN may have edited it). Filtering those out would hide
+  // RN-sent letters from the doctor's queue, so the physician inbox now shows ALL physician_review.
 
   return where;
 }

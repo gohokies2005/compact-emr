@@ -31,7 +31,7 @@ import type { AppDb } from '../services/db-types.js';
 const PRESIGN_TTL_SECONDS = 300;
 // Statuses in which the letter may be edited. Outside these (e.g. delivered/paid/rejected)
 // the editor is read-only.
-const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'physician_review', 'correction_review']);
+const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'rn_review', 'physician_review', 'correction_review']);
 
 export interface RenderInvokeInput {
   caseData: {

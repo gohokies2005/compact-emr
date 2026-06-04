@@ -17,7 +17,12 @@ interface PhysicianLetterReadyPanelProps {
   readonly canSendBack: boolean;
   readonly onOpenPdf: (s3Key: string) => void | Promise<void>;
   readonly onEditText?: () => void;
-  readonly onOpenSignOff: () => void;
+  // Physician mode: the primary action signs off (onOpenSignOff). RN mode: the primary action
+  // sends the letter to the doctor (onSendToDoctor) — supplied for status='rn_review' so the RN
+  // reviews/edits first, then explicitly sends. Exactly one is expected per render.
+  readonly onOpenSignOff?: () => void;
+  readonly onSendToDoctor?: () => void;
+  readonly sending?: boolean;
   readonly onChanged: () => void | Promise<void>;
 }
 
@@ -39,6 +44,8 @@ export function PhysicianLetterReadyPanel({
   onOpenPdf,
   onEditText,
   onOpenSignOff,
+  onSendToDoctor,
+  sending,
   onChanged,
 }: PhysicianLetterReadyPanelProps) {
   const [sendBackOpen, setSendBackOpen] = useState(false);
@@ -52,7 +59,7 @@ export function PhysicianLetterReadyPanel({
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-base font-semibold text-slate-900">
-            Letter is ready for your review
+            {onSendToDoctor ? 'Review the letter, then send to the doctor' : 'Letter is ready for your review'}
           </h2>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-600">
             <GradeChip grade={grade} synthesizedFloor={job.gradeSidecarJson?.synthesized_floor} reason={job.gradeSidecarJson?.synthesized_floor_reason} />
@@ -76,9 +83,15 @@ export function PhysicianLetterReadyPanel({
           <Button type="button" variant="secondary" disabled={!onEditText} title={onEditText ? undefined : 'Coming soon'} onClick={onEditText}>
             Edit text
           </Button>
-          <Button type="button" variant="primary" onClick={onOpenSignOff}>
-            Approve and sign
-          </Button>
+          {onSendToDoctor ? (
+            <Button type="button" variant="primary" loading={sending ?? false} disabled={sending ?? false} onClick={onSendToDoctor}>
+              Send to doctor for review
+            </Button>
+          ) : onOpenSignOff ? (
+            <Button type="button" variant="primary" onClick={onOpenSignOff}>
+              Approve and sign
+            </Button>
+          ) : null}
         </div>
       </div>
 

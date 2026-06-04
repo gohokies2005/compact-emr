@@ -187,7 +187,7 @@ describe('POST /internal/drafter/jobs/:id/complete — late-artifact recovery', 
     expect(tx.activityLog.create).not.toHaveBeenCalled();
   });
 
-  it('completes a non-terminal running job normally (200, bumps case version, ship → physician_review)', async () => {
+  it('completes a non-terminal running job normally (200, bumps case version, ship → rn_review, NOT auto-routed to the doctor)', async () => {
     const { db, job, caseRow: cr } = makeDb(jobRow({ state: 'running' }), caseRow());
     const caseVersionBefore = cr.version;
 
@@ -199,7 +199,9 @@ describe('POST /internal/drafter/jobs/:id/complete — late-artifact recovery', 
     expect(res.body.recovered).toBeUndefined();
     expect(job.state).toBe('done');
     expect(cr.version).toBe(caseVersionBefore + 1);
-    expect(cr.status).toBe('physician_review');
+    // A completed draft now waits in rn_review for the RN to send it to the doctor — even when the
+    // grader says "ship". No auto-route to physician_review. (Ryan 2026-06-04.)
+    expect(cr.status).toBe('rn_review');
   });
 
   it('returns 404 for an unknown job', async () => {

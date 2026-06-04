@@ -1,6 +1,6 @@
 export type YesNoUnknown = 'yes' | 'no' | 'unknown';
 export type ClaimType = 'initial' | 'supplemental' | 'hlr' | 'appeal_bva';
-export type CaseStatus = 'intake' | 'records' | 'viability' | 'drafting' | 'physician_review' | 'correction_requested' | 'correction_review' | 'delivered' | 'paid' | 'rejected';
+export type CaseStatus = 'intake' | 'records' | 'viability' | 'drafting' | 'rn_review' | 'physician_review' | 'correction_requested' | 'correction_review' | 'delivered' | 'paid' | 'rejected';
 export type CdsVerdict = 'accept' | 'caution' | 'reject' | 'not_yet_run';
 export type DraftJobState = 'queued' | 'running' | 'done' | 'failed';
 export type CorrectionReason = 'veteran_added_info' | 'physician_caught_error' | 'ops_caught_error' | 'va_examiner_feedback' | 'other';

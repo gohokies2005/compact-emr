@@ -107,10 +107,25 @@ export function CaseDetailPage() {
       ),
   });
 
+  // Send to doctor for review: rn_review -> physician_review. Completed drafts no longer auto-route
+  // to the doctor — the RN reviews/edits, then explicitly sends. (Ryan 2026-06-04.)
+  const sendToDoctor = useMutation({
+    mutationFn: () => {
+      const cur = caseQuery.data?.data;
+      if (!cur) throw new Error('Case not loaded');
+      return transitionCaseStatus(caseId, { from: 'rn_review', to: 'physician_review', version: cur.version });
+    },
+    onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
+    onError: (e: unknown) => window.alert(e instanceof ConflictError ? 'This case changed — reload and try sending again.' : `Could not send to the doctor — ${describeApiError(e)}.`),
+  });
+
   if (caseQuery.isLoading) return <AppShell><div className="text-sm text-slate-500">Loading case…</div></AppShell>;
   if (!caseQuery.data) return <AppShell><EmptyState title="Case not found" message="The requested case could not be loaded." /></AppShell>;
   const c = caseQuery.data.data;
-  const nextStatuses = allowedNextStatusesForRole(role, c.status);
+  // From rn_review, "Send to doctor for review" (in the RN review panel) is the path to
+  // physician_review — drop the redundant generic "Move to physician review" header button.
+  const nextStatuses = allowedNextStatusesForRole(role, c.status)
+    .filter((to) => !(c.status === 'rn_review' && to === 'physician_review'));
   // CDS retired from the workflow (Ryan 2026-06-03): it no longer gates sign-off. A stale
   // cdsVerdict='reject' must NOT hide the sign-off button (the CDS panel is gone, so there'd be no
   // explanation and no way to recover — an RN/physician dead-end). (architect MF-2)
@@ -199,14 +214,25 @@ export function CaseDetailPage() {
       const canSendFirstDraft =
         (role === 'admin' || role === 'ops_staff') && !inFlightDraft && !hasCompletedDraft;
 
+      // Physician's view — any case the RN has sent (status physician_review). The RN's explicit
+      // send IS the gate now, so we no longer require ship/runComplete here (the RN may send a
+      // letter the grader flagged 'revise' after improving it). (Ryan 2026-06-04.)
       const canSeePhysicianReadyPanel =
-        c.runComplete === true &&
-        c.shipRecommendation === 'ship' &&
         c.status === 'physician_review' &&
         (role === 'admin' || role === 'physician');
 
+      // RN's view of a completed draft awaiting send (status rn_review): same grade + top-3 +
+      // view/edit as the physician panel, but the primary action is "Send to doctor for review".
+      const canSeeRnReviewPanel =
+        c.status === 'rn_review' &&
+        (role === 'admin' || role === 'ops_staff');
+
+      // Held panel is for a draft still in 'drafting' that failed / came back non-ready (re-run +
+      // send-back). Completed drafts now live in rn_review (handled above), so scope this to
+      // drafting only to avoid a double panel.
       const canSeeOpsHeldPanel =
         (role === 'admin' || role === 'ops_staff') &&
+        c.status === 'drafting' &&
         (c.runComplete === false ||
           c.shipRecommendation === 'revise' ||
           (c.operatorState !== undefined &&
@@ -237,6 +263,21 @@ export function CaseDetailPage() {
                   refetch(),
                   qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }),
                 ]);
+              }}
+            />
+          ) : null}
+
+          {!inFlightDraft && canSeeRnReviewPanel && latestDraftJob ? (
+            <PhysicianLetterReadyPanel
+              c={c}
+              job={latestDraftJob}
+              canSendBack={false}
+              onOpenPdf={openLetterPdf}
+              onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
+              onSendToDoctor={() => { if (window.confirm('Send this letter to the doctor for review? It will move to the physician queue.')) sendToDoctor.mutate(); }}
+              sending={sendToDoctor.isPending}
+              onChanged={async () => {
+                await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]);
               }}
             />
           ) : null}

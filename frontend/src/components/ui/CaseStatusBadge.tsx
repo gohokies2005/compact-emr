@@ -8,6 +8,7 @@ const STATUS_CLASSES: Record<CaseStatus, string> = {
   records: 'bg-amber-100 text-amber-700',
   viability: 'bg-blue-100 text-blue-700',
   drafting: 'bg-purple-100 text-purple-700',
+  rn_review: 'bg-indigo-100 text-indigo-700',
   physician_review: 'bg-pink-100 text-pink-700',
   correction_requested: 'bg-orange-100 text-orange-700',
   correction_review: 'bg-fuchsia-100 text-fuchsia-700',

@@ -9,6 +9,7 @@ export type CaseStatus =
   | 'records'
   | 'viability'
   | 'drafting'
+  | 'rn_review'
   | 'physician_review'
   | 'correction_requested'
   | 'correction_review'

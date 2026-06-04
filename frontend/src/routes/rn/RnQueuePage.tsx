@@ -1,13 +1,16 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
+import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { ConflictError } from '../../api/client';
 import {
   acknowledgeKeyDoc,
+  listCases,
   listFilesPendingManualGlobal,
   listKeyDocsNeedingReview,
   postManualSummary,
@@ -176,7 +179,67 @@ function KeyDocReviewQueue() {
   );
 }
 
-type QueueTab = 'manual_summary' | 'doc_review';
+// Post-sign-off release queue. After the physician approves, the case becomes `delivered` and the
+// DeliveryPanel (invoice email + Stripe link + optional cover memo + final-letter upload) appears
+// on the case page. This tab is the missing LIST so an RN can see every case awaiting release in
+// one place rather than hunting case-by-case. (Ryan 2026-06-04: "a nurse cue ... for final
+// invoice, upload and release.") Clicking a row opens the case where the release actions live.
+function DeliveryReleaseQueue() {
+  const queueQuery = useQuery({
+    queryKey: ['rn', 'release-queue'],
+    queryFn: () => listCases({ status: 'delivered', page: 1, pageSize: 50 }),
+  });
+  const rows = queueQuery.data?.data ?? [];
+
+  if (queueQuery.isLoading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-slate-500">
+        <Spinner /> Loading release queue
+      </div>
+    );
+  }
+  if (rows.length === 0) {
+    return <EmptyState title="Nothing to release" message="No signed-off cases are waiting for invoice + release. Cases appear here once the physician approves the letter." />;
+  }
+  return (
+    <Card className="p-0">
+      <div className="border-b border-slate-200 p-4 text-sm text-slate-600">
+        <p className="font-medium text-slate-800">Signed off — ready to invoice + release.</p>
+        <p className="mt-1 text-xs text-slate-500">Open a case to send the invoice email + Stripe link, attach the cover memo, and release the final letter.</p>
+      </div>
+      <div className="overflow-hidden">
+        <table className="min-w-full divide-y divide-slate-200 text-sm">
+          <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+            <tr>
+              <th className="px-4 py-2">Case</th>
+              <th className="px-4 py-2">Veteran</th>
+              <th className="px-4 py-2">Condition</th>
+              <th className="px-4 py-2">Status</th>
+              <th className="px-4 py-2">Signed off</th>
+              <th className="px-4 py-2" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {rows.map((c) => (
+              <tr key={c.id}>
+                <td className="px-4 py-2 font-medium text-slate-900">{c.id}</td>
+                <td className="px-4 py-2 text-slate-700">{c.veteran ? `${c.veteran.lastName}, ${c.veteran.firstName}` : c.veteranId}</td>
+                <td className="px-4 py-2 text-slate-700">{c.claimedCondition}</td>
+                <td className="px-4 py-2"><CaseStatusBadge status={c.status} /></td>
+                <td className="px-4 py-2 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
+                <td className="px-4 py-2 text-right">
+                  <Link className="text-indigo-600 hover:underline" to={`/cases/${encodeURIComponent(c.id)}`}>Invoice + release</Link>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+type QueueTab = 'manual_summary' | 'doc_review' | 'release';
 
 export function RnQueuePage() {
   const [tab, setTab] = useState<QueueTab>('manual_summary');
@@ -208,7 +271,7 @@ export function RnQueuePage() {
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">RN queue</h1>
           <p className="mt-1 text-sm text-slate-500">
-            Two streams of work waiting on RN attention. Pick a tab; both run independently.
+            Streams of work waiting on RN attention. Pick a tab; each runs independently.
           </p>
         </div>
 
@@ -227,10 +290,21 @@ export function RnQueuePage() {
           >
             Doc selection review
           </button>
+          <button
+            type="button"
+            onClick={() => setTab('release')}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === 'release' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+          >
+            Invoice + release
+          </button>
         </div>
 
         {tab === 'doc_review' ? (
           <KeyDocReviewQueue />
+        ) : null}
+
+        {tab === 'release' ? (
+          <DeliveryReleaseQueue />
         ) : null}
 
         {tab === 'manual_summary' ? (

@@ -69,6 +69,11 @@ export interface DraftGradeSidecarJson {
   readonly targeted_revision_hints?: readonly TargetedRevisionHint[];
   readonly template_gate_findings?: readonly TemplateGateFinding[];
   readonly detail_phase?: string | null;
+  // True when the displayed grade is a synthesized FLOOR (grader crash / early halt produced no
+  // real probative grade) — UI renders "grade unavailable", never a silent C. Producer = the
+  // drafter worker (cross-window); dormant in the EMR until the worker emits it. 2026-06-03.
+  readonly synthesized_floor?: boolean | null;
+  readonly synthesized_floor_reason?: string | null;
 }
 
 export interface DraftManifestPhase {

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
+import { GradeChip } from './ui/GradeChip';
 import { postDraft } from '../api/drafter';
 import { transitionCaseStatus, type CaseDetail } from '../api/cases';
 import { ConflictError } from '../api/client';
@@ -19,6 +20,8 @@ interface ManifestSnapshot {
 
 interface GradeSidecarJson {
   readonly detail_phase?: string | null;
+  readonly synthesized_floor?: boolean | null;
+  readonly synthesized_floor_reason?: string | null;
 }
 
 export interface OpsDraftJob extends DraftJob {
@@ -121,7 +124,7 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
             variant="secondary"
             loading={rerunMutation.isPending}
             disabled={rerunMutation.isPending}
-            onClick={() => rerunMutation.mutate()}
+            onClick={() => { if (window.confirm('Re-run the drafter? This creates a new letter version and costs another drafting run. Re-run only if a prior run is genuinely unusable.')) rerunMutation.mutate(); }}
           >
             Re-run drafter
           </Button>
@@ -151,7 +154,7 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
       {detailsOpen ? (
         <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
           <div className="grid gap-2 text-sm text-slate-700 sm:grid-cols-3">
-            <div>Grade: {c.grade ?? 'Not graded'}</div>
+            <div><GradeChip grade={c.grade} synthesizedFloor={job?.gradeSidecarJson?.synthesized_floor} reason={job?.gradeSidecarJson?.synthesized_floor_reason} /></div>
             <div>Ship recommendation: {c.shipRecommendation ?? 'Unknown'}</div>
             <div>Operator state: {c.operatorState ?? 'Unknown'}</div>
           </div>

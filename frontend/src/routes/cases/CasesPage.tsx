@@ -7,9 +7,11 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { formatRelativeTime } from '../../lib/date';
-import { listCases } from '../../api/cases';
+import { listCases, type CaseLite } from '../../api/cases';
 import { listVeterans } from '../../api/veterans';
 import type { CaseStatus, ClaimType } from '../../types/prisma';
+import { useColumnSort, type ColType } from '../../lib/useColumnSort';
+import { exportRowsToCsv } from '../../lib/csv';
 
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -21,6 +23,23 @@ const CLAIM_TYPE_LABELS: Record<ClaimType, string> = { initial: 'Initial', suppl
 const STATUS_OPTIONS = Object.entries(CASE_STATUS_LABELS) as [CaseStatus, string][];
 const CLAIM_TYPE_OPTIONS = Object.entries(CLAIM_TYPE_LABELS) as [ClaimType, string][];
 const PAGE_SIZES = [25, 50, 100];
+const CASE_COLUMNS: readonly { readonly key: string; readonly label: string }[] = [
+  { key: 'id', label: 'Case' }, { key: 'veteran', label: 'Veteran' }, { key: 'condition', label: 'Condition' },
+  { key: 'type', label: 'Type' }, { key: 'status', label: 'Status' }, { key: 'updated', label: 'Updated' }, { key: 'version', label: 'v' },
+];
+const caseSortType = (key: string): ColType => (key === 'updated' ? 'date' : key === 'version' ? 'number' : 'text');
+const caseSortValue = (key: string) => (c: CaseLite): unknown => {
+  switch (key) {
+    case 'id': return c.id;
+    case 'veteran': return c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId;
+    case 'condition': return c.claimedCondition;
+    case 'type': return CLAIM_TYPE_LABELS[c.claimType];
+    case 'status': return CASE_STATUS_LABELS[c.status];
+    case 'updated': return c.updatedAt;
+    case 'version': return c.version;
+    default: return '';
+  }
+};
 
 export function CasesPage() {
   const [status, setStatus] = useState<CaseStatus | ''>('');
@@ -55,9 +74,25 @@ export function CasesPage() {
   const total = cases.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
+  const { onHeaderClick, sortRows, ariaSort, indicator } = useColumnSort();
+  const pageRows = cases.data?.data ?? [];
+  const rows = sortRows(pageRows, caseSortValue, caseSortType);
+  const pageTruncated = total > pageRows.length;
+  function exportCsv() {
+    // Cases is server-paginated, so this exports the CURRENT page only (after filters + sort).
+    if (pageTruncated) console.warn(`cases CSV export: current page only (${pageRows.length} of ${total}); backend full-export is a follow-up.`);
+    const headers = ['Case ID', 'Veteran', 'Condition', 'Type', 'Status', 'Updated', 'Version'];
+    const matrix = rows.map((c) => [
+      c.id, c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId, c.claimedCondition,
+      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.updatedAt, c.version,
+    ]);
+    exportRowsToCsv(`cases-export-${new Date().toISOString().slice(0, 10)}.csv`, headers, matrix);
+  }
+
   return <AppShell><div className="space-y-6">
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div><h1 className="text-2xl font-semibold text-slate-900">Cases</h1><p className="text-sm text-slate-500">Browse and filter claims across all veterans.</p></div>
+      <Button variant="secondary" onClick={exportCsv} disabled={rows.length === 0}>Export to Excel</Button>
     </div>
 
     <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
@@ -81,9 +116,13 @@ export function CasesPage() {
 
     <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
       <table className="min-w-full divide-y divide-slate-200 text-sm">
-        <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Case</th><th className="px-4 py-3">Veteran</th><th className="px-4 py-3">Condition</th><th className="px-4 py-3">Type</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Updated</th><th className="px-4 py-3">v</th></tr></thead>
+        <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr>
+          {CASE_COLUMNS.map((col) => <th key={col.key} className="px-4 py-3" aria-sort={ariaSort(col.key)}>
+            <button type="button" className="flex items-center gap-1 uppercase tracking-wide hover:text-slate-700" onClick={() => onHeaderClick(col.key)}>{col.label}{indicator(col.key)}</button>
+          </th>)}
+        </tr></thead>
         <tbody className="divide-y divide-slate-100">
-          {cases.data?.data.map((c) => <tr key={c.id} className="hover:bg-slate-50">
+          {rows.map((c) => <tr key={c.id} className="hover:bg-slate-50">
             <td className="px-4 py-3 font-medium"><Link className="text-indigo-600" to={`/cases/${encodeURIComponent(c.id)}`}>{c.id}</Link></td>
             <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</Link></td>
             <td className="px-4 py-3 text-slate-700">{c.claimedCondition}</td>
@@ -99,7 +138,7 @@ export function CasesPage() {
     </div>
 
     <div className="flex flex-col items-center justify-between gap-3 text-sm text-slate-600 sm:flex-row">
-      <div>{total} case{total === 1 ? '' : 's'} · page {page} of {totalPages}</div>
+      <div>{total} case{total === 1 ? '' : 's'} · page {page} of {totalPages}{pageTruncated ? ' · export covers this page only' : ''}</div>
       <div className="flex items-center gap-2">
         <label className="flex items-center gap-2">Per page<select className="input w-auto" value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>{PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
         <Button variant="secondary" size="sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Previous</Button>

@@ -119,7 +119,8 @@ describe('OpsHeldPanel', () => {
     ).toBeInTheDocument();
   });
 
-  it('calls postDraft when re-running the drafter', async () => {
+  it('calls postDraft when re-running the drafter (after confirm)', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     renderPanel();
 
     fireEvent.click(screen.getByRole('button', { name: 'Re-run drafter' }));
@@ -127,6 +128,17 @@ describe('OpsHeldPanel', () => {
     await waitFor(() => {
       expect(postDraftMock).toHaveBeenCalledWith('CASE-2');
     });
+    confirmSpy.mockRestore();
+  });
+
+  it('does NOT re-run when the confirm is dismissed (redraft-pileup guard)', () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderPanel();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Re-run drafter' }));
+
+    expect(postDraftMock).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 
   it('shows details from the manifest summary', () => {

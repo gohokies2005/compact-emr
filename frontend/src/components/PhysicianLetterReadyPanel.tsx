@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
+import { GradeChip } from './ui/GradeChip';
 import { SendBackToRnModal } from './SendBackToRnModal';
 import type { CaseDetail } from '../api/cases';
 import type { DraftJob, TargetedRevisionHint, TemplateGateFinding, DraftGradeSidecarJson } from '../types/prisma';
@@ -18,13 +19,6 @@ interface PhysicianLetterReadyPanelProps {
   readonly onEditText?: () => void;
   readonly onOpenSignOff: () => void;
   readonly onChanged: () => void | Promise<void>;
-}
-
-function gradeClassName(grade: string | null | undefined): string {
-  if (!grade) return 'bg-slate-100 text-slate-700';
-  if (grade.startsWith('A')) return 'bg-emerald-100 text-emerald-800';
-  if (grade === 'B+' || grade === 'B') return 'bg-blue-100 text-blue-800';
-  return 'bg-slate-100 text-slate-700';
 }
 
 function truncate(value: string, max = 120): string {
@@ -79,9 +73,7 @@ export function PhysicianLetterReadyPanel({
             Letter is ready for your review
           </h2>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-600">
-            <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${gradeClassName(grade)}`}>
-              Grade: {grade ?? 'Not graded'}
-            </span>
+            <GradeChip grade={grade} synthesizedFloor={job.gradeSidecarJson?.synthesized_floor} reason={job.gradeSidecarJson?.synthesized_floor_reason} />
             <span>
               Probative score: {typeof score === 'number' ? `${score}/10` : 'Not scored'}
             </span>

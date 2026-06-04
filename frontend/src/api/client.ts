@@ -89,6 +89,26 @@ apiClient.interceptors.response.use((response) => response, async (error: AxiosE
   throw error;
 });
 
+// Human-readable description of a caught API error for surfacing to the operator. The recurring
+// FRN failure mode (Ryan: "every catch must surface the real reason") is an opaque "could not do
+// X" alert that hides the server's own reason, forcing hours of log forensics — and HttpErrors
+// aren't logged server-side, so the alert is often the ONLY place the reason ever appears. This
+// pulls the HTTP status + the server's error.message (or the axios network message) so the
+// operator — and the next debugging session — see WHY, not just THAT.
+export function describeApiError(error: unknown): string {
+  if (error instanceof ForbiddenError) return 'not permitted for your role (403)';
+  if (error instanceof ServiceUnavailableError) return 'not available in this environment (503)';
+  if (error instanceof ConflictError) return 'the case changed or a job is already running (409)';
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status;
+    const serverMsg = (error.response?.data as { error?: { message?: string } } | undefined)?.error?.message;
+    if (status === undefined) return `could not reach the server (${error.message || 'network error'})`;
+    return serverMsg ? `server returned ${status}: ${serverMsg}` : `server returned ${status}`;
+  }
+  if (error instanceof Error && error.message) return error.message;
+  return 'unknown error';
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const response = await apiClient.get<T>(path);
   return response.data;

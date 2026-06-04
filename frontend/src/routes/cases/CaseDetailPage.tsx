@@ -18,7 +18,7 @@ import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { getArtifactPdfUrl, postDraft } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
 import { useAuth } from '../../auth/useAuth';
-import { ConflictError } from '../../api/client';
+import { ConflictError, describeApiError } from '../../api/client';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone } from '../../lib/format';
@@ -94,7 +94,16 @@ export function CaseDetailPage() {
   const redraft = useMutation({
     mutationFn: () => postDraft(caseId),
     onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
-    onError: (e: unknown) => window.alert(e instanceof ConflictError ? 'A drafter run is already in flight for this case.' : 'Could not start a redraft — the case may not be in a redraftable state. Please retry or flag to Dr. Ryan.'),
+    // Surface the REAL reason (status + server message), never a canned guess — the redraft
+    // endpoint's HttpErrors aren't logged server-side, so this alert is the only place the reason
+    // appears. A 409 honestly covers both "already in flight" and "chart not ready yet" (we don't
+    // claim a specific one). Everything else shows the server's own message. (Ryan: error-proof.)
+    onError: (e: unknown) =>
+      window.alert(
+        e instanceof ConflictError
+          ? 'Cannot redraft right now — a drafter run may already be in flight, or the chart is not ready yet. Reload the case and check its status.'
+          : `Could not start a redraft — ${describeApiError(e)}. Please retry or flag to Dr. Ryan.`,
+      ),
   });
 
   if (caseQuery.isLoading) return <AppShell><div className="text-sm text-slate-500">Loading case…</div></AppShell>;

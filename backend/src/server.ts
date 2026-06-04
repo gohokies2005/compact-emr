@@ -18,6 +18,7 @@ import { createDoctorPackRouter } from './routes/doctor-pack.js';
 import { createReportsRouter } from './routes/reports.js';
 import { createInternalWorkerRouter } from './routes/internal-worker.js';
 import { createJotformWebhookRouter } from './routes/jotform-webhook.js';
+import { createIntakesRouter } from './routes/intakes.js';
 import { createDrafterClientRouter, createDrafterWorkerRouter } from './routes/drafter.js';
 import { createLetterRouter } from './routes/letter.js';
 import { createDeliveryRouter } from './routes/delivery.js';
@@ -104,6 +105,8 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createClarificationsRouter(db));
   app.use('/api/v1', authenticateJwt(), createViabilityRouter(db));
   app.use('/api/v1', authenticateJwt(), createChartReadinessRouter(db));
+  // Jotform intake pool (triage). Signed previews need S3; assign endpoint ships in a later batch.
+  app.use('/api/v1', authenticateJwt(), createIntakesRouter(db, { s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) as unknown as { send: (cmd: unknown) => Promise<unknown> }, bucketName: process.env.PHI_BUCKET_NAME }));
   app.use('/api/v1', authenticateJwt(), createDoctorPackRouter(db));
   // Admin-only drafting-cost report (per-claim LLM spend aggregated from DraftJob.costUsd).
   app.use('/api/v1', authenticateJwt(), createReportsRouter(db));

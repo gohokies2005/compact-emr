@@ -639,5 +639,47 @@ export function createInternalWorkerRouter(db: AppDb): Router {
     }),
   );
 
+  // PATCH /internal/intakes/:id — the jotform-ingest worker reports completion. On success it sets
+  // status=ready + the parsed fields + the file manifest (the worker is the sole writer of these,
+  // per spec §2/P1-6). On failure it sets status=failed + errorMessage (surfaced to the RN with a
+  // Retry button — never a silent drop). Only a 'pending' intake may transition. (Service principal.)
+  router.patch(
+    '/internal/intakes/:id',
+    asyncHandler(async (req: Request, res: Response) => {
+      const id = String(req.params.id);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const status = body['status'];
+      if (status !== 'ready' && status !== 'failed') {
+        throw new HttpError(400, 'bad_request', "status must be 'ready' or 'failed'", { field: 'status' });
+      }
+      const existing = await db.intake.findUnique({ where: { id } });
+      if (existing === null) throw new HttpError(404, 'not_found', 'Intake not found', { intakeId: id });
+
+      if (status === 'failed') {
+        const errorMessage = typeof body['errorMessage'] === 'string' ? (body['errorMessage'] as string).slice(0, 2000) : 'ingest failed';
+        const updated = await db.intake.update({ where: { id }, data: { status: 'failed', errorMessage } });
+        res.json({ data: updated });
+        return;
+      }
+
+      // status === 'ready' — accept the parsed fields + file manifest the worker fetched by ID.
+      const data: Record<string, unknown> = { status: 'ready', errorMessage: null };
+      const strOrUndef = (k: string): string | undefined => (typeof body[k] === 'string' && (body[k] as string).length > 0 ? (body[k] as string) : undefined);
+      const name = strOrUndef('submittedName'); if (name !== undefined) data['submittedName'] = name;
+      const email = strOrUndef('submittedEmail'); if (email !== undefined) data['submittedEmail'] = email;
+      const phone = strOrUndef('submittedPhone'); if (phone !== undefined) data['submittedPhone'] = phone;
+      const state = strOrUndef('submittedState'); if (state !== undefined) data['submittedState'] = (state as string).slice(0, 2).toUpperCase();
+      const condition = strOrUndef('submittedCondition'); if (condition !== undefined) data['submittedCondition'] = condition;
+      if (Array.isArray(body['fileManifest'])) data['fileManifestJson'] = body['fileManifest'];
+      if (body['rawAnswers'] !== undefined && body['rawAnswers'] !== null) data['rawAnswersJson'] = body['rawAnswers'];
+      if (typeof body['submittedAt'] === 'string') {
+        const d = new Date(body['submittedAt'] as string);
+        if (!Number.isNaN(d.getTime())) data['submittedAt'] = d;
+      }
+      const updated = await db.intake.update({ where: { id }, data });
+      res.json({ data: updated });
+    }),
+  );
+
   return router;
 }

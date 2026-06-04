@@ -19,7 +19,7 @@ import {
 } from '../services/drafter-bundle.js';
 import { isDrafterArtifactS3Key } from '../services/s3-key-safety.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 let cachedS3Client: S3Client | null = null;
@@ -556,18 +556,32 @@ export function createDrafterClientRouter(db: AppDb): Router {
       if (job === null || job.caseId !== caseId) {
         throw new HttpError(404, 'not_found', 'DraftJob not found for this case', { caseId, jobId });
       }
-      if (job.artifactPdfS3Key === null || job.artifactPdfS3Key === '') {
-        throw new HttpError(409, 'conflict', 'DraftJob has no PDF artifact yet', { caseId, jobId });
-      }
-      // Defensive: re-validate the stored key matches the safe pattern. The /complete
-      // route already validated on write, but a corrupted row shouldn't be used to sign
-      // an arbitrary URL.
-      if (!isDrafterArtifactS3Key(job.artifactPdfS3Key)) {
-        throw new HttpError(500, 'internal_error', 'Stored artifactPdfS3Key fails safety check', { caseId, jobId });
+      // Resolve the PDF key: prefer the stored artifactPdfS3Key, but FALL BACK to the canonical
+      // drafter-artifacts path derived from the job version. The stored key can be null when the
+      // stuck-job watcher flips a long (>~10min) run to 'failed' before /complete merges the keys,
+      // yet the rendered PDF still exists in S3 at the deterministic path. Deriving from version
+      // makes "View letter" work for the RN every time a run produced a letter, independent of the
+      // nullable column. caseId is the validated job.caseId; the final key is re-validated below;
+      // HeadObject confirms the object exists so a true early-fail (no PDF) returns a clean 404.
+      // (2026-06-04 — Ryan: the letter must be viewable in the EMR every time, no manual pulls.)
+      const artifactPrefix = (process.env['DRAFTER_ARTIFACTS_S3_PREFIX'] || 'drafter-artifacts/').replace(/^\/+/, '');
+      const pdfKey =
+        typeof job.artifactPdfS3Key === 'string' && job.artifactPdfS3Key.length > 0
+          ? job.artifactPdfS3Key
+          : `${artifactPrefix}${caseId}/v${job.version}/v${job.version}.pdf`;
+      if (!isDrafterArtifactS3Key(pdfKey)) {
+        throw new HttpError(500, 'internal_error', 'Resolved artifactPdfS3Key fails safety check', { caseId, jobId });
       }
 
       const s3 = getS3ForArtifacts();
-      const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: job.artifactPdfS3Key }), {
+      // Confirm the object exists before signing — a derived key for a job that never rendered
+      // should 404 cleanly, not hand back a URL that resolves to S3 NoSuchKey XML.
+      try {
+        await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: pdfKey }));
+      } catch {
+        throw new HttpError(404, 'not_found', 'No letter PDF exists for this draft yet', { caseId, jobId });
+      }
+      const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: pdfKey }), {
         expiresIn: ARTIFACT_PDF_TTL_SECONDS,
       });
       const expiresAt = new Date(Date.now() + ARTIFACT_PDF_TTL_SECONDS * 1000).toISOString();

@@ -95,6 +95,27 @@ export function CaseDetailPage() {
   // explanation and no way to recover — an RN/physician dead-end). (architect MF-2)
   const canShowSignOff =
     c.status === 'physician_review' && (role === 'admin' || role === 'physician');
+
+  // The newest draft-job that produced (or should have produced) a letter PDF. draftJobs is
+  // version-desc, so the first terminal-or-keyed job is the latest letter. Terminal (done OR a
+  // watcher-flipped 'failed' that still rendered) is included because artifactPdfS3Key can be null
+  // after the stuck-watcher race — the backend derives the key from version + HEAD-checks it. This
+  // is what makes "View letter" reliably available in the EMR, no manual pulls (2026-06-04).
+  const viewableLetterJob = (c.draftJobs ?? []).find((job) => {
+    const j = job as InFlightDraftJob;
+    const hasKey = typeof j.artifactPdfS3Key === 'string' && (j.artifactPdfS3Key as string).length > 0;
+    return hasKey || j.state === 'done' || j.state === 'failed';
+  }) as InFlightDraftJob | undefined;
+  async function openLetterPdf() {
+    if (!viewableLetterJob) return;
+    try {
+      const { data } = await getArtifactPdfUrl(c.id, viewableLetterJob.id);
+      window.open(data.url, '_blank', 'noopener,noreferrer');
+    } catch {
+      window.alert('Could not open the letter PDF. If it keeps failing, flag this case to Dr. Ryan.');
+    }
+  }
+
   const tabsWithBadge = TABS.map((t) =>
     t.id === 'clarifications' && openClarificationCount > 0
       ? { ...t, label: `Clarifications (${openClarificationCount})` }
@@ -112,6 +133,7 @@ export function CaseDetailPage() {
           <p className="mt-1 text-xs text-slate-400">Updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
         </div>
         <div className="flex flex-wrap items-start gap-2">
+          {viewableLetterJob ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}
           {canShowSignOff ? <Button variant="primary" size="sm" onClick={() => setSignOffOpen(true)}>Sign off</Button> : null}
           {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>Move to {CASE_STATUS_LABELS[to].toLowerCase()}</Button>)}
           {role === 'admin' ? <Button variant="destructive" size="sm" onClick={() => { if (window.confirm('Reject and soft-delete this case? It will be marked rejected.')) del.mutate(); }} loading={del.isPending}>Reject + soft delete</Button> : null}
@@ -127,16 +149,6 @@ export function CaseDetailPage() {
       const latestDraftJob = c.draftJobs?.[0] as InFlightDraftJob | undefined;
       const inFlightDraft =
         latestDraftJob?.state === 'queued' || latestDraftJob?.state === 'running';
-
-      // The newest job that actually produced a letter PDF. draftJobs is version-desc, so the
-      // first with an artifact key is the latest viewable letter. Used so a held/revise letter
-      // (or a hollow "done" latest job with no artifact) can still be opened from the chart.
-      // (2026-06-03 — Ryan "could not see the letter drafted anywhere in the chart".)
-      const viewableLetterJob = (c.draftJobs ?? []).find(
-        (job) =>
-          typeof (job as InFlightDraftJob).artifactPdfS3Key === 'string' &&
-          ((job as InFlightDraftJob).artifactPdfS3Key as string).length > 0,
-      ) as InFlightDraftJob | undefined;
 
       // Gap 1: first-draft trigger. RN/admin can kick off the drafter when no run is in
       // flight and none has completed yet. Chart-readiness is enforced inside the panel.
@@ -159,18 +171,6 @@ export function CaseDetailPage() {
             c.operatorState !== 'ready' &&
             c.operatorState !== 'ready_with_notes'));
 
-      const handleOpenPdf = async () => {
-        // Prefer the newest job that actually has a PDF; fall back to the latest job.
-        const target = viewableLetterJob ?? latestDraftJob;
-        if (!target) return;
-        try {
-          const { data } = await getArtifactPdfUrl(c.id, target.id);
-          window.open(data.url, '_blank', 'noopener,noreferrer');
-        } catch {
-          window.alert('Could not open the PDF. Please try again — if it keeps failing, flag this case to Dr. Ryan.');
-        }
-      };
-
       return (
         <>
           {inFlightDraft && latestDraftJob ? (
@@ -184,7 +184,7 @@ export function CaseDetailPage() {
               c={c}
               job={latestDraftJob}
               canSendBack={role === 'admin' || role === 'physician'}
-              onOpenPdf={handleOpenPdf}
+              onOpenPdf={openLetterPdf}
               onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
               onOpenSignOff={() => setSignOffOpen(true)}
               // GPT chunk 2: invalidate both queries on case-changing mutations so the
@@ -206,7 +206,7 @@ export function CaseDetailPage() {
               {...(latestDraftJob ? { job: latestDraftJob } : {})}
               isAdmin={role === 'admin'}
               hasLetter={!!viewableLetterJob}
-              onViewLetter={handleOpenPdf}
+              onViewLetter={openLetterPdf}
             />
           ) : null}
         </>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
@@ -47,6 +47,7 @@ export function LetterEditorPage() {
   const [declineOpen, setDeclineOpen] = useState(false);
   const [declineReason, setDeclineReason] = useState('');
   const [message, setMessage] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   const letterQuery = useQuery({
     queryKey: ['case', caseId, 'letter'],
@@ -135,6 +136,7 @@ export function LetterEditorPage() {
         qc.invalidateQueries({ queryKey: ['case', caseId] }),
         qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] }),
       ]);
+      navigate('/p/queue'); // back to the physician queue after approving (Ryan 2026-06-04)
     },
     onError: (error: unknown) => setMessage(error instanceof ServiceUnavailableError ? 'Letter render is not available in this environment.' : 'Letter could not be approved (a sign-off + a ready chart are required). Please retry.'),
   });
@@ -191,13 +193,13 @@ export function LetterEditorPage() {
         <WarningList warnings={warnings} />
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <LetterEditor txt={txt} lockedRanges={letter.locked_ranges} mode={canOpsEdit ? 'editable' : 'readonly'} zoom={zoom} onChange={setTxt} />
+          <LetterEditor txt={txt} lockedRanges={letter.locked_ranges} mode={canOpsEdit || canPhysicianAct ? 'editable' : 'readonly'} zoom={zoom} onChange={setTxt} />
 
           <aside className="space-y-4">
-            {canOpsEdit ? (
+            {canOpsEdit || canPhysicianAct ? (
               <Card className="p-6">
                 <h2 className="text-base font-semibold text-slate-900">Editing</h2>
-                <p className="mt-1 text-sm text-slate-600">Save creates a new letter version.</p>
+                <p className="mt-1 text-sm text-slate-600">Type directly in the letter (locked regions are greyed). Save creates a new version.</p>
                 <Button type="button" variant="primary" className="mt-4 w-full" loading={saveMutation.isPending} disabled={saveMutation.isPending} onClick={() => saveMutation.mutate()}>Save new version</Button>
               </Card>
             ) : null}

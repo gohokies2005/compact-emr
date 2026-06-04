@@ -19,6 +19,7 @@ import { createReportsRouter } from './routes/reports.js';
 import { createInternalWorkerRouter } from './routes/internal-worker.js';
 import { createDrafterClientRouter, createDrafterWorkerRouter } from './routes/drafter.js';
 import { createLetterRouter } from './routes/letter.js';
+import { createDeliveryRouter } from './routes/delivery.js';
 import { makeRenderInvoker } from './services/letter-render-invoke.js';
 import { makeSurgicalProposerFromEnv } from './services/letter-surgical-propose.js';
 import { createPhysiciansRouter } from './routes/physicians.js';
@@ -112,6 +113,12 @@ export function createApp(options: CreateAppOptions = {}) {
       ? makeRenderInvoker(renderLambdaName)
       : async () => { throw new HttpError(503, 'internal_error', 'Letter render is not configured in this environment.', { reason: 'render_unavailable' }); },
     ...(surgicalAiAvailable ? { proposeSurgicalEdit: makeSurgicalProposerFromEnv() } : {}),
+    s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
+    bucketName: process.env.PHI_BUCKET_NAME,
+  }));
+  // Post-approval delivery workflow (RN delivery panel). Reads the finalized letter TXT from S3 for
+  // the §VII+§VIII excerpt; Stripe + email transport are config-gated stubs (see delivery-config).
+  app.use('/api/v1', authenticateJwt(), createDeliveryRouter(db, {
     s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
     bucketName: process.env.PHI_BUCKET_NAME,
   }));

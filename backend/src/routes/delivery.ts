@@ -1,0 +1,275 @@
+import { Router, type Request, type Response } from 'express';
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { asyncHandler } from '../http/async-handler.js';
+import { HttpError } from '../http/errors.js';
+import { requireRole } from '../auth/roles.js';
+import { currentActor } from '../services/request-actor.js';
+import { parseCredentialBlock, KASKY_CREDENTIALS } from '../services/credential-block.js';
+import { buildOpinionExcerpt } from '../services/letter-opinion-excerpt.js';
+import {
+  buildDeliveryEmail,
+  buildCoverMemoText,
+  DELIVERY_FROM_ADDRESS,
+  DELIVERY_EMAIL_SUBJECT,
+  type CoverMemoPathway,
+} from '../services/delivery-templates.js';
+import {
+  isStripeConfigured,
+  buildStripeLink,
+  isEmailTransportConfigured,
+  coverMemoRequirement,
+} from '../services/delivery-config.js';
+import type { AppDb } from '../services/db-types.js';
+
+/**
+ * Post-approval DELIVERY workflow (cloud). Shown once the physician approves (POST
+ * /cases/:id/letter/approve sets status='delivered'). The RN verifies the letter + memo, confirms,
+ * then sends the ONE fixed delivery email from info@ with the §VII+§VIII excerpt and the Stripe
+ * link. Both external sends (Stripe + email) are STUBBED here: the route composes + persists and
+ * reports whether each is configured, so the operator drops in secrets later with no code change.
+ *
+ * Idempotency: POST /send re-uses an existing outbound delivery Email + letter_500 Payment for the
+ * case rather than duplicating (a double-click or retry is safe). Additive — touches only the
+ * already-existing Email/Payment tables and never mutates the approve/sign/draft flows.
+ */
+
+const PRESIGN_TTL_SECONDS = 300;
+const LETTER_500_CENTS = 50000;
+// The delivery panel only applies once the letter is finalized.
+const DELIVERY_STATUSES: ReadonlySet<string> = new Set(['delivered', 'paid']);
+
+export interface DeliveryRouterDeps {
+  s3?: S3Client;
+  bucketName?: string;
+}
+
+interface CurrentLetter {
+  version: number;
+  txtKey: string;
+  pdfKey: string | null;
+}
+
+export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): Router {
+  const router = Router();
+  const s3 = (): S3Client => deps.s3 ?? new S3Client({});
+  const bucket = (): string | undefined => deps.bucketName ?? process.env.PHI_BUCKET_NAME;
+
+  // Resolve the current letter's artifacts strictly by Case.currentVersion (single source of
+  // truth) — same resolution the letter editor uses. Prefer the LetterRevision row; fall back to
+  // the DraftJob row for drafted-but-pre-mirror cases.
+  async function resolveCurrent(caseId: string, currentVersion: number): Promise<CurrentLetter | null> {
+    if (!Number.isInteger(currentVersion) || currentVersion < 1) return null;
+    const rev = await db.letterRevision.findFirst({ where: { caseId, version: currentVersion } });
+    if (rev !== null) return { version: rev.version, txtKey: rev.artifactTxtS3Key, pdfKey: rev.artifactPdfS3Key };
+    const job = await db.draftJob.findFirst({ where: { caseId, version: currentVersion } });
+    if (job !== null && typeof job.artifactTxtS3Key === 'string') {
+      return { version: job.version, txtKey: job.artifactTxtS3Key, pdfKey: job.artifactPdfS3Key };
+    }
+    return null;
+  }
+
+  async function readTxtFromS3(bucketName: string, key: string): Promise<string> {
+    const obj = await s3().send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
+    if (obj.Body === undefined) {
+      throw new HttpError(502, 'internal_error', 'Letter TXT object had no body.', { reason: 'read_failed', key });
+    }
+    return obj.Body.transformToString('utf-8');
+  }
+
+  // Compose the full delivery preview for a case: excerpt + email body + memo (when applicable) +
+  // configured flags + Stripe link + any already-saved delivery email/payment. Shared by GET and
+  // POST so the two never diverge.
+  async function composeDelivery(caseId: string): Promise<{
+    version: number;
+    excerpt: ReturnType<typeof buildOpinionExcerpt>;
+    email: { subject: string; fromAddress: string; body: string };
+    memo: { applies: boolean; pathway: CoverMemoPathway | null; reason: string; text: string | null };
+    stripe: { configured: boolean; link: string | null };
+    emailTransport: { configured: boolean };
+    savedEmail: { id: string; subject: string; body: string; sentAt: Date } | null;
+    savedPayment: { id: string; kind: string; amountCents: number; status: string } | null;
+    status: string;
+  }> {
+    const c = await db.case.findFirst({ where: { id: caseId } });
+    if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+    if (!DELIVERY_STATUSES.has(c.status)) {
+      throw new HttpError(409, 'conflict', `Delivery is available only after the letter is finalized (status delivered/paid). Current status: '${c.status}'.`, { reason: 'not_deliverable', caseId, status: c.status });
+    }
+
+    const bucketName = bucket();
+    if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
+    const cur = await resolveCurrent(caseId, c.currentVersion);
+    if (cur === null) throw new HttpError(409, 'conflict', 'No finalized letter to deliver.', { reason: 'no_letter', caseId });
+
+    const txt = await readTxtFromS3(bucketName, cur.txtKey);
+    const excerpt = buildOpinionExcerpt(txt);
+
+    const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
+    const vFirst = (veteran as { firstName?: string } | null)?.firstName ?? null;
+    const vLast = (veteran as { lastName?: string } | null)?.lastName ?? '';
+
+    const stripeConfigured = isStripeConfigured();
+    const stripeLink = buildStripeLink(caseId);
+    const email = buildDeliveryEmail({ veteranFirstName: vFirst, excerptBlock: excerpt.block, stripeLink });
+
+    // Cover-memo predicate (mirror of local FRN single source). When it applies, build the TEXT
+    // using the ASSIGNED physician's credential block (D2); fall back to Kasky only if no assigned
+    // physician credential is on file (so a memo preview still renders rather than dead-ending).
+    const req = coverMemoRequirement({
+      claimType: c.claimType,
+      previouslyDenied: c.previouslyDenied,
+      priorDenialReason: c.priorDenialReason,
+    });
+    let memoText: string | null = null;
+    if (req.required && req.pathway !== null) {
+      let signer = KASKY_CREDENTIALS;
+      if (c.assignedPhysicianId !== null) {
+        const phys = await db.physician.findFirst({ where: { id: c.assignedPhysicianId } });
+        const creds = phys ? parseCredentialBlock(phys.credentialBlockJson) : null;
+        if (creds !== null) signer = creds;
+      }
+      memoText = buildCoverMemoText({
+        pathway: req.pathway,
+        veteranFullName: `${vFirst ?? ''} ${vLast}`.trim(),
+        veteranLastName: vLast,
+        claimedCondition: c.claimedCondition,
+        priorDecisionDate: c.priorDecisionDate ? c.priorDecisionDate.toISOString().slice(0, 10) : null,
+        signer,
+      });
+    }
+
+    // Existing saved delivery artifacts (idempotency surface). The delivery email is the outbound
+    // email from info@ with our fixed subject; the payment is the letter_500 row.
+    const savedEmailRow = await db.email.findFirst({
+      where: { caseId, direction: 'outbound', fromAddress: DELIVERY_FROM_ADDRESS, subject: DELIVERY_EMAIL_SUBJECT },
+      orderBy: { createdAt: 'desc' },
+    });
+    const savedPaymentRow = await db.payment.findFirst({
+      where: { caseId, kind: 'letter_500' },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return {
+      version: cur.version,
+      excerpt,
+      email,
+      memo: { applies: req.required, pathway: req.pathway, reason: req.reason, text: memoText },
+      stripe: { configured: stripeConfigured, link: stripeLink },
+      emailTransport: { configured: isEmailTransportConfigured() },
+      savedEmail: savedEmailRow ? { id: savedEmailRow.id, subject: savedEmailRow.subject, body: savedEmailRow.body, sentAt: savedEmailRow.sentAt } : null,
+      savedPayment: savedPaymentRow ? { id: savedPaymentRow.id, kind: savedPaymentRow.kind, amountCents: savedPaymentRow.amountCents, status: savedPaymentRow.status } : null,
+      status: c.status,
+    };
+  }
+
+  // ── GET — delivery preview (RN delivery panel data source) ────────────────
+  router.get(
+    '/cases/:id/delivery',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const out = await composeDelivery(caseId);
+      res.json({ data: out });
+    }),
+  );
+
+  // ── POST — RN confirm + send (stubbed external sends) ─────────────────────
+  // Body: { emailBody?: string } — the RN-edited email body (falls back to the composed body).
+  // Persists an outbound Email row (from info@) + a letter_500 Payment row, both idempotent.
+  router.post(
+    '/cases/:id/delivery/send',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      const body = (req.body ?? {}) as { emailBody?: unknown };
+
+      const out = await composeDelivery(caseId);
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
+      const toAddress = (veteran as { email?: string } | null)?.email ?? '';
+
+      const emailBody = typeof body.emailBody === 'string' && body.emailBody.trim() !== ''
+        ? body.emailBody
+        : out.email.body;
+
+      const emailTransportConfigured = out.emailTransport.configured;
+      const stripeConfigured = out.stripe.configured;
+
+      // Idempotent: re-use the existing delivery email/payment if present (double-click / retry).
+      let emailId = out.savedEmail?.id ?? null;
+      let paymentId = out.savedPayment?.id ?? null;
+
+      await db.$transaction(async (tx) => {
+        if (emailId === null) {
+          // STUB: we never actually transmit in this build. We persist the composed email marked
+          // outbound from info@ so it is ready-to-send the moment a transport is configured.
+          const created = await tx.email.create({
+            data: {
+              caseId,
+              direction: 'outbound',
+              subject: DELIVERY_EMAIL_SUBJECT,
+              body: emailBody,
+              fromAddress: DELIVERY_FROM_ADDRESS,
+              toAddress,
+              // sentAt records WHEN it was composed/queued. With no transport this is the queue
+              // time, not a real send — the email is "ready-to-send", reflected by the response
+              // flag below. (NOT NULL column, so we always set it.)
+              sentAt: new Date(),
+            },
+          });
+          emailId = created.id;
+        }
+        if (paymentId === null) {
+          // STUB: no Stripe charge is created. We record the invoice intent as a pending
+          // letter_500 Payment so the ledger reflects "invoice sent". Status flips to settled when
+          // payment is reconciled (manual delivered→paid transition, admin-only, already allowed).
+          const created = await tx.payment.create({
+            data: {
+              caseId,
+              kind: 'letter_500',
+              amountCents: LETTER_500_CENTS,
+              status: 'invoiced',
+              stripeChargeId: null,
+            },
+          });
+          paymentId = created.id;
+        }
+        await tx.activityLog.create({
+          data: {
+            actorUserId: user.sub,
+            action: 'delivery_sent',
+            caseId,
+            veteranId: c.veteranId,
+            detailsJson: {
+              emailId,
+              paymentId,
+              emailTransportConfigured,
+              stripeConfigured,
+              stubbed: !emailTransportConfigured,
+            },
+          },
+        });
+      });
+
+      res.json({
+        data: {
+          emailId,
+          paymentId,
+          // The case stays 'delivered' (invoice sent); reconciliation to 'paid' is the admin-only
+          // delivered→paid transition that already exists. We do NOT invent a new status.
+          status: c.status,
+          emailTransportConfigured,
+          stripeConfigured,
+          emailSent: emailTransportConfigured,
+          message: emailTransportConfigured
+            ? 'Delivery email sent and invoice recorded.'
+            : 'Stubbed — composed and saved. Add an email transport (and Stripe key) and this will send.',
+        },
+      });
+    }),
+  );
+
+  return router;
+}

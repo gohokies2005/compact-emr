@@ -7,7 +7,7 @@ export type CorrectionReason = 'veteran_added_info' | 'physician_caught_error' |
 export type BillingTier = 'free_first' | 'free_our_fault' | 'paid_50';
 export type PhysicianActivity = 'letter_review' | 'correction_review';
 export type EmailDirection = 'inbound' | 'outbound';
-export type PaymentKind = 'review_50' | 'letter_350' | 'refund' | 'correction_fee';
+export type PaymentKind = 'review_50' | 'letter_350' | 'letter_500' | 'refund' | 'correction_fee';
 export type Role = 'admin' | 'physician' | 'ops_staff';
 
 export interface VersionedRecord { readonly updatedAt: string; readonly version: number; }

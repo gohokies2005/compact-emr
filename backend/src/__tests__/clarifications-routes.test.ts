@@ -23,6 +23,7 @@ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
   const now = new Date('2026-05-25T00:00:00.000Z');
   return {
     id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'OSA', claimedConditions: ['OSA'], claimType: 'initial',
+    previouslyDenied: false, priorDenialReason: null, priorDecisionDate: null,
     framingChoice: 'secondary', upstreamScCondition: 'PTSD', veteranStatement: null, inServiceEvent: null,
     status: 'records', cdsVerdict: 'not_yet_run', cdsOddsPct: null, cdsRationale: null,
     assignedPhysicianId: null, assignedRnId: null, refundEligible: false, currentVersion: 0,

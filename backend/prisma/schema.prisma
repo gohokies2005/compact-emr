@@ -93,6 +93,7 @@ enum EmailDirection {
 enum PaymentKind {
   review_50
   letter_350
+  letter_500
   refund
   correction_fee
 
@@ -306,6 +307,15 @@ model Case {
   // claimedConditions is the complete set CDS scores (verdict follows the best-odds member).
   claimedConditions   String[]   @default([]) @map("claimed_conditions")
   claimType           ClaimType  @map("claim_type")
+  // Prior-denial signals for the delivery cover-memo predicate (coverMemoRequirement mirror).
+  // A claimType of supplemental/hlr/appeal_bva ALONE implies a prior denial, but the local FRN
+  // HARD RULE (feedback_supplemental_appeals_need_cover_letter) is that a denial signal — not the
+  // intake dropdown alone — promotes a case to "needs a cover memo." These two additive fields
+  // carry that signal explicitly so an `initial` case that is really an appeal still generates the
+  // memo. Both optional/defaulted → existing rows unaffected.
+  previouslyDenied    Boolean    @default(false) @map("previously_denied")
+  priorDenialReason   String?    @map("prior_denial_reason")
+  priorDecisionDate   DateTime?  @map("prior_decision_date") @db.Date
   framingChoice       String?    @map("framing_choice")
   upstreamScCondition String?    @map("upstream_sc_condition")
   veteranStatement    String?    @map("veteran_statement")

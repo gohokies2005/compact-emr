@@ -161,6 +161,49 @@ export interface CaseMessageDelegate {
   updateMany(args: unknown): Promise<{ count: number }>;
 }
 
+// ── Delivery workflow: Email + Payment (additive) ───────────────────────────────────────────────
+// The Prisma models already exist (emails / payments tables). These hand-written delegates expose
+// the minimal surface the delivery route needs (find existing rows for idempotency + create).
+export interface EmailRecord {
+  id: string;
+  caseId: string;
+  direction: 'inbound' | 'outbound';
+  subject: string;
+  body: string;
+  fromAddress: string;
+  toAddress: string;
+  sentAt: Date;
+  gmailMessageId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface EmailDelegate {
+  findFirst(args: unknown): Promise<EmailRecord | null>;
+  findMany(args: unknown): Promise<readonly EmailRecord[]>;
+  create(args: unknown): Promise<EmailRecord>;
+}
+
+export interface PaymentRecord {
+  id: string;
+  caseId: string;
+  kind: 'review_50' | 'letter_350' | 'letter_500' | 'refund' | 'correction_fee';
+  amountCents: number;
+  stripeChargeId: string | null;
+  status: string;
+  settledAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+  version: number;
+}
+
+export interface PaymentDelegate {
+  findFirst(args: unknown): Promise<PaymentRecord | null>;
+  findMany(args: unknown): Promise<readonly PaymentRecord[]>;
+  create(args: unknown): Promise<PaymentRecord>;
+}
+
 export interface AppDbTransaction {
   veteran: VeteranDelegate;
   activityLog: ActivityLogDelegate;
@@ -179,6 +222,8 @@ export interface AppDbTransaction {
   documentPage: DocumentPageDelegate;
   letterRevision: LetterRevisionDelegate;
   caseMessage: CaseMessageDelegate;
+  email: EmailDelegate;
+  payment: PaymentDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -203,6 +248,10 @@ export interface CaseRecord {
   // `claimedCondition` (singular) remains the PRIMARY (RN's first pick) for display/back-compat.
   claimedConditions: readonly string[];
   claimType: ClaimType;
+  // Prior-denial signals (additive, delivery workflow) — drive the cover-memo predicate.
+  previouslyDenied: boolean;
+  priorDenialReason: string | null;
+  priorDecisionDate: Date | null;
   framingChoice: string | null;
   upstreamScCondition: string | null;
   veteranStatement: string | null;

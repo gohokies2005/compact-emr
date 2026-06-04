@@ -11,6 +11,7 @@ import { ClarificationsPanel } from '../../components/ClarificationsPanel';
 import { InFlightDrafterPanel, type InFlightDraftJob } from '../../components/InFlightDrafterPanel';
 import { SendToDrafterPanel } from '../../components/SendToDrafterPanel';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
+import { DeliveryPanel } from '../../components/DeliveryPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
@@ -230,6 +231,11 @@ export function CaseDetailPage() {
         </>
       );
     })()}
+
+    {/* Post-approval RN delivery panel — invoice email + cover memo + Stripe link. Stubbed sends. */}
+    {(c.status === 'delivered' || c.status === 'paid') && (role === 'admin' || role === 'ops_staff') ? (
+      <DeliveryPanel caseId={caseId} onVerifyLetter={openLetterPdf} hasLetterPdf={!!viewableLetterJob} />
+    ) : null}
 
     <div className="rounded-lg border border-slate-200 bg-white">
       <TabBar tabs={tabsWithBadge} active={tab} onChange={setTab} />

@@ -1,13 +1,26 @@
 import { Router, type Request, type Response } from 'express';
-import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { randomUUID } from 'node:crypto';
+import { GetObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import type { AppDb } from '../services/db-types.js';
 import { publishJotformIngest } from '../services/jotform-ingest-queue.js';
+import { parseVeteranCreate } from '../services/veteran-validation.js';
+import { parseCaseCreate } from '../services/case-validation.js';
 
 const PREVIEW_TTL_SECONDS = 300;
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+// Mirror the manual-upload allow-list (documents.ts). Jotform files can be HEIC/ZIP/etc — those are
+// flagged per-file on assign, never copied into a case as an un-OCR-able Document. (Spec P1-3.)
+const ASSIGN_ALLOWED_CONTENT_TYPES = new Set([
+  'application/pdf', 'image/jpeg', 'image/png', 'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]);
+function sanitizeFilename(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200) || 'file';
+}
 
 interface IntakesRouterDeps {
   readonly s3?: { send: (cmd: unknown) => Promise<unknown> };
@@ -75,6 +88,116 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     await db.intake.update({ where: { id: r.id }, data: { status: 'pending', errorMessage: null, retryCount: (r.retryCount ?? 0) + 1 } });
     await publishJotformIngest({ intakeId: r.id, formId: r.jotformFormId, submissionId: r.jotformSubmissionId }).catch(() => { /* stays pending for a later re-enqueue */ });
     res.json({ data: { ok: true } });
+  }));
+
+  // POST /intakes/:id/assign — the data-plane-sensitive operation. Resolve/create the veteran +
+  // case in ONE transaction (no S3 inside a DB tx), THEN per file: create the Document row FIRST
+  // and CopyObject into cases/<caseId>/ SECOND — so the S3 ObjectCreated event → ocr-start resolves
+  // the row by s3-key (a 404 there is a permanent skip). On copy failure, delete the orphan row.
+  // Set the intake 'assigned' only if ≥1 file actually attached. (Spec §6 + architect P0-1/P1-3/P1-4.)
+  router.post('/intakes/:id/assign', requireRole(['admin', 'ops_staff']), asyncHandler(async (req: Request, res: Response) => {
+    if (deps.s3 === undefined || deps.bucketName === undefined || deps.bucketName.length === 0) {
+      throw new HttpError(503, 'internal_error', 'Document storage is not configured.', { reason: 'no_bucket' });
+    }
+    const intakeId = String(req.params.id);
+    const intake = await db.intake.findUnique({ where: { id: intakeId } });
+    if (intake === null) throw new HttpError(404, 'not_found', 'Intake not found.', { intakeId });
+    const intakeRow = intake as { id: string; status: string; fileManifestJson?: unknown };
+    if (intakeRow.status !== 'ready') {
+      throw new HttpError(409, 'conflict', `Intake is '${intakeRow.status}', not ready to assign.`, { intakeId, status: intakeRow.status });
+    }
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const actor = (req as { user?: { sub?: string } }).user?.sub ?? 'unknown';
+
+    // 1) Resolve/create veteran + case in ONE transaction (veteran.create / case.create are typed on
+    // the tx). No S3 here — S3 ops can't join a DB transaction.
+    const { veteranId, caseId } = await db.$transaction(async (tx) => {
+      let vId: string;
+      if (typeof body['veteranId'] === 'string' && (body['veteranId'] as string).length > 0) {
+        const v = await tx.veteran.findUnique({ where: { id: body['veteranId'] as string } });
+        if (v === null) throw new HttpError(404, 'not_found', 'Veteran not found.', { veteranId: body['veteranId'] });
+        vId = body['veteranId'] as string;
+      } else if (body['newVeteran'] !== undefined && body['newVeteran'] !== null) {
+        const data = parseVeteranCreate(body['newVeteran']); // validates id (MRN-) + firstName + lastName + dob + email
+        const created = await tx.veteran.create({ data: data as never });
+        vId = (created as { id: string }).id;
+      } else {
+        throw new HttpError(400, 'bad_request', 'Provide veteranId (existing) or newVeteran (create).');
+      }
+
+      let cId: string;
+      if (typeof body['caseId'] === 'string' && (body['caseId'] as string).length > 0) {
+        const c = await tx.case.findFirst({ where: { id: body['caseId'] as string, veteranId: vId } });
+        if (c === null) throw new HttpError(404, 'not_found', 'Case not found for this veteran.', { caseId: body['caseId'], veteranId: vId });
+        cId = body['caseId'] as string;
+      } else if (body['newCase'] !== undefined && body['newCase'] !== null) {
+        const parsed = parseCaseCreate(body['newCase']);
+        const created = await tx.case.create({ data: { ...parsed, veteranId: vId } as never });
+        cId = (created as { id: string }).id;
+      } else {
+        throw new HttpError(400, 'bad_request', 'Provide caseId (existing) or newCase (create).');
+      }
+      return { veteranId: vId, caseId: cId };
+    });
+
+    // 2) Per-file: row FIRST, then CopyObject. `document` is not on AppDb — cast (as drafter-bundle does).
+    const docDb = db as unknown as {
+      document: { create: (a: { data: Record<string, unknown> }) => Promise<{ id: string }>; delete: (a: { where: { id: string } }) => Promise<unknown> };
+    };
+    const s3 = deps.s3 as { send: (cmd: unknown) => Promise<unknown> };
+    const rawManifest = intakeRow.fileManifestJson;
+    const manifest: ManifestFile[] = Array.isArray(rawManifest) ? (rawManifest as ManifestFile[]) : [];
+    const requested: Set<string> | null = Array.isArray(body['fileS3Keys']) ? new Set((body['fileS3Keys'] as string[])) : null;
+
+    const attached: { name?: string; s3Key: string }[] = [];
+    const failed: { name?: string; reason: string }[] = [];
+
+    for (const f of manifest) {
+      if (typeof f?.s3Key !== 'string') continue;
+      if (requested !== null && !requested.has(f.s3Key)) continue;
+      const contentType = typeof f.contentType === 'string' ? f.contentType : '';
+      if (!ASSIGN_ALLOWED_CONTENT_TYPES.has(contentType)) {
+        failed.push({ name: f.name, reason: `unsupported content-type: ${contentType || 'unknown'}` });
+        continue;
+      }
+      const sizeBytes = typeof f.sizeBytes === 'number' ? Math.round(f.sizeBytes) : 0;
+      if (sizeBytes <= 0 || sizeBytes > MAX_UPLOAD_BYTES) {
+        failed.push({ name: f.name, reason: 'file is empty or larger than 50 MB' });
+        continue;
+      }
+      const finalKey = `cases/${caseId}/${randomUUID()}-${sanitizeFilename(f.name ?? 'file')}`;
+      // ROW FIRST — so ocr-start (fired by the CopyObject's S3 event) can resolve the Document by key.
+      let docId: string;
+      try {
+        const doc = await docDb.document.create({
+          data: { caseId, filename: f.name ?? 'file', sizeBytes: BigInt(sizeBytes), contentType, s3Key: finalKey, uploadedBy: actor },
+        });
+        docId = doc.id;
+      } catch (err) {
+        failed.push({ name: f.name, reason: `could not create document row: ${err instanceof Error ? err.message : String(err)}` });
+        continue;
+      }
+      // THEN copy intake/<id>/<file> → cases/<caseId>/<uuid>-<file>.
+      try {
+        await s3.send(new CopyObjectCommand({ Bucket: deps.bucketName, CopySource: `${deps.bucketName}/${f.s3Key}`, Key: finalKey, MetadataDirective: 'COPY' }));
+        attached.push({ name: f.name, s3Key: finalKey });
+      } catch (err) {
+        // Delete the orphan row so OCR/the drafter bundle never see a Document with no S3 object.
+        await docDb.document.delete({ where: { id: docId } }).catch(() => { /* best-effort */ });
+        failed.push({ name: f.name, reason: `copy failed: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+
+    // 3) Mark assigned only if at least one file actually landed (else it stays 'ready' with reasons).
+    if (attached.length > 0) {
+      await db.intake.update({
+        where: { id: intakeId },
+        data: { status: 'assigned', assignedVeteranId: veteranId, assignedCaseId: caseId, assignedAt: new Date(), assignedBy: actor },
+      });
+    }
+
+    res.json({ data: { veteranId, caseId, assigned: attached.length > 0, attached, failed } });
   }));
 
   return router;

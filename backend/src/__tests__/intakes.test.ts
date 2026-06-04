@@ -47,3 +47,79 @@ describe('intakes pool API', () => {
     expect(update).toHaveBeenCalledWith({ where: { id: 'i1' }, data: { status: 'pending', errorMessage: null, retryCount: 3 } });
   });
 });
+
+// ───────────────────────── ASSIGN (data-plane-sensitive) ─────────────────────────
+
+function assignApp(db: unknown, s3send: (cmd: unknown) => Promise<unknown>) {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => { (req as { user?: unknown }).user = { sub: 'rn-1', email: 'rn@e.com', roles: ['ops_staff'] }; next(); });
+  app.use('/api/v1', createIntakesRouter(db as never, { s3: { send: s3send } as never, bucketName: 'phi-bucket' }));
+  return app;
+}
+
+function readyIntake(manifest: unknown[]) {
+  return { id: 'i1', status: 'ready', fileManifestJson: manifest };
+}
+function txWithExisting() {
+  // existing veteran VET-1 + existing case CLM-1
+  return async (fn: (tx: unknown) => unknown) => fn({
+    veteran: { findUnique: async () => ({ id: 'VET-1' }), create: async () => ({ id: 'VET-NEW' }) },
+    case: { findFirst: async () => ({ id: 'CLM-1', veteranId: 'VET-1' }), create: async () => ({ id: 'CLM-NEW' }) },
+  });
+}
+
+describe('intakes assign', () => {
+  it('attaches an allowed file (row-first then copy) and skips an unsupported one; marks assigned', async () => {
+    const docCreate = vi.fn(async () => ({ id: 'doc-1' }));
+    const docDelete = vi.fn(async () => ({}));
+    const intakeUpdate = vi.fn(async () => ({}));
+    const copy = vi.fn(async () => ({}));
+    const db = {
+      intake: { findUnique: async () => readyIntake([
+        { name: 'rec.pdf', s3Key: 'intake/i1/rec.pdf', contentType: 'application/pdf', sizeBytes: 1000 },
+        { name: 'photo.heic', s3Key: 'intake/i1/photo.heic', contentType: 'image/heic', sizeBytes: 1000 },
+      ]), update: intakeUpdate },
+      $transaction: txWithExisting(),
+      document: { create: docCreate, delete: docDelete },
+    };
+    const res = await request(assignApp(db, copy)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    expect(res.body.data.assigned).toBe(true);
+    expect(res.body.data.attached).toHaveLength(1);
+    expect(res.body.data.failed).toHaveLength(1); // the .heic
+    expect(res.body.data.failed[0].reason).toContain('unsupported content-type');
+    expect(docCreate).toHaveBeenCalledTimes(1); // only the pdf
+    expect(copy).toHaveBeenCalledTimes(1);
+    expect(intakeUpdate).toHaveBeenCalled();
+    // row created BEFORE copy
+    expect(docCreate.mock.invocationCallOrder[0]).toBeLessThan(copy.mock.invocationCallOrder[0]);
+  });
+
+  it('deletes the orphan Document row when the S3 copy fails', async () => {
+    const docCreate = vi.fn(async () => ({ id: 'doc-1' }));
+    const docDelete = vi.fn(async () => ({}));
+    const intakeUpdate = vi.fn(async () => ({}));
+    const copy = vi.fn(async () => { throw new Error('AccessDenied'); });
+    const db = {
+      intake: { findUnique: async () => readyIntake([{ name: 'rec.pdf', s3Key: 'intake/i1/rec.pdf', contentType: 'application/pdf', sizeBytes: 1000 }]), update: intakeUpdate },
+      $transaction: txWithExisting(),
+      document: { create: docCreate, delete: docDelete },
+    };
+    const res = await request(assignApp(db, copy)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    expect(res.body.data.assigned).toBe(false);
+    expect(res.body.data.attached).toHaveLength(0);
+    expect(res.body.data.failed[0].reason).toContain('copy failed');
+    expect(docDelete).toHaveBeenCalledWith({ where: { id: 'doc-1' } });
+    expect(intakeUpdate).not.toHaveBeenCalled(); // nothing attached → not marked assigned
+  });
+
+  it('409s when the intake is not ready', async () => {
+    const db = { intake: { findUnique: async () => ({ id: 'i1', status: 'pending' }) }, $transaction: txWithExisting(), document: { create: vi.fn(), delete: vi.fn() } };
+    await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(409);
+  });
+
+  it('400s when neither veteranId nor newVeteran is provided', async () => {
+    const db = { intake: { findUnique: async () => readyIntake([]) }, $transaction: txWithExisting(), document: { create: vi.fn(), delete: vi.fn() } };
+    await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ caseId: 'CLM-1' }).expect(400);
+  });
+});

@@ -35,7 +35,10 @@ export interface DeliverySavedEmail {
   readonly id: string;
   readonly subject: string;
   readonly body: string;
-  readonly sentAt: string;
+  // null until a real transmit happens (a composed/queued stub email has no sentAt).
+  readonly sentAt: string | null;
+  // 'queued' = composed, not yet transmitted; 'sent' = actually transmitted.
+  readonly status: string;
 }
 
 export interface DeliverySavedPayment {
@@ -63,7 +66,10 @@ export interface DeliverySendResult {
   readonly status: string;
   readonly emailTransportConfigured: boolean;
   readonly stripeConfigured: boolean;
+  // false in this build (no transport code) — the email is composed/queued, not transmitted.
   readonly emailSent: boolean;
+  // 'queued' = composed, not transmitted (the only state reachable in this build); 'sent' = real send.
+  readonly emailStatus: string;
   readonly message: string;
 }
 

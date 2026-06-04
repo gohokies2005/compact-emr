@@ -15,7 +15,7 @@ import { DeliveryPanel } from '../../components/DeliveryPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
-import { getArtifactPdfUrl } from '../../api/drafter';
+import { getArtifactPdfUrl, postDraft } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
 import { useAuth } from '../../auth/useAuth';
 import { ConflictError } from '../../api/client';
@@ -87,6 +87,15 @@ export function CaseDetailPage() {
 
   const del = useMutation({ mutationFn: () => deleteCase(caseId), onSuccess: () => refetch() });
 
+  // Redraft (re-run the drafter). Available to admin/ops_staff post-draft so a physician_review
+  // letter can be re-run (the OpsHeldPanel 'Re-run' only shows for held/revise). Guarded by a
+  // confirm + the backend's in-flight 409. (Ryan 2026-06-04: "lost the ability to redraft".)
+  const redraft = useMutation({
+    mutationFn: () => postDraft(caseId),
+    onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
+    onError: (e: unknown) => window.alert(e instanceof ConflictError ? 'A drafter run is already in flight for this case.' : 'Could not start a redraft — the case may not be in a redraftable state. Please retry or flag to Dr. Ryan.'),
+  });
+
   if (caseQuery.isLoading) return <AppShell><div className="text-sm text-slate-500">Loading case…</div></AppShell>;
   if (!caseQuery.data) return <AppShell><EmptyState title="Case not found" message="The requested case could not be loaded." /></AppShell>;
   const c = caseQuery.data.data;
@@ -96,6 +105,9 @@ export function CaseDetailPage() {
   // explanation and no way to recover — an RN/physician dead-end). (architect MF-2)
   const canShowSignOff =
     c.status === 'physician_review' && (role === 'admin' || role === 'physician');
+  const draftInFlight = (c.draftJobs?.[0] as InFlightDraftJob | undefined)?.state === 'queued'
+    || (c.draftJobs?.[0] as InFlightDraftJob | undefined)?.state === 'running';
+  const canRedraft = (role === 'admin' || role === 'ops_staff') && (c.draftJobs ?? []).length > 0 && !draftInFlight;
 
   // The newest draft-job that produced (or should have produced) a letter PDF. draftJobs is
   // version-desc, so the first terminal-or-keyed job is the latest letter. Terminal (done OR a
@@ -153,6 +165,7 @@ export function CaseDetailPage() {
         </div>
         <div className="flex flex-wrap items-start gap-2">
           {viewableLetterJob ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}
+          {canRedraft ? <Button variant="secondary" size="sm" loading={redraft.isPending} disabled={redraft.isPending} onClick={() => { if (window.confirm('Re-run the drafter? This creates a NEW letter version and costs another drafting run. Redraft only if the current letter is unusable.')) redraft.mutate(); }}>Redraft</Button> : null}
           {canShowSignOff ? <Button variant="primary" size="sm" onClick={() => setSignOffOpen(true)}>Sign off</Button> : null}
           {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>Move to {CASE_STATUS_LABELS[to].toLowerCase()}</Button>)}
           {role === 'admin' ? <Button variant="destructive" size="sm" onClick={() => { if (window.confirm('Reject and soft-delete this case? It will be marked rejected.')) del.mutate(); }} loading={del.isPending}>Reject + soft delete</Button> : null}

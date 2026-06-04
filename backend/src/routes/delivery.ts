@@ -86,7 +86,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
     memo: { applies: boolean; pathway: CoverMemoPathway | null; reason: string; text: string | null };
     stripe: { configured: boolean; link: string | null };
     emailTransport: { configured: boolean };
-    savedEmail: { id: string; subject: string; body: string; sentAt: Date } | null;
+    savedEmail: { id: string; subject: string; body: string; sentAt: Date | null; status: string } | null;
     savedPayment: { id: string; kind: string; amountCents: number; status: string } | null;
     status: string;
   }> {
@@ -156,7 +156,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       memo: { applies: req.required, pathway: req.pathway, reason: req.reason, text: memoText },
       stripe: { configured: stripeConfigured, link: stripeLink },
       emailTransport: { configured: isEmailTransportConfigured() },
-      savedEmail: savedEmailRow ? { id: savedEmailRow.id, subject: savedEmailRow.subject, body: savedEmailRow.body, sentAt: savedEmailRow.sentAt } : null,
+      savedEmail: savedEmailRow ? { id: savedEmailRow.id, subject: savedEmailRow.subject, body: savedEmailRow.body, sentAt: savedEmailRow.sentAt, status: savedEmailRow.status } : null,
       savedPayment: savedPaymentRow ? { id: savedPaymentRow.id, kind: savedPaymentRow.kind, amountCents: savedPaymentRow.amountCents, status: savedPaymentRow.status } : null,
       status: c.status,
     };
@@ -200,12 +200,23 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       // Idempotent: re-use the existing delivery email/payment if present (double-click / retry).
       let emailId = out.savedEmail?.id ?? null;
       let paymentId = out.savedPayment?.id ?? null;
+      let emailStatus = out.savedEmail?.status ?? null;
 
-      await db.$transaction(async (tx) => {
-        if (emailId === null) {
+      // Race-proof create-or-reuse. The pre-flight findFirst above is NOT atomic — two concurrent
+      // POSTs both see null and both try to insert. The partial unique indexes (migration
+      // 20260612000000: emails_case_id_delivery_uq / payments_case_id_letter_500_uq) make the
+      // loser's insert fail with Prisma P2002; we catch it and re-fetch the winner's row so a
+      // double-click / retry / concurrent request always converges on exactly ONE row. (Same idiom
+      // as drafter.ts:511, but here we RE-USE rather than reject — re-send is allowed + idempotent.)
+      const isP2002 = (e: unknown): boolean =>
+        typeof e === 'object' && e !== null && 'code' in e && (e as { code?: unknown }).code === 'P2002';
+
+      if (emailId === null) {
+        try {
           // STUB: we never actually transmit in this build. We persist the composed email marked
-          // outbound from info@ so it is ready-to-send the moment a transport is configured.
-          const created = await tx.email.create({
+          // outbound from info@, status 'queued' with NO sentAt — it is NOT "sent", just ready to
+          // send the moment a real transport is wired (which will set sentAt + status 'sent').
+          const created = await db.email.create({
             data: {
               caseId,
               direction: 'outbound',
@@ -213,19 +224,31 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
               body: emailBody,
               fromAddress: DELIVERY_FROM_ADDRESS,
               toAddress,
-              // sentAt records WHEN it was composed/queued. With no transport this is the queue
-              // time, not a real send — the email is "ready-to-send", reflected by the response
-              // flag below. (NOT NULL column, so we always set it.)
-              sentAt: new Date(),
+              // No transmit happened: leave sentAt NULL and mark the row 'queued'. sentAt + 'sent'
+              // are set ONLY by the future real-send wire-up, never by this stub.
+              sentAt: null,
+              status: 'queued',
             },
           });
           emailId = created.id;
+          emailStatus = created.status;
+        } catch (e) {
+          if (!isP2002(e)) throw e;
+          const existing = await db.email.findFirst({
+            where: { caseId, direction: 'outbound', fromAddress: DELIVERY_FROM_ADDRESS, subject: DELIVERY_EMAIL_SUBJECT },
+            orderBy: { createdAt: 'desc' },
+          });
+          if (existing === null) throw e; // index says it exists but we can't read it — surface the error
+          emailId = existing.id;
+          emailStatus = existing.status;
         }
-        if (paymentId === null) {
-          // STUB: no Stripe charge is created. We record the invoice intent as a pending
-          // letter_500 Payment so the ledger reflects "invoice sent". Status flips to settled when
-          // payment is reconciled (manual delivered→paid transition, admin-only, already allowed).
-          const created = await tx.payment.create({
+      }
+      if (paymentId === null) {
+        try {
+          // STUB: no Stripe charge is created. We record the invoice intent as a pending letter_500
+          // Payment so the ledger reflects "invoice sent". Status flips to settled when payment is
+          // reconciled (manual delivered→paid transition, admin-only, already allowed).
+          const created = await db.payment.create({
             data: {
               caseId,
               kind: 'letter_500',
@@ -235,37 +258,51 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
             },
           });
           paymentId = created.id;
+        } catch (e) {
+          if (!isP2002(e)) throw e;
+          const existing = await db.payment.findFirst({ where: { caseId, kind: 'letter_500' }, orderBy: { createdAt: 'desc' } });
+          if (existing === null) throw e;
+          paymentId = existing.id;
         }
-        await tx.activityLog.create({
-          data: {
-            actorUserId: user.sub,
-            action: 'delivery_sent',
-            caseId,
-            veteranId: c.veteranId,
-            detailsJson: {
-              emailId,
-              paymentId,
-              emailTransportConfigured,
-              stripeConfigured,
-              stubbed: !emailTransportConfigured,
-            },
+      }
+
+      await db.activityLog.create({
+        data: {
+          actorUserId: user.sub,
+          action: 'delivery_sent',
+          caseId,
+          veteranId: c.veteranId,
+          detailsJson: {
+            emailId,
+            paymentId,
+            emailTransportConfigured,
+            stripeConfigured,
+            // No real transmit in this build — record that this was a stub compose+queue.
+            stubbed: true,
+            emailStatus,
           },
-        });
+        },
       });
 
+      // In this build NO transport code exists, so an email is NEVER actually transmitted: report
+      // pending, never "sent". emailSent stays false until the real send wire-up sets sentAt.
+      const emailSent = false;
       res.json({
         data: {
           emailId,
           paymentId,
-          // The case stays 'delivered' (invoice sent); reconciliation to 'paid' is the admin-only
-          // delivered→paid transition that already exists. We do NOT invent a new status.
+          // The case stays 'delivered' (invoice composed); reconciliation to 'paid' is the
+          // admin-only delivered→paid transition that already exists. We do NOT invent a new status.
           status: c.status,
           emailTransportConfigured,
           stripeConfigured,
-          emailSent: emailTransportConfigured,
+          emailSent,
+          // Lifecycle of the delivery email: 'queued' = composed, not transmitted (the only state
+          // reachable in this build). The future real-send sets this to 'sent'.
+          emailStatus: emailStatus ?? 'queued',
           message: emailTransportConfigured
-            ? 'Delivery email sent and invoice recorded.'
-            : 'Stubbed — composed and saved. Add an email transport (and Stripe key) and this will send.',
+            ? 'Pending send — composed and saved. Email transport configured, but live sending is not wired in this build.'
+            : 'Pending send — composed and saved. Transport not configured; add an email transport (and Stripe key) and this will send.',
         },
       });
     }),

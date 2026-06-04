@@ -51,7 +51,10 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
   const memoApplies = data.memo.applies;
   const stripeConfigured = data.stripe.configured;
   const emailTransportConfigured = data.emailTransport.configured;
-  const alreadySent = data.savedEmail !== null;
+  // An existing delivery row is COMPOSED/QUEUED, not transmitted, until a real transport sets a
+  // sentAt. Never say "sent" unless the row actually reports it.
+  const alreadyComposed = data.savedEmail !== null;
+  const actuallySent = data.savedEmail?.status === 'sent' && data.savedEmail?.sentAt != null;
   // Send is allowed once both applicable confirms are checked. The memo confirm only gates when a
   // memo applies. Stripe/email NOT being configured does NOT block compose+save (stub-friendly).
   const confirmsMet = letterConfirmed && (!memoApplies || memoConfirmed);
@@ -132,10 +135,16 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
         </div>
       ) : null}
 
-      {alreadySent ? (
-        <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-          A delivery email and a $500 invoice are already recorded for this case. Sending again is safe (it will not duplicate).
-        </div>
+      {alreadyComposed ? (
+        actuallySent ? (
+          <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+            This delivery email has been sent and a $500 invoice is recorded for this case. Sending again is safe (it will not duplicate).
+          </div>
+        ) : (
+          <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
+            A delivery email is composed and a $500 invoice is recorded for this case — <strong>pending send</strong> (not yet transmitted; transport is not wired in this build). Confirming again is safe (it will not duplicate).
+          </div>
+        )
       ) : null}
 
       {sentMessage ? <p className="mt-3 text-sm text-emerald-700">{sentMessage}</p> : null}
@@ -152,7 +161,7 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
           loading={send.isPending}
           onClick={() => send.mutate()}
         >
-          {emailTransportConfigured ? 'Send from info@' : 'Compose + save (send when configured)'}
+          {emailTransportConfigured ? 'Compose + queue (pending send)' : 'Compose + save (pending send — transport not configured)'}
         </Button>
       </div>
     </Card>

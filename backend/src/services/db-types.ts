@@ -172,7 +172,10 @@ export interface EmailRecord {
   body: string;
   fromAddress: string;
   toAddress: string;
-  sentAt: Date;
+  // NULL until a real transmit happens (a composed/queued stub email has no sentAt).
+  sentAt: Date | null;
+  // 'sent' (transmitted) | 'queued' (composed, not yet transmitted).
+  status: string;
   gmailMessageId: string | null;
   createdAt: Date;
   updatedAt: Date;

@@ -85,6 +85,9 @@ export interface CaseDetail extends Case {
   readonly emails?: readonly Email[];
   readonly payments?: readonly Payment[];
   readonly _count?: { readonly documents: number; readonly draftJobs: number; readonly corrections: number; readonly emails: number; readonly payments: number };
+  // Authoritative drafting cost summed over ALL the case's DraftJobs (backend aggregate, not the
+  // truncated take:5 draftJobs list). null when no job carries a recorded cost → UI shows "—".
+  readonly draftingCostUsd?: number | null;
 }
 
 export interface PatchCaseInput {

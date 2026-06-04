@@ -21,6 +21,7 @@ import { useAuth } from '../../auth/useAuth';
 import { ConflictError } from '../../api/client';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { formatRelativeTime } from '../../lib/date';
+import { formatDateOnly, formatPhone } from '../../lib/format';
 import {
   deleteCase, getCase, listCorrections, listDraftJobs, patchCase, transitionCaseStatus,
   type CaseDetail, type PatchCaseInput, type TransitionInput,
@@ -153,10 +154,10 @@ export function CaseDetailPage() {
             const htwt = [ht, v?.weightLb != null ? `${v.weightLb} lb` : null].filter(Boolean).join(' ');
             const svc = [v?.branch, v?.serviceStartYear ? `${v.serviceStartYear}–${v.serviceEndYear ?? ''}` : null].filter(Boolean).join(' ');
             const bits = [
-              v?.dob ? `DOB ${v.dob}${age != null ? ` (age ${age})` : ''}` : null,
+              v?.dob ? `DOB ${formatDateOnly(v.dob)}${age != null ? ` (age ${age})` : ''}` : null,
               svc || null,
               htwt || null,
-              v?.phone || null,
+              v?.phone ? formatPhone(v.phone) : null,
               v?.address || null,
             ].filter(Boolean);
             return bits.length ? <p className="mt-2 text-sm text-slate-600">{bits.join('  ·  ')}</p> : null;
@@ -277,23 +278,11 @@ export function CaseDetailPage() {
 
 type EditableField = 'framingChoice' | 'upstreamScCondition' | 'veteranStatement' | 'inServiceEvent';
 
-// Per-claim drafting cost = sum of the case's DraftJob.costUsd (US-dollar LLM spend posted by
-// the drafter worker). Returns null when no job carries a recorded cost so the UI can show "—".
-function sumDraftingCostUsd(c: CaseDetail): number | null {
-  const jobs = c.draftJobs ?? [];
-  let hasAny = false;
-  let total = 0;
-  for (const j of jobs) {
-    if (typeof j.costUsd === 'number' && Number.isFinite(j.costUsd)) {
-      hasAny = true;
-      total += j.costUsd;
-    }
-  }
-  return hasAny ? total : null;
-}
-
 function OverviewTab({ c, onSave, saving }: { readonly c: CaseDetail; readonly onSave: (field: EditableField, value: string) => void; readonly saving: boolean }) {
-  const draftingCost = sumDraftingCostUsd(c);
+  // Authoritative total from the backend aggregate over ALL DraftJobs (c.draftingCostUsd) — the
+  // old client-side sum over the truncated take:5 c.draftJobs list missed older cost-bearing runs
+  // and showed "—" (Ryan 2026-06-04). null === no recorded cost on any job → honest "—".
+  const draftingCost = c.draftingCostUsd ?? null;
   return <div className="divide-y divide-slate-100">
     <InlineEditRow label="Framing" value={c.framingChoice ?? ''} saving={saving} onSave={(v) => onSave('framingChoice', v)} />
     <InlineEditRow label="Upstream SC condition" value={c.upstreamScCondition ?? ''} saving={saving} onSave={(v) => onSave('upstreamScCondition', v)} />
@@ -367,7 +356,12 @@ function DraftJobsTab({ caseId }: { readonly caseId: string }) {
   if (q.isLoading) return <div className="text-sm text-slate-500">Loading draft jobs…</div>;
   const rows = q.data?.data ?? [];
   if (!rows.length) return <EmptyState title="No draft jobs" message="No drafting runs have been enqueued for this case." />;
-  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Version</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th><th className="px-4 py-2">Letter</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d) => <tr key={d.id} className="hover:bg-slate-50"><td className="px-4 py-2">{d.version}</td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td><td className="px-4 py-2">{d.state === 'done' || d.state === 'failed' ? <button type="button" className="font-medium text-indigo-600 hover:underline" onClick={() => viewVersion(d.id)}>View letter</button> : <span className="text-slate-400">—</span>}</td></tr>)}</tbody></table></div>;
+  // Rows arrive version-desc (newest first). The raw DB version is inflated by the /draft pileup
+  // (v81, v57…) and confused Ryan ("v 87? wrong"), so show a sane sequential attempt label:
+  // oldest run = "Draft #1" … newest = "Draft #N". attempt = rows.length - index. The raw version
+  // stays visible (muted + tooltip) for traceability — View letter still uses jobId, not this.
+  const total = rows.length;
+  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Draft</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th><th className="px-4 py-2">Letter</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d, i) => <tr key={d.id} className="hover:bg-slate-50"><td className="px-4 py-2"><span className="font-medium text-slate-800">Draft #{total - i}</span> <span className="ml-1 text-xs text-slate-400" title={`Internal letter version ${d.version}`}>v{d.version}</span></td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td><td className="px-4 py-2">{d.state === 'done' || d.state === 'failed' ? <button type="button" className="font-medium text-indigo-600 hover:underline" onClick={() => viewVersion(d.id)}>View letter</button> : <span className="text-slate-400">—</span>}</td></tr>)}</tbody></table></div>;
 }
 
 function CorrectionsTab({ caseId }: { readonly caseId: string }) {

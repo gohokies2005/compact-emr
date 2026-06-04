@@ -245,7 +245,31 @@ export function createCasesRouter(db: AppDb): Router {
         },
       });
       if (found === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
-      res.json({ data: found });
+
+      // Authoritative per-case drafting cost over ALL DraftJobs — NOT just the take:5 above.
+      // The cost-bearing completed runs are often older than the latest 5 redraft rows, so summing
+      // `found.draftJobs` misses them and the UI showed "—" (Ryan 2026-06-04). Select only costUsd
+      // (cheap) and reduce here. costUsd is a Prisma Decimal? → may serialize as a string/Decimal;
+      // `Number(v)` coerces it and null/undefined rows are skipped (treated as 0). When NO job
+      // carries a cost we leave draftingCostUsd null so the UI can honestly show "—".
+      // Mirrors the proven reduction in routes/reports.ts (avoids the un-typed aggregate delegate).
+      const costRows = (await db.draftJob.findMany({
+        where: { caseId: id },
+        select: { costUsd: true },
+      })) as unknown as Array<{ costUsd?: unknown }>;
+      let hasCost = false;
+      let costTotal = 0;
+      for (const r of costRows) {
+        const v = r.costUsd;
+        if (v === null || v === undefined) continue;
+        const n = Number(v);
+        if (!Number.isFinite(n)) continue;
+        hasCost = true;
+        costTotal += n;
+      }
+      const draftingCostUsd = hasCost ? Math.round((costTotal + Number.EPSILON) * 100) / 100 : null;
+
+      res.json({ data: { ...found, draftingCostUsd } });
     }),
   );
 

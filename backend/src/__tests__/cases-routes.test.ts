@@ -170,6 +170,29 @@ describe('cases routes', () => {
     expect(spies.caseFindFirst).toHaveBeenCalledWith(expect.objectContaining({ include: expect.objectContaining({ draftJobs: expect.any(Object) }) }));
   });
 
+  it('returns draftingCostUsd null when no DraftJob carries a recorded cost', async () => {
+    // Default mock draftJob.findMany returns rows without costUsd → honest null (UI shows "—").
+    const { db } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1');
+    expect(res.status).toBe(200);
+    expect(res.body.data.draftingCostUsd).toBeNull();
+  });
+
+  it('aggregates draftingCostUsd over ALL DraftJobs, coercing Decimal strings and skipping null', async () => {
+    const { db } = makeDb();
+    // Cost-bearing runs older than the take:5 detail list; Prisma Decimal may serialize as a string.
+    (db.draftJob.findMany as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { costUsd: 3.42 }, { costUsd: '1.58' }, { costUsd: null }, { costUsd: undefined },
+    ]);
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1');
+    expect(res.status).toBe(200);
+    expect(res.body.data.draftingCostUsd).toBe(5.0);
+    // Aggregate is over the whole case, NOT scoped to the take:5 include.
+    expect((db.draftJob.findMany as unknown as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { caseId: 'CASE-1' }, select: { costUsd: true } }),
+    );
+  });
+
   it('patches fields, bumps version, and writes activity row', async () => {
     const { db, spies } = makeDb();
     const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, framingChoice: 'redacted framing' });

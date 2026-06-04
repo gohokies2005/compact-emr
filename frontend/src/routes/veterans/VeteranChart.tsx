@@ -12,6 +12,7 @@ import { NewClaimModal } from '../cases/NewClaimModal';
 import { ChartNotesPanel } from './ChartNotesPanel';
 import { ConditionSelect } from '../../components/ConditionSelect';
 import { classifyEntry, isZip, uploadErrorReason, type CandidateResult } from './documentUpload';
+import { formatDateOnly, formatPhone } from '../../lib/format';
 import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition, ScConditionStatus } from '../../types/prisma';
 
 const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
@@ -57,7 +58,7 @@ export function VeteranChart() {
   if (!veteran.data) return <AppShell><EmptyState title="Veteran not found" message="The requested veteran could not be loaded." /></AppShell>;
   const v = veteran.data.data;
   return <AppShell><div className="space-y-6">
-    <div className="rounded-lg border border-slate-200 bg-white p-6"><div className="flex flex-col justify-between gap-3 sm:flex-row"><div><h1 className="text-3xl font-bold text-slate-900">{v.firstName} {v.lastName}</h1><p className="mt-1 text-sm text-slate-600">{(() => { const age = v.dob ? Math.floor((Date.now() - Date.parse(v.dob)) / 31557600000) : null; const ht = v.heightIn != null ? `${Math.floor(v.heightIn / 12)}'${v.heightIn % 12}"` : null; const htwt = [ht, v.weightLb != null ? `${v.weightLb} lb` : null].filter(Boolean).join(' '); const svc = [v.branch, v.serviceStartYear ? `${v.serviceStartYear}–${v.serviceEndYear ?? ''}` : null].filter(Boolean).join(' '); return [`MRN ${v.id}`, v.dob ? `DOB ${v.dob}${age != null ? ` (age ${age})` : ''}` : null, svc || null, htwt || null, v.phone, v.address, v.email].filter(Boolean).join('  ·  '); })()}</p></div><div className="flex items-center gap-3"><Button size="sm" onClick={() => setClaimModalOpen(true)}>+ New claim</Button><Link className="text-sm text-indigo-600" to="/veterans">Back to veterans</Link></div></div></div>
+    <div className="rounded-lg border border-slate-200 bg-white p-6"><div className="flex flex-col justify-between gap-3 sm:flex-row"><div><h1 className="text-3xl font-bold text-slate-900">{v.firstName} {v.lastName}</h1><p className="mt-1 text-sm text-slate-600">{(() => { const age = v.dob ? Math.floor((Date.now() - Date.parse(v.dob)) / 31557600000) : null; const ht = v.heightIn != null ? `${Math.floor(v.heightIn / 12)}'${v.heightIn % 12}"` : null; const htwt = [ht, v.weightLb != null ? `${v.weightLb} lb` : null].filter(Boolean).join(' '); const svc = [v.branch, v.serviceStartYear ? `${v.serviceStartYear}–${v.serviceEndYear ?? ''}` : null].filter(Boolean).join(' '); return [`MRN ${v.id}`, v.dob ? `DOB ${formatDateOnly(v.dob)}${age != null ? ` (age ${age})` : ''}` : null, svc || null, htwt || null, v.phone ? formatPhone(v.phone) : null, v.address, v.email].filter(Boolean).join('  ·  '); })()}</p></div><div className="flex items-center gap-3"><Button size="sm" onClick={() => setClaimModalOpen(true)}>+ New claim</Button><Link className="text-sm text-indigo-600" to="/veterans">Back to veterans</Link></div></div></div>
     <div className="rounded-lg border border-slate-200 bg-white">
       <TabBar tabs={CHART_TABS} active={tab} onChange={setTab} className="flex-wrap" />
       {/* All six panels stay mounted; we toggle visibility with `hidden` rather than

@@ -66,6 +66,13 @@ export function PhysicianReviewPage() {
     await qc.invalidateQueries({ queryKey: ['case', caseId] });
   };
 
+  // After the physician signs off, the case leaves the review queue — refetch + return to it so
+  // the physician isn't stranded on a now-signed letter. (Ryan 2026-06-04: approve did nothing.)
+  const onSignedOff = async () => {
+    await qc.invalidateQueries({ queryKey: ['case', caseId] });
+    navigate('/p/queue');
+  };
+
   return (
     <AppShell>
       <div className="space-y-6">
@@ -106,7 +113,7 @@ export function PhysicianReviewPage() {
           caseId={caseId}
           open={signOffOpen}
           onClose={() => setSignOffOpen(false)}
-          onSignedOff={onChanged}
+          onSignedOff={onSignedOff}
         />
       </div>
     </AppShell>

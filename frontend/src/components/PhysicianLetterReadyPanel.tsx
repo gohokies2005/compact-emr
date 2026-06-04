@@ -131,7 +131,7 @@ export function PhysicianLetterReadyPanel({
               <li key={`${hint.section ?? 'section'}-${index}`} className="text-sm text-slate-700">
                 <span className="text-slate-400">{'• '}</span>
                 <span className="font-medium">Section {hint.section ?? 'review'} - </span>
-                <span>{truncate(hint.issue ?? '')}</span>
+                <span>{hint.issue ?? ''}</span>
               </li>
             ))}
           </ul>

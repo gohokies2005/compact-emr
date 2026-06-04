@@ -102,6 +102,14 @@ export function InFlightDrafterPanel({ job }: InFlightDrafterPanelProps) {
   const step = useMemo(() => stepFromPhase(job.currentPhase), [job.currentPhase]);
   const takingLonger = isTakingLonger(job);
   const operatorMessage = job.operatorMessage?.trim();
+  // Sanity cap on the elapsed timer: a run "running" far past the normal window is almost always a
+  // stale/backgrounded tab (the client clock keeps ticking without refetching) or a stuck job —
+  // either way, stop implying it's healthily in progress. (2026-06-04 — Ryan saw a 413-minute
+  // "running" timer that never said complete.)
+  const startMs = job.startedAt ? Date.parse(job.startedAt) : job.enqueuedAt ? Date.parse(job.enqueuedAt) : NaN;
+  const elapsedMin = Number.isNaN(startMs) ? 0 : (Date.now() - startMs) / 60000;
+  // Only "stuck" when NOT actively retrying — a retrying job is legitimately "still working".
+  const looksStuck = elapsedMin > 40 && !takingLonger;
 
   // Tick every second so the elapsed timer counts up LIVE, not only when the poll re-renders the
   // parent (otherwise it sits frozen at "running 0s" between polls). (architect I2, 2026-06-03)
@@ -144,7 +152,11 @@ export function InFlightDrafterPanel({ job }: InFlightDrafterPanelProps) {
         </div>
       </div>
 
-      {takingLonger ? (
+      {looksStuck ? (
+        <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+          This run has been going far longer than usual ({Math.round(elapsedMin)} min). It may be stuck, or this page may be stale — refresh the page, then check the Draft jobs tab to see if a letter already completed.
+        </div>
+      ) : takingLonger ? (
         <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
           Still working — taking a little longer than usual.
         </div>

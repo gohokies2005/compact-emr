@@ -316,10 +316,21 @@ function TransitionModal({ caseId, from, to, version, onClose, onDone }: { reado
 
 function DraftJobsTab({ caseId }: { readonly caseId: string }) {
   const q = useQuery({ queryKey: ['case', caseId, 'draft-jobs'], queryFn: () => listDraftJobs(caseId) });
+  // Open a SPECIFIC version's letter PDF. The backend derives the key from the job version, so
+  // any terminal run is viewable even if artifactPdfS3Key didn't persist. (2026-06-04 — Ryan:
+  // "what's the point if I can't click the files to see the version".)
+  async function viewVersion(jobId: string) {
+    try {
+      const { data } = await getArtifactPdfUrl(caseId, jobId);
+      window.open(data.url, '_blank', 'noopener,noreferrer');
+    } catch {
+      window.alert('No letter PDF for that version — it may not have finished drafting.');
+    }
+  }
   if (q.isLoading) return <div className="text-sm text-slate-500">Loading draft jobs…</div>;
   const rows = q.data?.data ?? [];
   if (!rows.length) return <EmptyState title="No draft jobs" message="No drafting runs have been enqueued for this case." />;
-  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Version</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d) => <tr key={d.id}><td className="px-4 py-2">{d.version}</td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td></tr>)}</tbody></table></div>;
+  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Version</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th><th className="px-4 py-2">Letter</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d) => <tr key={d.id} className="hover:bg-slate-50"><td className="px-4 py-2">{d.version}</td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td><td className="px-4 py-2">{d.state === 'done' || d.state === 'failed' ? <button type="button" className="font-medium text-indigo-600 hover:underline" onClick={() => viewVersion(d.id)}>View letter</button> : <span className="text-slate-400">—</span>}</td></tr>)}</tbody></table></div>;
 }
 
 function CorrectionsTab({ caseId }: { readonly caseId: string }) {

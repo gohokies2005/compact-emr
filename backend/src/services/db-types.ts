@@ -228,6 +228,7 @@ export interface AppDbTransaction {
   caseMessage: CaseMessageDelegate;
   email: EmailDelegate;
   payment: PaymentDelegate;
+  intake: IntakeDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -671,6 +672,41 @@ export interface DoctorPackDelegate {
   findMany(args: unknown): Promise<readonly DoctorPackRecord[]>;
   create(args: unknown): Promise<DoctorPackRecord>;
   update(args: unknown): Promise<DoctorPackRecord>;
+}
+
+// Jotform intake pool (staging). See docs/JOTFORM_INTAKE_INGESTION_SPEC.md.
+export interface IntakeRecord {
+  id: string;
+  jotformFormId: string;
+  jotformSubmissionId: string;
+  status: string; // pending | ready | assigned | dismissed | failed
+  submittedName: string | null;
+  submittedEmail: string | null;
+  submittedPhone: string | null;
+  submittedState: string | null;
+  submittedCondition: string | null;
+  rawAnswersJson: unknown | null;
+  fileManifestJson: unknown | null;
+  submittedAt: Date | null;
+  webhookReceivedAt: Date;
+  assignedVeteranId: string | null;
+  assignedCaseId: string | null;
+  assignedAt: Date | null;
+  assignedBy: string | null;
+  dismissedReason: string | null;
+  retryCount: number;
+  errorMessage: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface IntakeDelegate {
+  findUnique(args: unknown): Promise<IntakeRecord | null>;
+  findFirst(args: unknown): Promise<IntakeRecord | null>;
+  findMany(args: unknown): Promise<readonly IntakeRecord[]>;
+  count(args: unknown): Promise<number>;
+  create(args: unknown): Promise<IntakeRecord>;
+  update(args: unknown): Promise<IntakeRecord>;
 }
 
 // ====================== Phase 7B-revised Build 1: DocumentPage ======================

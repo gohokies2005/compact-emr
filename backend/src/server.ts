@@ -17,6 +17,7 @@ import { createChartReadinessRouter } from './routes/chart-readiness.js';
 import { createDoctorPackRouter } from './routes/doctor-pack.js';
 import { createReportsRouter } from './routes/reports.js';
 import { createInternalWorkerRouter } from './routes/internal-worker.js';
+import { createJotformWebhookRouter } from './routes/jotform-webhook.js';
 import { createDrafterClientRouter, createDrafterWorkerRouter } from './routes/drafter.js';
 import { createLetterRouter } from './routes/letter.js';
 import { createDeliveryRouter } from './routes/delivery.js';
@@ -60,7 +61,9 @@ export function createApp(options: CreateAppOptions = {}) {
   // 1,182-page Blue Button 500'd on POST /internal/documents/:id/pages with the 1mb global cap.)
   const globalJson = express.json({ limit: '1mb' });
   app.use((req, res, next) => {
-    if (req.path.startsWith('/api/v1/internal/')) return next();
+    // /internal/* uses its own 50mb json parsers (below); /jotform/webhook uses its own urlencoded
+    // parser (Jotform POSTs urlencoded, not JSON) — both must bypass the global json parser.
+    if (req.path.startsWith('/api/v1/internal/') || req.path.startsWith('/api/v1/jotform/webhook')) return next();
     return globalJson(req, res, next);
   });
 
@@ -81,6 +84,11 @@ export function createApp(options: CreateAppOptions = {}) {
   const internalJson = express.json({ limit: '50mb' });
   app.use('/api/v1', internalJson, requireServicePrincipal(), createInternalWorkerRouter(db));
   app.use('/api/v1', internalJson, requireDrafterPrincipal(), createDrafterWorkerRouter(db));
+
+  // Public, secret-gated Jotform webhook (doorbell). Mounted BEFORE the authenticateJwt client
+  // routes (it has no Cognito) with its OWN urlencoded parser scoped to this subtree — Jotform
+  // POSTs urlencoded, and the payload can exceed the 1mb global json limit. See spec §2.
+  app.use('/api/v1/jotform/webhook', express.urlencoded({ extended: true, limit: '2mb' }), createJotformWebhookRouter(db));
 
   app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
   app.use('/api/v1', authenticateJwt(), createDocumentsRouter());

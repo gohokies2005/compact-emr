@@ -5,12 +5,15 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LetterEditorPage } from '../routes/cases/LetterEditorPage';
 import { applySurgicalAi, approveLetter, declineLetter, getLetter, previewSurgicalAi, saveLetter } from '../api/letter';
+import { getCase } from '../api/cases';
 import { ConflictError, ServiceUnavailableError } from '../api/client';
 
 vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { readonly children: ReactNode }) => <div>{children}</div> }));
 vi.mock('../api/letter', () => ({ getLetter: vi.fn(), saveLetter: vi.fn(), previewSurgicalAi: vi.fn(), applySurgicalAi: vi.fn(), approveLetter: vi.fn(), declineLetter: vi.fn() }));
+vi.mock('../api/cases', () => ({ getCase: vi.fn() }));
 
 const getLetterMock = vi.mocked(getLetter);
+const getCaseMock = vi.mocked(getCase);
 const saveLetterMock = vi.mocked(saveLetter);
 const previewMock = vi.mocked(previewSurgicalAi);
 const applyMock = vi.mocked(applySurgicalAi);
@@ -42,6 +45,8 @@ function renderPage() {
 beforeEach(() => {
   vi.clearAllMocks();
   getLetterMock.mockResolvedValue({ data: opsLetter });
+  // The editor title is now the filename (Lastname_Firstname_COND_vN), built from the case detail.
+  getCaseMock.mockResolvedValue({ data: { veteran: { firstName: 'Armand', lastName: 'Frank' }, claimedCondition: 'Obstructive Sleep Apnea' } } as unknown as Awaited<ReturnType<typeof getCase>>);
   saveLetterMock.mockResolvedValue({ data: { version: 5, txt: 'Saved letter text.', warnings: [{ rule: 'short_letter', detail: 'Letter appears unusually short.' }] } });
   previewMock.mockResolvedValue({ data: { proposal: PROPOSAL, preview: 'Preview of the limited edit.', warnings: [], costUsd: 0.42, model: 'claude-opus-4-8' } });
   applyMock.mockResolvedValue({ data: { version: 6, txt: 'Applied limited edit.', warnings: [] } });
@@ -52,7 +57,7 @@ beforeEach(() => {
 describe('LetterEditorPage', () => {
   it('loads and renders the editor (ops_staff) WITH surgical-AI parity but NO sign-off', async () => {
     renderPage();
-    expect(await screen.findByText('Letter editor')).toBeInTheDocument();
+    expect(await screen.findByText('Frank_Armand_OSA_v4')).toBeInTheDocument();
     expect(screen.getByText('Version 4 · ops_staff')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save new version' })).toBeInTheDocument();
     // RN parity (Ryan 2026-06-04): ops_staff now gets the AI surgical-edit card...
@@ -65,7 +70,7 @@ describe('LetterEditorPage', () => {
 
   it('saves a new version and shows rule/detail warnings', async () => {
     renderPage();
-    await screen.findByText('Letter editor');
+    await screen.findByText('Frank_Armand_OSA_v4');
     fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
     await waitFor(() => { expect(saveLetterMock).toHaveBeenCalledWith('CASE-1', { base_version: 4, txt: 'This is **bold** letter text.' }); });
     expect(await screen.findByText('Saved version 5.')).toBeInTheDocument();
@@ -75,7 +80,7 @@ describe('LetterEditorPage', () => {
   it('reloads on a stale save (ConflictError)', async () => {
     saveLetterMock.mockRejectedValueOnce(new ConflictError());
     renderPage();
-    await screen.findByText('Letter editor');
+    await screen.findByText('Frank_Armand_OSA_v4');
     fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
     expect(await screen.findByText('This letter was changed elsewhere. Reloaded the latest version.')).toBeInTheDocument();
     expect(getLetterMock).toHaveBeenCalledTimes(2);
@@ -84,7 +89,7 @@ describe('LetterEditorPage', () => {
   it('shows "not available" on a 503 save', async () => {
     saveLetterMock.mockRejectedValueOnce(new ServiceUnavailableError());
     renderPage();
-    await screen.findByText('Letter editor');
+    await screen.findByText('Frank_Armand_OSA_v4');
     fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
     expect(await screen.findByText('Letter service is not available in this environment.')).toBeInTheDocument();
   });

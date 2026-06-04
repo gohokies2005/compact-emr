@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AppShell } from '../../layout/AppShell';
@@ -7,6 +7,8 @@ import { Card } from '../../components/ui/Card';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import { LetterEditor } from '../../components/LetterEditor';
+import { getCase } from '../../api/cases';
+import { letterFilename } from '../../lib/letterFilename';
 import { ConflictError, ServiceUnavailableError, SurgicalEditUnappliableError } from '../../api/client';
 import {
   applySurgicalAi,
@@ -37,6 +39,10 @@ export function LetterEditorPage() {
   const qc = useQueryClient();
 
   const [txt, setTxt] = useState('');
+  // Live edited text captured from the editor's onChange. A REF (not state) so keystrokes do NOT
+  // re-render the page and echo back into the contentEditable (which wiped the caret). Save reads
+  // this. Kept in sync with `txt` on load / save / surgical-apply. (Ryan 2026-06-04.)
+  const editedTextRef = useRef('');
   const [baseVersion, setBaseVersion] = useState<number | null>(null);
   const [zoom, setZoom] = useState(1);
   const [warnings, setWarnings] = useState<readonly LetterWarning[]>([]);
@@ -60,20 +66,34 @@ export function LetterEditorPage() {
   const canOpsEdit = role === 'ops_staff' || role === 'admin';
   const canPhysicianAct = role === 'physician' || role === 'admin';
 
+  // Case detail (veteran name + condition) drives the filename-style title. Read-only; if it
+  // hasn't loaded yet we fall back to a generic title.
+  const caseQuery = useQuery({
+    queryKey: ['case', caseId],
+    queryFn: () => getCase(caseId),
+    enabled: caseId.length > 0,
+  });
+  const caseDetail = caseQuery.data?.data;
+  const fileName = caseDetail
+    ? letterFilename(caseDetail.veteran?.lastName, caseDetail.veteran?.firstName, caseDetail.claimedCondition, baseVersion ?? letter?.version)
+    : null;
+
   useEffect(() => {
     if (!letter) return;
     setTxt(letter.txt);
+    editedTextRef.current = letter.txt;
     setBaseVersion(letter.version);
   }, [letter]);
 
   const saveMutation = useMutation({
     mutationFn: () => {
       if (baseVersion === null) throw new Error('Letter version is missing.');
-      return saveLetter(caseId, { base_version: baseVersion, txt });
+      return saveLetter(caseId, { base_version: baseVersion, txt: editedTextRef.current });
     },
     onSuccess: (res) => {
       setBaseVersion(res.data.version);
       setTxt(res.data.txt);
+      editedTextRef.current = res.data.txt;
       setWarnings(res.data.warnings ?? []);
       setMessage(`Saved version ${res.data.version}.`);
       void qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] });
@@ -120,6 +140,7 @@ export function LetterEditorPage() {
       setProposalCostUsd(null);
       setInstruction('');
       setTxt(res.data.txt);
+      editedTextRef.current = res.data.txt;
       setBaseVersion(res.data.version);
       setWarnings(res.data.warnings ?? []);
       setMessage(`Applied limited scope edit. Current version ${res.data.version}.`);
@@ -177,7 +198,7 @@ export function LetterEditorPage() {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <Link to={`/cases/${encodeURIComponent(caseId)}`} className="text-sm text-slate-500 hover:text-slate-800">Back to case</Link>
-              <h1 className="mt-2 text-2xl font-semibold text-slate-950">Letter editor</h1>
+              <h1 className="mt-2 text-2xl font-semibold text-slate-950" title="Last name, first name, condition, version">{fileName ?? 'Letter'}</h1>
               <p className="mt-1 text-sm text-slate-600">Version {baseVersion ?? letter.version} &middot; {role}</p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -185,6 +206,7 @@ export function LetterEditorPage() {
               <Button type="button" variant="secondary" onClick={() => setZoom((z) => Math.min(1.4, Math.round((z + 0.1) * 10) / 10))}>Zoom in</Button>
               {letter.rendered.pdfUrl ? <a href={letter.rendered.pdfUrl} target="_blank" rel="noreferrer"><Button type="button" variant="secondary">Open PDF</Button></a> : null}
               {letter.rendered.docxUrl ? <a href={letter.rendered.docxUrl} target="_blank" rel="noreferrer"><Button type="button" variant="secondary">Open DOCX</Button></a> : null}
+              <Button type="button" variant="secondary" onClick={() => navigate(`/cases/${encodeURIComponent(caseId)}`)}>Close</Button>
             </div>
           </div>
         </Card>
@@ -193,7 +215,7 @@ export function LetterEditorPage() {
         <WarningList warnings={warnings} />
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <LetterEditor txt={txt} lockedRanges={letter.locked_ranges} mode={canOpsEdit || canPhysicianAct ? 'editable' : 'readonly'} zoom={zoom} onChange={setTxt} />
+          <LetterEditor key={baseVersion ?? letter.version} txt={txt} lockedRanges={letter.locked_ranges} mode={canOpsEdit || canPhysicianAct ? 'editable' : 'readonly'} zoom={zoom} onChange={(t) => { editedTextRef.current = t; }} />
 
           <aside className="space-y-4">
             {canOpsEdit || canPhysicianAct ? (

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import type { LetterLockedRange } from '../api/letter';
 
 type LetterEditorMode = 'editable' | 'readonly';
@@ -80,30 +80,33 @@ function lockedSlicesChanged(original: string, next: string, lockedRanges: reado
 
 export function LetterEditor({ txt, lockedRanges, mode, zoom, onChange }: LetterEditorProps) {
   const editorRef = useRef<HTMLDivElement | null>(null);
-  const lastGoodTextRef = useRef(txt);
-  const [localText, setLocalText] = useState(txt);
+  // Last accepted text — for the incremental locked-region check + revert. Deliberately a ref, NOT
+  // React state: updating it must NOT trigger a re-render, or React would reconcile the
+  // contentEditable's children and wipe the caret/keystrokes mid-typing — the bug Ryan hit
+  // (2026-06-04: "still cannot edit the letter manually typing"). The parent remounts this
+  // component (key={version}) when a new letter loads, so this ref + the pieces below reset cleanly.
+  const prevTextRef = useRef(txt);
   const [lockWarning, setLockWarning] = useState<string | null>(null);
 
-  useEffect(() => {
-    setLocalText(txt);
-    lastGoodTextRef.current = txt;
-  }, [txt]);
-
   const editable = mode === 'editable';
-  const pieces = useMemo(() => splitIntoPieces(localText, lockedRanges), [localText, lockedRanges]);
+  // pieces derive from the txt PROP — which is STABLE while the user types (the parent captures
+  // keystrokes in a ref for Save instead of echoing them back into txt). Stable pieces mean React
+  // never overwrites the browser-owned contentEditable DOM during typing, so edits + caret persist.
+  const pieces = useMemo(() => splitIntoPieces(txt, lockedRanges), [txt, lockedRanges]);
 
   function handleInput() {
     if (editorRef.current === null || !editable) return;
     const nextText = getTextFromEditor(editorRef.current);
-    if (lockedSlicesChanged(localText, nextText, lockedRanges)) {
+    if (lockedSlicesChanged(prevTextRef.current, nextText, lockedRanges)) {
       setLockWarning('Locked letter sections cannot be edited.');
-      // Revert the DOM to the last good text.
-      editorRef.current.innerText = lastGoodTextRef.current;
+      // Revert the DOM to the last good text (caret resets — acceptable on a locked-region hit).
+      editorRef.current.innerText = prevTextRef.current;
       return;
     }
-    lastGoodTextRef.current = nextText;
-    setLocalText(nextText);
-    setLockWarning(null);
+    prevTextRef.current = nextText;
+    // Only touch state to CLEAR a stale warning — never on a normal keystroke, so the
+    // contentEditable subtree is not reconciled (and the caret not lost) while the user types.
+    if (lockWarning !== null) setLockWarning(null);
     onChange(nextText);
   }
 

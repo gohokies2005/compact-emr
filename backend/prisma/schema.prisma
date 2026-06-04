@@ -783,3 +783,37 @@ model DoctorPack {
   @@index([caseId, caseVersion])
   @@map("doctor_packs")
 }
+
+// Jotform intake pool (intake triage). One Jotform submission = one Intake row. Files land in S3
+// under intake/<id>/ until an RN assigns them to a veteran/case (then they become Documents on
+// cases/<caseId>/). See docs/JOTFORM_INTAKE_INGESTION_SPEC.md. assigned_* are non-FK staging
+// columns by design (intake is a staging table, not referential).
+model Intake {
+  id                  String    @id @default(uuid())
+  jotformFormId       String    @map("jotform_form_id") @db.VarChar(40)
+  jotformSubmissionId String    @map("jotform_submission_id") @db.VarChar(40)
+  status              String    @default("pending") @db.VarChar(20) // pending|ready|assigned|dismissed|failed
+  submittedName       String?   @map("submitted_name")
+  submittedEmail      String?   @map("submitted_email")
+  submittedPhone      String?   @map("submitted_phone")
+  submittedState      String?   @map("submitted_state") @db.VarChar(2)
+  submittedCondition  String?   @map("submitted_condition")
+  rawAnswersJson      Json?     @map("raw_answers_json")
+  fileManifestJson    Json?     @map("file_manifest_json")
+  submittedAt         DateTime? @map("submitted_at") @db.Timestamptz(6)
+  webhookReceivedAt   DateTime  @default(now()) @map("webhook_received_at") @db.Timestamptz(6)
+  assignedVeteranId   String?   @map("assigned_veteran_id")
+  assignedCaseId      String?   @map("assigned_case_id")
+  assignedAt          DateTime? @map("assigned_at") @db.Timestamptz(6)
+  assignedBy          String?   @map("assigned_by")
+  dismissedReason     String?   @map("dismissed_reason")
+  retryCount          Int       @default(0) @map("retry_count")
+  errorMessage        String?   @map("error_message")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([jotformSubmissionId], map: "intakes_submission_uq")
+  @@index([status, createdAt])
+  @@index([jotformFormId])
+  @@map("intakes")
+}

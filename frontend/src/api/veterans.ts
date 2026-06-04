@@ -49,4 +49,7 @@ export async function listDocuments(veteranId: string): Promise<Envelope<readonl
 export async function presignDocument(veteranId: string, body: PresignDocumentInput): Promise<Envelope<PresignDocumentResponse>> { return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/documents/presign`, body); }
 export async function recordDocument(veteranId: string, body: PresignDocumentInput & { readonly s3Key: string; readonly docTag?: string }): Promise<Envelope<Document>> { return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/documents`, body); }
 export async function downloadDocument(id: string): Promise<Envelope<{ downloadUrl: string }>> { return apiGet(`/api/v1/documents/${encodeURIComponent(id)}/download`); }
+// Delete a misuploaded file (admin/ops_staff). Removes the S3 object + the document, its OCR pages,
+// and its read-status/key-doc rows so it fully disappears from the veteran-wide drafter bundle.
+export async function deleteDocument(id: string): Promise<void> { return apiDelete(`/api/v1/documents/${encodeURIComponent(id)}`); }
 export async function uploadToPresignedUrl(url: string, file: File, headers: Record<string, string>): Promise<void> { await axios.put(url, file, { headers }); }

@@ -81,6 +81,15 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
   }).veteran.findUnique({ where: { id: cw.veteranId } });
   if (veteran === null) throw new VeteranNotFoundError(cw.veteranId);
 
+  // Returning-customer document reuse (Ryan 2026-06-04): a veteran's documents are parsed once and
+  // stay useful across claims ("all files might have something hidden useful"). So the drafter
+  // bundle pulls documents + their already-extracted pages across ALL of this veteran's cases, not
+  // just the current one — no re-upload, no re-OCR. keyDocs stay case-scoped (per-case curation);
+  // the drafter still has every page. chartReadiness below is computed from THIS case's files only
+  // (empty file set = ready) so a new case is never blocked by an unrelated prior case's files.
+  const veteranCaseRows = await db.case.findMany({ where: { veteranId: cw.veteranId }, select: { id: true } });
+  const veteranCaseIds = veteranCaseRows.map((r) => r.id);
+
   const [
     scConditions,
     activeProblems,
@@ -101,16 +110,19 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
       .chartNote.findMany({ where: { veteranId: cw.veteranId }, orderBy: { createdAt: 'asc' } }),
     (db as unknown as { keyDoc: { findMany: (args: { where: { caseId: string } }) => Promise<unknown[]> } })
       .keyDoc.findMany({ where: { caseId } }),
-    db.fileReadStatus.findMany({ where: { caseId } }),
+    // Veteran-scoped: read status for every file across the veteran's cases (carries manual
+    // summaries for inherited docs). chartReadiness is recomputed from this case's subset below.
+    db.fileReadStatus.findMany({ where: { caseId: { in: veteranCaseIds } } }),
     (db as unknown as {
       document: {
         findMany: (args: {
-          where: { caseId: string };
+          where: { caseId: { in: string[] } };
           include: { pages: { orderBy: { pageNumber: 'asc' } } };
         }) => Promise<unknown[]>;
       };
     }).document.findMany({
-      where: { caseId },
+      // Veteran-scoped: all of this veteran's already-parsed documents (+ pages) across cases.
+      where: { caseId: { in: veteranCaseIds } },
       include: { pages: { orderBy: { pageNumber: 'asc' } } },
     }),
     db.doctorPack.findFirst({
@@ -123,7 +135,10 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
     }),
   ]);
 
-  const chartReadiness = evaluateChartReadiness(fileReadStatuses);
+  // Gate on THIS case's own files only (empty set = ready). The bundle payload still carries the
+  // veteran-wide fileReadStatuses above so the drafter can use inherited manual summaries; a prior
+  // case's unresolved file must not block this case's draft. (Ryan 2026-06-04 returning-customer.)
+  const chartReadiness = evaluateChartReadiness(fileReadStatuses.filter((r) => r.caseId === caseId));
 
   return {
     case: {

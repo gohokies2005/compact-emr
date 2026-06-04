@@ -68,8 +68,16 @@ describe('document routes', () => {
     expect(tx.activityLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'document_created' }) }));
   });
 
-  it('requires admin role to delete documents', async () => {
+  it('allows ops_staff to delete a document (RN self-service for a misupload)', async () => {
+    // findUnique -> null so we don't need the full S3/tx flow; the point is the role gate passes
+    // (ops_staff is now permitted), so the response is NOT a 403. (Ryan 2026-06-04.)
+    const prisma = { document: { findUnique: vi.fn(async () => null) } };
+    const res = await request(appFor(prisma, 'ops_staff')).delete('/api/v1/documents/doc-1');
+    expect(res.status).not.toBe(403);
+  });
+
+  it('rejects a physician deleting documents', async () => {
     const prisma = { document: { findUnique: vi.fn() } };
-    await request(appFor(prisma, 'ops_staff')).delete('/api/v1/documents/doc-1').expect(403);
+    await request(appFor(prisma, 'physician')).delete('/api/v1/documents/doc-1').expect(403);
   });
 });

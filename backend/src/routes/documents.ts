@@ -180,7 +180,13 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     res.json({ data: { downloadUrl, expiresInSeconds: DOWNLOAD_TTL_SECONDS } });
   });
 
-  router.delete('/documents/:id', requireRole(['admin']), async (req, res) => {
+  // Delete a misuploaded file (Ryan 2026-06-04: "if a file were ever accidentally uploaded to the
+  // wrong chart, i need a delete function"). ops_staff may delete too — fixing one's own misupload
+  // is RN self-service, not an admin-only escalation. Now that the drafter bundle is veteran-wide, a
+  // stray file would pollute EVERY case's draft, so the delete also removes the file's read-status
+  // and key-doc rows (keyed by caseId + s3Key) — otherwise an orphan would linger in the bundle and
+  // the RN manual-summary queue. Document.delete cascades its OCR pages.
+  router.delete('/documents/:id', requireRole(['admin', 'ops_staff']), async (req, res) => {
     if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
     const document = await prisma.document.findUnique({
       where: { id: String(req.params.id) },
@@ -191,6 +197,10 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     await s3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: document.s3Key }));
     await prisma.$transaction(async (tx) => {
       await tx.document.delete({ where: { id: document.id } });
+      // Remove the orphan read-status + key-doc rows for this exact file (filePath === s3Key).
+      await tx.fileReadStatus.deleteMany({ where: { caseId: document.caseId, filePath: document.s3Key } });
+      await (tx as unknown as { keyDoc: { deleteMany: (a: { where: { caseId: string; filePath: string } }) => Promise<unknown> } })
+        .keyDoc.deleteMany({ where: { caseId: document.caseId, filePath: document.s3Key } });
       await tx.activityLog.create({
         data: {
           caseId: document.caseId,

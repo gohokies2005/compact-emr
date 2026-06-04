@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
@@ -44,6 +44,7 @@ const caseSortValue = (key: string) => (c: CaseLite): unknown => {
 };
 
 export function CasesPage() {
+  const navigate = useNavigate();
   const [status, setStatus] = useState<CaseStatus | ''>('');
   const [claimType, setClaimType] = useState<ClaimType | ''>('');
   const [vetQuery, setVetQuery] = useState('');
@@ -124,9 +125,9 @@ export function CasesPage() {
           </th>)}
         </tr></thead>
         <tbody className="divide-y divide-slate-100">
-          {rows.map((c) => <tr key={c.id} className="hover:bg-slate-50">
-            <td className="px-4 py-3 font-medium"><Link className="text-indigo-600" to={`/cases/${encodeURIComponent(c.id)}`}>{c.id}</Link></td>
-            <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</Link></td>
+          {rows.map((c) => <tr key={c.id} className="cursor-pointer hover:bg-slate-50" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}`)}>
+            <td className="px-4 py-3 font-medium"><Link className="text-indigo-600" to={`/cases/${encodeURIComponent(c.id)}`} onClick={(e) => e.stopPropagation()}>{c.id}</Link></td>
+            <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`} onClick={(e) => e.stopPropagation()}>{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</Link></td>
             <td className="px-4 py-3 text-slate-700">{c.claimedCondition}</td>
             <td className="px-4 py-3 text-slate-600">{CLAIM_TYPE_LABELS[c.claimType]}</td>
             <td className="px-4 py-3"><CaseStatusBadge status={c.status} /></td>

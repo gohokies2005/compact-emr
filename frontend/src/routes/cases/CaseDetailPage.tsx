@@ -19,6 +19,7 @@ import { getArtifactPdfUrl, postDraft } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
 import { useAuth } from '../../auth/useAuth';
 import { ConflictError, describeApiError } from '../../api/client';
+import { letterFilename } from '../../lib/letterFilename';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone } from '../../lib/format';
@@ -262,13 +263,13 @@ export function CaseDetailPage() {
           {!inFlightDraft && role === 'ops_staff' && viewableLetterJob &&
             (c.status === 'drafting' || c.status === 'physician_review' || c.status === 'correction_review') ? (
             <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-              <h2 className="text-base font-semibold text-slate-900">Edit the letter</h2>
+              <h2 className="text-base font-semibold text-slate-900">Edit {letterFilename(c.veteran?.lastName, c.veteran?.firstName, c.claimedCondition, c.currentVersion ?? c.version)}</h2>
               <p className="mt-1 text-sm text-slate-600">
                 Revise the letter by hand or with an AI surgical edit — same tools the physician has.
                 Save creates a new version, and the doctor reviews the newest version.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
-                <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button>
+                {/* View letter lives in the page header — not duplicated here. */}
                 <Button variant="primary" size="sm" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}>Open letter editor</Button>
               </div>
             </div>
@@ -276,6 +277,13 @@ export function CaseDetailPage() {
         </>
       );
     })()}
+
+    {/* Assignments — moved out of the buried Overview tab to right under the editor panels so it's
+        apparent (Ryan 2026-06-04: "move assignments just under the letter editor ... needs to be
+        apparent"). Admin/ops_staff only. */}
+    {role === 'admin' || role === 'ops_staff' ? (
+      <CaseAssignmentPanel caseId={c.id} version={c.version} assignedPhysician={c.assignedPhysician ?? null} assignedRn={c.assignedRn ?? null} />
+    ) : null}
 
     {/* Post-approval RN delivery panel — invoice email + cover memo + Stripe link. Stubbed sends. */}
     {(c.status === 'delivered' || c.status === 'paid') && (role === 'admin' || role === 'ops_staff') ? (
@@ -286,12 +294,7 @@ export function CaseDetailPage() {
       <TabBar tabs={tabsWithBadge} active={tab} onChange={setTab} />
       <div className="p-4">
         {tab === 'overview' ? (
-          <>
-            <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
-            {role === 'admin' || role === 'ops_staff' ? (
-              <div className="mt-4"><CaseAssignmentPanel caseId={c.id} version={c.version} assignedPhysician={c.assignedPhysician ?? null} assignedRn={c.assignedRn ?? null} /></div>
-            ) : null}
-          </>
+          <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
         ) : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
         {tab === 'corrections' ? <CorrectionsTab caseId={caseId} /> : null}
@@ -392,7 +395,7 @@ function DraftJobsTab({ caseId }: { readonly caseId: string }) {
   // oldest run = "Draft #1" … newest = "Draft #N". attempt = rows.length - index. The raw version
   // stays visible (muted + tooltip) for traceability — View letter still uses jobId, not this.
   const total = rows.length;
-  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Draft</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th><th className="px-4 py-2">Letter</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d, i) => <tr key={d.id} className="hover:bg-slate-50"><td className="px-4 py-2"><span className="font-medium text-slate-800">Draft #{total - i}</span> <span className="ml-1 text-xs text-slate-400" title={`Internal letter version ${d.version}`}>v{d.version}</span></td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td><td className="px-4 py-2">{d.state === 'done' || d.state === 'failed' ? <button type="button" className="font-medium text-indigo-600 hover:underline" onClick={() => viewVersion(d.id)}>View letter</button> : <span className="text-slate-400">—</span>}</td></tr>)}</tbody></table></div>;
+  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Draft</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th><th className="px-4 py-2">Letter</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d, i) => { const viewable = d.state === 'done' || d.state === 'failed'; return <tr key={d.id} className={`hover:bg-slate-50 ${viewable ? 'cursor-pointer' : ''}`} onClick={viewable ? () => viewVersion(d.id) : undefined}><td className="px-4 py-2"><span className="font-medium text-slate-800">Draft #{total - i}</span> <span className="ml-1 text-xs text-slate-400" title={`Internal letter version ${d.version}`}>v{d.version}</span></td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td><td className="px-4 py-2">{viewable ? <button type="button" className="font-medium text-indigo-600 hover:underline" onClick={(e) => { e.stopPropagation(); viewVersion(d.id); }}>View letter</button> : <span className="text-slate-400">—</span>}</td></tr>; })}</tbody></table></div>;
 }
 
 function CorrectionsTab({ caseId }: { readonly caseId: string }) {

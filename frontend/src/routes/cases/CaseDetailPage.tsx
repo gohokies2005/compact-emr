@@ -123,14 +123,32 @@ export function CaseDetailPage() {
   );
 
   return <AppShell><div className="space-y-6">
+    {c.status === 'delivered' || c.status === 'paid' ? (
+      <div className="rounded-lg border border-emerald-300 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-900">
+        ✓ Physician signed off — letter finalized{c.status === 'paid' ? ' and paid' : ' and ready for delivery'}.
+      </div>
+    ) : null}
     <div className="rounded-lg border border-slate-200 bg-white p-6">
       <div className="flex flex-col justify-between gap-4 lg:flex-row">
         <div>
-          <div className="flex items-center gap-3"><h1 className="text-2xl font-semibold text-slate-900">{c.claimedCondition}</h1><CaseStatusBadge status={c.status} /></div>
-          <p className="mt-1 text-sm text-slate-500">
-            Case {c.id} · {c.claimType} · <Link className="text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</Link>
-          </p>
-          <p className="mt-1 text-xs text-slate-400">Updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
+          <h1 className="text-3xl font-bold text-slate-900">{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</h1>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-base text-slate-700"><span className="font-medium">{c.claimedCondition}</span><CaseStatusBadge status={c.status} /></div>
+          {(() => {
+            const v = c.veteran;
+            const age = v?.dob ? Math.floor((Date.now() - Date.parse(v.dob)) / 31557600000) : null;
+            const ht = v?.heightIn != null ? `${Math.floor(v.heightIn / 12)}'${v.heightIn % 12}"` : null;
+            const htwt = [ht, v?.weightLb != null ? `${v.weightLb} lb` : null].filter(Boolean).join(' ');
+            const svc = [v?.branch, v?.serviceStartYear ? `${v.serviceStartYear}–${v.serviceEndYear ?? ''}` : null].filter(Boolean).join(' ');
+            const bits = [
+              v?.dob ? `DOB ${v.dob}${age != null ? ` (age ${age})` : ''}` : null,
+              svc || null,
+              htwt || null,
+              v?.phone || null,
+              v?.address || null,
+            ].filter(Boolean);
+            return bits.length ? <p className="mt-2 text-sm text-slate-600">{bits.join('  ·  ')}</p> : null;
+          })()}
+          <p className="mt-1 text-xs text-slate-400">Case {c.id} · {c.claimType} · <Link className="text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>chart</Link> · updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
         </div>
         <div className="flex flex-wrap items-start gap-2">
           {viewableLetterJob ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}

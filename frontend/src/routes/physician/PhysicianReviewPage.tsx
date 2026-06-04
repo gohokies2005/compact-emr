@@ -13,6 +13,7 @@ import {
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { getCase } from '../../api/cases';
 import { getArtifactPdfUrl } from '../../api/drafter';
+import { approveLetter } from '../../api/letter';
 
 export function PhysicianReviewPage() {
   const { caseId: routeCaseId } = useParams();
@@ -66,11 +67,19 @@ export function PhysicianReviewPage() {
     await qc.invalidateQueries({ queryKey: ['case', caseId] });
   };
 
-  // After the physician signs off, the case leaves the review queue — refetch + return to it so
-  // the physician isn't stranded on a now-signed letter. (Ryan 2026-06-04: approve did nothing.)
+  // "Approve and sign" = record the sign-off questionnaire (the popup) AND finalize the letter.
+  // The popup only RECORDED the sign-off; without the approve call the case stayed in
+  // physician_review and approve appeared to do nothing. Chain the finalize (-> 'delivered'),
+  // then return to the queue. (Ryan 2026-06-04.)
   const onSignedOff = async () => {
-    await qc.invalidateQueries({ queryKey: ['case', caseId] });
-    navigate('/p/queue');
+    try {
+      await approveLetter(caseId);
+      await qc.invalidateQueries({ queryKey: ['case', caseId] });
+      navigate('/p/queue');
+    } catch {
+      await qc.invalidateQueries({ queryKey: ['case', caseId] });
+      window.alert('Sign-off was recorded, but finalizing the letter failed (the chart may not be ready, or render is unavailable). The case stays in review — please retry or flag to Dr. Ryan.');
+    }
   };
 
   return (

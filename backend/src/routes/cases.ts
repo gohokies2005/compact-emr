@@ -233,7 +233,7 @@ export function createCasesRouter(db: AppDb): Router {
       const found = await db.case.findFirst({
         where: { id },
         include: {
-          veteran: { select: { id: true, firstName: true, lastName: true, email: true } },
+          veteran: { select: { id: true, firstName: true, lastName: true, email: true, dob: true, phone: true, address: true, branch: true, serviceStartYear: true, serviceEndYear: true, heightIn: true, weightLb: true, combatVeteran: true } },
           assignedPhysician: { select: { id: true, fullName: true, email: true } },
           assignedRn: { select: { id: true, email: true } },
           documents: { orderBy: { uploadedAt: 'desc' }, take: 5 },

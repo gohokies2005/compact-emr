@@ -1,7 +1,13 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from './client';
 import type { Case, CaseStatus, ClaimType, Correction, Document, DraftJob, Email, Payment } from '../types/prisma';
 
-export interface CaseVeteranLite { readonly id: string; readonly firstName: string; readonly lastName: string; readonly email: string; }
+export interface CaseVeteranLite {
+  readonly id: string; readonly firstName: string; readonly lastName: string; readonly email: string;
+  // Demographics — populated on the case-DETAIL query (claim page header); absent on list rows.
+  readonly dob?: string; readonly phone?: string | null; readonly address?: string | null;
+  readonly branch?: string | null; readonly serviceStartYear?: number | null; readonly serviceEndYear?: number | null;
+  readonly heightIn?: number | null; readonly weightLb?: number | null; readonly combatVeteran?: string | null;
+}
 export interface CasePhysicianLite { readonly id: string; readonly fullName: string; readonly email: string; }
 export interface AssignedRnLite { readonly id: string; readonly email: string; }
 

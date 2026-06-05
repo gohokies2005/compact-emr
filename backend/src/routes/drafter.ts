@@ -52,13 +52,17 @@ import type { AppDb } from '../services/db-types.js';
  * dominates grade gate.)
  */
 
-const OPERATOR_STATES = ['ready', 'ready_with_notes', 'needs_one_thing', 'paused'] as const;
+// 'cancelled' (2026-06-05, drafter30): the worker posts a terminal /complete with
+// operatorState:'cancelled' / failureClass:'cancelled' after an RN Cancel kills the pipeline child.
+// Both columns are plain VarChar (no Prisma enum), so this needs no migration. Accepting the value
+// (vs 400-rejecting it) lets the cancelled callback reach the discard guard cleanly.
+const OPERATOR_STATES = ['ready', 'ready_with_notes', 'needs_one_thing', 'paused', 'cancelled'] as const;
 type OperatorState = (typeof OPERATOR_STATES)[number];
 
 const SHIP_RECOMMENDATIONS = ['ship', 'revise'] as const;
 type ShipRecommendation = (typeof SHIP_RECOMMENDATIONS)[number];
 
-const FAILURE_CLASSES = ['transient', 'degrade', 'needs_human', 'system'] as const;
+const FAILURE_CLASSES = ['transient', 'degrade', 'needs_human', 'system', 'cancelled'] as const;
 type FailureClass = (typeof FAILURE_CLASSES)[number];
 
 const GRADES = ['A', 'A-', 'B+', 'B', 'B-', 'C+', 'C'] as const;
@@ -889,7 +893,15 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
       if (existing.state === 'done' || existing.state === 'failed') {
         // An RN cancellation must NOT resurrect a letter/grade onto the case via late-artifact
         // recovery — the run was explicitly abandoned. Discard the callback. (Architect QA #2.)
-        if (existing.errorMessage === 'Cancelled by RN') {
+        // Key off BOTH signals so a cancel is caught even if one is absent (drafter30 contract,
+        // confirmed 2026-06-05): (a) the row pre-stamped 'Cancelled by RN' by the cancel route when
+        // the RN clicked Cancel, AND (b) the worker's own terminal payload, which sends
+        // operatorState:'cancelled' / failureClass:'cancelled' after it kills the pipeline child.
+        if (
+          existing.errorMessage === 'Cancelled by RN' ||
+          parsed.operatorState === 'cancelled' ||
+          parsed.failureClass === 'cancelled'
+        ) {
           throw new HttpError(409, 'conflict', 'DraftJob was cancelled by the RN — artifacts discarded.', { jobId, cancelled: true });
         }
         const hasArtifacts =

@@ -5,7 +5,7 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   intake: ['records', 'rejected'],
   records: ['viability', 'rejected'],
   viability: ['drafting', 'rejected'],
-  drafting: ['rn_review', 'physician_review', 'rejected'],
+  drafting: ['rn_review', 'physician_review', 'needs_rn_decision', 'needs_records', 'rejected'],
   rn_review: ['physician_review', 'drafting', 'rejected'],
   physician_review: ['correction_requested', 'delivered', 'rejected'],
   correction_requested: ['correction_review'],
@@ -13,6 +13,8 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   delivered: ['paid'],
   paid: [],
   rejected: [],
+  needs_rn_decision: ['drafting', 'records', 'rejected'],
+  needs_records: ['drafting', 'records', 'rejected'],
 };
 
 export const CASE_STATUS_LABELS: Record<CaseStatus, string> = {
@@ -27,6 +29,8 @@ export const CASE_STATUS_LABELS: Record<CaseStatus, string> = {
   delivered: 'Delivered',
   paid: 'Paid',
   rejected: 'Rejected',
+  needs_rn_decision: 'Needs RN decision',
+  needs_records: 'Needs records',
 };
 
 export function validNextStatuses(from: CaseStatus): readonly CaseStatus[] {

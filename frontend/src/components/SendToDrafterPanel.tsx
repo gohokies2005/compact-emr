@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
@@ -5,12 +6,17 @@ import { Spinner } from './ui/Spinner';
 import { getChartReadiness } from '../api/chart-readiness';
 import { postDraft } from '../api/drafter';
 import { ConflictError } from '../api/client';
+import { Gate1ChecklistModal } from './Gate1ChecklistModal';
 
 interface SendToDrafterPanelProps {
   readonly caseId: string;
+  // When provided, "Send to Drafter" opens the Gate-1 "before we draft" checklist first.
+  readonly claimType?: string;
+  readonly claimedCondition?: string;
+  readonly draftAttempt?: number;
 }
 
-export function SendToDrafterPanel({ caseId }: SendToDrafterPanelProps) {
+export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftAttempt }: SendToDrafterPanelProps) {
   const queryClient = useQueryClient();
 
   const readinessQuery = useQuery({
@@ -28,6 +34,15 @@ export function SendToDrafterPanel({ caseId }: SendToDrafterPanelProps) {
       ]);
     },
   });
+
+  const [gate1Open, setGate1Open] = useState(false);
+  // Gate-1 "before we draft" checklist gates the start ONLY when claim context is provided
+  // (real case page). Without it (e.g. unit tests), the button drafts directly (back-compat).
+  const gate1Enabled = typeof claimedCondition === 'string';
+  function startDraft() {
+    if (gate1Enabled) setGate1Open(true);
+    else draftMutation.mutate(undefined);
+  }
 
   // Never a dead-end: when the chart isn't ready (e.g. a file couldn't be auto-read), the RN can
   // override and draft anyway with a logged reason (Ryan HARD RULE: EVERYTHING must be overridable).
@@ -62,7 +77,7 @@ export function SendToDrafterPanel({ caseId }: SendToDrafterPanelProps) {
           variant="primary"
           disabled={!ready}
           loading={draftMutation.isPending}
-          onClick={() => draftMutation.mutate(undefined)}
+          onClick={startDraft}
         >
           Send to Drafter
         </Button>
@@ -101,6 +116,17 @@ export function SendToDrafterPanel({ caseId }: SendToDrafterPanelProps) {
           </div>
         ) : null}
       </div>
+
+      {gate1Open && gate1Enabled ? (
+        <Gate1ChecklistModal
+          caseId={caseId}
+          claimType={claimType ?? 'initial'}
+          claimedCondition={claimedCondition ?? ''}
+          draftAttempt={draftAttempt ?? 1}
+          onClose={() => setGate1Open(false)}
+          onConfirmed={() => { setGate1Open(false); draftMutation.mutate(undefined); }}
+        />
+      ) : null}
     </Card>
   );
 }

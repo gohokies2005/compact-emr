@@ -15,6 +15,8 @@ const STATUS_CLASSES: Record<CaseStatus, string> = {
   delivered: 'bg-emerald-100 text-emerald-700',
   paid: 'bg-emerald-200 text-emerald-900 font-semibold',
   rejected: 'bg-rose-100 text-rose-700',
+  needs_rn_decision: 'bg-amber-200 text-amber-900 font-semibold',
+  needs_records: 'bg-amber-100 text-amber-800',
 };
 
 export function CaseStatusBadge({ status, className }: { readonly status: CaseStatus; readonly className?: string }) {

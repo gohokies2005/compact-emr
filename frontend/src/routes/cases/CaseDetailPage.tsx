@@ -13,6 +13,8 @@ import { SendToDrafterPanel } from '../../components/SendToDrafterPanel';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
 import { DeliveryPanel } from '../../components/DeliveryPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
+import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
+import { DecisionsOverridesPanel } from '../../components/DecisionsOverridesPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { getArtifactPdfUrl, postDraft } from '../../api/drafter';
@@ -248,7 +250,7 @@ export function CaseDetailPage() {
             <InFlightDrafterPanel job={latestDraftJob} />
           ) : null}
 
-          {canSendFirstDraft ? <SendToDrafterPanel caseId={caseId} /> : null}
+          {canSendFirstDraft ? <SendToDrafterPanel caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} /> : null}
 
           {!inFlightDraft && canSeePhysicianReadyPanel && latestDraftJob ? (
             <PhysicianLetterReadyPanel
@@ -295,6 +297,19 @@ export function CaseDetailPage() {
               onViewLetter={openLetterPdf}
             />
           ) : null}
+
+          {/* Gate-2 dx/event verification halt — the case is parked for the RN's decision. Never a
+              dead-end: override / switch / proceed / pause, all logged. */}
+          {c.status === 'needs_rn_decision' || c.status === 'needs_records' ? (
+            <Gate2HaltPanel
+              c={c}
+              {...((c.draftJobs ?? []).find((j) => (j as { state?: string }).state === 'halted') ? { job: (c.draftJobs ?? []).find((j) => (j as { state?: string }).state === 'halted') as never } : {})}
+              onChanged={async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-decisions'] })]); }}
+            />
+          ) : null}
+
+          {/* In-chart decisions/overrides audit — self-hides when empty. */}
+          <DecisionsOverridesPanel caseId={caseId} />
 
           {/* RN letter-edit entry. The physician/admin reach the editor via the ready panel above;
               an RN (ops_staff) otherwise has no entry to it. Ryan 2026-06-04: "RNs need the ability

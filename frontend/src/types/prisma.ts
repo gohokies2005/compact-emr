@@ -1,8 +1,8 @@
 export type YesNoUnknown = 'yes' | 'no' | 'unknown';
 export type ClaimType = 'initial' | 'supplemental' | 'hlr' | 'appeal_bva';
-export type CaseStatus = 'intake' | 'records' | 'viability' | 'drafting' | 'rn_review' | 'physician_review' | 'correction_requested' | 'correction_review' | 'delivered' | 'paid' | 'rejected';
+export type CaseStatus = 'intake' | 'records' | 'viability' | 'drafting' | 'rn_review' | 'physician_review' | 'correction_requested' | 'correction_review' | 'delivered' | 'paid' | 'rejected' | 'needs_rn_decision' | 'needs_records';
 export type CdsVerdict = 'accept' | 'caution' | 'reject' | 'not_yet_run';
-export type DraftJobState = 'queued' | 'running' | 'done' | 'failed';
+export type DraftJobState = 'queued' | 'running' | 'done' | 'failed' | 'halted';
 export type CorrectionReason = 'veteran_added_info' | 'physician_caught_error' | 'ops_caught_error' | 'va_examiner_feedback' | 'other';
 export type BillingTier = 'free_first' | 'free_our_fault' | 'paid_50';
 export type PhysicianActivity = 'letter_review' | 'correction_review';
@@ -98,6 +98,17 @@ export interface Case extends VersionedRecord { readonly id: string; readonly ve
   readonly operatorMessage?: string | null;
 }
 export interface Document extends VersionedRecord { readonly id: string; readonly caseId: string; readonly filename: string; readonly sizeBytes: string; readonly contentType: string; readonly docTag?: string; readonly s3Key: string; readonly uploadedAt: string; readonly uploadedBy: string; }
+export interface Gate2SwitchProposal { readonly dx: string; readonly scAnchor?: string; readonly whyMoreViable?: string; readonly plainEnglish?: string }
+export interface Gate2HaltPayload {
+  readonly haltGate?: string;
+  readonly reasonCode?: string;
+  readonly plainEnglish?: string;
+  readonly claimedDxFound?: string;
+  readonly inServiceEventFound?: string;
+  readonly switchProposal?: Gate2SwitchProposal | null;
+  readonly operatorMessage?: string;
+}
+
 export interface DraftJob { readonly id: string; readonly caseId: string; readonly version: number; readonly sqsMessageId?: string; readonly state: DraftJobState; readonly enqueuedAt: string; readonly startedAt?: string; readonly completedAt?: string; readonly errorMessage?: string; readonly updatedAt: string;
   // Phase 8 drafter integration: progress + terminal fields populated by drafter wrapper
   // via /internal/drafter/jobs/:id/{progress,complete}. Chunk 2 promoted the manifest +
@@ -107,6 +118,7 @@ export interface DraftJob { readonly id: string; readonly caseId: string; readon
   readonly nextRetryInS?: number | null;
   readonly failureClass?: FailureClass | null;
   readonly gradeSidecarJson?: DraftGradeSidecarJson | null;
+  readonly haltPayloadJson?: Gate2HaltPayload | null; // Gate-2 halt reason + switchProposal for the RN UI
   readonly artifactPdfS3Key?: string | null;
   readonly artifactTxtS3Key?: string | null;
   readonly artifactDocxS3Key?: string | null;

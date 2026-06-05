@@ -85,6 +85,15 @@ export function createJotformWebhookRouter(db: AppDb): Router {
       });
     }
 
+    // Observability (2026-06-05 incident): the webhook used to return 200 with no log line, so when
+    // submissions stopped arriving there was NO way to tell "Jotform isn't calling us" from "we
+    // dropped it" — the incident was invisible for hours. Log ONE structured line per hit. formID /
+    // submissionID are opaque ids, NOT PHI; never log req.body (it carries name/dob/etc.).
+    console.log(JSON.stringify({
+      msg: 'jotform-webhook: hit', formId, submissionId,
+      result: !intakeId ? 'no-intake' : shouldEnqueue ? 'enqueued' : 'noop-duplicate',
+    }));
+
     // Always 200 fast. (Jotform treats non-200/slow as failure and retries → handled idempotently.)
     res.status(200).json({ ok: true });
   }));

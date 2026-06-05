@@ -233,6 +233,15 @@ export class WorkersStack extends Stack {
       logRetention: logs.RetentionDays.ONE_MONTH,
     });
     anthropicKeySecret.grantRead(chartExtractWorker);
+    // Same bare-ARN-vs-`-??????` defect as the sweep secrets (see JotformSweep IAM note below): this
+    // worker reads ANTHROPIC_SECRET_ARN (the bare ARN) via GetSecretValue at cold start, so the
+    // grantRead() above can't cover the real request — it works today only by SDK name-resolution
+    // luck. Suffix-independent `*` grant makes it deterministic so OCR/chart-extract can't silently
+    // die the way the intake sweep did.
+    chartExtractWorker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
+      resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:compact-emr-${config.envName}/drafter-anthropic-api-key*`],
+    }));
     chartExtractWorker.addEventSource(new eventSources.SqsEventSource(chartExtractQueue, { batchSize: 1 }));
 
     // ===== Textract async completion SNS topic =====
@@ -321,6 +330,13 @@ export class WorkersStack extends Stack {
     phiBucket.grantRead(ocrCompletion); // fetch the file bytes for the Claude OCR fallback
     documentsKey.grantDecrypt(ocrCompletion);
     anthropicKeySecret.grantRead(ocrCompletion);
+    // Same bare-ARN GetSecretValue defect — the Claude OCR fallback reads ANTHROPIC_SECRET_ARN at
+    // runtime. Suffix-independent `*` grant (see chartExtractWorker note) so the fallback can't
+    // silently lose Secrets Manager access.
+    ocrCompletion.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
+      resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:compact-emr-${config.envName}/drafter-anthropic-api-key*`],
+    }));
     textractCompletionTopic.addSubscription(new subs.LambdaSubscription(ocrCompletion));
 
     // ===== Doctor Pack assembler Lambda =====
@@ -605,14 +621,44 @@ export class WorkersStack extends Stack {
         LOOKBACK_MINUTES: '180',
       },
     });
-    jotformApiKeySecret.grantRead(jotformSweep);
-    jotformWebhookSecretForSweep.grantRead(jotformSweep);
+    // IAM FIX (2026-06-05 incident): `fromSecretNameV2(...).grantRead()` emits a policy resource of
+    // `<bare-arn>-??????` (6 wildcard chars for the random suffix), but the Lambda calls
+    // GetSecretValue with the BARE, no-suffix ARN (`secretArn` of a name-imported secret) — and IAM
+    // authorizes that request against the bare ARN, which `-??????` cannot match. Result: the sweep
+    // was 100% AccessDenied on the webhook-secret read on EVERY hourly run since deploy — the safety
+    // net silently dead for days. Grant suffix-INDEPENDENTLY on the secret NAME + `*`, which matches
+    // BOTH the bare identifier the SDK sends AND any 6-char-suffixed full ARN (and survives a
+    // secret delete+recreate, which rotates the suffix). The old grantRead() calls are replaced, not
+    // kept, since they never covered the real request.
+    jotformSweep.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:compact-emr-${config.envName}/jotform-api-key*`,
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:compact-emr-${config.envName}/jotform-webhook-secret*`,
+      ],
+    }));
 
     new events.Rule(this, 'JotformSweepSchedule', {
       ruleName: `compact-emr-${config.envName}-jotform-sweep-schedule`,
       description: 'Hourly: replay the recent window of Jotform submissions through the webhook (safety net).',
       schedule: events.Schedule.rate(Duration.hours(1)),
       targets: [new targets.LambdaFunction(jotformSweep, { retryAttempts: 1 })],
+    });
+
+    // A safety net that can die silently is not a safety net — this alarm is what was MISSING when
+    // the sweep AccessDenied'd on every run for days with nobody paged. Any sweep invocation error
+    // (IAM, Jotform unreachable, code throw) breaches within the hour. No SNS action wired here yet
+    // (matches StuckJobsSweptAlarm/DoctorPacksSweptAlarm above — console/dashboard-visible); wire an
+    // ops topic subscription when one exists. NOT-breaching on missing data so a paused schedule
+    // doesn't false-alarm.
+    new cloudwatch.Alarm(this, 'JotformSweepErrorsAlarm', {
+      alarmName: `compact-emr-${config.envName}-jotform-sweep-errors`,
+      alarmDescription: 'The hourly Jotform intake safety-net sweep is erroring (IAM / Jotform / code). Intake submissions on unregistered forms may be silently dropped. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-sweep.',
+      metric: jotformSweep.metricErrors({ statistic: 'Sum', period: Duration.hours(1) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
   }
 }

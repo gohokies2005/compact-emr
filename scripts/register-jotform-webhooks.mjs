@@ -72,14 +72,29 @@ async function main() {
   if (formIds.length === 0) { console.error('No form ids. Use --list to see them, or pass ids / --all-active.'); process.exit(1); }
 
   const replace = args.includes('--replace'); // delete any existing intake webhook first (fix a wrong URL)
+  // GUARD: --all-active --replace would DELETE+POST on every enabled form (~180 calls) — a perfect
+  // way to re-trip the account lockout the owner warned about. --replace is for fixing ONE form's URL.
+  if (replace && args.includes('--all-active')) {
+    console.error('Refusing --all-active --replace (mass delete+recreate risks an account lockout). Use --replace with explicit form ids only.');
+    process.exit(1);
+  }
+  // THROTTLE: the owner's hard constraint is "never lock the Jotform account" (a 10-min poller did,
+  // once). Pace every Jotform call so a bulk run is gentle (~2.5 req/s) instead of an unbounded burst.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  console.log(`Plan: ${formIds.length} form(s)${replace ? ' (REPLACE mode)' : ''}, paced ~2.5 req/s.`);
+  let registered = 0, skipped = 0, failed = 0;
   for (const id of formIds) {
+    await sleep(400);
     const existing = await jotform('GET', `/form/${id}/webhooks`, apiKey);
     const ours = Object.entries(existing.json?.content || {}).filter(([, u]) => typeof u === 'string' && u.includes('/jotform/webhook/'));
-    if (ours.length > 0 && !replace) { console.log(`= ${id}  already has an intake webhook — skipped (use --replace to update the URL)`); continue; }
-    if (replace) { for (const [whId] of ours) { await jotform('DELETE', `/form/${id}/webhooks/${whId}`, apiKey); } }
+    if (ours.length > 0 && !replace) { console.log(`= ${id}  already has an intake webhook — skipped (use --replace to update the URL)`); skipped++; continue; }
+    if (replace) { for (const [whId] of ours) { await sleep(400); await jotform('DELETE', `/form/${id}/webhooks/${whId}`, apiKey); } }
+    await sleep(400);
     const res = await jotform('POST', `/form/${id}/webhooks`, apiKey, { webhookURL: webhookUrl });
+    if (res.status < 300) registered++; else failed++;
     console.log(`${res.status < 300 ? '+' : '!'} ${id}  ${replace && ours.length ? 'replaced' : 'registered'} (HTTP ${res.status})`);
   }
+  console.log(`Done: ${registered} registered, ${skipped} already-had, ${failed} failed.`);
 }
 
 main().catch((e) => { console.error(e.message || e); process.exit(1); });

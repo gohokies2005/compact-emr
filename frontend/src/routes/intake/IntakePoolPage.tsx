@@ -23,6 +23,8 @@ function splitName(full: string | null): { first: string; last: string } {
   return { first: parts.slice(0, -1).join(' '), last: parts[parts.length - 1]! };
 }
 function mintId(prefix: string): string { return `${prefix}-${crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`; }
+// Display as "Lastname, Firstname" (Ryan 2026-06-05).
+function displayName(full: string | null): string { const { first, last } = splitName(full); return last ? (first ? `${last}, ${first}` : last) : (full ?? ''); }
 
 // Significant condition tokens (drop punctuation + filler) so "migraines" and "Migraines / Chronic
 // Headaches" are recognized as the same claim — prevents a duplicate claim on the second intake.
@@ -40,7 +42,7 @@ type SortKey = 'name' | 'profile' | 'condition' | 'files' | 'received' | 'status
 function sortRows(rows: readonly IntakeListItem[], key: SortKey, dir: 1 | -1): IntakeListItem[] {
   const val = (r: IntakeListItem): string | number => {
     switch (key) {
-      case 'name': return (r.submittedName ?? r.submittedEmail ?? '').toLowerCase();
+      case 'name': return (displayName(r.submittedName) || r.submittedEmail || '').toLowerCase(); // sorts by last name
       case 'profile': return r.veteranMatch ? 0 : 1; // existing profiles first when ascending
       case 'condition': return (r.submittedCondition ?? '').toLowerCase();
       case 'files': return r.fileManifestJson?.length ?? 0;
@@ -99,7 +101,7 @@ export function IntakePoolPage() {
               <tbody className="divide-y divide-slate-100">
                 {rows.map((r) => (
                   <tr key={r.id} className="cursor-pointer hover:bg-slate-50" onClick={() => setSelectedId(r.id)}>
-                    <td className="px-4 py-2 font-medium text-slate-900">{r.submittedName ?? r.submittedEmail ?? '(no name)'}</td>
+                    <td className="px-4 py-2 font-medium text-slate-900">{r.submittedName ? displayName(r.submittedName) : (r.submittedEmail ?? '(no name)')}</td>
                     <td className="px-4 py-2">{r.veteranMatch
                       ? <span className="inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700" title={`Existing profile: ${r.veteranMatch.name}`}>✓ Exists</span>
                       : <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">New</span>}</td>
@@ -237,7 +239,7 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
   return (
     <div className="space-y-5 p-6">
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
-        <div className="font-medium text-slate-900">{intake.submittedName ?? '(no name)'}</div>
+        <div className="font-medium text-slate-900">{intake.submittedName ? displayName(intake.submittedName) : '(no name)'}</div>
         <div className="mt-1 text-slate-600">{[intake.submittedEmail, intake.submittedPhone, intake.submittedState].filter(Boolean).join(' · ')}</div>
         <div className="mt-1 text-slate-600">Condition (from form): {intake.submittedCondition ?? '—'} · {intake.submittedFormTitle ?? (kind === 'additional_docs' ? 'Additional records' : kind === 'stage1' ? 'Stage 1' : 'Stage 2')}</div>
         {match ? <div className="mt-2 inline-flex rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">✓ Existing profile found — preselected as {match.name} (no DOB entry needed)</div> : null}

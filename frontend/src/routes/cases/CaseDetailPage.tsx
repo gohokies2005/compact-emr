@@ -129,7 +129,10 @@ export function CaseDetailPage() {
   // From rn_review, "Send to doctor for review" (in the RN review panel) is the path to
   // physician_review — drop the redundant generic "Move to physician review" header button.
   const nextStatuses = allowedNextStatusesForRole(role, c.status)
-    .filter((to) => !(c.status === 'rn_review' && to === 'physician_review'));
+    .filter((to) => !(c.status === 'rn_review' && to === 'physician_review'))
+    // "Move to drafting" is a bare status flip with no action — Redraft / Send to Drafter / the
+    // Gate-2 resume are the real paths. Drop it (Ryan 2026-06-05: "seems pointless").
+    .filter((to) => to !== 'drafting');
   // CDS retired from the workflow (Ryan 2026-06-03): it no longer gates sign-off. A stale
   // cdsVerdict='reject' must NOT hide the sign-off button (the CDS panel is gone, so there'd be no
   // explanation and no way to recover — an RN/physician dead-end). (architect MF-2)
@@ -194,10 +197,12 @@ export function CaseDetailPage() {
           <p className="mt-1 text-xs text-slate-400">Case {c.id} · {c.claimType} · <Link className="text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>chart</Link> · updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
         </div>
         <div className="flex flex-wrap items-start gap-2">
-          {viewableLetterJob ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}
+          {/* View letter only when the review panel (which has its own "Open PDF") isn't showing —
+              no duplicate view button (Ryan 2026-06-05). */}
+          {viewableLetterJob && c.status !== 'rn_review' && c.status !== 'physician_review' ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}
           {canRedraft ? <Button variant="secondary" size="sm" loading={redraft.isPending} disabled={redraft.isPending} onClick={() => { if (window.confirm('Re-run the drafter? This creates a NEW letter version and costs another drafting run. Redraft only if the current letter is unusable.')) redraft.mutate(); }}>Redraft</Button> : null}
           {canShowSignOff ? <Button variant="primary" size="sm" onClick={() => setSignOffOpen(true)}>Sign off</Button> : null}
-          {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>Move to {CASE_STATUS_LABELS[to].toLowerCase()}</Button>)}
+          {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>{to === 'rejected' ? 'Reject claim' : `Move to ${CASE_STATUS_LABELS[to].toLowerCase()}`}</Button>)}
           {role === 'admin' ? <Button variant="destructive" size="sm" onClick={() => { if (window.confirm('Reject and soft-delete this case? It will be marked rejected.')) del.mutate(); }} loading={del.isPending}>Reject + soft delete</Button> : null}
         </div>
       </div>

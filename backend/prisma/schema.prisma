@@ -37,6 +37,8 @@ enum CaseStatus {
   delivered
   paid
   rejected
+  needs_rn_decision // Gate-2 dx/event verification halt — RN must decide (override/switch/proceed)
+  needs_records // Gate-2 halt where the RN chose to pause and gather more records
 
   @@map("case_status")
 }
@@ -55,6 +57,7 @@ enum DraftJobState {
   running
   done
   failed
+  halted // Gate-2 pre-draft verification halt — terminal-for-the-watcher; resumed via a NEW job
 
   @@map("draft_job_state")
 }
@@ -359,6 +362,7 @@ model Case {
   payments          Payment[]
   letterRevisions   LetterRevision[]
   caseMessages      CaseMessage[]
+  draftDecisions    DraftDecision[]
 
   @@index([veteranId])
   @@index([assignedPhysicianId])
@@ -368,6 +372,26 @@ model Case {
   @@index([veteranId, status])
   @@index([assignedPhysicianId, runComplete, shipRecommendation], map: "cases_physician_inbox_idx")
   @@map("cases")
+}
+
+// Gate-1 (RN checklist) + Gate-2 (AI dx/event verification) decision log. Every override reason is
+// shown IN THE CHART (case-page "Decisions & overrides" panel), per the owner's hard requirement —
+// never log-only. One row per decision/attestation.
+model DraftDecision {
+  id           String   @id @default(uuid())
+  caseId       String   @map("case_id")
+  draftAttempt Int      @map("draft_attempt") // distinguishes re-runs
+  gate         Int      @db.SmallInt // 1 = checklist, 2 = ai_verification
+  item         String   @db.VarChar(40) // dx_present | in_service_event | sc_conditions | prior_denial | nexus_switch
+  decision     String   @db.VarChar(20) // yes | no | not_applicable | override | switch_accept | switch_decline | proceed | pause
+  reason       String? // required for override / decline / switch_decline; else null
+  rnUser       String   @map("rn_user")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  case         Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+  @@index([caseId, draftAttempt])
+  @@map("draft_decisions")
 }
 
 enum LetterRevisionSource {
@@ -474,6 +498,7 @@ model DraftJob {
   nextRetryInS      Int?       @map("next_retry_in_s")
   failureClass      String?    @map("failure_class") @db.VarChar(20)
   gradeSidecarJson  Json?      @map("grade_sidecar_json")
+  haltPayloadJson   Json?      @map("halt_payload_json") // Gate-2 halt: plain-English reason + switchProposal + evidence the RN UI renders
   artifactPdfS3Key  String?    @map("artifact_pdf_s3_key") @db.VarChar(500)
   artifactTxtS3Key  String?    @map("artifact_txt_s3_key") @db.VarChar(500)
   artifactDocxS3Key String?    @map("artifact_docx_s3_key") @db.VarChar(500)

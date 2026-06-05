@@ -15,7 +15,9 @@ export type CaseStatus =
   | 'correction_review'
   | 'delivered'
   | 'paid'
-  | 'rejected';
+  | 'rejected'
+  | 'needs_rn_decision' // Gate-2 halt — RN must decide
+  | 'needs_records'; // Gate-2 halt — RN chose to gather more records
 export type CdsVerdict = 'accept' | 'caution' | 'reject' | 'not_yet_run';
 
 export interface VeteranRecord {
@@ -229,6 +231,7 @@ export interface AppDbTransaction {
   email: EmailDelegate;
   payment: PaymentDelegate;
   intake: IntakeDelegate;
+  draftDecision: DraftDecisionDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -291,7 +294,7 @@ export interface DraftJobRecord {
   caseId: string;
   version: number;
   sqsMessageId: string | null;
-  state: 'queued' | 'running' | 'done' | 'failed';
+  state: 'queued' | 'running' | 'done' | 'failed' | 'halted';
   enqueuedAt: Date;
   startedAt: Date | null;
   completedAt: Date | null;
@@ -301,6 +304,7 @@ export interface DraftJobRecord {
   nextRetryInS: number | null;
   failureClass: string | null;
   gradeSidecarJson: unknown;
+  haltPayloadJson: unknown;
   artifactPdfS3Key: string | null;
   artifactTxtS3Key: string | null;
   artifactDocxS3Key: string | null;
@@ -707,6 +711,26 @@ export interface IntakeDelegate {
   count(args: unknown): Promise<number>;
   create(args: unknown): Promise<IntakeRecord>;
   update(args: unknown): Promise<IntakeRecord>;
+}
+
+// Gate-1/Gate-2 decision log (project_compact_emr_gate2_emr_half).
+export interface DraftDecisionRecord {
+  id: string;
+  caseId: string;
+  draftAttempt: number;
+  gate: number;
+  item: string;
+  decision: string;
+  reason: string | null;
+  rnUser: string;
+  createdAt: Date;
+}
+
+export interface DraftDecisionDelegate {
+  findMany(args: unknown): Promise<readonly DraftDecisionRecord[]>;
+  create(args: unknown): Promise<DraftDecisionRecord>;
+  createMany(args: unknown): Promise<{ count: number }>;
+  count(args: unknown): Promise<number>;
 }
 
 // ====================== Phase 7B-revised Build 1: DocumentPage ======================

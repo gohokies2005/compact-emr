@@ -64,11 +64,20 @@ type FailureClass = (typeof FAILURE_CLASSES)[number];
 const GRADES = ['A', 'A-', 'B+', 'B', 'B-', 'C+', 'C'] as const;
 type Grade = (typeof GRADES)[number];
 
+interface ParsedRnDecision {
+  gate2Override?: boolean;
+  switchToCondition?: string;
+  proceed?: boolean;
+  reason?: string;
+  rnUser?: string;
+}
+
 interface ParsedDraftCreate {
   strategyOverride?: string;
   parentVersion?: number;
   acknowledgeMissingDocs?: boolean;
   overrideReason?: string;
+  rnDecision?: ParsedRnDecision;
 }
 
 function parseDraftCreateBody(body: unknown): ParsedDraftCreate {
@@ -107,6 +116,30 @@ function parseDraftCreateBody(body: unknown): ParsedDraftCreate {
       badRequest('parentVersion must be a positive integer', { field: 'parentVersion' });
     }
     out.parentVersion = parentVersion as number;
+  }
+  // Gate-2 resume: the RN's decision attached to a fresh draft job (the drafter skips the gate).
+  const rnDecision = body['rnDecision'];
+  if (rnDecision !== undefined && rnDecision !== null) {
+    if (!isRecord(rnDecision)) badRequest('rnDecision must be an object', { field: 'rnDecision' });
+    const rd = rnDecision as Record<string, unknown>;
+    const override = rd['gate2Override'] === true;
+    const proceed = rd['proceed'] === true;
+    const switchTo = typeof rd['switchToCondition'] === 'string' && (rd['switchToCondition'] as string).trim().length > 0 ? (rd['switchToCondition'] as string).trim() : undefined;
+    const chosen = [override, proceed, switchTo !== undefined].filter(Boolean).length;
+    if (chosen !== 1) badRequest('rnDecision must carry exactly one of gate2Override / switchToCondition / proceed', { field: 'rnDecision' });
+    const reason = typeof rd['reason'] === 'string' ? (rd['reason'] as string).trim() : '';
+    // Override / switch require a typed reason (logged + shown in chart, spec §178).
+    if ((override || switchTo !== undefined) && reason.length === 0) {
+      badRequest('rnDecision.reason is required for an override or a condition switch', { field: 'rnDecision.reason' });
+    }
+    const rnUser = typeof rd['rnUser'] === 'string' ? (rd['rnUser'] as string).trim() : '';
+    const parsed: ParsedRnDecision = {};
+    if (override) parsed.gate2Override = true;
+    if (proceed) parsed.proceed = true;
+    if (switchTo !== undefined) parsed.switchToCondition = switchTo;
+    if (reason.length > 0) parsed.reason = reason.slice(0, 2000);
+    if (rnUser.length > 0) parsed.rnUser = rnUser;
+    out.rnDecision = parsed;
   }
   return out;
 }
@@ -506,9 +539,28 @@ export function createDrafterClientRouter(db: AppDb): Router {
                 bundleSizeBytes: upload.sizeBytes,
                 ...(parsed.strategyOverride !== undefined && { strategyOverride: parsed.strategyOverride }),
                 ...(parsed.parentVersion !== undefined && { parentVersion: parsed.parentVersion }),
+                ...(parsed.rnDecision !== undefined && { rnDecision: parsed.rnDecision }),
               },
             },
           });
+          // Gate-2 resume: persist the RN's decision into the chart-visible decision log BEFORE
+          // the job goes out (spec §183 — reason logged + shown in chart before re-enqueue).
+          if (parsed.rnDecision !== undefined) {
+            const rd = parsed.rnDecision;
+            const decision = rd.switchToCondition !== undefined ? 'switch_accept' : rd.gate2Override ? 'override' : 'proceed';
+            const item = rd.switchToCondition !== undefined ? 'nexus_switch' : 'dx_verification';
+            await tx.draftDecision.create({
+              data: {
+                caseId,
+                draftAttempt: nextVersion,
+                gate: 2,
+                item,
+                decision,
+                reason: rd.reason ?? (rd.switchToCondition !== undefined ? `switch to ${rd.switchToCondition}` : null),
+                rnUser: rd.rnUser ?? actor.sub,
+              },
+            });
+          }
           return job;
         });
       } catch (err) {
@@ -530,6 +582,7 @@ export function createDrafterClientRouter(db: AppDb): Router {
         bundleS3Key,
         strategyOverride: parsed.strategyOverride ?? null,
         parentVersion: parsed.parentVersion ?? null,
+        rnDecision: parsed.rnDecision ?? null,
       });
 
       res.status(201).json({ data: { job: created, publish: publishResult, bundle: { s3Key: bundleS3Key, sizeBytes: upload.sizeBytes } } });
@@ -597,7 +650,104 @@ export function createDrafterClientRouter(db: AppDb): Router {
     }),
   );
 
+  /**
+   * GET /api/v1/cases/:id/draft-decisions  (admin / ops_staff / physician)
+   * The chart-visible "Decisions & overrides" log — Gate-1 attestations, Gate-2 halt findings, and
+   * RN resume decisions. Physician MUST see overrides (spec §108), so they're never log-only.
+   */
+  router.get(
+    '/cases/:id/draft-decisions',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const rows = await db.draftDecision.findMany({ where: { caseId }, orderBy: { createdAt: 'desc' } });
+      res.json({ data: rows });
+    }),
+  );
+
+  /**
+   * POST /api/v1/internal-free /cases/:id/draft-decisions  (admin / ops_staff)
+   * Gate-1 "Before we draft" checklist attestations. Body: { draftAttempt, items: [{item, decision,
+   * reason?}] }. decision in yes|no|not_applicable|override; reason required for override. Written
+   * BEFORE the draft is enqueued so the attestation is on the chart even if the run later halts.
+   */
+  router.post(
+    '/cases/:id/draft-decisions',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const actor = currentActor(req);
+      if (!isRecord(req.body)) badRequest('Request body must be an object');
+      const body = req.body as Record<string, unknown>;
+      const draftAttempt = typeof body['draftAttempt'] === 'number' && Number.isInteger(body['draftAttempt']) ? (body['draftAttempt'] as number) : 1;
+      const itemsRaw = body['items'];
+      if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) badRequest('items must be a non-empty array', { field: 'items' });
+      const ALLOWED = new Set(['yes', 'no', 'not_applicable', 'override']);
+      const data = (itemsRaw as unknown[]).map((it) => {
+        if (!isRecord(it)) { badRequest('each item must be an object', { field: 'items' }); }
+        const r = it as Record<string, unknown>;
+        const item = typeof r['item'] === 'string' ? (r['item'] as string).slice(0, 40) : '';
+        const decision = typeof r['decision'] === 'string' ? (r['decision'] as string) : '';
+        if (item.length === 0 || !ALLOWED.has(decision)) badRequest('each item needs item + a valid decision', { field: 'items' });
+        const reason = typeof r['reason'] === 'string' ? (r['reason'] as string).trim() : '';
+        if (decision === 'override' && reason.length === 0) badRequest(`item '${item}' is an override and needs a reason`, { field: 'items' });
+        return { caseId, draftAttempt, gate: 1, item, decision, reason: reason.length > 0 ? reason.slice(0, 2000) : null, rnUser: actor.sub };
+      });
+      const result = await db.draftDecision.createMany({ data });
+      res.status(201).json({ data: { written: result.count } });
+    }),
+  );
+
   return router;
+}
+
+const HALT_REASON_CODES = [
+  'dx_not_found', 'event_not_found', 'dx_and_event_not_found',
+  'verify_error', 'verify_parse_error', 'verify_unavailable', 'no_records_text',
+] as const;
+
+interface ParsedHalt {
+  haltGate: string;
+  reasonCode: string;
+  plainEnglish: string;
+  operatorMessage?: string;
+  switchProposal?: unknown;
+  claimedDxFound?: string;
+  inServiceEventFound?: string;
+  manifest?: Record<string, unknown>;
+  payload: Record<string, unknown>;
+}
+
+function parseHaltBody(body: unknown): ParsedHalt {
+  if (!isRecord(body)) { badRequest('Request body must be an object'); }
+  const b = body as Record<string, unknown>;
+  const reasonCode = b['reasonCode'];
+  if (typeof reasonCode !== 'string' || !(HALT_REASON_CODES as readonly string[]).includes(reasonCode)) {
+    badRequest(`reasonCode must be one of: ${HALT_REASON_CODES.join(', ')}`, { field: 'reasonCode' });
+  }
+  const plainEnglish = b['plainEnglish'];
+  if (typeof plainEnglish !== 'string' || plainEnglish.trim().length === 0) {
+    badRequest('plainEnglish is required (the RN-facing reason)', { field: 'plainEnglish' });
+  }
+  const out: ParsedHalt = {
+    haltGate: typeof b['haltGate'] === 'string' ? (b['haltGate'] as string) : 'dx_verification',
+    reasonCode: reasonCode as string,
+    plainEnglish: (plainEnglish as string).trim(),
+    payload: b, // the full payload is stored for the RN UI to render (switchProposal, evidence, etc.)
+  };
+  if (typeof b['operatorMessage'] === 'string') out.operatorMessage = b['operatorMessage'] as string;
+  if (b['switchProposal'] !== undefined && b['switchProposal'] !== null) out.switchProposal = b['switchProposal'];
+  if (typeof b['claimedDxFound'] === 'string') out.claimedDxFound = b['claimedDxFound'] as string;
+  if (typeof b['inServiceEventFound'] === 'string') out.inServiceEventFound = b['inServiceEventFound'] as string;
+  if (isRecord(b['manifest'])) out.manifest = b['manifest'] as Record<string, unknown>;
+  return out;
+}
+
+// Map a Gate-2 halt reasonCode to the draft_decisions item it concerns (for the chart panel).
+function haltItem(reasonCode: string): string {
+  if (reasonCode === 'event_not_found') return 'in_service_event';
+  if (reasonCode === 'dx_not_found' || reasonCode === 'dx_and_event_not_found') return 'dx_present';
+  return 'dx_verification';
 }
 
 /**
@@ -831,6 +981,89 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
           });
         }
 
+        return { job, case: caseUpdated };
+      });
+
+      res.json({ data: updated });
+    }),
+  );
+
+  /**
+   * POST /api/v1/internal/drafter/jobs/:id/halt   (drafter-principal)
+   *
+   * Gate-2 pre-draft dx/event verification HALT. The drafter ran one bounded check over the
+   * already-extracted chart and could not confirm the claimed diagnosis and/or in-service event
+   * (fail-TO-halt — it NEVER drafts on a guess and spends zero drafting tokens). This parks the
+   * case for an RN decision.
+   *
+   * CRITICAL: sets DraftJob.state='halted' so the stuck-job-watcher (state IN ('queued','running'))
+   * can never resurrect the parked case. Stores the full payload (plain-English reason + optional
+   * switchProposal) so the RN UI renders the real reason + choices — never a blind block.
+   */
+  router.post(
+    '/internal/drafter/jobs/:id/halt',
+    asyncHandler(async (req: Request, res: Response) => {
+      const jobId = String(req.params.id);
+      const parsed = parseHaltBody(req.body);
+
+      const existing = await db.draftJob.findUnique({ where: { id: jobId } });
+      if (existing === null) throw new HttpError(404, 'not_found', 'DraftJob not found', { jobId });
+      // Idempotent: a redelivered halt on an already-halted job is a no-op 200 (a DLQ replay must
+      // not double-park or double-bump the case version).
+      if (existing.state === 'halted') { res.json({ data: existing, alreadyHalted: true }); return; }
+      if (existing.state === 'done' || existing.state === 'failed') {
+        throw new HttpError(409, 'conflict', `DraftJob is already in terminal state '${existing.state}'`, { jobId, state: existing.state });
+      }
+
+      const now = new Date();
+      const message = parsed.operatorMessage ?? parsed.plainEnglish;
+      const updated = await db.$transaction(async (tx) => {
+        const job = await tx.draftJob.update({
+          where: { id: jobId },
+          data: {
+            state: 'halted', // <-- watcher-immunity: falls outside state IN ('queued','running')
+            failureClass: 'needs_human',
+            completedAt: now,
+            lastHeartbeatAt: now,
+            errorMessage: parsed.plainEnglish.slice(0, 2000),
+            haltPayloadJson: parsed.payload,
+            ...(parsed.manifest !== undefined ? { manifestSnapshot: parsed.manifest } : {}),
+          },
+        });
+        const caseUpdated = await tx.case.update({
+          where: { id: existing.caseId },
+          data: {
+            status: parsed.reasonCode === 'no_records_text' ? 'needs_records' : 'needs_rn_decision',
+            operatorState: 'paused',
+            operatorMessage: message.slice(0, 2000),
+            runComplete: false,
+            version: { increment: 1 },
+          },
+        });
+        // Record the gate-2 FINDING in the chart-visible decision log (so the panel shows WHY it
+        // halted, not a blank block). The RN's response is logged separately on resume.
+        await tx.draftDecision.create({
+          data: {
+            caseId: existing.caseId,
+            draftAttempt: existing.version,
+            gate: 2,
+            item: haltItem(parsed.reasonCode),
+            decision: parsed.reasonCode.startsWith('verify') || parsed.reasonCode === 'no_records_text' ? 'pause' : 'no',
+            reason: parsed.plainEnglish.slice(0, 2000),
+            rnUser: SERVICE_ACTORS.DRAFTER,
+          },
+        });
+        await tx.activityLog.create({
+          data: {
+            actorUserId: SERVICE_ACTORS.DRAFTER,
+            caseId: existing.caseId,
+            action: 'draft_job_halted_gate2',
+            detailsJson: {
+              jobId, version: existing.version, haltGate: parsed.haltGate, reasonCode: parsed.reasonCode,
+              switchProposal: parsed.switchProposal ?? null,
+            },
+          },
+        });
         return { job, case: caseUpdated };
       });
 

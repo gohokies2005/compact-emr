@@ -12,6 +12,8 @@ export const CASE_STATUSES: readonly CaseStatus[] = [
   'delivered',
   'paid',
   'rejected',
+  'needs_rn_decision',
+  'needs_records',
 ] as const;
 
 export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> = {
@@ -20,7 +22,8 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   viability: ['drafting', 'rejected'],
   // A completed draft lands in rn_review (set by the drafter /complete handler). The RN reviews/
   // edits, then sends to the doctor. drafting->physician_review is kept for back-compat/manual use.
-  drafting: ['rn_review', 'physician_review', 'rejected'],
+  // Gate-2 can park a drafting case for an RN decision (set by the internal /halt handler).
+  drafting: ['rn_review', 'physician_review', 'needs_rn_decision', 'needs_records', 'rejected'],
   // RN review: "Send to doctor for review" -> physician_review; a redraft drops back to drafting;
   // or reject. (Ryan 2026-06-04: no auto-route to the doctor.)
   rn_review: ['physician_review', 'drafting', 'rejected'],
@@ -30,6 +33,10 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   delivered: ['paid'],
   paid: [],
   rejected: [],
+  // Gate-2 parked states: the RN resumes (drafting via the rnDecision draft) or rejects. needs_records
+  // can also drop back to records to gather more, then re-run.
+  needs_rn_decision: ['drafting', 'records', 'rejected'],
+  needs_records: ['drafting', 'records', 'rejected'],
 };
 
 export function isCaseStatus(value: unknown): value is CaseStatus {

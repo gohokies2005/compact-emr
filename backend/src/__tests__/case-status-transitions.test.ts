@@ -16,8 +16,11 @@ describe('case status transitions', () => {
     expect(CASE_STATUS_TRANSITIONS.viability).toEqual(['drafting', 'rejected']);
     // A completed draft lands in rn_review (RN reviews/edits, then sends to the doctor). No
     // auto-route to the physician. (Ryan 2026-06-04.)
-    expect(CASE_STATUS_TRANSITIONS.drafting).toEqual(['rn_review', 'physician_review', 'rejected']);
+    // Gate-2 can park a drafting case for an RN decision.
+    expect(CASE_STATUS_TRANSITIONS.drafting).toEqual(['rn_review', 'physician_review', 'needs_rn_decision', 'needs_records', 'rejected']);
     expect(CASE_STATUS_TRANSITIONS.rn_review).toEqual(['physician_review', 'drafting', 'rejected']);
+    expect(CASE_STATUS_TRANSITIONS.needs_rn_decision).toEqual(['drafting', 'records', 'rejected']);
+    expect(CASE_STATUS_TRANSITIONS.needs_records).toEqual(['drafting', 'records', 'rejected']);
     expect(CASE_STATUS_TRANSITIONS.physician_review).toEqual([
       'correction_requested',
       'delivered',

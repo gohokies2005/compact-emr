@@ -24,6 +24,15 @@ interface DraftJobQueueMessage {
   readonly bundleS3Key: string;
   readonly strategyOverride?: string | null;
   readonly parentVersion?: number | null;
+  // Gate-2 resume: the RN's decision rides the NEW draft-job message so the drafter SKIPS the
+  // dx-verification gate (no loop). Exactly one of gate2Override / switchToCondition / proceed.
+  readonly rnDecision?: {
+    readonly gate2Override?: boolean;
+    readonly switchToCondition?: string;
+    readonly proceed?: boolean;
+    readonly reason?: string;
+    readonly rnUser?: string;
+  } | null;
 }
 
 let cachedClient: unknown = null;
@@ -56,6 +65,9 @@ export async function publishDraftJobQueued(message: DraftJobQueueMessage): Prom
   }
   if (message.parentVersion !== undefined && message.parentVersion !== null) {
     body['parentVersion'] = message.parentVersion;
+  }
+  if (message.rnDecision !== undefined && message.rnDecision !== null) {
+    body['rnDecision'] = message.rnDecision;
   }
   const command = new sdk.SendMessageCommand({
     QueueUrl: queueUrl,

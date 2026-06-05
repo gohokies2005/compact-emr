@@ -17,6 +17,8 @@ import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { getArtifactPdfUrl, postDraft } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
+import { listDocuments } from '../../api/veterans';
+import { PdfViewerModal, type ViewableDoc } from '../../components/PdfViewerModal';
 import { useAuth } from '../../auth/useAuth';
 import { ConflictError, describeApiError } from '../../api/client';
 import { letterFilename } from '../../lib/letterFilename';
@@ -340,7 +342,7 @@ export function CaseDetailPage() {
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
         {tab === 'corrections' ? <CorrectionsTab caseId={caseId} /> : null}
         {tab === 'clarifications' ? <ClarificationsPanel caseId={caseId} /> : null}
-        {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} /> : null}
+        {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} /> : null}
         {tab === 'messages' ? <CaseMessagesPanel caseId={caseId} /> : null}
         {tab === 'activity' ? <EmptyState title="Activity" message="The per-case activity log ships in a later phase." /> : null}
       </div>
@@ -447,9 +449,34 @@ function CorrectionsTab({ caseId }: { readonly caseId: string }) {
   return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">From</th><th className="px-4 py-2">To</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2">Requested by</th><th className="px-4 py-2">Approved by</th><th className="px-4 py-2">Billing</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((r) => <tr key={r.id}><td className="px-4 py-2">{r.fromVersion}</td><td className="px-4 py-2">{r.toVersion ?? '—'}</td><td className="px-4 py-2">{r.correctionReason}</td><td className="px-4 py-2 text-slate-500">{r.requestedBy}</td><td className="px-4 py-2 text-slate-500">{r.approvedBy ?? '—'}</td><td className="px-4 py-2 text-slate-500">{r.billingTier}</td></tr>)}</tbody></table></div>;
 }
 
-function DocumentsTab({ veteranId }: { readonly veteranId: string }) {
-  return <div className="rounded-lg border border-dashed border-slate-300 bg-white p-6 text-center">
-    <p className="text-sm text-slate-600">Documents are managed at the veteran chart level.</p>
-    <div className="mt-3"><Link to={`/veterans/${encodeURIComponent(veteranId)}#documents`}><Button variant="secondary" size="sm">Open veteran documents</Button></Link></div>
-  </div>;
+function DocumentsTab({ veteranId, caseId }: { readonly veteranId: string; readonly caseId: string }) {
+  const q = useQuery({ queryKey: ['documents', veteranId], queryFn: () => listDocuments(veteranId), enabled: veteranId.length > 0 });
+  const [viewDoc, setViewDoc] = useState<ViewableDoc | null>(null);
+  const all = q.data?.data ?? [];
+  const docs = all.filter((d) => d.caseId === caseId); // this claim's files
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white">
+      <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+        <h3 className="text-sm font-semibold text-slate-800">Documents on this claim</h3>
+        <Link className="text-xs text-indigo-600 hover:underline" to={`/veterans/${encodeURIComponent(veteranId)}#documents`}>Manage all veteran documents →</Link>
+      </div>
+      {q.isLoading ? (
+        <div className="p-6 text-sm text-slate-500">Loading documents…</div>
+      ) : docs.length === 0 ? (
+        <EmptyState title="No documents on this claim" message="Files assigned to this claim (including the auto-generated Intake Summary) appear here. Click any file to view it in-page." />
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {docs.map((d) => (
+            <div key={d.id} className="flex items-center justify-between gap-3 px-4 py-3 text-sm">
+              <button className="flex flex-1 items-center justify-between gap-3 text-left hover:bg-slate-50" onClick={() => setViewDoc({ id: d.id, filename: d.filename, contentType: d.contentType })}>
+                <span className="text-indigo-700">{d.filename}</span>
+                <span className="text-slate-500">{d.docTag ?? 'Other'} · {formatRelativeTime(d.uploadedAt)}</span>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <PdfViewerModal doc={viewDoc} onClose={() => setViewDoc(null)} />
+    </div>
+  );
 }

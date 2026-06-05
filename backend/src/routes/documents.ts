@@ -170,12 +170,21 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     res.status(201).json({ data: { ...created, sizeBytes: created.sizeBytes.toString() } });
   });
 
-  router.get('/documents/:id/download', requireRole(['admin', 'ops_staff']), async (req, res) => {
+  router.get('/documents/:id/download', requireRole(['admin', 'ops_staff', 'physician']), async (req, res) => {
     if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
-    const document = await prisma.document.findUnique({ where: { id: String(req.params.id) }, select: { id: true, s3Key: true, filename: true } });
+    const document = await prisma.document.findUnique({ where: { id: String(req.params.id) }, select: { id: true, s3Key: true, filename: true, contentType: true } });
     if (!document) return error(res, 404, 'document_not_found', 'Document was not found.');
 
-    const command = new GetObjectCommand({ Bucket: bucketName, Key: document.s3Key, ResponseContentDisposition: `attachment; filename="${sanitizeFilename(document.filename)}"` });
+    // disposition=inline → render in-page (the EMR's PDF viewer iframe) instead of downloading.
+    // Setting ResponseContentType makes the browser render the PDF rather than save it. Default
+    // (no param) keeps the attachment/download behavior for any existing callers.
+    const inline = req.query['disposition'] === 'inline';
+    const command = new GetObjectCommand({
+      Bucket: bucketName,
+      Key: document.s3Key,
+      ResponseContentDisposition: `${inline ? 'inline' : 'attachment'}; filename="${sanitizeFilename(document.filename)}"`,
+      ...(inline && document.contentType ? { ResponseContentType: document.contentType } : {}),
+    });
     const downloadUrl = await getSignedUrl(s3, command, { expiresIn: DOWNLOAD_TTL_SECONDS });
     res.json({ data: { downloadUrl, expiresInSeconds: DOWNLOAD_TTL_SECONDS } });
   });

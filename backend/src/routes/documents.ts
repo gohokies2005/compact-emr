@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { CopyObjectCommand, DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Router, type Request, type Response } from 'express';
 import type { PrismaClient } from '@prisma/client';
@@ -187,6 +187,25 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     });
     const downloadUrl = await getSignedUrl(s3, command, { expiresIn: DOWNLOAD_TTL_SECONDS });
     res.json({ data: { downloadUrl, expiresInSeconds: DOWNLOAD_TTL_SECONDS } });
+  });
+
+  // POST /documents/:id/reocr — re-run OCR on a file (e.g. one stuck in "needs review" before the
+  // Claude fallback shipped). Re-fires the deployed pipeline by COPYING the object onto itself
+  // (MetadataDirective REPLACE) → a fresh S3 ObjectCreated event → ocr-start → Textract → Claude
+  // fallback. No extra Textract/Anthropic perms on the API; reuses everything. (admin/ops_staff.)
+  router.post('/documents/:id/reocr', requireRole(['admin', 'ops_staff']), async (req, res) => {
+    if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
+    const document = await prisma.document.findUnique({ where: { id: String(req.params.id) }, select: { id: true, s3Key: true, contentType: true } });
+    if (!document) return error(res, 404, 'document_not_found', 'Document was not found.');
+    await s3.send(new CopyObjectCommand({
+      Bucket: bucketName,
+      Key: document.s3Key,
+      CopySource: `${bucketName}/${document.s3Key}`,
+      MetadataDirective: 'REPLACE',
+      ServerSideEncryption: 'aws:kms',
+      ...(document.contentType ? { ContentType: document.contentType } : {}),
+    }));
+    res.json({ data: { ok: true, reocrTriggered: true } });
   });
 
   // Delete a misuploaded file (Ryan 2026-06-04: "if a file were ever accidentally uploaded to the

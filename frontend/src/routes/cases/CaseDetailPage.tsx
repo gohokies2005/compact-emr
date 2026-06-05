@@ -19,7 +19,7 @@ import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { getArtifactPdfUrl, postDraft } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
-import { listDocuments } from '../../api/veterans';
+import { listDocuments, reocrDocument } from '../../api/veterans';
 import { PdfViewerModal, type ViewableDoc } from '../../components/PdfViewerModal';
 import { useAuth } from '../../auth/useAuth';
 import { ConflictError, describeApiError } from '../../api/client';
@@ -467,6 +467,7 @@ function CorrectionsTab({ caseId }: { readonly caseId: string }) {
 function DocumentsTab({ veteranId, caseId }: { readonly veteranId: string; readonly caseId: string }) {
   const q = useQuery({ queryKey: ['documents', veteranId], queryFn: () => listDocuments(veteranId), enabled: veteranId.length > 0 });
   const [viewDoc, setViewDoc] = useState<ViewableDoc | null>(null);
+  const reocr = useMutation({ mutationFn: reocrDocument, onSuccess: () => window.alert('Re-running OCR on this file (Textract → Claude fallback). Refresh in a minute to see it read.') });
   const all = q.data?.data ?? [];
   const docs = all.filter((d) => d.caseId === caseId); // this claim's files
   return (
@@ -487,6 +488,7 @@ function DocumentsTab({ veteranId, caseId }: { readonly veteranId: string; reado
                 <span className="text-indigo-700">{d.filename}</span>
                 <span className="text-slate-500">{d.docTag ?? 'Other'} · {formatRelativeTime(d.uploadedAt)}</span>
               </button>
+              <button type="button" className="shrink-0 text-xs font-medium text-slate-500 hover:text-indigo-600 disabled:opacity-50" disabled={reocr.isPending} title="Re-run OCR (Textract → Claude fallback) — use if this file shows as unreadable" onClick={() => reocr.mutate(d.id)}>Re-run OCR</button>
             </div>
           ))}
         </div>

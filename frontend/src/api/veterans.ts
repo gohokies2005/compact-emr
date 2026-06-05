@@ -51,6 +51,8 @@ export async function recordDocument(veteranId: string, body: PresignDocumentInp
 export async function downloadDocument(id: string): Promise<Envelope<{ downloadUrl: string }>> { return apiGet(`/api/v1/documents/${encodeURIComponent(id)}/download`); }
 // Inline (in-page viewer) presign — disposition=inline so the browser renders it, not downloads.
 export async function viewDocument(id: string): Promise<Envelope<{ downloadUrl: string }>> { return apiGet(`/api/v1/documents/${encodeURIComponent(id)}/download?disposition=inline`); }
+// Re-run OCR on a file (re-fires Textract → Claude fallback) — clears a "needs review" stuck file.
+export async function reocrDocument(id: string): Promise<Envelope<{ ok: boolean }>> { return apiPost(`/api/v1/documents/${encodeURIComponent(id)}/reocr`, {}); }
 // Delete a misuploaded file (admin/ops_staff). Removes the S3 object + the document, its OCR pages,
 // and its read-status/key-doc rows so it fully disappears from the veteran-wide drafter bundle.
 export async function deleteDocument(id: string): Promise<void> { return apiDelete(`/api/v1/documents/${encodeURIComponent(id)}`); }

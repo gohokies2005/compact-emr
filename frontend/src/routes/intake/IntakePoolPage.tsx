@@ -12,6 +12,7 @@ import {
 } from '../../api/intakes';
 import { listVeterans } from '../../api/veterans';
 import { listCases } from '../../api/cases';
+import { formatConditionLabel } from '../../lib/conditionLabel';
 
 const ALLOWED_CT = new Set(['application/pdf', 'image/jpeg', 'image/png', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']);
 const CLAIM_TYPES = ['initial', 'supplemental', 'hlr', 'appeal'] as const;
@@ -23,8 +24,17 @@ function splitName(full: string | null): { first: string; last: string } {
   return { first: parts.slice(0, -1).join(' '), last: parts[parts.length - 1]! };
 }
 function mintId(prefix: string): string { return `${prefix}-${crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`; }
-// Display as "Lastname, Firstname" (Ryan 2026-06-05).
-function displayName(full: string | null): string { const { first, last } = splitName(full); return last ? (first ? `${last}, ${first}` : last) : (full ?? ''); }
+// Title-case a name part (fixes ALL-CAPS form entries like "WOODLEY" → "Woodley"); preserves hyphens
+// and apostrophes (Hamilton-Dorsey, O'Brien).
+function titleCaseName(s: string): string {
+  return s.toLowerCase().replace(/(^|[\s'-])([a-z])/g, (_, sep: string, ch: string) => sep + ch.toUpperCase());
+}
+// Display as "Lastname, Firstname" (Ryan 2026-06-05), title-cased.
+function displayName(full: string | null): string {
+  const { first, last } = splitName(full);
+  const f = titleCaseName(first); const l = titleCaseName(last);
+  return l ? (f ? `${l}, ${f}` : l) : titleCaseName(full ?? '');
+}
 
 // Significant condition tokens (drop punctuation + filler) so "migraines" and "Migraines / Chronic
 // Headaches" are recognized as the same claim — prevents a duplicate claim on the second intake.
@@ -105,7 +115,7 @@ export function IntakePoolPage() {
                     <td className="px-4 py-2">{r.veteranMatch
                       ? <span className="inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700" title={`Existing profile: ${r.veteranMatch.name}`}>✓ Exists</span>
                       : <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">New</span>}</td>
-                    <td className="px-4 py-2 text-slate-700">{r.submittedCondition ?? '—'}</td>
+                    <td className="px-4 py-2 text-slate-700">{r.submittedCondition ? formatConditionLabel(r.submittedCondition) : '—'}</td>
                     <td className="px-4 py-2 text-slate-600">{(r.fileManifestJson?.length ?? 0)} file(s)</td>
                     <td className="px-4 py-2 text-slate-500">{formatRelativeTime(r.createdAt)}</td>
                     <td className="px-4 py-2"><StatusChip s={r.status} retry={r.retryCount} /></td>
@@ -176,7 +186,7 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
   // case: existing (the veteran's claims) or new (condition + claim type prefilled)
   const [caseMode, setCaseMode] = useState<'existing' | 'new'>(kind === 'additional_docs' ? 'existing' : 'new');
   const [caseId, setCaseId] = useState<string | null>(null);
-  const [nc, setNc] = useState({ claimedCondition: intake.submittedCondition ?? '', claimType: prefillClaimType });
+  const [nc, setNc] = useState({ claimedCondition: formatConditionLabel(intake.submittedCondition ?? ''), claimType: prefillClaimType });
 
   const [fileKeys, setFileKeys] = useState<Set<string>>(new Set(intake.files.filter((f) => typeof f.s3Key === 'string').map((f) => f.s3Key!)));
   const [result, setResult] = useState<{ attached: number; failed: { name?: string; reason: string }[] } | null>(null);
@@ -258,7 +268,7 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
         <div className="font-medium text-slate-900">{intake.submittedName ? displayName(intake.submittedName) : '(no name)'}</div>
         <div className="mt-1 text-slate-600">{[intake.submittedEmail, intake.submittedPhone, intake.submittedState].filter(Boolean).join(' · ')}</div>
-        <div className="mt-1 text-slate-600">Condition (from form): {intake.submittedCondition ?? '—'} · {intake.submittedFormTitle ?? (kind === 'additional_docs' ? 'Additional records' : kind === 'stage1' ? 'Stage 1' : 'Stage 2')}</div>
+        <div className="mt-1 text-slate-600">Condition (from form): {intake.submittedCondition ? formatConditionLabel(intake.submittedCondition) : '—'} · {intake.submittedFormTitle ?? (kind === 'additional_docs' ? 'Additional records' : kind === 'stage1' ? 'Stage 1' : 'Stage 2')}</div>
         {match ? (
           dobMatches
             ? <div className="mt-2 inline-flex rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">✓ Matched existing profile {match.name} — name + DOB ({match.dob}) match</div>

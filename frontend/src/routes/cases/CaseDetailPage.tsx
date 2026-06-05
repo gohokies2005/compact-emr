@@ -21,6 +21,7 @@ import { getArtifactPdfUrl, postDraft, cancelDraftJob } from '../../api/drafter'
 import { listClarifications } from '../../api/cases';
 import { listDocuments, reocrDocument } from '../../api/veterans';
 import { PdfViewerModal, type ViewableDoc } from '../../components/PdfViewerModal';
+import { formatConditionLabel } from '../../lib/conditionLabel';
 import { useAuth } from '../../auth/useAuth';
 import { ConflictError, describeApiError } from '../../api/client';
 import { letterFilename } from '../../lib/letterFilename';
@@ -185,7 +186,7 @@ export function CaseDetailPage() {
       <div className="flex flex-col justify-between gap-4 lg:flex-row">
         <div>
           <h1 className="text-3xl font-bold text-slate-900">{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</h1>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-base text-slate-700"><span className="font-medium">{c.claimedCondition}</span><CaseStatusBadge status={c.status} /></div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-base text-slate-700"><span className="font-medium">{formatConditionLabel(c.claimedCondition)}</span><CaseStatusBadge status={c.status} /></div>
           {(() => {
             const v = c.veteran;
             const age = v?.dob ? Math.floor((Date.now() - Date.parse(v.dob)) / 31557600000) : null;

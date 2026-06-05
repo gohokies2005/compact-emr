@@ -108,6 +108,12 @@ function optionalVersion(input: Record<string, unknown>): number {
   return value;
 }
 
+// Normalize a name to title-case so an ALL-CAPS or lower-case form entry ("WOODLEY", "travis")
+// stores clean. Preserves hyphens/apostrophes (Hamilton-Dorsey, O'Brien). Ryan 2026-06-05.
+export function toTitleCaseName(s: string): string {
+  return s.trim().toLowerCase().replace(/(^|[\s'-])([a-z])/g, (_m, sep: string, ch: string) => sep + ch.toUpperCase());
+}
+
 export function parseVeteranCreate(body: unknown): VeteranCreateInput {
   if (!isObject(body)) throw new HttpError(400, 'bad_request', 'Request body must be an object.');
   const branch = optionalString(body, 'branch');
@@ -122,8 +128,8 @@ export function parseVeteranCreate(body: unknown): VeteranCreateInput {
   const weightLb = optionalNullableInt(body, 'weightLb');
   return {
     id: requiredString(body, 'id'),
-    lastName: requiredString(body, 'lastName'),
-    firstName: requiredString(body, 'firstName'),
+    lastName: toTitleCaseName(requiredString(body, 'lastName')),
+    firstName: toTitleCaseName(requiredString(body, 'firstName')),
     dob: parseDate(body.dob, 'dob'),
     email: requiredString(body, 'email'),
     ...(phone !== undefined ? { phone } : {}),

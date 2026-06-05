@@ -13,6 +13,7 @@ import { listVeterans } from '../../api/veterans';
 import type { CaseStatus, ClaimType } from '../../types/prisma';
 import { useColumnSort, type ColType } from '../../lib/useColumnSort';
 import { exportRowsToCsv } from '../../lib/csv';
+import { formatConditionLabel } from '../../lib/conditionLabel';
 
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -139,7 +140,7 @@ export function CasesPage() {
           {rows.map((c) => <tr key={c.id} className="cursor-pointer hover:bg-slate-50" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}`)}>
             <td className="px-4 py-3 font-medium"><Link className="text-indigo-600" to={`/cases/${encodeURIComponent(c.id)}`} onClick={(e) => e.stopPropagation()}>{c.id}</Link></td>
             <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`} onClick={(e) => e.stopPropagation()}>{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</Link></td>
-            <td className="px-4 py-3 text-slate-700">{c.claimedCondition}</td>
+            <td className="px-4 py-3 text-slate-700">{formatConditionLabel(c.claimedCondition)}</td>
             <td className="px-4 py-3 text-slate-600">{CLAIM_TYPE_LABELS[c.claimType]}</td>
             <td className="px-4 py-3"><CaseStatusBadge status={c.status} /></td>
             <td className="px-4 py-3 text-slate-600">{c.assignedPhysician?.fullName ?? '—'}</td>

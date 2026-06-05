@@ -53,6 +53,7 @@ new ApiStack(app, stackName(config, 'api'), {
   draftJobQueue: workers.draftJobQueue,
   drafterInvokeTokenSecret: workers.drafterInvokeTokenSecret,
   chartExtractQueue: workers.chartExtractQueue,
+  jotformIngestQueue: workers.jotformIngestQueue,
   env: config.awsEnv,
 });
 

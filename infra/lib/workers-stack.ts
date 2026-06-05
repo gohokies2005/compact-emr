@@ -67,6 +67,8 @@ export class WorkersStack extends Stack {
   public readonly drafterInvokeTokenSecret: secretsmanager.ISecret;
   public readonly chartExtractQueue: sqs.IQueue;
   public readonly chartExtractQueueUrl: string;
+  public readonly jotformIngestQueue: sqs.IQueue;
+  public readonly jotformIngestQueueUrl: string;
 
   constructor(scope: Construct, id: string, props: WorkersStackProps) {
     super(scope, id, props);
@@ -117,6 +119,49 @@ export class WorkersStack extends Stack {
     });
     this.doctorPackQueue = doctorPackQueue;
     this.doctorPackQueueUrl = doctorPackQueue.queueUrl;
+
+    // ===== Jotform intake-ingest queue (FIFO) + worker Lambda =====
+    const jotformIngestDlq = new sqs.Queue(this, 'JotformIngestDlq', {
+      queueName: `compact-emr-${config.envName}-jotform-ingest-dlq.fifo`,
+      fifo: true,
+    });
+    const jotformIngestQueue = new sqs.Queue(this, 'JotformIngestQueue', {
+      queueName: `compact-emr-${config.envName}-jotform-ingest.fifo`,
+      fifo: true,
+      visibilityTimeout: Duration.minutes(11), // > the worker's 10-min timeout
+      deadLetterQueue: { queue: jotformIngestDlq, maxReceiveCount: 3 },
+    });
+    this.jotformIngestQueue = jotformIngestQueue;
+    this.jotformIngestQueueUrl = jotformIngestQueue.queueUrl;
+
+    // API key (read-only) — populated out-of-band via the CLI (persists across deploys). Injected
+    // as a deploy-time dynamic ref, same pattern as workerTokenSecret.
+    const jotformApiKeySecret = secretsmanager.Secret.fromSecretNameV2(this, 'JotformApiKey', `compact-emr-${config.envName}/jotform-api-key`);
+    const jotformIngest = new lambda.Function(this, 'JotformIngest', {
+      functionName: `compact-emr-${config.envName}-jotform-ingest`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'handler.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'workers', 'jotform-ingest')),
+      timeout: Duration.minutes(10),
+      memorySize: 1024,
+      environment: {
+        COMPACT_EMR_API_URL: apiBaseUrl,
+        INTERNAL_WORKER_TOKEN: workerTokenSecret.secretValue.unsafeUnwrap(),
+        RECORDS_BUCKET: phiBucket.bucketName,
+        JOTFORM_API_KEY: jotformApiKeySecret.secretValue.unsafeUnwrap(),
+      },
+      logRetention: logs.RetentionDays.ONE_MONTH,
+    });
+    jotformIngest.addEventSource(new eventSources.SqsEventSource(jotformIngestQueue, { batchSize: 1 }));
+    phiBucket.grantPut(jotformIngest); // worker only PUTs to intake/<id>/; the EMR assign does the copy
+    documentsKey.grantEncryptDecrypt(jotformIngest);
+    new sqs.CfnQueuePolicy(this, 'JotformIngestQueuePolicy', {
+      queues: [jotformIngestQueue.queueUrl],
+      policyDocument: {
+        Version: '2012-10-17',
+        Statement: [{ Effect: 'Allow', Principal: { Service: 'lambda.amazonaws.com' }, Action: ['sqs:SendMessage', 'sqs:ReceiveMessage', 'sqs:DeleteMessage'], Resource: jotformIngestQueue.queueArn }],
+      },
+    });
 
     // ===== Drafter job SQS queue (FIFO) =====
     // ApiStack publishes here when ops_staff hits "Send to drafter"; the long-running Fargate

@@ -42,6 +42,7 @@ export interface ApiStackProps extends StackProps {
   draftJobQueue: sqs.IQueue;
   drafterInvokeTokenSecret: secretsmanager.ISecret;
   chartExtractQueue: sqs.IQueue;
+  jotformIngestQueue: sqs.IQueue;
 }
 
 export class ApiStack extends Stack {
@@ -113,6 +114,10 @@ export class ApiStack extends Stack {
         DOCTOR_PACK_QUEUE_URL: props.doctorPackQueue.queueUrl,
         DRAFT_JOB_QUEUE_URL: props.draftJobQueue.queueUrl,
         CHART_EXTRACT_QUEUE_URL: props.chartExtractQueue.queueUrl,
+        JOTFORM_INGEST_QUEUE_URL: props.jotformIngestQueue.queueUrl,
+        // Shared secret in the Jotform webhook URL path. Populated out-of-band via CLI; injected as
+        // a deploy-time dynamic ref (same pattern as the worker token). Enables the webhook to accept.
+        JOTFORM_WEBHOOK_SECRET: secretsmanager.Secret.fromSecretNameV2(this, 'JotformWebhookSecret', `compact-emr-${props.config.envName}/jotform-webhook-secret`).secretValue.unsafeUnwrap(),
         // Chart auto-extract: 'on' makes the merge endpoint WRITE extracted rows into the chart
         // (non-destructive). Controlled by cdk.json context `chart_autofill` (default off = shadow).
         // The draft-readiness DOOR (DRAFT_READINESS_GATE) stays separate + off until the popup ships.
@@ -167,6 +172,7 @@ export class ApiStack extends Stack {
     props.doctorPackQueue.grantSendMessages(handler);
     props.draftJobQueue.grantSendMessages(handler);
     props.chartExtractQueue.grantSendMessages(handler);
+    props.jotformIngestQueue.grantSendMessages(handler);
 
     // ── Letter editor grants ──────────────────────────────────────────────────────────
     // API Lambda reads the surgical-AI key at runtime. (phiBucket RW + documentsKey already

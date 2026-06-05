@@ -820,6 +820,14 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
 
       const existing = await db.draftJob.findUnique({ where: { id: jobId } });
       if (existing === null) throw new HttpError(404, 'not_found', 'DraftJob not found', { jobId });
+      // RN cancellation gets a DISTINCT, abort-able signal (200 + cancelRequested:true) rather than a
+      // plain 409 — the drafter worker swallows 409 as idempotent redelivery and would NOT stop.
+      // (Architect QA #1: the worker must check this flag and kill the child to actually stop spend —
+      // that worker change is a separate drafter-window task.)
+      if (existing.state === 'failed' && existing.errorMessage === 'Cancelled by RN') {
+        res.status(200).json({ data: existing, cancelRequested: true });
+        return;
+      }
       if (existing.state === 'done' || existing.state === 'failed') {
         throw new HttpError(409, 'conflict', `DraftJob is already in terminal state '${existing.state}'`, {
           jobId,
@@ -879,6 +887,11 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
       // bump case.version / currentVersion / status — the watcher already settled those; this is
       // a pure artifact-attachment, not a second terminal transition.
       if (existing.state === 'done' || existing.state === 'failed') {
+        // An RN cancellation must NOT resurrect a letter/grade onto the case via late-artifact
+        // recovery — the run was explicitly abandoned. Discard the callback. (Architect QA #2.)
+        if (existing.errorMessage === 'Cancelled by RN') {
+          throw new HttpError(409, 'conflict', 'DraftJob was cancelled by the RN — artifacts discarded.', { jobId, cancelled: true });
+        }
         const hasArtifacts =
           typeof existing.artifactPdfS3Key === 'string' &&
           existing.artifactPdfS3Key.length > 0 &&

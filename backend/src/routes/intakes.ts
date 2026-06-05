@@ -233,7 +233,10 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     // Same row-first-then-write discipline as the file copies so ocr-start resolves it by s3-key.
     const rawAnswers = (intake as { rawAnswersJson?: unknown }).rawAnswersJson;
     if (rawAnswers && typeof rawAnswers === 'object') {
-      const summaryKey = `cases/${caseId}/${randomUUID()}-${sanitizeFilename(`${lastName || 'Veteran'}_Intake_Summary.pdf`)}`;
+      // Fixed, distinctive name (no veteran lastname) so the chart-readiness exclusion can match the
+      // GENERATED summary precisely (key ends '-Intake_Summary.pdf') and never a real uploaded record
+      // that happens to be a "Nursing Intake Summary". (Architect QA finding #5.)
+      const summaryKey = `cases/${caseId}/${randomUUID()}-Intake_Summary.pdf`;
       let summaryDocId: string | undefined;
       try {
         const im = intake as unknown as { submittedName?: string | null; submittedFormTitle?: string | null; submittedAt?: Date | string | null };

@@ -171,7 +171,7 @@ export function InFlightDrafterPanel({ job, onCancel, cancelling }: InFlightDraf
           </div>
           {onCancel ? (
             <Button variant="secondary" size="sm" disabled={cancelling ?? false} loading={cancelling ?? false}
-              onClick={() => { if (window.confirm('Cancel this draft? It stops the run so you are not billed for the rest. You can re-send afterward.')) onCancel(); }}>
+              onClick={() => { if (window.confirm('Cancel this draft? It stops the EMR from waiting on this run and lets you re-send. (Halting the cloud run mid-way is being wired with the drafter.)')) onCancel(); }}>
               Cancel draft
             </Button>
           ) : null}

@@ -130,7 +130,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
           claimType={claimType ?? 'initial'}
           claimedCondition={claimedCondition ?? ''}
           draftAttempt={draftAttempt ?? 1}
-          onClose={() => setGate1Open(false)}
+          onClose={() => { setGate1Open(false); setPendingOverride(null); }}
           onConfirmed={() => { setGate1Open(false); draftMutation.mutate(pendingOverride ?? undefined); setPendingOverride(null); }}
         />
       ) : null}

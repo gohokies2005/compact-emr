@@ -149,10 +149,12 @@ export function evaluateChartReadiness(rows: readonly FileReadStatusRecord[]): C
   let provided = 0;
 
   for (const row of rows) {
-    // The Intake Summary is a doc WE generate from the form answers — it's always valid (a sparse
-    // intake just yields a short PDF that trips the <40-word read threshold). It must never block
-    // drafting or send an RN to manual review. Treat it as read regardless of its OCR word count.
-    if (typeof row.filePath === 'string' && /intake[_ ]?summary/i.test(row.filePath)) {
+    // The Intake Summary is a doc WE generate from the form answers — always valid (a sparse intake
+    // yields a short PDF that trips the <40-word read threshold). It must never block drafting or
+    // send an RN to manual review. Match the GENERATED key precisely (it's minted as
+    // `cases/<id>/<uuid>-Intake_Summary.pdf`, so the key ends with '-Intake_Summary.pdf') — NOT a
+    // loose substring, so a real uploaded "Nursing Intake Summary" record is never masked. (QA #5.)
+    if (typeof row.filePath === 'string' && /-intake_summary\.pdf$/i.test(row.filePath)) {
       read++;
       continue;
     }

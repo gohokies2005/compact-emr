@@ -19,12 +19,15 @@ function canonicalCondition(s: string): string {
   if (COND_SYNONYMS[t] !== undefined) t = COND_SYNONYMS[t]!;
   return t.split(' ').filter((w) => w.length > 0 && !COND_STOP.has(w)).sort().join(' ');
 }
-function dedupByCondition<T>(rows: readonly T[], getName: (r: T) => string): T[] {
+// keyExtra (e.g. SC claim status) is folded into the dedup key so rows that differ in that field
+// are NOT collapsed — preserves denial/SC history (architect QA: don't drop a differently-rated row).
+function dedupByCondition<T>(rows: readonly T[], getName: (r: T) => string, keyExtra?: (r: T) => string): T[] {
   const byKey = new Map<string, T>();
   const passthrough: T[] = [];
   for (const r of rows) {
-    const k = canonicalCondition(getName(r));
-    if (k.length === 0) { passthrough.push(r); continue; }
+    const base = canonicalCondition(getName(r));
+    if (base.length === 0) { passthrough.push(r); continue; }
+    const k = keyExtra ? `${base}|${keyExtra(r)}` : base;
     const cur = byKey.get(k);
     if (cur === undefined || getName(r).length > getName(cur).length) byKey.set(k, r);
   }
@@ -115,7 +118,7 @@ function ConditionsPanel({ veteranId, rows, onChange }: { readonly veteranId: st
     </div>
     {rows.length === 0
       ? <EmptyState title="Nothing recorded yet" message="Add the first condition above." />
-      : <div className="divide-y divide-slate-100">{dedupByCondition(rows, (r) => r.condition).map((r) => <ScConditionRow key={r.id} row={r} onChange={onChange} onDelete={() => { if (window.confirm('Remove this SC condition?')) del.mutate(r.id); }} />)}</div>}
+      : <div className="divide-y divide-slate-100">{dedupByCondition(rows, (r) => r.condition, (r) => r.status).map((r) => <ScConditionRow key={r.id} row={r} onChange={onChange} onDelete={() => { if (window.confirm('Remove this SC condition?')) del.mutate(r.id); }} />)}</div>}
   </div>;
 }
 

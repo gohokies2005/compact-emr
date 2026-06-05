@@ -567,6 +567,11 @@ export function createDrafterClientRouter(db: AppDb): Router {
                 rnUser: rd.rnUser ?? actor.sub,
               },
             });
+            // Architect QA blocker fix: a Gate-2 resume MUST move the case out of the parked
+            // status (needs_rn_decision / needs_records) into 'drafting' — else the halt panel
+            // never clears and the case stops polling, stranding the RN. (drafter /progress will
+            // keep it 'drafting'; /complete then sets rn_review.)
+            await tx.case.update({ where: { id: caseId }, data: { status: 'drafting' } });
           }
           return job;
         });

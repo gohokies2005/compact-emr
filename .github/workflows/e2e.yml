@@ -1,12 +1,16 @@
 name: E2E (live site)
 
-# Runs the Playwright RN-workflow smoke test against the deployed site after a
-# successful staging deploy. workflow_run fires when "Deploy staging" completes;
-# the job guard ensures we only run when that deploy actually succeeded.
+# DISABLED 2026-06-05: this Playwright live-site smoke test was failing on every staging deploy
+# (missing/invalid E2E_* secrets) and emailing the repo owner on each failure — dozens/day. Auto-run
+# is OFF (manual-only via "Run workflow") so it stops spamming. To re-enable after fixing the
+# E2E_BASE_URL / E2E_USERNAME / E2E_PASSWORD / E2E_TOTP_SECRET repo secrets, restore the
+# `workflow_run` trigger below:
+#   on:
+#     workflow_run:
+#       workflows: ["Deploy staging"]
+#       types: [completed]
 on:
-  workflow_run:
-    workflows: ["Deploy staging"]
-    types: [completed]
+  workflow_dispatch: {}
 
 permissions:
   contents: read

@@ -23,6 +23,7 @@ import { PhysicianQueuePage } from './routes/physician/PhysicianQueuePage';
 import { PhysicianReviewPage } from './routes/physician/PhysicianReviewPage';
 import { PhysicianLettersPage } from './routes/physician/PhysicianLettersPage';
 import { RnQueuePage } from './routes/rn/RnQueuePage';
+import { IntakePoolPage } from './routes/intake/IntakePoolPage';
 
 const queryClient = new QueryClient();
 
@@ -47,6 +48,7 @@ export function App() {
     <Route path="/p/review/:caseId" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianReviewPage /></ProtectedRoute>} />
     <Route path="/p/letters" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianLettersPage /></ProtectedRoute>} />
     <Route path="/rn" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><RnQueuePage /></ProtectedRoute>} />
+    <Route path="/intake" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><IntakePoolPage /></ProtectedRoute>} />
     <Route path="/403" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><NoAccessPage /></ProtectedRoute>} />
     <Route path="/not-found" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><NotFoundPage /></ProtectedRoute>} />
     <Route path="*" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><NotFoundPage /></ProtectedRoute>} />

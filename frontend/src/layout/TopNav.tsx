@@ -5,6 +5,7 @@ import type { Role } from '../types/prisma';
 
 const navItems: readonly { label: string; href: string; roles: readonly Role[] }[] = [
   { label: 'Home', href: '/', roles: ['admin', 'ops_staff'] },
+  { label: 'Intake', href: '/intake', roles: ['admin', 'ops_staff'] },
   { label: 'Veterans', href: '/veterans', roles: ['admin', 'ops_staff'] },
   { label: 'Cases', href: '/cases', roles: ['admin', 'ops_staff'] },
   { label: 'Templates', href: '/templates', roles: ['admin'] },

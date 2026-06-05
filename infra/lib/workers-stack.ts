@@ -616,20 +616,24 @@ export class WorkersStack extends Stack {
         ENV_NAME: config.envName,
         JOTFORM_API_HOST: 'hipaa-api.jotform.com',
         API_DOMAIN: apiBaseUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
-        JOTFORM_API_KEY_SECRET_ARN: jotformApiKeySecret.secretArn,
-        JOTFORM_WEBHOOK_SECRET_ARN: jotformWebhookSecretForSweep.secretArn,
+        // Pass the FRIENDLY NAME, not `.secretArn`. For a name-imported secret, `.secretArn` is the
+        // PARTIAL ARN (no `-XXXXXX` suffix), and Secrets Manager CANNOT resolve a partial ARN —
+        // GetSecretValue(partialArn) returns ResourceNotFound (masked as AccessDenied for a scoped
+        // role). VERIFIED 2026-06-05: this, not the IAM grant, was why the sweep died on every run.
+        // The friendly name resolves to the current secret regardless of suffix; its authz resource
+        // is the resolved full ARN, which the `*` grant below covers.
+        JOTFORM_API_KEY_SECRET_ARN: jotformApiKeySecret.secretName,
+        JOTFORM_WEBHOOK_SECRET_ARN: jotformWebhookSecretForSweep.secretName,
         LOOKBACK_MINUTES: '180',
       },
     });
-    // IAM FIX (2026-06-05 incident): `fromSecretNameV2(...).grantRead()` emits a policy resource of
-    // `<bare-arn>-??????` (6 wildcard chars for the random suffix), but the Lambda calls
-    // GetSecretValue with the BARE, no-suffix ARN (`secretArn` of a name-imported secret) — and IAM
-    // authorizes that request against the bare ARN, which `-??????` cannot match. Result: the sweep
-    // was 100% AccessDenied on the webhook-secret read on EVERY hourly run since deploy — the safety
-    // net silently dead for days. Grant suffix-INDEPENDENTLY on the secret NAME + `*`, which matches
-    // BOTH the bare identifier the SDK sends AND any 6-char-suffixed full ARN (and survives a
-    // secret delete+recreate, which rotates the suffix). The old grantRead() calls are replaced, not
-    // kept, since they never covered the real request.
+    // IAM FIX (2026-06-05 incident, defense-in-depth). The ACTUAL blocker was the partial-ARN
+    // SecretId above (now passing `.secretName`). This `*` grant is the matching authz: a
+    // GetSecretValue-by-name authorizes against the RESOLVED full ARN (`...-XXXXXX`), so the policy
+    // resource must cover it. `<name>*` matches the full ARN AND survives a secret delete+recreate
+    // (which rotates the suffix) — unlike `fromSecretNameV2(...).grantRead()`, which emits
+    // `<bare-arn>-??????` and broke in concert with the partial-ARN read. The old grantRead() calls
+    // are replaced, not kept.
     jotformSweep.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
       resources: [

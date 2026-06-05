@@ -25,7 +25,7 @@ export interface IntakeListItem {
   readonly errorMessage: string | null;
   readonly submittedAt: string | null;
   readonly createdAt: string;
-  readonly veteranMatch: { readonly id: string; readonly name: string } | null; // existing profile for this email
+  readonly veteranMatch: { readonly id: string; readonly name: string; readonly dob: string | null } | null; // existing profile for this email
 }
 export interface IntakeDetail extends IntakeListItem {
   readonly files: readonly IntakeFile[];

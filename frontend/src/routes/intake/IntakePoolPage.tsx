@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
@@ -162,7 +162,12 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
   // veteran: existing (search/select) or new (prefilled). If a profile already exists for this email,
   // PRESELECT it (returning customer → no DOB entry needed; their claims load automatically).
   const match = intake.veteranMatch;
-  const [vetMode, setVetMode] = useState<'existing' | 'new'>(match ? 'existing' : (kind === 'stage1' ? 'new' : 'existing'));
+  // Default: existing when a profile is found, create-new when not (Ryan 2026-06-05).
+  const [vetMode, setVetMode] = useState<'existing' | 'new'>(match ? 'existing' : 'new');
+  const [searching, setSearching] = useState(false); // RN chose to search a different veteran than the match
+  // Two-factor identity: confirm name + DOB. (intake DOB vs the matched profile's DOB.)
+  const intakeDob = intake.submittedDob ?? '';
+  const dobMatches = !!match?.dob && !!intakeDob && match.dob === intakeDob;
   const [vetQuery, setVetQuery] = useState(match?.name ?? intake.submittedName ?? intake.submittedEmail ?? '');
   const [vetId, setVetId] = useState<string | null>(match?.id ?? null);
   const [vetLabel, setVetLabel] = useState<string>(match?.name ?? '');
@@ -178,6 +183,18 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
 
   const vetSearch = useQuery({ queryKey: ['intake-vetsearch', vetQuery], queryFn: () => listVeterans(vetQuery), enabled: vetMode === 'existing' && vetQuery.trim().length >= 2 });
   const vetCases = useQuery({ queryKey: ['intake-vetcases', vetId], queryFn: () => listCases({ veteranId: vetId!, page: 1, pageSize: 25 }), enabled: vetMode === 'existing' && vetId !== null });
+
+  // Default the CLAIM to existing when the chosen veteran already has a claim for this condition
+  // (Ryan 2026-06-05: "if a claim already exists, default to existing"). One-shot, RN can still change.
+  const claimAutoSet = useRef(false);
+  useEffect(() => {
+    if (claimAutoSet.current) return;
+    const cases = vetCases.data?.data;
+    if (!cases || cases.length === 0) return;
+    const cond = intake.submittedCondition ?? '';
+    const m = cases.find((c) => conditionsLikelySame(c.claimedCondition ?? '', cond));
+    if (m) { setCaseMode('existing'); setCaseId(m.id); claimAutoSet.current = true; }
+  }, [vetCases.data, intake.submittedCondition]);
 
   const assign = useMutation({
     mutationFn: () => {
@@ -242,7 +259,11 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
         <div className="font-medium text-slate-900">{intake.submittedName ? displayName(intake.submittedName) : '(no name)'}</div>
         <div className="mt-1 text-slate-600">{[intake.submittedEmail, intake.submittedPhone, intake.submittedState].filter(Boolean).join(' · ')}</div>
         <div className="mt-1 text-slate-600">Condition (from form): {intake.submittedCondition ?? '—'} · {intake.submittedFormTitle ?? (kind === 'additional_docs' ? 'Additional records' : kind === 'stage1' ? 'Stage 1' : 'Stage 2')}</div>
-        {match ? <div className="mt-2 inline-flex rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">✓ Existing profile found — preselected as {match.name} (no DOB entry needed)</div> : null}
+        {match ? (
+          dobMatches
+            ? <div className="mt-2 inline-flex rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">✓ Matched existing profile {match.name} — name + DOB ({match.dob}) match</div>
+            : <div className="mt-2 inline-flex rounded-md bg-amber-100 px-2 py-1 text-xs font-medium text-amber-900">⚠ Email matches {match.name} (profile DOB {match.dob ?? '—'}) but {intakeDob ? `the intake DOB is ${intakeDob}` : 'no DOB on this intake'} — verify name + DOB before assigning</div>
+        ) : null}
       </div>
 
       {/* Files */}
@@ -271,18 +292,28 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
           <label className="flex items-center gap-1"><input type="radio" checked={vetMode === 'new'} onChange={() => setVetMode('new')} /> Create new</label>
         </div>
         {vetMode === 'existing' ? (
-          <div>
-            <input className="input w-full" placeholder="Search by name / email / ID" value={vetQuery} onChange={(e) => { setVetQuery(e.target.value); setVetId(null); }} />
-            {vetSearch.data && vetSearch.data.data.length > 0 ? (
-              <ul className="mt-1 divide-y divide-slate-100 rounded-lg border border-slate-200">
-                {vetSearch.data.data.map((v) => (
-                  <li key={v.id}><button type="button" className={`flex w-full justify-between px-3 py-2 text-left text-sm hover:bg-slate-50 ${vetId === v.id ? 'bg-indigo-50' : ''}`} onClick={() => { setVetId(v.id); setVetLabel(`${v.firstName} ${v.lastName}`); setCaseMode((m) => m); }}>
-                    <span>{v.firstName} {v.lastName}</span><span className="text-slate-500">DOB {v.dob?.slice(0, 10) ?? '—'}</span>
-                  </button></li>
-                ))}
-              </ul>
-            ) : vetMode === 'existing' && vetQuery.trim().length >= 2 && !vetSearch.isLoading ? <p className="mt-1 text-xs text-slate-500">No match — switch to “Create new”.</p> : null}
-          </div>
+          match && vetId === match.id && !searching ? (
+            // Preselected matched profile — show it as confirmed (name + DOB), not a search that says
+            // "No match". The email match is authoritative; the RN verifies name + DOB here.
+            <div className={`rounded-lg border p-3 text-sm ${dobMatches ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+              <div className="font-medium text-slate-900">{match.name}</div>
+              <div className="text-slate-600">Profile DOB {match.dob ?? '—'}{intakeDob && match.dob && !dobMatches ? ` · intake says ${intakeDob}` : ''}</div>
+              <button type="button" className="mt-1 text-xs text-indigo-600 underline" onClick={() => { setSearching(true); setVetId(null); setVetQuery(''); }}>Pick a different veteran</button>
+            </div>
+          ) : (
+            <div>
+              <input className="input w-full" placeholder="Search by name / email / ID" value={vetQuery} onChange={(e) => { setVetQuery(e.target.value); setVetId(null); }} />
+              {vetSearch.data && vetSearch.data.data.length > 0 ? (
+                <ul className="mt-1 divide-y divide-slate-100 rounded-lg border border-slate-200">
+                  {vetSearch.data.data.map((v) => (
+                    <li key={v.id}><button type="button" className={`flex w-full justify-between px-3 py-2 text-left text-sm hover:bg-slate-50 ${vetId === v.id ? 'bg-indigo-50' : ''}`} onClick={() => { setVetId(v.id); setVetLabel(`${v.firstName} ${v.lastName}`); }}>
+                      <span>{v.firstName} {v.lastName}</span><span className="text-slate-500">DOB {v.dob?.slice(0, 10) ?? '—'}</span>
+                    </button></li>
+                  ))}
+                </ul>
+              ) : vetQuery.trim().length >= 2 && !vetSearch.isLoading ? <p className="mt-1 text-xs text-slate-500">No match — switch to “Create new”.</p> : null}
+            </div>
+          )
         ) : (
           <div className="grid grid-cols-2 gap-2">
             <input className="input" placeholder="First name" value={nv.firstName} onChange={(e) => setNv({ ...nv, firstName: e.target.value })} />

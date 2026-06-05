@@ -40,16 +40,18 @@ interface ManifestFile { readonly name?: string; readonly s3Key?: string; readon
 export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Router {
   const router = Router();
 
-  // Annotate intake rows with whether a veteran PROFILE already exists for the submitted email (the
-  // pool's "Profile" column + the drawer's auto-match for returning customers, who then need no DOB).
+  // Annotate intake rows with the existing veteran PROFILE (by email) — id + name + DOB. The drawer
+  // preselects it AND shows the profile DOB next to the intake's DOB so the RN confirms name + DOB
+  // (two-factor PHI identity), never "no DOB needed".
   async function withVeteranMatch(rows: Array<Record<string, unknown>>): Promise<Array<Record<string, unknown>>> {
     const emails = [...new Set(rows.map((r) => (typeof r['submittedEmail'] === 'string' ? (r['submittedEmail'] as string) : '')).filter(Boolean))];
     if (emails.length === 0) return rows.map((r) => ({ ...r, veteranMatch: null }));
-    let byEmail = new Map<string, { id: string; name: string }>();
+    let byEmail = new Map<string, { id: string; name: string; dob: string | null }>();
     try {
       const vets = await db.veteran.findMany({ where: { email: { in: emails } } });
-      byEmail = new Map((vets as Array<{ id: string; email?: string; firstName?: string; lastName?: string }>).map((v) => [
-        (v.email ?? '').toLowerCase(), { id: v.id, name: `${v.firstName ?? ''} ${v.lastName ?? ''}`.trim() },
+      byEmail = new Map((vets as Array<{ id: string; email?: string; firstName?: string; lastName?: string; dob?: Date | string | null }>).map((v) => [
+        (v.email ?? '').toLowerCase(),
+        { id: v.id, name: `${v.firstName ?? ''} ${v.lastName ?? ''}`.trim(), dob: v.dob instanceof Date ? v.dob.toISOString().slice(0, 10) : (typeof v.dob === 'string' ? v.dob.slice(0, 10) : null) },
       ]));
     } catch { /* match is best-effort — never block the pool list on it */ }
     return rows.map((r) => ({ ...r, veteranMatch: byEmail.get((typeof r['submittedEmail'] === 'string' ? (r['submittedEmail'] as string) : '').toLowerCase()) ?? null }));

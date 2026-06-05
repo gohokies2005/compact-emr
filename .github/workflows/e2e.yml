@@ -1,15 +1,14 @@
 name: E2E (live site)
 
-# DISABLED 2026-06-05: this Playwright live-site smoke test was failing on every staging deploy
-# (missing/invalid E2E_* secrets) and emailing the repo owner on each failure — dozens/day. Auto-run
-# is OFF (manual-only via "Run workflow") so it stops spamming. To re-enable after fixing the
-# E2E_BASE_URL / E2E_USERNAME / E2E_PASSWORD / E2E_TOTP_SECRET repo secrets, restore the
-# `workflow_run` trigger below:
-#   on:
-#     workflow_run:
-#       workflows: ["Deploy staging"]
-#       types: [completed]
+# Playwright RN-workflow smoke test against the deployed site after a successful staging deploy.
+# RE-ENABLED 2026-06-05 but SECRET-GUARDED: if the E2E_* repo secrets aren't configured, the job
+# skips cleanly (success, no email) instead of failing on every deploy. To activate real live-site
+# coverage, set repo secrets: E2E_BASE_URL, E2E_USERNAME, E2E_PASSWORD, E2E_TOTP_SECRET — it then
+# runs automatically after each staging deploy. Also runnable on demand via "Run workflow".
 on:
+  workflow_run:
+    workflows: ["Deploy staging"]
+    types: [completed]
   workflow_dispatch: {}
 
 permissions:
@@ -18,17 +17,33 @@ permissions:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    # Only run when the upstream deploy concluded successfully.
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Only after a SUCCESSFUL deploy (or a manual run).
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Check E2E secrets are configured
+        id: guard
+        env:
+          BASE: ${{ secrets.E2E_BASE_URL }}
+        run: |
+          if [ -z "$BASE" ]; then
+            echo "E2E_BASE_URL not set — skipping live E2E (no failure, no email). Set the E2E_* repo secrets to enable.";
+            echo "configured=false" >> "$GITHUB_OUTPUT";
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT";
+          fi
+      - if: steps.guard.outputs.configured == 'true'
+        uses: actions/checkout@v4
+      - if: steps.guard.outputs.configured == 'true'
+        uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - if: steps.guard.outputs.configured == 'true'
+        run: npm ci
+      - if: steps.guard.outputs.configured == 'true'
+        run: npx playwright install --with-deps chromium
       - name: Run E2E
+        if: steps.guard.outputs.configured == 'true'
         run: npx playwright test
         env:
           E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
@@ -36,7 +51,7 @@ jobs:
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           E2E_TOTP_SECRET: ${{ secrets.E2E_TOTP_SECRET }}
       - name: Upload Playwright report
-        if: failure()
+        if: ${{ failure() && steps.guard.outputs.configured == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report

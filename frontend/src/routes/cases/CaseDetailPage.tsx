@@ -22,6 +22,7 @@ import { listClarifications } from '../../api/cases';
 import { listDocuments, reocrDocument } from '../../api/veterans';
 import { PdfViewerModal, type ViewableDoc } from '../../components/PdfViewerModal';
 import { formatConditionLabel } from '../../lib/conditionLabel';
+import { Gate1ChecklistModal } from '../../components/Gate1ChecklistModal';
 import { useAuth } from '../../auth/useAuth';
 import { ConflictError, describeApiError } from '../../api/client';
 import { letterFilename } from '../../lib/letterFilename';
@@ -66,6 +67,7 @@ export function CaseDetailPage() {
   const [tab, setTab] = useState<TabId>('overview');
   const [pendingTo, setPendingTo] = useState<CaseStatus | null>(null);
   const [signOffOpen, setSignOffOpen] = useState(false);
+  const [redraftGate1Open, setRedraftGate1Open] = useState(false); // Gate-1 checklist before a redraft
 
   // Phase 8.1 G2 (Ryan's RN-self-service audit): poll the main case query every 8s while
   // the case is in pre-draft states so Textract OCR callbacks (FileReadStatus flips to
@@ -208,7 +210,7 @@ export function CaseDetailPage() {
           {/* View letter only when the review panel (which has its own "Open PDF") isn't showing —
               no duplicate view button (Ryan 2026-06-05). */}
           {viewableLetterJob && c.status !== 'rn_review' && c.status !== 'physician_review' ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}
-          {canRedraft ? <Button variant="secondary" size="sm" loading={redraft.isPending} disabled={redraft.isPending} onClick={() => { if (window.confirm('Re-run the drafter? This creates a NEW letter version and costs another drafting run. Redraft only if the current letter is unusable.')) redraft.mutate(); }}>Redraft</Button> : null}
+          {canRedraft ? <Button variant="secondary" size="sm" loading={redraft.isPending} disabled={redraft.isPending} onClick={() => setRedraftGate1Open(true)}>Redraft</Button> : null}
           {canShowSignOff ? <Button variant="primary" size="sm" onClick={() => setSignOffOpen(true)}>Sign off</Button> : null}
           {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>{to === 'rejected' ? 'Reject claim' : `Move to ${CASE_STATUS_LABELS[to].toLowerCase()}`}</Button>)}
           {role === 'admin' ? <Button variant="destructive" size="sm" onClick={() => { if (window.confirm('Reject and soft-delete this case? It will be marked rejected.')) del.mutate(); }} loading={del.isPending}>Reject + soft delete</Button> : null}
@@ -378,6 +380,16 @@ export function CaseDetailPage() {
 
     {pendingTo ? <TransitionModal caseId={caseId} from={c.status} to={pendingTo} version={c.version} onClose={() => setPendingTo(null)} onDone={async () => { setPendingTo(null); await refetch(); }} /> : null}
     <SignOffPopup caseId={caseId} open={signOffOpen} onClose={() => setSignOffOpen(false)} onSignedOff={refetch} />
+    {redraftGate1Open ? (
+      <Gate1ChecklistModal
+        caseId={caseId}
+        claimType={c.claimType}
+        claimedCondition={c.claimedCondition}
+        draftAttempt={(c.currentVersion ?? 0) + 1}
+        onClose={() => setRedraftGate1Open(false)}
+        onConfirmed={() => { setRedraftGate1Open(false); redraft.mutate(); }}
+      />
+    ) : null}
   </div></AppShell>;
 }
 

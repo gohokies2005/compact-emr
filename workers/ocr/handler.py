@@ -43,6 +43,7 @@ _secrets = boto3.client("secretsmanager")
 
 ANTHROPIC_MODEL = "claude-sonnet-4-6"  # matches local claude.js OCR model
 MAX_OCR_BYTES = 25 * 1024 * 1024  # Claude document/image request cap headroom; larger → flag for RN
+LOW_TEXT_CHARS = 200  # Textract output below this ≈ a barely-read scan → try Claude (≈ the 40-word read gate)
 _MEDIA_BY_EXT = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}
 _cached_anthropic_key: str | None = None
 
@@ -252,6 +253,10 @@ def _claude_ocr(document_id: str) -> str:
     s3_key = src.get("s3Key")
     if not s3_key:
         return ""
+    # Skip our OWN generated Intake Summary — a short one is valid (it's just a sparse intake) and the
+    # readiness gate already excludes it, so don't waste a Claude call on it.
+    if re.search(r"-intake_summary\.pdf$", str(s3_key), re.IGNORECASE):
+        return ""
     media = _media_type(s3_key, src.get("contentType"))
     if media is None:  # e.g. .docx — not a Claude vision input; let it flag (overridable)
         return ""
@@ -328,6 +333,22 @@ def completion_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         blocks = _fetch_all_pages(job_id)
         pages, document_page_count = _build_page_payload(blocks)
         if pages:
+            # Textract read SOMETHING but very little (a scan it choked on → a few words). Try Claude
+            # OCR and keep whichever extraction has more text — so a partially-read scanned record
+            # gets a real read instead of tripping the <40-word readiness threshold. (Our generated
+            # Intake_Summary is skipped inside _claude_ocr.)
+            total_chars = sum(len(p.get("text", "")) for p in pages)
+            if total_chars < LOW_TEXT_CHARS:
+                claude_text = ""
+                try:
+                    claude_text = _claude_ocr(document_id)
+                except Exception as exc:  # noqa: BLE001
+                    print(json.dumps({"msg": "ocr: claude low-text fallback error", "documentId": document_id, "error": f"{type(exc).__name__}: {exc}"}))
+                if len(claude_text) > total_chars:
+                    _post_pages_to_api(document_id, [{"pageNumber": 1, "text": claude_text, "confidence": None}], 1)
+                    print(json.dumps({"msg": "ocr: claude low-text fallback won", "documentId": document_id, "textractChars": total_chars, "claudeChars": len(claude_text)}))
+                    processed.append({"jobId": job_id, "documentId": document_id, "status": "POSTED", "pages": 1, "claudeOcr": True})
+                    continue
             _post_pages_to_api(document_id, pages, document_page_count)
             processed.append({"jobId": job_id, "documentId": document_id, "status": "POSTED", "pages": len(pages)})
         else:

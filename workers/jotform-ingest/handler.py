@@ -73,8 +73,12 @@ def _jotform_get(path: str) -> dict[str, Any]:
 
 
 def _download(url: str) -> bytes:
-    # Jotform HIPAA file URLs need the APIKEY to authorize the download.
-    req = urllib.request.Request(url, headers={"APIKEY": _jotform_api_key()})
+    # Jotform HIPAA file URLs need the APIKEY to authorize the download. The path can contain spaces
+    # / commas (the original filename), which urllib rejects ("URL can't contain control characters")
+    # — encode the path before requesting.
+    parts = urllib.parse.urlsplit(url)
+    safe_url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, urllib.parse.quote(parts.path), parts.query, parts.fragment))
+    req = urllib.request.Request(safe_url, headers={"APIKEY": _jotform_api_key()})
     with urllib.request.urlopen(req, timeout=120) as response:
         data = response.read(MAX_FILE_BYTES + 1)
     if len(data) > MAX_FILE_BYTES:

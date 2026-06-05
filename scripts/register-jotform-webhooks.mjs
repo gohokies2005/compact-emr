@@ -23,7 +23,10 @@ import https from 'node:https';
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const ENV_NAME = process.env.ENV_NAME || 'staging';
-const API_DOMAIN = process.env.API_DOMAIN || 'api.emr.flatratenexus.com';
+// The live, publicly-resolvable API host is the HttpApi execute-api URL (what the frontend uses).
+// api.emr.flatratenexus.com is NOT set up (no DNS / custom-domain mapping) — a stable custom domain
+// is a follow-up. Override with API_DOMAIN once that's wired.
+const API_DOMAIN = process.env.API_DOMAIN || 'nypr790pq7.execute-api.us-east-1.amazonaws.com';
 const JOTFORM_BASE = 'hipaa-api.jotform.com';
 
 function getSecret(name) {
@@ -68,12 +71,14 @@ async function main() {
   const formIds = args.filter((a) => /^\d{10,}$/.test(a));
   if (formIds.length === 0) { console.error('No form ids. Use --list to see them, or pass ids / --all-active.'); process.exit(1); }
 
+  const replace = args.includes('--replace'); // delete any existing intake webhook first (fix a wrong URL)
   for (const id of formIds) {
     const existing = await jotform('GET', `/form/${id}/webhooks`, apiKey);
-    const already = Object.values(existing.json?.content || {}).some((u) => typeof u === 'string' && u.includes('/jotform/webhook/'));
-    if (already) { console.log(`= ${id}  already has an intake webhook — skipped`); continue; }
+    const ours = Object.entries(existing.json?.content || {}).filter(([, u]) => typeof u === 'string' && u.includes('/jotform/webhook/'));
+    if (ours.length > 0 && !replace) { console.log(`= ${id}  already has an intake webhook — skipped (use --replace to update the URL)`); continue; }
+    if (replace) { for (const [whId] of ours) { await jotform('DELETE', `/form/${id}/webhooks/${whId}`, apiKey); } }
     const res = await jotform('POST', `/form/${id}/webhooks`, apiKey, { webhookURL: webhookUrl });
-    console.log(`${res.status < 300 ? '+' : '!'} ${id}  registered (HTTP ${res.status})`);
+    console.log(`${res.status < 300 ? '+' : '!'} ${id}  ${replace && ours.length ? 'replaced' : 'registered'} (HTTP ${res.status})`);
   }
 }
 

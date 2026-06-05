@@ -18,7 +18,8 @@ import https from 'node:https';
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const ENV_NAME = process.env.ENV_NAME || 'staging';
-const API_DOMAIN = process.env.API_DOMAIN || 'api.emr.flatratenexus.com';
+// Live API host = the execute-api URL (api.emr.flatratenexus.com isn't wired yet). Override w/ env.
+const API_DOMAIN = process.env.API_DOMAIN || 'nypr790pq7.execute-api.us-east-1.amazonaws.com';
 const JOTFORM_HOST = 'hipaa-api.jotform.com';
 
 function getSecret(name) {

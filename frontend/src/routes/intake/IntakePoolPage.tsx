@@ -24,6 +24,17 @@ function splitName(full: string | null): { first: string; last: string } {
 }
 function mintId(prefix: string): string { return `${prefix}-${crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`; }
 
+// Significant condition tokens (drop punctuation + filler) so "migraines" and "Migraines / Chronic
+// Headaches" are recognized as the same claim — prevents a duplicate claim on the second intake.
+const COND_STOPWORDS = new Set(['and', 'the', 'condition', 'disorder', 'chronic', 'unspecified', 'left', 'right', 'bilateral']);
+function condTokens(s: string): string[] {
+  return (s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length > 2 && !COND_STOPWORDS.has(w));
+}
+function conditionsLikelySame(a: string, b: string): boolean {
+  const ta = condTokens(a); const tb = condTokens(b);
+  return ta.length > 0 && tb.length > 0 && ta.some((w) => tb.includes(w));
+}
+
 type SortKey = 'name' | 'profile' | 'condition' | 'files' | 'received' | 'status';
 
 function sortRows(rows: readonly IntakeListItem[], key: SortKey, dir: 1 | -1): IntakeListItem[] {
@@ -193,6 +204,12 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
   const dismiss = useMutation({ mutationFn: () => dismissIntake(intake.id, window.prompt('Reason for dismissing (spam/dupe)?') ?? 'dismissed'), onSuccess: () => { onChanged(); onAssigned(); } });
   const retry = useMutation({ mutationFn: () => retryIntake(intake.id), onSuccess: onChanged });
 
+  // Same-condition dedup: if the chosen veteran already has a claim matching this condition, warn so
+  // the RN attaches to it instead of creating a duplicate claim (the "two migraines claims" problem).
+  const dupeClaim = (caseMode === 'new' && vetMode === 'existing' && vetId && nc.claimedCondition)
+    ? (vetCases.data?.data ?? []).find((c) => conditionsLikelySame(c.claimedCondition ?? '', nc.claimedCondition))
+    : undefined;
+
   const vetName = vetMode === 'existing' ? vetLabel : `${nv.lastName}, ${nv.firstName}`;
   const vetDob = vetMode === 'new' ? nv.dob : '';
   const claimLabel = caseMode === 'new' ? nc.claimedCondition : (vetCases.data?.data.find((c) => c.id === caseId)?.claimedCondition ?? caseId ?? '');
@@ -291,9 +308,17 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
             </select>
           ) : <p className="text-xs text-slate-500">Pick an existing veteran first.</p>
         ) : (
-          <div className="grid grid-cols-2 gap-2">
-            <input className="input" placeholder="Condition" value={nc.claimedCondition} onChange={(e) => setNc({ ...nc, claimedCondition: e.target.value })} />
-            <select className="input" value={nc.claimType} onChange={(e) => setNc({ ...nc, claimType: e.target.value })}>{CLAIM_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select>
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <input className="input" placeholder="Condition" value={nc.claimedCondition} onChange={(e) => setNc({ ...nc, claimedCondition: e.target.value })} />
+              <select className="input" value={nc.claimType} onChange={(e) => setNc({ ...nc, claimType: e.target.value })}>{CLAIM_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select>
+            </div>
+            {dupeClaim ? (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                {vetLabel} already has a claim for <b>{dupeClaim.claimedCondition}</b> ({dupeClaim.id}). Creating a new claim would duplicate it.{' '}
+                <button type="button" className="font-semibold text-indigo-700 underline" onClick={() => { setCaseMode('existing'); setCaseId(dupeClaim.id); }}>Attach to that claim instead</button> (the files/records go onto the existing claim).
+              </div>
+            ) : null}
           </div>
         )}
       </div>

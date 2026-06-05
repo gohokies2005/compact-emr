@@ -20,7 +20,7 @@ export function SendToDrafterPanel({ caseId }: SendToDrafterPanelProps) {
   });
 
   const draftMutation = useMutation({
-    mutationFn: () => postDraft(caseId),
+    mutationFn: (override?: { acknowledgeMissingDocs: boolean; overrideReason: string }) => postDraft(caseId, override ?? {}),
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
@@ -28,6 +28,14 @@ export function SendToDrafterPanel({ caseId }: SendToDrafterPanelProps) {
       ]);
     },
   });
+
+  // Never a dead-end: when the chart isn't ready (e.g. a file couldn't be auto-read), the RN can
+  // override and draft anyway with a logged reason (Ryan HARD RULE: EVERYTHING must be overridable).
+  function overrideAndDraft() {
+    const reason = window.prompt('Draft anyway? Type a brief reason (logged on the case). The drafter will run without the file(s) that could not be read.');
+    if (reason === null || reason.trim().length === 0) return;
+    draftMutation.mutate({ acknowledgeMissingDocs: true, overrideReason: reason.trim() });
+  }
 
   const readiness = readinessQuery.data?.data;
   const ready = readiness?.ready === true;
@@ -54,7 +62,7 @@ export function SendToDrafterPanel({ caseId }: SendToDrafterPanelProps) {
           variant="primary"
           disabled={!ready}
           loading={draftMutation.isPending}
-          onClick={() => draftMutation.mutate()}
+          onClick={() => draftMutation.mutate(undefined)}
         >
           Send to Drafter
         </Button>
@@ -76,9 +84,14 @@ export function SendToDrafterPanel({ caseId }: SendToDrafterPanelProps) {
             <h3 className="text-sm font-semibold text-amber-900">Chart is not ready for drafting</h3>
             <p className="mt-1 text-sm text-amber-800">
               {blockingFileCount > 0
-                ? `${blockingFileCount} file(s) need RN manual summary before drafting.`
+                ? `${blockingFileCount} file(s) could not be automatically read. You can draft anyway — the drafter will run without them.`
                 : (readiness?.reason ?? 'Resolve chart-readiness blockers before starting the drafter.')}
             </p>
+            <div className="mt-3">
+              <Button type="button" variant="secondary" size="sm" loading={draftMutation.isPending} onClick={overrideAndDraft}>
+                Override and draft anyway
+              </Button>
+            </div>
           </div>
         )}
 

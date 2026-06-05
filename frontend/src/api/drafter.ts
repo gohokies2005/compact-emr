@@ -6,6 +6,9 @@ import type { CaseLite } from './cases';
 export interface DraftRequestInput {
   readonly strategyOverride?: string;
   readonly parentVersion?: number;
+  // Override the chart-readiness / essential-docs block and draft anyway (logged reason). Never a dead-end.
+  readonly acknowledgeMissingDocs?: boolean;
+  readonly overrideReason?: string;
 }
 
 export interface DraftPublishResult {

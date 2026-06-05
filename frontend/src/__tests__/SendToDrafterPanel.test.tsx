@@ -42,10 +42,10 @@ describe('SendToDrafterPanel', () => {
     expect(await screen.findByText('Chart is ready for drafting.')).toBeInTheDocument();
 
     button.click();
-    await waitFor(() => expect(postDraftMock).toHaveBeenCalledWith('CASE-1'));
+    await waitFor(() => expect(postDraftMock).toHaveBeenCalledWith('CASE-1', {}));
   });
 
-  it('disables the button and explains the blocker when the chart is not ready', async () => {
+  it('explains the blocker AND offers an override (never a dead-end) when the chart is not ready', async () => {
     readinessMock.mockResolvedValue({
       data: {
         ready: false,
@@ -58,9 +58,11 @@ describe('SendToDrafterPanel', () => {
 
     expect(await screen.findByText('Chart is not ready for drafting')).toBeInTheDocument();
     expect(
-      screen.getByText('1 file(s) need RN manual summary before drafting.'),
+      screen.getByText('1 file(s) could not be automatically read. You can draft anyway — the drafter will run without them.'),
     ).toBeInTheDocument();
+    // primary button stays disabled, but an OVERRIDE button is always offered (Ryan HARD RULE).
     expect(screen.getByRole('button', { name: 'Send to Drafter' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Override and draft anyway' })).toBeEnabled();
     expect(postDraftMock).not.toHaveBeenCalled();
   });
 });

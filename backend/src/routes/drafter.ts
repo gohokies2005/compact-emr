@@ -416,10 +416,16 @@ export function createDrafterClientRouter(db: AppDb): Router {
 
       const fileRows = await db.fileReadStatus.findMany({ where: { caseId } });
       const chartReadiness = evaluateChartReadiness(fileRows);
-      if (!chartReadiness.ready) {
-        throw new HttpError(409, 'conflict', 'Chart is not ready — manual summary required on at least one file.', {
+      // OVERRIDABLE — never a dead-end (Ryan HARD RULE: EVERYTHING must be overridable). When some
+      // files couldn't be auto-read, the RN may still proceed with a logged reason (the chart simply
+      // drafts without those files). Names the blocking files + canOverride so the UI shows the
+      // override button + what's blocking, never a blind "N files need review" with no recourse.
+      if (!chartReadiness.ready && parsed.acknowledgeMissingDocs !== true) {
+        throw new HttpError(409, 'conflict', `${chartReadiness.manualSummaryRequired} file(s) could not be automatically read. Add a manual summary, or override to draft without them.`, {
           caseId,
           manualSummaryRequired: chartReadiness.manualSummaryRequired,
+          blockingFiles: chartReadiness.blockingFiles.map((b) => ({ filePath: b.filePath, terminalStatus: b.terminalStatus })),
+          canOverride: true,
         });
       }
 
@@ -540,6 +546,7 @@ export function createDrafterClientRouter(db: AppDb): Router {
                 ...(parsed.strategyOverride !== undefined && { strategyOverride: parsed.strategyOverride }),
                 ...(parsed.parentVersion !== undefined && { parentVersion: parsed.parentVersion }),
                 ...(parsed.rnDecision !== undefined && { rnDecision: parsed.rnDecision }),
+                ...(parsed.acknowledgeMissingDocs === true && { acknowledgeMissingDocs: true, overrideReason: parsed.overrideReason ?? null }),
               },
             },
           });

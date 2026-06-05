@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
-import { GetObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand, CopyObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
@@ -11,6 +11,7 @@ import { parseVeteranCreate } from '../services/veteran-validation.js';
 import { parseCaseCreate } from '../services/case-validation.js';
 import { assignChartFilenames } from '../services/chart-filename.js';
 import { fillIntakeDerived } from '../services/intake-derive.js';
+import { renderIntakeSummaryPdf } from '../services/intake-summary-pdf.js';
 
 const PREVIEW_TTL_SECONDS = 300;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -223,6 +224,35 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
       } catch (err) {
         await docDb.document.delete({ where: { id: docId } }).catch(() => { /* best-effort */ });
         failed.push({ name: c.original, reason: `copy failed: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+
+    // 2b) ALWAYS attach an Intake Summary PDF rendered from the submitted answers — so the FULL intake
+    // Q&A (Stage 1 AND Stage 2: service history, diagnosis/onset answers, prior-denial reason, the
+    // "why connected" narrative) reaches the chart, even when the submission carried no file uploads.
+    // Same row-first-then-write discipline as the file copies so ocr-start resolves it by s3-key.
+    const rawAnswers = (intake as { rawAnswersJson?: unknown }).rawAnswersJson;
+    if (rawAnswers && typeof rawAnswers === 'object') {
+      const summaryKey = `cases/${caseId}/${randomUUID()}-${sanitizeFilename(`${lastName || 'Veteran'}_Intake_Summary.pdf`)}`;
+      let summaryDocId: string | undefined;
+      try {
+        const im = intake as unknown as { submittedName?: string | null; submittedFormTitle?: string | null; submittedAt?: Date | string | null };
+        const submittedAt = im.submittedAt instanceof Date ? im.submittedAt.toISOString().slice(0, 10) : (typeof im.submittedAt === 'string' ? im.submittedAt : undefined);
+        const pdf = await renderIntakeSummaryPdf(rawAnswers, {
+          veteranName: im.submittedName ?? lastName,
+          condition,
+          formTitle: im.submittedFormTitle ?? undefined,
+          submittedAt,
+        });
+        const doc = await docDb.document.create({
+          data: { caseId, filename: 'Intake_Summary.pdf', sizeBytes: BigInt(pdf.byteLength), contentType: 'application/pdf', s3Key: summaryKey, uploadedBy: actor },
+        });
+        summaryDocId = doc.id;
+        await s3.send(new PutObjectCommand({ Bucket: deps.bucketName, Key: summaryKey, Body: Buffer.from(pdf), ContentType: 'application/pdf', ServerSideEncryption: 'aws:kms' }));
+        attached.push({ name: 'Intake_Summary.pdf', s3Key: summaryKey });
+      } catch (err) {
+        if (summaryDocId) await docDb.document.delete({ where: { id: summaryDocId } }).catch(() => { /* best-effort */ });
+        failed.push({ name: 'Intake_Summary.pdf', reason: `could not generate intake summary: ${err instanceof Error ? err.message : String(err)}` });
       }
     }
 

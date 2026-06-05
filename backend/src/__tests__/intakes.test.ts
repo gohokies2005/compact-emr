@@ -134,6 +134,33 @@ describe('intakes assign', () => {
     expect(intakeUpdate).toHaveBeenCalled();
   });
 
+  it('attaches an Intake Summary PDF rendered from the answers (Q&A reaches the chart, even with 0 files)', async () => {
+    const docCreate = vi.fn(async () => ({ id: 'doc-s' }));
+    const s3send = vi.fn(async () => ({}));
+    const intakeUpdate = vi.fn(async () => ({}));
+    const db = {
+      intake: {
+        findUnique: async () => ({
+          id: 'i1', status: 'ready', fileManifestJson: [], submittedName: 'Marcus Justice',
+          rawAnswersJson: {
+            q1: { type: 'control_textbox', name: 's2_dob_s1', text: 'Date of Birth', answer: '08/13/1985' },
+            q2: { type: 'control_textarea', name: 's2_why_s1', text: 'Why connected', answer: 'urinary symptoms since service' },
+          },
+        }),
+        update: intakeUpdate,
+      },
+      $transaction: txWithExisting(),
+      document: { create: docCreate, delete: vi.fn() },
+    };
+    const res = await request(assignApp(db, s3send)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    const calls = docCreate.mock.calls as unknown as Array<[{ data: { filename: string; contentType: string } }]>;
+    const summary = calls.find((c) => c[0].data.filename === 'Intake_Summary.pdf');
+    expect(summary).toBeTruthy();
+    expect(summary![0].data.contentType).toBe('application/pdf');
+    expect(res.body.data.attached.some((a: { name: string }) => a.name === 'Intake_Summary.pdf')).toBe(true);
+    expect(s3send).toHaveBeenCalled(); // PutObject of the PDF bytes
+  });
+
   it('409s when the intake is not ready', async () => {
     const db = { intake: { findUnique: async () => ({ id: 'i1', status: 'pending' }) }, $transaction: txWithExisting(), document: { create: vi.fn(), delete: vi.fn() } };
     await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(409);

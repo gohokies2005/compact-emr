@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
@@ -7,7 +7,8 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { formatRelativeTime } from '../../lib/date';
-import { listCases, type CaseLite } from '../../api/cases';
+import { listCases, deleteCase, type CaseLite } from '../../api/cases';
+import { describeApiError } from '../../api/client';
 import { listVeterans } from '../../api/veterans';
 import type { CaseStatus, ClaimType } from '../../types/prisma';
 import { useColumnSort, type ColType } from '../../lib/useColumnSort';
@@ -77,6 +78,15 @@ export function CasesPage() {
   const total = cases.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
+  const qc = useQueryClient();
+  // Delete an un-started (intake/rejected) claim — clean up a mis-assigned / duplicate claim.
+  const DELETABLE = new Set(['intake', 'rejected']);
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => deleteCase(id),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['cases'] }); },
+    onError: (e: unknown) => window.alert(`Could not delete this claim — ${describeApiError(e)}`),
+  });
+
   const { onHeaderClick, sortRows, ariaSort, indicator } = useColumnSort();
   const pageRows = cases.data?.data ?? [];
   const rows = sortRows(pageRows, caseSortValue, caseSortType);
@@ -123,6 +133,7 @@ export function CasesPage() {
           {CASE_COLUMNS.map((col) => <th key={col.key} className="px-4 py-3" aria-sort={ariaSort(col.key)}>
             <button type="button" className="flex items-center gap-1 uppercase tracking-wide hover:text-slate-700" onClick={() => onHeaderClick(col.key)}>{col.label}{indicator(col.key)}</button>
           </th>)}
+          <th className="px-4 py-3" />
         </tr></thead>
         <tbody className="divide-y divide-slate-100">
           {rows.map((c) => <tr key={c.id} className="cursor-pointer hover:bg-slate-50" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}`)}>
@@ -135,6 +146,16 @@ export function CasesPage() {
             <td className="px-4 py-3 text-slate-500">{c.assignedRn?.email ?? '—'}</td>
             <td className="px-4 py-3 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
             <td className="px-4 py-3 text-slate-400">{c.version}</td>
+            <td className="px-4 py-3 text-right">
+              {DELETABLE.has(c.status) ? (
+                <button
+                  type="button"
+                  className="text-xs font-medium text-rose-600 hover:text-rose-700 disabled:opacity-50"
+                  disabled={deleteMut.isPending}
+                  onClick={(e) => { e.stopPropagation(); if (window.confirm(`Delete claim ${c.id} (${c.claimedCondition}) for ${c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}? This removes the claim and its files. It cannot be undone.`)) deleteMut.mutate(c.id); }}
+                >Delete</button>
+              ) : null}
+            </td>
           </tr>)}
         </tbody>
       </table>

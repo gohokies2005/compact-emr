@@ -60,6 +60,7 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
   const caseCount = vi.fn(async () => 1);
   const caseCreate = vi.fn(async (args: { data: Partial<CaseRecord> }) => { current = baseCase({ ...args.data, version: 1, status: 'intake' }); return current; });
   const caseUpdate = vi.fn(async (args: { data: Record<string, unknown> }) => { current = { ...current, ...args.data, version: current.version + 1 } as CaseRecord; return current; });
+  const caseDelete = vi.fn(async () => ({}));
   const draftJobFindMany = vi.fn(async () => [{ id: 'DJ-1', version: 1 }]);
   const correctionFindMany = vi.fn(async () => [{ id: 'CORR-1' }]);
   const veteranFindUnique = vi.fn(async () => ({ id: 'VET-1' }));
@@ -70,7 +71,7 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
   });
 
   const tx = {
-    case: { findMany: caseFindMany, findFirst: caseFindFirst, findUnique: caseFindFirst, count: caseCount, create: caseCreate, update: caseUpdate },
+    case: { findMany: caseFindMany, findFirst: caseFindFirst, findUnique: caseFindFirst, count: caseCount, create: caseCreate, update: caseUpdate, delete: caseDelete },
     veteran: { findUnique: veteranFindUnique },
     draftJob: { findMany: draftJobFindMany },
     correction: { findMany: correctionFindMany },
@@ -79,7 +80,7 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
 
-  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, draftJobFindMany, physicianFindUnique } };
+  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, caseDelete, draftJobFindMany, physicianFindUnique } };
 }
 
 function appFor(db: AppDb) {
@@ -207,12 +208,20 @@ describe('cases routes', () => {
     expect(res.status).toBe(409);
   });
 
-  it('soft deletes as rejected (204) with distinct activity action, admin only', async () => {
-    const { db, spies } = makeDb(baseCase({ status: 'records' }));
+  it('hard-deletes an un-started (intake) claim (204) + audit row, and only then', async () => {
+    const { db, spies } = makeDb(baseCase({ status: 'intake' }));
     const res = await request(appFor(db)).delete('/api/v1/cases/CASE-1');
     expect(res.status).toBe(204);
-    expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'rejected' }) }));
-    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'case_soft_deleted', detailsJson: expect.objectContaining({ previousStatus: 'records' }) }) }));
+    expect(spies.caseDelete).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'CASE-1' } }));
+    expect(spies.caseUpdate).not.toHaveBeenCalled(); // a real delete, not a soft status flip
+    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'case_deleted', detailsJson: expect.objectContaining({ previousStatus: 'intake' }) }) }));
+  });
+
+  it('refuses (409) to delete a claim that has progressed past intake — drafting/letters are protected', async () => {
+    const { db, spies } = makeDb(baseCase({ status: 'records' }));
+    const res = await request(appFor(db)).delete('/api/v1/cases/CASE-1');
+    expect(res.status).toBe(409);
+    expect(spies.caseDelete).not.toHaveBeenCalled();
   });
 
   it('performs valid status transition without touching draft jobs', async () => {

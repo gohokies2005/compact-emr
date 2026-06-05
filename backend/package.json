@@ -29,6 +29,7 @@
     "@prisma/client": "latest",
     "express": "latest",
     "jose": "latest",
+    "pdf-lib": "^1.17.1",
     "serverless-http": "latest"
   },
   "devDependencies": {

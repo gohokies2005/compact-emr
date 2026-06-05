@@ -348,9 +348,14 @@ export function createCasesRouter(db: AppDb): Router {
     }),
   );
 
+  // DELETE /cases/:id — remove a claim. Used to clean up a mis-assigned / duplicate claim (e.g. two
+  // intake rows assigned for the same condition). HARD delete (Case children are all onDelete:Cascade;
+  // the activity_log row is onDelete:SetNull so the audit survives). Guarded to UN-STARTED claims only
+  // ('intake' or already 'rejected') so real drafting/letters can never be destroyed by a stray click.
+  const DELETABLE_STATUSES = new Set(['intake', 'rejected']);
   router.delete(
     '/cases/:id',
-    requireRole(['admin']),
+    requireRole(['admin', 'ops_staff']),
     asyncHandler(async (req: Request, res: Response) => {
       const user = currentUser(req);
       const id = String(req.params.id);
@@ -358,27 +363,24 @@ export function createCasesRouter(db: AppDb): Router {
       await db.$transaction(async (tx) => {
         const existing = await tx.case.findFirst({
           where: { id },
-          select: { id: true, veteranId: true, status: true, version: true },
+          select: { id: true, veteranId: true, status: true },
         });
         if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
-
-        const row = await tx.case.update({
-          where: { id },
-          data: { status: 'rejected', version: { increment: 1 } },
-          select: CASE_LITE_SELECT,
-        });
+        if (!DELETABLE_STATUSES.has(existing.status)) {
+          throw new HttpError(409, 'conflict', `This claim is '${existing.status}' — only un-started (intake) or rejected claims can be deleted, so in-progress drafting and letters are never lost.`, { caseId: id, status: existing.status });
+        }
 
         await tx.activityLog.create({
           data: {
             actorUserId: user.id,
-            action: 'case_soft_deleted',
+            action: 'case_deleted',
             caseId: id,
             veteranId: existing.veteranId,
             detailsJson: { caseId: id, previousStatus: existing.status },
           },
         });
-
-        return row;
+        // Cascade-deletes documents / draft jobs / chart data; activity_log is SetNull (audit kept).
+        await (tx as unknown as { case: { delete: (a: { where: { id: string } }) => Promise<unknown> } }).case.delete({ where: { id } });
       });
 
       res.status(204).send();

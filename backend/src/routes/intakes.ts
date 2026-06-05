@@ -9,6 +9,7 @@ import type { AppDb } from '../services/db-types.js';
 import { publishJotformIngest } from '../services/jotform-ingest-queue.js';
 import { parseVeteranCreate } from '../services/veteran-validation.js';
 import { parseCaseCreate } from '../services/case-validation.js';
+import { assignChartFilenames } from '../services/chart-filename.js';
 
 const PREVIEW_TTL_SECONDS = 300;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -112,33 +113,37 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
 
     // 1) Resolve/create veteran + case in ONE transaction (veteran.create / case.create are typed on
     // the tx). No S3 here — S3 ops can't join a DB transaction.
-    const { veteranId, caseId } = await db.$transaction(async (tx) => {
-      let vId: string;
+    const { veteranId, caseId, lastName, condition } = await db.$transaction(async (tx) => {
+      let vId: string; let last: string;
       if (typeof body['veteranId'] === 'string' && (body['veteranId'] as string).length > 0) {
         const v = await tx.veteran.findUnique({ where: { id: body['veteranId'] as string } });
         if (v === null) throw new HttpError(404, 'not_found', 'Veteran not found.', { veteranId: body['veteranId'] });
         vId = body['veteranId'] as string;
+        last = (v as { lastName?: string }).lastName ?? '';
       } else if (body['newVeteran'] !== undefined && body['newVeteran'] !== null) {
         const data = parseVeteranCreate(body['newVeteran']); // validates id (MRN-) + firstName + lastName + dob + email
         const created = await tx.veteran.create({ data: data as never });
         vId = (created as { id: string }).id;
+        last = (data as { lastName?: string }).lastName ?? '';
       } else {
         throw new HttpError(400, 'bad_request', 'Provide veteranId (existing) or newVeteran (create).');
       }
 
-      let cId: string;
+      let cId: string; let cond: string;
       if (typeof body['caseId'] === 'string' && (body['caseId'] as string).length > 0) {
         const c = await tx.case.findFirst({ where: { id: body['caseId'] as string, veteranId: vId } });
         if (c === null) throw new HttpError(404, 'not_found', 'Case not found for this veteran.', { caseId: body['caseId'], veteranId: vId });
         cId = body['caseId'] as string;
+        cond = (c as { claimedCondition?: string }).claimedCondition ?? '';
       } else if (body['newCase'] !== undefined && body['newCase'] !== null) {
         const parsed = parseCaseCreate(body['newCase']);
         const created = await tx.case.create({ data: { ...parsed, veteranId: vId } as never });
         cId = (created as { id: string }).id;
+        cond = (parsed as { claimedCondition?: string }).claimedCondition ?? '';
       } else {
         throw new HttpError(400, 'bad_request', 'Provide caseId (existing) or newCase (create).');
       }
-      return { veteranId: vId, caseId: cId };
+      return { veteranId: vId, caseId: cId, lastName: last, condition: cond };
     });
 
     // 2) Per-file: row FIRST, then CopyObject. `document` is not on AppDb — cast (as drafter-bundle does).
@@ -150,9 +155,11 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     const manifest: ManifestFile[] = Array.isArray(rawManifest) ? (rawManifest as ManifestFile[]) : [];
     const requested: Set<string> | null = Array.isArray(body['fileS3Keys']) ? new Set((body['fileS3Keys'] as string[])) : null;
 
-    const attached: { name?: string; s3Key: string }[] = [];
+    const attached: { name: string; s3Key: string }[] = [];
     const failed: { name?: string; reason: string }[] = [];
 
+    // First pass: filter to attachable files (content-type + size), flagging the rest with reasons.
+    const candidates: { srcKey: string; original: string; contentType: string; sizeBytes: number }[] = [];
     for (const f of manifest) {
       if (typeof f?.s3Key !== 'string') continue;
       if (requested !== null && !requested.has(f.s3Key)) continue;
@@ -166,26 +173,34 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
         failed.push({ name: f.name, reason: 'file is empty or larger than 50 MB' });
         continue;
       }
-      const finalKey = `cases/${caseId}/${randomUUID()}-${sanitizeFilename(f.name ?? 'file')}`;
-      // ROW FIRST — so ocr-start (fired by the CopyObject's S3 event) can resolve the Document by key.
+      candidates.push({ srcKey: f.s3Key, original: f.name ?? 'file', contentType, sizeBytes });
+    }
+
+    // Consistent chart names (Lastname_Condition_DocType, combined→Misc, collisions numbered).
+    const chartNames = assignChartFilenames(lastName, condition, candidates.map((c) => c.original));
+
+    // Second pass: row FIRST, then CopyObject (so ocr-start can resolve the Document by key; a 404
+    // there is a permanent OCR skip). On copy failure, delete the orphan row.
+    for (let i = 0; i < candidates.length; i += 1) {
+      const c = candidates[i]!;
+      const chartName = chartNames[i] ?? sanitizeFilename(c.original);
+      const finalKey = `cases/${caseId}/${randomUUID()}-${sanitizeFilename(chartName)}`;
       let docId: string;
       try {
         const doc = await docDb.document.create({
-          data: { caseId, filename: f.name ?? 'file', sizeBytes: BigInt(sizeBytes), contentType, s3Key: finalKey, uploadedBy: actor },
+          data: { caseId, filename: chartName, sizeBytes: BigInt(c.sizeBytes), contentType: c.contentType, s3Key: finalKey, uploadedBy: actor },
         });
         docId = doc.id;
       } catch (err) {
-        failed.push({ name: f.name, reason: `could not create document row: ${err instanceof Error ? err.message : String(err)}` });
+        failed.push({ name: c.original, reason: `could not create document row: ${err instanceof Error ? err.message : String(err)}` });
         continue;
       }
-      // THEN copy intake/<id>/<file> → cases/<caseId>/<uuid>-<file>.
       try {
-        await s3.send(new CopyObjectCommand({ Bucket: deps.bucketName, CopySource: `${deps.bucketName}/${f.s3Key}`, Key: finalKey, MetadataDirective: 'COPY' }));
-        attached.push({ name: f.name, s3Key: finalKey });
+        await s3.send(new CopyObjectCommand({ Bucket: deps.bucketName, CopySource: `${deps.bucketName}/${c.srcKey}`, Key: finalKey, MetadataDirective: 'COPY' }));
+        attached.push({ name: chartName, s3Key: finalKey });
       } catch (err) {
-        // Delete the orphan row so OCR/the drafter bundle never see a Document with no S3 object.
         await docDb.document.delete({ where: { id: docId } }).catch(() => { /* best-effort */ });
-        failed.push({ name: f.name, reason: `copy failed: ${err instanceof Error ? err.message : String(err)}` });
+        failed.push({ name: c.original, reason: `copy failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }
 

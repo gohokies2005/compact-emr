@@ -17,6 +17,9 @@ export interface IntakeListItem {
   readonly submittedPhone: string | null;
   readonly submittedState: string | null;
   readonly submittedCondition: string | null;
+  readonly submittedDob: string | null; // ISO YYYY-MM-DD (worker-normalized)
+  readonly submittedClaimType: string | null; // initial|supplemental|hlr|appeal
+  readonly submittedFormTitle: string | null; // real Jotform form title
   readonly fileManifestJson: readonly IntakeFile[] | null;
   readonly retryCount: number;
   readonly errorMessage: string | null;
@@ -81,7 +84,13 @@ export async function retryIntake(id: string): Promise<{ data: unknown }> {
 const MAIN_INTAKE_FORM = '260898029223159'; // Stage 1: new veteran + initial claim
 const ADDITIONAL_DOCS_FORM = '260804641700146'; // existing veteran + existing claim + re-run prompt
 export type IntakeKind = 'stage1' | 'additional_docs' | 'stage2';
-export function intakeKind(formId: string): IntakeKind {
+// Prefer the real form TITLE (robust to unknown/cloned form IDs) and fall back to the known IDs. The
+// title-based match is why a Stage-1 submission from a cloned form no longer mislabels as "Stage 2".
+export function intakeKind(formId: string, formTitle?: string | null): IntakeKind {
+  const t = (formTitle ?? '').toLowerCase();
+  if (/additional|more record|supporting doc|upload (more|additional)/.test(t)) return 'additional_docs';
+  if (/stage\s*1|new (client|patient|veteran)|initial intake|get started/.test(t)) return 'stage1';
+  if (/stage\s*2/.test(t)) return 'stage2';
   if (formId === MAIN_INTAKE_FORM) return 'stage1';
   if (formId === ADDITIONAL_DOCS_FORM) return 'additional_docs';
   return 'stage2'; // the 28 condition forms (and anything else): match veteran + new claim

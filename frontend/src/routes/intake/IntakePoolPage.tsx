@@ -116,20 +116,21 @@ function IntakeDrawer({ id, onClose }: { readonly id: string; readonly onClose: 
 }
 
 function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: IntakeDetail; readonly onAssigned: () => void; readonly onChanged: () => void }) {
-  const kind = intakeKind(intake.jotformFormId);
+  const kind = intakeKind(intake.jotformFormId, intake.submittedFormTitle);
   const nm = splitName(intake.submittedName);
+  const prefillClaimType = (CLAIM_TYPES as readonly string[]).includes(intake.submittedClaimType ?? '') ? intake.submittedClaimType! : 'initial';
 
   // veteran: existing (search/select) or new (prefilled)
   const [vetMode, setVetMode] = useState<'existing' | 'new'>(kind === 'stage1' ? 'new' : 'existing');
   const [vetQuery, setVetQuery] = useState(intake.submittedName ?? intake.submittedEmail ?? '');
   const [vetId, setVetId] = useState<string | null>(null);
   const [vetLabel, setVetLabel] = useState<string>('');
-  const [nv, setNv] = useState({ firstName: nm.first, lastName: nm.last, dob: '', email: intake.submittedEmail ?? '', state: intake.submittedState ?? '', phone: intake.submittedPhone ?? '' });
+  const [nv, setNv] = useState({ firstName: nm.first, lastName: nm.last, dob: intake.submittedDob ?? '', email: intake.submittedEmail ?? '', state: intake.submittedState ?? '', phone: intake.submittedPhone ?? '' });
 
-  // case: existing (the veteran's claims) or new (condition prefilled)
+  // case: existing (the veteran's claims) or new (condition + claim type prefilled)
   const [caseMode, setCaseMode] = useState<'existing' | 'new'>(kind === 'additional_docs' ? 'existing' : 'new');
   const [caseId, setCaseId] = useState<string | null>(null);
-  const [nc, setNc] = useState({ claimedCondition: intake.submittedCondition ?? '', claimType: 'initial' });
+  const [nc, setNc] = useState({ claimedCondition: intake.submittedCondition ?? '', claimType: prefillClaimType });
 
   const [fileKeys, setFileKeys] = useState<Set<string>>(new Set(intake.files.filter((f) => typeof f.s3Key === 'string').map((f) => f.s3Key!)));
   const [result, setResult] = useState<{ attached: number; failed: { name?: string; reason: string }[] } | null>(null);
@@ -167,7 +168,9 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
   const vetName = vetMode === 'existing' ? vetLabel : `${nv.lastName}, ${nv.firstName}`;
   const vetDob = vetMode === 'new' ? nv.dob : '';
   const claimLabel = caseMode === 'new' ? nc.claimedCondition : (vetCases.data?.data.find((c) => c.id === caseId)?.claimedCondition ?? caseId ?? '');
-  const canAssign = fileKeys.size > 0 && (vetMode === 'existing' ? !!vetId : (nv.firstName && nv.lastName && nv.dob && nv.email)) && (caseMode === 'existing' ? !!caseId : nc.claimedCondition.length > 0);
+  // Files are optional — a Stage-1/2 submission may carry no uploads; the value is creating the
+  // veteran + claim from the answers. Assign needs a veteran + a claim, not files.
+  const canAssign = (vetMode === 'existing' ? !!vetId : (!!nv.firstName && !!nv.lastName && !!nv.dob && !!nv.email)) && (caseMode === 'existing' ? !!caseId : nc.claimedCondition.length > 0);
 
   if (intake.status === 'pending' || intake.status === 'failed') {
     return (
@@ -183,7 +186,7 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
         <div className="font-medium text-slate-900">{intake.submittedName ?? '(no name)'}</div>
         <div className="mt-1 text-slate-600">{[intake.submittedEmail, intake.submittedPhone, intake.submittedState].filter(Boolean).join(' · ')}</div>
-        <div className="mt-1 text-slate-600">Condition (from form): {intake.submittedCondition ?? '—'} · {kind === 'additional_docs' ? 'Additional records' : kind === 'stage1' ? 'Stage 1' : 'Stage 2'}</div>
+        <div className="mt-1 text-slate-600">Condition (from form): {intake.submittedCondition ?? '—'} · {intake.submittedFormTitle ?? (kind === 'additional_docs' ? 'Additional records' : kind === 'stage1' ? 'Stage 1' : 'Stage 2')}</div>
       </div>
 
       {/* Files */}
@@ -228,9 +231,9 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
           <div className="grid grid-cols-2 gap-2">
             <input className="input" placeholder="First name" value={nv.firstName} onChange={(e) => setNv({ ...nv, firstName: e.target.value })} />
             <input className="input" placeholder="Last name" value={nv.lastName} onChange={(e) => setNv({ ...nv, lastName: e.target.value })} />
-            <input className="input" type="date" title="DOB (confirm from the Stage-1 PDF)" value={nv.dob} onChange={(e) => setNv({ ...nv, dob: e.target.value })} />
+            <input className="input" type="date" title="Date of birth (prefilled from the form when present)" value={nv.dob} onChange={(e) => setNv({ ...nv, dob: e.target.value })} />
             <input className="input" placeholder="Email" value={nv.email} onChange={(e) => setNv({ ...nv, email: e.target.value })} />
-            <input className="input" placeholder="State (2)" maxLength={2} value={nv.state} onChange={(e) => setNv({ ...nv, state: e.target.value.toUpperCase() })} />
+            <input className="input" placeholder="State" title="2-letter state (e.g. CO, ID) — the EMR mints the record ID automatically" maxLength={2} value={nv.state} onChange={(e) => setNv({ ...nv, state: e.target.value.toUpperCase() })} />
             <input className="input" placeholder="Phone" value={nv.phone} onChange={(e) => setNv({ ...nv, phone: e.target.value })} />
           </div>
         )}

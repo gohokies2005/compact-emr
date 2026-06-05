@@ -678,6 +678,9 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       const phone = strOrUndef('submittedPhone'); if (phone !== undefined) data['submittedPhone'] = phone;
       const state = strOrUndef('submittedState'); if (state !== undefined) data['submittedState'] = (state as string).slice(0, 2).toUpperCase();
       const condition = strOrUndef('submittedCondition'); if (condition !== undefined) data['submittedCondition'] = condition;
+      const dob = strOrUndef('submittedDob'); if (dob !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(dob)) data['submittedDob'] = dob;
+      const claimType = strOrUndef('submittedClaimType'); if (claimType !== undefined) data['submittedClaimType'] = (claimType as string).slice(0, 20);
+      const formTitle = strOrUndef('submittedFormTitle'); if (formTitle !== undefined) data['submittedFormTitle'] = (formTitle as string).slice(0, 300);
       if (Array.isArray(body['fileManifest'])) data['fileManifestJson'] = body['fileManifest'];
       if (body['rawAnswers'] !== undefined && body['rawAnswers'] !== null) data['rawAnswersJson'] = body['rawAnswers'];
       if (typeof body['submittedAt'] === 'string') {

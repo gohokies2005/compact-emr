@@ -204,15 +204,27 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
       }
     }
 
-    // 3) Mark assigned only if at least one file actually landed (else it stays 'ready' with reasons).
-    if (attached.length > 0) {
+    // 3) Mark 'assigned' once the work is genuinely complete — but DON'T silently swallow a total
+    // copy failure. A Stage-1/2 submission often carries NO uploads; its value is the veteran + claim,
+    // so 0 files must still assign. Rule:
+    //  - a NEW veteran/case was created → MUST mark assigned (the tx already committed; leaving it
+    //    'ready' would let a retry create DUPLICATE profiles). Failed files are surfaced for re-upload
+    //    onto the now-existing case.
+    //  - ≥1 file attached → assigned.
+    //  - no attachable files at all (0 uploads, or all unsupported/oversized — a retry can't fix those)
+    //    → assigned (the deliverable is the veteran + claim).
+    // The single case left 'ready' for a lossless retry: real files were selected but EVERY copy
+    // failed (e.g. transient S3) on an EXISTING veteran + case, where re-assigning duplicates nothing.
+    const createdNewProfile = body['newVeteran'] != null || body['newCase'] != null;
+    const markAssigned = createdNewProfile || attached.length > 0 || candidates.length === 0;
+    if (markAssigned) {
       await db.intake.update({
         where: { id: intakeId },
         data: { status: 'assigned', assignedVeteranId: veteranId, assignedCaseId: caseId, assignedAt: new Date(), assignedBy: actor },
       });
     }
 
-    res.json({ data: { veteranId, caseId, assigned: attached.length > 0, attached, failed } });
+    res.json({ data: { veteranId, caseId, assigned: markAssigned, attached, failed } });
   }));
 
   return router;

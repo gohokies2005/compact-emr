@@ -798,6 +798,9 @@ model Intake {
   submittedPhone      String?   @map("submitted_phone")
   submittedState      String?   @map("submitted_state") @db.VarChar(2)
   submittedCondition  String?   @map("submitted_condition")
+  submittedDob        String?   @map("submitted_dob") @db.VarChar(10) // ISO YYYY-MM-DD, normalized by the worker
+  submittedClaimType  String?   @map("submitted_claim_type") @db.VarChar(20) // initial|supplemental|hlr|appeal
+  submittedFormTitle  String?   @map("submitted_form_title") // Jotform form title — drives the stage label + assign defaults
   rawAnswersJson      Json?     @map("raw_answers_json")
   fileManifestJson    Json?     @map("file_manifest_json")
   submittedAt         DateTime? @map("submitted_at") @db.Timestamptz(6)

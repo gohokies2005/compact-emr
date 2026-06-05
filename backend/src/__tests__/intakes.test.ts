@@ -113,6 +113,27 @@ describe('intakes assign', () => {
     expect(intakeUpdate).not.toHaveBeenCalled(); // nothing attached → not marked assigned
   });
 
+  it('assigns a 0-file submission by creating the veteran + claim (no uploads needed)', async () => {
+    // A Stage-1/2 submission frequently has no files — the deliverable is the veteran + claim. Assign
+    // must succeed (not gray out / stay 'ready'), and mark the intake assigned so it leaves the pool.
+    const intakeUpdate = vi.fn(async () => ({}));
+    const docCreate = vi.fn(async () => ({ id: 'doc-x' }));
+    const db = {
+      intake: { findUnique: async () => readyIntake([]), update: intakeUpdate },
+      $transaction: txWithExisting(),
+      document: { create: docCreate, delete: vi.fn() },
+    };
+    const res = await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({
+      newVeteran: { id: 'MRN-0123456789', firstName: 'Jane', lastName: 'Doe', dob: '1980-01-01', email: 'jane@e.com' },
+      newCase: { id: 'CLM-0123456789', claimedCondition: 'PTSD', claimType: 'initial' },
+      fileS3Keys: [],
+    }).expect(200);
+    expect(res.body.data.assigned).toBe(true);
+    expect(res.body.data.attached).toHaveLength(0);
+    expect(docCreate).not.toHaveBeenCalled();
+    expect(intakeUpdate).toHaveBeenCalled();
+  });
+
   it('409s when the intake is not ready', async () => {
     const db = { intake: { findUnique: async () => ({ id: 'i1', status: 'pending' }) }, $transaction: txWithExisting(), document: { create: vi.fn(), delete: vi.fn() } };
     await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(409);

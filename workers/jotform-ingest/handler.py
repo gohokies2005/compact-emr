@@ -103,11 +103,72 @@ def _content_type(name: str) -> str:
     return _CT_BY_EXT.get(ext, "application/octet-stream")
 
 
+_MONTHS = {m.lower(): i for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June",
+     "July", "August", "September", "October", "November", "December"], 1)}
+_MONTHS_ABBR = {m[:3]: i for m, i in _MONTHS.items()}
+
+
+def _iso_date(year: Any, month: Any, day: Any) -> str | None:
+    """Build a strict ISO YYYY-MM-DD (what an <input type=date> needs), or None if implausible."""
+    try:
+        y = int(str(year).strip())
+        d = int(str(day).strip())
+        ms = str(month).strip().lower()
+        mm = int(ms) if ms.isdigit() else (_MONTHS.get(ms) or _MONTHS_ABBR.get(ms[:3]) or 0)
+        if not (1 <= mm <= 12) or not (1 <= d <= 31) or not (1900 <= y <= 2100):
+            return None
+        return f"{y:04d}-{mm:02d}-{d:02d}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_dob(answer: Any, pretty: Any) -> str | None:
+    """Jotform birthdate/date answers come as a dict {month,day,year} or assorted strings — coerce to
+    ISO so the assign drawer prefills the DOB and the RN never has to look it up in Jotform."""
+    if isinstance(answer, dict):
+        iso = _iso_date(answer.get("year"), answer.get("month"), answer.get("day"))
+        if iso:
+            return iso
+    for s in (answer if isinstance(answer, str) else None, pretty if isinstance(pretty, str) else None):
+        if not s:
+            continue
+        s = s.strip()
+        m = re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$", s)  # ISO-ish
+        if m and (iso := _iso_date(m.group(1), m.group(2), m.group(3))):
+            return iso
+        m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$", s)  # US MM/DD/YYYY
+        if m and (iso := _iso_date(m.group(3), m.group(1), m.group(2))):
+            return iso
+        m = re.match(r"^([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})$", s)  # Month DD, YYYY
+        if m and (iso := _iso_date(m.group(3), m.group(1), m.group(2))):
+            return iso
+    return None
+
+
+def _normalize_claim_type(s: Any) -> str | None:
+    """Map a free-text claim-type answer to the EMR enum (initial|supplemental|hlr|appeal)."""
+    if not isinstance(s, str):
+        return None
+    t = s.strip().lower()
+    if not t:
+        return None
+    if "supplement" in t:
+        return "supplemental"
+    if "higher" in t or t == "hlr":
+        return "hlr"
+    if "appeal" in t or "disagree" in t or t == "nod" or "board" in t:
+        return "appeal"
+    if "initial" in t or "original" in t or "new" in t or "first" in t:
+        return "initial"
+    return None
+
+
 def _parse_submission(content: dict[str, Any]) -> dict[str, Any]:
     """Heuristically pull the fields we surface in the pool + collect uploaded-file URLs. Defensive:
     forms vary across 59 templates, so match on Jotform field TYPE first, then on the field name."""
     answers = content.get("answers", {}) or {}
-    parsed: dict[str, Any] = {"name": None, "email": None, "phone": None, "state": None, "condition": None, "dob": None}
+    parsed: dict[str, Any] = {"name": None, "email": None, "phone": None, "state": None, "condition": None, "dob": None, "claim_type": None}
     file_urls: list[str] = []
 
     for _qid, a in answers.items():
@@ -134,15 +195,17 @@ def _parse_submission(content: dict[str, Any]) -> dict[str, Any]:
             parsed["phone"] = parsed["phone"] or (a.get("prettyFormat") or (ans if isinstance(ans, str) else None))
             continue
         if a_type in ("control_datetime", "control_birthdate") or "dob" in a_name or "birth" in (a_name + text):
-            parsed["dob"] = parsed["dob"] or (a.get("prettyFormat") or (ans if isinstance(ans, str) else None))
+            parsed["dob"] = parsed["dob"] or _normalize_dob(ans, a.get("prettyFormat"))
             continue
-        # name/state/condition by field name/label when not typed above
+        # name/state/condition/claim-type by field name/label when not typed above
         if parsed["name"] is None and ("name" in a_name or "name" in text) and isinstance(ans, str):
             parsed["name"] = ans
         if "state" in (a_name + " " + text) and isinstance(ans, str) and len(ans) <= 20:
             parsed["state"] = parsed["state"] or ans
         if "condition" in (a_name + " " + text) and isinstance(ans, str):
             parsed["condition"] = parsed["condition"] or ans
+        if parsed["claim_type"] is None and "claim" in (a_name + " " + text) and "type" in (a_name + " " + text):
+            parsed["claim_type"] = _normalize_claim_type(ans if isinstance(ans, str) else a.get("prettyFormat"))
         if parsed["email"] is None and isinstance(ans, str) and "@" in ans and "." in ans:
             parsed["email"] = ans
 
@@ -181,6 +244,20 @@ def _ingest_one(intake_id: str, submission_id: str) -> None:
         body["submittedState"] = parsed["state"]
     if parsed.get("condition"):
         body["submittedCondition"] = parsed["condition"]
+    if parsed.get("dob"):
+        body["submittedDob"] = parsed["dob"]
+    if parsed.get("claim_type"):
+        body["submittedClaimType"] = parsed["claim_type"]
+    # Form title → drives the stage label + assign defaults in the pool (robust to unknown form IDs).
+    form_id = content.get("form_id")
+    if form_id:
+        try:
+            form = _jotform_get(f"form/{urllib.parse.quote(str(form_id))}")
+            title = (form.get("content", {}) or {}).get("title")
+            if isinstance(title, str) and title.strip():
+                body["submittedFormTitle"] = title.strip()
+        except Exception:  # noqa: BLE001 — title is best-effort; never fail the ingest over it
+            pass
     created = sub.get("created_at")
     if isinstance(created, str):
         body["submittedAt"] = created.replace(" ", "T") + ("Z" if "Z" not in created else "")

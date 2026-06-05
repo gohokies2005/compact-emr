@@ -16,13 +16,17 @@ Completion handler (`completion_handler` below): SNS-triggered. Fetches the Text
 in pages, groups blocks by Page, and POSTs to the API:
   - POST /api/v1/internal/documents/<documentId>/pages with the per-page text + confidence.
 
-Per FRN ingest spec (HARD requirement #1): we NEVER use Claude as OCR. Textract is the
-single OCR provider on this path.
+OCR provider: Textract first. When Textract CANNOT read a file (job FAILED, or SUCCEEDED with no
+text — image-only/scanned docs it choked on), fall back to CLAUDE OCR (ports the local app's
+claude.js ocrSinglePdf: send the file as a base64 document/image, ask for verbatim text). This
+restores the local behavior on the cloud side so an unreadable file is auto-read instead of
+dead-ending to the RN queue. Reversible: env CLAUDE_OCR_FALLBACK=off → Textract-only.
 
 DEPLOYED via workers-stack.ts (compact-emr-<env>-ocr-start / -ocr-completion Lambdas). To run
 locally, see the README at workers/README.md.
 """
 
+import base64
 import json
 import os
 import urllib.error
@@ -34,6 +38,13 @@ from typing import Any
 import boto3
 
 textract = boto3.client("textract")
+s3 = boto3.client("s3")
+_secrets = boto3.client("secretsmanager")
+
+ANTHROPIC_MODEL = "claude-sonnet-4-6"  # matches local claude.js OCR model
+MAX_OCR_BYTES = 25 * 1024 * 1024  # Claude document/image request cap headroom; larger → flag for RN
+_MEDIA_BY_EXT = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}
+_cached_anthropic_key: str | None = None
 
 
 def _api_base_url() -> str:
@@ -195,6 +206,102 @@ def _post_failed_read_attempt(document_id: str, textract_status: str, job_id: st
             raise RuntimeError(f"API rejected failed-read-attempt POST: {response.status}")
 
 
+def _claude_enabled() -> bool:
+    return os.environ.get("CLAUDE_OCR_FALLBACK", "off").lower() == "on"
+
+
+def _phi_bucket() -> str:
+    return os.environ["RECORDS_BUCKET"]
+
+
+def _anthropic_key() -> str | None:
+    global _cached_anthropic_key
+    if _cached_anthropic_key is None:
+        arn = os.environ.get("ANTHROPIC_SECRET_ARN")
+        if not arn:
+            return None
+        _cached_anthropic_key = _secrets.get_secret_value(SecretId=arn)["SecretString"].strip()
+    return _cached_anthropic_key
+
+
+def _document_source(document_id: str) -> dict[str, Any]:
+    """Resolve documentId -> {s3Key, contentType} (the worker only has the id on completion)."""
+    url = f"{_api_base_url()}/api/v1/internal/documents/{urllib.parse.quote(document_id)}/source"
+    req = urllib.request.Request(url, headers={"X-Internal-Worker-Token": _worker_token()})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8")).get("data", {})
+
+
+def _media_type(s3_key: str, content_type: str | None) -> str | None:
+    if content_type in ("application/pdf", "image/png", "image/jpeg"):
+        return content_type
+    ext = s3_key.rsplit(".", 1)[-1].lower() if "." in s3_key else ""
+    return _MEDIA_BY_EXT.get(ext)
+
+
+def _claude_ocr(document_id: str) -> str:
+    """Claude OCR fallback — ports local claude.js ocrSinglePdf. Fetch the file from S3 and ask
+    Claude to extract verbatim text. Returns '' if disabled / unsupported / too large / on error
+    (caller then flags the file for the RN, which is overridable — never a dead-end)."""
+    if not _claude_enabled():
+        return ""
+    api_key = _anthropic_key()
+    if not api_key:
+        return ""
+    src = _document_source(document_id)
+    s3_key = src.get("s3Key")
+    if not s3_key:
+        return ""
+    media = _media_type(s3_key, src.get("contentType"))
+    if media is None:  # e.g. .docx — not a Claude vision input; let it flag (overridable)
+        return ""
+    data = s3.get_object(Bucket=_phi_bucket(), Key=s3_key)["Body"].read(MAX_OCR_BYTES + 1)
+    if len(data) > MAX_OCR_BYTES:
+        print(json.dumps({"msg": "ocr: file too large for Claude fallback", "documentId": document_id, "bytes": len(data)}))
+        return ""
+    b64 = base64.b64encode(data).decode("ascii")
+    block = (
+        {"type": "document", "source": {"type": "base64", "media_type": media, "data": b64}}
+        if media == "application/pdf"
+        else {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}}
+    )
+    body = json.dumps({
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 16000,
+        "messages": [{"role": "user", "content": [
+            block,
+            {"type": "text", "text": "Extract ALL text from this medical record document verbatim. Include every date, diagnosis, lab value, provider name, medication, and clinical finding. Preserve the document structure. Output the raw text only, no commentary."},
+        ]}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=body, method="POST",
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=300) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    parts = payload.get("content") or []
+    return "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+
+
+def _handle_unreadable(document_id: str, textract_status: str, job_id: str) -> bool:
+    """Textract could not read this file. Try the Claude OCR fallback; if it yields text, post it as
+    a page so the file reads (no dead-end). Otherwise flag for the RN (overridable). Never silent."""
+    text = ""
+    try:
+        text = _claude_ocr(document_id)
+    except Exception as exc:  # noqa: BLE001 — surface the reason, never a silent drop
+        print(json.dumps({"msg": "ocr: claude fallback error", "documentId": document_id, "error": f"{type(exc).__name__}: {exc}"}))
+    if text:
+        _post_pages_to_api(document_id, [{"pageNumber": 1, "text": text, "confidence": None}], 1)
+        print(json.dumps({"msg": "ocr: claude fallback succeeded", "documentId": document_id, "chars": len(text)}))
+        return True
+    try:
+        _post_failed_read_attempt(document_id, textract_status, job_id)
+    except Exception as post_exc:  # noqa: BLE001
+        print(f"could not post failed read-attempt for {document_id} (status={textract_status}): {post_exc}")
+    return False
+
+
 def completion_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     """SNS-triggered handler. Textract notifies us when an async job is done. Pull the
     blocks, group by page, POST to the API."""
@@ -212,15 +319,10 @@ def completion_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         document_id = message.get("JobTag")  # we stamped this on StartDocumentTextDetection
 
         if status != "SUCCEEDED":
-            # Architect final QA finding #3 (REVIEW.md 0f8b64a): on Textract failure, POST a
-            # synthetic failed read-attempt so the chart-readiness gate sees this file as
-            # 'manual_summary_required' and the RN queue picks it up. Otherwise the file
-            # silently disappears from the pipeline and no human ever knows it failed.
-            try:
-                _post_failed_read_attempt(document_id, status, job_id)
-            except Exception as post_exc:
-                print(f"could not post failed read-attempt for {document_id} (status={status}): {post_exc}")
-            processed.append({"jobId": job_id, "documentId": document_id, "status": status, "posted": False, "flaggedForRn": True})
+            # Textract failed. Try the Claude OCR fallback; if it can't read it either, flag for the
+            # RN (overridable) so the file is never silently lost.
+            read = _handle_unreadable(document_id, status, job_id)
+            processed.append({"jobId": job_id, "documentId": document_id, "status": status, "posted": read, "claudeOcr": read, "flaggedForRn": not read})
             continue
 
         blocks = _fetch_all_pages(job_id)
@@ -229,6 +331,9 @@ def completion_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             _post_pages_to_api(document_id, pages, document_page_count)
             processed.append({"jobId": job_id, "documentId": document_id, "status": "POSTED", "pages": len(pages)})
         else:
-            processed.append({"jobId": job_id, "documentId": document_id, "status": "EMPTY", "pages": 0})
+            # Textract succeeded but extracted NO text (image-only/scanned doc it choked on). Same
+            # fallback path — Claude OCR, else flag for the RN.
+            read = _handle_unreadable(document_id, "EMPTY", job_id)
+            processed.append({"jobId": job_id, "documentId": document_id, "status": "EMPTY", "pages": 0, "claudeOcr": read, "flaggedForRn": not read})
 
     return {"processed": processed}

@@ -381,6 +381,25 @@ export function createInternalWorkerRouter(db: AppDb): Router {
   );
 
   /**
+   * GET /api/v1/internal/documents/:id/source
+   *
+   * Resolves a documentId → its S3 key + content type so the OCR worker's Claude fallback can
+   * fetch the file bytes (when Textract couldn't read it). Service-principal only.
+   * Returns { data: { s3Key, contentType } } or 404.
+   */
+  router.get(
+    '/internal/documents/:id/source',
+    asyncHandler(async (req: Request, res: Response) => {
+      const id = String(req.params.id);
+      const doc = await (db as unknown as {
+        document: { findUnique: (args: { where: { id: string }; select?: Record<string, true> }) => Promise<{ s3Key: string; contentType: string | null } | null> };
+      }).document.findUnique({ where: { id }, select: { s3Key: true, contentType: true } });
+      if (doc === null) throw new HttpError(404, 'not_found', 'Document not found', { documentId: id });
+      res.json({ data: { s3Key: doc.s3Key, contentType: doc.contentType } });
+    }),
+  );
+
+  /**
    * PATCH /api/v1/internal/doctor-packs/:id
    *
    * Worker callback for the Doctor Pack assembler. Body:

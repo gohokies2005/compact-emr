@@ -305,6 +305,12 @@ export class WorkersStack extends Stack {
         INTERNAL_WORKER_TOKEN: workerTokenSecret.secretValue.unsafeUnwrap(),
         COMPLETION_SNS_TOPIC_ARN: textractCompletionTopic.topicArn,
         TEXTRACT_SNS_ROLE_ARN: textractSnsRole.roleArn,
+        // Claude OCR fallback (ports the local claude.js ocrSinglePdf): when Textract can't read a
+        // file, OCR it with Claude instead of dead-ending to the RN queue. Reversible: set
+        // CLAUDE_OCR_FALLBACK=off to revert to Textract-only ("if it breaks we go back").
+        RECORDS_BUCKET: phiBucket.bucketName,
+        ANTHROPIC_SECRET_ARN: anthropicKeySecret.secretArn,
+        CLAUDE_OCR_FALLBACK: 'on',
       },
       logRetention: logs.RetentionDays.ONE_MONTH,
     });
@@ -312,6 +318,9 @@ export class WorkersStack extends Stack {
       actions: ['textract:GetDocumentTextDetection'],
       resources: ['*'],
     }));
+    phiBucket.grantRead(ocrCompletion); // fetch the file bytes for the Claude OCR fallback
+    documentsKey.grantDecrypt(ocrCompletion);
+    anthropicKeySecret.grantRead(ocrCompletion);
     textractCompletionTopic.addSubscription(new subs.LambdaSubscription(ocrCompletion));
 
     // ===== Doctor Pack assembler Lambda =====

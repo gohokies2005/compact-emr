@@ -48,22 +48,33 @@ export function createJotformWebhookRouter(db: AppDb): Router {
 
     // Idempotent: Jotform retries on slow/non-200. create-catch-P2002 = success. The webhook writes
     // ONLY the keys + status=pending; the worker is the sole writer of the parsed fields/files.
+    //
+    // Re-enqueue gate: on a fresh create, always enqueue. On a DUPLICATE (P2002 — same submissionId
+    // already ingested), only re-enqueue if it's still pending/failed (i.e. needs processing). This
+    // is what makes the hourly safety-net sweep cheap: replaying an already-ready/assigned submission
+    // collapses to a no-op here, so the worker never re-fetches it (detail + files) from Jotform —
+    // the exact load that previously rate-limit-locked the account. Stuck pending/failed rows DO
+    // re-enqueue, so the sweep self-heals genuinely-dropped submissions.
     let intakeId = '';
+    let shouldEnqueue = false;
     try {
       const created = await db.intake.create({
         data: { jotformFormId: formId, jotformSubmissionId: submissionId, status: 'pending' },
       });
       intakeId = (created as { id: string }).id;
+      shouldEnqueue = true;
     } catch (err) {
       if (isUniqueViolation(err)) {
         const existing = await db.intake.findUnique({ where: { jotformSubmissionId: submissionId } });
         intakeId = (existing as { id?: string } | null)?.id ?? '';
+        const status = (existing as { status?: string } | null)?.status;
+        shouldEnqueue = status === 'pending' || status === 'failed';
       } else {
         throw err;
       }
     }
 
-    if (intakeId.length > 0) {
+    if (intakeId.length > 0 && shouldEnqueue) {
       // Best-effort enqueue — never blocks the 200 — but SURFACE the reason on failure (per the
       // "every catch must surface the reason" rule): log it + stamp errorMessage so the row is
       // visibly stuck-pending in the pool (RN can Retry), not a silent no-op.

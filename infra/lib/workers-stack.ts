@@ -568,5 +568,42 @@ export class WorkersStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+
+    // ===== Jotform intake safety-net sweep (hourly) =====
+    // Webhook deliveries can be silently missed (Jotform outage / our 5xx in a deploy window /
+    // Jotform auto-disabling a webhook after failures). Every hour, re-list the recent window of
+    // submissions and REPLAY them through the live webhook. Idempotent (intakes_submission_uq +
+    // the webhook's status-gated re-enqueue), so already-ingested submissions are no-ops and the
+    // worker never re-fetches them from Jotform — keeping steady-state load at ~1 list call/hour
+    // (the owner's hard constraint: no account lockout). No VPC/DB — talks only to Jotform + our
+    // own public webhook. reuses jotformApiKeySecret (declared above).
+    const jotformWebhookSecretForSweep = secretsmanager.Secret.fromSecretNameV2(
+      this, 'JotformWebhookSecretForSweep', `compact-emr-${config.envName}/jotform-webhook-secret`);
+    const jotformSweep = new nodejs.NodejsFunction(this, 'JotformSweep', {
+      functionName: `compact-emr-${config.envName}-jotform-sweep`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.resolve(__dirname, '..', '..', 'backend', 'src', 'lambdas', 'jotform-sweep.ts'),
+      handler: 'handler',
+      timeout: Duration.minutes(2),
+      memorySize: 256,
+      logRetention: logs.RetentionDays.THREE_MONTHS,
+      environment: {
+        ENV_NAME: config.envName,
+        JOTFORM_API_HOST: 'hipaa-api.jotform.com',
+        API_DOMAIN: apiBaseUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+        JOTFORM_API_KEY_SECRET_ARN: jotformApiKeySecret.secretArn,
+        JOTFORM_WEBHOOK_SECRET_ARN: jotformWebhookSecretForSweep.secretArn,
+        LOOKBACK_MINUTES: '180',
+      },
+    });
+    jotformApiKeySecret.grantRead(jotformSweep);
+    jotformWebhookSecretForSweep.grantRead(jotformSweep);
+
+    new events.Rule(this, 'JotformSweepSchedule', {
+      ruleName: `compact-emr-${config.envName}-jotform-sweep-schedule`,
+      description: 'Hourly: replay the recent window of Jotform submissions through the webhook (safety net).',
+      schedule: events.Schedule.rate(Duration.hours(1)),
+      targets: [new targets.LambdaFunction(jotformSweep, { retryAttempts: 1 })],
+    });
   }
 }

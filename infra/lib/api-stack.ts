@@ -328,5 +328,16 @@ export class ApiStack extends Stack {
       integration: new integrations.HttpLambdaIntegration('InternalApiProxyIntegration', handler),
       // no authorizer — token auth enforced in-app by requireDrafterPrincipal
     });
+
+    // Jotform webhook (/api/v1/jotform/webhook/:secret) is PUBLIC + secret-gated IN-APP (the secret
+    // path segment is validated in createJotformWebhookRouter). It MUST bypass the Cognito JWT
+    // authorizer or Jotform's POST gets a gateway 401 ({"message":"Unauthorized"}). More-specific
+    // route wins over /api/v1/{proxy+}. (2026-06-04 — found the webhook 401ing at the gateway.)
+    httpApi.addRoutes({
+      path: '/api/v1/jotform/webhook/{proxy+}',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new integrations.HttpLambdaIntegration('JotformWebhookIntegration', handler),
+      // no authorizer — secret auth enforced in-app
+    });
   }
 }

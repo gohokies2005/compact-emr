@@ -37,6 +37,11 @@ export async function getDraftDecisions(caseId: string): Promise<{ data: readonl
   return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/draft-decisions`);
 }
 
+// Cancel an in-flight draft (stops the ~$15 spend — the drafter aborts on its next heartbeat).
+export async function cancelDraftJob(caseId: string, jobId: string): Promise<{ data: unknown }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/draft-jobs/${encodeURIComponent(jobId)}/cancel`, {});
+}
+
 export async function postGate1Attestations(caseId: string, draftAttempt: number, items: ReadonlyArray<{ item: string; decision: string; reason?: string }>): Promise<{ data: { written: number } }> {
   return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/draft-decisions`, { draftAttempt, items });
 }

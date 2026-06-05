@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Card } from './ui/Card';
+import { Button } from './ui/Button';
 import type { DraftJob, DraftJobPhase } from '../types/prisma';
 
 export interface InFlightDraftJob extends DraftJob {
@@ -12,6 +13,8 @@ export interface InFlightDraftJob extends DraftJob {
 
 interface InFlightDrafterPanelProps {
   readonly job: InFlightDraftJob;
+  readonly onCancel?: () => void;
+  readonly cancelling?: boolean;
 }
 
 interface DraftStep {
@@ -131,7 +134,7 @@ function isTakingLonger(job: InFlightDraftJob): boolean {
   return state.includes('hold') || state.includes('retry') || state.includes('paused');
 }
 
-export function InFlightDrafterPanel({ job }: InFlightDrafterPanelProps) {
+export function InFlightDrafterPanel({ job, onCancel, cancelling }: InFlightDrafterPanelProps) {
   const step = useMemo(() => resolveStep(job), [job]);
   const takingLonger = isTakingLonger(job);
   const operatorMessage = job.operatorMessage?.trim();
@@ -162,8 +165,16 @@ export function InFlightDrafterPanel({ job }: InFlightDrafterPanelProps) {
           </p>
         </div>
 
-        <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
-          {elapsedLabel(job.startedAt, job.enqueuedAt)}
+        <div className="flex items-center gap-2">
+          <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
+            {elapsedLabel(job.startedAt, job.enqueuedAt)}
+          </div>
+          {onCancel ? (
+            <Button variant="secondary" size="sm" disabled={cancelling ?? false} loading={cancelling ?? false}
+              onClick={() => { if (window.confirm('Cancel this draft? It stops the run so you are not billed for the rest. You can re-send afterward.')) onCancel(); }}>
+              Cancel draft
+            </Button>
+          ) : null}
         </div>
       </div>
 

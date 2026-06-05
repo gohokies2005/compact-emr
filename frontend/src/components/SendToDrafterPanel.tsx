@@ -36,20 +36,27 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   });
 
   const [gate1Open, setGate1Open] = useState(false);
+  // The override args (if any) to draft with AFTER Gate-1 — so the Gate-1 checklist fires on BOTH
+  // the normal start AND the chart-not-ready override path (it used to skip Gate-1 on override).
+  const [pendingOverride, setPendingOverride] = useState<{ acknowledgeMissingDocs: boolean; overrideReason: string } | null>(null);
   // Gate-1 "before we draft" checklist gates the start ONLY when claim context is provided
   // (real case page). Without it (e.g. unit tests), the button drafts directly (back-compat).
   const gate1Enabled = typeof claimedCondition === 'string';
   function startDraft() {
+    setPendingOverride(null);
     if (gate1Enabled) setGate1Open(true);
     else draftMutation.mutate(undefined);
   }
 
   // Never a dead-end: when the chart isn't ready (e.g. a file couldn't be auto-read), the RN can
   // override and draft anyway with a logged reason (Ryan HARD RULE: EVERYTHING must be overridable).
+  // Still runs Gate-1 first (the dx/event checklist must not be skipped just because a file was unreadable).
   function overrideAndDraft() {
     const reason = window.prompt('Draft anyway? Type a brief reason (logged on the case). The drafter will run without the file(s) that could not be read.');
     if (reason === null || reason.trim().length === 0) return;
-    draftMutation.mutate({ acknowledgeMissingDocs: true, overrideReason: reason.trim() });
+    const ov = { acknowledgeMissingDocs: true, overrideReason: reason.trim() };
+    if (gate1Enabled) { setPendingOverride(ov); setGate1Open(true); }
+    else draftMutation.mutate(ov);
   }
 
   const readiness = readinessQuery.data?.data;
@@ -124,7 +131,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
           claimedCondition={claimedCondition ?? ''}
           draftAttempt={draftAttempt ?? 1}
           onClose={() => setGate1Open(false)}
-          onConfirmed={() => { setGate1Open(false); draftMutation.mutate(undefined); }}
+          onConfirmed={() => { setGate1Open(false); draftMutation.mutate(pendingOverride ?? undefined); setPendingOverride(null); }}
         />
       ) : null}
     </Card>

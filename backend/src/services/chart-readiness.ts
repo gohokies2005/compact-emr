@@ -149,6 +149,13 @@ export function evaluateChartReadiness(rows: readonly FileReadStatusRecord[]): C
   let provided = 0;
 
   for (const row of rows) {
+    // The Intake Summary is a doc WE generate from the form answers — it's always valid (a sparse
+    // intake just yields a short PDF that trips the <40-word read threshold). It must never block
+    // drafting or send an RN to manual review. Treat it as read regardless of its OCR word count.
+    if (typeof row.filePath === 'string' && /intake[_ ]?summary/i.test(row.filePath)) {
+      read++;
+      continue;
+    }
     if (row.terminalStatus === 'read') {
       read++;
     } else if (row.terminalStatus === 'manual_summary_provided') {

@@ -602,6 +602,39 @@ export function createDrafterClientRouter(db: AppDb): Router {
   );
 
   /**
+   * POST /api/v1/cases/:id/draft-jobs/:jobId/cancel  (admin / ops_staff)
+   *
+   * Cancel an in-flight draft so the RN doesn't burn a full ~$15 drafter run on a bad start. Marks
+   * the DraftJob terminal ('failed', failureClass='system', reason "Cancelled by RN") — the drafter
+   * wrapper's NEXT /progress heartbeat then gets a 409 (terminal-state guard) and aborts, stopping
+   * the spend. The case drops out of "in flight" so the RN can re-send. Idempotent on an already-
+   * terminal job.
+   */
+  router.post(
+    '/cases/:id/draft-jobs/:jobId/cancel',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const jobId = String(req.params.jobId);
+      const actor = currentActor(req);
+      const job = await db.draftJob.findUnique({ where: { id: jobId } });
+      if (job === null) throw new HttpError(404, 'not_found', 'DraftJob not found', { jobId });
+      if (job.state === 'done' || job.state === 'failed' || job.state === 'halted') {
+        res.json({ data: job, alreadyTerminal: true });
+        return;
+      }
+      const updated = await db.$transaction(async (tx) => {
+        const j = await tx.draftJob.update({
+          where: { id: jobId },
+          data: { state: 'failed', failureClass: 'system', completedAt: new Date(), errorMessage: 'Cancelled by RN' },
+        });
+        await tx.activityLog.create({ data: { actorUserId: actor.sub, caseId: job.caseId, action: 'draft_job_cancelled', detailsJson: { jobId, cancelledBy: actor.sub } } });
+        return j;
+      });
+      res.json({ data: updated, cancelled: true });
+    }),
+  );
+
+  /**
    * GET /api/v1/cases/:id/draft-jobs/:jobId/artifact-pdf-url
    *
    * Returns a 5-min presigned GET URL for the DraftJob's artifactPdfS3Key. Used by the

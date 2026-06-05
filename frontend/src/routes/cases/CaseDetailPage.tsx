@@ -17,7 +17,7 @@ import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
 import { DecisionsOverridesPanel } from '../../components/DecisionsOverridesPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
-import { getArtifactPdfUrl, postDraft } from '../../api/drafter';
+import { getArtifactPdfUrl, postDraft, cancelDraftJob } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
 import { listDocuments, reocrDocument } from '../../api/veterans';
 import { PdfViewerModal, type ViewableDoc } from '../../components/PdfViewerModal';
@@ -109,6 +109,13 @@ export function CaseDetailPage() {
           ? 'Cannot redraft right now — a drafter run may already be in flight, or the chart is not ready yet. Reload the case and check its status.'
           : `Could not start a redraft — ${describeApiError(e)}. Please retry or flag to Dr. Ryan.`,
       ),
+  });
+
+  // Cancel an in-flight draft (stops the ~$15 spend). (Ryan 2026-06-05.)
+  const cancelDraft = useMutation({
+    mutationFn: (jobId: string) => cancelDraftJob(caseId, jobId),
+    onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
+    onError: (e: unknown) => window.alert(`Could not cancel — ${describeApiError(e)}`),
   });
 
   // Send to doctor for review: rn_review -> physician_review. Completed drafts no longer auto-route
@@ -252,7 +259,7 @@ export function CaseDetailPage() {
       return (
         <>
           {inFlightDraft && latestDraftJob ? (
-            <InFlightDrafterPanel job={latestDraftJob} />
+            <InFlightDrafterPanel job={latestDraftJob} onCancel={() => cancelDraft.mutate(latestDraftJob.id)} cancelling={cancelDraft.isPending} />
           ) : null}
 
           {canSendFirstDraft ? <SendToDrafterPanel caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} /> : null}

@@ -357,7 +357,11 @@ export function createInternalWorkerRouter(db: AppDb): Router {
    * documentId, which it then stamps as the Textract JobTag so the completion callback can
    * post pages/failures to the right document.
    *
-   * Returns { data: { documentId, caseId, s3Key } } or 404 if no Document has that s3Key.
+   * Returns { data: { documentId, caseId, s3Key, hasPages } } or 404 if no Document has that s3Key.
+   * `hasPages` lets ocr-start SKIP Textract when the document already carries OCR text — the
+   * double-OCR guard (#8 v1): a re-fired ObjectCreated event, an assign-time CopyObject of a file
+   * whose text was already transplanted from intake, or a retry will not re-spend on Textract. The
+   * /pages upsert is idempotent so correctness never depends on the skip — it's pure cost-saving.
    */
   router.get(
     '/internal/documents/by-s3-key',
@@ -376,7 +380,10 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       if (doc === null) {
         throw new HttpError(404, 'not_found', 'No document found for that s3Key', { s3Key: key });
       }
-      res.json({ data: { documentId: doc.id, caseId: doc.caseId, s3Key: doc.s3Key } });
+      const pageCount = await (db as unknown as {
+        documentPage: { count: (args: { where: { documentId: string } }) => Promise<number> };
+      }).documentPage.count({ where: { documentId: doc.id } });
+      res.json({ data: { documentId: doc.id, caseId: doc.caseId, s3Key: doc.s3Key, hasPages: pageCount > 0 } });
     }),
   );
 

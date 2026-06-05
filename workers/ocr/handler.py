@@ -58,12 +58,13 @@ def _worker_token() -> str:
     return os.environ["INTERNAL_WORKER_TOKEN"]
 
 
-def _resolve_document_id(s3_key: str) -> str | None:
-    """Resolve the Document row id from its S3 key via the internal API.
+def _resolve_document(s3_key: str) -> dict[str, Any] | None:
+    """Resolve the Document row (id + whether it already has OCR pages) from its S3 key.
 
     The upload key (`cases/<caseId>/<uuid>-<filename>`) carries no documentId — the Document
-    row id is minted after the key is chosen — so the worker must look it up. Returns the
-    documentId, or None if the API has no Document for that key (404) or the call fails.
+    row id is minted after the key is chosen — so the worker must look it up. Returns
+    {"documentId": ..., "hasPages": bool}, or None if the API has no Document for that key
+    (404) or the call fails. `hasPages` drives the double-OCR guard (#8 v1).
     """
     query = urllib.parse.urlencode({"key": s3_key})
     url = f"{_api_base_url()}/api/v1/internal/documents/by-s3-key?{query}"
@@ -75,7 +76,8 @@ def _resolve_document_id(s3_key: str) -> str | None:
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        return payload.get("data", {}).get("documentId")
+        data = payload.get("data")
+        return data if isinstance(data, dict) and data.get("documentId") else None
     except urllib.error.HTTPError as http_err:
         if http_err.code == 404:
             print(f"no document for s3 key {s3_key} (404); skipping")
@@ -102,10 +104,19 @@ def start_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         return {"started": []}
 
     key = urllib.parse.unquote_plus(raw_key)
-    document_id = _resolve_document_id(key)
-    if not document_id:
+    doc = _resolve_document(key)
+    if not doc:
         print(f"skipping key with no resolvable document: {key}")
         return {"started": []}
+    document_id = doc["documentId"]
+
+    # Double-OCR guard (#8 v1): the document already carries OCR text (a re-fired ObjectCreated
+    # event, a retry, or — once #8 v2 lands — text transplanted from the intake-time OCR at assign).
+    # Skip Textract; the /pages upsert is idempotent so correctness never depended on this — pure
+    # cost-saving. NOT keyed on the prefix: works for cases/ today and intake/ under v2.
+    if doc.get("hasPages"):
+        print(f"document {document_id} already has OCR pages; skipping Textract for {key}")
+        return {"started": [], "skipped": "already_has_pages"}
 
     sns_topic = os.environ["COMPLETION_SNS_TOPIC_ARN"]
     sns_role_arn = os.environ["TEXTRACT_SNS_ROLE_ARN"]

@@ -30,6 +30,12 @@ function makeDb(initialDoctorPack: DoctorPackRecord | null = null, initialDocume
       findFirst: vi.fn(async () => null),
       create: vi.fn(),
       deleteMany: vi.fn(async () => ({ count: 0 })),
+      // by-s3-key now returns hasPages (double-OCR guard, #8 v1) — count pages for the document.
+      count: vi.fn(async (args: { where: { documentId: string } }) => {
+        let n = 0;
+        for (const r of pages.values()) { if ((r as { documentId?: string }).documentId === args.where.documentId) n += 1; }
+        return n;
+      }),
     },
     doctorPack: {
       findUnique: vi.fn(async () => doctorPack),
@@ -281,7 +287,23 @@ describe('GET /internal/documents/by-s3-key', () => {
       .query({ key: 'cases/CASE-9/uuid-records.pdf' })
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN);
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ documentId: 'DOC-42', caseId: 'CASE-9', s3Key: 'cases/CASE-9/uuid-records.pdf' });
+    // hasPages=false when the document has no OCR pages yet (double-OCR guard, #8 v1).
+    expect(res.body.data).toEqual({ documentId: 'DOC-42', caseId: 'CASE-9', s3Key: 'cases/CASE-9/uuid-records.pdf', hasPages: false });
+  });
+
+  it('returns hasPages=true once the document carries OCR pages (double-OCR guard)', async () => {
+    const { db } = makeDb(null, { id: 'DOC-42', caseId: 'CASE-9', s3Key: 'cases/CASE-9/uuid-records.pdf' });
+    // Seed a page via the /pages upsert so documentPage.count() > 0 for DOC-42.
+    await request(appFor(db))
+      .post('/api/v1/internal/documents/DOC-42/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ pages: [{ pageNumber: 1, text: 'this document already has readable ocr text content present', confidence: 0.95 }], documentPageCount: 1 });
+    const res = await request(appFor(db))
+      .get('/api/v1/internal/documents/by-s3-key')
+      .query({ key: 'cases/CASE-9/uuid-records.pdf' })
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN);
+    expect(res.status).toBe(200);
+    expect(res.body.data.hasPages).toBe(true);
   });
 
   it('returns 404 when no document has that s3Key', async () => {

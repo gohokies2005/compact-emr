@@ -80,6 +80,10 @@ export async function dismissIntake(id: string, reason: string): Promise<{ data:
 export async function retryIntake(id: string): Promise<{ data: unknown }> {
   return apiPost(`/api/v1/intakes/${encodeURIComponent(id)}/retry`, {});
 }
+// Un-dismiss a wrongly-dismissed intake back to ready (reversible).
+export async function restoreIntake(id: string): Promise<{ data: unknown }> {
+  return apiPost(`/api/v1/intakes/${encodeURIComponent(id)}/restore`, {});
+}
 
 // Form-type awareness (spec §6b). Known Jotform form IDs → how the assign should default.
 export type IntakeKind = 'stage1' | 'additional_docs' | 'stage2';

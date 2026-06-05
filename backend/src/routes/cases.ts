@@ -109,6 +109,10 @@ function buildCaseListWhere(query: Request['query']): Record<string, unknown> {
   if (assignedRnId === '__none__') where.assignedRnId = null;
   else if (assignedRnId !== undefined) where.assignedRnId = assignedRnId;
 
+  // Soft-archive: default views EXCLUDE archived cases; `?archived=true` shows only the archive.
+  if (optionalStringQuery(query.archived) === 'true') where.archivedAt = { not: null };
+  else where.archivedAt = null;
+
   // NOTE (Ryan 2026-06-04): the old ship/runComplete read-filter on physician_review was removed.
   // Completed drafts no longer auto-route to the doctor — they land in 'rn_review' and reach
   // physician_review ONLY when the RN explicitly clicks "Send to doctor for review". That deliberate
@@ -348,41 +352,56 @@ export function createCasesRouter(db: AppDb): Router {
     }),
   );
 
-  // DELETE /cases/:id — remove a claim. Used to clean up a mis-assigned / duplicate claim (e.g. two
-  // intake rows assigned for the same condition). HARD delete (Case children are all onDelete:Cascade;
-  // the activity_log row is onDelete:SetNull so the audit survives). Guarded to UN-STARTED claims only
-  // ('intake' or already 'rejected') so real drafting/letters can never be destroyed by a stray click.
-  const DELETABLE_STATUSES = new Set(['intake', 'rejected']);
+  // DELETE /cases/:id — ARCHIVE a claim (soft-delete, reversible). Used to clean up a mis-assigned /
+  // duplicate claim. Sets archived_at so it drops out of default views but its files/drafts/audit are
+  // preserved and it can be Restored. No status guard — archiving is reversible, so it's safe on any
+  // case. (Replaces the old permanent cascade delete; a true purge is admin-only below.) Ryan 2026-06-05.
   router.delete(
     '/cases/:id',
     requireRole(['admin', 'ops_staff']),
     asyncHandler(async (req: Request, res: Response) => {
       const user = currentUser(req);
       const id = String(req.params.id);
-
       await db.$transaction(async (tx) => {
-        const existing = await tx.case.findFirst({
-          where: { id },
-          select: { id: true, veteranId: true, status: true },
-        });
+        const existing = await tx.case.findFirst({ where: { id }, select: { id: true, veteranId: true, status: true } });
         if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
-        if (!DELETABLE_STATUSES.has(existing.status)) {
-          throw new HttpError(409, 'conflict', `This claim is '${existing.status}' — only un-started (intake) or rejected claims can be deleted, so in-progress drafting and letters are never lost.`, { caseId: id, status: existing.status });
-        }
+        await tx.case.update({ where: { id }, data: { archivedAt: new Date() } as never });
+        await tx.activityLog.create({ data: { actorUserId: user.id, action: 'case_archived', caseId: id, veteranId: existing.veteranId, detailsJson: { caseId: id, previousStatus: existing.status } } });
+      });
+      res.status(204).send();
+    }),
+  );
 
-        await tx.activityLog.create({
-          data: {
-            actorUserId: user.id,
-            action: 'case_deleted',
-            caseId: id,
-            veteranId: existing.veteranId,
-            detailsJson: { caseId: id, previousStatus: existing.status },
-          },
-        });
-        // Cascade-deletes documents / draft jobs / chart data; activity_log is SetNull (audit kept).
+  // POST /cases/:id/restore — un-archive (archived_at = null).
+  router.post(
+    '/cases/:id/restore',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentUser(req);
+      const id = String(req.params.id);
+      const existing = await db.case.findFirst({ where: { id }, select: { id: true, veteranId: true } });
+      if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+      await db.case.update({ where: { id }, data: { archivedAt: null } as never });
+      await db.activityLog.create({ data: { actorUserId: user.id, action: 'case_restored', caseId: id, veteranId: existing.veteranId, detailsJson: { caseId: id } } });
+      res.json({ data: { ok: true } });
+    }),
+  );
+
+  // DELETE /cases/:id/purge — TRUE permanent delete (admin only), for genuine spam/junk. Cascade
+  // removes children; activity_log is SetNull so the audit survives. Only an already-ARCHIVED case.
+  router.delete(
+    '/cases/:id/purge',
+    requireRole(['admin']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentUser(req);
+      const id = String(req.params.id);
+      await db.$transaction(async (tx) => {
+        const existing = await tx.case.findFirst({ where: { id }, select: { id: true, veteranId: true, archivedAt: true } as never }) as { id: string; veteranId: string; archivedAt: Date | null } | null;
+        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+        if (existing.archivedAt === null) throw new HttpError(409, 'conflict', 'Archive the claim first, then purge — prevents an accidental permanent delete.', { caseId: id });
+        await tx.activityLog.create({ data: { actorUserId: user.id, action: 'case_purged', caseId: id, veteranId: existing.veteranId, detailsJson: { caseId: id } } });
         await (tx as unknown as { case: { delete: (a: { where: { id: string } }) => Promise<unknown> } }).case.delete({ where: { id } });
       });
-
       res.status(204).send();
     }),
   );

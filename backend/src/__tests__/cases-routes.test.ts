@@ -208,20 +208,28 @@ describe('cases routes', () => {
     expect(res.status).toBe(409);
   });
 
-  it('hard-deletes an un-started (intake) claim (204) + audit row, and only then', async () => {
+  it('ARCHIVES a claim (204) — soft delete (sets archived_at), keeps the row + audit, no hard delete', async () => {
     const { db, spies } = makeDb(baseCase({ status: 'intake' }));
     const res = await request(appFor(db)).delete('/api/v1/cases/CASE-1');
     expect(res.status).toBe(204);
-    expect(spies.caseDelete).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'CASE-1' } }));
-    expect(spies.caseUpdate).not.toHaveBeenCalled(); // a real delete, not a soft status flip
-    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'case_deleted', detailsJson: expect.objectContaining({ previousStatus: 'intake' }) }) }));
+    expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'CASE-1' }, data: expect.objectContaining({ archivedAt: expect.anything() }) }));
+    expect(spies.caseDelete).not.toHaveBeenCalled(); // soft archive, NOT a destructive delete
+    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'case_archived' }) }));
   });
 
-  it('refuses (409) to delete a claim that has progressed past intake — drafting/letters are protected', async () => {
+  it('archives ANY status (reversible) — even a progressed claim, no 409', async () => {
     const { db, spies } = makeDb(baseCase({ status: 'records' }));
     const res = await request(appFor(db)).delete('/api/v1/cases/CASE-1');
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(204);
+    expect(spies.caseUpdate).toHaveBeenCalled();
     expect(spies.caseDelete).not.toHaveBeenCalled();
+  });
+
+  it('restores an archived claim (archived_at = null)', async () => {
+    const { db, spies } = makeDb(baseCase({ status: 'rejected' }));
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/restore').send({});
+    expect(res.status).toBe(200);
+    expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'CASE-1' }, data: expect.objectContaining({ archivedAt: null }) }));
   });
 
   it('performs valid status transition without touching draft jobs', async () => {

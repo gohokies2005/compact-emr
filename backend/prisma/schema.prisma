@@ -348,6 +348,7 @@ model Case {
   operatorMessage     String?    @map("operator_message")
   createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  archivedAt          DateTime?  @map("archived_at") @db.Timestamptz(6) // soft-delete: hidden from default views, restorable
   version             Int        @default(1)
 
   veteran           Veteran     @relation(fields: [veteranId], references: [id], onDelete: Cascade)
@@ -371,6 +372,7 @@ model Case {
   @@index([status, updatedAt])
   @@index([veteranId, status])
   @@index([assignedPhysicianId, runComplete, shipRecommendation], map: "cases_physician_inbox_idx")
+  @@index([archivedAt])
   @@map("cases")
 }
 

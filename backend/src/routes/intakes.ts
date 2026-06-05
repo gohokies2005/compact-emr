@@ -106,6 +106,14 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     res.json({ data: updated });
   }));
 
+  // POST /intakes/:id/restore — un-dismiss a wrongly-dismissed intake back to 'ready' (reversible).
+  router.post('/intakes/:id/restore', requireRole(['admin', 'ops_staff']), asyncHandler(async (req: Request, res: Response) => {
+    const row = await db.intake.findUnique({ where: { id: String(req.params.id) } });
+    if (row === null) throw new HttpError(404, 'not_found', 'Intake not found.', { intakeId: req.params.id });
+    const updated = await db.intake.update({ where: { id: (row as { id: string }).id }, data: { status: 'ready', dismissedReason: null } });
+    res.json({ data: updated });
+  }));
+
   // POST /intakes/:id/retry — re-enqueue a failed/pending fetch (RN self-service, never a silent drop).
   router.post('/intakes/:id/retry', requireRole(['admin', 'ops_staff']), asyncHandler(async (req: Request, res: Response) => {
     const row = await db.intake.findUnique({ where: { id: String(req.params.id) } });

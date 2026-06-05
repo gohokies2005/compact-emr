@@ -7,7 +7,7 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { formatRelativeTime } from '../../lib/date';
-import { listCases, deleteCase, type CaseLite } from '../../api/cases';
+import { listCases, deleteCase, restoreCase, type CaseLite } from '../../api/cases';
 import { describeApiError } from '../../api/client';
 import { listVeterans } from '../../api/veterans';
 import type { CaseStatus, ClaimType } from '../../types/prisma';
@@ -51,12 +51,13 @@ export function CasesPage() {
   const [claimType, setClaimType] = useState<ClaimType | ''>('');
   const [vetQuery, setVetQuery] = useState('');
   const [veteran, setVeteran] = useState<{ id: string; label: string } | null>(null);
+  const [archived, setArchived] = useState(false); // show the Archive (soft-deleted claims)
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
 
   const debouncedVet = useDebounced(vetQuery, 300);
   // Reset to page 1 whenever a filter changes.
-  useEffect(() => { setPage(1); }, [status, claimType, veteran?.id, pageSize]);
+  useEffect(() => { setPage(1); }, [status, claimType, veteran?.id, pageSize, archived]);
 
   const vetMatches = useQuery({
     queryKey: ['veteran-search', debouncedVet],
@@ -65,27 +66,32 @@ export function CasesPage() {
   });
 
   const cases = useQuery({
-    queryKey: ['cases', { status, claimType, veteranId: veteran?.id ?? '', page, pageSize }],
+    queryKey: ['cases', { status, claimType, veteranId: veteran?.id ?? '', archived, page, pageSize }],
     queryFn: () => listCases({
       ...(status && { status }),
       ...(claimType && { claimType }),
       ...(veteran && { veteranId: veteran.id }),
+      ...(archived && { archived: true }),
       page,
       pageSize,
     }),
   });
 
-  function clearFilters() { setStatus(''); setClaimType(''); setVetQuery(''); setVeteran(null); }
+  function clearFilters() { setStatus(''); setClaimType(''); setVetQuery(''); setVeteran(null); setArchived(false); }
   const total = cases.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   const qc = useQueryClient();
-  // Delete an un-started (intake/rejected) claim — clean up a mis-assigned / duplicate claim.
-  const DELETABLE = new Set(['intake', 'rejected']);
-  const deleteMut = useMutation({
+  // Archive (soft-delete, reversible) a claim — clean up a mis-assigned / duplicate one. Restorable.
+  const archiveMut = useMutation({
     mutationFn: (id: string) => deleteCase(id),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['cases'] }); },
-    onError: (e: unknown) => window.alert(`Could not delete this claim — ${describeApiError(e)}`),
+    onError: (e: unknown) => window.alert(`Could not archive this claim — ${describeApiError(e)}`),
+  });
+  const restoreMut = useMutation({
+    mutationFn: (id: string) => restoreCase(id),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['cases'] }); },
+    onError: (e: unknown) => window.alert(`Could not restore this claim — ${describeApiError(e)}`),
   });
 
   const { onHeaderClick, sortRows, ariaSort, indicator } = useColumnSort();
@@ -125,6 +131,7 @@ export function CasesPage() {
           ? <ul className="absolute z-10 mt-1 w-full overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">{vetMatches.data.data.slice(0, 5).map((v) => <li key={v.id}><button type="button" className="flex w-full justify-between px-3 py-2 text-left hover:bg-slate-50" onClick={() => { setVeteran({ id: v.id, label: `${v.firstName} ${v.lastName} (${v.id})` }); }}><span>{v.firstName} {v.lastName}</span><span className="text-slate-500">{v.dob?.slice(0, 4) ?? ''}</span></button></li>)}</ul>
           : null}
       </div>
+      <label className="flex items-center gap-2 text-sm lg:pb-2"><input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} /> Show archived</label>
       <Button variant="secondary" onClick={clearFilters}>Clear filters</Button>
     </div>
 
@@ -148,14 +155,14 @@ export function CasesPage() {
             <td className="px-4 py-3 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
             <td className="px-4 py-3 text-slate-400">{c.version}</td>
             <td className="px-4 py-3 text-right">
-              {DELETABLE.has(c.status) ? (
-                <button
-                  type="button"
-                  className="text-xs font-medium text-rose-600 hover:text-rose-700 disabled:opacity-50"
-                  disabled={deleteMut.isPending}
-                  onClick={(e) => { e.stopPropagation(); if (window.confirm(`Delete claim ${c.id} (${c.claimedCondition}) for ${c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}? This removes the claim and its files. It cannot be undone.`)) deleteMut.mutate(c.id); }}
-                >Delete</button>
-              ) : null}
+              {archived ? (
+                <button type="button" className="text-xs font-medium text-indigo-600 hover:text-indigo-700 disabled:opacity-50" disabled={restoreMut.isPending}
+                  onClick={(e) => { e.stopPropagation(); restoreMut.mutate(c.id); }}>Restore</button>
+              ) : (
+                <button type="button" className="text-xs font-medium text-rose-600 hover:text-rose-700 disabled:opacity-50" disabled={archiveMut.isPending}
+                  onClick={(e) => { e.stopPropagation(); if (window.confirm(`Archive claim ${c.id} (${formatConditionLabel(c.claimedCondition)})? It's hidden from the list but kept and can be Restored from "Show archived".`)) archiveMut.mutate(c.id); }}
+                >Archive</button>
+              )}
             </td>
           </tr>)}
         </tbody>

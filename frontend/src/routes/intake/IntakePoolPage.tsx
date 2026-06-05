@@ -7,7 +7,7 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import { formatRelativeTime } from '../../lib/date';
 import {
-  assignIntake, dismissIntake, getIntake, intakeKind, listIntakes, retryIntake,
+  assignIntake, dismissIntake, getIntake, intakeKind, listIntakes, retryIntake, restoreIntake,
   type IntakeDetail, type IntakeListItem, type AssignIntakeInput,
 } from '../../api/intakes';
 import { listVeterans } from '../../api/veterans';
@@ -232,6 +232,7 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
 
   const dismiss = useMutation({ mutationFn: () => dismissIntake(intake.id, window.prompt('Reason for dismissing (spam/dupe)?') ?? 'dismissed'), onSuccess: () => { onChanged(); onAssigned(); } });
   const retry = useMutation({ mutationFn: () => retryIntake(intake.id), onSuccess: onChanged });
+  const restore = useMutation({ mutationFn: () => restoreIntake(intake.id), onSuccess: () => { onChanged(); onAssigned(); } });
 
   // Same-condition dedup: if the chosen veteran already has a claim matching this condition, warn so
   // the RN attaches to it instead of creating a duplicate claim (the "two migraines claims" problem).
@@ -259,6 +260,15 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
       <div className="space-y-3 p-6 text-sm">
         <p className="text-slate-700">This intake is <b>{intake.status}</b> — its files haven't been fetched from Jotform yet{intake.errorMessage ? `: ${intake.errorMessage}` : ''}.</p>
         <Button size="sm" loading={retry.isPending} onClick={() => retry.mutate()}>Retry fetch</Button>
+      </div>
+    );
+  }
+
+  if (intake.status === 'dismissed') {
+    return (
+      <div className="space-y-3 p-6 text-sm">
+        <p className="text-slate-700">This intake was <b>dismissed</b>{intake.errorMessage ? '' : ''}. Restore it to the pool if that was a mistake.</p>
+        <Button size="sm" loading={restore.isPending} onClick={() => restore.mutate()}>Restore to pool</Button>
       </div>
     );
   }

@@ -43,6 +43,7 @@ export interface ListCasesParams {
   readonly claimType?: ClaimType;
   readonly veteranId?: string;
   readonly assignedPhysicianId?: string;
+  readonly archived?: boolean; // true = show only archived (soft-deleted) claims
   readonly page?: number;
   readonly pageSize?: number;
 }
@@ -53,6 +54,7 @@ export async function listCases(params: ListCasesParams = {}): Promise<CaseListR
   if (params.claimType) sp.set('claimType', params.claimType);
   if (params.veteranId) sp.set('veteranId', params.veteranId);
   if (params.assignedPhysicianId) sp.set('assignedPhysicianId', params.assignedPhysicianId);
+  if (params.archived) sp.set('archived', 'true');
   if (params.page) sp.set('page', String(params.page));
   if (params.pageSize) sp.set('pageSize', String(params.pageSize));
   const qs = sp.toString();
@@ -129,6 +131,13 @@ export async function assignCaseRn(id: string, input: AssignRnInput): Promise<{ 
   return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/assign-rn`, input);
 }
 
+// Archive (soft-delete, reversible) — same endpoint, now sets archived_at instead of hard-deleting.
+export async function archiveCase(id: string): Promise<void> {
+  return apiDelete(`/api/v1/cases/${encodeURIComponent(id)}`);
+}
+export async function restoreCase(id: string): Promise<{ data: unknown }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/restore`, {});
+}
 export async function deleteCase(id: string): Promise<void> {
   return apiDelete(`/api/v1/cases/${encodeURIComponent(id)}`);
 }

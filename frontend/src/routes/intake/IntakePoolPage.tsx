@@ -24,13 +24,36 @@ function splitName(full: string | null): { first: string; last: string } {
 }
 function mintId(prefix: string): string { return `${prefix}-${crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`; }
 
+type SortKey = 'name' | 'profile' | 'condition' | 'files' | 'received' | 'status';
+
+function sortRows(rows: readonly IntakeListItem[], key: SortKey, dir: 1 | -1): IntakeListItem[] {
+  const val = (r: IntakeListItem): string | number => {
+    switch (key) {
+      case 'name': return (r.submittedName ?? r.submittedEmail ?? '').toLowerCase();
+      case 'profile': return r.veteranMatch ? 0 : 1; // existing profiles first when ascending
+      case 'condition': return (r.submittedCondition ?? '').toLowerCase();
+      case 'files': return r.fileManifestJson?.length ?? 0;
+      case 'received': return new Date(r.createdAt).getTime();
+      case 'status': return r.status;
+    }
+  };
+  return [...rows].sort((a, b) => { const av = val(a); const bv = val(b); return av < bv ? -1 * dir : av > bv ? 1 * dir : 0; });
+}
+
 export function IntakePoolPage() {
   const [status, setStatus] = useState('ready');
   const [q, setQ] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'received', dir: -1 });
 
   const pool = useQuery({ queryKey: ['intakes', status, q], queryFn: () => listIntakes({ status, q }) });
-  const rows = pool.data?.data ?? [];
+  const rows = useMemo(() => sortRows(pool.data?.data ?? [], sort.key, sort.dir), [pool.data, sort]);
+  const toggleSort = (key: SortKey) => setSort((s) => (s.key === key ? { key, dir: (s.dir * -1) as 1 | -1 } : { key, dir: key === 'received' ? -1 : 1 }));
+  const Th = ({ k, label, className }: { k: SortKey; label: string; className?: string }) => (
+    <th className={`cursor-pointer select-none px-4 py-2 hover:text-slate-800 ${className ?? ''}`} onClick={() => toggleSort(k)}>
+      {label}{sort.key === k ? <span className="ml-1 text-slate-400">{sort.dir === 1 ? '▲' : '▼'}</span> : null}
+    </th>
+  );
 
   return (
     <AppShell>
@@ -60,12 +83,15 @@ export function IntakePoolPage() {
           <Card className="p-0">
             <table className="min-w-full divide-y divide-slate-200 text-sm">
               <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr>
-                <th className="px-4 py-2">Name</th><th className="px-4 py-2">Condition</th><th className="px-4 py-2">Files</th><th className="px-4 py-2">Received</th><th className="px-4 py-2">Status</th>
+                <Th k="name" label="Name" /><Th k="profile" label="Profile" /><Th k="condition" label="Condition" /><Th k="files" label="Files" /><Th k="received" label="Received" /><Th k="status" label="Status" />
               </tr></thead>
               <tbody className="divide-y divide-slate-100">
                 {rows.map((r) => (
                   <tr key={r.id} className="cursor-pointer hover:bg-slate-50" onClick={() => setSelectedId(r.id)}>
                     <td className="px-4 py-2 font-medium text-slate-900">{r.submittedName ?? r.submittedEmail ?? '(no name)'}</td>
+                    <td className="px-4 py-2">{r.veteranMatch
+                      ? <span className="inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700" title={`Existing profile: ${r.veteranMatch.name}`}>✓ Exists</span>
+                      : <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">New</span>}</td>
                     <td className="px-4 py-2 text-slate-700">{r.submittedCondition ?? '—'}</td>
                     <td className="px-4 py-2 text-slate-600">{(r.fileManifestJson?.length ?? 0)} file(s)</td>
                     <td className="px-4 py-2 text-slate-500">{formatRelativeTime(r.createdAt)}</td>
@@ -120,11 +146,13 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
   const nm = splitName(intake.submittedName);
   const prefillClaimType = (CLAIM_TYPES as readonly string[]).includes(intake.submittedClaimType ?? '') ? intake.submittedClaimType! : 'initial';
 
-  // veteran: existing (search/select) or new (prefilled)
-  const [vetMode, setVetMode] = useState<'existing' | 'new'>(kind === 'stage1' ? 'new' : 'existing');
-  const [vetQuery, setVetQuery] = useState(intake.submittedName ?? intake.submittedEmail ?? '');
-  const [vetId, setVetId] = useState<string | null>(null);
-  const [vetLabel, setVetLabel] = useState<string>('');
+  // veteran: existing (search/select) or new (prefilled). If a profile already exists for this email,
+  // PRESELECT it (returning customer → no DOB entry needed; their claims load automatically).
+  const match = intake.veteranMatch;
+  const [vetMode, setVetMode] = useState<'existing' | 'new'>(match ? 'existing' : (kind === 'stage1' ? 'new' : 'existing'));
+  const [vetQuery, setVetQuery] = useState(match?.name ?? intake.submittedName ?? intake.submittedEmail ?? '');
+  const [vetId, setVetId] = useState<string | null>(match?.id ?? null);
+  const [vetLabel, setVetLabel] = useState<string>(match?.name ?? '');
   const [nv, setNv] = useState({ firstName: nm.first, lastName: nm.last, dob: intake.submittedDob ?? '', email: intake.submittedEmail ?? '', state: intake.submittedState ?? '', phone: intake.submittedPhone ?? '' });
 
   // case: existing (the veteran's claims) or new (condition + claim type prefilled)
@@ -171,6 +199,14 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
   // Files are optional — a Stage-1/2 submission may carry no uploads; the value is creating the
   // veteran + claim from the answers. Assign needs a veteran + a claim, not files.
   const canAssign = (vetMode === 'existing' ? !!vetId : (!!nv.firstName && !!nv.lastName && !!nv.dob && !!nv.email)) && (caseMode === 'existing' ? !!caseId : nc.claimedCondition.length > 0);
+  // Surface exactly WHY Assign is disabled (no silent gray-out).
+  const missingVetFields = [!nv.firstName && 'first name', !nv.lastName && 'last name', !nv.dob && 'date of birth', !nv.email && 'email'].filter(Boolean);
+  const disabledReason = canAssign ? null
+    : vetMode === 'existing' && !vetId ? 'Choose an existing veteran above, or switch to "Create new".'
+    : vetMode === 'new' && missingVetFields.length > 0 ? `Add the new veteran's ${missingVetFields.join(', ')}${!nv.dob ? ' (date of birth is on the DD-214 if the form didn’t capture it)' : ''}.`
+    : caseMode === 'existing' && !caseId ? 'Choose a claim.'
+    : caseMode === 'new' && nc.claimedCondition.length === 0 ? 'Enter the claimed condition.'
+    : null;
 
   if (intake.status === 'pending' || intake.status === 'failed') {
     return (
@@ -187,6 +223,7 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
         <div className="font-medium text-slate-900">{intake.submittedName ?? '(no name)'}</div>
         <div className="mt-1 text-slate-600">{[intake.submittedEmail, intake.submittedPhone, intake.submittedState].filter(Boolean).join(' · ')}</div>
         <div className="mt-1 text-slate-600">Condition (from form): {intake.submittedCondition ?? '—'} · {intake.submittedFormTitle ?? (kind === 'additional_docs' ? 'Additional records' : kind === 'stage1' ? 'Stage 1' : 'Stage 2')}</div>
+        {match ? <div className="mt-2 inline-flex rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">✓ Existing profile found — preselected as {match.name} (no DOB entry needed)</div> : null}
       </div>
 
       {/* Files */}
@@ -271,6 +308,8 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
       <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-900">
         Assign <b>{fileKeys.size}</b> file(s) → <b>{vetName || '(choose veteran)'}{vetDob ? ` (DOB ${vetDob})` : ''}</b> → <b>{claimLabel || '(choose claim)'}</b>
       </div>
+
+      {disabledReason ? <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">To assign: {disabledReason}</div> : null}
 
       <div className="flex flex-wrap gap-2">
         <Button variant="primary" disabled={!canAssign || assign.isPending} loading={assign.isPending} onClick={() => { if (window.confirm(`Assign ${fileKeys.size} file(s) to ${vetName}${vetDob ? ` (DOB ${vetDob})` : ''} → ${claimLabel}?`)) assign.mutate(); }}>Assign</Button>

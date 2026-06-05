@@ -25,6 +25,7 @@ export interface IntakeListItem {
   readonly errorMessage: string | null;
   readonly submittedAt: string | null;
   readonly createdAt: string;
+  readonly veteranMatch: { readonly id: string; readonly name: string } | null; // existing profile for this email
 }
 export interface IntakeDetail extends IntakeListItem {
   readonly files: readonly IntakeFile[];
@@ -81,17 +82,23 @@ export async function retryIntake(id: string): Promise<{ data: unknown }> {
 }
 
 // Form-type awareness (spec §6b). Known Jotform form IDs → how the assign should default.
-const MAIN_INTAKE_FORM = '260898029223159'; // Stage 1: new veteran + initial claim
-const ADDITIONAL_DOCS_FORM = '260804641700146'; // existing veteran + existing claim + re-run prompt
 export type IntakeKind = 'stage1' | 'additional_docs' | 'stage2';
-// Prefer the real form TITLE (robust to unknown/cloned form IDs) and fall back to the known IDs. The
-// title-based match is why a Stage-1 submission from a cloned form no longer mislabels as "Stage 2".
+// Known form IDs (verified live against the Jotform account 2026-06-04). A new-veteran intake (main +
+// returning) defaults to create-new veteran + new claim; the additional-docs form to existing+existing;
+// the condition forms to match-veteran + new claim.
+const KNOWN_FORMS: Record<string, IntakeKind> = {
+  '260898029223159': 'stage1',        // Main Stage-1 intake (new veteran + initial claim)
+  '261495407772061': 'stage1',        // Returning-client intake (new veteran/claim in a fresh EMR)
+  '260804641700146': 'additional_docs', // Additional Records upload (existing veteran + existing claim)
+  '261483559233058': 'stage2',        // Stage-2 condition form (carries Stage-1 demographics)
+};
+// Prefer the real form TITLE (robust to unknown/cloned form IDs), then the known-ID map, then default.
+// This is why a Stage-1 submission no longer mislabels as "Stage 2".
 export function intakeKind(formId: string, formTitle?: string | null): IntakeKind {
   const t = (formTitle ?? '').toLowerCase();
   if (/additional|more record|supporting doc|upload (more|additional)/.test(t)) return 'additional_docs';
-  if (/stage\s*1|new (client|patient|veteran)|initial intake|get started/.test(t)) return 'stage1';
+  if (/stage\s*1|new (client|patient|veteran)|initial intake|get started|returning/.test(t)) return 'stage1';
   if (/stage\s*2/.test(t)) return 'stage2';
-  if (formId === MAIN_INTAKE_FORM) return 'stage1';
-  if (formId === ADDITIONAL_DOCS_FORM) return 'additional_docs';
-  return 'stage2'; // the 28 condition forms (and anything else): match veteran + new claim
+  if (KNOWN_FORMS[formId]) return KNOWN_FORMS[formId]!;
+  return 'stage2'; // unknown condition forms: match veteran + new claim
 }

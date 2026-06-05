@@ -10,6 +10,7 @@ import { publishJotformIngest } from '../services/jotform-ingest-queue.js';
 import { parseVeteranCreate } from '../services/veteran-validation.js';
 import { parseCaseCreate } from '../services/case-validation.js';
 import { assignChartFilenames } from '../services/chart-filename.js';
+import { fillIntakeDerived } from '../services/intake-derive.js';
 
 const PREVIEW_TTL_SECONDS = 300;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -38,6 +39,21 @@ interface ManifestFile { readonly name?: string; readonly s3Key?: string; readon
 export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Router {
   const router = Router();
 
+  // Annotate intake rows with whether a veteran PROFILE already exists for the submitted email (the
+  // pool's "Profile" column + the drawer's auto-match for returning customers, who then need no DOB).
+  async function withVeteranMatch(rows: Array<Record<string, unknown>>): Promise<Array<Record<string, unknown>>> {
+    const emails = [...new Set(rows.map((r) => (typeof r['submittedEmail'] === 'string' ? (r['submittedEmail'] as string) : '')).filter(Boolean))];
+    if (emails.length === 0) return rows.map((r) => ({ ...r, veteranMatch: null }));
+    let byEmail = new Map<string, { id: string; name: string }>();
+    try {
+      const vets = await db.veteran.findMany({ where: { email: { in: emails } } });
+      byEmail = new Map((vets as Array<{ id: string; email?: string; firstName?: string; lastName?: string }>).map((v) => [
+        (v.email ?? '').toLowerCase(), { id: v.id, name: `${v.firstName ?? ''} ${v.lastName ?? ''}`.trim() },
+      ]));
+    } catch { /* match is best-effort — never block the pool list on it */ }
+    return rows.map((r) => ({ ...r, veteranMatch: byEmail.get((typeof r['submittedEmail'] === 'string' ? (r['submittedEmail'] as string) : '').toLowerCase()) ?? null }));
+  }
+
   // GET /intakes?status=ready&q=<name|email|phone>  — pool list, newest first.
   router.get('/intakes', requireRole(['admin', 'ops_staff']), asyncHandler(async (req: Request, res: Response) => {
     const status = typeof req.query['status'] === 'string' && (req.query['status'] as string).length > 0 ? (req.query['status'] as string) : undefined;
@@ -52,13 +68,18 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
       ];
     }
     const rows = await db.intake.findMany({ where, orderBy: { createdAt: 'desc' }, take: 100 });
-    res.json({ data: rows });
+    // Self-heal DOB/state/claim-type from rawAnswersJson for rows ingested before the worker wrote them.
+    const derived = rows.map((r) => fillIntakeDerived(r as unknown as Record<string, unknown>));
+    res.json({ data: await withVeteranMatch(derived) });
   }));
 
   // GET /intakes/:id — detail + short-TTL signed preview URLs for each downloaded file.
   router.get('/intakes/:id', requireRole(['admin', 'ops_staff']), asyncHandler(async (req: Request, res: Response) => {
-    const row = await db.intake.findUnique({ where: { id: String(req.params.id) } });
-    if (row === null) throw new HttpError(404, 'not_found', 'Intake not found.', { intakeId: req.params.id });
+    const rawRow = await db.intake.findUnique({ where: { id: String(req.params.id) } });
+    if (rawRow === null) throw new HttpError(404, 'not_found', 'Intake not found.', { intakeId: req.params.id });
+    // Self-heal DOB/state/claim-type from rawAnswersJson so the assign drawer prefills even for rows
+    // ingested before the worker wrote those columns (the "DOB wasn't prefilling" fix).
+    const row = fillIntakeDerived(rawRow as unknown as Record<string, unknown>);
     const rawManifest = (row as { fileManifestJson?: unknown }).fileManifestJson;
     const manifest: ManifestFile[] = Array.isArray(rawManifest) ? (rawManifest as ManifestFile[]) : [];
     let files: ManifestFile[] = manifest;
@@ -69,7 +90,8 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
         return { ...f, previewUrl: url };
       }));
     }
-    res.json({ data: { ...row, files } });
+    const [withMatch] = await withVeteranMatch([row]);
+    res.json({ data: { ...withMatch, files } });
   }));
 
   // POST /intakes/:id/dismiss { reason } — spam/dupe; keep the row for audit.

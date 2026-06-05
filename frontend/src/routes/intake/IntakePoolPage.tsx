@@ -15,7 +15,14 @@ import { listCases } from '../../api/cases';
 import { formatConditionLabel } from '../../lib/conditionLabel';
 
 const ALLOWED_CT = new Set(['application/pdf', 'image/jpeg', 'image/png', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']);
-const CLAIM_TYPES = ['initial', 'supplemental', 'hlr', 'appeal'] as const;
+// Canonical case-enum values (must match backend ClaimType / case-validation CLAIM_TYPES). The old
+// list used 'appeal', which the case layer rejects ('appeal_bva') — that mismatch failed Wayne
+// Mosely's assign 3× (2026-06-05). Friendly labels so the RN doesn't see raw enum slugs.
+const CLAIM_TYPES = [['initial', 'Initial'], ['supplemental', 'Supplemental'], ['hlr', 'Higher-level review'], ['appeal_bva', 'Board appeal']] as const;
+// Worker/Jotform legacy claim-type values → canonical enum (mirrors backend normalizeClaimType so a
+// pre-filled 'appeal' selects 'Board appeal' instead of silently falling back to Initial).
+const CLAIM_TYPE_ALIAS: Readonly<Record<string, string>> = { appeal: 'appeal_bva', board_appeal: 'appeal_bva', bva: 'appeal_bva', nod: 'appeal_bva', hlr_request: 'hlr', higher_level_review: 'hlr' };
+const normalizeClaimType = (s: string | null): string => { const t = (s ?? '').trim().toLowerCase(); return CLAIM_TYPE_ALIAS[t] ?? (s ?? ''); };
 
 function splitName(full: string | null): { first: string; last: string } {
   const parts = (full ?? '').trim().split(/\s+/).filter(Boolean);
@@ -167,7 +174,8 @@ function IntakeDrawer({ id, onClose }: { readonly id: string; readonly onClose: 
 function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: IntakeDetail; readonly onAssigned: () => void; readonly onChanged: () => void }) {
   const kind = intakeKind(intake.jotformFormId, intake.submittedFormTitle);
   const nm = splitName(intake.submittedName);
-  const prefillClaimType = (CLAIM_TYPES as readonly string[]).includes(intake.submittedClaimType ?? '') ? intake.submittedClaimType! : 'initial';
+  const canonicalCt = normalizeClaimType(intake.submittedClaimType);
+  const prefillClaimType = CLAIM_TYPES.some(([v]) => v === canonicalCt) ? canonicalCt : 'initial';
 
   // veteran: existing (search/select) or new (prefilled). If a profile already exists for this email,
   // PRESELECT it (returning customer → no DOB entry needed; their claims load automatically).
@@ -364,7 +372,7 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
           <div className="space-y-2">
             <div className="grid grid-cols-2 gap-2">
               <input className="input" placeholder="Condition" value={nc.claimedCondition} onChange={(e) => setNc({ ...nc, claimedCondition: e.target.value })} />
-              <select className="input" value={nc.claimType} onChange={(e) => setNc({ ...nc, claimType: e.target.value })}>{CLAIM_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select>
+              <select className="input" value={nc.claimType} onChange={(e) => setNc({ ...nc, claimType: e.target.value })}>{CLAIM_TYPES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
             </div>
             {dupeClaim ? (
               <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">

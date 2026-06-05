@@ -147,7 +147,9 @@ def _normalize_dob(answer: Any, pretty: Any) -> str | None:
 
 
 def _normalize_claim_type(s: Any) -> str | None:
-    """Map a free-text claim-type answer to the EMR enum (initial|supplemental|hlr|appeal)."""
+    """Map a free-text claim-type answer to the EMR ClaimType enum
+    (initial|supplemental|hlr|appeal_bva). The enum canonicalized on 'appeal_bva'; emitting the old
+    'appeal' value made the case-create 400 (Wayne Mosely, 2026-06-05)."""
     if not isinstance(s, str):
         return None
     t = s.strip().lower()
@@ -158,7 +160,7 @@ def _normalize_claim_type(s: Any) -> str | None:
     if "higher" in t or t == "hlr":
         return "hlr"
     if "appeal" in t or "disagree" in t or t == "nod" or "board" in t:
-        return "appeal"
+        return "appeal_bva"
     if "initial" in t or "original" in t or "new" in t or "first" in t:
         return "initial"
     return None

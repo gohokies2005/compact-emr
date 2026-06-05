@@ -7,6 +7,24 @@ const MAX_CLAIMED_CONDITIONS = 10;
 const MAX_CONDITION_LENGTH = 200;
 
 const CLAIM_TYPES: readonly ClaimType[] = ['initial', 'supplemental', 'hlr', 'appeal_bva'] as const;
+// Legacy/alias claim-type values the intake layer + Jotform worker historically emitted before the
+// case enum canonicalized on 'appeal_bva'. Normalize at this boundary so an intake that pre-filled
+// 'appeal' (the worker's old value) does NOT 400 at case creation (Wayne Mosely, 2026-06-05 — 3
+// failed creates with 'appeal', succeeded only after manually switching to 'supplemental'). The
+// intake dropdown + worker are also fixed to emit the canonical value; this is the durable guard
+// for any stale value already in a row or in flight from Jotform.
+const CLAIM_TYPE_ALIASES: Readonly<Record<string, ClaimType>> = {
+  appeal: 'appeal_bva',
+  board_appeal: 'appeal_bva',
+  bva: 'appeal_bva',
+  nod: 'appeal_bva',
+  higher_level_review: 'hlr',
+  hlr_request: 'hlr',
+};
+function normalizeClaimType(v: unknown): unknown {
+  if (typeof v !== 'string') return v;
+  return CLAIM_TYPE_ALIASES[v.trim().toLowerCase()] ?? v;
+}
 const PHI_PATTERN_REJECTIONS: readonly RegExp[] = [
   /\d{3}-?\d{2}-?\d{4}/,
   /\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/,
@@ -165,7 +183,7 @@ export function parseCaseCreate(body: unknown): ParsedCaseCreate {
     claimedConditions = [claimedCondition];
   }
 
-  const claimType = body.claimType;
+  const claimType = normalizeClaimType(body.claimType);
   if (typeof claimType !== 'string' || !CLAIM_TYPES.includes(claimType as ClaimType)) {
     badRequest('claimType is invalid', { field: 'claimType', allowedValues: CLAIM_TYPES });
   }

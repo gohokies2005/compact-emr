@@ -29,6 +29,7 @@ locally, see the README at workers/README.md.
 import base64
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request

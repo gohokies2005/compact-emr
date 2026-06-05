@@ -115,9 +115,11 @@ export class ApiStack extends Stack {
         DRAFT_JOB_QUEUE_URL: props.draftJobQueue.queueUrl,
         CHART_EXTRACT_QUEUE_URL: props.chartExtractQueue.queueUrl,
         JOTFORM_INGEST_QUEUE_URL: props.jotformIngestQueue.queueUrl,
-        // Shared secret in the Jotform webhook URL path. Populated out-of-band via CLI; injected as
-        // a deploy-time dynamic ref (same pattern as the worker token). Enables the webhook to accept.
-        JOTFORM_WEBHOOK_SECRET: secretsmanager.Secret.fromSecretNameV2(this, 'JotformWebhookSecret', `compact-emr-${props.config.envName}/jotform-webhook-secret`).secretValue.unsafeUnwrap(),
+        // Shared secret in the Jotform webhook URL path (enables the webhook to accept). Populated
+        // out-of-band via CLI. Use a RAW friendly-name CFN dynamic reference — fromSecretNameV2 emits
+        // a partial-ARN form that CloudFormation failed to resolve ("ResourceNotFound") for this
+        // secret on deploy; the friendly-name form resolves reliably + is env-portable. (2026-06-04.)
+        JOTFORM_WEBHOOK_SECRET: `{{resolve:secretsmanager:compact-emr-${props.config.envName}/jotform-webhook-secret:SecretString}}`,
         // Chart auto-extract: 'on' makes the merge endpoint WRITE extracted rows into the chart
         // (non-destructive). Controlled by cdk.json context `chart_autofill` (default off = shadow).
         // The draft-readiness DOOR (DRAFT_READINESS_GATE) stays separate + off until the popup ships.

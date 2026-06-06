@@ -232,7 +232,7 @@ describe('cases routes', () => {
   // NOT bump case.version (it can't collide with the editor/assignment optimistic concurrency).
   it('PUT /quick-note sets the note + editor-email stamp without touching version', async () => {
     const { db, spies } = makeDb();
-    const res = await request(appFor(db)).put('/api/v1/cases/CASE-1/quick-note').send({ note: 'waiting on records' });
+    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1/quick-note').send({ note: 'waiting on records' });
     expect(res.status).toBe(200);
     const data = (spies.caseUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
     expect(data).toMatchObject({ quickNote: 'waiting on records', quickNoteBy: 'a@example.com' });
@@ -242,7 +242,7 @@ describe('cases routes', () => {
 
   it('PUT /quick-note with an empty/whitespace note CLEARS the field', async () => {
     const { db, spies } = makeDb();
-    const res = await request(appFor(db)).put('/api/v1/cases/CASE-1/quick-note').send({ note: '   ' });
+    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1/quick-note').send({ note: '   ' });
     expect(res.status).toBe(200);
     const data = (spies.caseUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
     expect(data).toEqual({ quickNote: null, quickNoteBy: null, quickNoteAt: null });

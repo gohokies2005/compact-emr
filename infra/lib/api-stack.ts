@@ -286,7 +286,10 @@ export class ApiStack extends Stack {
       apiName: `compact-emr-${props.config.envName}`,
       corsPreflight: {
         allowHeaders: ['authorization', 'content-type'],
-        allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.PATCH, apigwv2.CorsHttpMethod.DELETE, apigwv2.CorsHttpMethod.OPTIONS],
+        // PUT is required by the letter-editor "Save new version" (api/letter.ts apiPut → backend
+        // router.put /cases/:id/letter). It was missing here AND from the proxy route methods below, so
+        // the browser preflight blocked every manual letter save ("Network Error"). (2026-06-06.)
+        allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.PUT, apigwv2.CorsHttpMethod.PATCH, apigwv2.CorsHttpMethod.DELETE, apigwv2.CorsHttpMethod.OPTIONS],
         allowOrigins,
       },
     });
@@ -307,6 +310,7 @@ export class ApiStack extends Stack {
       methods: [
         apigwv2.HttpMethod.GET,
         apigwv2.HttpMethod.POST,
+        apigwv2.HttpMethod.PUT, // letter-editor save (router.put /cases/:id/letter) — was unroutable
         apigwv2.HttpMethod.PATCH,
         apigwv2.HttpMethod.DELETE,
       ],

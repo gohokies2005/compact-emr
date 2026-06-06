@@ -375,7 +375,10 @@ export function createCasesRouter(db: AppDb): Router {
   // last-writer-wins with an author+time stamp (stored as the editor's EMAIL, never a uuid). It does
   // NOT touch case.version — a scratch note must not collide with the editor/assignment optimistic
   // concurrency. An empty/whitespace note clears the field.
-  router.put(
+  // PATCH (not PUT): the API Gateway CORS allowMethods is [GET,POST,PATCH,DELETE,OPTIONS] — a PUT's
+  // preflight is rejected by the browser ("Network Error") before it ever reaches the Lambda. PATCH is
+  // also the right verb for a partial field update. (Caught in live testing 2026-06-06.)
+  router.patch(
     '/cases/:id/quick-note',
     requireStaffOrAssignedPhysician(db, ['admin', 'ops_staff']),
     asyncHandler(async (req: Request, res: Response) => {

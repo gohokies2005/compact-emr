@@ -17,7 +17,8 @@ export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draft
   readonly claimType: string;
   readonly claimedCondition: string;
   readonly draftAttempt: number;
-  readonly onConfirmed: () => void;
+  // Receives the optional free-text drafting guidance the RN typed (→ strategyOverride on the draft).
+  readonly onConfirmed: (guidance?: string) => void;
   readonly onClose: () => void;
 }) {
   const items = useMemo<Item[]>(() => {
@@ -34,6 +35,7 @@ export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draft
 
   const [answers, setAnswers] = useState<Record<string, Answer>>({});
   const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [guidance, setGuidance] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const anyNo = items.some((i) => answers[i.key] === 'no');
@@ -53,7 +55,7 @@ export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draft
         decision: answers[i.key]!,
         ...(answers[i.key] === 'override' ? { reason: (reasons[i.key] ?? '').trim() } : {}),
       })));
-      onConfirmed();
+      onConfirmed(guidance.trim() || undefined);
     } catch (e) {
       window.alert(`Could not record the checklist — ${describeApiError(e)}`);
     } finally {
@@ -85,6 +87,16 @@ export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draft
             </div>
           ))}
         </div>
+        <label className="mt-4 block">
+          <span className="text-sm font-medium text-slate-800">Drafting guidance <span className="font-normal text-slate-400">(optional)</span></span>
+          <span className="mt-0.5 block text-xs text-slate-500">Steer the approach — the drafter still grounds every claim in the records and literature.</span>
+          <textarea
+            className="input mt-1 min-h-20 w-full text-sm"
+            value={guidance}
+            onChange={(e) => setGuidance(e.target.value)}
+            placeholder="e.g. Focus on PTSD as the primary cause given stronger viability; mention GERD as a secondary contributor."
+          />
+        </label>
         {anyNo ? (
           <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">Retrieve those records or discuss with the veteran, then come back. The draft won&apos;t start with a &quot;No&quot;.</p>
         ) : null}

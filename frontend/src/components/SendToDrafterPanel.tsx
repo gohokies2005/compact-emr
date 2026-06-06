@@ -4,7 +4,7 @@ import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { Spinner } from './ui/Spinner';
 import { getChartReadiness } from '../api/chart-readiness';
-import { postDraft } from '../api/drafter';
+import { postDraft, type DraftRequestInput } from '../api/drafter';
 import { ConflictError } from '../api/client';
 import { Gate1ChecklistModal } from './Gate1ChecklistModal';
 
@@ -26,7 +26,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   });
 
   const draftMutation = useMutation({
-    mutationFn: (override?: { acknowledgeMissingDocs: boolean; overrideReason: string }) => postDraft(caseId, override ?? {}),
+    mutationFn: (input?: DraftRequestInput) => postDraft(caseId, input ?? {}),
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
@@ -148,7 +148,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
           claimedCondition={claimedCondition ?? ''}
           draftAttempt={draftAttempt ?? 1}
           onClose={() => { setGate1Open(false); setPendingOverride(null); }}
-          onConfirmed={() => { setGate1Open(false); draftMutation.mutate(pendingOverride ?? undefined); setPendingOverride(null); }}
+          onConfirmed={(guidance) => { setGate1Open(false); draftMutation.mutate({ ...(pendingOverride ?? {}), ...(guidance ? { strategyOverride: guidance } : {}) }); setPendingOverride(null); }}
         />
       ) : null}
     </Card>

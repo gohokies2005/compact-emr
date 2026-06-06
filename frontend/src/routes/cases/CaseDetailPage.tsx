@@ -100,7 +100,7 @@ export function CaseDetailPage() {
   // letter can be re-run (the OpsHeldPanel 'Re-run' only shows for held/revise). Guarded by a
   // confirm + the backend's in-flight 409. (Ryan 2026-06-04: "lost the ability to redraft".)
   const redraft = useMutation({
-    mutationFn: () => postDraft(caseId),
+    mutationFn: (guidance?: string) => postDraft(caseId, guidance ? { strategyOverride: guidance } : {}),
     onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
     // Surface the REAL reason (status + server message), never a canned guess — the redraft
     // endpoint's HttpErrors aren't logged server-side, so this alert is the only place the reason
@@ -386,7 +386,7 @@ export function CaseDetailPage() {
         claimedCondition={c.claimedCondition}
         draftAttempt={(c.currentVersion ?? 0) + 1}
         onClose={() => setRedraftGate1Open(false)}
-        onConfirmed={() => { setRedraftGate1Open(false); redraft.mutate(); }}
+        onConfirmed={(guidance) => { setRedraftGate1Open(false); redraft.mutate(guidance); }}
       />
     ) : null}
   </div></AppShell>;

@@ -221,7 +221,10 @@ export class DrafterStack extends Stack {
     // message (in-flight / NotVisible) the depth stays >= 1, keeping the task alive until it
     // deletes the message on /complete. Cold start adds ~2-4 min before a queued job is picked up
     // (alarm period + image pull) — fine for the 15-20 min async drafting run.
-    const scaling = service.autoScaleTaskCount({ minCapacity: 0, maxCapacity: 1 });
+    // maxCapacity 6: lets a batch of independent drafts (distinct caseId = distinct FIFO group) fan
+    // out instead of serializing (2026-06-06). Hard ceiling is the Fargate On-Demand vCPU quota (30)
+    // ÷ 4 vCPU/task = 7 tasks; 6 leaves headroom. For >7, request an AWS quota increase (L-3032A538).
+    const scaling = service.autoScaleTaskCount({ minCapacity: 0, maxCapacity: 6 });
     const queueDepth = new cloudwatch.MathExpression({
       expression: 'visible + inflight',
       label: 'DraftJobQueueDepth',
@@ -236,10 +239,19 @@ export class DrafterStack extends Stack {
     });
     scaling.scaleOnMetric('DrafterQueueDepthScaling', {
       metric: queueDepth,
+      // EXACT_CAPACITY: `change` is the ABSOLUTE desired task count for that depth band (not a delta).
+      // The old [{<=0:0},{>=1:1}] pinned the service to EXACTLY 1 task at ANY depth — so raising
+      // maxCapacity did nothing and a batch serialized (2026-06-06). Set tasks = min(depth, 6) so N
+      // independent queued drafts get N tasks and run concurrently (each pulls a distinct FIFO group).
       adjustmentType: appscaling.AdjustmentType.EXACT_CAPACITY,
       scalingSteps: [
-        { upper: 0, change: 0 }, // no messages -> 0 tasks
-        { lower: 1, change: 1 }, // any visible or in-flight message -> 1 task
+        { upper: 0, change: 0 }, // no messages -> 0 tasks (scale-to-zero)
+        { lower: 1, change: 1 },
+        { lower: 2, change: 2 },
+        { lower: 3, change: 3 },
+        { lower: 4, change: 4 },
+        { lower: 5, change: 5 },
+        { lower: 6, change: 6 }, // depth >= 6 -> 6 tasks (maxCapacity ceiling)
       ],
       evaluationPeriods: 1,
       datapointsToAlarm: 1,

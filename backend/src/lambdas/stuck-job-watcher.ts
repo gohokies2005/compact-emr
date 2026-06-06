@@ -9,14 +9,21 @@ import { SERVICE_ACTORS } from '../services/service-actors.js';
  * invisible for 45 minutes (SQS visibility timeout) — operators get no signal, the
  * physician inbox stays empty, the veteran gets no letter.
  *
- * Sweep rule: state IN ('queued','running') AND
- *   (last_heartbeat_at IS NULL AND enqueued_at < NOW() - 10min)
- *   OR (last_heartbeat_at < NOW() - 10min)
+ * Sweep rule (FIXED 2026-06-06, "reaped queued letters" incident):
+ *   - state='running'  AND last_heartbeat_at < NOW() - 10min   (a real mid-run task crash)
+ *   - state='queued'   AND enqueued_at        < NOW() - 120min (genuinely ABANDONED, backstop only)
  *
- * Why 10 min: the drafter spine heartbeats once per phase transition. Phases take 1-3 min
- * each; 10 min of silence means the wrapper is dead, not slow. False positives would be
- * worse than late detection — but the SQS visibility timeout of 45 min means a redelivered
- * stuck message would just re-enqueue and the new run would proceed normally.
+ * Why this changed: the old rule reaped ANY 'queued' job whose enqueued_at was >10min old
+ * (last_heartbeat_at is NULL until a worker claims it). With maxCapacity scaling, a job that simply
+ * WAITS in the FIFO behind a long-running draft (Pryor ran 15.5min) crossed 10min and was killed
+ * mid-wait — its letter discarded — even though nothing was wrong. A queued job has no worker yet,
+ * so it can't be "stuck mid-run". It either gets picked up when capacity frees, or — if its SQS
+ * message truly vanished — the 120min backstop eventually fails it (well past the 45min SQS
+ * visibility-timeout redelivery, so normal waits are never touched). Only a job a worker actually
+ * CLAIMED (state='running', so it has a heartbeat) can go stale and need reaping.
+ *
+ * Why 10 min (running): the drafter spine heartbeats every 60s; /progress writes last_heartbeat_at.
+ * 10 min of silence on a running job means the wrapper is dead, not slow.
  *
  * Action: flip the DraftJob to state='failed', failureClass='system'. Case.status is NOT
  * mutated — it stays at 'drafting' (the ops queue state), so the operator can retry via a
@@ -27,7 +34,8 @@ import { SERVICE_ACTORS } from '../services/service-actors.js';
  * Scheduled by EventBridge every 5 minutes from the WorkersStack rule.
  */
 
-const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 min
+const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 min — running job, no heartbeat => crashed
+const QUEUE_ABANDON_MS = 120 * 60 * 1000; // 2h — queued job that never got claimed (backstop only)
 const BATCH_LIMIT = 100; // per invocation; lifecycle: 100 * (60/5) = 1200/hr max sweep rate
 
 let cachedPrisma: PrismaClient | null = null;
@@ -44,21 +52,23 @@ export interface StuckJobWatcherResult {
   ranAt: string;
 }
 
-export async function handler(): Promise<StuckJobWatcherResult> {
+export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWatcherResult> {
   const now = new Date();
   const staleBoundary = new Date(now.getTime() - STALE_THRESHOLD_MS);
-  const prisma = getPrisma();
+  const queueAbandonBoundary = new Date(now.getTime() - QUEUE_ABANDON_MS);
+  const prisma = injectedPrisma ?? getPrisma();
 
-  // Two stale conditions in one query — Prisma OR clause.
   const stuckJobs = await prisma.draftJob.findMany({
     where: {
-      state: { in: ['queued', 'running'] },
       OR: [
-        // Never heartbeated, and was enqueued > 10 min ago. Covers a wrapper that died
-        // before its first /progress call.
-        { lastHeartbeatAt: null, enqueuedAt: { lt: staleBoundary } },
-        // Heartbeated once, then silence > 10 min. Covers a mid-run crash.
-        { lastHeartbeatAt: { lt: staleBoundary } },
+        // A RUNNING job whose worker stopped heartbeating > 10 min — a real mid-run crash. A running
+        // job always has lastHeartbeatAt set (/progress writes state=running + lastHeartbeatAt
+        // atomically), so this one clause covers every claimed-then-died case.
+        { state: 'running', lastHeartbeatAt: { lt: staleBoundary } },
+        // A QUEUED job that has waited > 2h without ever being claimed — backstop for a truly
+        // orphaned job (SQS message gone), NOT a normal queue wait behind other drafts. NEVER reap a
+        // queued job on the 10-min clock — that discarded healthy queued letters (2026-06-06).
+        { state: 'queued', enqueuedAt: { lt: queueAbandonBoundary } },
       ],
     },
     select: {
@@ -83,7 +93,7 @@ export async function handler(): Promise<StuckJobWatcherResult> {
   // next-action prompt instead of leaving the RN to interpret "system error". No infra
   // jargon (no "Lambda", "Fargate", "heartbeat" etc.) — just what happened plus what to do.
   const sweptCaseMessage =
-    'We had a problem and couldn’t finish drafting this letter after 10 minutes. Please click Send to Drafter again. If it keeps failing, flag this case to Dr. Ryan.';
+    'We had a problem and couldn’t finish drafting this letter. Please click Send to Drafter again. If it keeps failing, flag this case to Dr. Ryan.';
 
   for (const job of stuckJobs) {
     try {

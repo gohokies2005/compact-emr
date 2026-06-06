@@ -14,6 +14,7 @@ import type { CaseStatus, ClaimType } from '../../types/prisma';
 import { useColumnSort, type ColType } from '../../lib/useColumnSort';
 import { exportRowsToCsv } from '../../lib/csv';
 import { formatConditionLabel } from '../../lib/conditionLabel';
+import { formatNameLastFirst } from '../../lib/format';
 
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -128,7 +129,7 @@ export function CasesPage() {
           ? <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2"><span className="text-slate-900">{veteran.label}</span><button type="button" className="text-xs text-indigo-600" onClick={() => { setVeteran(null); setVetQuery(''); }}>Clear</button></div>
           : <input className="input" aria-label="Search veterans" placeholder="Search veteran by name or ID…" value={vetQuery} onChange={(e) => setVetQuery(e.target.value)} />}
         {!veteran && debouncedVet.trim() && vetMatches.data && vetMatches.data.data.length > 0
-          ? <ul className="absolute z-10 mt-1 w-full overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">{vetMatches.data.data.slice(0, 5).map((v) => <li key={v.id}><button type="button" className="flex w-full justify-between px-3 py-2 text-left hover:bg-slate-50" onClick={() => { setVeteran({ id: v.id, label: `${v.firstName} ${v.lastName} (${v.id})` }); }}><span>{v.firstName} {v.lastName}</span><span className="text-slate-500">{v.dob?.slice(0, 4) ?? ''}</span></button></li>)}</ul>
+          ? <ul className="absolute z-10 mt-1 w-full overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">{vetMatches.data.data.slice(0, 5).map((v) => <li key={v.id}><button type="button" className="flex w-full justify-between px-3 py-2 text-left hover:bg-slate-50" onClick={() => { setVeteran({ id: v.id, label: `${formatNameLastFirst(v.firstName, v.lastName)} (${v.id})` }); }}><span>{formatNameLastFirst(v.firstName, v.lastName)}</span><span className="text-slate-500">{v.dob?.slice(0, 4) ?? ''}</span></button></li>)}</ul>
           : null}
       </div>
       <label className="flex items-center gap-2 text-sm lg:pb-2"><input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} /> Show archived</label>
@@ -146,7 +147,7 @@ export function CasesPage() {
         <tbody className="divide-y divide-slate-100">
           {rows.map((c) => <tr key={c.id} className="cursor-pointer hover:bg-slate-50" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}`)}>
             <td className="px-4 py-3 font-medium"><Link className="text-indigo-600" to={`/cases/${encodeURIComponent(c.id)}`} onClick={(e) => e.stopPropagation()}>{c.id}</Link></td>
-            <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`} onClick={(e) => e.stopPropagation()}>{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</Link></td>
+            <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`} onClick={(e) => e.stopPropagation()}>{formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}</Link></td>
             <td className="px-4 py-3 text-slate-700">{formatConditionLabel(c.claimedCondition)}</td>
             <td className="px-4 py-3 text-slate-600">{CLAIM_TYPE_LABELS[c.claimType]}</td>
             <td className="px-4 py-3"><CaseStatusBadge status={c.status} /></td>

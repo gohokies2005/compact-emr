@@ -12,6 +12,7 @@ import {
 } from '../../components/PhysicianLetterReadyPanel';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { getCase } from '../../api/cases';
+import { formatNameLastFirst } from '../../lib/format';
 import { getArtifactPdfUrl } from '../../api/drafter';
 import { approveLetter } from '../../api/letter';
 
@@ -92,7 +93,7 @@ export function PhysicianReviewPage() {
           </div>
           <p className="mt-1 text-sm text-slate-500">
             Case {c.id} ·{' '}
-            {c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}
+            {formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}
           </p>
           <p className="mt-2 text-sm">
             <Link className="text-indigo-600 hover:underline" to="/p/queue">

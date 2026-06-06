@@ -28,9 +28,9 @@ import { ConflictError, describeApiError } from '../../api/client';
 import { letterFilename } from '../../lib/letterFilename';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { formatRelativeTime } from '../../lib/date';
-import { formatDateOnly, formatPhone } from '../../lib/format';
+import { formatDateOnly, formatPhone, formatNameLastFirst } from '../../lib/format';
 import {
-  deleteCase, getCase, listCorrections, listDraftJobs, patchCase, transitionCaseStatus,
+  deleteCase, getCase, listDraftJobs, patchCase, transitionCaseStatus,
   type CaseDetail, type PatchCaseInput, type TransitionInput,
 } from '../../api/cases';
 import type { CaseStatus, Role } from '../../types/prisma';
@@ -42,15 +42,15 @@ export function decidePollIntervalMs(status: CaseStatus | undefined): number | f
   return false;
 }
 
-type TabId = 'overview' | 'drafts' | 'corrections' | 'clarifications' | 'documents' | 'messages' | 'activity';
+// Activity (never-built placeholder) + Corrections (backing table is never written) removed to
+// declutter (Ryan 2026-06-06). Clarifications kept — it's a live RN/physician Q&A feature.
+type TabId = 'overview' | 'drafts' | 'clarifications' | 'documents' | 'messages';
 const TABS: readonly TabItem<TabId>[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'drafts', label: 'Draft jobs' },
-  { id: 'corrections', label: 'Corrections' },
   { id: 'clarifications', label: 'Clarifications' },
   { id: 'documents', label: 'Documents' },
   { id: 'messages', label: 'Messages' },
-  { id: 'activity', label: 'Activity' },
 ];
 
 function serverErrorMessage(err: unknown): string | undefined {
@@ -187,7 +187,7 @@ export function CaseDetailPage() {
     <div className="rounded-lg border border-slate-200 bg-white p-6">
       <div className="flex flex-col justify-between gap-4 lg:flex-row">
         <div>
-          <h1 className="text-3xl font-bold text-slate-900">{c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}</h1>
+          <h1 className="text-3xl font-bold text-slate-900">{formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}</h1>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-base text-slate-700"><span className="font-medium">{formatConditionLabel(c.claimedCondition)}</span><CaseStatusBadge status={c.status} /></div>
           {(() => {
             const v = c.veteran;
@@ -323,9 +323,6 @@ export function CaseDetailPage() {
             />
           ) : null}
 
-          {/* In-chart decisions/overrides audit — self-hides when empty. */}
-          <DecisionsOverridesPanel caseId={caseId} />
-
           {/* RN letter-edit entry. The physician/admin reach the editor via the ready panel above;
               an RN (ops_staff) otherwise has no entry to it. Ryan 2026-06-04: "RNs need the ability
               to edit letters too ... by hand or AI surgically before sending to doc." Shown when a
@@ -370,13 +367,15 @@ export function CaseDetailPage() {
           <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
         ) : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
-        {tab === 'corrections' ? <CorrectionsTab caseId={caseId} /> : null}
         {tab === 'clarifications' ? <ClarificationsPanel caseId={caseId} /> : null}
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} /> : null}
         {tab === 'messages' ? <CaseMessagesPanel caseId={caseId} /> : null}
-        {tab === 'activity' ? <EmptyState title="Activity" message="The per-case activity log ships in a later phase." /> : null}
       </div>
     </div>
+
+    {/* In-chart decisions/overrides audit — plain-language, pinned to the very bottom of the case
+        screen (Ryan 2026-06-06). Self-hides when empty. */}
+    <DecisionsOverridesPanel caseId={caseId} />
 
     {pendingTo ? <TransitionModal caseId={caseId} from={c.status} to={pendingTo} version={c.version} onClose={() => setPendingTo(null)} onDone={async () => { setPendingTo(null); await refetch(); }} /> : null}
     <SignOffPopup caseId={caseId} open={signOffOpen} onClose={() => setSignOffOpen(false)} onSignedOff={refetch} />
@@ -479,14 +478,6 @@ function DraftJobsTab({ caseId }: { readonly caseId: string }) {
   // stays visible (muted + tooltip) for traceability — View letter still uses jobId, not this.
   const total = rows.length;
   return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Draft</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th><th className="px-4 py-2">Letter</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d, i) => { const viewable = d.state === 'done' || d.state === 'failed'; return <tr key={d.id} className={`hover:bg-slate-50 ${viewable ? 'cursor-pointer' : ''}`} onClick={viewable ? () => viewVersion(d.id) : undefined}><td className="px-4 py-2"><span className="font-medium text-slate-800">Draft #{total - i}</span> <span className="ml-1 text-xs text-slate-400" title={`Internal letter version ${d.version}`}>v{d.version}</span></td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td><td className="px-4 py-2">{viewable ? <button type="button" className="font-medium text-indigo-600 hover:underline" onClick={(e) => { e.stopPropagation(); viewVersion(d.id); }}>View letter</button> : <span className="text-slate-400">—</span>}</td></tr>; })}</tbody></table></div>;
-}
-
-function CorrectionsTab({ caseId }: { readonly caseId: string }) {
-  const q = useQuery({ queryKey: ['case', caseId, 'corrections'], queryFn: () => listCorrections(caseId) });
-  if (q.isLoading) return <div className="text-sm text-slate-500">Loading corrections…</div>;
-  const rows = q.data?.data ?? [];
-  if (!rows.length) return <EmptyState title="No corrections" message="No correction history for this case." />;
-  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">From</th><th className="px-4 py-2">To</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2">Requested by</th><th className="px-4 py-2">Approved by</th><th className="px-4 py-2">Billing</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((r) => <tr key={r.id}><td className="px-4 py-2">{r.fromVersion}</td><td className="px-4 py-2">{r.toVersion ?? '—'}</td><td className="px-4 py-2">{r.correctionReason}</td><td className="px-4 py-2 text-slate-500">{r.requestedBy}</td><td className="px-4 py-2 text-slate-500">{r.approvedBy ?? '—'}</td><td className="px-4 py-2 text-slate-500">{r.billingTier}</td></tr>)}</tbody></table></div>;
 }
 
 function DocumentsTab({ veteranId, caseId }: { readonly veteranId: string; readonly caseId: string }) {

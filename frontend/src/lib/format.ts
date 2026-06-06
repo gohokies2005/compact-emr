@@ -31,3 +31,20 @@ export function formatPhone(value: string | null | undefined): string {
   if (local.length !== 10) return value;
   return `(${local.slice(0, 3)}) ${local.slice(3, 6)}-${local.slice(6)}`;
 }
+
+/**
+ * Render a person's name LAST-NAME-FIRST — "Kasky, Ryan" — the EMR convention for every list,
+ * column, dropdown, and record header (Ryan 2026-06-06: "ALL names ... LAST NAME FIRST,
+ * everywhere"). Sorting on this string sorts by last name. Degrades gracefully: if only one part
+ * is present it's returned alone; if BOTH are absent `fallback` (e.g. the veteran's MRN) is used.
+ */
+export function formatNameLastFirst(
+  firstName: string | null | undefined,
+  lastName: string | null | undefined,
+  fallback = '',
+): string {
+  const first = (firstName ?? '').trim();
+  const last = (lastName ?? '').trim();
+  if (last && first) return `${last}, ${first}`;
+  return last || first || fallback;
+}

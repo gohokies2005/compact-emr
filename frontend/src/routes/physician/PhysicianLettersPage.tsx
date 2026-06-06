@@ -7,6 +7,7 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { listCases, type CaseLite } from '../../api/cases';
 import { formatRelativeTime } from '../../lib/date';
+import { formatNameLastFirst } from '../../lib/format';
 
 export function PhysicianLettersPage() {
   const deliveredQuery = useQuery({
@@ -58,7 +59,7 @@ export function PhysicianLettersPage() {
                   <tr key={c.id}>
                     <td className="px-4 py-2 font-medium text-slate-900">{c.id}</td>
                     <td className="px-4 py-2 text-slate-700">
-                      {c.veteran ? `${c.veteran.firstName} ${c.veteran.lastName}` : c.veteranId}
+                      {formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}
                     </td>
                     <td className="px-4 py-2 text-slate-700">{c.claimedCondition}</td>
                     <td className="px-4 py-2">

@@ -55,7 +55,7 @@ describe('PhysicianQueuePage', () => {
     renderQueue();
 
     expect(await screen.findByText('CASE-1')).toBeInTheDocument();
-    expect(screen.getByText('Matthew Young')).toBeInTheDocument();
+    expect(screen.getByText('Young, Matthew')).toBeInTheDocument();
     expect(screen.getByText('Obstructive sleep apnea')).toBeInTheDocument();
     const reviewLink = screen.getByRole('link', { name: 'Review' });
     expect(reviewLink).toHaveAttribute('href', '/p/review/CASE-1');

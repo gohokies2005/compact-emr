@@ -37,7 +37,7 @@ describe('CasesPage', () => {
     renderPage();
     expect(screen.getByText('All statuses')).toBeInTheDocument();
     expect(await screen.findByText('CASE-001')).toBeInTheDocument();
-    expect(screen.getByText('Matthew Young')).toBeInTheDocument();
+    expect(screen.getByText('Young, Matthew')).toBeInTheDocument();
     // "Drafting" appears in the status filter option AND the row badge — assert the badge specifically.
     expect(screen.getAllByText('Drafting').some((el) => el.className.includes('bg-purple-100'))).toBe(true);
   });

@@ -18,7 +18,7 @@ describe('VeteranChart', () => {
   it('renders veteran chart panels', async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/veterans/TEST-001']}><Routes><Route path="/veterans/:id" element={<VeteranChart />} /></Routes></MemoryRouter></QueryClientProvider>);
-    expect(await screen.findByText('John Smith')).toBeInTheDocument();
+    expect(await screen.findByText('Smith, John')).toBeInTheDocument();
     expect(screen.getByText((text) => text.includes('MRN TEST-001'))).toBeInTheDocument();
     // The previously-buried tables are now top-level tabs, in owner-specified order.
     expect(screen.getByRole('tab', { name: 'FRN Claims' })).toBeInTheDocument();

@@ -13,6 +13,7 @@ import {
 import { listVeterans } from '../../api/veterans';
 import { listCases } from '../../api/cases';
 import { formatConditionLabel } from '../../lib/conditionLabel';
+import { formatNameLastFirst } from '../../lib/format';
 
 const ALLOWED_CT = new Set(['application/pdf', 'image/jpeg', 'image/png', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']);
 // Canonical case-enum values (must match backend ClaimType / case-validation CLAIM_TYPES). The old
@@ -334,8 +335,8 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
               {vetSearch.data && vetSearch.data.data.length > 0 ? (
                 <ul className="mt-1 divide-y divide-slate-100 rounded-lg border border-slate-200">
                   {vetSearch.data.data.map((v) => (
-                    <li key={v.id}><button type="button" className={`flex w-full justify-between px-3 py-2 text-left text-sm hover:bg-slate-50 ${vetId === v.id ? 'bg-indigo-50' : ''}`} onClick={() => { setVetId(v.id); setVetLabel(`${v.firstName} ${v.lastName}`); }}>
-                      <span>{v.firstName} {v.lastName}</span><span className="text-slate-500">DOB {v.dob?.slice(0, 10) ?? '—'}</span>
+                    <li key={v.id}><button type="button" className={`flex w-full justify-between px-3 py-2 text-left text-sm hover:bg-slate-50 ${vetId === v.id ? 'bg-indigo-50' : ''}`} onClick={() => { setVetId(v.id); setVetLabel(formatNameLastFirst(v.firstName, v.lastName)); }}>
+                      <span>{formatNameLastFirst(v.firstName, v.lastName)}</span><span className="text-slate-500">DOB {v.dob?.slice(0, 10) ?? '—'}</span>
                     </button></li>
                   ))}
                 </ul>

@@ -86,7 +86,7 @@ describe('PhysicianReviewPage', () => {
 
     expect(await screen.findByText('Letter is ready for your review')).toBeInTheDocument();
     // Header shows the veteran name + case id.
-    expect(screen.getAllByText(/Matthew Young/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Young, Matthew/).length).toBeGreaterThan(0);
   });
 
   it('shows the not-ready empty state when the case is not ready', async () => {

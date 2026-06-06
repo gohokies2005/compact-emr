@@ -95,6 +95,15 @@ export class ApiStack extends Stack {
       secretName: `compact-emr-${props.config.envName}/api-anthropic-api-key`,
     });
 
+    // Stripe webhook SIGNING secret (whsec_) — operator-populated AFTER deploy (you add the webhook
+    // endpoint in the Stripe dashboard Webhooks section, Stripe hands you the secret, you paste it
+    // here). Read at runtime by FRIENDLY NAME (never partial ARN — the AccessDenied footgun). This is
+    // the ONLY Stripe secret the core payment→delivery chain needs (no sk_ key — a signature-verified
+    // event is trusted; the sk_/restricted key is only for the future poller).
+    const stripeWebhookSecret = new secretsmanager.Secret(this, 'StripeWebhookSecret', {
+      secretName: `compact-emr-${props.config.envName}/stripe-webhook-secret`,
+    });
+
     const handler = new nodejs.NodejsFunction(this, 'PlaceholderApiLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: path.resolve(__dirname, '../../backend/src/placeholder-lambda.ts'),
@@ -141,6 +150,12 @@ export class ApiStack extends Stack {
         // Letter editor: surgical-AI key (runtime-fetched from this ARN) + render Lambda name
         // (only set once the render image exists, so the mount wires the invoker only then).
         API_ANTHROPIC_KEY_SECRET_ARN: apiAnthropicSecret.secretArn,
+        // Stripe payment → password-portal PDF delivery (Ryan 2026-06-06).
+        STRIPE_WEBHOOK_SECRET_NAME: `compact-emr-${props.config.envName}/stripe-webhook-secret`,
+        STRIPE_LINK_500: 'https://buy.stripe.com/3cI9ALcMG5LH05Y3Xm0Ba03', // public payment link (not a secret)
+        SES_FROM_ADDRESS: 'info@flatratenexus.com',                          // must be a VERIFIED SES identity
+        DELIVERY_PORTAL_BASE_URL: `https://${props.config.domainName}`,      // /d/<token> lives on the SPA
+        DELIVERY_ADMIN_BCC: 'admin@flatratenexus.com',
         ...(renderImageTag ? { RENDER_LAMBDA_NAME: renderFnName } : {}),
       },
       bundling: {
@@ -180,6 +195,14 @@ export class ApiStack extends Stack {
     // API Lambda reads the surgical-AI key at runtime. (phiBucket RW + documentsKey already
     // granted above cover the letter-revisions/* artifacts.)
     apiAnthropicSecret.grantRead(handler);
+
+    // Stripe + delivery: read the webhook signing secret at runtime; send the portal email via SES.
+    stripeWebhookSecret.grantRead(handler);
+    handler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ses:SendEmail', 'ses:SendRawEmail'],
+      resources: ['*'], // SES SendEmail is identity-scoped; '*' is the conventional resource for send
+    }));
 
     // Staff provisioning: the API admin-creates/enables/disables Cognito users in THIS pool only
     // (POST /users, PATCH /users/:id). Scoped to the pool ARN — not the account-wide '*'.
@@ -342,6 +365,22 @@ export class ApiStack extends Stack {
       methods: [apigwv2.HttpMethod.POST],
       integration: new integrations.HttpLambdaIntegration('JotformWebhookIntegration', handler),
       // no authorizer — secret auth enforced in-app
+    });
+
+    // Stripe webhook (PUBLIC — Stripe SIGNATURE is the auth, verified in-app) + the password-protected
+    // delivery portal (PUBLIC — token + emailed password are the auth). Both bypass the Cognito
+    // authorizer; more-specific routes win over /api/v1/{proxy+}. (Ryan 2026-06-06.)
+    httpApi.addRoutes({
+      path: '/api/v1/stripe/webhook',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new integrations.HttpLambdaIntegration('StripeWebhookIntegration', handler),
+      // no authorizer — Stripe signature enforced in-app (verifyStripeSignature)
+    });
+    httpApi.addRoutes({
+      path: '/api/v1/delivery/{proxy+}',
+      methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+      integration: new integrations.HttpLambdaIntegration('DeliveryPortalIntegration', handler),
+      // no authorizer — token + password enforced in-app
     });
   }
 }

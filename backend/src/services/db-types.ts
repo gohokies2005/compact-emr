@@ -220,6 +220,25 @@ export interface MonitoredMailboxDelegate {
   delete(args: unknown): Promise<MonitoredMailboxRecord>;
 }
 
+export interface DeliveryTokenRecord {
+  id: string;
+  caseId: string;
+  token: string;
+  passwordHash: string;
+  letterVersion: number;
+  pdfS3Key: string;
+  expiresAt: Date;
+  downloadCount: number;
+  lastAccessedAt: Date | null;
+  createdAt: Date;
+}
+export interface DeliveryTokenDelegate {
+  findUnique(args: unknown): Promise<DeliveryTokenRecord | null>;
+  findFirst(args: unknown): Promise<DeliveryTokenRecord | null>;
+  create(args: unknown): Promise<DeliveryTokenRecord>;
+  update(args: unknown): Promise<DeliveryTokenRecord>;
+}
+
 export interface PaymentRecord {
   id: string;
   caseId: string;
@@ -259,6 +278,7 @@ export interface AppDbTransaction {
   caseMessage: CaseMessageDelegate;
   email: EmailDelegate;
   monitoredMailbox: MonitoredMailboxDelegate;
+  deliveryToken: DeliveryTokenDelegate;
   payment: PaymentDelegate;
   intake: IntakeDelegate;
   draftDecision: DraftDecisionDelegate;

@@ -20,6 +20,8 @@ import { createDoctorPackRouter } from './routes/doctor-pack.js';
 import { createReportsRouter } from './routes/reports.js';
 import { createInternalWorkerRouter } from './routes/internal-worker.js';
 import { createJotformWebhookRouter } from './routes/jotform-webhook.js';
+import { createStripeWebhookRouter } from './routes/stripe-webhook.js';
+import { createDeliveryPortalRouter } from './routes/delivery-portal.js';
 import { createIntakesRouter } from './routes/intakes.js';
 import { createDrafterClientRouter, createDrafterWorkerRouter } from './routes/drafter.js';
 import { createLetterRouter } from './routes/letter.js';
@@ -66,7 +68,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use((req, res, next) => {
     // /internal/* uses its own 50mb json parsers (below); /jotform/webhook uses its own urlencoded
     // parser (Jotform POSTs urlencoded, not JSON) — both must bypass the global json parser.
-    if (req.path.startsWith('/api/v1/internal/') || req.path.startsWith('/api/v1/jotform/webhook')) return next();
+    if (req.path.startsWith('/api/v1/internal/') || req.path.startsWith('/api/v1/jotform/webhook') || req.path.startsWith('/api/v1/stripe/webhook')) return next();
     return globalJson(req, res, next);
   });
 
@@ -92,6 +94,14 @@ export function createApp(options: CreateAppOptions = {}) {
   // routes (it has no Cognito) with its OWN urlencoded parser scoped to this subtree — Jotform
   // POSTs urlencoded, and the payload can exceed the 1mb global json limit. See spec §2.
   app.use('/api/v1/jotform/webhook', express.urlencoded({ extended: true, limit: '2mb' }), createJotformWebhookRouter(db));
+
+  // Public Stripe webhook (signature-gated, no Cognito). express.raw so the body is the EXACT bytes
+  // Stripe signed — express.json would re-serialize them and break HMAC verification. (Mounted before
+  // the authenticateJwt blanket; the API Gateway routes /stripe/webhook without the Cognito authorizer.)
+  app.use('/api/v1/stripe/webhook', express.raw({ type: '*/*', limit: '1mb' }), createStripeWebhookRouter(db));
+  // Public password-protected delivery portal (token + password gated, no Cognito). The global json
+  // parser above already parsed the unlock body (this path isn't in the skip list).
+  app.use('/api/v1/delivery', createDeliveryPortalRouter(db, { bucketName: process.env.PHI_BUCKET_NAME, s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) }));
 
   app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
   app.use('/api/v1', authenticateJwt(), createDocumentsRouter());

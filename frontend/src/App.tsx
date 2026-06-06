@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider } from './auth/AuthProvider';
 import { ProtectedRoute } from './auth/ProtectedRoute';
 import { SignInScreen } from './auth/SignInScreen';
+import { DownloadPortalPage } from './routes/DownloadPortalPage';
 import { HomePage } from './routes/HomePage';
 import { NoAccessPage } from './routes/NoAccessPage';
 import { NotFoundPage } from './routes/NotFoundPage';
@@ -31,6 +32,7 @@ const queryClient = new QueryClient();
 export function App() {
   return <QueryClientProvider client={queryClient}><BrowserRouter><AuthProvider><Routes>
     <Route path="/signin" element={<SignInScreen />} />
+    <Route path="/d/:token" element={<DownloadPortalPage />} />
     <Route path="/" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><HomePage /></ProtectedRoute>} />
     <Route path="/veterans" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><VeteransPage /></ProtectedRoute>} />
     <Route path="/veterans/:id" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><VeteranChart /></ProtectedRoute>} />

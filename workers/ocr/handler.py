@@ -203,6 +203,8 @@ def _complete_intake(job_id: str, status: str, job_tag: str) -> dict[str, Any]:
         print(json.dumps({"msg": "ocr: intake textract read no text; assign will live-OCR", "jobTag": job_tag}))
         return {"status": "EMPTY", "posted": False}
     posted = _post_intake_pages(job_tag, pages, page_count)
+    total_chars = sum(len(p.get("text", "")) for p in pages)
+    print(json.dumps({"msg": "ocr: intake pages posted" if posted else "ocr: intake pages dropped (jobTag gone)", "jobTag": job_tag, "pages": len(pages), "chars": total_chars, "posted": posted}))
     return {"status": "POSTED" if posted else "DROPPED", "pages": len(pages), "posted": posted}
 
 

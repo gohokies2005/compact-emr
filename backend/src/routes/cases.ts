@@ -319,7 +319,7 @@ export function createCasesRouter(db: AppDb): Router {
       const parsed = parseCasePatch(req.body);
 
       const updated = await db.$transaction(async (tx) => {
-        const existing = await tx.case.findFirst({ where: { id }, select: { id: true, veteranId: true, version: true } });
+        const existing = await tx.case.findFirst({ where: { id }, select: { id: true, veteranId: true, version: true, claimedConditions: true } });
         if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
         if (existing.version !== parsed.version) {
           throw new HttpError(409, 'conflict', 'Case version is stale', {
@@ -329,9 +329,21 @@ export function createCasesRouter(db: AppDb): Router {
           });
         }
 
+        // Keep claimedConditions[] in sync when the primary claimedCondition is edited on a
+        // SINGLE-condition claim. The CDS + drafter pipeline read claimedConditions[] when it's
+        // non-empty (cds.ts) and fall back to claimedCondition only when empty — so editing just the
+        // primary would leave a stale array and the run would use the OLD condition. Clustered claims
+        // (len > 1) are NOT touched here; re-editing a multi-condition cluster is a separate flow.
+        // (Ryan 2026-06-06 — changing Warren's dx "other joint" → "left shoulder osteoarthritis".)
+        const newPrimary = parsed.fields.claimedCondition;
+        const syncConditions =
+          typeof newPrimary === 'string' && newPrimary.length > 0 && existing.claimedConditions.length <= 1
+            ? { claimedConditions: [newPrimary] }
+            : {};
+
         const row = await tx.case.update({
           where: { id },
-          data: { ...parsed.fields, version: { increment: 1 } },
+          data: { ...parsed.fields, ...syncConditions, version: { increment: 1 } },
           select: CASE_LITE_SELECT,
         });
 

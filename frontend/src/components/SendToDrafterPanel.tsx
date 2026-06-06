@@ -61,7 +61,11 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
 
   const readiness = readinessQuery.data?.data;
   const ready = readiness?.ready === true;
-  const blockingFileCount = (readiness?.blockingFiles ?? readiness?.blockers ?? []).length;
+  const blockingFiles = readiness?.blockingFiles ?? readiness?.blockers ?? [];
+  const blockingFileCount = blockingFiles.length;
+  // The original filename (basename of the S3 key) so the RN knows EXACTLY which file to re-upload or
+  // re-OCR — a bare "1 file(s) could not be read" with no name is useless (Ryan 2026-06-06, Yorde).
+  const fileName = (filePath: string): string => filePath.split('/').pop() || filePath;
 
   const draftError = draftMutation.error;
   const draftErrorMessage = draftError
@@ -104,11 +108,24 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
         ) : (
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
             <h3 className="text-sm font-semibold text-amber-900">Chart is not ready for drafting</h3>
-            <p className="mt-1 text-sm text-amber-800">
-              {blockingFileCount > 0
-                ? `${blockingFileCount} file(s) could not be automatically read. You can draft anyway — the drafter will run without them.`
-                : (readiness?.reason ?? 'Resolve chart-readiness blockers before starting the drafter.')}
-            </p>
+            {blockingFileCount > 0 ? (
+              <>
+                <p className="mt-1 text-sm text-amber-800">
+                  {blockingFileCount === 1 ? 'This file' : `These ${blockingFileCount} files`} could not be
+                  automatically read. Re-upload {blockingFileCount === 1 ? 'it' : 'them'} or re-run OCR from
+                  the chart, or draft anyway — the drafter will run without {blockingFileCount === 1 ? 'it' : 'them'}.
+                </p>
+                <ul className="mt-2 list-disc space-y-0.5 pl-5 text-sm font-medium text-amber-900">
+                  {blockingFiles.map((f) => (
+                    <li key={f.id ?? f.filePath} className="break-all">{fileName(f.filePath)}</li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p className="mt-1 text-sm text-amber-800">
+                {readiness?.reason ?? 'Resolve chart-readiness blockers before starting the drafter.'}
+              </p>
+            )}
             <div className="mt-3">
               <Button type="button" variant="secondary" size="sm" loading={draftMutation.isPending} onClick={overrideAndDraft}>
                 Override and draft anyway

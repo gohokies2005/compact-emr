@@ -5,7 +5,7 @@ import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { TabBar, type TabItem } from '../../components/ui/TabBar';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { addMedication, addProblem, addScCondition, deleteDocument, deleteMedication, deleteProblem, deleteScCondition, getVeteran, listDocuments, presignDocument, recordDocument, updateScCondition, uploadToPresignedUrl } from '../../api/veterans';
+import { addMedication, addProblem, addScCondition, deleteDocument, deleteMedication, deleteProblem, deleteScCondition, getVeteran, listDocuments, presignDocument, recordDocument, updateScCondition, updateVeteran, uploadToPresignedUrl, type UpdateVeteranInput, type VeteranDetail } from '../../api/veterans';
 import { PdfViewerModal } from '../../components/PdfViewerModal';
 
 // Collapse duplicate/synonym condition rows (chart-extract over duplicate docs produced e.g. OSA ×3).
@@ -33,14 +33,15 @@ function dedupByCondition<T>(rows: readonly T[], getName: (r: T) => string, keyE
   }
   return [...byKey.values(), ...passthrough];
 }
-import { ConflictError } from '../../api/client';
-import { createCase, type CreateCaseInput } from '../../api/cases';
+import { ConflictError, describeApiError } from '../../api/client';
+import { createCase, patchCase, type CreateCaseInput } from '../../api/cases';
+import { useAuth } from '../../auth/useAuth';
 import { NewClaimModal } from '../cases/NewClaimModal';
 import { ChartNotesPanel } from './ChartNotesPanel';
 import { ConditionSelect } from '../../components/ConditionSelect';
 import { classifyEntry, isZip, uploadErrorReason, type CandidateResult } from './documentUpload';
 import { formatDateOnly, formatPhone, formatNameLastFirst } from '../../lib/format';
-import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition, ScConditionStatus } from '../../types/prisma';
+import type { ActiveMedication, ActiveProblem, Case, Document, Role, ScCondition, ScConditionStatus } from '../../types/prisma';
 
 const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
 
@@ -75,6 +76,8 @@ export function VeteranChart() {
   const veteranId = id ?? '';
   const [tab, setTab] = useState<ChartTab>('claims');
   const [claimModalOpen, setClaimModalOpen] = useState(false);
+  const { user } = useAuth();
+  const role: Role = user?.role ?? 'ops_staff';
   const qc = useQueryClient();
   const createClaim = useMutation({ mutationFn: (input: CreateCaseInput) => createCase(veteranId, input), onSuccess: async () => { setClaimModalOpen(false); await Promise.all([qc.invalidateQueries({ queryKey: ['veteran', veteranId] }), qc.invalidateQueries({ queryKey: ['documents', veteranId] })]); } });
   const veteran = useQuery({ queryKey: ['veteran', veteranId], queryFn: () => getVeteran(veteranId), enabled: veteranId.length > 0 });
@@ -85,7 +88,7 @@ export function VeteranChart() {
   if (!veteran.data) return <AppShell><EmptyState title="Veteran not found" message="The requested veteran could not be loaded." /></AppShell>;
   const v = veteran.data.data;
   return <AppShell><div className="space-y-6">
-    <div className="rounded-lg border border-slate-200 bg-white p-6"><div className="flex flex-col justify-between gap-3 sm:flex-row"><div><h1 className="text-3xl font-bold text-slate-900">{formatNameLastFirst(v.firstName, v.lastName)}</h1><p className="mt-1 text-sm text-slate-600">{(() => { const age = v.dob ? Math.floor((Date.now() - Date.parse(v.dob)) / 31557600000) : null; const ht = v.heightIn != null ? `${Math.floor(v.heightIn / 12)}'${v.heightIn % 12}"` : null; const htwt = [ht, v.weightLb != null ? `${v.weightLb} lb` : null].filter(Boolean).join(' '); const svc = [v.branch, v.serviceStartYear ? `${v.serviceStartYear}–${v.serviceEndYear ?? ''}` : null].filter(Boolean).join(' '); return [`MRN ${v.id}`, v.dob ? `DOB ${formatDateOnly(v.dob)}${age != null ? ` (age ${age})` : ''}` : null, svc || null, htwt || null, v.phone ? formatPhone(v.phone) : null, v.address, v.email].filter(Boolean).join('  ·  '); })()}</p></div><div className="flex items-center gap-3"><Button size="sm" onClick={() => setClaimModalOpen(true)}>+ New claim</Button><Link className="text-sm text-indigo-600" to="/veterans">Back to veterans</Link></div></div></div>
+    <div className="rounded-lg border border-slate-200 bg-white p-6"><div className="flex flex-col justify-between gap-3 sm:flex-row"><div><h1 className="text-3xl font-bold text-slate-900">{formatNameLastFirst(v.firstName, v.lastName)}</h1><p className="mt-1 text-xs text-slate-400">MRN {v.id}{v.dob ? ` · age ${Math.floor((Date.now() - Date.parse(v.dob)) / 31557600000)}` : ''}</p></div><div className="flex items-center gap-3"><Button size="sm" onClick={() => setClaimModalOpen(true)}>+ New claim</Button><Link className="text-sm text-indigo-600" to="/veterans">Back to veterans</Link></div></div><VeteranDemographics v={v} role={role} onSaved={invalidate} /></div>
     <div className="rounded-lg border border-slate-200 bg-white">
       <TabBar tabs={CHART_TABS} active={tab} onChange={setTab} className="flex-wrap" />
       {/* All six panels stay mounted; we toggle visibility with `hidden` rather than
@@ -93,7 +96,7 @@ export function VeteranChart() {
           switch and silently drop an in-flight upload's status/error line — the upload path
           was hardened specifically to surface that reason, so we must not lose it. */}
       <div className="p-4">
-        <div role="tabpanel" hidden={tab !== 'claims'}><CasesPanel rows={v.cases} /></div>
+        <div role="tabpanel" hidden={tab !== 'claims'}><CasesPanel veteranId={veteranId} rows={v.cases} onChange={invalidate} /></div>
         <div role="tabpanel" hidden={tab !== 'notes'}><ChartNotesPanel veteranId={veteranId} /></div>
         <div role="tabpanel" hidden={tab !== 'documents'}><DocumentsPanel veteranId={veteranId} cases={v.cases} documents={documents.data?.data ?? []} onChange={invalidate} /></div>
         <div role="tabpanel" hidden={tab !== 'conditions'}><ConditionsPanel veteranId={veteranId} rows={v.scConditions} onChange={invalidate} /></div>
@@ -233,4 +236,128 @@ function DocumentsPanel({ veteranId, cases, documents, onChange }: { readonly ve
 
   return <div id="documents"><p className="text-sm text-slate-500">Upload one or more files, or a .zip — PDF, JPG, PNG, DOC, DOCX (max 50 MB each).</p><div className="mt-4 flex flex-col gap-3 sm:flex-row"><select className="input" value={caseId} onChange={(e) => setCaseId(e.target.value)}>{cases.map((c) => <option key={c.id} value={c.id}>{c.id} — {c.claimedCondition}</option>)}</select><select className="input" value={docTag} onChange={(e) => setDocTag(e.target.value)}>{DOC_TAGS.map((t) => <option key={t}>{t}</option>)}</select><input className="text-sm" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.zip,application/pdf,image/jpeg,image/png,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,application/x-zip-compressed" disabled={busy} onChange={(e) => { void onFiles(e.target.files); e.target.value = ''; }} /></div>{status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}<div className="mt-4 divide-y divide-slate-100">{documents.map((d) => <div key={d.id} className="flex items-center justify-between gap-3 py-3 text-sm"><button className="flex flex-1 items-center justify-between gap-3 text-left hover:bg-slate-50" onClick={() => setViewDoc(d)}><span>{d.filename}</span><span className="text-slate-500">{d.docTag ?? 'Other'} · {d.uploadedAt}{(d as { caseId?: string }).caseId ? ` · ${(d as { caseId?: string }).caseId}` : ''}</span></button><button type="button" className="shrink-0 rounded px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-50" disabled={del.isPending} onClick={() => { if (window.confirm(`Delete "${d.filename}"? This removes the file and its parsed text from this veteran's chart for ALL of their claims. Use this only for a file uploaded to the wrong chart.`)) del.mutate(d.id); }}>Delete</button></div>)}</div><PdfViewerModal doc={viewDoc} onClose={() => setViewDoc(null)} /></div>;
 }
-function CasesPanel({ rows }: { readonly rows: readonly Case[] }) { return <div><div className="divide-y divide-slate-100">{rows.map((c) => <Link key={c.id} className="flex justify-between py-3 text-sm hover:bg-slate-50" to={`/cases/${encodeURIComponent(c.id)}`}><span>{c.claimedCondition}</span><span className="text-slate-500">{c.status} · {c.claimType}</span></Link>)}</div>{!rows.length ? <EmptyState title="No claims yet" message="This veteran has no claims on file yet. Use “+ New claim” above to start one." /> : null}</div>; }
+function CasesPanel({ veteranId: _veteranId, rows, onChange }: { readonly veteranId: string; readonly rows: readonly Case[]; readonly onChange: () => Promise<void> }) {
+  if (!rows.length) return <EmptyState title="No claims yet" message="This veteran has no claims on file yet. Use “+ New claim” above to start one." />;
+  return <div className="divide-y divide-slate-100">{rows.map((c) => <ClaimRow key={c.id} c={c} onChange={onChange} />)}</div>;
+}
+
+// One FRN claim row. The claimed condition is CLICK-TO-EDIT (Ryan 2026-06-06: fix a wrong dx without
+// rebuilding the whole chart — e.g. "Other joint" → "Left shoulder osteoarthritis"). Saving PATCHes
+// claimedCondition; the backend syncs claimedConditions[] for single-condition claims so the next
+// drafter run uses the corrected condition. "Open →" still navigates to the claim page.
+function ClaimRow({ c, onChange }: { readonly c: Case; readonly onChange: () => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(c.claimedCondition);
+  const save = useMutation({
+    mutationFn: (condition: string) => patchCase(c.id, { version: c.version, claimedCondition: condition }),
+    onSuccess: async () => { setEditing(false); await onChange(); },
+    onError: async (e: unknown) => {
+      if (e instanceof ConflictError) { await onChange(); window.alert('This claim changed elsewhere. Reloaded — reopen and retry.'); }
+      else window.alert(`Could not save the condition — ${describeApiError(e)}`);
+    },
+  });
+  function commit() {
+    const t = draft.trim();
+    if (!t) { window.alert('The claimed condition cannot be empty.'); return; }
+    if (t === c.claimedCondition) { setEditing(false); return; }
+    save.mutate(t);
+  }
+  return (
+    <div className="flex items-center justify-between gap-3 py-3 text-sm">
+      {editing ? (
+        <div className="flex flex-1 items-center gap-2">
+          <input className="input h-8 flex-1" value={draft} autoFocus onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setDraft(c.claimedCondition); setEditing(false); } }} />
+          <button type="button" className="text-xs font-medium text-indigo-600 disabled:opacity-50" disabled={save.isPending} onClick={commit}>Save</button>
+          <button type="button" className="text-xs text-slate-400" onClick={() => { setDraft(c.claimedCondition); setEditing(false); }}>Cancel</button>
+        </div>
+      ) : (
+        <button type="button" className="rounded px-1 text-left font-medium text-slate-800 decoration-dotted hover:bg-amber-50 hover:underline" title="Click to edit the claimed condition" onClick={() => { setDraft(c.claimedCondition); setEditing(true); }}>
+          {c.claimedCondition}
+        </button>
+      )}
+      <div className="flex shrink-0 items-center gap-3 text-slate-500">
+        <span>{c.status} · {c.claimType}</span>
+        <Link className="text-indigo-600 hover:underline" to={`/cases/${encodeURIComponent(c.id)}`}>Open →</Link>
+      </div>
+    </div>
+  );
+}
+
+// Editable veteran demographics grid (Ryan 2026-06-06: "click on it and change it" — a typo in DOB,
+// email, height, etc. shouldn't force a whole new chart). Each field PATCHes ONE column with the row
+// version (optimistic concurrency); the parent refetch bumps v.version for the next edit. Name + DOB
+// are ADMIN-ONLY — the backend enforces it (veteran-validation ADMIN_ONLY_FIELDS); the UI mirrors that
+// so a non-admin sees them read-only instead of hitting a 403.
+function VeteranDemographics({ v, role, onSaved }: { readonly v: VeteranDetail; readonly role: Role; readonly onSaved: () => Promise<void> }) {
+  const isAdmin = role === 'admin';
+  const save = useMutation({
+    mutationFn: (input: UpdateVeteranInput) => updateVeteran(v.id, input),
+    onSuccess: () => onSaved(),
+    onError: async (e: unknown) => {
+      if (e instanceof ConflictError) { await onSaved(); window.alert('This veteran was updated elsewhere. Reloaded — please retry your edit.'); }
+      else window.alert(`Could not save — ${describeApiError(e)}`);
+    },
+  });
+  // Cast is needed because UpdateVeteranInput types the numeric fields as `number` (no null), but the
+  // backend accepts null to CLEAR height/weight. The cast is sound — the backend validates the shape.
+  const patch = (field: string, value: string | number | null) => save.mutate({ version: v.version, [field]: value } as UpdateVeteranInput);
+  const reqStr = (field: 'firstName' | 'lastName' | 'email', label: string) => (raw: string) => { const t = raw.trim(); if (!t) { window.alert(`${label} cannot be empty.`); return; } patch(field, t); };
+  const optStr = (field: 'phone' | 'address' | 'branch') => (raw: string) => patch(field, raw.trim()); // '' → backend stores null
+  const yearReq = (field: 'serviceStartYear' | 'serviceEndYear') => (raw: string) => { const t = raw.trim(); if (!t) return; const n = Number.parseInt(t, 10); if (Number.isNaN(n)) { window.alert('Enter a 4-digit year.'); return; } patch(field, n); };
+  const intNul = (field: 'heightIn' | 'weightLb', label: string) => (raw: string) => { const t = raw.trim(); if (!t) { patch(field, null); return; } const n = Number.parseInt(t, 10); if (Number.isNaN(n) || n < 0) { window.alert(`${label} must be a positive whole number.`); return; } patch(field, n); };
+  const onDob = (raw: string) => { const t = raw.trim(); if (!t) { window.alert('DOB cannot be empty.'); return; } patch('dob', t); };
+
+  const ht = v.heightIn != null ? `${Math.floor(v.heightIn / 12)}'${v.heightIn % 12}"` : '';
+  return (
+    <div className="mt-4 grid grid-cols-1 gap-x-10 gap-y-0.5 border-t border-slate-100 pt-4 sm:grid-cols-2">
+      <InlineField label="First name" value={v.firstName} editable={isAdmin} saving={save.isPending} onSave={reqStr('firstName', 'First name')} />
+      <InlineField label="Last name" value={v.lastName} editable={isAdmin} saving={save.isPending} onSave={reqStr('lastName', 'Last name')} />
+      <InlineField label="DOB" type="date" value={formatDateOnly(v.dob)} display={v.dob ? formatDateOnly(v.dob) : ''} editable={isAdmin} saving={save.isPending} onSave={onDob} />
+      <InlineField label="Email" value={v.email ?? ''} saving={save.isPending} onSave={reqStr('email', 'Email')} />
+      <InlineField label="Phone" value={v.phone ?? ''} display={v.phone ? formatPhone(v.phone) : ''} saving={save.isPending} onSave={optStr('phone')} />
+      <InlineField label="Address" value={v.address ?? ''} saving={save.isPending} onSave={optStr('address')} />
+      <InlineField label="Branch" value={v.branch ?? ''} saving={save.isPending} onSave={optStr('branch')} />
+      <InlineField label="Service start" type="number" value={v.serviceStartYear != null ? String(v.serviceStartYear) : ''} saving={save.isPending} onSave={yearReq('serviceStartYear')} />
+      <InlineField label="Service end" type="number" value={v.serviceEndYear != null ? String(v.serviceEndYear) : ''} saving={save.isPending} onSave={yearReq('serviceEndYear')} />
+      <InlineField label="Height (in)" type="number" value={v.heightIn != null ? String(v.heightIn) : ''} display={ht} saving={save.isPending} onSave={intNul('heightIn', 'Height')} />
+      <InlineField label="Weight (lb)" type="number" value={v.weightLb != null ? String(v.weightLb) : ''} display={v.weightLb != null ? `${v.weightLb} lb` : ''} saving={save.isPending} onSave={intNul('weightLb', 'Weight')} />
+    </div>
+  );
+}
+
+// Compact click-to-edit field. `value` = the RAW editable string; `display` = the formatted read view
+// (phone, height, DOB). Non-editable fields render as plain text (admin-only demographics).
+function InlineField({ label, value, display, type = 'text', editable = true, saving, onSave }: {
+  readonly label: string;
+  readonly value: string;
+  readonly display?: string;
+  readonly type?: 'text' | 'number' | 'date';
+  readonly editable?: boolean;
+  readonly saving: boolean;
+  readonly onSave: (raw: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  function commit() { onSave(draft); setEditing(false); }
+  return (
+    <div className="flex items-baseline gap-2 py-1">
+      <span className="w-28 shrink-0 text-xs font-medium uppercase tracking-wide text-slate-400">{label}</span>
+      {editing ? (
+        <span className="flex items-center gap-2">
+          <input className="input h-7 w-44 py-0 text-sm" type={type} value={draft} autoFocus
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false); }} />
+          <button type="button" className="text-xs font-medium text-indigo-600 disabled:opacity-50" disabled={saving} onClick={commit}>Save</button>
+          <button type="button" className="text-xs text-slate-400" onClick={() => setEditing(false)}>Cancel</button>
+        </span>
+      ) : editable ? (
+        <button type="button" className="rounded px-1 text-left text-sm text-slate-700 decoration-dotted hover:bg-amber-50 hover:underline" title={`Click to edit ${label.toLowerCase()}`} onClick={() => { setDraft(value); setEditing(true); }}>
+          {display || value || <span className="text-slate-300">— add</span>}
+        </button>
+      ) : (
+        <span className="px-1 text-sm text-slate-500" title={`${label} — admin only`}>{display || value || '—'}</span>
+      )}
+    </div>
+  );
+}

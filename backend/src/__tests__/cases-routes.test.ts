@@ -208,6 +208,26 @@ describe('cases routes', () => {
     expect(res.status).toBe(409);
   });
 
+  // Ryan 2026-06-06 (Warren dx change): editing the primary claimedCondition on a SINGLE-condition
+  // claim must also rewrite claimedConditions[] — the CDS/drafter read the array when non-empty, so a
+  // stale array would make the run use the OLD condition.
+  it('syncs claimedConditions[] when claimedCondition is patched on a single-condition claim', async () => {
+    const { db, spies } = makeDb(baseCase({ claimedCondition: 'Other joint', claimedConditions: ['Other joint'] }));
+    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, claimedCondition: 'Left shoulder osteoarthritis' });
+    expect(res.status).toBe(200);
+    expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ claimedCondition: 'Left shoulder osteoarthritis', claimedConditions: ['Left shoulder osteoarthritis'] }),
+    }));
+  });
+
+  it('does NOT touch claimedConditions[] on a CLUSTERED (multi-condition) claim', async () => {
+    const { db, spies } = makeDb(baseCase({ claimedCondition: 'Hip', claimedConditions: ['Hip', 'Lumbar / back'] }));
+    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, claimedCondition: 'Hip, left' });
+    expect(res.status).toBe(200);
+    const data = (spies.caseUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
+    expect(data).not.toHaveProperty('claimedConditions');
+  });
+
   it('ARCHIVES a claim (204) — soft delete (sets archived_at), keeps the row + audit, no hard delete', async () => {
     const { db, spies } = makeDb(baseCase({ status: 'intake' }));
     const res = await request(appFor(db)).delete('/api/v1/cases/CASE-1');

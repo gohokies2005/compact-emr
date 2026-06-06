@@ -57,9 +57,8 @@ describe('SendToDrafterPanel', () => {
     renderPanel();
 
     expect(await screen.findByText('Chart is not ready for drafting')).toBeInTheDocument();
-    expect(
-      screen.getByText('1 file(s) could not be automatically read. You can draft anyway — the drafter will run without them.'),
-    ).toBeInTheDocument();
+    // The blocker text now NAMES the file (basename of the S3 key) — a bare count was useless (Yorde).
+    expect(screen.getByText('garbled.pdf')).toBeInTheDocument();
     // primary button stays disabled, but an OVERRIDE button is always offered (Ryan HARD RULE).
     expect(screen.getByRole('button', { name: 'Send to Drafter' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Override and draft anyway' })).toBeEnabled();

@@ -188,7 +188,7 @@ export function parseVeteranPatch(body: unknown): { version: number; data: Veter
     data.address = address;
     changedFields.push('address');
   }
-  const branch = optionalString(body, 'branch');
+  const branch = nullableString(body, 'branch'); // '' clears it (column is nullable) — matches phone/address
   if (branch !== undefined) {
     data.branch = branch;
     changedFields.push('branch');

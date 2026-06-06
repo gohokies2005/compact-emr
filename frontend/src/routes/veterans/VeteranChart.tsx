@@ -291,6 +291,10 @@ function ClaimRow({ c, onChange }: { readonly c: Case; readonly onChange: () => 
 // so a non-admin sees them read-only instead of hitting a 403.
 function VeteranDemographics({ v, role, onSaved }: { readonly v: VeteranDetail; readonly role: Role; readonly onSaved: () => Promise<void> }) {
   const isAdmin = role === 'admin';
+  // The backend PATCH /veterans/:id is gated to OPS_ROLES — a physician can VIEW the chart but cannot
+  // edit demographics (every save would 403). Gate the edit affordance on the same role set so a
+  // physician sees read-only values instead of a dead "click to edit" that errors. (architect QA)
+  const canEdit = isAdmin || role === 'ops_staff';
   const save = useMutation({
     mutationFn: (input: UpdateVeteranInput) => updateVeteran(v.id, input),
     onSuccess: () => onSaved(),
@@ -304,7 +308,7 @@ function VeteranDemographics({ v, role, onSaved }: { readonly v: VeteranDetail; 
   const patch = (field: string, value: string | number | null) => save.mutate({ version: v.version, [field]: value } as UpdateVeteranInput);
   const reqStr = (field: 'firstName' | 'lastName' | 'email', label: string) => (raw: string) => { const t = raw.trim(); if (!t) { window.alert(`${label} cannot be empty.`); return; } patch(field, t); };
   const optStr = (field: 'phone' | 'address' | 'branch') => (raw: string) => patch(field, raw.trim()); // '' → backend stores null
-  const yearReq = (field: 'serviceStartYear' | 'serviceEndYear') => (raw: string) => { const t = raw.trim(); if (!t) return; const n = Number.parseInt(t, 10); if (Number.isNaN(n)) { window.alert('Enter a 4-digit year.'); return; } patch(field, n); };
+  const yearReq = (field: 'serviceStartYear' | 'serviceEndYear') => (raw: string) => { const t = raw.trim(); if (!t) return; if (!/^\d{4}$/.test(t)) { window.alert('Enter a 4-digit year (e.g. 2008).'); return; } patch(field, Number.parseInt(t, 10)); };
   const intNul = (field: 'heightIn' | 'weightLb', label: string) => (raw: string) => { const t = raw.trim(); if (!t) { patch(field, null); return; } const n = Number.parseInt(t, 10); if (Number.isNaN(n) || n < 0) { window.alert(`${label} must be a positive whole number.`); return; } patch(field, n); };
   const onDob = (raw: string) => { const t = raw.trim(); if (!t) { window.alert('DOB cannot be empty.'); return; } patch('dob', t); };
 
@@ -314,14 +318,14 @@ function VeteranDemographics({ v, role, onSaved }: { readonly v: VeteranDetail; 
       <InlineField label="First name" value={v.firstName} editable={isAdmin} saving={save.isPending} onSave={reqStr('firstName', 'First name')} />
       <InlineField label="Last name" value={v.lastName} editable={isAdmin} saving={save.isPending} onSave={reqStr('lastName', 'Last name')} />
       <InlineField label="DOB" type="date" value={formatDateOnly(v.dob)} display={v.dob ? formatDateOnly(v.dob) : ''} editable={isAdmin} saving={save.isPending} onSave={onDob} />
-      <InlineField label="Email" value={v.email ?? ''} saving={save.isPending} onSave={reqStr('email', 'Email')} />
-      <InlineField label="Phone" value={v.phone ?? ''} display={v.phone ? formatPhone(v.phone) : ''} saving={save.isPending} onSave={optStr('phone')} />
-      <InlineField label="Address" value={v.address ?? ''} saving={save.isPending} onSave={optStr('address')} />
-      <InlineField label="Branch" value={v.branch ?? ''} saving={save.isPending} onSave={optStr('branch')} />
-      <InlineField label="Service start" type="number" value={v.serviceStartYear != null ? String(v.serviceStartYear) : ''} saving={save.isPending} onSave={yearReq('serviceStartYear')} />
-      <InlineField label="Service end" type="number" value={v.serviceEndYear != null ? String(v.serviceEndYear) : ''} saving={save.isPending} onSave={yearReq('serviceEndYear')} />
-      <InlineField label="Height (in)" type="number" value={v.heightIn != null ? String(v.heightIn) : ''} display={ht} saving={save.isPending} onSave={intNul('heightIn', 'Height')} />
-      <InlineField label="Weight (lb)" type="number" value={v.weightLb != null ? String(v.weightLb) : ''} display={v.weightLb != null ? `${v.weightLb} lb` : ''} saving={save.isPending} onSave={intNul('weightLb', 'Weight')} />
+      <InlineField label="Email" value={v.email ?? ''} editable={canEdit} saving={save.isPending} onSave={reqStr('email', 'Email')} />
+      <InlineField label="Phone" value={v.phone ?? ''} display={v.phone ? formatPhone(v.phone) : ''} editable={canEdit} saving={save.isPending} onSave={optStr('phone')} />
+      <InlineField label="Address" value={v.address ?? ''} editable={canEdit} saving={save.isPending} onSave={optStr('address')} />
+      <InlineField label="Branch" value={v.branch ?? ''} editable={canEdit} saving={save.isPending} onSave={optStr('branch')} />
+      <InlineField label="Service start" type="number" value={v.serviceStartYear != null ? String(v.serviceStartYear) : ''} editable={canEdit} saving={save.isPending} onSave={yearReq('serviceStartYear')} />
+      <InlineField label="Service end" type="number" value={v.serviceEndYear != null ? String(v.serviceEndYear) : ''} editable={canEdit} saving={save.isPending} onSave={yearReq('serviceEndYear')} />
+      <InlineField label="Height (in)" type="number" value={v.heightIn != null ? String(v.heightIn) : ''} display={ht} editable={canEdit} saving={save.isPending} onSave={intNul('heightIn', 'Height')} />
+      <InlineField label="Weight (lb)" type="number" value={v.weightLb != null ? String(v.weightLb) : ''} display={v.weightLb != null ? `${v.weightLb} lb` : ''} editable={canEdit} saving={save.isPending} onSave={intNul('weightLb', 'Weight')} />
     </div>
   );
 }

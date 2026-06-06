@@ -216,7 +216,7 @@ export function parseCasePatch(body: unknown): ParsedCasePatch {
     if (parsed !== undefined) fields[field] = parsed as never;
   };
 
-  setString('claimedCondition', 500);
+  setString('claimedCondition', MAX_CONDITION_LENGTH); // align with claimedConditions[] entry cap (the patch syncs the array)
   setString('framingChoice', 80);
   setString('upstreamScCondition', 200);
   setString('veteranStatement', 2000);

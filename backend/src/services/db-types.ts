@@ -107,7 +107,7 @@ export interface VeteranUpdateInput {
   email?: string;
   phone?: string | null;
   address?: string | null;
-  branch?: string;
+  branch?: string | null;
   serviceStartYear?: number;
   serviceEndYear?: number;
   combatVeteran?: YesNoUnknown;

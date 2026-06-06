@@ -661,6 +661,22 @@ model Email {
   @@map("emails")
 }
 
+// Feature B — the set of Google Workspace mailboxes the gmail-ingest poller monitors (Ryan 2026-06-06:
+// "add an email profile to the EMR ... easily add emails as I add staff"). Managed in-app from an admin
+// page (no AWS console); the ingester reads the ACTIVE addresses via GET /internal/monitored-mailboxes.
+// `active=false` keeps a mailbox's history but stops polling it (e.g. a departed staffer).
+model MonitoredMailbox {
+  id        String   @id @default(uuid())
+  address   String   @unique          // normalized lowercase email
+  label     String?                    // friendly note, e.g. "Primary intake" / "Jane (RN)"
+  active    Boolean  @default(true)
+  addedBy   String?  @map("added_by")  // editor email
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("monitored_mailboxes")
+}
+
 model ActivityLog {
   id          String   @id @default(uuid())
   caseId      String?  @map("case_id")

@@ -12,7 +12,6 @@
 // "Easily add staff emails" = just add an address to the SSM StringList; one service account with
 // domain-wide delegation impersonates any mailbox in the domain (no per-mailbox OAuth).
 
-import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { JWT } from 'google-auth-library';
@@ -21,18 +20,20 @@ import { createHash } from 'node:crypto';
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1';
 const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
 
-const ssm = new SSMClient({});
 const secrets = new SecretsManagerClient({});
 const s3 = new S3Client({});
 
 const deriveEmailId = (messageId) => `eml_${createHash('sha256').update(messageId).digest('hex').slice(0, 32)}`;
 
 async function getMailboxes() {
-  const name = process.env.MONITORED_MAILBOXES_PARAM; // SSM StringList, operator-edited
-  if (!name) return [];
+  // The in-EMR admin list (active mailboxes), DB-backed — managed from the "Email Setup" admin page.
   try {
-    const r = await ssm.send(new GetParameterCommand({ Name: name }));
-    return (r.Parameter?.Value ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const res = await fetch(`${process.env.EMR_API_BASE}/api/v1/internal/monitored-mailboxes`, {
+      headers: { authorization: `Bearer ${process.env.INTERNAL_WORKER_TOKEN}` },
+    });
+    if (!res.ok) return [];
+    const j = await res.json();
+    return (j.data ?? []).map((s) => String(s).trim().toLowerCase()).filter(Boolean);
   } catch { return []; }
 }
 

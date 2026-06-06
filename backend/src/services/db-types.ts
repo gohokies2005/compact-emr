@@ -202,6 +202,24 @@ export interface EmailDelegate {
   count(args: unknown): Promise<number>;
 }
 
+export interface MonitoredMailboxRecord {
+  id: string;
+  address: string;
+  label: string | null;
+  active: boolean;
+  addedBy: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+export interface MonitoredMailboxDelegate {
+  findMany(args?: unknown): Promise<readonly MonitoredMailboxRecord[]>;
+  findUnique(args: unknown): Promise<MonitoredMailboxRecord | null>;
+  findFirst(args: unknown): Promise<MonitoredMailboxRecord | null>;
+  create(args: unknown): Promise<MonitoredMailboxRecord>;
+  update(args: unknown): Promise<MonitoredMailboxRecord>;
+  delete(args: unknown): Promise<MonitoredMailboxRecord>;
+}
+
 export interface PaymentRecord {
   id: string;
   caseId: string;
@@ -240,6 +258,7 @@ export interface AppDbTransaction {
   letterRevision: LetterRevisionDelegate;
   caseMessage: CaseMessageDelegate;
   email: EmailDelegate;
+  monitoredMailbox: MonitoredMailboxDelegate;
   payment: PaymentDelegate;
   intake: IntakeDelegate;
   draftDecision: DraftDecisionDelegate;

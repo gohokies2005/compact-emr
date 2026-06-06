@@ -266,6 +266,16 @@ export function createInternalWorkerRouter(db: AppDb): Router {
     }),
   );
 
+  // GET /api/v1/internal/monitored-mailboxes — the gmail-ingest poller asks which mailboxes to poll
+  // (the in-EMR admin list, active only). Replaces the SSM-parameter approach with the DB-backed list.
+  router.get(
+    '/internal/monitored-mailboxes',
+    asyncHandler(async (_req: Request, res: Response) => {
+      const rows = await db.monitoredMailbox.findMany({ where: { active: true }, select: { address: true } });
+      res.json({ data: rows.map((r) => r.address) });
+    }),
+  );
+
   // ===== Parse-at-intake (#8 v2): intake-time OCR cache (IntakePage) =====
   // intakePage is not on the AppDb hand-rolled delegate — cast like `document` elsewhere.
   type IntakePageRow = { id: string; intakeS3Key: string; pageNumber: number; jobTag: string | null };

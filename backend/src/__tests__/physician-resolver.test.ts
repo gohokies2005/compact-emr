@@ -57,6 +57,7 @@ function buildDb(physiciansByCognitoSub: Record<string, PhysicianRecord>): AppDb
     documentPage: {} as never,
     caseMessage: {} as never,
     email: {} as never,
+    monitoredMailbox: {} as never,
     payment: {} as never,
     intake: {} as never,
     draftDecision: {} as never,

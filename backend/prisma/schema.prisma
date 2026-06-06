@@ -371,6 +371,7 @@ model Case {
   activityLogs      ActivityLog[]
   payments          Payment[]
   letterRevisions   LetterRevision[]
+  deliveryTokens    DeliveryToken[]
   caseMessages      CaseMessage[]
   draftDecisions    DraftDecision[]
 
@@ -675,6 +676,27 @@ model MonitoredMailbox {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("monitored_mailboxes")
+}
+
+// Feature: password-protected PDF delivery portal (Ryan 2026-06-06). On a confirmed Stripe payment the
+// EMR mints a token (the URL secret) + a unique password (emailed via SES). The veteran visits
+// /d/<token>, enters the password, and the public portal returns a short-lived presigned S3 URL to the
+// signed letter PDF — no PHI attachment in email. passwordHash = sha256 hex (never the plaintext).
+model DeliveryToken {
+  id             String    @id @default(uuid())
+  caseId         String    @map("case_id")
+  token          String    @unique          // long random URL secret
+  passwordHash   String    @map("password_hash")
+  letterVersion  Int       @map("letter_version")
+  pdfS3Key       String    @map("pdf_s3_key") // drafter-artifacts/<caseId>/v<N>/*.pdf (validated)
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(6)
+  downloadCount  Int       @default(0) @map("download_count")
+  lastAccessedAt DateTime? @map("last_accessed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  case           Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+  @@map("delivery_tokens")
 }
 
 model ActivityLog {

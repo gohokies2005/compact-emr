@@ -7,7 +7,7 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { formatRelativeTime } from '../../lib/date';
-import { listCases, deleteCase, restoreCase, type CaseLite } from '../../api/cases';
+import { listCases, deleteCase, restoreCase, updateQuickNote, type CaseLite } from '../../api/cases';
 import { describeApiError } from '../../api/client';
 import { listVeterans } from '../../api/veterans';
 import type { CaseStatus, ClaimType } from '../../types/prisma';
@@ -28,7 +28,7 @@ const CLAIM_TYPE_OPTIONS = Object.entries(CLAIM_TYPE_LABELS) as [ClaimType, stri
 const PAGE_SIZES = [25, 50, 100];
 const CASE_COLUMNS: readonly { readonly key: string; readonly label: string }[] = [
   { key: 'id', label: 'Case' }, { key: 'veteran', label: 'Veteran' }, { key: 'condition', label: 'Condition' },
-  { key: 'type', label: 'Type' }, { key: 'status', label: 'Status' }, { key: 'physician', label: 'Physician' }, { key: 'rn', label: 'RN' }, { key: 'updated', label: 'Updated' }, { key: 'version', label: 'v' },
+  { key: 'type', label: 'Type' }, { key: 'status', label: 'Status' }, { key: 'note', label: 'Note' }, { key: 'physician', label: 'Physician' }, { key: 'rn', label: 'RN' }, { key: 'updated', label: 'Updated' }, { key: 'version', label: 'v' },
 ];
 const caseSortType = (key: string): ColType => (key === 'updated' ? 'date' : key === 'version' ? 'number' : 'text');
 const caseSortValue = (key: string) => (c: CaseLite): unknown => {
@@ -38,6 +38,7 @@ const caseSortValue = (key: string) => (c: CaseLite): unknown => {
     case 'condition': return c.claimedCondition;
     case 'type': return CLAIM_TYPE_LABELS[c.claimType];
     case 'status': return CASE_STATUS_LABELS[c.status];
+    case 'note': return c.quickNote ?? '';
     case 'physician': return c.assignedPhysician?.fullName ?? '';
     case 'rn': return c.assignedRn?.email ?? '';
     case 'updated': return c.updatedAt;
@@ -93,6 +94,14 @@ export function CasesPage() {
     mutationFn: (id: string) => restoreCase(id),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['cases'] }); },
     onError: (e: unknown) => window.alert(`Could not restore this claim — ${describeApiError(e)}`),
+  });
+
+  // Feature A quick-note popup (Epic/Cerner-style scratch note on the row).
+  const [noteCase, setNoteCase] = useState<CaseLite | null>(null);
+  const quickNoteMut = useMutation({
+    mutationFn: ({ id, note }: { id: string; note: string }) => updateQuickNote(id, note),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['cases'] }); setNoteCase(null); },
+    onError: (e: unknown) => window.alert(`Could not save the note — ${describeApiError(e)}`),
   });
 
   const { onHeaderClick, sortRows, ariaSort, indicator } = useColumnSort();
@@ -151,6 +160,15 @@ export function CasesPage() {
             <td className="px-4 py-3 text-slate-700">{formatConditionLabel(c.claimedCondition)}</td>
             <td className="px-4 py-3 text-slate-600">{CLAIM_TYPE_LABELS[c.claimType]}</td>
             <td className="px-4 py-3"><CaseStatusBadge status={c.status} /></td>
+            <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+              {c.quickNote ? (
+                <button type="button" title={c.quickNote} aria-label={`Quick note: ${c.quickNote}`} className="text-amber-500 hover:text-amber-600" onClick={() => setNoteCase(c)}>
+                  <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4"><path d="M4 3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7l-4-4H4zm9 1.5L16.5 8H13V4.5zM5 9h8v1.5H5V9zm0 3h6v1.5H5V12z"/></svg>
+                </button>
+              ) : (
+                <button type="button" aria-label="Add quick note" title="Add a quick note" className="text-base leading-none text-slate-300 hover:text-indigo-600" onClick={() => setNoteCase(c)}>+</button>
+              )}
+            </td>
             <td className="px-4 py-3 text-slate-600">{c.assignedPhysician?.fullName ?? '—'}</td>
             <td className="px-4 py-3 text-slate-500">{c.assignedRn?.email ?? '—'}</td>
             <td className="px-4 py-3 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
@@ -180,5 +198,40 @@ export function CasesPage() {
         <Button variant="secondary" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>Next</Button>
       </div>
     </div>
+
+    {noteCase ? (
+      <QuickNotePopup
+        c={noteCase}
+        saving={quickNoteMut.isPending}
+        onClose={() => setNoteCase(null)}
+        onSave={(note) => quickNoteMut.mutate({ id: noteCase.id, note })}
+      />
+    ) : null}
   </div></AppShell>;
+}
+
+// Epic/Cerner-style quick-note popup: overwrite scratchpad + a last-editor stamp. "Delete" clears it
+// (sends an empty note). This is the QUICK layer — the official record lives in the chart's Notes.
+function QuickNotePopup({ c, saving, onClose, onSave }: { readonly c: CaseLite; readonly saving: boolean; readonly onClose: () => void; readonly onSave: (note: string) => void }) {
+  const [draft, setDraft] = useState(c.quickNote ?? '');
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/40 p-6" onClick={onClose}>
+      <div className="mx-auto mt-32 max-w-sm rounded-lg bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-slate-900">Quick note · {c.id}</h2>
+          <button type="button" className="text-slate-400 hover:text-slate-600" aria-label="Close" onClick={onClose}>✕</button>
+        </div>
+        <p className="mt-0.5 text-xs text-slate-500">At-a-glance status. For the official record, use the chart’s Notes.</p>
+        <textarea className="input mt-3 min-h-24 w-full text-sm" autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="e.g. Waiting on records · rejected, refund offered" />
+        {c.quickNoteBy ? <p className="mt-1 text-xs text-slate-400">Last edited by {c.quickNoteBy}{c.quickNoteAt ? ` · ${formatRelativeTime(c.quickNoteAt)}` : ''}</p> : null}
+        <div className="mt-4 flex items-center justify-between">
+          <button type="button" className="text-xs font-medium text-rose-600 hover:text-rose-700 disabled:opacity-40" disabled={saving || !c.quickNote} onClick={() => onSave('')}>Delete</button>
+          <div className="flex gap-2">
+            <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
+            <Button variant="primary" size="sm" loading={saving} onClick={() => onSave(draft)}>Save</Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }

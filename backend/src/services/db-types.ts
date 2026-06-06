@@ -272,6 +272,12 @@ export interface CaseRecord {
   assignedRnId: string | null;
   refundEligible: boolean;
   currentVersion: number;
+  // Feature A quick-note (scratchpad). quickNoteBy stores the editor's EMAIL (human-readable, not a uuid).
+  // Optional on this facade type to match the existing loose convention (operatorState/grade/etc. are
+  // likewise omitted) — the DB column always exists (nullable); the route reads via the loose delegate.
+  quickNote?: string | null;
+  quickNoteBy?: string | null;
+  quickNoteAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
   version: number;

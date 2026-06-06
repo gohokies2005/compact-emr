@@ -228,6 +228,26 @@ describe('cases routes', () => {
     expect(data).not.toHaveProperty('claimedConditions');
   });
 
+  // Feature A quick-note (Ryan 2026-06-06): overwrite scratchpad, stamps the editor's EMAIL, and must
+  // NOT bump case.version (it can't collide with the editor/assignment optimistic concurrency).
+  it('PUT /quick-note sets the note + editor-email stamp without touching version', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).put('/api/v1/cases/CASE-1/quick-note').send({ note: 'waiting on records' });
+    expect(res.status).toBe(200);
+    const data = (spies.caseUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
+    expect(data).toMatchObject({ quickNote: 'waiting on records', quickNoteBy: 'a@example.com' });
+    expect(data).not.toHaveProperty('version');
+    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'quick_note_set' }) }));
+  });
+
+  it('PUT /quick-note with an empty/whitespace note CLEARS the field', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).put('/api/v1/cases/CASE-1/quick-note').send({ note: '   ' });
+    expect(res.status).toBe(200);
+    const data = (spies.caseUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
+    expect(data).toEqual({ quickNote: null, quickNoteBy: null, quickNoteAt: null });
+  });
+
   it('ARCHIVES a claim (204) — soft delete (sets archived_at), keeps the row + audit, no hard delete', async () => {
     const { db, spies } = makeDb(baseCase({ status: 'intake' }));
     const res = await request(appFor(db)).delete('/api/v1/cases/CASE-1');

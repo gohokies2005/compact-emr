@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPatch, apiPost } from './client';
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from './client';
 import type { Case, CaseStatus, ClaimType, Correction, Document, DraftJob, Email, Payment } from '../types/prisma';
 
 export interface CaseVeteranLite {
@@ -23,11 +23,21 @@ export interface CaseLite {
   readonly assignedPhysicianId: string | null;
   readonly assignedRnId: string | null;
   readonly refundEligible: boolean;
+  readonly quickNote?: string | null;
+  readonly quickNoteBy?: string | null;
+  readonly quickNoteAt?: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly veteran?: CaseVeteranLite | null;
   readonly assignedPhysician?: CasePhysicianLite | null;
   readonly assignedRn?: AssignedRnLite | null;
+}
+
+export interface QuickNote { readonly id: string; readonly quickNote: string | null; readonly quickNoteBy: string | null; readonly quickNoteAt: string | null; }
+
+// Overwrite the claim's quick-note scratchpad (empty string clears it). Does not bump case version.
+export async function updateQuickNote(id: string, note: string): Promise<{ data: QuickNote }> {
+  return apiPut(`/api/v1/cases/${encodeURIComponent(id)}/quick-note`, { note });
 }
 
 // Offset-paginated envelope (cases list uses page/pageSize/total, not cursor).

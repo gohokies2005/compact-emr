@@ -29,6 +29,9 @@ const CASE_LITE_SELECT = {
   assignedPhysicianId: true,
   assignedRnId: true,
   refundEligible: true,
+  quickNote: true,
+  quickNoteBy: true,
+  quickNoteAt: true,
   createdAt: true,
   updatedAt: true,
   veteran: {
@@ -361,6 +364,48 @@ export function createCasesRouter(db: AppDb): Router {
       });
 
       res.json({ data: updated });
+    }),
+  );
+
+  // PUT /cases/:id/quick-note — Feature A (Ryan 2026-06-06). An overwrite scratchpad shown in the
+  // claims list for at-a-glance status ("waiting on records"). Multi-user (RN + assigned physician);
+  // last-writer-wins with an author+time stamp (stored as the editor's EMAIL, never a uuid). It does
+  // NOT touch case.version — a scratch note must not collide with the editor/assignment optimistic
+  // concurrency. An empty/whitespace note clears the field.
+  router.put(
+    '/cases/:id/quick-note',
+    requireStaffOrAssignedPhysician(db, ['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentUser(req);
+      const id = String(req.params.id);
+      const body = (req.body ?? {}) as { note?: unknown };
+      if (body.note !== undefined && body.note !== null && typeof body.note !== 'string') {
+        throw new HttpError(400, 'bad_request', 'note must be a string', { field: 'note' });
+      }
+      const raw = typeof body.note === 'string' ? body.note.trim() : '';
+      if (raw.length > 2000) throw new HttpError(400, 'bad_request', 'note exceeds 2000 chars', { field: 'note', max: 2000 });
+      const cleared = raw.length === 0;
+
+      const existing = await db.case.findFirst({ where: { id }, select: { id: true, veteranId: true } });
+      if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+
+      const row = await db.case.update({
+        where: { id },
+        data: cleared
+          ? { quickNote: null, quickNoteBy: null, quickNoteAt: null }
+          : { quickNote: raw, quickNoteBy: user.email ?? user.id, quickNoteAt: new Date() },
+        select: { id: true, quickNote: true, quickNoteBy: true, quickNoteAt: true },
+      });
+      await db.activityLog.create({
+        data: {
+          actorUserId: user.id,
+          action: cleared ? 'quick_note_cleared' : 'quick_note_set',
+          caseId: id,
+          veteranId: existing.veteranId,
+          detailsJson: { caseId: id },
+        },
+      });
+      res.json({ data: row });
     }),
   );
 

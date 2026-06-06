@@ -346,6 +346,14 @@ model Case {
   // stuck-job watcher when it sweeps stale jobs (so RN sees "We had a problem and gave up
   // after 10 minutes — click Retry" instead of "system error").
   operatorMessage     String?    @map("operator_message")
+  // Quick-note: a lightweight at-a-glance scratch note on the claim row (Epic/Cerner-style), for
+  // fast references like "rejected, refund offered" / "waiting on records". OVERWRITE scratchpad
+  // (not an append-list — substantive history lives in chart Notes). Multi-user (RN + physician);
+  // last-writer-wins with an author+time stamp. Set ONLY by PUT /cases/:id/quick-note, which never
+  // touches `version` (it must not collide with the optimistic-concurrency used by editor/assignment).
+  quickNote           String?    @map("quick_note")
+  quickNoteBy         String?    @map("quick_note_by")   // app user id of the last editor
+  quickNoteAt         DateTime?  @map("quick_note_at") @db.Timestamptz(6)
   createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt          DateTime?  @map("archived_at") @db.Timestamptz(6) // soft-delete: hidden from default views, restorable

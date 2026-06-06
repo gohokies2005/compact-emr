@@ -25,11 +25,17 @@ const CLAIM_TYPES = [['initial', 'Initial'], ['supplemental', 'Supplemental'], [
 const CLAIM_TYPE_ALIAS: Readonly<Record<string, string>> = { appeal: 'appeal_bva', board_appeal: 'appeal_bva', bva: 'appeal_bva', nod: 'appeal_bva', hlr_request: 'hlr', higher_level_review: 'hlr' };
 const normalizeClaimType = (s: string | null): string => { const t = (s ?? '').trim().toLowerCase(); return CLAIM_TYPE_ALIAS[t] ?? (s ?? ''); };
 
+// Generational suffixes are NOT a surname — "Arturo Perez Jr" must NOT split to last="Jr" (Ryan
+// 2026-06-06). Attach a trailing suffix to the real last name so it stays "Perez Jr". (Backfill any
+// already-mis-stored rows by editing the veteran's name in the chart demographics.)
+const NAME_SUFFIXES = new Set(['jr', 'jr.', 'sr', 'sr.', 'ii', 'iii', 'iv', 'v', '2nd', '3rd']);
 function splitName(full: string | null): { first: string; last: string } {
   const parts = (full ?? '').trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return { first: '', last: '' };
   if (parts.length === 1) return { first: parts[0]!, last: '' };
-  return { first: parts.slice(0, -1).join(' '), last: parts[parts.length - 1]! };
+  let suffix = '';
+  if (parts.length >= 3 && NAME_SUFFIXES.has(parts[parts.length - 1]!.toLowerCase())) suffix = ` ${parts.pop()!}`;
+  return { first: parts.slice(0, -1).join(' '), last: `${parts[parts.length - 1]!}${suffix}` };
 }
 function mintId(prefix: string): string { return `${prefix}-${crypto.randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`; }
 // Title-case a name part (fixes ALL-CAPS form entries like "WOODLEY" → "Woodley"); preserves hyphens

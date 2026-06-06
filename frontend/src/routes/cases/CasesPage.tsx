@@ -28,9 +28,9 @@ const CLAIM_TYPE_OPTIONS = Object.entries(CLAIM_TYPE_LABELS) as [ClaimType, stri
 const PAGE_SIZES = [25, 50, 100];
 const CASE_COLUMNS: readonly { readonly key: string; readonly label: string }[] = [
   { key: 'id', label: 'Case' }, { key: 'veteran', label: 'Veteran' }, { key: 'condition', label: 'Condition' },
-  { key: 'type', label: 'Type' }, { key: 'status', label: 'Status' }, { key: 'note', label: 'Note' }, { key: 'physician', label: 'Physician' }, { key: 'rn', label: 'RN' }, { key: 'updated', label: 'Updated' }, { key: 'version', label: 'v' },
+  { key: 'type', label: 'Type' }, { key: 'status', label: 'Status' }, { key: 'note', label: 'Note' }, { key: 'physician', label: 'Physician' }, { key: 'rn', label: 'RN' }, { key: 'submitted', label: 'Submitted' }, { key: 'updated', label: 'Updated' }, { key: 'version', label: 'v' },
 ];
-const caseSortType = (key: string): ColType => (key === 'updated' ? 'date' : key === 'version' ? 'number' : 'text');
+const caseSortType = (key: string): ColType => (key === 'updated' || key === 'submitted' ? 'date' : key === 'version' ? 'number' : 'text');
 const caseSortValue = (key: string) => (c: CaseLite): unknown => {
   switch (key) {
     case 'id': return c.id;
@@ -41,6 +41,7 @@ const caseSortValue = (key: string) => (c: CaseLite): unknown => {
     case 'note': return c.quickNote ?? '';
     case 'physician': return c.assignedPhysician?.fullName ?? '';
     case 'rn': return c.assignedRn?.email ?? '';
+    case 'submitted': return c.createdAt;
     case 'updated': return c.updatedAt;
     case 'version': return c.version;
     default: return '';
@@ -111,10 +112,10 @@ export function CasesPage() {
   function exportCsv() {
     // Cases is server-paginated, so this exports the CURRENT page only (after filters + sort).
     if (pageTruncated) console.warn(`cases CSV export: current page only (${pageRows.length} of ${total}); backend full-export is a follow-up.`);
-    const headers = ['Case ID', 'Veteran', 'Condition', 'Type', 'Status', 'Physician', 'RN', 'Updated', 'Version'];
+    const headers = ['Case ID', 'Veteran', 'Condition', 'Type', 'Status', 'Physician', 'RN', 'Submitted', 'Updated', 'Version'];
     const matrix = rows.map((c) => [
       c.id, c.veteran ? `${c.veteran.lastName}, ${c.veteran.firstName}` : c.veteranId, c.claimedCondition,
-      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.assignedPhysician?.fullName ?? '', c.assignedRn?.email ?? '', c.updatedAt, c.version,
+      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.assignedPhysician?.fullName ?? '', c.assignedRn?.email ?? '', c.createdAt, c.updatedAt, c.version,
     ]);
     exportRowsToCsv(`cases-export-${new Date().toISOString().slice(0, 10)}.csv`, headers, matrix);
   }
@@ -171,6 +172,7 @@ export function CasesPage() {
             </td>
             <td className="px-4 py-3 text-slate-600">{c.assignedPhysician?.fullName ?? '—'}</td>
             <td className="px-4 py-3 text-slate-500">{c.assignedRn?.email ?? '—'}</td>
+            <td className="px-4 py-3 text-slate-500" title={new Date(c.createdAt).toLocaleString()}>{formatRelativeTime(c.createdAt)}</td>
             <td className="px-4 py-3 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
             <td className="px-4 py-3 text-slate-400">{c.version}</td>
             <td className="px-4 py-3 text-right">

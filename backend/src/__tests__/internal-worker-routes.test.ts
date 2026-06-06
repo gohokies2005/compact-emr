@@ -10,6 +10,7 @@ const TEST_TOKEN = 'phase7b-test-worker-token-must-be-16+chars';
 
 function makeDb(initialDoctorPack: DoctorPackRecord | null = null, initialDocument: { id: string; caseId: string; s3Key: string } | null = null) {
   const pages = new Map<string, DocumentPageRecord>();
+  const intakePages = new Map<string, { id: string; intakeS3Key: string; pageNumber: number; text: string; confidence: number | null; pageCount: number | null; readStatus: string | null; jobTag: string | null }>();
   let doctorPack: DoctorPackRecord | null = initialDoctorPack;
   const fileReadStatuses = new Map<string, { id: string; caseId: string; filePath: string; terminalStatus: string; attemptsJson: unknown[]; lastCheckedAt: Date; version: number }>();
   let nextFrsId = 1;
@@ -35,6 +36,24 @@ function makeDb(initialDoctorPack: DoctorPackRecord | null = null, initialDocume
         let n = 0;
         for (const r of pages.values()) { if ((r as { documentId?: string }).documentId === args.where.documentId) n += 1; }
         return n;
+      }),
+    },
+    // #8 v2 parse-at-intake OCR cache.
+    intakePage: {
+      upsert: vi.fn(async (args: { where: { intakeS3Key_pageNumber: { intakeS3Key: string; pageNumber: number } }; create: Record<string, unknown>; update: Record<string, unknown> }) => {
+        const k = `${args.where.intakeS3Key_pageNumber.intakeS3Key}#${args.where.intakeS3Key_pageNumber.pageNumber}`;
+        const existing = intakePages.get(k);
+        const row = existing
+          ? { ...existing, ...args.update }
+          : { id: `IP-${intakePages.size + 1}`, ...args.create } as typeof existing & { id: string };
+        intakePages.set(k, row as NonNullable<typeof existing>);
+        return row;
+      }),
+      findFirst: vi.fn(async (args: { where: Record<string, unknown> }) => {
+        for (const r of intakePages.values()) {
+          if (r.jobTag === args.where['jobTag'] && r.pageNumber === args.where['pageNumber']) return r;
+        }
+        return null;
       }),
     },
     doctorPack: {
@@ -320,6 +339,44 @@ describe('GET /internal/documents/by-s3-key', () => {
     const res = await request(appFor(db))
       .get('/api/v1/internal/documents/by-s3-key')
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN);
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('parse-at-intake (#8 v2) intake OCR endpoints', () => {
+  const KEY = 'intake/INTAKE-1/records.pdf';
+  it('ocr-start records the jobTag placeholder, then by-job-tag/pages resolves + upserts as read', async () => {
+    const { db } = makeDb();
+    const start = await request(appFor(db))
+      .post('/api/v1/internal/intakes/ocr-start')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ intakeS3Key: KEY, jobTag: 'abc123' });
+    expect(start.status).toBe(201);
+
+    const pagesRes = await request(appFor(db))
+      .post('/api/v1/internal/intakes/by-job-tag/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ jobTag: 'abc123', pages: [{ pageNumber: 1, text: 'The veteran presented to the clinic with chronic lower back pain that began during active duty service and has progressively worsened over the years since separation, with documented imaging findings of degenerative disc disease at multiple lumbar levels confirmed by the treating physician on examination today.', confidence: 0.96 }], documentPageCount: 1 });
+    expect(pagesRes.status).toBe(201);
+    expect(pagesRes.body.data.intakeS3Key).toBe(KEY);
+    expect(pagesRes.body.data.readStatus).toBe('read');
+  });
+
+  it('by-job-tag/pages returns 404 for an unknown jobTag', async () => {
+    const { db } = makeDb();
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/intakes/by-job-tag/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ jobTag: 'never-recorded', pages: [{ pageNumber: 1, text: 'some words here for the page', confidence: 0.9 }], documentPageCount: 1 });
+    expect(res.status).toBe(404);
+  });
+
+  it('ocr-start rejects a missing intakeS3Key (400)', async () => {
+    const { db } = makeDb();
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/intakes/ocr-start')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ jobTag: 'abc123' });
     expect(res.status).toBe(400);
   });
 });

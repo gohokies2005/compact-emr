@@ -12,6 +12,7 @@ import { parseCaseCreate } from '../services/case-validation.js';
 import { assignChartFilenames } from '../services/chart-filename.js';
 import { fillIntakeDerived } from '../services/intake-derive.js';
 import { renderIntakeSummaryPdf } from '../services/intake-summary-pdf.js';
+import { writeDocumentPages } from '../services/document-pages-writer.js';
 
 const PREVIEW_TTL_SECONDS = 300;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -182,6 +183,7 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     // 2) Per-file: row FIRST, then CopyObject. `document` is not on AppDb — cast (as drafter-bundle does).
     const docDb = db as unknown as {
       document: { create: (a: { data: Record<string, unknown> }) => Promise<{ id: string }>; delete: (a: { where: { id: string } }) => Promise<unknown> };
+      intakePage: { findMany: (a: { where: Record<string, unknown>; orderBy?: Record<string, string>; select?: Record<string, true> }) => Promise<{ pageNumber: number; text: string; confidence: number | null; pageCount: number | null }[]> };
     };
     const s3 = deps.s3 as { send: (cmd: unknown) => Promise<unknown> };
     const rawManifest = intakeRow.fileManifestJson;
@@ -227,6 +229,27 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
       } catch (err) {
         failed.push({ name: c.original, reason: `could not create document row: ${err instanceof Error ? err.message : String(err)}` });
         continue;
+      }
+      // #8 v2 parse-at-intake: if this file was already OCR'd at intake time (IntakePage rows for the
+      // intake/ src key), copy that text forward into document_pages NOW — BEFORE the CopyObject — so
+      // (a) the case has readable text instantly (no post-assign Textract wait) and (b) when the
+      // CopyObject fires the cases/ ObjectCreated, ocr-start sees hasPages=true and SKIPS Textract (v1
+      // guard). If there are no intake pages (not OCR'd yet, or Textract couldn't read it), this is a
+      // no-op and the CopyObject's live OCR handles the file as it does today. Correctness never
+      // depends on this — writeDocumentPages is idempotent and the live OCR is the fallback.
+      try {
+        const intakePages = await docDb.intakePage.findMany({
+          where: { intakeS3Key: c.srcKey, pageNumber: { gte: 1 } },
+          orderBy: { pageNumber: 'asc' },
+          select: { pageNumber: true, text: true, confidence: true, pageCount: true },
+        });
+        if (intakePages.length > 0) {
+          const pageCount = intakePages[0]?.pageCount ?? intakePages.length;
+          await writeDocumentPages(db, docId, intakePages.map((p) => ({ pageNumber: p.pageNumber, text: p.text, confidence: p.confidence })), pageCount);
+        }
+      } catch (err) {
+        // Non-fatal — fall through to live OCR. Surface the reason (per-item-catch rule).
+        console.error(JSON.stringify({ msg: 'intake_page_copyforward_failed', srcKey: c.srcKey, docId, error: err instanceof Error ? err.message : String(err) }));
       }
       try {
         await s3.send(new CopyObjectCommand({ Bucket: deps.bucketName, CopySource: `${deps.bucketName}/${c.srcKey}`, Key: finalKey, MetadataDirective: 'COPY' }));

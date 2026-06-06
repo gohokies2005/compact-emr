@@ -33,6 +33,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections import defaultdict
 from typing import Any
 
@@ -104,6 +105,12 @@ def start_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         return {"started": []}
 
     key = urllib.parse.unquote_plus(raw_key)
+
+    # #8 v2 parse-at-intake: intake/ objects are OCR'd in place BEFORE assign. No Document exists yet,
+    # so cache to IntakePage keyed by the intake s3 key. Branch off before the by-s3-key lookup.
+    if key.startswith("intake/"):
+        return _start_intake_ocr(bucket, key)
+
     doc = _resolve_document(key)
     if not doc:
         print(f"skipping key with no resolvable document: {key}")
@@ -129,6 +136,74 @@ def start_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     started = [{"documentId": document_id, "jobId": response["JobId"]}]
 
     return {"started": started}
+
+
+def _post_intake_ocr_start(intake_s3_key: str, job_tag: str) -> None:
+    """Record the jobTag -> intake s3Key mapping (IntakePage placeholder) BEFORE Textract starts, so
+    the async completion can route the result back (JobTag can't hold the slash-bearing s3 key)."""
+    url = f"{_api_base_url()}/api/v1/internal/intakes/ocr-start"
+    body = json.dumps({"intakeS3Key": intake_s3_key, "jobTag": job_tag}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/json", "X-Internal-Worker-Token": _worker_token()},
+    )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        if response.status >= 300:
+            raise RuntimeError(f"intake ocr-start record failed: {response.status}")
+
+
+def _start_intake_ocr(bucket: str, key: str) -> dict[str, Any]:
+    """Parse-at-intake (#8 v2): start Textract on an intake/ object. Records the jobTag->s3Key mapping
+    first; if that fails we DON'T start a job we couldn't route — the file is OCR'd at assign instead."""
+    job_tag = uuid.uuid4().hex  # 32 hex chars; "intake:" + tag = 39 < the 64-char JobTag limit
+    try:
+        _post_intake_ocr_start(key, job_tag)
+    except Exception as exc:  # noqa: BLE001 — surface + fall through to assign-time OCR
+        print(json.dumps({"msg": "ocr: intake ocr-start record failed; will OCR at assign", "key": key, "error": f"{type(exc).__name__}: {exc}"}))
+        return {"started": []}
+    sns_topic = os.environ["COMPLETION_SNS_TOPIC_ARN"]
+    sns_role_arn = os.environ["TEXTRACT_SNS_ROLE_ARN"]
+    response = textract.start_document_text_detection(
+        DocumentLocation={"S3Object": {"Bucket": bucket, "Name": key}},
+        NotificationChannel={"SNSTopicArn": sns_topic, "RoleArn": sns_role_arn},
+        JobTag="intake:" + job_tag,
+    )
+    return {"started": [{"intakeS3Key": key, "jobId": response["JobId"], "jobTag": job_tag}]}
+
+
+def _post_intake_pages(job_tag: str, pages: list[dict[str, Any]], page_count: int) -> bool:
+    """POST intake OCR pages -> /internal/intakes/by-job-tag/pages. 404 (unknown jobTag) is terminal
+    (don't retry forever); other errors raise so SNS redelivers."""
+    url = f"{_api_base_url()}/api/v1/internal/intakes/by-job-tag/pages"
+    body = json.dumps({"jobTag": job_tag, "pages": pages, "documentPageCount": page_count}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/json", "X-Internal-Worker-Token": _worker_token()},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return response.status < 300
+    except urllib.error.HTTPError as http_err:
+        if http_err.code == 404:
+            print(json.dumps({"msg": "ocr: intake jobTag not found; dropping (assign will live-OCR)", "jobTag": job_tag}))
+            return False
+        raise
+
+
+def _complete_intake(job_id: str, status: str, job_tag: str) -> dict[str, Any]:
+    """Parse-at-intake completion. Best-effort Textract-only: cache the text to IntakePage if the job
+    read text; if Textract FAILED or read nothing, do NOTHING — at assign the CopyObject's live OCR
+    (with the Claude fallback) handles it. Keeps the intake path simple + cheap (no Claude at intake)."""
+    if status != "SUCCEEDED":
+        print(json.dumps({"msg": "ocr: intake textract not SUCCEEDED; assign will live-OCR", "jobTag": job_tag, "status": status}))
+        return {"status": status, "posted": False}
+    blocks = _fetch_all_pages(job_id)
+    pages, page_count = _build_page_payload(blocks)
+    if not pages:
+        print(json.dumps({"msg": "ocr: intake textract read no text; assign will live-OCR", "jobTag": job_tag}))
+        return {"status": "EMPTY", "posted": False}
+    posted = _post_intake_pages(job_tag, pages, page_count)
+    return {"status": "POSTED" if posted else "DROPPED", "pages": len(pages), "posted": posted}
 
 
 def _fetch_all_pages(job_id: str) -> list[dict[str, Any]]:
@@ -333,7 +408,15 @@ def completion_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         message = json.loads(message_raw)
         job_id = message.get("JobId")
         status = message.get("Status")
-        document_id = message.get("JobTag")  # we stamped this on StartDocumentTextDetection
+        job_tag = message.get("JobTag")  # we stamped this on StartDocumentTextDetection
+
+        # #8 v2 parse-at-intake: intake jobs are tagged "intake:<jobTag>" and route to IntakePage.
+        if isinstance(job_tag, str) and job_tag.startswith("intake:"):
+            intake_result = _complete_intake(job_id, status, job_tag[len("intake:"):])
+            processed.append({"jobId": job_id, "intake": True, **intake_result})
+            continue
+
+        document_id = job_tag  # cases path: JobTag == documentId
 
         if status != "SUCCEEDED":
             # Textract failed. Try the Claude OCR fallback; if it can't read it either, flag for the

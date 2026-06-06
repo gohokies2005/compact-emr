@@ -284,10 +284,13 @@ export class WorkersStack extends Stack {
     phiBucket.grantRead(ocrStart);
     documentsKey.grantDecrypt(ocrStart);
 
-    // EventBridge rule: PUT into cases/ in the PHI bucket fires the OCR start.
-    // C2: uploads write `cases/<caseId>/<uuid>-<filename>` (documents.ts:99 /
+    // EventBridge rule: PUT into cases/ OR intake/ in the PHI bucket fires the OCR start.
+    // C2: case uploads write `cases/<caseId>/<uuid>-<filename>` (documents.ts:99 /
     // s3-key-safety.ts isCaseDocumentS3Key). The prior `records/` prefix never matched
     // any produced key, so ocr-start was never triggered.
+    // #8 v2 parse-at-intake: the jotform-ingest worker writes uploads to `intake/<intakeId>/<file>`
+    // BEFORE assign — OCR them in place via this same async pipeline so the text is ready by assign
+    // (ocr-start branches on the intake/ prefix; there is no Document, so it caches to IntakePage).
     new events.Rule(this, 'OcrStartRule', {
       ruleName: `compact-emr-${config.envName}-ocr-on-record-upload`,
       eventPattern: {
@@ -295,7 +298,7 @@ export class WorkersStack extends Stack {
         detailType: ['Object Created'],
         detail: {
           bucket: { name: [phiBucket.bucketName] },
-          object: { key: [{ prefix: 'cases/' }] },
+          object: { key: [{ prefix: 'cases/' }, { prefix: 'intake/' }] },
         },
       },
       targets: [new targets.LambdaFunction(ocrStart, { retryAttempts: 2 })],

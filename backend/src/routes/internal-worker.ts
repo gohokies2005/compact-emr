@@ -8,6 +8,7 @@ import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
+import { writeDocumentPages } from '../services/document-pages-writer.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
 import type { FinalExtractedItem } from '../services/chart-extract-llm.js';
 import type { ExtractCategory } from '../services/chart-extractor.js';
@@ -198,153 +199,87 @@ export function createInternalWorkerRouter(db: AppDb): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const documentId = String(req.params.id);
       const parsed = parsePageUpsertBody(req.body);
-
-      const now = new Date();
-
-      const result = await db.$transaction(async (tx) => {
-        for (const page of parsed.pages) {
-          await tx.documentPage.upsert({
-            where: { documentId_pageNumber: { documentId, pageNumber: page.pageNumber } },
-            create: {
-              documentId,
-              pageNumber: page.pageNumber,
-              text: page.text,
-              confidence: page.confidence,
-            },
-            update: {
-              text: page.text,
-              confidence: page.confidence,
-              extractedAt: new Date(),
-            },
-          });
-        }
-
-        // Architect final QA finding #1 (REVIEW.md 0f8b64a): patch Document.pageCount so the
-        // page-selector's per-file caps work meaningfully. The worker is the source of truth
-        // for page count; the route's manifest builder reads from documents.page_count.
-        if (parsed.documentPageCount !== null) {
-          await (tx as unknown as { document: { update: (args: { where: { id: string }; data: { pageCount: number } }) => Promise<unknown> } }).document.update({
-            where: { id: documentId },
-            data: { pageCount: parsed.documentPageCount },
-          });
-        }
-
-        // C1 (audit 2026-05-27): bridge the Textract success path into the chart-readiness
-        // gate. Before this, a successful OCR wrote ONLY document_pages — never a
-        // file_read_status row — so evaluateChartReadiness() never saw the file as read
-        // (the gate reads file_read_status exclusively). The only writer of
-        // terminalStatus='read' was POST /cases/:id/files/read-attempts, which nothing in
-        // the cloud tree calls. Result: OCR failure blocked correctly, OCR success was
-        // invisible (empty set => ready=true). Here we resolve the document's caseId + s3Key
-        // (same join as the read-attempt-failed route below), run the concatenated page text
-        // through classifyReadAttempt so a "successful" Textract job with garbled / too-few
-        // words still lands as manual_summary_required (NOT a false 'read'), and upsert the
-        // file_read_status row keyed (caseId, s3Key) in the SAME transaction.
-        const doc = await (tx as unknown as {
-          document: { findUnique: (args: { where: { id: string }; select?: Record<string, true> }) => Promise<{ id: string; caseId: string; s3Key: string } | null> };
-        }).document.findUnique({
-          where: { id: documentId },
-          select: { id: true, caseId: true, s3Key: true },
-        });
-
-        let readStatus: { terminalStatus: string; wordCount: number; corruptedTokenRatio: number } | null = null;
-        if (doc !== null) {
-          const concatenatedText = parsed.pages.map((p) => p.text).join('\n');
-          const outcome = classifyReadAttempt({ method: 'textract', extractedText: concatenatedText });
-
-          const existing = await tx.fileReadStatus.findFirst({ where: { caseId: doc.caseId, filePath: doc.s3Key } });
-          const newAttempt = {
-            method: 'textract' as const,
-            wordCount: outcome.wordCount,
-            corruptedTokenRatio: outcome.corruptedTokenRatio,
-            attemptedAt: now.toISOString(),
-            note: outcome.succeeded
-              ? `Textract read OK (${outcome.wordCount} words)`
-              : `Textract read insufficient: ${outcome.reason}`,
-          };
-          const prior: readonly unknown[] = (existing?.attemptsJson as readonly unknown[] | undefined) ?? [];
-          const attempts = [...prior, newAttempt];
-
-          // Don't overwrite an RN's manual_summary_provided clearance (mirror the
-          // read-attempt-failed route's guard). Otherwise: read on success, else
-          // manual_summary_required (garbled / too-few-words).
-          const terminalStatus =
-            existing?.terminalStatus === 'manual_summary_provided'
-              ? 'manual_summary_provided'
-              : outcome.succeeded
-                ? 'read'
-                : 'manual_summary_required';
-
-          if (existing) {
-            await tx.fileReadStatus.update({
-              where: { id: existing.id },
-              data: {
-                terminalStatus,
-                attemptsJson: attempts,
-                lastCheckedAt: now,
-                version: { increment: 1 },
-              },
-            });
-          } else {
-            await tx.fileReadStatus.create({
-              data: {
-                caseId: doc.caseId,
-                filePath: doc.s3Key,
-                fileSha256: '',
-                terminalStatus,
-                attemptsJson: attempts,
-                lastCheckedAt: now,
-              },
-            });
-          }
-          readStatus = { terminalStatus, wordCount: outcome.wordCount, corruptedTokenRatio: outcome.corruptedTokenRatio };
-        }
-
-        await tx.activityLog.create({
-          data: {
-            actorUserId: SERVICE_ACTORS.WORKER,
-            action: 'document_pages_extracted',
-            ...(doc !== null ? { caseId: doc.caseId } : {}),
-            detailsJson: {
-              documentId,
-              pageCount: parsed.pages.length,
-              ...(parsed.documentPageCount !== null && { documentPageCount: parsed.documentPageCount }),
-              ...(readStatus !== null && { readTerminalStatus: readStatus.terminalStatus, readWordCount: readStatus.wordCount }),
-            },
-          },
-        });
-
-        return {
-          documentId,
-          caseId: doc !== null ? doc.caseId : null,
-          pagesUpserted: parsed.pages.length,
-          documentPageCount: parsed.documentPageCount,
-          ...(readStatus !== null && { readTerminalStatus: readStatus.terminalStatus }),
-        };
-      },
-      // A 1,182-page Blue Button means 1,182 sequential upserts + the readiness logic, all in one
-      // interactive transaction. Prisma's default 5s timeout would roll the whole commit back
-      // (P2028) on a big record — trading the old PayloadTooLarge for a different 500. Raise the
-      // ceiling so large legitimate records commit. (2026-06-03, with the 50mb body-limit fix.)
-      { timeout: 30_000, maxWait: 10_000 });
-
-      // Chart auto-extract trigger. Runs AFTER the page-write transaction has COMMITTED, in a
-      // log-only try/catch: an enqueue/latch failure can never roll back or affect the OCR write
-      // above. Fires exactly once per (case, doc-set) once all docs are OCR-terminal. (2026-06-03)
-      if (result.caseId !== null) {
-        try {
-          await maybeEnqueueChartExtract(db, result.caseId);
-        } catch (err) {
-          console.error(JSON.stringify({
-            msg: 'chart_extract_enqueue_failed',
-            documentId,
-            caseId: result.caseId,
-            error: err instanceof Error ? err.message : String(err),
-          }));
-        }
-      }
-
+      // Single-source side-effect (extracted to document-pages-writer.ts so the parse-at-intake
+      // assign path copies text forward through the EXACT same pages + readiness-bridge + chart-
+      // extract logic — #8 v2). Behavior is byte-for-byte the prior inline transaction.
+      const result = await writeDocumentPages(db, documentId, parsed.pages, parsed.documentPageCount);
       res.status(201).json({ data: result });
+    }),
+  );
+
+  // ===== Parse-at-intake (#8 v2): intake-time OCR cache (IntakePage) =====
+  // intakePage is not on the AppDb hand-rolled delegate — cast like `document` elsewhere.
+  type IntakePageRow = { id: string; intakeS3Key: string; pageNumber: number; jobTag: string | null };
+  const intakePageDb = db as unknown as {
+    intakePage: {
+      upsert: (a: { where: { intakeS3Key_pageNumber: { intakeS3Key: string; pageNumber: number } }; create: Record<string, unknown>; update: Record<string, unknown> }) => Promise<IntakePageRow>;
+      findFirst: (a: { where: Record<string, unknown>; select?: Record<string, true> }) => Promise<{ intakeS3Key: string } | null>;
+    };
+  };
+
+  /**
+   * POST /api/v1/internal/intakes/ocr-start  { intakeS3Key, jobTag }
+   * The OCR worker records the Textract jobTag -> intake s3Key mapping BEFORE starting Textract on an
+   * intake/ object (Textract's JobTag can't carry the slash-bearing s3Key). Written as the
+   * pageNumber=0 placeholder row; the async completion resolves the s3Key back via jobTag. Idempotent.
+   */
+  router.post(
+    '/internal/intakes/ocr-start',
+    asyncHandler(async (req: Request, res: Response) => {
+      const body = req.body;
+      if (!isRecord(body)) { badRequest('Request body must be an object'); return; }
+      const intakeS3Key = body['intakeS3Key'];
+      const jobTag = body['jobTag'];
+      if (typeof intakeS3Key !== 'string' || intakeS3Key.length === 0) { badRequest('intakeS3Key is required', { field: 'intakeS3Key' }); return; }
+      if (typeof jobTag !== 'string' || jobTag.length === 0 || jobTag.length > 64) { badRequest('jobTag is required (<=64 chars)', { field: 'jobTag' }); return; }
+      await intakePageDb.intakePage.upsert({
+        where: { intakeS3Key_pageNumber: { intakeS3Key, pageNumber: 0 } },
+        create: { intakeS3Key, pageNumber: 0, text: '', jobTag, readStatus: 'processing' },
+        update: { jobTag, readStatus: 'processing' },
+      });
+      res.status(201).json({ data: { ok: true } });
+    }),
+  );
+
+  /**
+   * POST /api/v1/internal/intakes/by-job-tag/pages  { jobTag, pages:[{pageNumber,text,confidence}], documentPageCount? }
+   * Worker callback when intake-time Textract SUCCEEDS with text. Resolves jobTag -> intakeS3Key via
+   * the placeholder, then upserts the real IntakePage rows (pageNumber >= 1) + computes readStatus the
+   * same way the case path does (classifyReadAttempt, so a garbled/too-short read isn't a false 'read').
+   * 404 if the jobTag is unknown. At assign these rows are copied forward into document_pages.
+   */
+  router.post(
+    '/internal/intakes/by-job-tag/pages',
+    asyncHandler(async (req: Request, res: Response) => {
+      const parsed = parsePageUpsertBody(req.body); // validates pages (pageNumber>=1) + documentPageCount
+      const body = req.body as Record<string, unknown>;
+      const jobTag = body['jobTag'];
+      if (typeof jobTag !== 'string' || jobTag.length === 0) { badRequest('jobTag is required', { field: 'jobTag' }); return; }
+      const placeholder = await intakePageDb.intakePage.findFirst({ where: { jobTag, pageNumber: 0 }, select: { intakeS3Key: true } });
+      if (placeholder === null) {
+        throw new HttpError(404, 'not_found', 'No intake OCR job for that jobTag', { jobTag });
+      }
+      const intakeS3Key = placeholder.intakeS3Key;
+      const concatenatedText = parsed.pages.map((p) => p.text).join('\n');
+      const outcome = classifyReadAttempt({ method: 'textract', extractedText: concatenatedText });
+      const readStatus = outcome.succeeded ? 'read' : 'manual_summary_required';
+      const txDb = db as unknown as { $transaction: (fn: (tx: typeof intakePageDb) => Promise<unknown>) => Promise<unknown> };
+      await txDb.$transaction(async (tx) => {
+        for (const p of parsed.pages) {
+          await tx.intakePage.upsert({
+            where: { intakeS3Key_pageNumber: { intakeS3Key, pageNumber: p.pageNumber } },
+            create: { intakeS3Key, pageNumber: p.pageNumber, text: p.text, confidence: p.confidence, pageCount: parsed.documentPageCount, readStatus },
+            update: { text: p.text, confidence: p.confidence, pageCount: parsed.documentPageCount, readStatus },
+          });
+        }
+        // Stamp the placeholder so the pool can show "parsed" / "needs manual" without scanning pages.
+        await tx.intakePage.upsert({
+          where: { intakeS3Key_pageNumber: { intakeS3Key, pageNumber: 0 } },
+          create: { intakeS3Key, pageNumber: 0, text: '', jobTag, readStatus },
+          update: { readStatus },
+        });
+      });
+      res.status(201).json({ data: { intakeS3Key, pagesUpserted: parsed.pages.length, readStatus } });
     }),
   );
 

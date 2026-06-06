@@ -789,6 +789,31 @@ model DocumentPage {
   @@map("document_pages")
 }
 
+// Parse-at-intake OCR cache (#8 v2). Intake files are OCR'd IN PLACE (the EventBridge rule fires
+// ocr-start on the intake/ prefix too) BEFORE an RN assigns them to a case — so the text is ready
+// by assign time and isn't re-OCR'd. Keyed by the intake S3 key (intake/<intakeId>/<file>); NO FK to
+// Intake (intake is a staging table; the key already namespaces by intakeId). At assign the text is
+// copied forward into document_pages via the existing /pages path. The pageNumber=0 row is a
+// placeholder written at OCR start carrying the Textract jobTag, so the async completion can resolve
+// which intake key a finished job belongs to (Textract JobTag can't hold the slash-bearing s3Key).
+model IntakePage {
+  id          String   @id @default(uuid())
+  intakeS3Key String   @map("intake_s3_key")
+  pageNumber  Int      @map("page_number")
+  text        String   @default("")
+  confidence  Float?
+  pageCount   Int?     @map("page_count")
+  readStatus  String?  @map("read_status") @db.VarChar(40) // read | manual_summary_required (mirrors file_read_status)
+  jobTag      String?  @map("job_tag") @db.VarChar(64) // on the pageNumber=0 placeholder: the Textract job tag
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([intakeS3Key, pageNumber], map: "intake_pages_key_page_uq")
+  @@index([intakeS3Key])
+  @@index([jobTag])
+  @@map("intake_pages")
+}
+
 model DoctorPack {
   id             String    @id @default(uuid())
   caseId         String    @map("case_id")

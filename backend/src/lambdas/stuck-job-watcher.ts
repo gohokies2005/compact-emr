@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
+import { DRAFT_JOB_WATCHER_SWEPT_MESSAGE } from '../services/draft-job-constants.js';
 
 /**
  * Architect QA F6: stuck-Fargate-task watcher.
@@ -103,7 +104,7 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
           data: {
             state: 'failed',
             failureClass: 'system',
-            errorMessage: 'Heartbeat stale; Fargate task assumed crashed. Watcher swept.',
+            errorMessage: DRAFT_JOB_WATCHER_SWEPT_MESSAGE,
             completedAt: now,
             lastHeartbeatAt: now,
           },

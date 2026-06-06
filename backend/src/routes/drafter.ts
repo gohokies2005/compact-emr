@@ -8,6 +8,7 @@ import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import { getDraftReadiness } from '../services/draft-readiness.js';
 import { publishDraftJobQueued } from '../services/draft-job-queue.js';
+import { DRAFT_JOB_WATCHER_SWEPT_MESSAGE } from '../services/draft-job-constants.js';
 import {
   buildDrafterBundle,
   buildJobBundleS3Key,
@@ -915,6 +916,87 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
             jobId,
             state: existing.state,
           });
+        }
+
+        // RESURRECT (2026-06-06): the stuck-job watcher FALSE-POSITIVE-reaped this job (marked it
+        // 'failed'), but the worker actually finished a real letter and is now posting it. Merging
+        // artifacts onto the 'failed' row alone is NOT enough — resolveCurrent() reads
+        // Case.currentVersion, so the letter would stay unreachable (the RN sees "paused/failed"
+        // while the letter sits in S3). Run the SAME case transition the happy path uses so the
+        // letter SURFACES. Keyed on the EXACT watcher errorMessage (NOT failureClass='system', which
+        // RN-cancel also uses) + a genuine completion (runComplete + both artifact keys). Cancelled
+        // jobs were already 409'd above. KEEP IN SYNC with the happy-path completion below.
+        const wasWatcherSwept = existing.errorMessage === DRAFT_JOB_WATCHER_SWEPT_MESSAGE;
+        const incomingIsRealLetter =
+          parsed.runComplete === true &&
+          typeof parsed.artifactPdfS3Key === 'string' && parsed.artifactPdfS3Key.length > 0 &&
+          typeof parsed.artifactTxtS3Key === 'string' && parsed.artifactTxtS3Key.length > 0;
+        if (wasWatcherSwept && incomingIsRealLetter) {
+          const resurrected = await db.$transaction(async (tx) => {
+            const job = await tx.draftJob.update({
+              where: { id: jobId },
+              data: {
+                state: 'done',
+                artifactPdfS3Key: parsed.artifactPdfS3Key,
+                artifactTxtS3Key: parsed.artifactTxtS3Key,
+                ...(parsed.artifactDocxS3Key !== undefined ? { artifactDocxS3Key: parsed.artifactDocxS3Key } : {}),
+                manifestSnapshot: parsed.manifest,
+                gradeSidecarJson: parsed.gradeSidecar,
+                ...(parsed.costUsd !== undefined ? { costUsd: parsed.costUsd } : {}),
+                failureClass: null,
+                errorMessage: null,
+                completedAt: now,
+                lastHeartbeatAt: now,
+              },
+            });
+            const caseUpdated = await tx.case.update({
+              where: { id: existing.caseId },
+              data: {
+                probativeScore: parsed.probativeScore,
+                grade: parsed.grade,
+                shipRecommendation: parsed.shipRecommendation,
+                operatorState: parsed.operatorState,
+                operatorMessage: parsed.operatorMessage,
+                runComplete: true,
+                currentVersion: existing.version, // <-- the real fix: what resolveCurrent() reads
+                status: 'rn_review',
+                version: { increment: 1 },
+              },
+            });
+            // Idempotent LetterRevision mirror (unique [caseId,version]) — same as the happy path.
+            const existingRev = await tx.letterRevision.findFirst({ where: { caseId: existing.caseId, version: existing.version } });
+            if (existingRev === null) {
+              await tx.letterRevision.create({
+                data: {
+                  caseId: existing.caseId,
+                  version: existing.version,
+                  parentVersion: existing.parentVersion ?? existing.version,
+                  source: 'drafter_run',
+                  artifactTxtS3Key: parsed.artifactTxtS3Key,
+                  artifactPdfS3Key: parsed.artifactPdfS3Key ?? null,
+                  artifactDocxS3Key: parsed.artifactDocxS3Key ?? null,
+                  editedBy: SERVICE_ACTORS.DRAFTER,
+                  editorRole: 'drafter',
+                  sanityJson: null,
+                },
+              });
+            }
+            await tx.activityLog.create({
+              data: {
+                actorUserId: SERVICE_ACTORS.DRAFTER,
+                caseId: existing.caseId,
+                action: 'draft_job_resurrected',
+                detailsJson: {
+                  jobId,
+                  version: existing.version,
+                  note: 'Watcher-swept job posted a real completed letter; resurrected to rn_review and currentVersion advanced so the letter surfaces.',
+                },
+              },
+            });
+            return { job, case: caseUpdated };
+          });
+          res.json({ data: resurrected, resurrected: true });
+          return;
         }
 
         const recovered = await db.$transaction(async (tx) => {

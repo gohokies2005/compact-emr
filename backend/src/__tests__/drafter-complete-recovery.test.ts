@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDrafterWorkerRouter } from '../routes/drafter.js';
 import { isHttpError, sendError } from '../http/errors.js';
 import type { AppDb } from '../services/db-types.js';
+import { DRAFT_JOB_WATCHER_SWEPT_MESSAGE } from '../services/draft-job-constants.js';
 
 /**
  * Regression coverage for the late-artifact-recovery branch on
@@ -202,6 +203,46 @@ describe('POST /internal/drafter/jobs/:id/complete — late-artifact recovery', 
     // A completed draft now waits in rn_review for the RN to send it to the doctor — even when the
     // grader says "ship". No auto-route to physician_review. (Ryan 2026-06-04.)
     expect(cr.status).toBe('rn_review');
+  });
+
+  it('RESURRECTS a watcher-swept job that posts a REAL completed letter (advances currentVersion → letter surfaces)', async () => {
+    const { db, tx, job, caseRow: cr } = makeDb(
+      jobRow({ state: 'failed', errorMessage: DRAFT_JOB_WATCHER_SWEPT_MESSAGE, completedAt: new Date('2026-05-28T00:10:00.000Z') }),
+      caseRow({ status: 'drafting', currentVersion: 14, operatorState: 'paused' }),
+    );
+    const caseVersionBefore = cr.version;
+
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send(completeBody({ runComplete: true, operatorState: 'ready', gradeSidecar: { probative_score: 9, grade: 'A', ship_recommendation: 'ship' } }));
+
+    expect(res.status).toBe(200);
+    expect(res.body.resurrected).toBe(true);
+    expect(job.state).toBe('done');
+    expect(job.artifactPdfS3Key).toBe('drafter-artifacts/CASE-1/v15/v15.pdf');
+    expect(job.errorMessage).toBeNull();
+    // THE FIX: currentVersion advances to the job's version so resolveCurrent() reaches the letter.
+    expect(cr.currentVersion).toBe(15);
+    expect(cr.status).toBe('rn_review');
+    expect(cr.runComplete).toBe(true);
+    expect(cr.version).toBe(caseVersionBefore + 1);
+    expect(tx.letterRevision.create).toHaveBeenCalledTimes(1);
+    expect(tx.activityLog.create.mock.calls[0]?.[0]?.data?.action).toBe('draft_job_resurrected');
+  });
+
+  it('does NOT resurrect a watcher-swept job whose /complete is NOT a real completion (runComplete=false → merge only)', async () => {
+    const { job, caseRow: cr, db } = makeDb(
+      jobRow({ state: 'failed', errorMessage: DRAFT_JOB_WATCHER_SWEPT_MESSAGE, completedAt: new Date('2026-05-28T00:10:00.000Z') }),
+      caseRow({ status: 'drafting', currentVersion: 14 }),
+    );
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send(completeBody({ runComplete: false }));
+    expect(res.status).toBe(200);
+    expect(res.body.recovered).toBe(true); // merge path, not resurrect
+    expect(res.body.resurrected).toBeUndefined();
+    expect(job.state).toBe('failed');
+    expect(cr.currentVersion).toBe(14); // NOT advanced
   });
 
   it('returns 404 for an unknown job', async () => {

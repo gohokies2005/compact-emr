@@ -627,7 +627,7 @@ export class WorkersStack extends Stack {
         // is the resolved full ARN, which the `*` grant below covers.
         JOTFORM_API_KEY_SECRET_ARN: jotformApiKeySecret.secretName,
         JOTFORM_WEBHOOK_SECRET_ARN: jotformWebhookSecretForSweep.secretName,
-        LOOKBACK_MINUTES: '180',
+        LOOKBACK_MINUTES: '360',
       },
     });
     // IAM FIX (2026-06-05 incident, defense-in-depth). The ACTUAL blocker was the partial-ARN

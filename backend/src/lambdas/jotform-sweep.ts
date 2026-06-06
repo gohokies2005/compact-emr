@@ -28,9 +28,26 @@ interface SweepDeps {
 }
 export interface SweepResult { listed: number; replayed: number; failed: number; failures: Array<{ submissionId: string; reason: string }>; sinceIso: string }
 
-function fmtUtc(d: Date): string {
-  const p = (n: number): string => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+/**
+ * Format a Date as `YYYY-MM-DD HH:MM:SS` in US Eastern (America/New_York).
+ *
+ * CRITICAL (2026-06-06 incident, Arturo Perez): Jotform's `created_at:gt` filter — and the
+ * created_at it returns — are in US EASTERN, NOT UTC, regardless of the account's timezone setting.
+ * (Verified against Jotform's own API docs/support.) The sweep previously formatted the cutoff in
+ * UTC; in EDT that cutoff is 4 HOURS in the future relative to what Jotform compares against, so the
+ * filter matched NOTHING and every run logged `listed:0` — the safety net ran clean but replayed
+ * zero submissions, EVER. Formatting in America/New_York (DST-aware via Intl) fixes it.
+ */
+export function fmtEastern(d: Date): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '00';
+  let hh = get('hour');
+  if (hh === '24') hh = '00'; // some runtimes emit '24' for midnight under hour12:false
+  return `${get('year')}-${get('month')}-${get('day')} ${hh}:${get('minute')}:${get('second')}`;
 }
 
 /** Core sweep — deps injected so it's unit-testable without network. */
@@ -88,11 +105,16 @@ function postWebhook(apiDomain: string, secret: string, formId: string, submissi
 export async function handler(): Promise<SweepResult> {
   const jotformHost = process.env['JOTFORM_API_HOST'] ?? 'hipaa-api.jotform.com';
   const apiDomain = (process.env['API_DOMAIN'] ?? '').replace(/^https?:\/\//, '').replace(/\/$/, '');
-  const lookbackMin = Number.parseInt(process.env['LOOKBACK_MINUTES'] ?? '180', 10) || 180;
+  // 360-min (6h) default lookback: wide enough that a submission Jotform's webhook dropped and which
+  // then sat for a few hours still gets caught by the next hourly run (Arturo sat ~3h). Replays are
+  // idempotent (the webhook's status-gated re-enqueue no-ops already-ingested ones), so over-wide is
+  // free. The hourly cron means each submission gets ~6 sweep attempts before it ages out.
+  const lookbackMin = Number.parseInt(process.env['LOOKBACK_MINUTES'] ?? '360', 10) || 360;
   if (cachedApiKey === null) cachedApiKey = await readSecret(process.env['JOTFORM_API_KEY_SECRET_ARN'] ?? '');
   if (cachedSecret === null) cachedSecret = await readSecret(process.env['JOTFORM_WEBHOOK_SECRET_ARN'] ?? '');
   const apiKey = cachedApiKey; const secret = cachedSecret;
-  const sinceIso = fmtUtc(new Date(Date.now() - lookbackMin * 60 * 1000));
+  // Eastern, NOT UTC — Jotform's created_at filter is US Eastern (see fmtEastern). This was the bug.
+  const sinceIso = fmtEastern(new Date(Date.now() - lookbackMin * 60 * 1000));
 
   return runSweep(sinceIso, {
     listSubmissions: async (since, offset) => {

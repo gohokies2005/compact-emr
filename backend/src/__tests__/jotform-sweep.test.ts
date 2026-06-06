@@ -1,5 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
-import { runSweep } from '../lambdas/jotform-sweep.js';
+import { runSweep, fmtEastern } from '../lambdas/jotform-sweep.js';
+
+// Regression for the 2026-06-06 incident (Arturo Perez): the sweep formatted its created_at:gt
+// cutoff in UTC, but Jotform's filter is US Eastern — so the cutoff was 4-5h in the future and the
+// sweep matched NOTHING every run (listed:0). fmtEastern must render the instant in America/New_York.
+describe('fmtEastern (Jotform created_at filter is US Eastern, not UTC)', () => {
+  it('renders a summer (EDT, UTC-4) instant in Eastern', () => {
+    // 2026-06-05 22:14:41Z = Arturo. EDT is UTC-4 → 18:14:41.
+    expect(fmtEastern(new Date('2026-06-05T22:14:41Z'))).toBe('2026-06-05 18:14:41');
+  });
+  it('renders a winter (EST, UTC-5) instant in Eastern', () => {
+    expect(fmtEastern(new Date('2026-01-15T10:00:00Z'))).toBe('2026-01-15 05:00:00');
+  });
+  it('is NOT equal to the UTC rendering (the old bug)', () => {
+    const d = new Date('2026-06-05T22:14:41Z');
+    expect(fmtEastern(d)).not.toBe('2026-06-05 22:14:41');
+  });
+});
 
 function subs(n: number, startId = 0): Array<{ id: string; form_id: string; created_at: string }> {
   return Array.from({ length: n }, (_, i) => ({ id: `S${startId + i}`, form_id: 'F1', created_at: '2026-06-05 08:00:00' }));

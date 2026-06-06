@@ -169,12 +169,20 @@ export interface CaseMessageDelegate {
 // the minimal surface the delivery route needs (find existing rows for idempotency + create).
 export interface EmailRecord {
   id: string;
-  caseId: string;
+  // Feature B: nullable — chart-level email (no claim) or unmatched (no veteran either).
+  caseId: string | null;
+  veteranId?: string | null;
   direction: 'inbound' | 'outbound';
   subject: string;
   body: string;
   fromAddress: string;
   toAddress: string;
+  mailbox?: string | null;
+  messageId?: string | null;
+  snippet?: string | null;
+  rawS3Key?: string | null;
+  attachmentsJson?: unknown;
+  receivedAt?: Date | null;
   // NULL until a real transmit happens (a composed/queued stub email has no sentAt).
   sentAt: Date | null;
   // 'sent' (transmitted) | 'queued' (composed, not yet transmitted).
@@ -187,8 +195,11 @@ export interface EmailRecord {
 
 export interface EmailDelegate {
   findFirst(args: unknown): Promise<EmailRecord | null>;
+  findUnique(args: unknown): Promise<EmailRecord | null>;
   findMany(args: unknown): Promise<readonly EmailRecord[]>;
   create(args: unknown): Promise<EmailRecord>;
+  update(args: unknown): Promise<EmailRecord>;
+  count(args: unknown): Promise<number>;
 }
 
 export interface PaymentRecord {

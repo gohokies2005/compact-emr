@@ -38,6 +38,8 @@ import { createCase, patchCase, type CreateCaseInput } from '../../api/cases';
 import { useAuth } from '../../auth/useAuth';
 import { NewClaimModal } from '../cases/NewClaimModal';
 import { ChartNotesPanel } from './ChartNotesPanel';
+import { EmailLogPanel } from '../../components/EmailLogPanel';
+import { listVeteranEmails } from '../../api/emails';
 import { ConditionSelect } from '../../components/ConditionSelect';
 import { classifyEntry, isZip, uploadErrorReason, type CandidateResult } from './documentUpload';
 import { formatDateOnly, formatPhone, formatNameLastFirst } from '../../lib/format';
@@ -48,11 +50,12 @@ const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
 // All six chart sections are top-level tabs. Order is owner-specified (2026-05-30): the
 // previously-buried Pending Claims / Staff Notes / Documents tables come FIRST (they were
 // stacked below the chart and hard to find), then the clinical chart tabs.
-type ChartTab = 'claims' | 'notes' | 'documents' | 'conditions' | 'problems' | 'medications';
+type ChartTab = 'claims' | 'notes' | 'documents' | 'emails' | 'conditions' | 'problems' | 'medications';
 const CHART_TABS: readonly TabItem<ChartTab>[] = [
   { id: 'claims', label: 'FRN Claims' },
   { id: 'notes', label: 'Staff Notes' },
   { id: 'documents', label: 'Documents' },
+  { id: 'emails', label: 'Email' },
   { id: 'conditions', label: 'Service Connected Conditions' },
   { id: 'problems', label: 'Active Problems' },
   { id: 'medications', label: 'Medications' },
@@ -99,6 +102,7 @@ export function VeteranChart() {
         <div role="tabpanel" hidden={tab !== 'claims'}><CasesPanel veteranId={veteranId} rows={v.cases} onChange={invalidate} /></div>
         <div role="tabpanel" hidden={tab !== 'notes'}><ChartNotesPanel veteranId={veteranId} /></div>
         <div role="tabpanel" hidden={tab !== 'documents'}><DocumentsPanel veteranId={veteranId} cases={v.cases} documents={documents.data?.data ?? []} onChange={invalidate} /></div>
+        <div role="tabpanel" hidden={tab !== 'emails'}><EmailLogPanel queryKey={['veteran', veteranId, 'emails']} fetcher={() => listVeteranEmails(veteranId)} scope="veteran" /></div>
         <div role="tabpanel" hidden={tab !== 'conditions'}><ConditionsPanel veteranId={veteranId} rows={v.scConditions} onChange={invalidate} /></div>
         <div role="tabpanel" hidden={tab !== 'problems'}><ProblemsPanel veteranId={veteranId} rows={v.activeProblems} onChange={invalidate} /></div>
         <div role="tabpanel" hidden={tab !== 'medications'}><MedicationsPanel veteranId={veteranId} rows={v.activeMedications} onChange={invalidate} /></div>

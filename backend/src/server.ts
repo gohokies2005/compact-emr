@@ -7,6 +7,7 @@ import { prisma } from './db/client.js';
 import { createVeteransRouter } from './routes/veterans.js';
 import { createDocumentsRouter } from './routes/documents.js';
 import { createCasesRouter } from './routes/cases.js';
+import { createEmailsRouter } from './routes/emails.js';
 import { createChartNotesRouter } from './routes/chart-notes.js';
 import { createCdsRouter } from './routes/cds.js';
 import { createLookupRouter } from './routes/lookup.js';
@@ -94,6 +95,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
   app.use('/api/v1', authenticateJwt(), createDocumentsRouter());
   app.use('/api/v1', authenticateJwt(), createCasesRouter(db));
+  app.use('/api/v1', authenticateJwt(), createEmailsRouter(db, { bucketName: process.env.PHI_BUCKET_NAME, s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) }));
   const cognitoUserPoolId = process.env.COGNITO_USER_POOL_ID;
   app.use('/api/v1', authenticateJwt(), createUsersRouter(db, cognitoUserPoolId ? { cognito: makeCognitoAdmin(cognitoUserPoolId) } : {}));
   app.use('/api/v1', authenticateJwt(), createPhysiciansRouter(db, { bucketName: process.env.PHI_BUCKET_NAME, s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) }));

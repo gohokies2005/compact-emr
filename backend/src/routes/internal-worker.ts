@@ -9,6 +9,7 @@ import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
+import { candidateAddresses, decideVeteranMatch, deriveEmailId, makeSnippet, normalizeEmailAddress } from '../services/email-matching.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
 import type { FinalExtractedItem } from '../services/chart-extract-llm.js';
 import type { ExtractCategory } from '../services/chart-extractor.js';
@@ -204,6 +205,64 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       // extract logic — #8 v2). Behavior is byte-for-byte the prior inline transaction.
       const result = await writeDocumentPages(db, documentId, parsed.pages, parsed.documentPageCount);
       res.status(201).json({ data: result });
+    }),
+  );
+
+  /**
+   * POST /api/v1/internal/emails/ingest — Feature B inbound email ingest (gmail-ingest Lambda).
+   * Body: { messageId, mailbox, subject, body, fromAddress, toAddress, toAddresses?, ccAddresses?,
+   *         frnAddresses?, receivedAt?, rawS3Key?, attachments? }.
+   * IDEMPOTENT (architect C3/C4): the row id derives from the Message-ID, so a retry / a copy from a
+   * second monitored mailbox collides on the PK or the message_id unique → we return {deduped:true}
+   * (200) and LOG the dropped mailbox (C2 — never a silent skip). Matching (architect I1): normalized,
+   * non-FRN party only, NEVER auto-assign on >1-veteran ambiguity → unmatched queue.
+   */
+  router.post(
+    '/internal/emails/ingest',
+    asyncHandler(async (req: Request, res: Response) => {
+      const b = req.body;
+      if (!isRecord(b)) { badRequest('Request body must be an object'); return; }
+      const str = (k: string): string => (typeof b[k] === 'string' ? (b[k] as string) : '');
+      const arr = (k: string): string[] => (Array.isArray(b[k]) ? (b[k] as unknown[]).filter((x): x is string => typeof x === 'string') : []);
+      const messageId = str('messageId').trim();
+      if (!messageId) { badRequest('messageId is required', { field: 'messageId' }); return; }
+      const id = deriveEmailId(messageId);
+
+      // Resolve the veteran (or leave unmatched). Candidate = non-FRN addresses on From+To+Cc.
+      const candidates = candidateAddresses({ from: str('fromAddress'), to: [str('toAddress'), ...arr('toAddresses')], cc: arr('ccAddresses'), frnAddresses: [str('mailbox'), ...arr('frnAddresses')] });
+      const byAddr = new Map<string, { id: string }[]>();
+      for (const addr of candidates) {
+        const vets = await db.veteran.findMany({ where: { email: { equals: addr, mode: 'insensitive' }, inactive: false }, select: { id: true } });
+        byAddr.set(addr, (vets as { id: string }[]).map((v) => ({ id: v.id })));
+      }
+      const match = decideVeteranMatch(candidates, (addr) => byAddr.get(normalizeEmailAddress(addr)) ?? byAddr.get(addr) ?? []);
+      const veteranId = match.status === 'matched' ? match.veteranId : null;
+
+      const body = str('body');
+      const receivedAt = str('receivedAt') ? new Date(str('receivedAt')) : new Date();
+      const attachments = Array.isArray(b['attachments']) ? b['attachments'] : [];
+      try {
+        const row = await db.email.create({
+          data: {
+            id, messageId, veteranId, caseId: null, direction: 'inbound',
+            subject: str('subject'), body, snippet: makeSnippet(body),
+            fromAddress: str('fromAddress'), toAddress: str('toAddress'), mailbox: str('mailbox') || null,
+            receivedAt, status: 'received',
+            ...(str('rawS3Key') ? { rawS3Key: str('rawS3Key') } : {}),
+            ...(attachments.length ? { attachmentsJson: attachments } : {}),
+          },
+          select: { id: true, veteranId: true },
+        });
+        await db.activityLog.create({ data: { actorUserId: SERVICE_ACTORS.DRAFTER, action: 'email_ingested', veteranId: row.veteranId ?? undefined, detailsJson: { emailId: id, mailbox: str('mailbox'), match: match.status, ...(match.status === 'unmatched' ? { reason: match.reason } : {}) } } });
+        res.status(201).json({ data: { emailId: id, deduped: false, match: match.status, veteranId: row.veteranId } });
+      } catch (e) {
+        const isP2002 = typeof e === 'object' && e !== null && 'code' in e && (e as { code?: unknown }).code === 'P2002';
+        if (!isP2002) throw e;
+        // Same Message-ID already ingested (a retry, or the message also landed in another monitored
+        // mailbox). Surface the dropped mailbox so the dedupe is observable, never a silent skip (C2).
+        await db.activityLog.create({ data: { actorUserId: SERVICE_ACTORS.DRAFTER, action: 'email_ingest_deduped', detailsJson: { emailId: id, droppedMailbox: str('mailbox') } } });
+        res.json({ data: { emailId: id, deduped: true } });
+      }
     }),
   );
 

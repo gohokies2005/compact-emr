@@ -17,6 +17,8 @@ import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
 import { DecisionsOverridesPanel } from '../../components/DecisionsOverridesPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
+import { EmailLogPanel } from '../../components/EmailLogPanel';
+import { listCaseEmails } from '../../api/emails';
 import { getArtifactPdfUrl, postDraft, cancelDraftJob } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
 import { listDocuments, reocrDocument } from '../../api/veterans';
@@ -44,12 +46,13 @@ export function decidePollIntervalMs(status: CaseStatus | undefined): number | f
 
 // Activity (never-built placeholder) + Corrections (backing table is never written) removed to
 // declutter (Ryan 2026-06-06). Clarifications kept — it's a live RN/physician Q&A feature.
-type TabId = 'overview' | 'drafts' | 'clarifications' | 'documents' | 'messages';
+type TabId = 'overview' | 'drafts' | 'clarifications' | 'documents' | 'emails' | 'messages';
 const TABS: readonly TabItem<TabId>[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'drafts', label: 'Draft jobs' },
   { id: 'clarifications', label: 'Clarifications' },
   { id: 'documents', label: 'Documents' },
+  { id: 'emails', label: 'Email' },
   { id: 'messages', label: 'Messages' },
 ];
 
@@ -369,6 +372,7 @@ export function CaseDetailPage() {
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
         {tab === 'clarifications' ? <ClarificationsPanel caseId={caseId} /> : null}
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} /> : null}
+        {tab === 'emails' ? <EmailLogPanel queryKey={['case', caseId, 'emails']} fetcher={() => listCaseEmails(caseId)} scope="claim" /> : null}
         {tab === 'messages' ? <CaseMessagesPanel caseId={caseId} /> : null}
       </div>
     </div>

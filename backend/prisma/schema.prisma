@@ -178,6 +178,7 @@ model Veteran {
   cases             Case[]
   activityLogs      ActivityLog[]
   chartNotes        ChartNote[]
+  emails            Email[] // Feature B: veteran-level email log (chart tab)
 
   @@index([lastName, firstName])
   @@index([email])
@@ -610,12 +611,29 @@ model PhysicianCompensation {
 
 model Email {
   id             String         @id @default(uuid())
-  caseId         String         @map("case_id")
+  // Feature B (Ryan 2026-06-06): caseId is NULLABLE. An inbound email matched to a veteran but not a
+  // specific claim is chart-level (caseId NULL); an UNMATCHED email (no veteran resolved) has BOTH
+  // NULL and sits in the unmatched queue for an RN to assign. Outbound delivery rows keep caseId.
+  caseId         String?        @map("case_id")
+  veteranId      String?        @map("veteran_id")
   direction      EmailDirection
   subject        String
   body           String
   fromAddress    String         @map("from_address")
   toAddress      String         @map("to_address")
+  // The FRN staff mailbox this landed in / went out from (info@, admin@, a staff address) — the
+  // "who on our side" of the audit log. NULL for legacy/outbound rows that predate the field.
+  mailbox        String?
+  // RFC 5322 Message-ID — the idempotent-ingest dedupe key. GLOBAL @unique: exactly ONE row per
+  // message, first monitored mailbox to ingest wins (a message CC'd to two monitored mailboxes
+  // dedupes to one row; the ingest route logs the dropped mailbox). Multiple NULLs are allowed
+  // (Postgres btree unique ignores NULLs) so outbound stub rows with no Message-ID coexist. Do NOT
+  // "fix" this to NOT NULL / a partial index without re-checking delivery.ts inserts.
+  messageId      String?        @unique @map("message_id")
+  snippet        String?        // first ~140 chars for the collapsed log row
+  rawS3Key       String?        @map("raw_s3_key")        // raw RFC822 in phiBucket emails/<id>/
+  attachmentsJson Json?         @map("attachments_json")  // [{filename,s3Key,contentType,sizeBytes}]
+  receivedAt     DateTime?      @map("received_at") @db.Timestamptz(6) // inbound time (outbound uses sentAt)
   // sentAt is set ONLY when a real transmit happens. A composed/queued (stub) email leaves this
   // NULL — a non-null sentAt is the source of truth for "actually sent". Widened from NOT NULL to
   // nullable (additive: existing rows keep their value).
@@ -627,9 +645,14 @@ model Email {
   createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
   version        Int            @default(1)
-  case           Case           @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  case           Case?          @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  veteran        Veteran?       @relation(fields: [veteranId], references: [id], onDelete: SetNull)
 
   @@index([caseId])
+  // Compound indexes match the actual queries: chart tab = a veteran's emails newest-first; claim
+  // tab = a case's emails newest-first. Sort key is the effective timestamp (receivedAt for inbound).
+  @@index([caseId, receivedAt],    map: "emails_case_received_idx")
+  @@index([veteranId, receivedAt], map: "emails_veteran_received_idx")
   @@index([sentAt])
   @@index([fromAddress])
   @@index([toAddress])

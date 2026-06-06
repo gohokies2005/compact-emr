@@ -241,7 +241,10 @@ export function createCasesRouter(db: AppDb): Router {
           documents: { orderBy: { uploadedAt: 'desc' }, take: 5 },
           draftJobs: { orderBy: { enqueuedAt: 'desc' }, take: 5 },
           corrections: { orderBy: { requestedAt: 'desc' }, take: 5 },
-          emails: { orderBy: { sentAt: 'desc' }, take: 5 },
+          // Order by createdAt (always non-null) — NOT sentAt: inbound emails (Feature B) leave sentAt
+          // NULL and Postgres NULLS-FIRST on DESC would float them above all outbound. createdAt ≈ when
+          // we recorded the message and is the single effective-timestamp sort used by the email log. (C1)
+          emails: { orderBy: { createdAt: 'desc' }, take: 5 },
           payments: { orderBy: { createdAt: 'desc' } },
           _count: { select: { documents: true, draftJobs: true, corrections: true, emails: true, payments: true } },
         },

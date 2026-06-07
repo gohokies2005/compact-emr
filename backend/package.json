@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",
+    "@aws-sdk/client-bedrock-runtime": "^3.1053.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1058.0",
     "@aws-sdk/client-lambda": "^3.1057.0",
     "@aws-sdk/client-s3": "latest",

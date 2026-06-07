@@ -15,6 +15,7 @@ import { DeliveryPanel } from '../../components/DeliveryPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
 import { DecisionsOverridesPanel } from '../../components/DecisionsOverridesPanel';
+import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { EmailLogPanel } from '../../components/EmailLogPanel';
@@ -386,6 +387,9 @@ export function CaseDetailPage() {
         {tab === 'messages' ? <CaseMessagesPanel caseId={caseId} /> : null}
       </div>
     </div>
+
+    {/* "Ask AI about this case" — read-only advisory Q&A (decision support only). */}
+    <AdvisoryPanel caseId={caseId} />
 
     {/* In-chart decisions/overrides audit — plain-language, pinned to the very bottom of the case
         screen (Ryan 2026-06-06). Self-hides when empty. */}

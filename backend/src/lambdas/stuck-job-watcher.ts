@@ -37,6 +37,10 @@ import { DRAFT_JOB_WATCHER_SWEPT_MESSAGE } from '../services/draft-job-constants
 
 const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 min — running job, no heartbeat => crashed
 const QUEUE_ABANDON_MS = 120 * 60 * 1000; // 2h — queued job that never got claimed (backstop only)
+// ABSOLUTE cap: nothing legit drafts this long (longest real run ~15.5 min), so ANY in-flight job older
+// than this is dead regardless of state/heartbeat — catches a 'running' job that NEVER heartbeated (NULL
+// lastHeartbeatAt evades the heartbeat clause). (Ryan 2026-06-07: "just have it dump and clear after that".)
+const MAX_LIFETIME_MS = 60 * 60 * 1000; // 60 min
 const BATCH_LIMIT = 100; // per invocation; lifecycle: 100 * (60/5) = 1200/hr max sweep rate
 
 let cachedPrisma: PrismaClient | null = null;
@@ -57,6 +61,7 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
   const now = new Date();
   const staleBoundary = new Date(now.getTime() - STALE_THRESHOLD_MS);
   const queueAbandonBoundary = new Date(now.getTime() - QUEUE_ABANDON_MS);
+  const lifetimeBoundary = new Date(now.getTime() - MAX_LIFETIME_MS);
   // The Lambda runtime passes the EVENT as the first arg, so injectedPrisma is the event object (truthy,
   // so `?? getPrisma()` wrongly kept it → `event.draftJob` undefined → crash on every scheduled run, the
   // safety net silently dead since 2026-06-06). Only use it if it's an actual PrismaClient (has draftJob).
@@ -73,6 +78,9 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
         // orphaned job (SQS message gone), NOT a normal queue wait behind other drafts. NEVER reap a
         // queued job on the 10-min clock — that discarded healthy queued letters (2026-06-06).
         { state: 'queued', enqueuedAt: { lt: queueAbandonBoundary } },
+        // ABSOLUTE lifetime cap — ANY in-flight job (queued OR running) older than 60 min is dead. Catches
+        // a 'running' job that never heartbeated (NULL lastHeartbeatAt, which the clause above misses).
+        { state: { in: ['queued', 'running'] }, enqueuedAt: { lt: lifetimeBoundary } },
       ],
     },
     select: {

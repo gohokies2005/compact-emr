@@ -24,7 +24,7 @@ describe('stuck-job-watcher reap predicate (#8 watchdog fix)', () => {
     await handler(prisma);
     const where = calls.where as { OR: Array<Record<string, unknown>> };
     expect(Array.isArray(where.OR)).toBe(true);
-    expect(where.OR).toHaveLength(2);
+    expect(where.OR).toHaveLength(3);
 
     const running = where.OR.find((c) => c['state'] === 'running');
     const queued = where.OR.find((c) => c['state'] === 'queued');
@@ -39,6 +39,16 @@ describe('stuck-job-watcher reap predicate (#8 watchdog fix)', () => {
     // queued arm keys on enqueuedAt with the LARGE 2h budget — NOT 10 min (the bug)
     const qen = (queued!['enqueuedAt'] as { lt: Date }).lt.getTime();
     expect(Date.now() - qen).toBeGreaterThan(110 * 60 * 1000);
+
+    // ABSOLUTE lifetime cap (Ryan 2026-06-07): ANY in-flight job older than ~60 min — catches a 'running'
+    // job that never heartbeated. Keys on enqueuedAt at 60 min (well above the legit queue wait, so it
+    // never reaps a healthy queued job).
+    const lifetime = where.OR.find((c) => typeof c['state'] === 'object');
+    expect(lifetime).toBeDefined();
+    expect((lifetime!['state'] as { in: string[] }).in).toEqual(['queued', 'running']);
+    const len = (lifetime!['enqueuedAt'] as { lt: Date }).lt.getTime();
+    expect(Date.now() - len).toBeGreaterThan(59 * 60 * 1000);
+    expect(Date.now() - len).toBeLessThan(61 * 60 * 1000);
 
     // The fatal old arm — { lastHeartbeatAt: null, enqueuedAt: <10min> } reaping queued — is gone.
     expect(where.OR.some((c) => c['lastHeartbeatAt'] === null)).toBe(false);

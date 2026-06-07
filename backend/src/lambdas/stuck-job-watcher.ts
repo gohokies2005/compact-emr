@@ -57,7 +57,10 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
   const now = new Date();
   const staleBoundary = new Date(now.getTime() - STALE_THRESHOLD_MS);
   const queueAbandonBoundary = new Date(now.getTime() - QUEUE_ABANDON_MS);
-  const prisma = injectedPrisma ?? getPrisma();
+  // The Lambda runtime passes the EVENT as the first arg, so injectedPrisma is the event object (truthy,
+  // so `?? getPrisma()` wrongly kept it → `event.draftJob` undefined → crash on every scheduled run, the
+  // safety net silently dead since 2026-06-06). Only use it if it's an actual PrismaClient (has draftJob).
+  const prisma = injectedPrisma && 'draftJob' in (injectedPrisma as object) ? injectedPrisma : getPrisma();
 
   const stuckJobs = await prisma.draftJob.findMany({
     where: {

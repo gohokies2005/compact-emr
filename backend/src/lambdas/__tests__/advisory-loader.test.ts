@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseEmbeddedChunk, toVectorLiteral, CABINET_DDL, EMBEDDING_DIM } from '../advisory-loader.js';
+import { parseEmbeddedChunk, toVectorLiteral, CABINET_DDL, EMBEDDING_DIM, buildSetRoleLoginSql } from '../advisory-loader.js';
 
 const validEmbedding = (): number[] => Array<number>(EMBEDDING_DIM).fill(0.1);
 const validLine = (over: Record<string, unknown> = {}): string =>
@@ -51,6 +51,15 @@ describe('toVectorLiteral', () => {
   });
   it('throws on wrong dimension', () => {
     expect(() => toVectorLiteral([1, 2, 3])).toThrow(/expected 1024 dims/);
+  });
+});
+
+describe('buildSetRoleLoginSql', () => {
+  it('makes advisory_ro a LOGIN role with the given password', () => {
+    expect(buildSetRoleLoginSql('abc123XYZ')).toBe("ALTER ROLE advisory_ro WITH LOGIN PASSWORD 'abc123XYZ'");
+  });
+  it('escapes single quotes defensively (no SQL break)', () => {
+    expect(buildSetRoleLoginSql("a'b")).toBe("ALTER ROLE advisory_ro WITH LOGIN PASSWORD 'a''b'");
   });
 });
 

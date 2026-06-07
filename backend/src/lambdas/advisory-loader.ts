@@ -10,6 +10,7 @@
 
 import { PrismaClient } from '@prisma/client';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 
 // The cabinet DDL (read-only-by-architecture roles + the pgvector table). NOLOGIN roles + SET-ROLE at
 // query time = no second DB login/secret. advisory_ro is the ask-path role (SELECT-only on ref_chunk);
@@ -101,12 +102,34 @@ export function toVectorLiteral(embedding: number[]): string {
   return `[${embedding.join(',')}]`;
 }
 
+// Make advisory_ro a LOGIN role with the given password (single-quote-escaped — the generated secret
+// excludes punctuation, but escape defensively). This gives the ASK PATH a DEDICATED read-only DB
+// identity to connect as, instead of `SET ROLE advisory_ro` on a pooled connection (the loader-pool bug
+// + the architect's #1 landmine: SET ROLE bleeds across a connection pool). advisory_ro keeps ONLY its
+// SELECT grants — login just lets it authenticate.
+export function buildSetRoleLoginSql(password: string): string {
+  const esc = password.replace(/'/g, "''");
+  return `ALTER ROLE advisory_ro WITH LOGIN PASSWORD '${esc}'`;
+}
+
+async function readSecretPassword(secretName: string): Promise<string> {
+  const sm = new SecretsManagerClient({});
+  // Read by FRIENDLY NAME, never partial ARN (Secrets Manager can't resolve a partial ARN → masked as
+  // AccessDenied — the FRN partial-ARN footgun).
+  const r = await sm.send(new GetSecretValueCommand({ SecretId: secretName }));
+  if (!r.SecretString) throw new Error(`secret ${secretName} has no SecretString`);
+  const pw = String((JSON.parse(r.SecretString) as Record<string, unknown>).password ?? '');
+  if (!pw) throw new Error(`secret ${secretName} has no password field`);
+  return pw;
+}
+
 export interface LoadResult {
   setup: 'ok';
   parsed: number;
   inserted: number;
   skippedDuplicate: number;
   deleted: number; // rows pruned because their id is no longer in the dropped file (e.g. stale bva_atlas:*)
+  advisoryRoLogin: 'set' | 'skipped'; // did we (re)set advisory_ro's LOGIN password from its secret?
   failed: Array<{ line: number; id?: string; reason: string }>;
 }
 
@@ -149,6 +172,17 @@ export async function handler(): Promise<LoadResult> {
   for (const stmt of CABINET_DDL.split(/;\s*\n/).map((s) => s.trim()).filter((s) => s.length > 0)) {
     await prisma.$executeRawUnsafe(stmt.endsWith(';') ? stmt : `${stmt};`);
   }
+  const result: LoadResult = { setup: 'ok', parsed: 0, inserted: 0, skippedDuplicate: 0, deleted: 0, advisoryRoLogin: 'skipped', failed: [] };
+
+  // 1b) Give advisory_ro a LOGIN password from its secret so the ASK PATH connects AS advisory_ro (a
+  //     dedicated read-only identity) instead of SET ROLE on a pooled connection. Skipped (logged) if the
+  //     secret env isn't wired yet — the cabinet + load still work.
+  const roSecret = process.env.ADVISORY_RO_SECRET_NAME;
+  if (roSecret) {
+    await prisma.$executeRawUnsafe(buildSetRoleLoginSql(await readSecretPassword(roSecret)));
+    result.advisoryRoLogin = 'set';
+  }
+
   // 2) Load the drop as the MASTER user (full access). We deliberately do NOT `SET ROLE advisory_loader`
   //    here: Prisma POOLS connections, so a session-level SET ROLE sticks on only one connection while the
   //    row-by-row inserts spread across the pool — that caused a partial 611/1244 load with "permission
@@ -157,7 +191,6 @@ export async function handler(): Promise<LoadResult> {
   //    ASK path, not this loader. (advisory_loader still exists in the cabinet for the design/future.)
   //    Per-row failures still surface their reason (never a silent partial).
   const lines = await readDropLines(bucket, key);
-  const result: LoadResult = { setup: 'ok', parsed: 0, inserted: 0, skippedDuplicate: 0, deleted: 0, failed: [] };
   const fileIds: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     let chunk: EmbeddedChunk;

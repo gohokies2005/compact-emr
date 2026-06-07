@@ -495,6 +495,21 @@ export class WorkersStack extends Stack {
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: config.envName === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
+    // The advisory_ro DB login secret (auto-generated password, alphanumeric so it's URL-safe in the
+    // ask-path DATABASE_URL). The loader sets advisory_ro's LOGIN password from this; the ask-path API
+    // Lambda will read it (by friendly name) to connect AS advisory_ro — a dedicated read-only identity,
+    // NOT SET ROLE on a pool (architect gap #1).
+    const advisoryRoSecret = new secretsmanager.Secret(this, 'AdvisoryRoDbSecret', {
+      secretName: `compact-emr-${config.envName}/advisory-ro-db`,
+      description: 'Password for the advisory_ro read-only DB login (the AI ask-path identity).',
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({ username: 'advisory_ro' }),
+        generateStringKey: 'password',
+        excludePunctuation: true,
+        passwordLength: 32,
+      },
+    });
+
     const advisoryLoader = new nodejs.NodejsFunction(this, 'AdvisoryLoader', {
       functionName: `compact-emr-${config.envName}-advisory-loader`,
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -511,6 +526,7 @@ export class WorkersStack extends Stack {
         DATABASE_URL: watcherDatabaseUrl, // same DB, identical construction to the watcher / ApiStack
         ADVISORY_DROP_BUCKET: props.phiBucket.bucketName,
         ADVISORY_DROP_KEY: 'advisory/advisory_chunks_embedded.jsonl',
+        ADVISORY_RO_SECRET_NAME: advisoryRoSecret.secretName,
       },
       bundling: {
         externalModules: ['@prisma/client', '@prisma/engines'],
@@ -531,6 +547,7 @@ export class WorkersStack extends Stack {
     });
     props.databaseSecret.grantRead(advisoryLoader);
     props.phiBucket.grantRead(advisoryLoader, 'advisory/*'); // read ONLY the advisory drop prefix
+    advisoryRoSecret.grantRead(advisoryLoader); // loader reads it to set advisory_ro's LOGIN password
 
     // ===== F6b: CloudWatch metric filter + alarm on watcher "swept" log lines =====
     // The watcher silently fixes stuck jobs — but if it's sweeping at >3/hr, drafter

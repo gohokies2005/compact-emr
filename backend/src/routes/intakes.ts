@@ -20,7 +20,7 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 // flagged per-file on assign, never copied into a case as an un-OCR-able Document. (Spec P1-3.)
 const ASSIGN_ALLOWED_CONTENT_TYPES = new Set([
   'application/pdf', 'image/jpeg', 'image/png', 'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain',
 ]);
 function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200) || 'file';

@@ -15,7 +15,7 @@ import { listCases } from '../../api/cases';
 import { formatConditionLabel } from '../../lib/conditionLabel';
 import { formatNameLastFirst } from '../../lib/format';
 
-const ALLOWED_CT = new Set(['application/pdf', 'image/jpeg', 'image/png', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']);
+const ALLOWED_CT = new Set(['application/pdf', 'image/jpeg', 'image/png', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain']);
 // Canonical case-enum values (must match backend ClaimType / case-validation CLAIM_TYPES). The old
 // list used 'appeal', which the case layer rejects ('appeal_bva') — that mismatch failed Wayne
 // Mosely's assign 3× (2026-06-05). Friendly labels so the RN doesn't see raw enum slugs.

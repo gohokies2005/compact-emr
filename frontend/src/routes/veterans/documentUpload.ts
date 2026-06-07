@@ -7,6 +7,7 @@ export const ALLOWED_TYPES = [
   'image/png',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain', // .txt — the purest format; content IS the text (read directly, no OCR). (2026-06-07)
 ] as const;
 
 export const MAX_BYTES = 50 * 1024 * 1024;
@@ -20,6 +21,7 @@ const EXT_TO_TYPE: Record<string, (typeof ALLOWED_TYPES)[number]> = {
   png: 'image/png',
   doc: 'application/msword',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  txt: 'text/plain',
 };
 
 export function extensionOf(filename: string): string {

@@ -12,7 +12,8 @@ describe('documentUpload helpers', () => {
 
   it('prefers an explicit allowed MIME, ignores a disallowed MIME', () => {
     expect(inferContentType('x.pdf', 'application/pdf')).toBe('application/pdf');
-    expect(inferContentType('x.pdf', 'text/plain')).toBe('application/pdf'); // falls back to ext
+    expect(inferContentType('x.pdf', 'application/zip')).toBe('application/pdf'); // disallowed MIME falls back to ext
+    expect(inferContentType('notes.txt')).toBe('text/plain'); // .txt is supported (pure text)
     expect(inferContentType('x.exe', 'application/octet-stream')).toBeNull();
   });
 

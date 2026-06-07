@@ -16,6 +16,7 @@ const ALLOWED_CONTENT_TYPES = new Set([
   'image/png',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain',
 ]);
 
 interface DocumentsRouterDeps {
@@ -88,7 +89,7 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
       return error(res, 400, 'invalid_presign_request', 'filename, contentType, sizeBytes, and caseId are required.');
     }
     if (!ALLOWED_CONTENT_TYPES.has(contentType)) {
-      return error(res, 400, 'unsupported_content_type', 'Only PDF, JPG, PNG, DOC, and DOCX uploads are supported.');
+      return error(res, 400, 'unsupported_content_type', 'Only PDF, JPG, PNG, DOC, DOCX, and TXT uploads are supported.');
     }
     if (sizeBytes <= 0 || sizeBytes > MAX_UPLOAD_BYTES) {
       return error(res, 400, 'file_too_large', 'Uploads must be greater than 0 bytes and no larger than 50 MB.', { maxBytes: MAX_UPLOAD_BYTES });

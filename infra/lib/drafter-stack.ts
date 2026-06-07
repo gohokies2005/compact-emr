@@ -182,6 +182,12 @@ export class DrafterStack extends Stack {
         DRAFT_JOB_QUEUE_URL: draftJobQueue.queueUrl,
         DRAFTER_ARTIFACTS_S3_BUCKET: phiBucket.bucketName,
         DRAFTER_ARTIFACTS_S3_PREFIX: 'drafter-artifacts/',
+        // Gate 2 (pre-draft dx/event verification) ON — drafter-worker reads `=== 'true'` exactly.
+        // The EMR side (/halt receiver + Gate-1 modal + needs_rn_decision panel + chart override log)
+        // is built, architect-QA'd (SHIP-WITH-FIXES, fixes applied), and live. Fail-to-halt: a no-dx
+        // case parks for the RN, never mis-drafts. Activated 2026-06-06 per the drafter33 bundle.
+        // Revert: set to 'false' + redeploy.
+        DRAFTER_GATE2_ENABLED: 'true',
       },
       secrets: {
         // The wrapper reads these from env at startup; AWS injects the actual secret values

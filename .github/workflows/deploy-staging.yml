@@ -61,7 +61,14 @@ jobs:
           DISTRIBUTION_ID=$(aws cloudformation describe-stacks --stack-name compact-emr-staging-frontend --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue" --output text)
           echo "frontend_bucket=$FRONTEND_BUCKET" >> "$GITHUB_OUTPUT"
           echo "distribution_id=$DISTRIBUTION_ID" >> "$GITHUB_OUTPUT"
-      - run: aws s3 sync frontend/dist s3://${{ steps.frontend_outputs.outputs.frontend_bucket }} --delete
+      # Cache strategy (fixes stale-UI-after-deploy): hashed assets are content-addressed so they're
+      # immutable for a year; index.html (+ any non-hashed root file) MUST be no-cache so browsers always
+      # revalidate and pick up the new asset hashes. Previously the single sync set no Cache-Control, so
+      # browsers heuristically cached index.html → users kept loading the OLD JS bundle across deploys.
+      - name: Sync hashed assets (immutable, 1yr)
+        run: aws s3 sync frontend/dist/assets s3://${{ steps.frontend_outputs.outputs.frontend_bucket }}/assets --delete --cache-control "public,max-age=31536000,immutable"
+      - name: Sync index.html + root files (always revalidate)
+        run: aws s3 sync frontend/dist s3://${{ steps.frontend_outputs.outputs.frontend_bucket }} --delete --exclude "assets/*" --cache-control "no-cache"
       - run: aws cloudfront create-invalidation --distribution-id ${{ steps.frontend_outputs.outputs.distribution_id }} --paths "/*"
       - name: Smoke test - Lambda cold start
         run: |

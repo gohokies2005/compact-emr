@@ -5,6 +5,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
+import { isSignOffAffirmative } from '../services/sign-off-validation.js';
 import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { buildLetterRevisionKey } from '../services/s3-key-safety.js';
 import { cleanProseForSave, sanityCheckLetterText, computeLockedRanges, type SanityFinding } from '../services/letter-sanity.js';
@@ -341,6 +342,12 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // finalizes; it does not replace the sign-off questionnaire.
       const signOffs = await db.signOff.findMany({ where: { caseId } });
       if (signOffs.length === 0) throw new HttpError(409, 'conflict', 'Record the physician sign-off before approving.', { reason: 'sign_off_required', caseId });
+      // Affirmativeness gate (audit 2026-06-07): the LATEST sign-off must attest every item "Yes" — never
+      // finalize a letter the physician signed off against. Defense-in-depth behind the sign-off route gate.
+      const latestSignOff = signOffs.reduce((a, b) => (a.createdAt >= b.createdAt ? a : b));
+      if (!isSignOffAffirmative(latestSignOff.answersJson)) {
+        throw new HttpError(409, 'conflict', 'Approve blocked: the sign-off has a "No" attestation. Resolve it or send the case back to the RN.', { reason: 'sign_off_not_affirmative', caseId });
+      }
       // Status transition must be legal + role-permitted (physician_review → delivered).
       if (!isValidCaseStatusTransition(c.status, 'delivered') || !canRolePerformCaseStatusTransition(user.role, c.status, 'delivered')) {
         throw new HttpError(409, 'conflict', `Cannot approve from status '${c.status}'.`, { reason: 'bad_transition', caseId, status: c.status });

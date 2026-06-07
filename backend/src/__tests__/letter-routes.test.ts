@@ -75,7 +75,10 @@ function makeDb(
   initialCase: CaseRecord = baseCase(),
   opts: { signOffs?: unknown[]; signer?: PhysicianRecord; self?: PhysicianRecord; roster?: PhysicianRecord[] } = {},
 ) {
-  const signOffs = opts.signOffs ?? [{ id: 'SO-1' }];
+  const signOffs = opts.signOffs ?? [{
+    id: 'SO-1', createdAt: new Date('2026-05-30T00:00:00.000Z'),
+    answersJson: { records_reviewed: true, diagnosis_documented: true, nexus_supported: true, no_phi_in_letter: true, final_pdf_correct: true },
+  }];
   // signer = the assigned physician resolved by id (the fraud gate). self = resolved by
   // cognitoSub for the physician-self auth check. roster = active physicians for foreign-name.
   const signer = opts.signer ?? physician();
@@ -181,6 +184,19 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
     expect(res.status).toBe(409);
     expect(res.body.error.details.reason).toBe('no_assigned_physician');
+  });
+
+  it('approve 409 (sign_off_not_affirmative) when the latest sign-off has a "No" answer', async () => {
+    // The legal gate (audit 2026-06-07): a physician who attested "No" to diagnosis_documented must not
+    // be able to finalize the signed letter. Before the gate, approve proceeded; now it 409s.
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const { db } = makeDb(baseCase(), { signOffs: [{
+      id: 'SO-NO', createdAt: new Date('2026-05-30T00:00:00.000Z'),
+      answersJson: { records_reviewed: true, diagnosis_documented: false, nexus_supported: true, no_phi_in_letter: true, final_pdf_correct: true },
+    }] });
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('sign_off_not_affirmative');
   });
 
   it('approve 409 when the assigned physician record is not found', async () => {

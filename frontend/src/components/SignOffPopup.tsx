@@ -40,10 +40,14 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff }: SignOffPopu
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const completeAnswers = useMemo(() => toCompleteAnswers(answers), [answers]);
+  // Every question is a POSITIVE attestation — a "No" on any means the letter is NOT ready to finalize,
+  // so Submit requires all-affirmative (a physician with a concern sends back, not signs off against it).
+  const allAffirmative = useMemo(() => completeAnswers !== null && Object.values(completeAnswers).every((v) => v === true), [completeAnswers]);
+  const hasNegative = useMemo(() => Object.values(answers).some((v) => v === false), [answers]);
 
   const signOffMutation = useMutation({
     mutationFn: () => {
-      if (!completeAnswers) throw new Error('All sign-off questions require an answer.');
+      if (!allAffirmative || completeAnswers === null) throw new Error('Every item must be "Yes" to sign off. Resolve a "No", or use "Send back to RN" instead.');
       return signOffCase(caseId, {
         answers: completeAnswers,
         ...(notes.trim().length > 0 && { notes: notes.trim() }),
@@ -129,12 +133,18 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff }: SignOffPopu
             <span className="mt-1 block text-xs text-slate-500">{notes.length}/500</span>
           </label>
 
+          {hasNegative ? (
+            <div className="rounded-lg border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-3 text-sm text-amber-900">
+              A “No” means the letter isn’t ready to finalize. Resolve the issue, or use <span className="font-medium">Send back to RN</span> instead of signing off.
+            </div>
+          ) : null}
+
           {errorMessage ? <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{errorMessage}</div> : null}
         </div>
 
         <div className="mt-6 flex justify-end gap-2">
           <Button type="button" variant="secondary" onClick={onClose} disabled={signOffMutation.isPending}>Cancel</Button>
-          <Button type="button" variant="primary" loading={signOffMutation.isPending} disabled={!completeAnswers || signOffMutation.isPending} onClick={() => signOffMutation.mutate()}>Submit sign-off</Button>
+          <Button type="button" variant="primary" loading={signOffMutation.isPending} disabled={!allAffirmative || signOffMutation.isPending} onClick={() => signOffMutation.mutate()}>Submit sign-off</Button>
         </div>
       </div>
     </div>

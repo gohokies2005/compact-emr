@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
-import { parseSignOffCreate } from '../services/sign-off-validation.js';
+import { parseSignOffCreate, isSignOffAffirmative } from '../services/sign-off-validation.js';
 import { resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor } from '../services/request-actor.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
@@ -31,6 +31,12 @@ export function createSignOffsRouter(db: AppDb): Router {
 
       const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true, assignedPhysicianId: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+
+      // Affirmativeness gate (audit 2026-06-07): a sign-off ATTESTS the letter is ready — every item must
+      // be "Yes". A "No" means resolve it or send the case back to the RN; you cannot sign off against it.
+      if (!isSignOffAffirmative(parsed.answers)) {
+        throw new HttpError(409, 'conflict', 'Sign-off requires every item to be "Yes". Resolve the flagged item, or send the case back to the RN instead.', { reason: 'sign_off_not_affirmative', caseId });
+      }
 
       // OCR HARD-STOP gate (Phase 5.2): no sign-off until every uploaded file is read or has
       // a manual summary. Unbypassable — no admin override per Ryan's HARD RULE.

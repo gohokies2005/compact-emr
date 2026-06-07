@@ -53,3 +53,18 @@ export function parseSignOffCreate(body: unknown): ParsedSignOff {
 
   return { answers, notes };
 }
+
+/**
+ * Every sign-off question is a POSITIVE attestation ("records reviewed", "diagnosis documented",
+ * "nexus supported >50%", "no PHI", "PDF correct") — so a "No" on ANY means the letter is NOT ready to
+ * finalize. A valid (and approvable) sign-off therefore requires every answer to be `true`. A physician
+ * with a concern must resolve it or send the case back to the RN, NOT sign off against the letter.
+ * (Audit 2026-06-07: the only gate before this checked the sign-off EXISTED, never its answers — a "No"
+ * attestation could still finalize a signed nexus letter.) If a future question is ever informational
+ * (where "No" is acceptable), replace this with an explicit blocking-keys allowlist.
+ */
+export function isSignOffAffirmative(answers: unknown): boolean {
+  if (!isRecord(answers)) return false;
+  const values = Object.values(answers);
+  return values.length > 0 && values.every((v) => v === true);
+}

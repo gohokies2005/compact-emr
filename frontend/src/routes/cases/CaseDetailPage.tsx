@@ -103,7 +103,20 @@ export function CaseDetailPage() {
     onError: async (err) => { if (err instanceof ConflictError) { await refetch(); window.alert('This case was modified elsewhere. Reloaded the latest version — please retry your edit.'); } },
   });
 
-  const del = useMutation({ mutationFn: () => deleteCase(caseId), onSuccess: () => refetch() });
+  const del = useMutation({
+    mutationFn: () => deleteCase(caseId),
+    onSuccess: () => refetch(),
+    // Audit 2026-06-07: a failed soft-delete used to no-op silently — the admin believed the case was
+    // rejected when nothing happened. Surface the real reason (reload on a version conflict).
+    onError: async (err: unknown) => {
+      if (err instanceof ConflictError) {
+        await refetch();
+        window.alert('This case was modified elsewhere — reloaded the latest version. Please retry.');
+      } else {
+        window.alert(`Could not reject the case — ${err instanceof Error ? err.message : 'please retry.'}`);
+      }
+    },
+  });
 
   // Redraft (re-run the drafter). Available to admin/ops_staff post-draft so a physician_review
   // letter can be re-run (the OpsHeldPanel 'Re-run' only shows for held/revise). Guarded by a

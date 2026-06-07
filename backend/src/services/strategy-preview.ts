@@ -121,6 +121,10 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   const isSecondary = input.claimType.toLowerCase().includes('secondary')
     || input.upstreamScCondition != null
     || /secondary|aggravat/.test((input.framingChoice ?? '').toLowerCase());
+  // A direct claim's whole case is the in-service event/onset + the veteran's account of it. No hook on
+  // file = we don't yet know the nexus story — the #1 pre-draft gap for a direct claim, and why everything
+  // was falsely passing (physician review 2026-06-07). proposedMechanism = inServiceEvent ?? veteranStatement.
+  const hasInServiceHook = (input.proposedMechanism ?? '').trim().length > 0;
 
   const criteria: StrategyCriterion[] = [
     {
@@ -133,9 +137,11 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     },
     {
       key: 'anchor',
-      label: 'Service-connected anchor present',
-      pass: !noAnchor,
-      detail: noAnchor ? (gate.detail ?? 'No service-connected anchor') : (input.upstreamScCondition ? `Anchored on ${input.upstreamScCondition}` : 'Direct claim — no secondary anchor needed'),
+      label: isSecondary ? 'Service-connected anchor present' : 'In-service event / veteran account on file',
+      pass: isSecondary ? !noAnchor : hasInServiceHook,
+      detail: isSecondary
+        ? (noAnchor ? (gate.detail ?? 'No service-connected anchor') : `Anchored on ${input.upstreamScCondition}`)
+        : (hasInServiceHook ? 'Veteran account / in-service event on file' : 'No in-service event or veteran account on file yet — confirm the nexus hook before drafting'),
     },
     {
       key: 'plausible',
@@ -167,9 +173,12 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   if (gate.triggered) tier = 'Stop';
   else if (cds.verdict === 'accept') tier = 'Strong';
   else if (cds.verdict === 'reject') tier = 'Thin';
-  // caution: a matched mid-odds pair OR a direct claim = Plausible; a SECONDARY claim with no Board pair =
-  // Thin ("rely on literature"). NEVER Stop on absent data — Stop is only a hard gate above. (FIX 2026-06-07)
-  else tier = (isSecondary && !cds.bva.matched) ? 'Thin' : 'Plausible';
+  // caution: Plausible normally; Thin (not Stop) when a real gap exists — a SECONDARY claim with no Board
+  // pair (rely on literature), OR a DIRECT claim with no in-service hook on file (we don't know the nexus
+  // story yet). NEVER Stop on absent data — Stop is only a hard gate above. (FIX 2026-06-07)
+  else if (isSecondary && !cds.bva.matched) tier = 'Thin';
+  else if (!isSecondary && !hasInServiceHook) tier = 'Thin';
+  else tier = 'Plausible';
 
   const mech = (input.proposedMechanism ?? '').trim();
   return {

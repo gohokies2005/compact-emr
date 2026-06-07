@@ -16,7 +16,9 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
   const cases: Array<{ name: string; over: Partial<StrategyPreviewInput>; tier: string }> = [
     { name: 'OSA secondary to PTSD = Strong (known strong Board pair)', over: {}, tier: 'Strong' },
     // DIRECT claim with no Board pair must NEVER Stop — the false-Stop bug Ryan caught (GERD/OSA direct).
-    { name: 'direct claim, no Board pair, dx on file = Plausible (NEVER Stop)', over: { claimType: 'direct', claimedCondition: 'GERD / Gastritis', framingChoice: 'direct', upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'] }, tier: 'Plausible' },
+    // WITH an in-service hook on file -> Plausible; WITHOUT -> Thin (we don't know the nexus story yet).
+    { name: 'direct claim WITH in-service hook, no Board pair = Plausible (NEVER Stop)', over: { claimType: 'direct', claimedCondition: 'GERD / Gastritis', framingChoice: 'direct', upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'], proposedMechanism: 'onset during service after a deployment exposure' }, tier: 'Plausible' },
+    { name: 'direct claim with NO in-service hook = Thin (flag the missing nexus story, not Stop)', over: { claimType: 'direct', claimedCondition: 'GERD / Gastritis', framingChoice: 'direct', upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'] }, tier: 'Thin' },
     // SECONDARY claim with no Board pair = Thin ("rely on literature"), not Stop — absence of data ≠ impossible.
     { name: 'secondary, no Board pair = Thin (not Stop)', over: { claimedCondition: 'blindness', upstreamScCondition: 'knee', serviceConnectedConditions: ['knee'], activeProblems: ['blindness'] }, tier: 'Thin' },
     { name: 'no diagnosis on file = Stop (hard gate)', over: { activeProblems: [] }, tier: 'Stop' },

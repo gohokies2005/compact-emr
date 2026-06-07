@@ -78,7 +78,7 @@ function normalizeClaimType(s: unknown): string | undefined {
   if (!t) return undefined;
   if (t.includes('supplement')) return 'supplemental';
   if (t.includes('higher') || t === 'hlr') return 'hlr';
-  if (t.includes('appeal') || t.includes('disagree') || t === 'nod' || t.includes('board')) return 'appeal';
+  if (t.includes('appeal') || t.includes('disagree') || t === 'nod' || t.includes('board')) return 'appeal_bva'; // canonical ClaimType enum value (NOT 'appeal' — would break assign) (architect QA 2026-06-07)
   if (t.includes('initial') || t.includes('original') || t.includes('new') || t.includes('first')) return 'initial';
   return undefined;
 }

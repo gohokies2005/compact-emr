@@ -30,8 +30,11 @@ export function suggestPathway(input: StrategyPreviewInput): PathwaySuggestion {
     if (best === null || score(m) > score(best)) best = m;
   }
   if (best !== null && (best.tier === 'high' || best.tier === 'moderate')) {
-    const cur = (input.upstreamScCondition ?? '').toLowerCase().trim();
-    const differs = cur.length === 0 || !best.upstream.toLowerCase().includes(cur);
+    // Don't nag "switch to X" when the case is ALREADY anchored on a condition that resolves to the SAME
+    // atlas pair (best.upstream is the atlas key, e.g. "lumbar back"; the RN's anchor may read "lumbar
+    // spine"). Resolve the current anchor through the same matcher before comparing. (architect QA 2026-06-07)
+    const curPair = input.upstreamScCondition ? findPair(input.upstreamScCondition, input.claimedCondition) : null;
+    const differs = curPair === null || curPair.upstream !== best.upstream;
     return {
       kind: 'secondary',
       anchor: best.upstream,

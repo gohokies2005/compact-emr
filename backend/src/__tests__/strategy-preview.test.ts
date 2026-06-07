@@ -41,6 +41,13 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
     expect(r.recommendedPathway.differsFromCurrent).toBe(true);
   });
 
+  it('does NOT nag to switch when already anchored on the suggested pathway', () => {
+    // Default input = OSA already framed secondary to granted PTSD (the strong pair) — no "switch" nag.
+    const r = computeStrategyPreview(input({}));
+    expect(r.recommendedPathway.kind).toBe('secondary');
+    expect(r.recommendedPathway.differsFromCurrent).toBe(false);
+  });
+
   it('recommends direct when no granted SC condition has a Board pair to the claimed condition', () => {
     const r = computeStrategyPreview(input({ claimType: 'direct', upstreamScCondition: null, serviceConnectedConditions: [], claimedCondition: 'GERD' }));
     expect(r.recommendedPathway.kind).toBe('direct');

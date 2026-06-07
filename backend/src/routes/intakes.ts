@@ -143,7 +143,7 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     }
     // The veteran's stated "why is this connected" theory (free text in the intake) — prefill it onto the
     // new case so it shows pre-draft. The assign-drawer value (if the RN typed one) still wins. (2026-06-07)
-    const derivedTheory = deriveIntakeFields((intake as { rawAnswersJson?: unknown }).rawAnswersJson).veteranTheory;
+    const derived = deriveIntakeFields((intake as { rawAnswersJson?: unknown }).rawAnswersJson);
 
     const body = (req.body ?? {}) as Record<string, unknown>;
     const actor = (req as { user?: { sub?: string } }).user?.sub ?? 'unknown';
@@ -174,7 +174,13 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
         cond = (c as { claimedCondition?: string }).claimedCondition ?? '';
       } else if (body['newCase'] !== undefined && body['newCase'] !== null) {
         const parsed = parseCaseCreate(body['newCase']);
-        const created = await tx.case.create({ data: { ...(derivedTheory ? { veteranStatement: derivedTheory } : {}), ...parsed, veteranId: vId } as never });
+        const created = await tx.case.create({ data: {
+          ...(derived.veteranTheory ? { veteranStatement: derived.veteranTheory } : {}),
+          // The veteran's own stated secondary link -> upstream anchor + framing, so the case isn't
+          // defaulted to "direct" when they said "secondary to X". The assign-drawer values still win.
+          ...(derived.upstreamCondition ? { upstreamScCondition: derived.upstreamCondition, framingChoice: derived.framing } : {}),
+          ...parsed, veteranId: vId,
+        } as never });
         cId = (created as { id: string }).id;
         cond = (parsed as { claimedCondition?: string }).claimedCondition ?? '';
       } else {

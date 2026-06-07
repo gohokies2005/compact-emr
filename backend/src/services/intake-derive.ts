@@ -17,8 +17,22 @@ type RawAnswer = { type?: string; name?: string; text?: string; answer?: unknown
 export type DerivedIntakeFields = {
   name?: string; email?: string; phone?: string; state?: string;
   condition?: string; dob?: string; claimType?: string;
-  veteranTheory?: string; // the veteran's free-text "why I think this is service-connected" narrative
+  veteranTheory?: string;       // the veteran's free-text "why I think this is service-connected" narrative
+  upstreamCondition?: string;   // the SECONDARY anchor the veteran themselves named ("secondary to PTSD")
+  framing?: string;             // 'secondary' | 'aggravation' — derived from the veteran's wording
 };
+
+// Veterans ROUTINELY state the secondary link themselves ("secondary to my PTSD", "caused or aggravated by
+// my lumbar spine", "2nd to sinusitis"). Dropping it is why every case defaulted to "direct" in Aegis
+// (Ryan 2026-06-07, verified against ~30 live Jotform submissions). Parse the upstream anchor + framing
+// from their words. Heuristic, first-match-wins; the drafter's framingGate refines it downstream.
+export function parseSecondaryFraming(text: string): { upstream: string; framing: string } | undefined {
+  const m = text.match(/\b(?:secondary to|2nd to|caused by|aggravated by|exacerbated by|due to|because of|connected to)\s+(?:my\s+)?(?:service[- ]connected\s+)?([A-Za-z][A-Za-z0-9 /'’()-]{2,45}?)(?=\s+(?:and|or|because|which|that|due|rated|condition)\b|[.,;]|\s*$)/i);
+  if (!m) return undefined;
+  const upstream = m[1].trim().replace(/\s+/g, ' ').replace(/[.,;]+$/, '');
+  if (upstream.length < 3) return undefined;
+  return { upstream, framing: /aggravat|exacerbat|worsen/i.test(text) ? 'aggravation' : 'secondary' };
+}
 
 const MONTHS: Record<string, number> = {
   january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
@@ -121,6 +135,12 @@ export function deriveIntakeFields(rawAnswers: unknown): DerivedIntakeFields {
     // pre-draft so the RN/physician sees the veteran's own theory. A real narrative, not a yes/no.
     if (out.veteranTheory === undefined && /why|connect|believe|caused|relate|in[- ]service|theory|happened|explain|describe/.test(label) && ansStr.trim().length > 25) {
       out.veteranTheory = ansStr.trim().slice(0, 2000);
+    }
+    // The veteran's own secondary framing ("secondary to PTSD", "caused by my lumbar spine") — captured
+    // from ANY answer so the case isn't defaulted to "direct" when they explicitly stated the link.
+    if (out.upstreamCondition === undefined && ansStr.trim().length > 8) {
+      const sec = parseSecondaryFraming(ansStr);
+      if (sec) { out.upstreamCondition = sec.upstream; out.framing = sec.framing; }
     }
     if (out.claimType === undefined && /claim/.test(label) && /type/.test(label)) out.claimType = normalizeClaimType(ansStr);
     if (out.email === undefined && ansStr.includes('@') && ansStr.includes('.')) out.email = ansStr;

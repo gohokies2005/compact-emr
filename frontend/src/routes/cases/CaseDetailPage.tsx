@@ -238,8 +238,12 @@ export function CaseDetailPage() {
       // Gap 1: first-draft trigger. RN/admin can kick off the drafter when no run is in
       // flight and none has completed yet. Chart-readiness is enforced inside the panel.
       const hasCompletedDraft = (c.draftJobs ?? []).some((job) => job.state === 'done');
+      // Hide the "Send to Drafter" card while the case is PARKED at a Gate-2 halt — the halt panel
+      // below owns the decision (override / re-run / pause), so showing both produced two redundant,
+      // misaligned amber boxes (Ryan 2026-06-06). The halt panel is the single source of action here.
+      const isParkedAtHalt = c.status === 'needs_rn_decision' || c.status === 'needs_records';
       const canSendFirstDraft =
-        (role === 'admin' || role === 'ops_staff') && !inFlightDraft && !hasCompletedDraft;
+        (role === 'admin' || role === 'ops_staff') && !inFlightDraft && !hasCompletedDraft && !isParkedAtHalt;
 
       // Physician's view — any case the RN has sent (status physician_review). The RN's explicit
       // send IS the gate now, so we no longer require ship/runComplete here (the RN may send a

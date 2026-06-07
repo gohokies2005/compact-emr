@@ -53,7 +53,12 @@ export function createStrategyPreviewRouter(db: AppDb): Router {
         claimType: c.claimType ?? '',
         framingChoice: c.framingChoice,
         upstreamScCondition: c.upstreamScCondition,
-        serviceConnectedConditions: (c.veteran?.scConditions ?? []).map((s) => s.condition),
+        // Only GRANTED conditions are valid anchors — a pending/denied claim is not yet service-connected,
+        // so a secondary theory hung on it isn't viable (architect QA FIX-1: don't show "Strong" on an
+        // ungranted anchor). cdsEngine's anchor check is status-blind by design; the filter lives here.
+        serviceConnectedConditions: (c.veteran?.scConditions ?? [])
+          .filter((s) => s.status === 'service_connected')
+          .map((s) => s.condition),
         activeProblems: (c.veteran?.activeProblems ?? []).map((p) => p.problem),
         proposedMechanism: c.inServiceEvent ?? c.veteranStatement ?? null,
       });

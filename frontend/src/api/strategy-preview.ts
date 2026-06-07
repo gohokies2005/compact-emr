@@ -10,6 +10,7 @@ export interface StrategyCriterion {
 }
 
 export interface StrategyPreview {
+  readonly evaluable: boolean;
   readonly primaryArgument: string;
   readonly proposedMechanism: string | null;
   readonly anchor: string | null;

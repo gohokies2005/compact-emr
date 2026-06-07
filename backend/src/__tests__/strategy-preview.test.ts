@@ -25,6 +25,11 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
     });
   }
 
+  it('is NOT evaluable on a bare/untriaged case (no claimed condition) — card stays hidden', () => {
+    expect(computeStrategyPreview(input({ claimedCondition: '' })).evaluable).toBe(false);
+    expect(computeStrategyPreview(input({})).evaluable).toBe(true);
+  });
+
   it('is reproducible — same input twice gives the identical result', () => {
     expect(computeStrategyPreview(input({}))).toEqual(computeStrategyPreview(input({})));
   });

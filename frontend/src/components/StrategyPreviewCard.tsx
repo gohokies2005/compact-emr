@@ -21,7 +21,9 @@ export function StrategyPreviewCard({ caseId }: { readonly caseId: string }) {
   });
 
   const p = q.data?.data;
-  if (!p) return null; // quiet while loading / on error — the Send panel below carries its own state
+  // Quiet while loading / on error, and on an untriaged case (no claimed condition yet) — never show an
+  // alarming "Stop" for a claim nobody has framed. The Send panel below carries its own state.
+  if (!p || !p.evaluable) return null;
 
   const s = TIER_STYLE[p.tier];
   return (

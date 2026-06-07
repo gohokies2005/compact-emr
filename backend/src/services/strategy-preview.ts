@@ -19,6 +19,9 @@ export interface StrategyCriterion {
 }
 
 export interface StrategyPreview {
+  // false on a bare/untriaged case (no claimed condition entered yet) — the card stays hidden rather than
+  // showing an alarming "Stop" for a claim nobody has framed (architect QA FIX-2).
+  readonly evaluable: boolean;
   readonly primaryArgument: string;
   readonly proposedMechanism: string | null;
   readonly anchor: string | null;
@@ -119,6 +122,7 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
 
   const mech = (input.proposedMechanism ?? '').trim();
   return {
+    evaluable: input.claimedCondition.trim().length > 0,
     primaryArgument: buildPrimaryArgument(input),
     proposedMechanism: mech.length > 0 ? mech : null,
     anchor: input.upstreamScCondition,

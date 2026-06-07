@@ -8,7 +8,7 @@ import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
-import { deriveIntakeFields } from '../services/intake-derive.js';
+import { deriveIntakeFields, isRecognizedSecondaryAnchor } from '../services/intake-derive.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
 import { candidateAddresses, decideVeteranMatch, deriveEmailId, makeSnippet, normalizeEmailAddress } from '../services/email-matching.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
@@ -744,9 +744,18 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       const cc = c as { id: string; upstreamScCondition: string | null; framingChoice: string | null; veteranStatement: string | null; claimedCondition: string };
       const data: Record<string, unknown> = {};
       if (derived.veteranTheory && (cc.veteranStatement ?? '').trim().length === 0) data.veteranStatement = derived.veteranTheory;
-      if (derived.upstreamCondition && (cc.upstreamScCondition ?? '').trim().length === 0) {
-        data.upstreamScCondition = derived.upstreamCondition;
-        if (derived.framing) data.framingChoice = derived.framing;
+      // Anchor reconciliation: a garbage anchor (set, but not a recognized condition — from the loose v1
+      // parse) is replaced by a clean one if available, else reverted to direct. A null anchor is filled
+      // only when a clean one is found. A valid existing anchor (recognized) is left untouched.
+      const currentGarbage = cc.upstreamScCondition !== null && !isRecognizedSecondaryAnchor(cc.upstreamScCondition);
+      if (derived.upstreamCondition) {
+        if (cc.upstreamScCondition === null || currentGarbage) {
+          data.upstreamScCondition = derived.upstreamCondition;
+          data.framingChoice = derived.framing ?? 'secondary';
+        }
+      } else if (currentGarbage) {
+        data.upstreamScCondition = null;
+        data.framingChoice = 'direct';
       }
       if (Object.keys(data).length > 0) {
         await db.case.update({ where: { id: cc.id }, data: data as never });

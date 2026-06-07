@@ -26,12 +26,32 @@ export type DerivedIntakeFields = {
 // my lumbar spine", "2nd to sinusitis"). Dropping it is why every case defaulted to "direct" in Aegis
 // (Ryan 2026-06-07, verified against ~30 live Jotform submissions). Parse the upstream anchor + framing
 // from their words. Heuristic, first-match-wins; the drafter's framingGate refines it downstream.
+// Recognized upstream conditions — the anchor must contain one of these, so we NEVER set a garbage anchor
+// ("service I wake up with headaches"). If none matches we leave the case direct; the pathway suggester
+// (which scans granted SC conditions for a Board pair) still catches a viable secondary.
+const SECONDARY_ANCHOR_KEYWORDS: readonly string[] = [
+  'ptsd', 'mental health', 'depression', 'mdd', 'anxiety', 'tinnitus', 'sleep apnea', 'osa', 'gerd',
+  'gastritis', 'hypertension', 'lumbar', 'back', 'spine', 'sciatica', 'radiculopathy', 'knee', 'hip',
+  'shoulder', 'ankle', 'plantar', 'sinusitis', 'rhinitis', 'asthma', 'migraine', 'diabetes', 'neuropathy',
+  'tbi', 'arthritis', 'thyroid', 'parkinson',
+];
+
+/** Does a stored upstream value look like a real condition (vs. a garbage phrase from a loose parse)? */
+export function isRecognizedSecondaryAnchor(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const v = value.toLowerCase();
+  return SECONDARY_ANCHOR_KEYWORDS.some((k) => v.includes(k));
+}
+
 export function parseSecondaryFraming(text: string): { upstream: string; framing: string } | undefined {
-  const m = text.match(/\b(?:secondary to|2nd to|caused by|aggravated by|exacerbated by|due to|because of|connected to)\s+(?:my\s+)?(?:service[- ]connected\s+)?([A-Za-z][A-Za-z0-9 /'’()-]{2,45}?)(?=\s+(?:and|or|because|which|that|due|rated|condition)\b|[.,;]|\s*$)/i);
+  const m = text.match(/\b(?:secondary to|2nd to|caused by|aggravated by|exacerbated by|due to)\s+(?:(?:a|an|the|my)\s+)?(?:service[- ]connected\s+)?([A-Za-z][A-Za-z0-9 /'’()-]{2,50}?)(?=\s+(?:and|or|because|which|that|due|rated|condition)\b|[.,;]|\s*$)/i);
   if (!m) return undefined;
-  const upstream = m[1].trim().replace(/\s+/g, ' ').replace(/[.,;]+$/, '');
-  if (upstream.length < 3) return undefined;
-  return { upstream, framing: /aggravat|exacerbat|worsen/i.test(text) ? 'aggravation' : 'secondary' };
+  const raw = m[1].trim().toLowerCase();
+  // Conservative: only accept when the captured phrase contains a recognized condition; normalize TO that
+  // keyword (clean), never the raw phrase. Avoids "service I wake up with headaches" / "a service-connected".
+  const hit = SECONDARY_ANCHOR_KEYWORDS.find((k) => raw.includes(k));
+  if (hit === undefined) return undefined;
+  return { upstream: hit, framing: /aggravat|exacerbat|worsen/i.test(text) ? 'aggravation' : 'secondary' };
 }
 
 const MONTHS: Record<string, number> = {

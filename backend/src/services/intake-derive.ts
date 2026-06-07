@@ -17,6 +17,7 @@ type RawAnswer = { type?: string; name?: string; text?: string; answer?: unknown
 export type DerivedIntakeFields = {
   name?: string; email?: string; phone?: string; state?: string;
   condition?: string; dob?: string; claimType?: string;
+  veteranTheory?: string; // the veteran's free-text "why I think this is service-connected" narrative
 };
 
 const MONTHS: Record<string, number> = {
@@ -116,6 +117,11 @@ export function deriveIntakeFields(rawAnswers: unknown): DerivedIntakeFields {
     if (out.name === undefined && /name/.test(label) && ansStr) out.name = ansStr;
     if (/\bstate\b/.test(label) && ansStr) out.state ??= toStateAbbr(ansStr) ?? ansStr.slice(0, 2).toUpperCase();
     if (/condition/.test(label) && ansStr) out.condition ??= ansStr;
+    // The "why do you think this is service-connected" narrative — the case in one sentence; surfaced
+    // pre-draft so the RN/physician sees the veteran's own theory. A real narrative, not a yes/no.
+    if (out.veteranTheory === undefined && /why|connect|believe|caused|relate|in[- ]service|theory|happened|explain|describe/.test(label) && ansStr.trim().length > 25) {
+      out.veteranTheory = ansStr.trim().slice(0, 2000);
+    }
     if (out.claimType === undefined && /claim/.test(label) && /type/.test(label)) out.claimType = normalizeClaimType(ansStr);
     if (out.email === undefined && ansStr.includes('@') && ansStr.includes('.')) out.email = ansStr;
   }

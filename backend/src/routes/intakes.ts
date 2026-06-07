@@ -10,7 +10,7 @@ import { publishJotformIngest } from '../services/jotform-ingest-queue.js';
 import { parseVeteranCreate } from '../services/veteran-validation.js';
 import { parseCaseCreate } from '../services/case-validation.js';
 import { assignChartFilenames } from '../services/chart-filename.js';
-import { fillIntakeDerived } from '../services/intake-derive.js';
+import { fillIntakeDerived, deriveIntakeFields } from '../services/intake-derive.js';
 import { renderIntakeSummaryPdf } from '../services/intake-summary-pdf.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
 
@@ -141,6 +141,9 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     if (intakeRow.status !== 'ready') {
       throw new HttpError(409, 'conflict', `Intake is '${intakeRow.status}', not ready to assign.`, { intakeId, status: intakeRow.status });
     }
+    // The veteran's stated "why is this connected" theory (free text in the intake) — prefill it onto the
+    // new case so it shows pre-draft. The assign-drawer value (if the RN typed one) still wins. (2026-06-07)
+    const derivedTheory = deriveIntakeFields((intake as { rawAnswersJson?: unknown }).rawAnswersJson).veteranTheory;
 
     const body = (req.body ?? {}) as Record<string, unknown>;
     const actor = (req as { user?: { sub?: string } }).user?.sub ?? 'unknown';
@@ -171,7 +174,7 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
         cond = (c as { claimedCondition?: string }).claimedCondition ?? '';
       } else if (body['newCase'] !== undefined && body['newCase'] !== null) {
         const parsed = parseCaseCreate(body['newCase']);
-        const created = await tx.case.create({ data: { ...parsed, veteranId: vId } as never });
+        const created = await tx.case.create({ data: { ...(derivedTheory ? { veteranStatement: derivedTheory } : {}), ...parsed, veteranId: vId } as never });
         cId = (created as { id: string }).id;
         cond = (parsed as { claimedCondition?: string }).claimedCondition ?? '';
       } else {

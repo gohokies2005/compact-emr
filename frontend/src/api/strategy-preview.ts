@@ -9,8 +9,16 @@ export interface StrategyCriterion {
   readonly detail: string;
 }
 
+export interface PathwaySuggestion {
+  readonly kind: 'direct' | 'secondary';
+  readonly anchor: string | null;
+  readonly basis: string | null;
+  readonly differsFromCurrent: boolean;
+}
+
 export interface StrategyPreview {
   readonly evaluable: boolean;
+  readonly recommendedPathway: PathwaySuggestion;
   readonly primaryArgument: string;
   readonly proposedMechanism: string | null;
   readonly anchor: string | null;

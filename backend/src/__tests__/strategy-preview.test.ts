@@ -33,6 +33,19 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
     expect(computeStrategyPreview(input({})).evaluable).toBe(true);
   });
 
+  it('recommends secondary-to-X when a strong Board pair exists for a granted SC condition', () => {
+    // OSA claimed, framed "direct", but PTSD is granted SC and PTSD->OSA is a strong pair -> suggest secondary.
+    const r = computeStrategyPreview(input({ claimType: 'direct', framingChoice: 'direct', upstreamScCondition: null, serviceConnectedConditions: ['PTSD'], claimedCondition: 'OSA', activeProblems: ['OSA'] }));
+    expect(r.recommendedPathway.kind).toBe('secondary');
+    expect(r.recommendedPathway.anchor?.toLowerCase()).toContain('ptsd');
+    expect(r.recommendedPathway.differsFromCurrent).toBe(true);
+  });
+
+  it('recommends direct when no granted SC condition has a Board pair to the claimed condition', () => {
+    const r = computeStrategyPreview(input({ claimType: 'direct', upstreamScCondition: null, serviceConnectedConditions: [], claimedCondition: 'GERD' }));
+    expect(r.recommendedPathway.kind).toBe('direct');
+  });
+
   it('is reproducible — same input twice gives the identical result', () => {
     expect(computeStrategyPreview(input({}))).toEqual(computeStrategyPreview(input({})));
   });

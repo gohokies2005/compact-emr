@@ -1,16 +1,18 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getStrategyPreview, type StrategyTier } from '../api/strategy-preview';
 
-// Pre-draft strategy preview: a deterministic, at-a-glance read of WHAT the draft will argue and how
-// viable it is — so a human can catch a crazy pathway ("knee pain doesn't cause blindness") before
-// spending on a draft. The tier + criteria come straight from the same engine the CDS uses; the steer to
-// redirect lives in the Gate-1 checklist on "Send to Drafter".
+// Pre-draft strategy section. NEUTRAL by design (architect/nurse/UI review 2026-06-07): it never wears a
+// blocker color and never gates the button — that's chart-readiness' job. The only color here is a small
+// advisory tier chip. Shows the primary argument, a SUGGESTED pathway when a stronger one exists, the
+// veteran's own stated theory, and the 5 checks collapsed behind a disclosure (auto-shown only when the
+// tier is concerning). One verdict, no conflicting traffic lights.
 
-const TIER_STYLE: Record<StrategyTier, { box: string; badge: string; label: string }> = {
-  Strong: { box: 'border-emerald-300 border-l-emerald-500 bg-emerald-50', badge: 'bg-emerald-100 text-emerald-800', label: 'Strong' },
-  Plausible: { box: 'border-sky-300 border-l-sky-500 bg-sky-50', badge: 'bg-sky-100 text-sky-800', label: 'Plausible' },
-  Thin: { box: 'border-amber-300 border-l-amber-500 bg-amber-50', badge: 'bg-amber-100 text-amber-800', label: 'Thin' },
-  Stop: { box: 'border-rose-300 border-l-rose-500 bg-rose-50', badge: 'bg-rose-100 text-rose-800', label: 'Stop — review' },
+const TIER_CHIP: Record<StrategyTier, { cls: string; label: string }> = {
+  Strong: { cls: 'bg-emerald-100 text-emerald-800', label: 'Strong' },
+  Plausible: { cls: 'bg-sky-100 text-sky-800', label: 'Plausible' },
+  Thin: { cls: 'bg-amber-100 text-amber-800', label: 'Thin — review' },
+  Stop: { cls: 'bg-rose-100 text-rose-800', label: 'Review needed' },
 };
 
 export function StrategyPreviewCard({ caseId }: { readonly caseId: string }) {
@@ -19,35 +21,48 @@ export function StrategyPreviewCard({ caseId }: { readonly caseId: string }) {
     queryFn: () => getStrategyPreview(caseId),
     enabled: caseId.length > 0,
   });
+  const [showDetail, setShowDetail] = useState(false);
 
   const p = q.data?.data;
-  // Quiet while loading / on error, and on an untriaged case (no claimed condition yet) — never show an
-  // alarming "Stop" for a claim nobody has framed. The Send panel below carries its own state.
-  if (!p || !p.evaluable) return null;
+  if (!p || !p.evaluable) return null; // quiet on load/error and on untriaged cases
 
-  const s = TIER_STYLE[p.tier];
+  const chip = TIER_CHIP[p.tier];
+  const concerning = p.tier === 'Stop' || p.tier === 'Thin';
+  const rec = p.recommendedPathway;
+
   return (
-    <div className={`mb-4 rounded-lg border border-l-4 ${s.box} p-4`}>
-      <div className="flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold text-slate-900">Strategy preview — before you draft</h3>
-        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${s.badge}`}>{s.label}</span>
+    <div className="mb-5 border-b border-slate-100 pb-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm text-slate-800"><span className="font-medium">Argument:</span> {p.primaryArgument}</div>
+          {rec.kind === 'secondary' && rec.differsFromCurrent ? (
+            <div className="mt-1 text-sm text-indigo-700">
+              <span className="font-medium">Suggested:</span> argue <span className="font-medium">secondary to {rec.anchor}</span>
+              {rec.basis ? ` (${rec.basis})` : ''} — set this in the checklist when you Send.
+            </div>
+          ) : null}
+          {p.proposedMechanism ? (
+            <div className="mt-1 text-sm text-slate-600"><span className="font-medium">Veteran’s theory:</span> {p.proposedMechanism}</div>
+          ) : null}
+        </div>
+        <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${chip.cls}`} title="Advisory only — does not block drafting">
+          {chip.label}
+        </span>
       </div>
-      <p className="mt-2 text-sm text-slate-800"><span className="font-medium">Primary argument:</span> {p.primaryArgument}</p>
-      {p.proposedMechanism ? (
-        <p className="mt-1 text-sm text-slate-700"><span className="font-medium">Veteran’s stated theory:</span> {p.proposedMechanism}</p>
+
+      <button type="button" onClick={() => setShowDetail((s) => !s)} className="mt-2 text-xs text-slate-400 hover:text-slate-600">
+        {showDetail ? 'Hide checks ▲' : `Strategy checks (${p.criteria.length}) ▼`}
+      </button>
+      {showDetail || concerning ? (
+        <ul className="mt-2 space-y-1">
+          {p.criteria.map((c) => (
+            <li key={c.key} className="flex items-start gap-2 text-xs">
+              <span className={c.pass ? 'flex-none text-emerald-600' : 'flex-none text-rose-600'} aria-hidden="true">{c.pass ? '✓' : '✗'}</span>
+              <span className="text-slate-600"><span className="font-medium">{c.label}.</span> {c.detail}</span>
+            </li>
+          ))}
+        </ul>
       ) : null}
-      <ul className="mt-3 space-y-1">
-        {p.criteria.map((c) => (
-          <li key={c.key} className="flex items-start gap-2 text-xs">
-            <span className={c.pass ? 'flex-none text-emerald-600' : 'flex-none text-rose-600'} aria-hidden="true">{c.pass ? '✓' : '✗'}</span>
-            <span className="text-slate-700"><span className="font-medium">{c.label}.</span> {c.detail}</span>
-          </li>
-        ))}
-      </ul>
-      <p className="mt-3 text-[11px] text-slate-500">
-        Deterministic sanity check from the chart — a relative ranking signal, not a win probability. If the
-        argument is wrong, redirect it in the checklist when you click Send; your steer is binding.
-      </p>
     </div>
   );
 }

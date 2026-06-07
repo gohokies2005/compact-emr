@@ -134,6 +134,27 @@ function barredTheory(input: CdsEngineInput): string | null {
   return null;
 }
 
+export interface PairMatch {
+  readonly upstream: string;
+  readonly claimed: string;
+  readonly n: number;
+  readonly tier: 'high' | 'moderate' | 'low';
+  readonly winPct: number;
+  readonly imoWinPct: number | null;
+}
+
+// Look up a BVA secondary pair (upstream -> claimed) using the SAME matcher evaluateCds uses, so the
+// strategy-preview pathway recommender stays in lockstep with the atlas vocabulary (a second matcher would
+// drift — a recurring FRN footgun). Returns null when either side doesn't resolve to an atlas key.
+export function findPair(upstream: string, claimed: string): PairMatch | null {
+  const upstreamKey = matchKey(upstream, Object.keys(PAIRS));
+  if (upstreamKey === null) return null;
+  const claimedKey = matchKey(claimed, Object.keys(PAIRS[upstreamKey]));
+  if (claimedKey === null) return null;
+  const s = PAIRS[upstreamKey][claimedKey];
+  return { upstream: upstreamKey, claimed: claimedKey, n: s.n, tier: s.tier, winPct: s.win_pct, imoWinPct: s.imo_win_pct };
+}
+
 export function evaluateCds(input: CdsEngineInput): CdsResult {
   const checkedAt = new Date().toISOString();
   const base = { checkedAt, engineVersion: CDS_ENGINE_VERSION };

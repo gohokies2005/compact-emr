@@ -7,7 +7,40 @@
 // steer; a material mid-draft theory change re-surfaces via Gate-2. Critical: compute LIVE here, never
 // read the stale Case.cdsVerdict column.
 
-import { evaluateCds } from './cdsEngine.js';
+import { evaluateCds, findPair, type PairMatch } from './cdsEngine.js';
+
+export interface PathwaySuggestion {
+  readonly kind: 'direct' | 'secondary';
+  readonly anchor: string | null;       // the granted SC condition, for a secondary recommendation
+  readonly basis: string | null;        // human-readable Board basis for the recommendation
+  readonly differsFromCurrent: boolean; // true when the suggestion isn't how the case is framed now
+}
+
+const TIER_RANK: Record<string, number> = { high: 3, moderate: 2, low: 1 };
+
+// Deterministic pathway recommender: scan the veteran's GRANTED SC conditions for a known Board pair to the
+// claimed condition, and recommend "secondary to X" when a strong (high/moderate-tier) pair exists — else
+// "direct". Recommend-only: the RN accepts it in the Gate-1 checklist; never auto-applied (steer-at-decision).
+export function suggestPathway(input: StrategyPreviewInput): PathwaySuggestion {
+  let best: PairMatch | null = null;
+  const score = (s: PairMatch): number => (TIER_RANK[s.tier] ?? 0) * 1e6 + (s.imoWinPct ?? s.winPct) * 1e3 + s.n;
+  for (const sc of input.serviceConnectedConditions) {
+    const m = findPair(sc, input.claimedCondition);
+    if (m === null) continue;
+    if (best === null || score(m) > score(best)) best = m;
+  }
+  if (best !== null && (best.tier === 'high' || best.tier === 'moderate')) {
+    const cur = (input.upstreamScCondition ?? '').toLowerCase().trim();
+    const differs = cur.length === 0 || !best.upstream.toLowerCase().includes(cur);
+    return {
+      kind: 'secondary',
+      anchor: best.upstream,
+      basis: `Board pairing n=${best.n}, tier ${best.tier}${best.imoWinPct != null ? `, IMO ${best.imoWinPct}%` : ''}`,
+      differsFromCurrent: differs,
+    };
+  }
+  return { kind: 'direct', anchor: null, basis: null, differsFromCurrent: false };
+}
 
 export type StrategyTier = 'Strong' | 'Plausible' | 'Thin' | 'Stop';
 
@@ -26,6 +59,7 @@ export interface StrategyPreview {
   readonly proposedMechanism: string | null;
   readonly anchor: string | null;
   readonly tier: StrategyTier;
+  readonly recommendedPathway: PathwaySuggestion;
   readonly criteria: readonly StrategyCriterion[];
   readonly summary: string;
 }
@@ -141,6 +175,7 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     proposedMechanism: mech.length > 0 ? mech : null,
     anchor: input.upstreamScCondition,
     tier,
+    recommendedPathway: suggestPathway(input),
     criteria,
     summary: cds.summary,
   };

@@ -10,6 +10,7 @@ import { createCasesRouter } from './routes/cases.js';
 import { createEmailsRouter } from './routes/emails.js';
 import { createMailboxesRouter } from './routes/mailboxes.js';
 import { createChartNotesRouter } from './routes/chart-notes.js';
+import { createAdvisoryRouter } from './routes/advisory.js';
 import { createCdsRouter } from './routes/cds.js';
 import { createLookupRouter } from './routes/lookup.js';
 import { createSignOffsRouter } from './routes/sign-offs.js';
@@ -112,6 +113,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createUsersRouter(db, cognitoUserPoolId ? { cognito: makeCognitoAdmin(cognitoUserPoolId) } : {}));
   app.use('/api/v1', authenticateJwt(), createPhysiciansRouter(db, { bucketName: process.env.PHI_BUCKET_NAME, s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) }));
   app.use('/api/v1', authenticateJwt(), createChartNotesRouter(db));
+  app.use('/api/v1', authenticateJwt(), createAdvisoryRouter(db));
   app.use('/api/v1', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), createCaseMessagesRouter(db));
   app.use('/api/v1', authenticateJwt(), createCdsRouter(db));
   app.use('/api/v1', authenticateJwt(), createLookupRouter());

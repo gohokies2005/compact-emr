@@ -295,6 +295,11 @@ function VeteranDemographics({ v, role, onSaved }: { readonly v: VeteranDetail; 
       <InlineField label="Service end" type="number" value={v.serviceEndYear != null ? String(v.serviceEndYear) : ''} editable={canEdit} saving={save.isPending} onSave={yearReq('serviceEndYear')} />
       <InlineField label="Height (in)" type="number" value={v.heightIn != null ? String(v.heightIn) : ''} display={ht} editable={canEdit} saving={save.isPending} onSave={intNul('heightIn', 'Height')} />
       <InlineField label="Weight (lb)" type="number" value={v.weightLb != null ? String(v.weightLb) : ''} display={v.weightLb != null ? `${v.weightLb} lb` : ''} editable={canEdit} saving={save.isPending} onSave={intNul('weightLb', 'Weight')} />
+      {/* Claim-relevant flags (combat 1154(b), PACT presumptives, TERA) — captured at intake + fed to the
+          drafter; now visible + correctable here (audit 2026-06-07: they were write-only). */}
+      <InlineSelect label="Combat veteran" value={v.combatVeteran ?? ''} editable={canEdit} saving={save.isPending} onSave={(val) => patch('combatVeteran', val)} />
+      <InlineSelect label="PACT area" value={v.pactArea ?? ''} editable={canEdit} saving={save.isPending} onSave={(val) => patch('pactArea', val)} />
+      <InlineSelect label="TERA conceded" value={v.teraConceded ?? ''} editable={canEdit} saving={save.isPending} onSave={(val) => patch('teraConceded', val)} />
     </div>
   );
 }
@@ -330,6 +335,43 @@ function InlineField({ label, value, display, type = 'text', editable = true, sa
         </button>
       ) : (
         <span className="px-1 text-sm text-slate-500" title={`${label} — admin only`}>{display || value || '—'}</span>
+      )}
+    </div>
+  );
+}
+
+// Click-to-edit Yes/No/Unknown field (combat / PACT / TERA flags). Same affordance as InlineField but a
+// bounded enum so an RN can't free-type a value the drafter won't recognize.
+function InlineSelect({ label, value, editable = true, saving, onSave }: {
+  readonly label: string;
+  readonly value: string; // 'yes' | 'no' | 'unknown' | ''
+  readonly editable?: boolean;
+  readonly saving: boolean;
+  readonly onSave: (value: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value || 'unknown');
+  function commit() { onSave(draft); setEditing(false); }
+  const display = value ? value.charAt(0).toUpperCase() + value.slice(1) : '';
+  return (
+    <div className="flex items-baseline gap-2 py-1">
+      <span className="w-28 shrink-0 text-xs font-medium uppercase tracking-wide text-slate-400">{label}</span>
+      {editing ? (
+        <span className="flex items-center gap-2">
+          <select className="input h-7 w-44 py-0 text-sm" value={draft} autoFocus onChange={(e) => setDraft(e.target.value)}>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+            <option value="unknown">Unknown</option>
+          </select>
+          <button type="button" className="text-xs font-medium text-indigo-600 disabled:opacity-50" disabled={saving} onClick={commit}>Save</button>
+          <button type="button" className="text-xs text-slate-400" onClick={() => setEditing(false)}>Cancel</button>
+        </span>
+      ) : editable ? (
+        <button type="button" className="rounded px-1 text-left text-sm text-slate-700 decoration-dotted hover:bg-amber-50 hover:underline" title={`Click to edit ${label.toLowerCase()}`} onClick={() => { setDraft(value || 'unknown'); setEditing(true); }}>
+          {display || <span className="text-slate-300">— add</span>}
+        </button>
+      ) : (
+        <span className="px-1 text-sm text-slate-500">{display || '—'}</span>
       )}
     </div>
   );

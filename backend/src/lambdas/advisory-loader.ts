@@ -106,6 +106,7 @@ export interface LoadResult {
   parsed: number;
   inserted: number;
   skippedDuplicate: number;
+  deleted: number; // rows pruned because their id is no longer in the dropped file (e.g. stale bva_atlas:*)
   failed: Array<{ line: number; id?: string; reason: string }>;
 }
 
@@ -156,12 +157,14 @@ export async function handler(): Promise<LoadResult> {
   //    ASK path, not this loader. (advisory_loader still exists in the cabinet for the design/future.)
   //    Per-row failures still surface their reason (never a silent partial).
   const lines = await readDropLines(bucket, key);
-  const result: LoadResult = { setup: 'ok', parsed: 0, inserted: 0, skippedDuplicate: 0, failed: [] };
+  const result: LoadResult = { setup: 'ok', parsed: 0, inserted: 0, skippedDuplicate: 0, deleted: 0, failed: [] };
+  const fileIds: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     let chunk: EmbeddedChunk;
     try {
       chunk = parseEmbeddedChunk(lines[i]);
       result.parsed++;
+      fileIds.push(chunk.id);
     } catch (e) {
       result.failed.push({ line: i + 1, reason: e instanceof Error ? e.message : String(e) });
       continue;
@@ -174,6 +177,19 @@ export async function handler(): Promise<LoadResult> {
       result.failed.push({ line: i + 1, id: chunk.id, reason: e instanceof Error ? e.message : String(e) });
     }
   }
+
+  // 3) Reconcile: delete rows whose id is NOT in the dropped file, so the table EXACTLY matches the file.
+  //    Handles REMOVALS (e.g. the stale `bva_atlas:*` chunks the flatratenexus window pruned 2026-06-07 —
+  //    the insert-only load would otherwise leave them behind to surface inflated BVA numbers). GUARDED on
+  //    a non-empty, fully-parsed file so a bad/empty/partially-failed drop can NEVER wipe the cabinet.
+  if (fileIds.length > 0 && result.failed.length === 0) {
+    const placeholders = fileIds.map((_, i) => `$${i + 1}`).join(',');
+    result.deleted = await prisma.$executeRawUnsafe(
+      `DELETE FROM advisory.ref_chunk WHERE id NOT IN (${placeholders})`,
+      ...fileIds,
+    );
+  }
+
   // eslint-disable-next-line no-console
   console.log('[advisory-loader]', JSON.stringify({ ...result, failed: result.failed.length }));
   return result;

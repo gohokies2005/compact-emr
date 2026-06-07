@@ -8,7 +8,10 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 
 export const ADVISORY_MODEL_ID = 'us.anthropic.claude-opus-4-6-v1';
-export const ADVISORY_MAX_TOKENS = 2048; // output cap = the cost ceiling on each answer
+// Output cap = the cost ceiling on each answer. 1024 tokens (~750 words) keeps a typical question at
+// ~5-10¢ (Ryan target): output 1024 @ $75/M ≈ 7.7¢ + input (cached system prompt) ≈ 1-3¢. Advisory
+// answers should be concise anyway.
+export const ADVISORY_MAX_TOKENS = 1024;
 
 // Bedrock list price for Opus-class, per 1M tokens. VERIFY against the AWS Bedrock pricing page before
 // trusting the cost log for billing — these are cost-attribution rates for the oversight dashboard.

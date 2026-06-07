@@ -1,94 +1,120 @@
 import { useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
-import { askAdvisory, type AdvisoryAnswer } from '../api/advisory';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { askAdvisory, getAdvisoryThread, type AdvisoryThreadItem } from '../api/advisory';
 import { describeApiError } from '../api/client';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 
-// "Ask AI about this case" — read-only advisory Q&A, grounded in FRN's reference library + BVA stats.
-// Decision support ONLY: the model gets no tools, can't change anything, and the human is the overseer.
+// "Ask Aegis" — read-only advisory Q&A about this case, grounded in FRN's reference library + Board data.
+// Decision support ONLY: the model gets no tools, can't change anything, the human is the overseer.
+// Collapsed by default (just the cue) so it never clutters the sign-off screen; the Q&A thread is saved
+// and re-renders when the case is reopened.
+
+const DISCLAIMER =
+  'Decision support only — not a medical opinion. A physician is the overseer; verify before relying on any answer. Internal Board figures are a relative ranking signal, never a win probability, and never for a letter or the veteran.';
+
+function ThreadEntry({ item }: { readonly item: AdvisoryThreadItem }) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+      <div className="text-sm font-medium text-slate-800">Q: {item.question}</div>
+      <div className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{item.answer}</div>
+      {item.citations && item.citations.length > 0 ? (
+        <div className="mt-2 text-xs text-slate-500">
+          Sources:{' '}
+          {item.citations.map((c, i) => (
+            <span key={`${c.citation}-${i}`}>
+              {i > 0 ? '; ' : ''}
+              {c.citation}
+              {c.letter_citable ? '' : ' (internal)'}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function AdvisoryPanel({ caseId }: { readonly caseId: string }) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
   const [question, setQuestion] = useState('');
-  const [answer, setAnswer] = useState<AdvisoryAnswer | null>(null);
+
+  const thread = useQuery({
+    queryKey: ['case', caseId, 'advisory-thread'],
+    queryFn: () => getAdvisoryThread(caseId),
+    enabled: open,
+  });
 
   const ask = useMutation({
     mutationFn: () => askAdvisory(caseId, question.trim()),
-    onSuccess: (r) => setAnswer(r.data),
+    onSuccess: async () => {
+      setQuestion('');
+      await qc.invalidateQueries({ queryKey: ['case', caseId, 'advisory-thread'] });
+    },
     onError: (e: unknown) => window.alert(`Could not get an answer — ${describeApiError(e)}`),
   });
 
   function submit() {
-    if (question.trim().length === 0 || ask.isPending) return;
-    setAnswer(null);
-    ask.mutate();
+    if (question.trim().length > 0 && !ask.isPending) ask.mutate();
   }
 
+  const items = thread.data?.data ?? [];
+
   return (
-    <div className="space-y-4">
-      <Card className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="text-base font-semibold text-slate-900">Ask Aegis</h2>
-        <p className="mt-1 text-sm text-slate-600">
-          Plain-language questions about viability, framing, or strategy — grounded in our medical library and
-          Board data.
-        </p>
-        <div className="mt-3 rounded-md border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-3 text-xs text-amber-900">
-          <strong>Decision support only — not a medical opinion.</strong> A physician is the overseer; verify
-          before relying on any answer. Internal Board figures are a relative ranking signal, never a win
-          probability, and never for a letter or the veteran.
+    <Card className="rounded-lg border border-slate-200 bg-white shadow-sm">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between rounded-lg p-5 text-left hover:bg-slate-50"
+      >
+        <div>
+          <h2 className="text-base font-semibold text-slate-900">Ask Aegis</h2>
+          <p className="text-sm text-slate-500">Decision-support Q&amp;A about this case — viability, framing, Board data.</p>
         </div>
-        <textarea
-          className="input mt-3 h-24 w-full"
-          placeholder="e.g. Is this OSA claim viable secondary to his service-connected PTSD?"
-          value={question}
-          onChange={(e) => setQuestion(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
-          }}
-        />
-        <div className="mt-2 flex items-center justify-between">
-          <span className="text-xs text-slate-400">Cmd/Ctrl+Enter to ask</span>
-          <Button type="button" variant="primary" loading={ask.isPending} disabled={question.trim().length === 0} onClick={submit}>
-            Ask
-          </Button>
+        <span className="text-xs text-slate-400">{open ? 'Hide ▲' : 'Open ▼'}</span>
+      </button>
+
+      {open ? (
+        <div className="space-y-4 border-t border-slate-100 p-5">
+          <div className="rounded-md border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-3 text-xs text-amber-900">
+            {DISCLAIMER}
+          </div>
+
+          {items.length > 0 ? (
+            <div className="space-y-3">
+              {items.map((it) => (
+                <ThreadEntry key={it.id} item={it} />
+              ))}
+            </div>
+          ) : thread.isLoading ? (
+            <div className="text-sm text-slate-400">Loading…</div>
+          ) : (
+            <div className="text-sm text-slate-400">No questions yet — ask the first one below.</div>
+          )}
+
+          {ask.isPending ? <div className="text-sm text-slate-400">Aegis is thinking…</div> : null}
+
+          <div>
+            <textarea
+              className="input h-24 w-full"
+              placeholder="e.g. Is this OSA claim viable secondary to his service-connected PTSD?"
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
+              }}
+            />
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <span className="text-[11px] text-slate-400">
+                Generated by AI · use thoughtfully — it can be wrong; verify before relying on any answer.
+              </span>
+              <Button type="button" variant="primary" loading={ask.isPending} disabled={question.trim().length === 0} onClick={submit}>
+                Ask
+              </Button>
+            </div>
+          </div>
         </div>
-      </Card>
-
-      {answer ? (
-        <Card className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-          {answer.guidance ? (
-            <div className="mb-3 rounded-md border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-3 text-xs text-amber-900">
-              {answer.guidance}
-            </div>
-          ) : null}
-          <div className="whitespace-pre-wrap text-sm text-slate-800">{answer.answer}</div>
-
-          {answer.citations.length > 0 ? (
-            <div className="mt-4 border-t border-slate-100 pt-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Sources</h3>
-              <ul className="mt-1 space-y-1 text-xs text-slate-600">
-                {answer.citations.map((c, i) => (
-                  <li key={`${c.citation}-${i}`} className="flex items-start gap-2">
-                    <span className="text-slate-400">[{i + 1}]</span>
-                    <span>
-                      {c.citation} <span className="text-slate-400">({c.source})</span>
-                      {c.letter_citable ? null : (
-                        <span className="ml-1 rounded bg-slate-100 px-1 text-[10px] font-medium text-slate-500">
-                          internal — not letter-citable
-                        </span>
-                      )}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-
-          <p className="mt-4 border-t border-slate-100 pt-2 text-[11px] text-slate-400">
-            Generated by AI for decision support. Use thoughtfully — it reasons from our library and Board
-            data, but it can be wrong; verify before relying on any answer.
-          </p>
-        </Card>
       ) : null}
-    </div>
+    </Card>
   );
 }

@@ -11,6 +11,7 @@ import {
   type ReadyDraftJob,
 } from '../../components/PhysicianLetterReadyPanel';
 import { SignOffPopup } from '../../components/SignOffPopup';
+import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { getCase } from '../../api/cases';
 import { formatNameLastFirst } from '../../lib/format';
 import { getArtifactPdfUrl } from '../../api/drafter';
@@ -118,6 +119,8 @@ export function PhysicianReviewPage() {
             message="This case is not ready for physician review."
           />
         )}
+
+        {caseId ? <AdvisoryPanel caseId={caseId} /> : null}
 
         <SignOffPopup
           caseId={caseId}

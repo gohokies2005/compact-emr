@@ -6,6 +6,7 @@ import { currentActor } from '../services/request-actor.js';
 import {
   classifyReadAttempt,
   evaluateChartReadiness,
+  isIntakeSummaryPath,
   MANUAL_SUMMARY_MIN_LEN,
 } from '../services/chart-readiness.js';
 import {
@@ -128,7 +129,14 @@ export function createChartReadinessRouter(db: AppDb): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const caseId = String(req.params.id);
       const rows = await db.fileReadStatus.findMany({ where: { caseId } });
-      const result = evaluateChartReadiness(rows);
+      // Readiness and the chart's document list are separate tables with no FK — an orphaned readiness row
+      // (a deleted/legacy file) would block drafting INVISIBLY (the chart can't even show it; Yorde 2026-06-07).
+      // Reconcile: only block on a file the chart actually has, or a generated intake summary. Self-healing.
+      const liveKeys = new Set(
+        (await db.document.findMany({ where: { caseId }, select: { s3Key: true } })).map((d) => d.s3Key),
+      );
+      const reconciled = rows.filter((r) => liveKeys.has(r.filePath) || isIntakeSummaryPath(r.filePath));
+      const result = evaluateChartReadiness(reconciled);
       res.json({ data: result });
     }),
   );

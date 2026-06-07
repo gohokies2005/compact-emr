@@ -142,6 +142,14 @@ const READINESS_GATE_VERSION = 'chart-readiness-1.0.0';
  * blocks. Empty file set = ready (no files to read yet — that's a chart-empty problem,
  * separate from the OCR gate).
  */
+// A generated intake-summary PDF (minted as cases/<id>/<uuid>-Intake_Summary.pdf, and the legacy
+// <uuid>-<Last>_Intake_Summary.pdf form) — always valid, never blocks the gate. Anchored to end-of-string
+// on the underscore form so a real uploaded "Nursing Intake Summary.pdf" (space) is NOT masked. (QA 2026-06-07
+// — the legacy lastname-embedded form slipped past the old `-intake_summary` regex and blocked Yorde forever.)
+export function isIntakeSummaryPath(filePath: unknown): boolean {
+  return typeof filePath === 'string' && /intake_summary\.pdf$/i.test(filePath);
+}
+
 export function evaluateChartReadiness(rows: readonly FileReadStatusRecord[]): ChartReadinessResult {
   const blockers: ChartReadinessBlocker[] = [];
   let read = 0;
@@ -154,7 +162,7 @@ export function evaluateChartReadiness(rows: readonly FileReadStatusRecord[]): C
     // send an RN to manual review. Match the GENERATED key precisely (it's minted as
     // `cases/<id>/<uuid>-Intake_Summary.pdf`, so the key ends with '-Intake_Summary.pdf') — NOT a
     // loose substring, so a real uploaded "Nursing Intake Summary" record is never masked. (QA #5.)
-    if (typeof row.filePath === 'string' && /-intake_summary\.pdf$/i.test(row.filePath)) {
+    if (isIntakeSummaryPath(row.filePath)) {
       read++;
       continue;
     }

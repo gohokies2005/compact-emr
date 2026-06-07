@@ -273,6 +273,7 @@ export interface AppDbTransaction {
   fileReadStatus: FileReadStatusDelegate;
   keyDoc: KeyDocDelegate;
   doctorPack: DoctorPackDelegate;
+  document: DocumentDelegate;
   documentPage: DocumentPageDelegate;
   letterRevision: LetterRevisionDelegate;
   caseMessage: CaseMessageDelegate;
@@ -686,6 +687,15 @@ export interface KeyDocRecord {
   createdAt: Date;
   updatedAt: Date;
   version: number;
+}
+
+// Minimal view of the chart's uploaded documents — used to reconcile the readiness gate against files the
+// chart actually has (chart-readiness route). Only s3Key is needed here.
+export interface DocumentRecord {
+  s3Key: string;
+}
+export interface DocumentDelegate {
+  findMany(args: unknown): Promise<readonly DocumentRecord[]>;
 }
 
 export interface KeyDocDelegate {

@@ -38,6 +38,9 @@ function makeDb(c: CaseRecord = baseCase()) {
   const tx = {
     case: { findFirst: vi.fn(async () => c), findUnique: vi.fn(async () => c), findMany: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn() },
     activityLog: { create: vi.fn(async () => ({})) },
+    // Reconciliation (chart-readiness route): every readiness row has a live document, so nothing is
+    // filtered as orphaned — the existing block/ready assertions hold.
+    document: { findMany: vi.fn(async () => [...fileRows.values()].map((r) => ({ s3Key: r.filePath }))) },
     fileReadStatus: {
       findUnique: vi.fn(async (args: { where: { id: string } }) => fileRows.get(args.where.id) ?? null),
       findFirst: vi.fn(async (args: { where?: { caseId?: string; filePath?: string; id?: string } }) => {

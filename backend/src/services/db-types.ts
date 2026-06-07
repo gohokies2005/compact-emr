@@ -805,6 +805,7 @@ export interface AdvisoryQueryRecord {
   coverageGap: unknown;
   costUsd: unknown;
   answerChars: number | null;
+  answer: string | null;
   createdAt: Date;
 }
 export interface AdvisoryQueryDelegate {

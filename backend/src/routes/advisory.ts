@@ -92,6 +92,7 @@ export function createAdvisoryRouter(db: AppDb, overrides: AdvisoryRouterDeps = 
             coverageGap,
             costUsd: outcome.costUsd,
             answerChars: outcome.answer.length,
+            answer: outcome.answer,
           },
         })
         .catch(() => undefined);
@@ -106,6 +107,30 @@ export function createAdvisoryRouter(db: AppDb, overrides: AdvisoryRouterDeps = 
           notes: outcome.notes,
         },
       });
+    }),
+  );
+
+  // The Q&A thread for a case (answered questions only), oldest-first, so Ask Aegis renders the history
+  // when the case is reopened. Both views.
+  router.get(
+    '/cases/:id/advisory/queries',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const rows = await db.advisoryQuery.findMany({
+        where: { caseId, answer: { not: null } },
+        orderBy: { createdAt: 'asc' },
+        take: 50,
+      });
+      const thread = rows.map((r) => ({
+        id: r.id,
+        question: r.question,
+        answer: r.answer,
+        status: r.status,
+        citations: r.citationsJson,
+        createdAt: r.createdAt,
+      }));
+      res.json({ data: thread });
     }),
   );
 

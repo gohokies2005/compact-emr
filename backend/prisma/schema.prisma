@@ -423,6 +423,7 @@ model AdvisoryQuery {
   coverageGap   Json?    @map("coverage_gap")
   costUsd       Decimal? @map("cost_usd") @db.Decimal(10, 5)
   answerChars   Int?     @map("answer_chars")
+  answer        String? // the answer text, persisted so the Q&A thread renders when the case is reopened
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@index([caseId])

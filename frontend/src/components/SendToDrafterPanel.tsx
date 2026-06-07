@@ -98,16 +98,19 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
         {readinessQuery.isLoading ? (
           <Spinner label="Checking chart readiness" />
         ) : readinessQuery.isError ? (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+          <div className="rounded-lg border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-4 text-sm text-amber-800">
             Could not check chart readiness. Please retry.
           </div>
         ) : ready ? (
-          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+          <div className="rounded-lg border border-emerald-300 border-l-4 border-l-emerald-500 bg-emerald-50 p-4 text-sm text-emerald-800">
             Chart is ready for drafting.
           </div>
         ) : (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-            <h3 className="text-sm font-semibold text-amber-900">Chart is not ready for drafting</h3>
+          <div className="rounded-lg border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-4">
+            <div className="flex items-center gap-2">
+              <svg className="h-4 w-4 flex-none text-amber-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.515 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>
+              <h3 className="text-sm font-semibold text-amber-900">Chart is not ready for drafting</h3>
+            </div>
             {blockingFileCount > 0 ? (
               <>
                 <p className="mt-1 text-sm text-amber-800">
@@ -127,7 +130,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
               </p>
             )}
             <div className="mt-3">
-              <Button type="button" variant="secondary" size="sm" loading={draftMutation.isPending} onClick={overrideAndDraft}>
+              <Button type="button" variant="secondary" size="sm" className="border border-amber-300 bg-white text-amber-900 shadow-sm hover:bg-amber-50" loading={draftMutation.isPending} onClick={overrideAndDraft}>
                 Override and draft anyway
               </Button>
             </div>
@@ -135,7 +138,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
         )}
 
         {draftErrorMessage ? (
-          <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+          <div className="mt-4 rounded-lg border border-rose-300 border-l-4 border-l-rose-500 bg-rose-50 p-4 text-sm text-rose-700">
             {draftErrorMessage}
           </div>
         ) : null}

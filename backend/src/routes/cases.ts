@@ -176,7 +176,10 @@ function roleGuardForStatusTransition(db: AppDb) {
       });
     }
 
-    if (user.role === 'physician') {
+    // Enforce assigned-physician ONLY when a physician IS assigned. An UNASSIGNED case in
+    // physician_review (legacy, or claimed from the queue) must still be actionable by the reviewing
+    // physician — otherwise the letter is stuck with nobody able to send it back. (Ryan 2026-06-06.)
+    if (user.role === 'physician' && current.assignedPhysicianId) {
       const isAssigned = await isAssignedPhysicianForCase(db, user.sub, current.assignedPhysicianId);
       if (!isAssigned) {
         throw new HttpError(403, 'forbidden', 'Physician is not assigned to this case.', { caseId: id });

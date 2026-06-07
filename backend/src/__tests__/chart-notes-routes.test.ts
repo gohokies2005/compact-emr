@@ -57,10 +57,12 @@ describe('chart-notes routes', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 for physician (not admin/ops_staff)', async () => {
+  it('lets a physician READ + CREATE chart notes (to leave a note when sending a letter back), but not edit', async () => {
     mockUser = { sub: 'PHYS', roles: ['physician'] };
-    const res = await request(appFor(makeDb().db)).get('/api/v1/veterans/VET-1/chart-notes');
-    expect(res.status).toBe(403);
+    const get = await request(appFor(makeDb().db)).get('/api/v1/veterans/VET-1/chart-notes');
+    expect(get.status).toBe(200);
+    const patch = await request(appFor(makeDb().db)).patch('/api/v1/chart-notes/N1').send({ body: 'x' });
+    expect(patch.status).toBe(403); // edit/delete stay admin/ops-only
   });
 
   it('lists notes for a veteran', async () => {

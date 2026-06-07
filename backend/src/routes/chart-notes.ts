@@ -21,7 +21,7 @@ export function createChartNotesRouter(db: AppDb): Router {
 
   router.get(
     '/veterans/:veteranId/chart-notes',
-    requireRole(['admin', 'ops_staff']),
+    requireRole(['admin', 'ops_staff', 'physician']),
     asyncHandler(async (req: Request, res: Response) => {
       const veteranId = String(req.params.veteranId);
       const rows = await db.chartNote.findMany({ where: { veteranId }, orderBy: { createdAt: 'desc' } });
@@ -31,7 +31,7 @@ export function createChartNotesRouter(db: AppDb): Router {
 
   router.post(
     '/veterans/:veteranId/chart-notes',
-    requireRole(['admin', 'ops_staff']),
+    requireRole(['admin', 'ops_staff', 'physician']), // physician leaves a note when sending a letter back
     asyncHandler(async (req: Request, res: Response) => {
       const user = currentUser(req);
       const veteranId = String(req.params.veteranId);

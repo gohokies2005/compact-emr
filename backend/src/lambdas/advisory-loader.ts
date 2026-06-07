@@ -148,9 +148,13 @@ export async function handler(): Promise<LoadResult> {
   for (const stmt of CABINET_DDL.split(/;\s*\n/).map((s) => s.trim()).filter((s) => s.length > 0)) {
     await prisma.$executeRawUnsafe(stmt.endsWith(';') ? stmt : `${stmt};`);
   }
-  await prisma.$executeRawUnsafe('SET ROLE advisory_loader');
-
-  // 2) Load the drop, row-by-row, surfacing per-row failure reasons (never a silent partial).
+  // 2) Load the drop as the MASTER user (full access). We deliberately do NOT `SET ROLE advisory_loader`
+  //    here: Prisma POOLS connections, so a session-level SET ROLE sticks on only one connection while the
+  //    row-by-row inserts spread across the pool — that caused a partial 611/1244 load with "permission
+  //    denied for table ref_chunk" on 2026-06-07. The loader is a trusted, in-VPC, one-shot setup op, so
+  //    inserting as master is correct; the enforced read-only boundary is advisory_ro (SELECT-only) on the
+  //    ASK path, not this loader. (advisory_loader still exists in the cabinet for the design/future.)
+  //    Per-row failures still surface their reason (never a silent partial).
   const lines = await readDropLines(bucket, key);
   const result: LoadResult = { setup: 'ok', parsed: 0, inserted: 0, skippedDuplicate: 0, failed: [] };
   for (let i = 0; i < lines.length; i++) {
@@ -170,7 +174,6 @@ export async function handler(): Promise<LoadResult> {
       result.failed.push({ line: i + 1, id: chunk.id, reason: e instanceof Error ? e.message : String(e) });
     }
   }
-  await prisma.$executeRawUnsafe('RESET ROLE');
   // eslint-disable-next-line no-console
   console.log('[advisory-loader]', JSON.stringify({ ...result, failed: result.failed.length }));
   return result;

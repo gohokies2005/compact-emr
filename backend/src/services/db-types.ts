@@ -282,6 +282,7 @@ export interface AppDbTransaction {
   payment: PaymentDelegate;
   intake: IntakeDelegate;
   draftDecision: DraftDecisionDelegate;
+  advisoryQuery: AdvisoryQueryDelegate;
 }
 
 export interface AppDb extends AppDbTransaction {
@@ -787,6 +788,29 @@ export interface DraftDecisionDelegate {
   create(args: unknown): Promise<DraftDecisionRecord>;
   createMany(args: unknown): Promise<{ count: number }>;
   count(args: unknown): Promise<number>;
+}
+
+// Advisory "Ask AI" oversight + cost log (advisory_queries).
+export interface AdvisoryQueryRecord {
+  id: string;
+  caseId: string | null;
+  veteranId: string | null;
+  userId: string;
+  userRole: string;
+  view: string;
+  question: string;
+  status: string;
+  modeRan: string[];
+  citationsJson: unknown;
+  coverageGap: unknown;
+  costUsd: unknown;
+  answerChars: number | null;
+  createdAt: Date;
+}
+export interface AdvisoryQueryDelegate {
+  create(args: unknown): Promise<AdvisoryQueryRecord>;
+  findMany(args?: unknown): Promise<readonly AdvisoryQueryRecord[]>;
+  count(args?: unknown): Promise<number>;
 }
 
 // ====================== Phase 7B-revised Build 1: DocumentPage ======================

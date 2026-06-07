@@ -406,6 +406,30 @@ model DraftDecision {
   @@map("draft_decisions")
 }
 
+// Advisory "Ask AI about this case" oversight + cost log — one row per question (spec §1.7). No FK to
+// Case (the audit log must survive case deletion). coverage_gap feeds the library-build roadmap
+// (AI-window red-team finding). status='refused' covers the empty-question/over-budget/not-found paths.
+model AdvisoryQuery {
+  id            String   @id @default(uuid())
+  caseId        String?  @map("case_id")
+  veteranId     String?  @map("veteran_id")
+  userId        String   @map("user_id")
+  userRole      String   @map("user_role") @db.VarChar(20)
+  view          String   @db.VarChar(24) // which surface asked: rn_chart | physician_chart | ...
+  question      String
+  status        String   @db.VarChar(20) // retrieval status: ok | thin | empty | degraded | refused
+  modeRan       String[] @default([]) @map("mode_ran")
+  citationsJson Json?    @map("citations_json")
+  coverageGap   Json?    @map("coverage_gap")
+  costUsd       Decimal? @map("cost_usd") @db.Decimal(10, 5)
+  answerChars   Int?     @map("answer_chars")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([caseId])
+  @@index([createdAt])
+  @@map("advisory_queries")
+}
+
 enum LetterRevisionSource {
   drafter_run     // mirror of a completed DraftJob (optional; unified-timeline mode)
   editor_save     // RN/physician full-text WYSIWYG save

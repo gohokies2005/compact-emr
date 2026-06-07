@@ -1,0 +1,89 @@
+{
+  "_meta": {
+    "purpose": "Per-intent recipes for the RN advisory AI tool. Each intent = {classifier_cues, retrieval_recipe (WHERE to look), algorithm (HOW to reason), answer_template (output shape), escalation_triggers}. The retrieve() layer reads retrieval_recipe to scope what it pulls BEFORE the Bedrock call (keeps cost ~5-10c). The system prompt enforces the algorithm + template.",
+    "design": "Start lean: 3 intents + a general fallback. Add an intent only when real-question frequency justifies it. Grounded in: Email Response Playbook (11-lane taxonomy), CLAUDE.md viability gate + 26-category reject list, bva_secondary_pairs.json atlas.",
+    "last_updated": "2026-06-06"
+  },
+  "intents": {
+    "viability": {
+      "label": "Is this case viable / should we take it?",
+      "sources": ["chart_slice", "reject_list", "pair_atlas", "library", "cfr", "pubmed_live_fallback"],
+      "classifier_cues": ["viable", "viability", "should we take", "is this a case", "worth it", "can we help", "case-check", "is this strong enough for us", "decline or accept", "connect", "link to", "related to", "caused by", "aggravated by", "pathway", "framing", "anchor"],
+      "retrieval_recipe": [
+        "chart slice (read-only): current diagnosis present? in-service event/exposure? if secondary, is the primary service-connected?",
+        "26-category hard-NO reject list (cdsRejectRules) — screen FIRST",
+        "bva_secondary_pairs.json via bvaPairLookup for the proposed framing (+ IMO uplift); psychRollup if a psych anchor",
+        "routing.json -> the condition's key_excerpts.md (mechanism literature)",
+        "relevant CFR (3.310 secondary/aggravation, 3.303 direct, 3.317 gulf war) + case_law.md"
+      ],
+      "algorithm": [
+        "1. Run the 26-category reject screen. If a hard-NO trips -> verdict probably-not + cite the category + escalate.",
+        "2. Run the 5-question viability gate (dx confirmed? in-service event? primary SC if secondary? at-least-as-likely? strongest counterargument?). FIRST scan what you were given + the chart slice for a hidden anchor the asker did not name (pathway pivot: problem list / med list) before concluding anything is missing.",
+        "2b. NEVER GUESS and NEVER ERROR-OUT ('unable to compute' is forbidden). If the question is vague OR any DECISIVE gate element is unknown/unconfirmable from what you have, return verdict='needs-more-info' and INTERVIEW: ask the 2-4 specific clarifying questions that would resolve it, and request ONLY the genuinely-missing records-minimalism items (current dx; in-service event/exposure; primary-SC status if secondary; a mechanism number only if the literature requires it). NEVER re-ask anything already conceded or already in the chart. Frame it conditionally and concretely: 'I can't support this yet until we confirm X; it becomes supportable if X shows Y.' For a vague viability question this interview IS the correct answer — do not force a verdict you cannot ground.",
+        "2c. CONSIDER ALTERNATIVES (the core of thinking like Dr. Ryan — do NOT stop at the asserted theory). From the chart slice, ENUMERATE other plausible anchors the veteran/intake did not name: other diagnoses in the problem list, medications (chronic NSAIDs/SSRIs/antipsychotics/diuretics/opioids each imply a recognized chain), and already-service-connected conditions. For EACH candidate check (i) medical-mechanism soundness against the library (a real cause-and-effect pathway, not a stretch) and (ii) the BVA pair signal (bvaPairLookup, relative ranking only). Surface the strongest 1-2 as: 'You could also consider X — the chart shows [grounding fact] and [mechanism] supports it; worth discussing with the veteran whether [the supporting fact, e.g. the diagnosis or the in-service link] is documented.' GUARDRAIL (the line between support and coaching): every alternative MUST be grounded in something ACTUALLY in the chart (a real dx / med / SC condition) plus a real mechanism. This is decision support, NOT coaching — NEVER tell the veteran what to say, NEVER suggest fabricating or 'getting diagnosed so you can claim X', NEVER predict the outcome.",
+        "2d. COVERAGE GATE — the UNKNOWNS are the hard ones; be honest, never bluff. If there is NO curated coverage (no library folder for the condition, bvaConditionMatch returns null, AND the semantic results are weak — top cosine similarity below the relevance floor): DO NOT fabricate and DO NOT lean on the off-topic nearest chunks as if they were grounding. SAY it plainly: 'We don't have curated medical-literature coverage for [condition] in our library.' Then STILL HELP (don't error), in this order: (A) FIRST do a LIVE PubMed pull (advisoryLiteratureLookup -> citationFallback, NCBI E-utilities, FREE) for the normalized condition — real PMIDs returned by NCBI (never model-generated), killer quote = verbatim abstract substring, retracted/off-topic rejected. If it returns papers, ground the read in those REAL papers and cite the PMIDs, but flag them 'candidate literature — VERIFY RELEVANCE, not yet curated' (yield/relevance on an off-library condition is variable). (B) ONLY if PubMed returns nothing on-topic, give a first-principles gate read explicitly LABELED 'general medical reasoning, NOT from our references — verify' — NEVER invent a PMID, never pass general knowledge off as grounded. (C) Emit a coverage_gap {condition, pubmed_pmids, reason} so it's logged for the library-build roadmap (the gap-tracker). Flag needs_physician_library_build + escalate to Dr. Ryan — the pulled PMIDs are the SEED for the new library folder. NOTE the pre-computed BVA set covers secondary PAIRS, so a DIRECT condition (cold-injury/frostbite residuals) may have BVA decisions we cannot surface until Tier-2 live BVA SQL ships — Dr. Ryan can check the full BVA database.",
+        "3. Select framing by MECHANISM/medical-literature soundness FIRST (aggravation-first among sound anchors). A pair is mechanism-eligible only if the library covers it; reject medically bogus pairs even if a BVA row exists.",
+        "4. Use the BVA signal ONLY to break ties among already-sound anchors (never to promote a bogus pair). It is a relative ranking signal, NOT a win probability; prefer shrunk_grant_pct; trust direction only when directionality_reliable; wins_without_us=near-presumptive (not a strong-letter signal).",
+        "5. State the strongest counterargument honestly. If it beats the affirmative case -> not viable."
+      ],
+      "answer_template": ["verdict (likely-viable | borderline | probably-not | needs-more-info)", "why (grounded, cited)", "strongest counterargument", "if needs-more-info: the 2-4 clarifying questions to ask back + the specific docs needed (records-minimalism only), framed as 'not supportable until we confirm X'", "alternatives to consider (grounded in a chart fact + real mechanism + BVA signal), framed as 'you could also consider X, discuss with the veteran whether Y is documented' — NOT coaching", "what's missing (records/dx/primary-SC)", "BVA signal (framing + IMO uplift, internal-only)", "escalate to Dr. Ryan? (yes/no + why)"],
+      "escalation_triggers": ["any hard-NO reject category", "low confidence / thin sample", "chart contradicts the proposed framing", "rating-increase or severity question (physician-only)", "primary not yet service-connected"]
+    },
+    "email_response": {
+      "label": "How do I respond to this email / message?",
+      "sources": ["email_text", "email_playbook", "canonical_facts"],
+      "classifier_cues": ["respond", "reply", "email", "how do I answer", "what do I say", "they wrote", "veteran asked", "[pasted email block]"],
+      "retrieval_recipe": [
+        "the email text itself",
+        "Email Response Playbook STEP 0 crisis scan + STEP 1 STOP-phrase scan",
+        "Playbook routing table -> the matching Attachment (A-K)",
+        "canonical_facts.json (Attachment L) for any price/scope/timeline/voice fact stated"
+      ],
+      "algorithm": [
+        "1. CRISIS scan (self-harm/acute) -> if present, Attachment A script + escalate immediately, answer nothing else.",
+        "2. STOP-phrase scan (is-my-case-strong / odds / which-form / connect-X-to-Y / refund / sign-this-letter / predict-the-VA). If present -> DEFLECT via Attachment B, do NOT answer the substance.",
+        "3. If no STOP phrase -> route to the lane (Attachments C-K) by topic.",
+        "4. Draft the reply in canonical voice (team 'we', sign 'Flat Rate Nexus', 'Dr. Ryan' never 'Kasky'), facts per Attachment L.",
+        "5. Pre-send check: no prediction/grading/medical-opinion/filing-advice; no uncommitted date; facts match Attachment L."
+      ],
+      "answer_template": ["email type / lane (e.g. STOP-bait, status, records, payment, scope, edit, outcome, ack, escalate)", "the suggested reply (copy-paste, canonical voice)", "what NOT to say", "escalate to Dr. Ryan? (yes/no + why)"],
+      "escalation_triggers": ["crisis content", "any STOP phrase (deflect + may need Dr. Ryan)", "delivered-letter refund request", "competitor / OTH discharge / sign-someone-else's-letter", "unsure which lane"]
+    },
+    "stats_lookup": {
+      "label": "What's the win rate for X->Y / does an IMO help?",
+      "sources": ["pair_atlas", "condition_atlas", "live_sql"],
+      "classifier_cues": ["win rate", "grant rate", "how often", "odds at BVA", "does an IMO help", "secondary to", "what % granted", "data on", "how does X do at the board", "strong pair", "numbers for", "bva data", "in the bva", "the numbers", "granted at the board"],
+      "retrieval_recipe": [
+        "bvaPairLookup(upstream, claimed) over bva_secondary_pairs.json (decided-only; remands excluded)",
+        "psychRollup(claimed) if the question is about a psych anchor generally",
+        "bva_condition_atlas.md for framing-level rates",
+        "Tier-2 live SQL only if the slice (era/branch/combat/direct-SC) isn't pre-computed"
+      ],
+      "algorithm": [
+        "1. Resolve upstream + claimed to atlas keys (bvaConditionMatch / psych rollup).",
+        "2. Return display_grant_pct (shrunk) + IMO uplift + n + tier. Quote directionality ONLY when directionality_reliable. Flag wins_without_us (near-presumptive, not a strong-letter signal).",
+        "3. Honesty gates: tier-based small-sample caveat; no IMO quote if imo_n<5; reject medically implausible pairs even if a row exists.",
+        "4. State it as a RELATIVE RANKING SIGNAL, not a win probability (selection-biased; Board% != RO success for supplementals). Internal strategy only (CLAUDE.md #17), never letter-citable / vet-facing."
+      ],
+      "answer_template": ["the pair (upstream -> claimed)", "display grant% (n, tier) as a RELATIVE signal", "IMO uplift (if quotable)", "directionality (only if reliable)", "caveats (small sample / wins_without_us / not a win probability)", "reminder: internal strategy, NOT for letter or veteran"],
+      "escalation_triggers": ["pair not in atlas (say so, don't fabricate)", "tier=low with a high-stakes decision riding on it"]
+    },
+    "general": {
+      "label": "Fallback for anything not matching the 3 intents",
+      "sources": ["library", "cfr", "case_law", "canonical_facts"],
+      "classifier_cues": ["*"],
+      "retrieval_recipe": [
+        "routing.json semantic hop over the medical library + CFR + case_law for the topic",
+        "canonical_facts.json for any FRN-policy fact",
+        "if it smells like viability/email/stats, re-route to that intent"
+      ],
+      "algorithm": [
+        "1. Answer ONLY from retrieved chunks. If not in the references -> 'not in our references, verify' (never confabulate).",
+        "2. Stay in scope: medical-literature + adjudication-pattern decision support. No legal/claims-strategy advice.",
+        "3. If the question is really one of the 3 intents, follow that intent's algorithm instead."
+      ],
+      "answer_template": ["the grounded answer (cited)", "confidence", "what's missing / verify-this", "escalate? (yes/no)"],
+      "escalation_triggers": ["question outside scope (legal/claims-strategy)", "no grounding found", "high-stakes + low confidence"]
+    }
+  }
+}

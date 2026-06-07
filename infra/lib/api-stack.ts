@@ -147,6 +147,13 @@ export class ApiStack extends Stack {
         COGNITO_USER_POOL_ID: props.userPool.userPoolId,
         DATABASE_URL: databaseUrl,
         DATABASE_URL_SECRET_ARN: props.databaseSecret.secretArn,
+        // Ask Aegis ask-path: a DEDICATED read-only connection AS advisory_ro (SELECT-only on
+        // advisory.ref_chunk — the architect's #1 landmine: never SET ROLE on a pool). Friendly-name
+        // {{resolve}} for the password (NOT a partial ARN — see the JOTFORM note above); host/port via Fn.sub.
+        ADVISORY_RO_DATABASE_URL: cdk.Fn.sub(
+          `postgresql://advisory_ro:{{resolve:secretsmanager:compact-emr-${props.config.envName}/advisory-ro-db:SecretString:password}}@\${host}:\${port}/compact_emr`,
+          { host: props.database.dbInstanceEndpointAddress, port: props.database.dbInstanceEndpointPort },
+        ),
         // Letter editor: surgical-AI key (runtime-fetched from this ARN) + render Lambda name
         // (only set once the render image exists, so the mount wires the invoker only then).
         API_ANTHROPIC_KEY_SECRET_ARN: apiAnthropicSecret.secretArn,
@@ -159,7 +166,7 @@ export class ApiStack extends Stack {
         ...(renderImageTag ? { RENDER_LAMBDA_NAME: renderFnName } : {}),
       },
       bundling: {
-        externalModules: ['@prisma/client', '@prisma/engines'],
+        externalModules: ['@prisma/client', '@prisma/engines', 'pg-native'], // pg-native is pg's optional native client; keep it external so esbuild uses the pure-JS path
         commandHooks: {
           beforeBundling: () => [],
           beforeInstall: () => [],
@@ -175,6 +182,10 @@ export class ApiStack extends Stack {
               `node ${q(helper)} ${q(inputDir + '/backend/node_modules/@prisma')} ${q(outputDir + '/node_modules/@prisma')}`,
               `node ${q(helper)} ${q(inputDir + '/backend/node_modules/.prisma')} ${q(outputDir + '/node_modules/.prisma')}`,
               `node ${q(helper)} ${q(inputDir + '/backend/prisma')} ${q(outputDir + '/prisma')}`,
+              // Advisory (Ask Aegis): the vendored CJS retrieve modules are NOT bundled (they read data
+              // files by __dirname-relative path), so copy the whole tree next to the handler. The wrapper
+              // loads it at runtime from <task>/advisory-vendor.
+              `node ${q(helper)} ${q(inputDir + '/backend/src/advisory/vendor')} ${q(outputDir + '/advisory-vendor')}`,
             ];
           },
         },
@@ -195,6 +206,13 @@ export class ApiStack extends Stack {
     // API Lambda reads the surgical-AI key at runtime. (phiBucket RW + documentsKey already
     // granted above cover the letter-revisions/* artifacts.)
     apiAnthropicSecret.grantRead(handler);
+
+    // Ask Aegis: invoke Opus 4.6 (the answer) + Titan-v2 (the query embedding) on Bedrock.
+    handler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['bedrock:InvokeModel'],
+      resources: ['*'], // InvokeModel-only (read inference); tighten to the model + inference-profile ARNs later
+    }));
 
     // Stripe + delivery: read the webhook signing secret at runtime; send the portal email via SES.
     stripeWebhookSecret.grantRead(handler);

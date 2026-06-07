@@ -10,7 +10,7 @@
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { Pool } from 'pg';
-import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
+import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import type { RetrieveFn, RetrievalInput, RetrievalResult } from './retrieveContract.js';
 
 const VENDOR_DIR = process.env.ADVISORY_VENDOR_DIR ?? 'advisory-vendor';
@@ -40,8 +40,17 @@ export function realRetrieveAvailable(): boolean {
 export const realRetrieve: RetrieveFn = (input) => {
   if (_retrieve === null) _retrieve = loadVendoredRetrieve();
   if (_pool === null) {
-    _pool = new Pool({ connectionString: process.env.ADVISORY_RO_DATABASE_URL, max: 2, idleTimeoutMillis: 30_000 });
+    // SSL required: RDS has rds.force_ssl=1, and node-pg does NOT use SSL by default (a non-SSL connect
+    // is rejected). rejectUnauthorized:false = encrypted-in-transit without RDS-CA pinning (private VPC).
+    _pool = new Pool({
+      connectionString: process.env.ADVISORY_RO_DATABASE_URL,
+      max: 2,
+      idleTimeoutMillis: 30_000,
+      ssl: { rejectUnauthorized: false },
+    });
   }
   if (_bedrock === null) _bedrock = new BedrockRuntimeClient({});
-  return _retrieve(input, { pgClient: _pool, bedrockClient: _bedrock });
+  // InvokeModelCommand is injected so the vendored (un-bundled) module doesn't runtime-require @aws-sdk
+  // (which would MODULE_NOT_FOUND in the Lambda — architect QA 🔴#1). esbuild bundles it via the import above.
+  return _retrieve(input, { pgClient: _pool, bedrockClient: _bedrock, InvokeModelCommand });
 };

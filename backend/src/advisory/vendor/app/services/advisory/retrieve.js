@@ -78,10 +78,13 @@ function resolveStat(question, caseConditions) {
 }
 
 // ---- semantic (live pgvector) ----------------------------------------------
-async function embedQuery(bedrockClient, text) {
-  const { InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
+async function embedQuery(bedrockClient, text, InvokeModelCommand) {
+  // InvokeModelCommand is INJECTED by the EMR wrapper so esbuild bundles the SDK into the Lambda — this
+  // vendored module is loaded OUTSIDE the bundle and can't resolve @aws-sdk at runtime (would crash
+  // MODULE_NOT_FOUND). Falls back to require() for local/non-Lambda use. [EMR drop-in edit 2026-06-07.]
+  const Cmd = InvokeModelCommand || require('@aws-sdk/client-bedrock-runtime').InvokeModelCommand;
   const body = JSON.stringify({ inputText: String(text).slice(0, 8000), dimensions: 1024, normalize: true });
-  const res = await bedrockClient.send(new InvokeModelCommand({
+  const res = await bedrockClient.send(new Cmd({
     modelId: 'amazon.titan-embed-text-v2:0', contentType: 'application/json', accept: 'application/json', body,
   }));
   const out = JSON.parse(Buffer.from(res.body).toString('utf8'));
@@ -113,7 +116,7 @@ async function semanticSearch(pgClient, qvec, caseConditions) {
 // ---- main ------------------------------------------------------------------
 async function retrieve(input, clients = {}) {
   const { question = '', caseConditions = [] } = input || {};
-  const { pgClient, bedrockClient } = clients;
+  const { pgClient, bedrockClient, InvokeModelCommand } = clients;
   const errors = [], notes = [], chunks = [], mode_ran = [];
   let stats, coverage_gap;
 
@@ -139,7 +142,7 @@ async function retrieve(input, clients = {}) {
       errors.push('semantic unavailable: pgClient/bedrockClient not injected'); // backend outage, NOT no-coverage
     } else {
       try {
-        const qvec = await embedQuery(bedrockClient, question);
+        const qvec = await embedQuery(bedrockClient, question, InvokeModelCommand);
         const sem = await semanticSearch(pgClient, qvec, caseConditions);
         semanticRan = true;
         covered = sem.folderCovered || sem.topScore >= RELEVANCE_FLOOR;

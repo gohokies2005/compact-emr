@@ -43,7 +43,7 @@
         "1. CRISIS scan (self-harm/acute) -> if present, Attachment A script + escalate immediately, answer nothing else.",
         "2. STOP-phrase scan (is-my-case-strong / odds / which-form / connect-X-to-Y / refund / sign-this-letter / predict-the-VA). If present -> DEFLECT via Attachment B, do NOT answer the substance.",
         "3. If no STOP phrase -> route to the lane (Attachments C-K) by topic.",
-        "4. Draft the reply in canonical voice (team 'we', sign 'Flat Rate Nexus', 'Dr. Ryan' never 'Kasky'), facts per Attachment L.",
+        "4. Draft the reply in your OWN plain language using the playbook's lanes/logic as a LOOSE guide — do NOT parrot the canned attachment scripts verbatim. Canonical voice (team 'we', sign 'Flat Rate Nexus', 'Dr. Ryan' never 'Kasky'), facts per canonical_facts. Never mention any $50 refund.",
         "5. Pre-send check: no prediction/grading/medical-opinion/filing-advice; no uncommitted date; facts match Attachment L."
       ],
       "answer_template": ["email type / lane (e.g. STOP-bait, status, records, payment, scope, edit, outcome, ack, escalate)", "the suggested reply (copy-paste, canonical voice)", "what NOT to say", "escalate to Dr. Ryan? (yes/no + why)"],

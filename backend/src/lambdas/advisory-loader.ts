@@ -36,6 +36,7 @@ CREATE INDEX IF NOT EXISTS ref_chunk_library_path_idx ON advisory.ref_chunk (lib
 CREATE INDEX IF NOT EXISTS ref_chunk_embedding_hnsw   ON advisory.ref_chunk USING hnsw (embedding vector_cosine_ops);
 DO $$ BEGIN CREATE ROLE advisory_ro NOLOGIN;     EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE advisory_loader NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+GRANT CONNECT ON DATABASE compact_emr TO advisory_ro;
 GRANT USAGE ON SCHEMA advisory TO advisory_ro;
 GRANT SELECT ON advisory.ref_chunk TO advisory_ro;
 GRANT USAGE ON SCHEMA advisory TO advisory_loader;

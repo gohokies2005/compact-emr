@@ -18,10 +18,11 @@ export interface PathwaySuggestion {
 
 const TIER_RANK: Record<string, number> = { high: 3, moderate: 2, low: 1 };
 
-// Deterministic pathway recommender: scan the veteran's GRANTED SC conditions for a known Board pair to the
-// claimed condition, and recommend "secondary to X" when a strong (high/moderate-tier) pair exists — else
-// "direct". Recommend-only: the RN accepts it in the Gate-1 checklist; never auto-applied (steer-at-decision).
-export function suggestPathway(input: StrategyPreviewInput): PathwaySuggestion {
+// The granted-SC condition with the best high/moderate Board pair to the claimed condition, or null.
+// Shared by suggestPathway (the advisory "Anticipated" line) and computeStrategyPreview (the effective-
+// anchor scoring) — so the rubric and the suggestion are computed off the SAME derived anchor and can
+// never contradict each other (architect QA 2026-06-07: the Stocks self-contradiction).
+function bestGrantedScPair(input: StrategyPreviewInput): PairMatch | null {
   let best: PairMatch | null = null;
   const score = (s: PairMatch): number => (TIER_RANK[s.tier] ?? 0) * 1e6 + (s.imoWinPct ?? s.winPct) * 1e3 + s.n;
   for (const sc of input.serviceConnectedConditions) {
@@ -29,20 +30,22 @@ export function suggestPathway(input: StrategyPreviewInput): PathwaySuggestion {
     if (m === null) continue;
     if (best === null || score(m) > score(best)) best = m;
   }
-  if (best !== null && (best.tier === 'high' || best.tier === 'moderate')) {
-    // Don't nag "switch to X" when the case is ALREADY anchored on a condition that resolves to the SAME
-    // atlas pair (best.upstream is the atlas key, e.g. "lumbar back"; the RN's anchor may read "lumbar
-    // spine"). Resolve the current anchor through the same matcher before comparing. (architect QA 2026-06-07)
-    const curPair = input.upstreamScCondition ? findPair(input.upstreamScCondition, input.claimedCondition) : null;
-    const differs = curPair === null || curPair.upstream !== best.upstream;
-    return {
-      kind: 'secondary',
-      anchor: best.upstream,
-      basis: `Board pairing n=${best.n}, tier ${best.tier}${best.imoWinPct != null ? `, IMO ${best.imoWinPct}%` : ''}`,
-      differsFromCurrent: differs,
-    };
-  }
-  return { kind: 'direct', anchor: null, basis: null, differsFromCurrent: false };
+  return best !== null && (best.tier === 'high' || best.tier === 'moderate') ? best : null;
+}
+
+// Deterministic pathway recommender: the strongest granted-SC Board pairing to the claimed condition.
+export function suggestPathway(input: StrategyPreviewInput): PathwaySuggestion {
+  const best = bestGrantedScPair(input);
+  if (best === null) return { kind: 'direct', anchor: null, basis: null, differsFromCurrent: false };
+  // Don't nag "switch to X" when already anchored on a condition that resolves to the SAME atlas pair.
+  const curPair = input.upstreamScCondition ? findPair(input.upstreamScCondition, input.claimedCondition) : null;
+  const differs = curPair === null || curPair.upstream !== best.upstream;
+  return {
+    kind: 'secondary',
+    anchor: best.upstream,
+    basis: `Board pairing n=${best.n}, tier ${best.tier}${best.imoWinPct != null ? `, IMO ${best.imoWinPct}%` : ''}`,
+    differsFromCurrent: differs,
+  };
 }
 
 export type StrategyTier = 'Strong' | 'Plausible' | 'Thin' | 'Stop';
@@ -85,10 +88,10 @@ function framingLabel(framingChoice: string | null): string {
   return 'causation';
 }
 
-function buildPrimaryArgument(input: StrategyPreviewInput): string {
-  const isSecondary = input.claimType.toLowerCase().includes('secondary') || input.upstreamScCondition != null;
+function buildPrimaryArgument(input: StrategyPreviewInput, effectiveAnchor: string | null): string {
+  const isSecondary = input.claimType.toLowerCase().includes('secondary') || effectiveAnchor != null;
   if (isSecondary) {
-    const anchor = input.upstreamScCondition ?? '(no service-connected anchor set)';
+    const anchor = effectiveAnchor ?? '(no service-connected anchor set)';
     return `${input.claimedCondition} — secondary to service-connected ${anchor} (${framingLabel(input.framingChoice)})`;
   }
   return `${input.claimedCondition} — direct service connection`;
@@ -102,11 +105,22 @@ function buildPrimaryArgument(input: StrategyPreviewInput): string {
 //   Plausible = engine caution WITH a known Board pathway (mid odds, established mechanism).
 //   Thin      = engine reject (a known pathway, but weak odds).
 export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPreview {
+  // EFFECTIVE ANCHOR: the stored upstreamScCondition is sometimes a garbage intake text-parse ("service I
+  // wake up with headaches") that resolves to NO atlas pair + fails the SC-anchor check — which made the
+  // rubric say "no anchor / no pair / Stop" while suggestPathway separately found the real granted-SC Board
+  // pair (the Stocks self-contradiction). RECOVER only when the stored anchor is UNSCOREABLE: a granted-SC
+  // condition with a high/moderate pair is authoritative (verified SC + Board data). We do NOT override a
+  // stored anchor that IS scoreable — that would clobber a deliberate RN/aggravation framing (the
+  // "Anticipated" line handles "stronger elsewhere"). framingChoice is left as stored. (architect QA 2026-06-07)
+  const storedPair = input.upstreamScCondition ? findPair(input.upstreamScCondition, input.claimedCondition) : null;
+  const recovered = storedPair === null ? bestGrantedScPair(input) : null;
+  const effectiveAnchor = recovered !== null ? recovered.upstream : input.upstreamScCondition;
+
   const cds = evaluateCds({
     claimedCondition: input.claimedCondition,
     claimType: input.claimType,
     framingChoice: input.framingChoice,
-    upstreamScCondition: input.upstreamScCondition,
+    upstreamScCondition: effectiveAnchor,
     serviceConnectedConditions: input.serviceConnectedConditions,
     activeProblems: input.activeProblems,
   });
@@ -119,7 +133,7 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   // claims. A direct claim has no pairing by construction — absence of a pair is "rely on literature",
   // NEVER a blocker (architect + physician review 2026-06-07: don't false-Stop every direct claim).
   const isSecondary = input.claimType.toLowerCase().includes('secondary')
-    || input.upstreamScCondition != null
+    || effectiveAnchor != null
     || /secondary|aggravat/.test((input.framingChoice ?? '').toLowerCase());
   // A direct claim's whole case is the in-service event/onset + the veteran's account of it. No hook on
   // file = we don't yet know the nexus story — the #1 pre-draft gap for a direct claim, and why everything
@@ -140,7 +154,7 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
       label: isSecondary ? 'Service-connected anchor present' : 'In-service event / veteran account on file',
       pass: isSecondary ? !noAnchor : hasInServiceHook,
       detail: isSecondary
-        ? (noAnchor ? (gate.detail ?? 'No service-connected anchor') : `Anchored on ${input.upstreamScCondition}`)
+        ? (noAnchor ? (gate.detail ?? 'No service-connected anchor') : `Anchored on ${effectiveAnchor}`)
         : (hasInServiceHook ? 'Veteran account / in-service event on file' : 'No in-service event or veteran account on file yet — confirm the nexus hook before drafting'),
     },
     {
@@ -183,9 +197,9 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   const mech = (input.proposedMechanism ?? '').trim();
   return {
     evaluable: input.claimedCondition.trim().length > 0,
-    primaryArgument: buildPrimaryArgument(input),
+    primaryArgument: buildPrimaryArgument(input, effectiveAnchor),
     proposedMechanism: mech.length > 0 ? mech : null,
-    anchor: input.upstreamScCondition,
+    anchor: effectiveAnchor,
     tier,
     recommendedPathway: suggestPathway(input),
     criteria,

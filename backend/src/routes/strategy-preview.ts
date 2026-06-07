@@ -60,7 +60,9 @@ export function createStrategyPreviewRouter(db: AppDb): Router {
           .filter((s) => s.status === 'service_connected')
           .map((s) => s.condition),
         activeProblems: (c.veteran?.activeProblems ?? []).map((p) => p.problem),
-        proposedMechanism: c.inServiceEvent ?? c.veteranStatement ?? null,
+        // Prefer the veteran's OWN stated theory for display ("why I think this is connected", even if
+        // wildly wrong — Ryan 2026-06-07); fall back to the extracted in-service event.
+        proposedMechanism: c.veteranStatement ?? c.inServiceEvent ?? null,
       });
       res.json({ data: preview });
     }),

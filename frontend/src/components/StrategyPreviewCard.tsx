@@ -35,7 +35,7 @@ export function StrategyPreviewCard({ caseId }: { readonly caseId: string }) {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-sm text-slate-800"><span className="font-medium">Argument:</span> {p.primaryArgument}</div>
-          {rec.kind === 'secondary' && rec.differsFromCurrent ? (
+          {rec.kind === 'secondary' && rec.differsFromCurrent && rec.anchor !== p.anchor ? (
             <div className="mt-1 text-sm text-slate-500">
               <span className="font-medium">Anticipated:</span> likely stronger as <span className="font-medium">secondary to {rec.anchor}</span>
               {rec.basis ? ` (${rec.basis})` : ''}. FYI — the drafter weighs this.

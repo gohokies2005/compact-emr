@@ -43,6 +43,32 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
     expect(r.recommendedPathway.differsFromCurrent).toBe(true);
   });
 
+  it('RECOVERS the effective anchor from a garbage stored value (Stocks: migraines secondary to OSA = Strong)', () => {
+    const r = computeStrategyPreview(input({
+      claimType: 'secondary', framingChoice: 'secondary', claimedCondition: 'migraines',
+      upstreamScCondition: 'service I wake up with headaches', // garbage — resolves to no atlas pair
+      serviceConnectedConditions: ['Obstructive sleep apnea'], activeProblems: ['migraines'],
+    }));
+    expect(r.tier).toBe('Strong');
+    expect(r.anchor?.toLowerCase()).toContain('sleep apnea');
+    expect(r.primaryArgument.toLowerCase()).toContain('sleep apnea');
+    expect(r.criteria.every((c) => c.pass), JSON.stringify(r.criteria)).toBe(true);
+  });
+
+  it('does NOT override a scoreable stored anchor (no silent rewrite of a deliberate framing)', () => {
+    const r = computeStrategyPreview(input({})); // default = OSA secondary to PTSD; PTSD resolves to a pair
+    expect(r.anchor?.toLowerCase()).toContain('ptsd');
+  });
+
+  it('preserves aggravation framing when recovering the anchor', () => {
+    const r = computeStrategyPreview(input({
+      claimType: 'secondary', framingChoice: 'aggravation', claimedCondition: 'migraines',
+      upstreamScCondition: 'garbage zzz', serviceConnectedConditions: ['Obstructive sleep apnea'], activeProblems: ['migraines'],
+    }));
+    expect(r.primaryArgument.toLowerCase()).toContain('aggravation');
+    expect(r.anchor?.toLowerCase()).toContain('sleep apnea');
+  });
+
   it('does NOT nag to switch when already anchored on the suggested pathway', () => {
     // Default input = OSA already framed secondary to granted PTSD (the strong pair) — no "switch" nag.
     const r = computeStrategyPreview(input({}));

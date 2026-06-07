@@ -471,6 +471,67 @@ export class WorkersStack extends Stack {
       targets: [new targets.LambdaFunction(stuckJobWatcher, { retryAttempts: 2 })],
     });
 
+    // ===== F7: RN Advisory cabinet loader Lambda (Approach A) =====
+    // Manually invoked (`aws lambda invoke`). Idempotently builds the pgvector "cabinet" (advisory
+    // schema + ref_chunk + HNSW + the two NOLOGIN roles) AND loads the embedded library that the
+    // flatratenexus window drops at s3://<phiBucket>/advisory/advisory_chunks_embedded.jsonl. Runs
+    // in-VPC as the RDS master; the flatratenexus window NEVER connects to RDS. No EventBridge schedule
+    // — it's a one-shot (re-runnable; setup is IF-NOT-EXISTS, load is ON CONFLICT DO NOTHING).
+    const advisoryLoaderSg = new ec2.SecurityGroup(this, 'AdvisoryLoaderSecurityGroup', {
+      vpc: props.vpc,
+      allowAllOutbound: true,
+      description: 'Compact EMR advisory cabinet loader Lambda egress + DB access.',
+    });
+    new ec2.CfnSecurityGroupIngress(this, 'DatabaseIngressFromAdvisoryLoader', {
+      groupId: props.databaseSecurityGroup.securityGroupId,
+      ipProtocol: 'tcp',
+      fromPort: 5432,
+      toPort: 5432,
+      sourceSecurityGroupId: advisoryLoaderSg.securityGroupId,
+      description: 'Compact EMR advisory loader Lambda to Postgres',
+    });
+    const advisoryLoaderLogGroup = new logs.LogGroup(this, 'AdvisoryLoaderLogGroup', {
+      logGroupName: `/aws/lambda/compact-emr-${config.envName}-advisory-loader`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: config.envName === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+    const advisoryLoader = new nodejs.NodejsFunction(this, 'AdvisoryLoader', {
+      functionName: `compact-emr-${config.envName}-advisory-loader`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.resolve(__dirname, '..', '..', 'backend', 'src', 'lambdas', 'advisory-loader.ts'),
+      handler: 'handler',
+      timeout: Duration.minutes(10),
+      memorySize: 1024,
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [advisoryLoaderSg],
+      logGroup: advisoryLoaderLogGroup,
+      environment: {
+        ENV_NAME: config.envName,
+        DATABASE_URL: watcherDatabaseUrl, // same DB, identical construction to the watcher / ApiStack
+        ADVISORY_DROP_BUCKET: props.phiBucket.bucketName,
+        ADVISORY_DROP_KEY: 'advisory/advisory_chunks_embedded.jsonl',
+      },
+      bundling: {
+        externalModules: ['@prisma/client', '@prisma/engines'],
+        commandHooks: {
+          beforeBundling: () => [],
+          beforeInstall: () => [],
+          afterBundling: (inputDir: string, outputDir: string) => {
+            const helper = path.join(__dirname, '..', 'scripts', 'bundle-copy.cjs');
+            const q = (s: string) => `"${s}"`;
+            return [
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/@prisma')} ${q(outputDir + '/node_modules/@prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/.prisma')} ${q(outputDir + '/node_modules/.prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/prisma')} ${q(outputDir + '/prisma')}`,
+            ];
+          },
+        },
+      },
+    });
+    props.databaseSecret.grantRead(advisoryLoader);
+    props.phiBucket.grantRead(advisoryLoader, 'advisory/*'); // read ONLY the advisory drop prefix
+
     // ===== F6b: CloudWatch metric filter + alarm on watcher "swept" log lines =====
     // The watcher silently fixes stuck jobs — but if it's sweeping at >3/hr, drafter
     // Fargate is recurring-crashing upstream and we need a human to investigate.

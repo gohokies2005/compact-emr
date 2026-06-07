@@ -78,13 +78,21 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   const barred = gate.triggered && gate.rule === 'barred_theory';
   const noDx = gate.triggered && gate.rule === 'no_diagnosis';
   const noAnchor = gate.triggered && gate.rule === 'no_sc_anchor';
+  // The BVA atlas holds ONLY secondary pairs, so its pathway/strength signals apply only to secondary
+  // claims. A direct claim has no pairing by construction — absence of a pair is "rely on literature",
+  // NEVER a blocker (architect + physician review 2026-06-07: don't false-Stop every direct claim).
+  const isSecondary = input.claimType.toLowerCase().includes('secondary')
+    || input.upstreamScCondition != null
+    || /secondary|aggravat/.test((input.framingChoice ?? '').toLowerCase());
 
   const criteria: StrategyCriterion[] = [
     {
       key: 'diagnosis',
       label: 'Current diagnosis on file',
       pass: !noDx,
-      detail: noDx ? (gate.detail ?? 'No current diagnosis recorded') : `${input.activeProblems.length} active problem(s) recorded`,
+      detail: noDx
+        ? (gate.detail ?? 'No current diagnosis recorded')
+        : `${input.activeProblems.length} active problem(s) recorded${input.activeProblems.length > 15 ? ' — unusually high; verify the problem list extracted correctly' : ''}`,
     },
     {
       key: 'anchor',
@@ -100,17 +108,21 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     },
     {
       key: 'pathway',
-      label: 'Established Board pathway for the pairing',
-      pass: cds.bva.matched,
-      detail: cds.bva.matched
-        ? `${cds.bva.upstream} → ${cds.bva.claimed} (n=${cds.bva.n}, tier ${cds.bva.tier})`
-        : 'No Board pair on record for this pairing — would rely on medical literature; confirm the theory is sound',
+      label: isSecondary ? 'Established Board pathway for the pairing' : 'Board pairing (secondary claims only)',
+      pass: isSecondary ? cds.bva.matched : true, // N/A for direct claims — never a ✗ for absent secondary data
+      detail: !isSecondary
+        ? 'Direct claim — a Board secondary-pairing does not apply'
+        : cds.bva.matched
+          ? `${cds.bva.upstream} → ${cds.bva.claimed} (n=${cds.bva.n}, tier ${cds.bva.tier})`
+          : 'No Board pair on record — would rely on medical literature; confirm the theory is sound',
     },
     {
       key: 'strength',
-      label: 'Adequate strength signal',
-      pass: cds.verdict === 'accept',
-      detail: cds.oddsPct != null ? `${cds.oddsPct}% Board signal (relative ranking, not a win probability)` : 'No quantified signal',
+      label: 'No adverse strength signal',
+      pass: cds.verdict !== 'reject', // ✗ ONLY when the engine actively recommends reject (a real low-odds pair)
+      detail: cds.oddsPct != null
+        ? `${cds.oddsPct}% Board signal (relative ranking, not a win probability)`
+        : 'No Board odds — normal for a direct or novel claim; rests on the record + literature',
     },
   ];
 
@@ -118,7 +130,9 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   if (gate.triggered) tier = 'Stop';
   else if (cds.verdict === 'accept') tier = 'Strong';
   else if (cds.verdict === 'reject') tier = 'Thin';
-  else tier = cds.bva.matched ? 'Plausible' : 'Stop'; // caution: matched=mid-odds Plausible; unmatched=no pathway, Stop
+  // caution: a matched mid-odds pair OR a direct claim = Plausible; a SECONDARY claim with no Board pair =
+  // Thin ("rely on literature"). NEVER Stop on absent data — Stop is only a hard gate above. (FIX 2026-06-07)
+  else tier = (isSecondary && !cds.bva.matched) ? 'Thin' : 'Plausible';
 
   const mech = (input.proposedMechanism ?? '').trim();
   return {

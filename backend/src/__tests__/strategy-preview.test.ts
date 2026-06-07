@@ -15,9 +15,12 @@ function input(over: Partial<StrategyPreviewInput>): StrategyPreviewInput {
 describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
   const cases: Array<{ name: string; over: Partial<StrategyPreviewInput>; tier: string }> = [
     { name: 'OSA secondary to PTSD = Strong (known strong Board pair)', over: {}, tier: 'Strong' },
-    { name: 'knee -> blindness = Stop (no established pathway)', over: { claimedCondition: 'blindness', upstreamScCondition: 'knee', serviceConnectedConditions: ['knee'], activeProblems: ['blindness'] }, tier: 'Stop' },
-    { name: 'no diagnosis on file = Stop', over: { activeProblems: [] }, tier: 'Stop' },
-    { name: 'anchor named but not service-connected = Stop', over: { serviceConnectedConditions: [] }, tier: 'Stop' },
+    // DIRECT claim with no Board pair must NEVER Stop — the false-Stop bug Ryan caught (GERD/OSA direct).
+    { name: 'direct claim, no Board pair, dx on file = Plausible (NEVER Stop)', over: { claimType: 'direct', claimedCondition: 'GERD / Gastritis', framingChoice: 'direct', upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'] }, tier: 'Plausible' },
+    // SECONDARY claim with no Board pair = Thin ("rely on literature"), not Stop — absence of data ≠ impossible.
+    { name: 'secondary, no Board pair = Thin (not Stop)', over: { claimedCondition: 'blindness', upstreamScCondition: 'knee', serviceConnectedConditions: ['knee'], activeProblems: ['blindness'] }, tier: 'Thin' },
+    { name: 'no diagnosis on file = Stop (hard gate)', over: { activeProblems: [] }, tier: 'Stop' },
+    { name: 'anchor named but not service-connected = Stop (hard gate)', over: { serviceConnectedConditions: [] }, tier: 'Stop' },
   ];
   for (const c of cases) {
     it(c.name, () => {

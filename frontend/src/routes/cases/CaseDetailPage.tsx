@@ -41,6 +41,11 @@ import type { CaseStatus, Role } from '../../types/prisma';
 // without fighting React Query + fake timers in component tests.
 export function decidePollIntervalMs(status: CaseStatus | undefined): number | false {
   if (status === 'records' || status === 'viability' || status === 'drafting') return 8000;
+  // Poll while PARKED at a Gate-2 halt so the open page stays truthful: it picks up the halt payload,
+  // a resume that flips the case back to 'drafting' (from this or another tab/device), or any status
+  // change — instead of going dead and stranding the RN on a stale halt panel. Visible-tab-only
+  // (refetchIntervalInBackground=false), so a walked-away RN burns nothing. (Gate-2 architect QA 🔴#1.)
+  if (status === 'needs_rn_decision' || status === 'needs_records') return 15000;
   return false;
 }
 

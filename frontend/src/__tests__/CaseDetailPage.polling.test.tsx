@@ -14,6 +14,11 @@ describe('decidePollIntervalMs', () => {
     expect(decidePollIntervalMs('drafting')).toBe(8000);
   });
 
+  it('polls while parked at a Gate-2 halt so the page stays truthful', () => {
+    expect(decidePollIntervalMs('needs_rn_decision')).toBe(15000);
+    expect(decidePollIntervalMs('needs_records')).toBe(15000);
+  });
+
   it('returns false (stop polling) for post-draft case statuses', () => {
     expect(decidePollIntervalMs('physician_review')).toBe(false);
     expect(decidePollIntervalMs('correction_requested')).toBe(false);

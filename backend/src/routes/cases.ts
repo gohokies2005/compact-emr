@@ -183,6 +183,12 @@ function roleGuardForStatusTransition(db: AppDb) {
       }
     }
 
+    // Don't send a letter "to the doctor" when no doctor is assigned (Ryan 2026-06-06). The
+    // rn_review -> physician_review hand-off requires an assigned physician on the case.
+    if (current.status === 'rn_review' && parsed.to === 'physician_review' && !current.assignedPhysicianId) {
+      throw new HttpError(409, 'conflict', 'Assign a physician to this case before sending it for review.', { caseId: id, reason: 'no_physician_assigned' });
+    }
+
     next();
   });
 }

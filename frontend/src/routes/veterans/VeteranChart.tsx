@@ -34,7 +34,7 @@ function dedupByCondition<T>(rows: readonly T[], getName: (r: T) => string, keyE
   return [...byKey.values(), ...passthrough];
 }
 import { ConflictError, describeApiError } from '../../api/client';
-import { createCase, patchCase, type CreateCaseInput } from '../../api/cases';
+import { createCase, type CreateCaseInput } from '../../api/cases';
 import { useAuth } from '../../auth/useAuth';
 import { NewClaimModal } from '../cases/NewClaimModal';
 import { ChartNotesPanel } from './ChartNotesPanel';
@@ -99,7 +99,7 @@ export function VeteranChart() {
           switch and silently drop an in-flight upload's status/error line — the upload path
           was hardened specifically to surface that reason, so we must not lose it. */}
       <div className="p-4">
-        <div role="tabpanel" hidden={tab !== 'claims'}><CasesPanel veteranId={veteranId} rows={v.cases} onChange={invalidate} /></div>
+        <div role="tabpanel" hidden={tab !== 'claims'}><CasesPanel rows={v.cases} /></div>
         <div role="tabpanel" hidden={tab !== 'notes'}><ChartNotesPanel veteranId={veteranId} /></div>
         <div role="tabpanel" hidden={tab !== 'documents'}><DocumentsPanel veteranId={veteranId} cases={v.cases} documents={documents.data?.data ?? []} onChange={invalidate} /></div>
         <div role="tabpanel" hidden={tab !== 'emails'}><EmailLogPanel queryKey={['veteran', veteranId, 'emails']} fetcher={() => listVeteranEmails(veteranId)} scope="veteran" /></div>
@@ -240,52 +240,17 @@ function DocumentsPanel({ veteranId, cases, documents, onChange }: { readonly ve
 
   return <div id="documents"><p className="text-sm text-slate-500">Upload one or more files, or a .zip — PDF, JPG, PNG, DOC, DOCX (max 50 MB each).</p><div className="mt-4 flex flex-col gap-3 sm:flex-row"><select className="input" value={caseId} onChange={(e) => setCaseId(e.target.value)}>{cases.map((c) => <option key={c.id} value={c.id}>{c.id} — {c.claimedCondition}</option>)}</select><select className="input" value={docTag} onChange={(e) => setDocTag(e.target.value)}>{DOC_TAGS.map((t) => <option key={t}>{t}</option>)}</select><input className="text-sm" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.zip,application/pdf,image/jpeg,image/png,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,application/x-zip-compressed" disabled={busy} onChange={(e) => { void onFiles(e.target.files); e.target.value = ''; }} /></div>{status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}<div className="mt-4 divide-y divide-slate-100">{documents.map((d) => <div key={d.id} className="flex items-center justify-between gap-3 py-3 text-sm"><button className="flex flex-1 items-center justify-between gap-3 text-left hover:bg-slate-50" onClick={() => setViewDoc(d)}><span>{d.filename}</span><span className="text-slate-500">{d.docTag ?? 'Other'} · {d.uploadedAt}{(d as { caseId?: string }).caseId ? ` · ${(d as { caseId?: string }).caseId}` : ''}</span></button><button type="button" className="shrink-0 rounded px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-50" disabled={del.isPending} onClick={() => { if (window.confirm(`Delete "${d.filename}"? This removes the file and its parsed text from this veteran's chart for ALL of their claims. Use this only for a file uploaded to the wrong chart.`)) del.mutate(d.id); }}>Delete</button></div>)}</div><PdfViewerModal doc={viewDoc} onClose={() => setViewDoc(null)} /></div>;
 }
-function CasesPanel({ veteranId: _veteranId, rows, onChange }: { readonly veteranId: string; readonly rows: readonly Case[]; readonly onChange: () => Promise<void> }) {
+// FRN claims: clicking a claim row OPENS it (that's the instinct — Ryan 2026-06-06). Editing the
+// claimed condition lives on the claim's own page (click the condition under the patient's name there),
+// NOT here — making the title edit-in-place surprised people who expected it to open the claim.
+function CasesPanel({ rows }: { readonly rows: readonly Case[] }) {
   if (!rows.length) return <EmptyState title="No claims yet" message="This veteran has no claims on file yet. Use “+ New claim” above to start one." />;
-  return <div className="divide-y divide-slate-100">{rows.map((c) => <ClaimRow key={c.id} c={c} onChange={onChange} />)}</div>;
-}
-
-// One FRN claim row. The claimed condition is CLICK-TO-EDIT (Ryan 2026-06-06: fix a wrong dx without
-// rebuilding the whole chart — e.g. "Other joint" → "Left shoulder osteoarthritis"). Saving PATCHes
-// claimedCondition; the backend syncs claimedConditions[] for single-condition claims so the next
-// drafter run uses the corrected condition. "Open →" still navigates to the claim page.
-function ClaimRow({ c, onChange }: { readonly c: Case; readonly onChange: () => Promise<void> }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(c.claimedCondition);
-  const save = useMutation({
-    mutationFn: (condition: string) => patchCase(c.id, { version: c.version, claimedCondition: condition }),
-    onSuccess: async () => { setEditing(false); await onChange(); },
-    onError: async (e: unknown) => {
-      if (e instanceof ConflictError) { await onChange(); window.alert('This claim changed elsewhere. Reloaded — reopen and retry.'); }
-      else window.alert(`Could not save the condition — ${describeApiError(e)}`);
-    },
-  });
-  function commit() {
-    const t = draft.trim();
-    if (!t) { window.alert('The claimed condition cannot be empty.'); return; }
-    if (t === c.claimedCondition) { setEditing(false); return; }
-    save.mutate(t);
-  }
-  return (
-    <div className="flex items-center justify-between gap-3 py-3 text-sm">
-      {editing ? (
-        <div className="flex flex-1 items-center gap-2">
-          <input className="input h-8 flex-1" value={draft} autoFocus onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setDraft(c.claimedCondition); setEditing(false); } }} />
-          <button type="button" className="text-xs font-medium text-indigo-600 disabled:opacity-50" disabled={save.isPending} onClick={commit}>Save</button>
-          <button type="button" className="text-xs text-slate-400" onClick={() => { setDraft(c.claimedCondition); setEditing(false); }}>Cancel</button>
-        </div>
-      ) : (
-        <button type="button" className="rounded px-1 text-left font-medium text-slate-800 decoration-dotted hover:bg-amber-50 hover:underline" title="Click to edit the claimed condition" onClick={() => { setDraft(c.claimedCondition); setEditing(true); }}>
-          {c.claimedCondition}
-        </button>
-      )}
-      <div className="flex shrink-0 items-center gap-3 text-slate-500">
-        <span>{c.status} · {c.claimType}</span>
-        <Link className="text-indigo-600 hover:underline" to={`/cases/${encodeURIComponent(c.id)}`}>Open →</Link>
-      </div>
-    </div>
-  );
+  return <div className="divide-y divide-slate-100">{rows.map((c) => (
+    <Link key={c.id} className="flex items-center justify-between gap-3 px-1 py-3 text-sm hover:bg-slate-50" to={`/cases/${encodeURIComponent(c.id)}`}>
+      <span className="font-medium text-slate-800">{c.claimedCondition}</span>
+      <span className="text-slate-500">{c.status} · {c.claimType} <span className="text-indigo-600">→</span></span>
+    </Link>
+  ))}</div>;
 }
 
 // Editable veteran demographics grid (Ryan 2026-06-06: "click on it and change it" — a typo in DOB,

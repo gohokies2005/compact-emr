@@ -22,6 +22,8 @@ interface PhysicianLetterReadyPanelProps {
   // reviews/edits first, then explicitly sends. Exactly one is expected per render.
   readonly onOpenSignOff?: () => void;
   readonly onSendToDoctor?: () => void;
+  // When set, "Send to doctor" is disabled and shows this reason (e.g. no physician assigned yet).
+  readonly sendToDoctorBlockedReason?: string | undefined;
   readonly sending?: boolean;
   readonly onChanged: () => void | Promise<void>;
 }
@@ -45,6 +47,7 @@ export function PhysicianLetterReadyPanel({
   onEditText,
   onOpenSignOff,
   onSendToDoctor,
+  sendToDoctorBlockedReason,
   sending,
   onChanged,
 }: PhysicianLetterReadyPanelProps) {
@@ -84,9 +87,12 @@ export function PhysicianLetterReadyPanel({
             Edit text
           </Button>
           {onSendToDoctor ? (
-            <Button type="button" variant="primary" loading={sending ?? false} disabled={sending ?? false} onClick={onSendToDoctor}>
-              Send to doctor for review
-            </Button>
+            <div className="flex flex-col items-end gap-1">
+              <Button type="button" variant="primary" loading={sending ?? false} disabled={(sending ?? false) || !!sendToDoctorBlockedReason} title={sendToDoctorBlockedReason} onClick={onSendToDoctor}>
+                Send to doctor for review
+              </Button>
+              {sendToDoctorBlockedReason ? <span className="text-xs text-amber-700">{sendToDoctorBlockedReason}</span> : null}
+            </div>
           ) : onOpenSignOff ? (
             <Button type="button" variant="primary" onClick={onOpenSignOff}>
               Approve and sign

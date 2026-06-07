@@ -191,7 +191,7 @@ export function CaseDetailPage() {
       <div className="flex flex-col justify-between gap-4 lg:flex-row">
         <div>
           <h1 className="text-3xl font-bold text-slate-900">{formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}</h1>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-base text-slate-700"><span className="font-medium">{formatConditionLabel(c.claimedCondition)}</span><CaseStatusBadge status={c.status} /></div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-base text-slate-700"><EditableClaimCondition c={c} onSave={(v) => patch.mutate({ version: c.version, claimedCondition: v })} /><CaseStatusBadge status={c.status} /></div>
           {(() => {
             const v = c.veteran;
             const age = v?.dob ? Math.floor((Date.now() - Date.parse(v.dob)) / 31557600000) : null;
@@ -297,6 +297,7 @@ export function CaseDetailPage() {
               onOpenPdf={openLetterPdf}
               onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
               onSendToDoctor={() => { if (window.confirm('Send this letter to the doctor for review? It will move to the physician queue.')) sendToDoctor.mutate(); }}
+              sendToDoctorBlockedReason={c.assignedPhysician ? undefined : 'Assign a physician below before sending.'}
               sending={sendToDoctor.isPending}
               onChanged={async () => {
                 await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]);
@@ -394,6 +395,25 @@ export function CaseDetailPage() {
       />
     ) : null}
   </div></AppShell>;
+}
+
+// The claimed condition is click-to-edit HERE on the claim's own page (Ryan 2026-06-06) — the
+// veteran-chart claim row OPENS the claim instead. Saving PATCHes claimedCondition; the backend syncs
+// claimedConditions[] for single-condition claims so the next drafter run uses the corrected dx.
+function EditableClaimCondition({ c, onSave }: { readonly c: CaseDetail; readonly onSave: (v: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(c.claimedCondition);
+  function commit() { const t = draft.trim(); if (t && t !== c.claimedCondition) onSave(t); setEditing(false); }
+  if (!editing) {
+    return <button type="button" className="rounded px-1 font-medium decoration-dotted hover:bg-amber-50 hover:underline" title="Click to edit the claimed condition" onClick={() => { setDraft(c.claimedCondition); setEditing(true); }}>{formatConditionLabel(c.claimedCondition)}</button>;
+  }
+  return (
+    <span className="inline-flex items-center gap-1">
+      <input className="input h-7 w-64 py-0 text-sm" value={draft} autoFocus onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false); }} />
+      <button type="button" className="text-xs font-medium text-indigo-600" onClick={commit}>Save</button>
+      <button type="button" className="text-xs text-slate-400" onClick={() => setEditing(false)}>Cancel</button>
+    </span>
+  );
 }
 
 type EditableField = 'framingChoice' | 'upstreamScCondition' | 'veteranStatement' | 'inServiceEvent';

@@ -8,6 +8,7 @@ import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
+import { deriveIntakeFields } from '../services/intake-derive.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
 import { candidateAddresses, decideVeteranMatch, deriveEmailId, makeSnippet, normalizeEmailAddress } from '../services/email-matching.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
@@ -721,6 +722,39 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       res.json({ data: updated });
     }),
   );
+
+  // One-time BACKFILL: re-derive the veteran's SECONDARY framing + stated theory from each assigned
+  // intake's raw answers and fill them onto the case — NULL fields only, never overwriting an RN edit.
+  // Fixes every case created before the secondary-framing parser shipped (Ryan 2026-06-07: cases read
+  // "direct" though the veteran wrote "secondary to PTSD"). Idempotent (re-running is a no-op once filled).
+  router.post('/internal/admin/backfill-intake-framing', asyncHandler(async (_req: Request, res: Response) => {
+    const intakes = await db.intake.findMany({ where: { assignedCaseId: { not: null } } });
+    let scanned = 0;
+    const changes: Array<Record<string, unknown>> = [];
+    for (const intakeRow of intakes) {
+      const i = intakeRow as { assignedCaseId: string | null; rawAnswersJson?: unknown };
+      if (i.assignedCaseId === null) continue;
+      scanned++;
+      const derived = deriveIntakeFields(i.rawAnswersJson);
+      const c = await db.case.findFirst({
+        where: { id: i.assignedCaseId },
+        select: { id: true, upstreamScCondition: true, framingChoice: true, veteranStatement: true, claimedCondition: true },
+      });
+      if (c === null) continue;
+      const cc = c as { id: string; upstreamScCondition: string | null; framingChoice: string | null; veteranStatement: string | null; claimedCondition: string };
+      const data: Record<string, unknown> = {};
+      if (derived.veteranTheory && (cc.veteranStatement ?? '').trim().length === 0) data.veteranStatement = derived.veteranTheory;
+      if (derived.upstreamCondition && (cc.upstreamScCondition ?? '').trim().length === 0) {
+        data.upstreamScCondition = derived.upstreamCondition;
+        if (derived.framing) data.framingChoice = derived.framing;
+      }
+      if (Object.keys(data).length > 0) {
+        await db.case.update({ where: { id: cc.id }, data: data as never });
+        changes.push({ caseId: cc.id, condition: cc.claimedCondition, ...data });
+      }
+    }
+    res.json({ data: { scanned, updated: changes.length, changes } });
+  }));
 
   return router;
 }

@@ -160,6 +160,7 @@ export class ApiStack extends Stack {
         // Stripe payment → password-portal PDF delivery (Ryan 2026-06-06).
         STRIPE_WEBHOOK_SECRET_NAME: `compact-emr-${props.config.envName}/stripe-webhook-secret`,
         STRIPE_LINK_500: 'https://buy.stripe.com/3cI9ALcMG5LH05Y3Xm0Ba03', // public payment link (not a secret)
+        STRIPE_LINK_350: 'https://buy.stripe.com/aFa5kvaEygql5qi9hG0Ba01', // $350 letter fee payment link (not a secret)
         SES_FROM_ADDRESS: 'info@flatratenexus.com',                          // must be a VERIFIED SES identity
         DELIVERY_PORTAL_BASE_URL: `https://${props.config.domainName}`,      // /d/<token> lives on the SPA
         DELIVERY_ADMIN_BCC: 'admin@flatratenexus.com',

@@ -19,8 +19,11 @@ export function isStripeConfigured(): boolean {
   return typeof process.env.STRIPE_LINK_500 === 'string' && process.env.STRIPE_LINK_500.trim() !== '';
 }
 
-export function buildStripeLink(caseId: string): string | null {
-  const base = process.env.STRIPE_LINK_500;
+/** Which fee a Stripe link is for. 500 → STRIPE_LINK_500, 350 → STRIPE_LINK_350. Defaults to 500. */
+export type StripeFee = 500 | 350;
+
+export function buildStripeLink(caseId: string, fee: StripeFee = 500): string | null {
+  const base = fee === 350 ? process.env.STRIPE_LINK_350 : process.env.STRIPE_LINK_500;
   if (typeof base !== 'string' || base.trim() === '') return null;
   const sep = base.includes('?') ? '&' : '?';
   return `${base.trim()}${sep}client_reference_id=CASE_${encodeURIComponent(caseId)}`;

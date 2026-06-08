@@ -25,6 +25,16 @@ export function createStripeWebhookRouter(db: AppDb): Router {
 
     const session = event.data?.object ?? {};
     if (session['payment_status'] !== undefined && session['payment_status'] !== 'paid') { res.json({ received: true, reason: 'not paid' }); return; }
+    // CURRENCY GUARD: amount_total is in the smallest unit of `currency`. We only recognize fixed USD
+    // cent amounts (50000/35000/5000). A non-USD session whose smallest-unit amount happens to equal
+    // one of those (e.g. 50000 in another currency) must NEVER auto-deliver a PDF. Require USD before
+    // treating the amount as valid; otherwise 200-and-ignore (Stripe must not retry a deliberate no-op).
+    const currency = typeof session['currency'] === 'string' ? (session['currency'] as string).toLowerCase() : undefined;
+    if (currency !== 'usd') {
+      console.warn(`[stripe-webhook] ignoring non-USD session: currency=${currency ?? 'missing'} ref=${String(session['client_reference_id'] ?? '')}`);
+      res.json({ received: true, ignored: 'currency', reason: `unrecognized currency: ${currency ?? 'missing'}` });
+      return;
+    }
     const caseId = parseCaseRef(session['client_reference_id'] as string | undefined);
     const amountCents = typeof session['amount_total'] === 'number' ? (session['amount_total'] as number) : 0;
     const chargeId = String(session['payment_intent'] ?? session['id'] ?? '');

@@ -45,6 +45,29 @@ describe('payment-delivery', () => {
     expect(calls.tokenCreate).toHaveBeenCalled();
   });
 
+  it('letter fee ($350) → delivers exactly like $500 (records payment, paid, token, kind letter_350)', async () => {
+    const { db, calls } = makeDb();
+    const r = await processStripePayment(db, { caseId: 'C1', amountCents: 35000, chargeId: 'pi_350' }, cfg);
+    expect(r.status).toBe('delivered');
+    expect(calls.paymentCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ kind: 'letter_350', amountCents: 35000 }) }));
+    expect(calls.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'paid' } }));
+    expect(calls.tokenCreate).toHaveBeenCalled();
+  });
+
+  it('email throw → still success (delivered_email_pending), payment stays recorded, breadcrumb written, no Stripe retry', async () => {
+    const { sendEmail } = await import('../services/mailer.js');
+    (sendEmail as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('SES sandbox: email address not verified'));
+    const { db, calls } = makeDb();
+    const r = await processStripePayment(db, { caseId: 'C1', amountCents: 50000, chargeId: 'pi_email_fail' }, cfg);
+    expect(r.status).toBe('delivered_email_pending');
+    // Payment recording + token issuance happened BEFORE (and independent of) the email.
+    expect(calls.paymentCreate).toHaveBeenCalled();
+    expect(calls.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'paid' } }));
+    expect(calls.tokenCreate).toHaveBeenCalled();
+    // Mandatory breadcrumb on email failure.
+    expect(calls.activity).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'payment_delivery_email_failed' }) }));
+  });
+
   it('duplicate charge → idempotent no-op (no new payment)', async () => {
     const { db, calls } = makeDb({ existingPayment: true });
     const r = await processStripePayment(db, { caseId: 'C1', amountCents: 50000, chargeId: 'pi_1' }, cfg);
@@ -82,9 +105,11 @@ describe('payment-delivery', () => {
     expect(calls.tokenCreate).not.toHaveBeenCalled();
   });
 
-  it('unknown case → no_case', async () => {
-    const { db } = makeDb({ noCase: true });
-    expect((await processStripePayment(db, { caseId: 'NOPE', amountCents: 50000, chargeId: 'x' }, cfg)).status).toBe('no_case');
+  it('unknown case → no_case, breadcrumb written (only trace of a paid-but-unmatched charge)', async () => {
+    const { db, calls } = makeDb({ noCase: true });
+    const r = await processStripePayment(db, { caseId: 'NOPE', amountCents: 50000, chargeId: 'x' }, cfg);
+    expect(r.status).toBe('no_case');
+    expect(calls.activity).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'payment_received_no_case' }) }));
   });
 
   it('delivery email carries the link + password + expiry', () => {

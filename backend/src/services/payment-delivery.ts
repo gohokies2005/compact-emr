@@ -4,8 +4,9 @@ import { sendEmail } from './mailer.js';
 
 // Stripe payment → password-portal delivery orchestration (Ryan 2026-06-06). Thin route, testable
 // service. IDEMPOTENT on the Stripe charge id (a Payment row already on that charge = already handled).
-const LETTER_FEE_CENTS = 50000; // $500 letter fee → triggers delivery
-const REVIEW_FEE_CENTS = 5000;  // $50 review fee → logged only
+const LETTER_FEE_CENTS = 50000;     // $500 letter fee → triggers delivery
+const LETTER_350_FEE_CENTS = 35000; // $350 letter fee → triggers delivery (same path as $500)
+const REVIEW_FEE_CENTS = 5000;      // $50 review fee → logged only
 const TOKEN_TTL_DAYS = 90;
 const STRIPE_ACTOR = 'service:stripe-webhook';
 
@@ -16,8 +17,9 @@ export function parseCaseRef(clientRef: string | null | undefined): string | nul
   return v.startsWith('CASE_') ? v.slice(5) : v;
 }
 
-function paymentKindForAmount(cents: number): 'letter_500' | 'review_50' | null {
+function paymentKindForAmount(cents: number): 'letter_500' | 'letter_350' | 'review_50' | null {
   if (cents === LETTER_FEE_CENTS) return 'letter_500';
+  if (cents === LETTER_350_FEE_CENTS) return 'letter_350';
   if (cents === REVIEW_FEE_CENTS) return 'review_50';
   return null;
 }
@@ -29,7 +31,7 @@ async function resolveSignedPdf(db: AppDb, caseId: string): Promise<{ version: n
 }
 
 export interface ProcessResult {
-  readonly status: 'delivered' | 'logged' | 'duplicate' | 'no_case' | 'no_pdf' | 'ignored_amount';
+  readonly status: 'delivered' | 'delivered_email_pending' | 'logged' | 'duplicate' | 'no_case' | 'no_pdf' | 'ignored_amount';
   readonly emailId?: string;
   readonly reason?: string;
 }
@@ -54,9 +56,14 @@ export async function processStripePayment(
   if (await db.payment.findFirst({ where: { stripeChargeId: chargeId } })) return { status: 'duplicate', reason: 'charge already processed' };
 
   const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true } });
-  if (c === null) return { status: 'no_case', reason: `case ${caseId} not found` };
+  if (c === null) {
+    // A real PAID charge whose client_reference_id matched no EMR case leaves NO other trace (Stripe
+    // gets 200 and never retries) — record a breadcrumb so an admin can reconcile it manually.
+    await db.activityLog.create({ data: { actorUserId: STRIPE_ACTOR, action: 'payment_received_no_case', caseId, detailsJson: { chargeId, amountCents, clientReferenceId: caseId } } }).catch(() => undefined);
+    return { status: 'no_case', reason: `case ${caseId} not found` };
+  }
 
-  const isLetter = kind === 'letter_500';
+  const isLetter = kind === 'letter_500' || kind === 'letter_350';
   // Reads + pure generation happen BEFORE the transaction (no side effects to roll back).
   const pdf = isLetter ? await resolveSignedPdf(db, caseId) : null;
   const vet = isLetter && pdf !== null ? ((await db.veteran.findUnique({ where: { id: c.veteranId } })) as { email?: string; firstName?: string } | null) : null;
@@ -90,13 +97,23 @@ export async function processStripePayment(
   if (!isLetter) return { status: 'logged' };
   if (pdf === null) return { status: 'no_pdf', reason: 'no signed PDF found for case' };
 
-  // POST-COMMIT: email the portal link + password.
+  // POST-COMMIT: email the portal link + password. The payment, case→paid, and DeliveryToken are
+  // ALREADY committed above. If the email throws (e.g. SES sandbox rejects an external veteran
+  // address until production access), we must NOT let Stripe retry: a retry hits the idempotency dup
+  // and would never re-send → silent half-delivery. So we breadcrumb the failure and STILL return
+  // success. The token persists, so the email is re-sendable later.
   let emailId: string | undefined;
   if (vet?.email) {
     const link = `${cfg.portalBaseUrl.replace(/\/$/, '')}/d/${token}`;
     const text = buildDeliveryEmailText({ firstName: vet.firstName, link, password, expiresDays: TOKEN_TTL_DAYS });
-    const r = await sendEmail({ to: vet.email, subject: 'Your nexus letter is ready', textBody: text, ...(cfg.adminBcc ? { bcc: cfg.adminBcc } : {}) });
-    emailId = r.messageId;
+    try {
+      const r = await sendEmail({ to: vet.email, subject: 'Your nexus letter is ready', textBody: text, ...(cfg.adminBcc ? { bcc: cfg.adminBcc } : {}) });
+      emailId = r.messageId;
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      await db.activityLog.create({ data: { actorUserId: STRIPE_ACTOR, action: 'payment_delivery_email_failed', caseId, veteranId: c.veteranId, detailsJson: { chargeId, amountCents, token, emailTo: vet.email, error: errMsg } } }).catch(() => undefined);
+      return { status: 'delivered_email_pending', reason: `token issued; delivery email failed: ${errMsg}` };
+    }
   }
   await db.activityLog.create({ data: { actorUserId: STRIPE_ACTOR, action: 'payment_delivered', caseId, veteranId: c.veteranId, detailsJson: { chargeId, amountCents, tokenIssued: true, emailedTo: vet?.email ?? null } } });
   return { status: 'delivered', emailId };

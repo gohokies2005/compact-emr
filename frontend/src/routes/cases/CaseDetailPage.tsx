@@ -23,6 +23,7 @@ import { ChartNotesPanel } from '../veterans/ChartNotesPanel';
 import { ConditionsPanel, MedicationsPanel, ProblemsPanel } from '../../components/ClinicalChartPanels';
 import { listCaseEmails } from '../../api/emails';
 import { getArtifactPdfUrl, postDraft, cancelDraftJob } from '../../api/drafter';
+import { getLetter } from '../../api/letter';
 import { listClarifications } from '../../api/cases';
 import { getVeteran, listDocuments, reocrDocument } from '../../api/veterans';
 import { PdfViewerModal, type ViewableDoc } from '../../components/PdfViewerModal';
@@ -197,8 +198,13 @@ export function CaseDetailPage() {
   async function openLetterPdf() {
     if (!viewableLetterJob) return;
     try {
-      const { data } = await getArtifactPdfUrl(c.id, viewableLetterJob.id);
-      window.open(data.url, '_blank', 'noopener,noreferrer');
+      // Read the PDF from the SAME source the DOCX uses — GET /cases/:id/letter (resolveCurrent at
+      // currentVersion) — so the physician's PDF and DOCX are ALWAYS the same version. The old
+      // getArtifactPdfUrl was job-pinned (viewableLetterJob.version) and could open an OLD version's
+      // PDF while the editor showed currentVersion → a physician could sign a version they never saw.
+      const { data } = await getLetter(c.id);
+      if (!data.rendered.pdfUrl) { window.alert('The letter PDF is not ready yet. If it persists, flag this case to Dr. Ryan.'); return; }
+      window.open(data.rendered.pdfUrl, '_blank', 'noopener,noreferrer');
     } catch {
       window.alert('Could not open the letter PDF. If it keeps failing, flag this case to Dr. Ryan.');
     }

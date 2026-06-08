@@ -32,6 +32,7 @@ import { makeRenderInvoker } from './services/letter-render-invoke.js';
 import { makeSurgicalProposerFromEnv } from './services/letter-surgical-propose.js';
 import { createPhysiciansRouter } from './routes/physicians.js';
 import { createCaseMessagesRouter } from './routes/case-messages.js';
+import { createStaffMessagesRouter } from './routes/staff-messages.js';
 import { createUsersRouter } from './routes/users.js';
 import { makeCognitoAdmin } from './services/cognito-admin.js';
 import { S3Client } from '@aws-sdk/client-s3';
@@ -117,6 +118,8 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createAdvisoryRouter(db));
   app.use('/api/v1', authenticateJwt(), createStrategyPreviewRouter(db));
   app.use('/api/v1', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), createCaseMessagesRouter(db));
+  // Internal staff messaging (Inbox + chart Messages tab). Same role gate; S3 for attachments.
+  app.use('/api/v1', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), createStaffMessagesRouter(db, { s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) as unknown as { send: (cmd: unknown) => Promise<unknown> }, bucketName: process.env.PHI_BUCKET_NAME }));
   app.use('/api/v1', authenticateJwt(), createCdsRouter(db));
   app.use('/api/v1', authenticateJwt(), createLookupRouter());
   app.use('/api/v1', authenticateJwt(), createSignOffsRouter(db));

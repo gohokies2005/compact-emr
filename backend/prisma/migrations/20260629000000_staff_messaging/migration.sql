@@ -47,7 +47,7 @@ CREATE INDEX IF NOT EXISTS "staff_message_recipients_thread_id_idx"
 
 CREATE TABLE IF NOT EXISTS "staff_message_attachments" (
   "id" TEXT NOT NULL,
-  "message_id" TEXT NOT NULL,
+  "message_id" TEXT, -- nullable: a pending (registered, not-yet-bound) attachment has no message yet
   "filename" TEXT NOT NULL,
   "content_type" TEXT NOT NULL,
   "size_bytes" BIGINT NOT NULL,

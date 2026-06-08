@@ -98,8 +98,13 @@ function makeDb(
       findMany: vi.fn(async () => roster),
       create: vi.fn(), update: vi.fn(),
     },
+    // Staff-messaging delegates for the bug-(a) decline hook.
+    staffMessage: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), findUnique: vi.fn(), count: vi.fn(), create: vi.fn(async (a: { data: unknown }) => ({ id: 'SM-1', ...(a.data as object) })) },
+    staffMessageRecipient: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), create: vi.fn(async () => ({})), createMany: vi.fn(async () => ({ count: 1 })), updateMany: vi.fn(async () => ({ count: 1 })), update: vi.fn(), count: vi.fn() },
   };
-  const db = { ...tx, $transaction: vi.fn(async (fn: (t: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
+  // appUser.findUnique resolves the assigned RN id -> cognitoSub (decline hook).
+  const appUser = { findUnique: vi.fn(async (a: { where?: { id?: string; cognitoSub?: string } }) => (a.where?.id === 'RN-1' ? { id: 'RN-1', cognitoSub: 'RN-SUB', email: 'rn@x', active: true, roles: [{ role: 'ops_staff' }] } : null)), findMany: vi.fn(async () => []) };
+  const db = { ...tx, appUser, staffMessage: tx.staffMessage, staffMessageRecipient: tx.staffMessageRecipient, $transaction: vi.fn(async (fn: (t: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
   return { db, tx };
 }
 
@@ -297,6 +302,29 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
   it('decline 400 without a reason', async () => {
     const res = await request(appFor(makeDb().db, deps())).post('/api/v1/cases/CASE-1/letter/decline').send({});
     expect(res.status).toBe(400);
+  });
+
+  // ── Bug (a) fix: the decline must drop a case-linked StaffMessage TO the assigned RN ──
+  it('decline ALSO creates a case-linked StaffMessage To the assigned RN with the reason', async () => {
+    const reason = 'the AHI is missing — get the sleep study and regenerate';
+    const { db, tx } = makeDb(baseCase({ assignedRnId: 'RN-1' }));
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/decline').send({ reason });
+    expect(res.status).toBe(200);
+    // A StaffMessage was created on the case with the reason as the body.
+    expect(tx.staffMessage.create).toHaveBeenCalled();
+    const smArg = (tx.staffMessage.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(smArg.data.caseId).toBe('CASE-1');
+    expect(smArg.data.body).toBe(reason);
+    expect(smArg.data.subject).toMatch(/Correction requested/);
+    // A recipient row To the assigned RN (RN-SUB) was created, marked unread.
+    expect(tx.staffMessageRecipient.create).toHaveBeenCalled();
+    const recipArg = (tx.staffMessageRecipient.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(recipArg.data.recipientSub).toBe('RN-SUB');
+    expect(recipArg.data.kind).toBe('to');
+    expect(recipArg.data.readAt).toBeNull();
+    // Back-compat operatorMessage still written.
+    const upd = (tx.case.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(upd.data.operatorMessage).toBe(reason);
   });
 
   it('rejects ops_staff on approve with 403', async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -458,10 +459,36 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         throw new HttpError(409, 'conflict', `Cannot decline from status '${c.status}'.`, { reason: 'bad_transition', caseId, status: c.status });
       }
 
+      // Bug (a) fix: the decline must also drop a case-linked StaffMessage TO the assigned RN so the
+      // correction reason is a human-readable message the RN actually sees in their inbox (operatorMessage
+      // alone is invisible to the RN). Resolve the RN's Cognito sub from the assigned AppUser id; if the
+      // case has no assigned RN we still keep the back-compat writes (no message — there is no addressee).
+      const reason = body.reason as string;
+      const assignedRn = c.assignedRnId !== null ? await db.appUser.findUnique({ where: { id: c.assignedRnId } }) : null;
+      const rnSub = (assignedRn as { cognitoSub?: string } | null)?.cognitoSub ?? null;
+      // Append to the existing correction thread for this case if one exists; else start a new thread.
+      const existingCorrection = await db.staffMessage.findFirst({ where: { caseId, subject: { not: null } }, orderBy: { createdAt: 'asc' } });
+      const threadId = existingCorrection?.threadId ?? randomUUID();
+      const isNewThread = existingCorrection === null;
+
       await db.$transaction(async (tx) => {
-        // operatorMessage is the existing RN-facing channel (rendered in the ops UI).
-        await tx.case.update({ where: { id: caseId }, data: { status: 'correction_requested', operatorMessage: body.reason as string, version: { increment: 1 } } });
-        await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_declined', caseId, veteranId: c.veteranId, detailsJson: { reason: (body.reason as string).slice(0, 1000) } } });
+        // operatorMessage is the existing RN-facing channel (rendered in the ops UI) — kept for back-compat.
+        await tx.case.update({ where: { id: caseId }, data: { status: 'correction_requested', operatorMessage: reason, version: { increment: 1 } } });
+        await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_declined', caseId, veteranId: c.veteranId, detailsJson: { reason: reason.slice(0, 1000) } } });
+
+        // The new human-readable source of truth: a case-linked StaffMessage to the RN.
+        await tx.staffMessage.create({ data: { threadId, caseId, authorSub: user.sub, subject: isNewThread ? `Correction requested: ${c.claimedCondition}`.slice(0, 200) : null, body: reason } });
+        if (rnSub !== null && rnSub !== user.sub) {
+          // Ensure a recipient row for the RN (idempotent on the (threadId, recipientSub) unique key)
+          // and re-flip it unread so the decline surfaces even on an existing correction thread.
+          const existingRecip = await tx.staffMessageRecipient.findFirst({ where: { threadId, recipientSub: rnSub } });
+          if (existingRecip === null) {
+            await tx.staffMessageRecipient.create({ data: { threadId, recipientSub: rnSub, kind: 'to', addedBySub: user.sub, readAt: null } });
+          } else {
+            await tx.staffMessageRecipient.updateMany({ where: { threadId, recipientSub: rnSub }, data: { readAt: null, archivedAt: null } });
+          }
+          await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'staff_message_sent', caseId, veteranId: c.veteranId, detailsJson: { threadId, reason: 'letter_decline_to_rn', recipientSub: rnSub } } });
+        }
       });
       res.json({ data: { status: 'correction_requested' } });
     }),

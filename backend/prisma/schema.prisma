@@ -538,12 +538,14 @@ model StaffMessageRecipient {
   @@map("staff_message_recipients")
 }
 
-// File attachment bound to a single StaffMessage. All-or-nothing with the message (the message is not
-// visible until every attachment is uploaded + validated). sizeBytes is BigInt (mirrors Document).
-// Immutable. FK cascade with the message.
+// File attachment for a StaffMessage. Uploaded via presign→register as a PENDING row (messageId
+// null) and BOUND to its message atomically at send/reply (the attachmentIds[] handoff). All-or-
+// nothing with the message (not visible in a thread until bound). sizeBytes is BigInt (mirrors
+// Document). Immutable. FK cascade with the message; SetNull would orphan, so an unbound pending row
+// just stays null until bound or swept.
 model StaffMessageAttachment {
   id           String   @id @default(uuid())
-  messageId    String   @map("message_id")
+  messageId    String?  @map("message_id") // null = pending (registered, not yet bound to a message)
   filename     String
   contentType  String   @map("content_type")
   sizeBytes    BigInt   @map("size_bytes")
@@ -551,7 +553,7 @@ model StaffMessageAttachment {
   uploadedBySub String  @map("uploaded_by_sub")
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  message StaffMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  message StaffMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
   @@index([messageId])
   @@map("staff_message_attachments")

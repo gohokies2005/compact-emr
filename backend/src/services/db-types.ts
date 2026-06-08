@@ -209,7 +209,7 @@ export interface StaffMessageRecipientDelegate {
 
 export interface StaffMessageAttachmentRecord {
   id: string;
-  messageId: string;
+  messageId: string | null; // null = pending (registered, not yet bound to a message)
   filename: string;
   contentType: string;
   // Prisma returns BigInt for size_bytes; typed loosely here (mirrors how Document's BigInt is handled

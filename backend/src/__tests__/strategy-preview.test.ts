@@ -69,6 +69,14 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
     expect(r.anchor?.toLowerCase()).toContain('sleep apnea');
   });
 
+  it('OSA claim in Jotform format "Sleep Apnea (OSA)" matches the Board pair (Yorde secondary to PTSD = Strong, was Thin)', () => {
+    const r = computeStrategyPreview(input({
+      claimType: 'secondary', framingChoice: 'secondary', claimedCondition: 'Sleep Apnea (OSA)',
+      upstreamScCondition: 'PTSD', serviceConnectedConditions: ['PTSD'], activeProblems: ['Sleep Apnea (OSA)'],
+    }));
+    expect(r.tier).toBe('Strong');
+  });
+
   it('does NOT nag to switch when already anchored on the suggested pathway', () => {
     // Default input = OSA already framed secondary to granted PTSD (the strong pair) — no "switch" nag.
     const r = computeStrategyPreview(input({}));

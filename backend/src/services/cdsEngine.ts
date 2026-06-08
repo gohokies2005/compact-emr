@@ -81,7 +81,10 @@ const ALIASES: Record<string, string> = {
 };
 
 function normalize(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // Strip parentheticals FIRST: the Jotform dropdown stores "Sleep Apnea (OSA)" / "Obstructive Sleep Apnea
+  // (OSA)", and the leftover "osa" token blocked token-containment against the atlas key "obstructive sleep
+  // apnea" — so every OSA claim failed to match its Board pair (Yorde Thin). (2026-06-07)
+  return value.toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function significantTokens(norm: string): string[] {

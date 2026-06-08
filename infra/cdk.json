@@ -1,7 +1,7 @@
 {
   "app": "npx tsx bin/compact-emr.ts",
   "context": {
-    "drafter_image_tag": "ba3cf64-drafter35",
+    "drafter_image_tag": "d4763fb-drafter36",
     "chart_autofill": "on",
     "staging": {
       "domainName": "emr.flatratenexus.com",

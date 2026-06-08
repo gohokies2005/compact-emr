@@ -103,6 +103,16 @@ export async function getInbox(limit?: number): Promise<InboxResponse> {
   return apiGet<InboxResponse>(`${BASE}/messages/inbox${qs}`);
 }
 
+// Case-scoped slice of the same thread model: the case-linked staff-message threads for one case. Used
+// by the chart Messages tab (CHUNK 5). Access is gated server-side by case access (assignedRn/physician
+// + admin), so a non-participant gets a 403 the panel renders as a quiet "not available" state. Returns
+// the same thread-summary shape as the inbox (sans top-level unreadCount).
+export async function getCaseThreads(caseId: string): Promise<{ data: readonly InboxThreadSummary[] }> {
+  return apiGet<{ data: readonly InboxThreadSummary[] }>(
+    `${BASE}/cases/${encodeURIComponent(caseId)}/staff-messages`,
+  );
+}
+
 export async function getUnreadCount(): Promise<{ data: { unreadCount: number } }> {
   return apiGet<{ data: { unreadCount: number } }>(`${BASE}/messages/unread-count`);
 }

@@ -1,37 +1,43 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { EmptyState } from './ui/EmptyState';
 import { Spinner } from './ui/Spinner';
 import { ForbiddenError } from '../api/client';
-import { createCaseMessage, listCaseMessages, markCaseMessagesRead, type CaseMessage } from '../api/case-messages';
+import { getCaseThreads } from '../api/messaging';
+import { listUsers } from '../api/users';
+import { listPhysicians } from '../api/physicians';
 import { formatRelativeTime } from '../lib/date';
+import { ThreadView } from './messaging/ThreadView';
+import { ComposeMessageModal } from './messaging/ComposeMessageModal';
+import type { SelectedRecipient } from './messaging/RecipientMultiSelect';
+import type { BubbleRole, SubDirectory } from './messaging/directory';
+import { senderLabel } from './messaging/directory';
+import type { CasePhysicianLite, AssignedRnLite } from '../api/cases';
 
 interface CaseMessagesPanelProps {
   readonly caseId: string;
+  // The case's assigned RN + physician, surfaced by CaseDetailPage. Used to seed the default recipients
+  // when composing a new case-linked thread (their Cognito sub is resolved by email against the staff +
+  // physician directory). Optional — an unassigned case just composes with no defaults.
+  readonly assignedRn?: AssignedRnLite | null;
+  readonly assignedPhysician?: CasePhysicianLite | null;
 }
 
-function roleLabel(role: CaseMessage['senderRole']): string {
-  if (role === 'physician') return 'Physician';
-  if (role === 'ops_staff') return 'RN';
-  return 'Admin';
-}
+// CHUNK 5: the chart Messages tab now renders the case's STAFF-MESSAGE threads (the new threaded,
+// multi-recipient, reply-all system) instead of the old flat 2-party CaseMessage thread. The case is
+// auto-linked: getCaseThreads returns only threads linked to this case, and composing a new thread locks
+// the case link + defaults recipients to the assigned RN + physician. The reusable ThreadView (CHUNK 4)
+// owns each thread's fetch / mark-read / reply-all; this panel just lists threads and drives compose.
+export function CaseMessagesPanel({ caseId, assignedRn, assignedPhysician }: CaseMessagesPanelProps) {
+  const [composing, setComposing] = useState(false);
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
 
-function roleClassName(role: CaseMessage['senderRole']): string {
-  if (role === 'physician') return 'border-purple-200 bg-purple-50 text-purple-800';
-  if (role === 'ops_staff') return 'border-blue-200 bg-blue-50 text-blue-800';
-  return 'border-slate-200 bg-slate-100 text-slate-700';
-}
-
-export function CaseMessagesPanel({ caseId }: CaseMessagesPanelProps) {
-  const qc = useQueryClient();
-  const [body, setBody] = useState('');
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  const messagesQuery = useQuery({
-    queryKey: ['case', caseId, 'messages'],
-    queryFn: () => listCaseMessages(caseId),
+  const threadsQuery = useQuery({
+    queryKey: ['case', caseId, 'staff-messages'],
+    queryFn: () => getCaseThreads(caseId),
     refetchOnWindowFocus: true,
     retry: (failureCount, error: unknown) => {
       if (error instanceof ForbiddenError) return false;
@@ -39,35 +45,74 @@ export function CaseMessagesPanel({ caseId }: CaseMessagesPanelProps) {
     },
   });
 
-  const messages = useMemo(() => messagesQuery.data?.data ?? [], [messagesQuery.data]);
-  const unreadCount = messagesQuery.data?.unreadCount ?? 0;
-  const latestMessageId = messages[messages.length - 1]?.id;
+  // Staff + physician directory (sub -> { name, role }) so bubbles + the thread list show names/roles
+  // rather than raw Cognito subs. Mirrors InboxPage.useSubDirectory; the assigned RN/physician + any
+  // thread participants resolve through it.
+  const usersQuery = useQuery({ queryKey: ['users', 'all'], queryFn: () => listUsers() });
+  const physiciansQuery = useQuery({ queryKey: ['physicians', 'all'], queryFn: () => listPhysicians() });
 
-  const markReadMutation = useMutation({
-    mutationFn: (upToMessageId?: string) => markCaseMessagesRead(caseId, { ...(upToMessageId && { upToMessageId }) }),
-    onSuccess: async () => { await qc.invalidateQueries({ queryKey: ['case', caseId, 'messages'] }); },
-  });
-  const markReadMutate = markReadMutation.mutate;
-  const markReadPending = markReadMutation.isPending;
-
-  const createMutation = useMutation({
-    mutationFn: () => createCaseMessage(caseId, { body: body.trim() }),
-    onSuccess: async () => { setBody(''); setErrorMessage(null); await qc.invalidateQueries({ queryKey: ['case', caseId, 'messages'] }); },
-    onError: () => { setErrorMessage('Message could not be sent. Please retry.'); },
-  });
-
-  // Mark a given latest message read at most once — otherwise the post-success refetch (which
-  // still reports it unread until the server catches up) would re-fire mark-read in a loop.
-  const markedUpToRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (unreadCount > 0 && latestMessageId && markedUpToRef.current !== latestMessageId && !markReadPending) {
-      markedUpToRef.current = latestMessageId;
-      markReadMutate(latestMessageId);
+  const directory = useMemo<SubDirectory>(() => {
+    const dir: Record<string, { name: string; role: BubbleRole }> = {};
+    for (const u of usersQuery.data?.data ?? []) {
+      const role: BubbleRole = u.roles.includes('admin')
+        ? 'admin'
+        : u.roles.includes('ops_staff')
+          ? 'ops_staff'
+          : u.roles.includes('physician')
+            ? 'physician'
+            : 'unknown';
+      dir[u.id] = { name: u.name ?? u.email, role };
     }
-  }, [latestMessageId, markReadMutate, markReadPending, unreadCount]);
+    for (const p of physiciansQuery.data?.data ?? []) {
+      if (p.cognitoSub) dir[p.cognitoSub] = { name: p.fullName, role: 'physician' };
+    }
+    return dir;
+  }, [usersQuery.data, physiciansQuery.data]);
 
-  if (messagesQuery.isError && messagesQuery.error instanceof ForbiddenError) {
-    return <Card><EmptyState message="Messages are not available for this case." /></Card>;
+  // Default recipients for a new case-linked thread = the assigned RN + physician. The case carries only
+  // their email (assignedRn/assignedPhysician), so we resolve each to a Cognito `sub` via the directory
+  // sources: staff users (sub == listUsers id) and physicians (cognitoSub). Unresolvable (no account /
+  // no Cognito identity) entries are dropped — the composer's recipient picker can still add them by hand.
+  const defaultRecipients = useMemo<readonly SelectedRecipient[]>(() => {
+    const out: SelectedRecipient[] = [];
+    const seen = new Set<string>();
+    function push(sub: string, label: string) {
+      if (seen.has(sub)) return;
+      seen.add(sub);
+      out.push({ key: sub, label, kind: 'to', send: { sub, kind: 'to' } });
+    }
+    if (assignedRn?.email) {
+      const match = (usersQuery.data?.data ?? []).find(
+        (u) => u.email.toLowerCase() === assignedRn.email.toLowerCase(),
+      );
+      if (match) push(match.id, match.name ?? match.email);
+    }
+    if (assignedPhysician?.email) {
+      const match = (physiciansQuery.data?.data ?? []).find(
+        (p) => p.cognitoSub && p.email.toLowerCase() === assignedPhysician.email.toLowerCase(),
+      );
+      if (match?.cognitoSub) push(match.cognitoSub, match.fullName);
+    }
+    return out;
+  }, [assignedRn, assignedPhysician, usersQuery.data, physiciansQuery.data]);
+
+  const threads = useMemo(() => threadsQuery.data?.data ?? [], [threadsQuery.data]);
+  const unreadCount = useMemo(() => threads.filter((t) => t.unread).length, [threads]);
+
+  // When exactly one thread exists, show it inline. With several, show a compact list and let the user
+  // pick one (selection falls back to the list when the chosen thread disappears after a refetch).
+  const activeThreadId = useMemo(() => {
+    if (selectedThreadId && threads.some((t) => t.threadId === selectedThreadId)) return selectedThreadId;
+    if (threads.length === 1) return threads[0]!.threadId;
+    return null;
+  }, [selectedThreadId, threads]);
+
+  if (threadsQuery.isError && threadsQuery.error instanceof ForbiddenError) {
+    return (
+      <Card>
+        <EmptyState message="Messages are not available for this case." />
+      </Card>
+    );
   }
 
   return (
@@ -76,41 +121,90 @@ export function CaseMessagesPanel({ caseId }: CaseMessagesPanelProps) {
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-base font-semibold text-slate-900">Case messages</h2>
-            {unreadCount > 0 ? <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-medium text-blue-800">{`${unreadCount} unread`}</span> : null}
+            {unreadCount > 0 ? (
+              <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-medium text-blue-800">{`${unreadCount} unread`}</span>
+            ) : null}
           </div>
-          <p className="mt-1 text-sm text-slate-600">RN and physician thread for this case. Clinical details are allowed here.</p>
+          <p className="mt-1 text-sm text-slate-600">
+            Staff threads linked to this case. RN and physician collaboration; clinical details are allowed here.
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Link to="/inbox" className="text-sm font-medium text-indigo-600 hover:text-indigo-700">
+            Open in Inbox →
+          </Link>
+          <Button type="button" variant="primary" onClick={() => setComposing(true)}>
+            New message
+          </Button>
         </div>
       </div>
 
-      {messagesQuery.isLoading ? <div className="mt-6 flex items-center gap-2 text-sm text-slate-500"><Spinner />Loading messages</div> : null}
-      {!messagesQuery.isLoading && messages.length === 0 ? <div className="mt-6"><EmptyState message="No messages yet." /></div> : null}
+      {threadsQuery.isLoading ? (
+        <div className="mt-6 flex items-center gap-2 text-sm text-slate-500">
+          <Spinner />
+          Loading messages
+        </div>
+      ) : null}
 
-      {messages.length > 0 ? (
-        <div className="mt-6 space-y-3">
-          {messages.map((message) => (
-            <article key={message.id} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${roleClassName(message.senderRole)}`}>{roleLabel(message.senderRole)}</span>
-                <span className="text-xs text-slate-500">{formatRelativeTime(message.createdAt)}</span>
-                {message.readAt ? <span className="text-xs text-slate-400">Read {formatRelativeTime(message.readAt)}</span> : null}
+      {!threadsQuery.isLoading && threads.length === 0 ? (
+        <div className="mt-6">
+          <EmptyState message="No messages yet. Start a thread with the assigned RN and physician." />
+        </div>
+      ) : null}
+
+      {/* Several threads: a compact selectable list above the open thread. One thread: straight to it. */}
+      {threads.length > 1 ? (
+        <div className="mt-6 space-y-2">
+          {threads.map((t) => (
+            <button
+              key={t.threadId}
+              type="button"
+              onClick={() => setSelectedThreadId(t.threadId)}
+              aria-current={t.threadId === activeThreadId ? 'true' : undefined}
+              className={`flex w-full flex-col gap-0.5 rounded-lg border px-3 py-2 text-left transition ${
+                t.threadId === activeThreadId
+                  ? 'border-indigo-300 bg-indigo-50'
+                  : 'border-slate-200 bg-white hover:bg-slate-50'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {t.unread ? <span className="h-2 w-2 shrink-0 rounded-full bg-indigo-500" aria-label="Unread" /> : null}
+                <span
+                  className={`flex-1 truncate text-sm ${t.unread ? 'font-semibold text-slate-900' : 'font-medium text-slate-700'}`}
+                >
+                  {t.subject ?? '(no subject)'}
+                </span>
+                <span className="shrink-0 text-xs text-slate-400">{formatRelativeTime(t.lastMessageAt)}</span>
               </div>
-              <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-800">{message.body}</p>
-            </article>
+              <p className="truncate text-xs text-slate-500">
+                {senderLabel(t.lastAuthorSub, directory)}: {t.lastMessageBody}
+              </p>
+            </button>
           ))}
         </div>
       ) : null}
 
-      <div className="mt-6 border-t border-slate-200 pt-4">
-        <label className="block">
-          <span className="text-sm font-medium text-slate-800">New message</span>
-          <textarea value={body} onChange={(e) => { setBody(e.target.value); setErrorMessage(null); }} rows={4} maxLength={4000} className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200" placeholder="Write a message for the assigned RN or physician." />
-          <span className="mt-1 block text-xs text-slate-500">{body.length}/4000</span>
-        </label>
-        {errorMessage ? <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{errorMessage}</div> : null}
-        <div className="mt-3 flex justify-end">
-          <Button type="button" variant="primary" loading={createMutation.isPending} disabled={body.trim().length === 0 || body.length > 4000 || createMutation.isPending} onClick={() => createMutation.mutate()}>Send message</Button>
-        </div>
-      </div>
+      {activeThreadId ? (
+        <ThreadView
+          threadId={activeThreadId}
+          directory={directory}
+          className="mt-6 border-t border-slate-200 pt-6"
+          onReplied={() => threadsQuery.refetch()}
+        />
+      ) : null}
+
+      {composing ? (
+        <ComposeMessageModal
+          lockedCase={{ id: caseId, label: caseId }}
+          initialRecipients={defaultRecipients}
+          onClose={() => setComposing(false)}
+          onSent={(threadId) => {
+            setComposing(false);
+            setSelectedThreadId(threadId);
+            void threadsQuery.refetch();
+          }}
+        />
+      ) : null}
     </Card>
   );
 }

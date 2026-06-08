@@ -397,7 +397,9 @@ export function CaseDetailPage() {
         {tab === 'clarifications' ? <ClarificationsPanel caseId={caseId} /> : null}
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} /> : null}
         {tab === 'emails' ? <EmailLogPanel queryKey={['case', caseId, 'emails']} fetcher={() => listCaseEmails(caseId)} scope="claim" /> : null}
-        {tab === 'messages' ? <CaseMessagesPanel caseId={caseId} /> : null}
+        {tab === 'messages' ? (
+          <CaseMessagesPanel caseId={caseId} assignedRn={c.assignedRn ?? null} assignedPhysician={c.assignedPhysician ?? null} />
+        ) : null}
       </div>
     </div>
 

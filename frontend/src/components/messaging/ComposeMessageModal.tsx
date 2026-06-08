@@ -9,18 +9,28 @@ import { MessageAttachmentPicker, type StagedAttachment } from './MessageAttachm
 
 // Compose-new modal (frame mirrors QuickNotePopup/TransitionModal: fixed overlay + centered card +
 // stop-propagation). Send is disabled until >=1 recipient + subject + body + no pending upload.
+//
+// Two modes:
+//   - Inbox (default): free-form case link via the optional CasePicker (toggle OFF by default).
+//   - Chart Messages tab: `lockedCase` pre-links the thread to that case and HIDES the CasePicker (the
+//     case is non-editable here — every chart-composed thread is collaboration-scoped to this case).
+//     `initialRecipients` seeds the recipient list (the case's assigned RN + physician).
 export function ComposeMessageModal({
   onClose,
   onSent,
+  lockedCase,
+  initialRecipients,
 }: {
   readonly onClose: () => void;
   readonly onSent: (threadId: string) => void;
+  readonly lockedCase?: SelectedCase;
+  readonly initialRecipients?: readonly SelectedRecipient[];
 }) {
   const qc = useQueryClient();
-  const [recipients, setRecipients] = useState<readonly SelectedRecipient[]>([]);
+  const [recipients, setRecipients] = useState<readonly SelectedRecipient[]>(initialRecipients ?? []);
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
-  const [linkedCase, setLinkedCase] = useState<SelectedCase | null>(null);
+  const [linkedCase, setLinkedCase] = useState<SelectedCase | null>(lockedCase ?? null);
   const [attachments, setAttachments] = useState<readonly StagedAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -99,7 +109,19 @@ export function ComposeMessageModal({
             <span className="mt-1 block text-xs text-slate-500">{body.length}/4000</span>
           </label>
 
-          <CasePicker value={linkedCase} onChange={setLinkedCase} />
+          {lockedCase ? (
+            <div>
+              <span className="mb-1 block text-sm font-medium text-slate-700">Linked case</span>
+              <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                <span className="inline-flex items-center rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                  Locked
+                </span>
+                <span className="text-slate-900">{lockedCase.label}</span>
+              </div>
+            </div>
+          ) : (
+            <CasePicker value={linkedCase} onChange={setLinkedCase} />
+          )}
 
           <MessageAttachmentPicker
             staged={attachments}

@@ -140,7 +140,7 @@ export class DrafterStack extends Stack {
     const taskDefinition = new ecs.FargateTaskDefinition(this, 'DrafterTaskDef', {
       family: `compact-emr-${config.envName}-drafter`,
       cpu: 4096, // 4 vCPU
-      memoryLimitMiB: 8192, // 8 GB
+      memoryLimitMiB: 16384, // 16 GB (bumped from 8 GB 2026-06-08: OOM hedge for the memory-heavy post-v1 QA phase; 4 vCPU supports 8-30 GB)
       executionRole,
       taskRole,
       ephemeralStorageGiB: 30, // S3-materialize-to-/tmp per Ryan's answer #2

@@ -12,7 +12,15 @@ import type { AppDb } from '../services/db-types.js';
 export function createStripeWebhookRouter(db: AppDb): Router {
   const router = Router();
   router.post('/', asyncHandler(async (req: Request, res: Response) => {
-    const raw = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (typeof req.body === 'string' ? req.body : '');
+    // serverless-http rebuilds req.body via Buffer.from(event.body,'utf8') — a RE-ENCODED copy, NOT
+    // Stripe's original wire bytes — so HMAC over req.body 400s every live event (architect+Stripe/AWS-SME
+    // proven 2026-06-08). Verify against the ORIGINAL API Gateway event body. The req.body fallback keeps
+    // the adapter-bypassing supertest unit tests valid; the new serverless-http event test covers this
+    // Lambda-only path the supertest suite was structurally blind to.
+    const evt = (req as unknown as { apiGateway?: { event?: { body?: string; isBase64Encoded?: boolean } } }).apiGateway?.event;
+    const raw = evt
+      ? (evt.isBase64Encoded ? Buffer.from(evt.body ?? '', 'base64').toString('utf8') : (evt.body ?? ''))
+      : (Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (typeof req.body === 'string' ? req.body : ''));
     const secret = await readSecretByName(process.env.STRIPE_WEBHOOK_SECRET_NAME);
     const verify = verifyStripeSignature(raw, req.header('stripe-signature'), secret, Math.floor(Date.now() / 1000));
     if (!verify.ok) { res.status(400).json({ error: 'signature verification failed', reason: verify.reason }); return; }

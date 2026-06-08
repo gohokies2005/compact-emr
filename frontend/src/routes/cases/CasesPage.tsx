@@ -115,7 +115,7 @@ export function CasesPage() {
     const headers = ['Case ID', 'Veteran', 'Condition', 'Type', 'Status', 'Records', 'Physician', 'RN', 'Submitted', 'Updated', 'Version'];
     const matrix = rows.map((c) => [
       c.id, c.veteran ? `${c.veteran.lastName}, ${c.veteran.firstName}` : c.veteranId, c.claimedCondition,
-      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.recordsUploaded ? 'Records in' : 'Awaiting records', c.assignedPhysician?.fullName ?? '', c.assignedRn?.email ?? '', c.createdAt, c.updatedAt, c.version,
+      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.recordsUploaded ? 'Received' : 'Pending', c.assignedPhysician?.fullName ?? '', c.assignedRn?.email ?? '', c.createdAt, c.updatedAt, c.version,
     ]);
     exportRowsToCsv(`cases-export-${new Date().toISOString().slice(0, 10)}.csv`, headers, matrix);
   }
@@ -220,8 +220,8 @@ export function CasesPage() {
 // `undefined` (older API response without the field) renders as awaiting — the conservative default.
 function RecordsChip({ recordsUploaded }: { readonly recordsUploaded: boolean | undefined }) {
   return recordsUploaded
-    ? <span className="text-xs font-medium text-slate-600" title="At least one veteran-uploaded record is on file (Stage 2 complete).">Records in</span>
-    : <span className="text-xs font-medium text-slate-500" title="No uploaded records yet — waiting on the veteran's files (Stage-1 only).">Awaiting records</span>;
+    ? <span className="text-xs font-medium text-slate-600" title="At least one veteran-uploaded record is on file (Stage 2 complete).">Received</span>
+    : <span className="text-xs font-medium text-slate-500" title="No uploaded records yet — waiting on the veteran's files (Stage-1 only).">Pending</span>;
 }
 
 // Epic/Cerner-style quick-note popup: overwrite scratchpad + a last-editor stamp. "Delete" clears it

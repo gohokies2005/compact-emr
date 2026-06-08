@@ -42,8 +42,8 @@ describe('CasesPage', () => {
     // NOT the colored CaseStatusBadge. "Drafting" appears in the status filter option AND the row cell —
     // assert the neutral row label specifically (centered slate text, no bg-* fill).
     expect(screen.getAllByText('Drafting').some((el) => el.className.includes('text-slate-600') && !el.className.includes('bg-'))).toBe(true);
-    // Records column renders the neutral "Awaiting records" label (mock rows have no recordsUploaded).
-    expect(screen.getAllByText('Awaiting records').length).toBeGreaterThan(0);
+    // Records column renders the neutral one-word "Pending" label (mock rows have no recordsUploaded).
+    expect(screen.getAllByText('Pending').length).toBeGreaterThan(0);
   });
 
   it('sorts by a column header: default -> asc -> desc (3-state) with aria-sort + indicator', async () => {

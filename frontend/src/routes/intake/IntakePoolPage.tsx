@@ -306,7 +306,9 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
         <div className="text-sm font-semibold text-slate-800">Files ({intake.files.length})</div>
         <ul className="mt-2 space-y-1">
           {intake.files.map((f) => {
-            const ok = ALLOWED_CT.has(f.contentType ?? '');
+            // Jotform/S3 often store .txt (and others) with a wrong/empty content-type, so also accept by
+            // extension — the assign path infers the same. (Ryan 2026-06-08: ".txt still won't file".)
+            const ok = ALLOWED_CT.has(f.contentType ?? '') || /\.(txt|pdf|jpe?g|png|docx?)$/i.test(f.name ?? '');
             const key = f.s3Key ?? '';
             return (
               <li key={key} className="flex items-center gap-2 text-sm">

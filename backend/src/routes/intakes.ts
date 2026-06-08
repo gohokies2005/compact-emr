@@ -22,6 +22,19 @@ const ASSIGN_ALLOWED_CONTENT_TYPES = new Set([
   'application/pdf', 'image/jpeg', 'image/png', 'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain',
 ]);
+
+const EXT_CONTENT_TYPE: Record<string, string> = {
+  txt: 'text/plain', pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+};
+// Jotform/S3 frequently store a .txt as application/octet-stream or an empty type, so the declared
+// content-type check rejected real .txt files even after text/plain was allowlisted. Infer a SUPPORTED
+// type from the file extension when the declared one isn't usable. (Ryan 2026-06-08: ".txt still won't file".)
+function effectiveContentType(name: string | undefined, declared: string): string {
+  if (ASSIGN_ALLOWED_CONTENT_TYPES.has(declared)) return declared;
+  const ext = (name ?? '').toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
+  return ext !== undefined && EXT_CONTENT_TYPE[ext] !== undefined ? EXT_CONTENT_TYPE[ext] : declared;
+}
 function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200) || 'file';
 }
@@ -207,7 +220,7 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     for (const f of manifest) {
       if (typeof f?.s3Key !== 'string') continue;
       if (requested !== null && !requested.has(f.s3Key)) continue;
-      const contentType = typeof f.contentType === 'string' ? f.contentType : '';
+      const contentType = effectiveContentType(f.name, typeof f.contentType === 'string' ? f.contentType : '');
       if (!ASSIGN_ALLOWED_CONTENT_TYPES.has(contentType)) {
         failed.push({ name: f.name, reason: `unsupported content-type: ${contentType || 'unknown'}` });
         continue;

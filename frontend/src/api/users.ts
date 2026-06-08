@@ -59,3 +59,33 @@ export async function createStaff(input: CreateStaffInput): Promise<{ data: Crea
 export async function setStaffActive(id: string, version: number, active: boolean): Promise<{ data: StaffUser }> {
   return apiPatch<{ data: StaffUser }, { version: number; active: boolean }>(`/api/v1/users/${encodeURIComponent(id)}`, { version, active });
 }
+
+export interface ResetPasswordResult {
+  readonly id: string;
+  readonly email: string;
+  readonly mode: string;
+}
+
+// Reset a staff login's password. Omit opts (or opts.mode !== 'temp_password') => Cognito emails a
+// reset code (no plaintext leaves the server; the recommended default). { mode: 'temp_password',
+// tempPassword } sets a known one-login temp password (must satisfy the 12+ upper/lower/digit/symbol
+// policy server-side). The password is never echoed back.
+export async function resetStaffPassword(
+  id: string,
+  opts: { mode?: 'temp_password'; tempPassword?: string } = {},
+): Promise<{ data: ResetPasswordResult }> {
+  const body = opts.mode === 'temp_password' ? { mode: 'temp_password' as const, tempPassword: opts.tempPassword } : {};
+  return apiPost<{ data: ResetPasswordResult }, typeof body>(`/api/v1/users/${encodeURIComponent(id)}/reset-password`, body);
+}
+
+export interface UnlockStaffResult {
+  readonly id: string;
+  readonly email: string;
+  readonly targetIsAdmin: boolean;
+}
+
+// Account-takeover-grade: clears the staff member's MFA factors and re-enables the login. The UI
+// gates this behind a typed-email confirmation before firing.
+export async function unlockStaff(id: string): Promise<{ data: UnlockStaffResult }> {
+  return apiPost<{ data: UnlockStaffResult }, Record<string, never>>(`/api/v1/users/${encodeURIComponent(id)}/unlock`, {});
+}

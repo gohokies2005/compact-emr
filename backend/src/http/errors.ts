@@ -6,6 +6,7 @@ export type ErrorCode =
   | 'forbidden'
   | 'not_found'
   | 'conflict'
+  | 'gone'
   | 'chart_not_ready'
   | 'essential_docs_missing'
   | 'internal_error';

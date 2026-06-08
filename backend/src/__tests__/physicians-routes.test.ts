@@ -82,39 +82,52 @@ function appFor(db: AppDb) {
 
 const VALID = { fullName: 'Dr. Jane Doe, MD', npi: '1234567890', specialty: 'Family Medicine', medicalLicense: 'NV-12345', email: 'jane@x.test', cognitoSub: 'sub-jane', boardName: 'American Board of Family Medicine', boardAbbreviation: 'ABFM', licenseState: 'Nevada', licenseNumber: '12345' };
 
+// POST /physicians is RETIRED (410) — physician creation is consolidated into Staff (POST /users) so
+// the Cognito login is provisioned with the profile. Tests that operate on an existing profile seed
+// the store directly via this helper instead of creating through the (now retired) route.
+function seedPhysician(store: Map<string, PhysicianRecord>, overrides: Partial<PhysicianRecord> = {}): PhysicianRecord {
+  const now = new Date('2026-06-01T00:00:00.000Z');
+  const id = overrides.id ?? 'PHYS-1';
+  const row: PhysicianRecord = {
+    id, cognitoSub: 'sub-jane', fullName: 'Dr. Jane Doe, MD', npi: '1234567890', specialty: 'Family Medicine',
+    medicalLicense: 'NV-12345', email: 'jane@x.test', phone: null, signatureImageS3Key: null,
+    credentialBlockJson: { fullNameWithCredential: 'Dr. Jane Doe, MD', specialty: 'Family Medicine', npi: '1234567890', boardName: 'American Board of Family Medicine', boardAbbreviation: 'ABFM', licenseState: 'Nevada', licenseNumber: '12345' },
+    active: true, createdAt: now, updatedAt: now, version: 1, ...overrides,
+  };
+  store.set(row.id, row);
+  return row;
+}
+
 describe('physician profile routes (D1)', () => {
   beforeEach(() => { mockUser = { sub: 'admin-sub', roles: ['admin'] }; });
 
-  it('POST creates a physician (201, hasSignature flag, no raw signature key leaked)', async () => {
+  it('POST /physicians is RETIRED -> 410 Gone (create via Staff)', async () => {
     const { db } = makeDb();
     const res = await request(appFor(db)).post('/api/v1/physicians').send(VALID);
-    expect(res.status).toBe(201);
-    expect(res.body.data.fullName).toBe('Dr. Jane Doe, MD');
-    expect(res.body.data.hasSignature).toBe(false);
-    expect(res.body.data).not.toHaveProperty('signatureImageS3Key');
+    expect(res.status).toBe(410);
+    expect(res.body.error.code).toBe('gone');
+    expect(res.body.error.message).toMatch(/Staff \(POST \/users\)/);
   });
 
-  it('POST composes a complete credential block from the credential fields', async () => {
-    const { db } = makeDb();
-    const res = await request(appFor(db)).post('/api/v1/physicians').send(VALID);
-    expect(res.status).toBe(201);
-    expect(res.body.data.hasCredentialBlock).toBe(true);
-    expect(res.body.data.boardAbbreviation).toBe('ABFM');
-    expect(res.body.data.licenseState).toBe('Nevada');
-  });
-
-  it('POST missing a credential field (boardName) -> 400 (cannot sign without it)', async () => {
+  it('POST /physicians returns 410 even for an otherwise-invalid body (route fully retired)', async () => {
     const { db } = makeDb();
     const { boardName: _omit, ...withoutBoard } = VALID;
     const res = await request(appFor(db)).post('/api/v1/physicians').send(withoutBoard);
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(410);
+  });
+
+  it('ops_staff can LIST but the retired CREATE is still admin-gated (403 before 410)', async () => {
+    const { db } = makeDb();
+    mockUser = { sub: 'ops-sub', roles: ['ops_staff'] };
+    expect((await request(appFor(db)).get('/api/v1/physicians')).status).toBe(200);
+    // requireRole runs before the handler, so a non-admin gets 403, not 410.
+    expect((await request(appFor(db)).post('/api/v1/physicians').send(VALID)).status).toBe(403);
   });
 
   it('PATCH a credential field recomposes the block', async () => {
-    const { db } = makeDb();
-    const app = appFor(db);
-    const created = (await request(app).post('/api/v1/physicians').send(VALID)).body.data;
-    const res = await request(app).patch(`/api/v1/physicians/${created.id}`).send({ version: 1, fields: { licenseNumber: 'DO99999' } });
+    const { db, store } = makeDb();
+    const created = seedPhysician(store);
+    const res = await request(appFor(db)).patch(`/api/v1/physicians/${created.id}`).send({ version: 1, fields: { licenseNumber: 'DO99999' } });
     expect(res.status).toBe(200);
     expect(res.body.data.licenseNumber).toBe('DO99999');
     expect(res.body.data.hasCredentialBlock).toBe(true);
@@ -124,9 +137,8 @@ describe('physician profile routes (D1)', () => {
 
   it('PATCH fullName refreshes the block fullNameWithCredential (column<->block never drift)', async () => {
     const { db, store } = makeDb();
-    const app = appFor(db);
-    const created = (await request(app).post('/api/v1/physicians').send(VALID)).body.data;
-    await request(app).patch(`/api/v1/physicians/${created.id}`).send({ version: 1, fields: { fullName: 'Dr. Jane A. Doe, MD' } });
+    const created = seedPhysician(store);
+    await request(appFor(db)).patch(`/api/v1/physicians/${created.id}`).send({ version: 1, fields: { fullName: 'Dr. Jane A. Doe, MD' } });
     const block = store.get(created.id)!.credentialBlockJson as { fullNameWithCredential: string; boardAbbreviation: string };
     expect(block.fullNameWithCredential).toBe('Dr. Jane A. Doe, MD');
     expect(block.boardAbbreviation).toBe('ABFM'); // unchanged fields survive
@@ -134,92 +146,54 @@ describe('physician profile routes (D1)', () => {
 
   it('PATCH an unrelated field on a no-block profile leaves credentialBlockJson untouched (no half-build)', async () => {
     const { db, store } = makeDb();
-    const now = new Date('2026-06-01T00:00:00.000Z');
-    store.set('LEGACY', { id: 'LEGACY', cognitoSub: null, fullName: 'Dr. Old, MD', npi: '5555555555', specialty: 'FM', medicalLicense: 'NV-9', email: 'old@x.test', phone: null, signatureImageS3Key: null, credentialBlockJson: null, active: true, createdAt: now, updatedAt: now, version: 1 });
+    seedPhysician(store, { id: 'LEGACY', cognitoSub: null, fullName: 'Dr. Old, MD', npi: '5555555555', specialty: 'FM', medicalLicense: 'NV-9', email: 'old@x.test', credentialBlockJson: null });
     const res = await request(appFor(db)).patch('/api/v1/physicians/LEGACY').send({ version: 1, fields: { email: 'new@x.test' } });
     expect(res.status).toBe(200);
     expect(store.get('LEGACY')!.credentialBlockJson).toBeNull();
   });
 
-  it('ops_staff can LIST but cannot CREATE', async () => {
-    const { db } = makeDb();
-    mockUser = { sub: 'ops-sub', roles: ['ops_staff'] };
-    expect((await request(appFor(db)).get('/api/v1/physicians')).status).toBe(200);
-    expect((await request(appFor(db)).post('/api/v1/physicians').send(VALID)).status).toBe(403);
-  });
-
-  it('duplicate NPI -> 409, not 500', async () => {
-    const { db } = makeDb();
-    const app = appFor(db);
-    await request(app).post('/api/v1/physicians').send(VALID);
-    const res = await request(app).post('/api/v1/physicians').send({ ...VALID, cognitoSub: 'sub-other' });
-    expect(res.status).toBe(409);
-    expect(res.body.error.details.field).toBe('npi');
-  });
-
-  it('duplicate cognitoSub -> 409 with clear message', async () => {
-    const { db } = makeDb();
-    const app = appFor(db);
-    await request(app).post('/api/v1/physicians').send(VALID);
-    const res = await request(app).post('/api/v1/physicians').send({ ...VALID, npi: '9999999999' });
-    expect(res.status).toBe(409);
-    expect(res.body.error.details.field).toBe('cognitoSub');
-  });
-
-  it('invalid NPI (not 10 digits) -> 400', async () => {
-    const { db } = makeDb();
-    const res = await request(appFor(db)).post('/api/v1/physicians').send({ ...VALID, npi: '123' });
-    expect(res.status).toBe(400);
-  });
-
   it('PATCH stale version -> 409', async () => {
-    const { db } = makeDb();
-    const app = appFor(db);
-    const created = (await request(app).post('/api/v1/physicians').send(VALID)).body.data;
-    const res = await request(app).patch(`/api/v1/physicians/${created.id}`).send({ version: 99, fields: { specialty: 'Cardiology' } });
+    const { db, store } = makeDb();
+    const created = seedPhysician(store);
+    const res = await request(appFor(db)).patch(`/api/v1/physicians/${created.id}`).send({ version: 99, fields: { specialty: 'Cardiology' } });
     expect(res.status).toBe(409);
   });
 
   it('deactivating a physician with in-flight cases -> 409', async () => {
-    const { db } = makeDb({ inFlight: 2 });
-    const app = appFor(db);
-    const created = (await request(app).post('/api/v1/physicians').send(VALID)).body.data;
-    const res = await request(app).patch(`/api/v1/physicians/${created.id}`).send({ version: 1, fields: { active: false } });
+    const { db, store } = makeDb({ inFlight: 2 });
+    const created = seedPhysician(store);
+    const res = await request(appFor(db)).patch(`/api/v1/physicians/${created.id}`).send({ version: 1, fields: { active: false } });
     expect(res.status).toBe(409);
     expect(res.body.error.details.inFlightCount).toBe(2);
   });
 
   it('signature presign rejects non-PNG -> 400', async () => {
-    const { db } = makeDb();
-    const app = appFor(db);
-    const created = (await request(app).post('/api/v1/physicians').send(VALID)).body.data;
-    const res = await request(app).post(`/api/v1/physicians/${created.id}/signature/presign`).send({ contentType: 'image/jpeg', sizeBytes: 1000 });
+    const { db, store } = makeDb();
+    const created = seedPhysician(store);
+    const res = await request(appFor(db)).post(`/api/v1/physicians/${created.id}/signature/presign`).send({ contentType: 'image/jpeg', sizeBytes: 1000 });
     expect(res.status).toBe(400);
   });
 
   it('signature presign for PNG -> 200 with key + upload url', async () => {
-    const { db } = makeDb();
-    const app = appFor(db);
-    const created = (await request(app).post('/api/v1/physicians').send(VALID)).body.data;
-    const res = await request(app).post(`/api/v1/physicians/${created.id}/signature/presign`).send({ contentType: 'image/png', sizeBytes: 5000 });
+    const { db, store } = makeDb();
+    const created = seedPhysician(store);
+    const res = await request(appFor(db)).post(`/api/v1/physicians/${created.id}/signature/presign`).send({ contentType: 'image/png', sizeBytes: 5000 });
     expect(res.status).toBe(200);
     expect(res.body.data.s3Key).toMatch(new RegExp(`^physician-signatures/${created.id}/`));
   });
 
   it('signature register rejects a key outside this physician subtree -> 400', async () => {
-    const { db } = makeDb();
-    const app = appFor(db);
-    const created = (await request(app).post('/api/v1/physicians').send(VALID)).body.data;
-    const res = await request(app).post(`/api/v1/physicians/${created.id}/signature`).send({ s3Key: `physician-signatures/SOMEONE-ELSE/${'a'.repeat(8)}-signature.png` });
+    const { db, store } = makeDb();
+    const created = seedPhysician(store);
+    const res = await request(appFor(db)).post(`/api/v1/physicians/${created.id}/signature`).send({ s3Key: `physician-signatures/SOMEONE-ELSE/${'a'.repeat(8)}-signature.png` });
     expect(res.status).toBe(400);
   });
 
   it('signature register with a valid key -> 200, hasSignature true', async () => {
-    const { db } = makeDb();
-    const app = appFor(db);
-    const created = (await request(app).post('/api/v1/physicians').send(VALID)).body.data;
+    const { db, store } = makeDb();
+    const created = seedPhysician(store);
     const key = `physician-signatures/${created.id}/abcdef12-3456-7890-abcd-ef1234567890-signature.png`;
-    const res = await request(app).post(`/api/v1/physicians/${created.id}/signature`).send({ s3Key: key });
+    const res = await request(appFor(db)).post(`/api/v1/physicians/${created.id}/signature`).send({ s3Key: key });
     expect(res.status).toBe(200);
     expect(res.body.data.hasSignature).toBe(true);
   });

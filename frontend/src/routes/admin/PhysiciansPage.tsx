@@ -1,4 +1,5 @@
 import { FormEvent, useMemo, useState } from 'react';
+import axios from 'axios';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
@@ -8,13 +9,18 @@ import { Spinner } from '../../components/ui/Spinner';
 import { ConflictError } from '../../api/client';
 import { PhysicianSignatureControl } from '../../components/PhysicianSignatureControl';
 import {
-  createPhysician,
+  linkPhysicianLogin,
   listPhysicians,
   updatePhysician,
-  type CreatePhysicianInput,
   type PhysicianPublic,
   type UpdatePhysicianFields,
 } from '../../api/physicians';
+
+// Mirrors the backend Cognito password policy so the temp-password branch of the link-login dialog
+// blocks client-side instead of bouncing off a server 400.
+function isStrongTempPassword(p: string): boolean {
+  return p.length >= 12 && /[A-Z]/.test(p) && /[a-z]/.test(p) && /[0-9]/.test(p) && /[^A-Za-z0-9]/.test(p);
+}
 
 interface PhysicianFormState {
   readonly fullName: string;
@@ -31,22 +37,6 @@ interface PhysicianFormState {
 }
 
 const EMPTY_FORM: PhysicianFormState = { fullName: '', npi: '', specialty: '', medicalLicense: '', email: '', phone: '', cognitoSub: '', boardName: '', boardAbbreviation: '', licenseState: '', licenseNumber: '' };
-
-function toCreateInput(form: PhysicianFormState): CreatePhysicianInput {
-  return {
-    fullName: form.fullName.trim(),
-    npi: form.npi.trim(),
-    specialty: form.specialty.trim(),
-    medicalLicense: form.medicalLicense.trim(),
-    email: form.email.trim(),
-    ...(form.phone.trim() && { phone: form.phone.trim() }),
-    ...(form.cognitoSub.trim() && { cognitoSub: form.cognitoSub.trim() }),
-    boardName: form.boardName.trim(),
-    boardAbbreviation: form.boardAbbreviation.trim(),
-    licenseState: form.licenseState.trim(),
-    licenseNumber: form.licenseNumber.trim(),
-  };
-}
 
 function toEditForm(physician: PhysicianPublic): PhysicianFormState {
   return {
@@ -82,20 +72,6 @@ function toUpdateFields(original: PhysicianPublic, form: PhysicianFormState): Up
   return fields;
 }
 
-function isCreateValid(form: PhysicianFormState): boolean {
-  return (
-    form.fullName.trim().length > 0 &&
-    /^\d{10}$/.test(form.npi.trim()) &&
-    form.specialty.trim().length > 0 &&
-    form.medicalLicense.trim().length > 0 &&
-    form.email.trim().length > 0 &&
-    form.boardName.trim().length > 0 &&
-    form.boardAbbreviation.trim().length > 0 &&
-    form.licenseState.trim().length > 0 &&
-    form.licenseNumber.trim().length > 0
-  );
-}
-
 // The 4 credential fields are all-or-nothing: a half-filled set composes an incomplete block the
 // server rejects (400). Block that submit client-side so the admin gets a clear inline hint
 // instead of a dead-end. All-empty is allowed on edit (a legacy profile left untouched).
@@ -127,6 +103,20 @@ function conflictMessage(error: unknown): string {
   return 'This physician was changed elsewhere. Reload and try again.';
 }
 
+// Link-login failures: 409 means the profile already has a login (someone linked it concurrently),
+// 404 means it was deleted. Surface the real reason rather than a generic retry hint.
+function linkErrorMessage(error: unknown): string {
+  if (error instanceof ConflictError) return 'This physician profile is already linked to a login. Reload the list.';
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status;
+    const msg = (error.response?.data as { error?: { message?: string } } | undefined)?.error?.message;
+    if (status === 404) return 'That physician profile no longer exists (404). Reload the list.';
+    if (status) return `Link login failed (HTTP ${status})${msg ? `: ${msg}` : ''}.`;
+    return `Link login failed (no response — network/CORS): ${error.message}`;
+  }
+  return 'Link login failed. Please retry.';
+}
+
 function Field({ label, value, onChange, required = false, placeholder }: { readonly label: string; readonly value: string; readonly onChange: (value: string) => void; readonly required?: boolean; readonly placeholder?: string }) {
   return (
     <label className="block">
@@ -138,18 +128,32 @@ function Field({ label, value, onChange, required = false, placeholder }: { read
 
 export function PhysiciansPage() {
   const qc = useQueryClient();
-  const [createForm, setCreateForm] = useState<PhysicianFormState>(EMPTY_FORM);
   const [editing, setEditing] = useState<PhysicianPublic | null>(null);
   const [editForm, setEditForm] = useState<PhysicianFormState>(EMPTY_FORM);
   const [message, setMessage] = useState<string | null>(null);
+  // Link-login dialog (only reachable for cognitoSub === null profiles).
+  const [linkTarget, setLinkTarget] = useState<PhysicianPublic | null>(null);
+  const [linkCredential, setLinkCredential] = useState<'invite' | 'temp_password'>('invite');
+  const [linkTempPassword, setLinkTempPassword] = useState('');
 
   const physiciansQuery = useQuery({ queryKey: ['physicians'], queryFn: listPhysicians });
   const physicians = useMemo(() => physiciansQuery.data?.data ?? [], [physiciansQuery.data]);
 
-  const createMutation = useMutation({
-    mutationFn: () => createPhysician(toCreateInput(createForm)),
-    onSuccess: async () => { setCreateForm(EMPTY_FORM); setMessage('Physician created.'); await qc.invalidateQueries({ queryKey: ['physicians'] }); },
-    onError: (error: unknown) => setMessage(conflictMessage(error)),
+  function closeLink() { setLinkTarget(null); setLinkCredential('invite'); setLinkTempPassword(''); }
+
+  const linkMutation = useMutation({
+    mutationFn: (vars: { physician: PhysicianPublic; credential: 'invite' | 'temp_password'; tempPassword: string }) =>
+      linkPhysicianLogin(vars.physician.id, vars.credential === 'temp_password'
+        ? { credential: 'temp_password', tempPassword: vars.tempPassword }
+        : { credential: 'invite' }),
+    onSuccess: async (res) => {
+      setMessage(res.data.credential === 'temp_password'
+        ? `Login created and linked for ${res.data.email} (temporary password set).`
+        : `Login created and linked; invite emailed to ${res.data.email}.`);
+      closeLink();
+      await qc.invalidateQueries({ queryKey: ['physicians'] });
+    },
+    onError: (error: unknown) => setMessage(linkErrorMessage(error)),
   });
 
   const editMutation = useMutation({
@@ -167,51 +171,32 @@ export function PhysiciansPage() {
     onError: (error: unknown) => setMessage(conflictMessage(error)),
   });
 
-  function updateCreateField<K extends keyof PhysicianFormState>(key: K, value: PhysicianFormState[K]) { setCreateForm((current) => ({ ...current, [key]: value })); setMessage(null); }
   function updateEditField<K extends keyof PhysicianFormState>(key: K, value: PhysicianFormState[K]) { setEditForm((current) => ({ ...current, [key]: value })); setMessage(null); }
   function openEdit(physician: PhysicianPublic) { setEditing(physician); setEditForm(toEditForm(physician)); setMessage(null); }
-  function handleCreate(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (isCreateValid(createForm)) createMutation.mutate(); }
+  function openLink(physician: PhysicianPublic) { setLinkTarget(physician); setLinkCredential('invite'); setLinkTempPassword(''); setMessage(null); }
   function handleEdit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (isEditValid(editForm)) editMutation.mutate(); }
+  function submitLink() {
+    if (!linkTarget) return;
+    if (linkCredential === 'temp_password' && !isStrongTempPassword(linkTempPassword)) {
+      setMessage('Temporary password must be at least 12 characters with an uppercase letter, a lowercase letter, a number, and a symbol (e.g. FrnTest-2026!!).');
+      return;
+    }
+    linkMutation.mutate({ physician: linkTarget, credential: linkCredential, tempPassword: linkTempPassword });
+  }
 
   return (
     <AppShell>
       <div className="space-y-6">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-950">Physicians</h1>
-          <p className="mt-2 text-sm text-slate-600">Manage physician profiles, Cognito mapping, active status, and signature readiness.</p>
+          <h1 className="text-2xl font-semibold text-slate-950">Physician credentials</h1>
+          <p className="mt-2 text-sm text-slate-600">Manage physician credentials, signature, login linkage, and active status. Create new physicians on the Staff page so their login is provisioned at the same time.</p>
         </div>
 
         {message ? <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">{message}</div> : null}
 
         <Card>
-          <h2 className="text-base font-semibold text-slate-900">New physician</h2>
-          <form onSubmit={handleCreate} className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <Field label="Full name" value={createForm.fullName} onChange={(v) => updateCreateField('fullName', v)} required />
-            <Field label="NPI" value={createForm.npi} onChange={(v) => updateCreateField('npi', v)} required placeholder="10 digits" />
-            <Field label="Specialty" value={createForm.specialty} onChange={(v) => updateCreateField('specialty', v)} required />
-            <Field label="Medical license" value={createForm.medicalLicense} onChange={(v) => updateCreateField('medicalLicense', v)} required />
-            <Field label="Email" value={createForm.email} onChange={(v) => updateCreateField('email', v)} required />
-            <Field label="Phone" value={createForm.phone} onChange={(v) => updateCreateField('phone', v)} />
-            <div className="md:col-span-2 xl:col-span-3 mt-1 border-t border-slate-200 pt-4">
-              <p className="text-sm font-semibold text-slate-900">Credentials printed on the letter</p>
-              <p className="mt-1 text-xs text-slate-500">These appear in Section I and the signature block. Enter the full name with post-nominal above (e.g. "Ryan J. Kasky, DO"); all four below are required to sign.</p>
-            </div>
-            <Field label="Certifying board" value={createForm.boardName} onChange={(v) => updateCreateField('boardName', v)} required placeholder="e.g. American Board of Osteopathic Family Physicians" />
-            <Field label="Board abbreviation" value={createForm.boardAbbreviation} onChange={(v) => updateCreateField('boardAbbreviation', v)} required placeholder="e.g. ABOFP" />
-            <Field label="License state" value={createForm.licenseState} onChange={(v) => updateCreateField('licenseState', v)} required placeholder="e.g. Nevada" />
-            <Field label="License number" value={createForm.licenseNumber} onChange={(v) => updateCreateField('licenseNumber', v)} required placeholder="e.g. DO2996" />
-            <div className="md:col-span-2 xl:col-span-3">
-              <Field label="Cognito subject" value={createForm.cognitoSub} onChange={(v) => updateCreateField('cognitoSub', v)} placeholder="Optional until user account is linked" />
-            </div>
-            <div className="md:col-span-2 xl:col-span-3">
-              <Button type="submit" variant="primary" loading={createMutation.isPending} disabled={!isCreateValid(createForm) || createMutation.isPending}>Create physician</Button>
-            </div>
-          </form>
-        </Card>
-
-        <Card>
           <h2 className="text-base font-semibold text-slate-900">Physician profiles</h2>
-          <p className="mt-1 text-sm text-slate-600">Active physicians are eligible for assignment.</p>
+          <p className="mt-1 text-sm text-slate-600">Active physicians are eligible for assignment. Profiles without a linked login show a "Link login" action.</p>
 
           {physiciansQuery.isLoading ? <div className="mt-6 flex items-center gap-2 text-sm text-slate-500"><Spinner />Loading physicians</div> : null}
           {!physiciansQuery.isLoading && physicians.length === 0 ? <div className="mt-6"><EmptyState message="No physicians found." /></div> : null}
@@ -231,7 +216,7 @@ export function PhysiciansPage() {
                       <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${physician.active ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700'}`}>{physician.active ? 'Active' : 'Inactive'}</span></td>
                       <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${physician.hasSignature ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{physician.hasSignature ? 'Signature ready' : 'Missing'}</span></td>
                       <td className="px-4 py-3 text-slate-500">v{physician.version}</td>
-                      <td className="px-4 py-3"><div className="flex justify-end gap-2"><Button type="button" variant="secondary" onClick={() => openEdit(physician)}>Edit</Button><Button type="button" variant="ghost" loading={toggleActiveMutation.isPending} disabled={toggleActiveMutation.isPending} onClick={() => toggleActiveMutation.mutate(physician)}>{physician.active ? 'Deactivate' : 'Activate'}</Button></div></td>
+                      <td className="px-4 py-3"><div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="secondary" onClick={() => openEdit(physician)}>Edit</Button>{physician.cognitoSub === null ? <Button type="button" variant="secondary" onClick={() => openLink(physician)}>Link login</Button> : null}<Button type="button" variant="ghost" loading={toggleActiveMutation.isPending} disabled={toggleActiveMutation.isPending} onClick={() => toggleActiveMutation.mutate(physician)}>{physician.active ? 'Deactivate' : 'Activate'}</Button></div></td>
                     </tr>
                   ))}
                 </tbody>
@@ -267,6 +252,36 @@ export function PhysiciansPage() {
                   <Button type="submit" variant="primary" loading={editMutation.isPending} disabled={editMutation.isPending || !isEditValid(editForm)}>Save changes</Button>
                 </div>
               </form>
+            </div>
+          </div>
+        ) : null}
+
+        {linkTarget ? (
+          <div role="dialog" aria-modal="true" aria-labelledby="link-login-title">
+            <div className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm" onClick={closeLink} />
+            <div className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl bg-white p-6 shadow-2xl">
+              <h2 id="link-login-title" className="text-lg font-semibold text-slate-900">Link login</h2>
+              <p className="mt-1 text-sm text-slate-600">Create a Cognito login for <span className="font-medium text-slate-900">{linkTarget.fullName}</span> (<span className="font-medium text-slate-900">{linkTarget.email}</span>) and link it to this credential profile. The NPI, signature, and credential block are preserved.</p>
+              <div className="mt-4 space-y-2 text-sm text-slate-700">
+                <label className="flex items-start gap-2">
+                  <input type="radio" name="link-cred" className="mt-1" checked={linkCredential === 'invite'} onChange={() => setLinkCredential('invite')} />
+                  <span><span className="font-medium text-slate-900">Send invite email</span> <span className="text-slate-500">(recommended)</span><br /><span className="text-xs text-slate-500">They set their own password from the invite.</span></span>
+                </label>
+                <label className="flex items-start gap-2">
+                  <input type="radio" name="link-cred" className="mt-1" checked={linkCredential === 'temp_password'} onChange={() => setLinkCredential('temp_password')} />
+                  <span><span className="font-medium text-slate-900">Set a temporary password</span><br /><span className="text-xs text-slate-500">One-time login; they must change it at next sign-in.</span></span>
+                </label>
+              </div>
+              {linkCredential === 'temp_password' ? (
+                <label className="mt-3 block">
+                  <span className="text-sm font-medium text-slate-800">Temporary password</span>
+                  <input type="text" value={linkTempPassword} onChange={(e) => setLinkTempPassword(e.target.value)} placeholder="12+ chars: UPPER, lower, number, symbol (e.g. FrnTest-2026!!)" className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200" />
+                </label>
+              ) : null}
+              <div className="mt-6 flex justify-end gap-2">
+                <Button type="button" variant="secondary" onClick={closeLink}>Cancel</Button>
+                <Button type="button" variant="primary" loading={linkMutation.isPending} disabled={linkMutation.isPending || (linkCredential === 'temp_password' && !isStrongTempPassword(linkTempPassword))} onClick={submitLink}>{linkCredential === 'temp_password' ? 'Create login (temp password)' : 'Create login (email invite)'}</Button>
+              </div>
             </div>
           </div>
         ) : null}

@@ -6,7 +6,7 @@ import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb, PhysicianRecord } from '../services/db-types.js';
-import { parsePhysicianCreate, parsePhysicianPatch, parseSignaturePresign } from '../services/physician-validation.js';
+import { parsePhysicianPatch, parseSignaturePresign } from '../services/physician-validation.js';
 import { buildPhysicianSignatureKey, isPhysicianSignatureS3Key } from '../services/s3-key-safety.js';
 import { composeCredentialBlock, parseCredentialBlock } from '../services/credential-block.js';
 
@@ -74,33 +74,12 @@ export function createPhysiciansRouter(db: AppDb, deps: PhysiciansRouterDeps = {
     res.json({ data: toPublic(row) });
   }));
 
-  router.post('/physicians', requireRole(['admin']), asyncHandler(async (req: Request, res: Response) => {
-    const parsed = parsePhysicianCreate(req.body);
-    // Compose the render-authoritative credential block server-side so it can never drift from the
-    // columns. All inputs are required at create, so this is always complete (non-null).
-    const credentialBlockJson = composeCredentialBlock({
-      fullNameWithCredential: parsed.fullName,
-      specialty: parsed.specialty,
-      npi: parsed.npi,
-      boardName: parsed.boardName,
-      boardAbbreviation: parsed.boardAbbreviation,
-      licenseState: parsed.licenseState,
-      licenseNumber: parsed.licenseNumber,
-    });
-    const row = await db.physician.create({
-      data: {
-        id: randomUUID(),
-        fullName: parsed.fullName,
-        npi: parsed.npi,
-        specialty: parsed.specialty,
-        medicalLicense: parsed.medicalLicense,
-        email: parsed.email,
-        phone: parsed.phone,
-        cognitoSub: parsed.cognitoSub,
-        credentialBlockJson,
-      },
-    }).catch(rethrowUnique);
-    res.status(201).json({ data: toPublic(row) });
+  // RETIRED: physician creation is consolidated into Staff (POST /users) so the Cognito login is
+  // provisioned at the same time — a credential-only physician with no login is the orphaned-profile
+  // problem the link-login flow exists to repair. The route stays registered (returns 410 Gone) so
+  // any stale caller gets a clear, actionable error instead of a 404 or a half-built profile.
+  router.post('/physicians', requireRole(['admin']), asyncHandler(async (_req: Request, res: Response) => {
+    res.status(410).json({ error: { code: 'gone', message: 'Create physicians via Staff (POST /users) so the login is provisioned; this endpoint is retired.' } });
   }));
 
   router.patch('/physicians/:id', requireRole(['admin']), asyncHandler(async (req: Request, res: Response) => {

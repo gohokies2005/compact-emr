@@ -24,20 +24,6 @@ export interface PhysicianPublic {
   readonly version: number;
 }
 
-export interface CreatePhysicianInput {
-  readonly fullName: string;
-  readonly npi: string;
-  readonly specialty: string;
-  readonly medicalLicense: string;
-  readonly email: string;
-  readonly phone?: string;
-  readonly cognitoSub?: string;
-  readonly boardName: string;
-  readonly boardAbbreviation: string;
-  readonly licenseState: string;
-  readonly licenseNumber: string;
-}
-
 export interface UpdatePhysicianFields {
   readonly fullName?: string;
   readonly npi?: string;
@@ -83,10 +69,6 @@ export async function getPhysician(id: string): Promise<{ data: PhysicianPublic 
   return apiGet(`/api/v1/physicians/${encodeURIComponent(id)}`);
 }
 
-export async function createPhysician(input: CreatePhysicianInput): Promise<{ data: PhysicianPublic }> {
-  return apiPost('/api/v1/physicians', input);
-}
-
 export async function updatePhysician(id: string, input: UpdatePhysicianInput): Promise<{ data: PhysicianPublic }> {
   return apiPatch(`/api/v1/physicians/${encodeURIComponent(id)}`, input);
 }
@@ -104,6 +86,24 @@ export async function attachPhysicianSignature(id: string, input: { s3Key: strin
 
 export async function downloadPhysicianSignature(id: string): Promise<{ data: PhysicianSignatureDownload }> {
   return apiGet(`/api/v1/physicians/${encodeURIComponent(id)}/signature/download`);
+}
+
+export interface LinkPhysicianLoginResult {
+  readonly physicianId: string;
+  readonly cognitoSub: string;
+  readonly email: string;
+  readonly appUserId: string;
+  readonly credential: string;
+}
+
+// Link an orphaned (cognitoSub null) physician credential profile to a Cognito login. credential
+// 'invite' emails an onboarding invite (default); 'temp_password' sets a known one-login password
+// (12+ upper/lower/digit/symbol). 409 already_linked if the profile already has a login.
+export async function linkPhysicianLogin(
+  id: string,
+  body: { credential: 'invite' | 'temp_password'; tempPassword?: string },
+): Promise<{ data: LinkPhysicianLoginResult }> {
+  return apiPost(`/api/v1/physicians/${encodeURIComponent(id)}/link-login`, body);
 }
 
 export async function uploadAndAttachPhysicianSignature(id: string, file: File): Promise<{ data: PhysicianPublic }> {

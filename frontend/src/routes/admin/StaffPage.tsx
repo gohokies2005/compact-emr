@@ -7,7 +7,13 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import axios from 'axios';
 import { ConflictError, ForbiddenError, ServiceUnavailableError } from '../../api/client';
-import { listUsers, createStaff, setStaffActive, type StaffRole, type CreateStaffInput, type StaffUser } from '../../api/users';
+import { listUsers, createStaff, setStaffActive, resetStaffPassword, unlockStaff, type StaffRole, type CreateStaffInput, type StaffUser } from '../../api/users';
+
+// Mirrors the backend Cognito password policy (assertCognitoPasswordPolicy) so the temp-password
+// branch of the reset dialog blocks client-side instead of bouncing off a server 400.
+function isStrongTempPassword(p: string): boolean {
+  return p.length >= 12 && /[A-Z]/.test(p) && /[a-z]/.test(p) && /[0-9]/.test(p) && /[^A-Za-z0-9]/.test(p);
+}
 
 const ROLE_OPTIONS: ReadonlyArray<{ value: StaffRole; label: string }> = [
   { value: 'ops_staff', label: 'RN / Ops staff' },
@@ -81,6 +87,20 @@ function staffErrorMessage(e: unknown): string {
   return 'Could not add staff. Retry — provisioning is safe to repeat.';
 }
 
+// Surface the real reason a per-row account action (reset / unlock) failed, including 404.
+function accountActionError(e: unknown, label: string): string {
+  if (e instanceof ServiceUnavailableError) return `${label} failed: the server says staff provisioning is not configured (503) — the Cognito pool needs wiring.`;
+  if (e instanceof ForbiddenError) return `${label} failed (403): your login is not recognized as an admin by the server.`;
+  if (axios.isAxiosError(e)) {
+    const status = e.response?.status;
+    const msg = (e.response?.data as { error?: { message?: string } } | undefined)?.error?.message;
+    if (status === 404) return `${label} failed: that staff account no longer exists (404). Reload the list.`;
+    if (status) return `${label} failed (HTTP ${status})${msg ? `: ${msg}` : ''}.`;
+    return `${label} failed (no response — network/CORS): ${e.message}`;
+  }
+  return `${label} failed. Please retry.`;
+}
+
 function Field({ label, value, onChange, required, placeholder, type = 'text' }: { label: string; value: string; onChange: (v: string) => void; required?: boolean; placeholder?: string; type?: string }) {
   return (
     <label className="block">
@@ -94,7 +114,16 @@ export function StaffPage() {
   const qc = useQueryClient();
   const [form, setForm] = useState<FormState>(EMPTY);
   const [message, setMessage] = useState<string | null>(null);
+  // Per-row account actions open one of these dialogs (target = the staffer being acted on).
+  const [resetTarget, setResetTarget] = useState<StaffUser | null>(null);
+  const [resetMode, setResetMode] = useState<'email_code' | 'temp_password'>('email_code');
+  const [resetTempPassword, setResetTempPassword] = useState('');
+  const [unlockTarget, setUnlockTarget] = useState<StaffUser | null>(null);
+  const [unlockEmailConfirm, setUnlockEmailConfirm] = useState('');
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => { setForm((c) => ({ ...c, [k]: v })); setMessage(null); };
+
+  function closeReset() { setResetTarget(null); setResetMode('email_code'); setResetTempPassword(''); }
+  function closeUnlock() { setUnlockTarget(null); setUnlockEmailConfirm(''); }
 
   const usersQuery = useQuery({ queryKey: ['users', 'all'], queryFn: () => listUsers({ includeInactive: true }) });
   const staff = useMemo(() => usersQuery.data?.data ?? [], [usersQuery.data]);
@@ -103,7 +132,7 @@ export function StaffPage() {
   const createMutation = useMutation({
     mutationFn: () => createStaff(toInput(form)),
     onSuccess: async (res) => {
-      const extra = res.data.physicianId ? ' Physician profile created — upload their signature next (Physicians page).' : '';
+      const extra = res.data.physicianId ? ' Physician profile created — upload their signature next (Physician credentials page).' : '';
       setMessage(`Staff added: ${res.data.email}.${extra}`);
       setForm(EMPTY);
       await qc.invalidateQueries({ queryKey: ['users'] });
@@ -126,11 +155,41 @@ export function StaffPage() {
     },
   });
 
+  const resetMutation = useMutation({
+    mutationFn: (vars: { user: StaffUser; mode: 'email_code' | 'temp_password'; tempPassword: string }) =>
+      resetStaffPassword(vars.user.id, vars.mode === 'temp_password' ? { mode: 'temp_password', tempPassword: vars.tempPassword } : {}),
+    onSuccess: (_res, vars) => {
+      setMessage(vars.mode === 'temp_password'
+        ? `Temporary password set for ${vars.user.email}. They must change it at next sign-in.`
+        : `Reset code emailed to ${vars.user.email}.`);
+      closeReset();
+    },
+    onError: (e: unknown) => setMessage(accountActionError(e, 'Reset password')),
+  });
+
+  const unlockMutation = useMutation({
+    mutationFn: (user: StaffUser) => unlockStaff(user.id),
+    onSuccess: (res) => {
+      setMessage(`MFA cleared and login re-enabled for ${res.data.email}.${res.data.targetIsAdmin ? ' (admin account — logged for audit)' : ''}`);
+      closeUnlock();
+    },
+    onError: (e: unknown) => setMessage(accountActionError(e, 'Unlock')),
+  });
+
   function handleCreate(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const err = validationError(form);
     if (err) { setMessage(err); return; }
     createMutation.mutate();
+  }
+
+  function submitReset() {
+    if (!resetTarget) return;
+    if (resetMode === 'temp_password' && !isStrongTempPassword(resetTempPassword)) {
+      setMessage('Temporary password must be at least 12 characters with an uppercase letter, a lowercase letter, a number, and a symbol (e.g. FrnTest-2026!!).');
+      return;
+    }
+    resetMutation.mutate({ user: resetTarget, mode: resetMode, tempPassword: resetTempPassword });
   }
 
   return (
@@ -206,8 +265,12 @@ export function StaffPage() {
                       <td className="px-4 py-3 text-slate-600">{s.email}</td>
                       <td className="px-4 py-3 text-slate-600">{s.roles.join(', ')}</td>
                       <td className="px-4 py-3">{s.active ? <span className="text-emerald-700">Active</span> : <span className="text-slate-400">Inactive</span>}</td>
-                      <td className="px-4 py-3 text-right">
-                        <Button type="button" variant="ghost" disabled={toggleMutation.isPending} onClick={() => toggleMutation.mutate({ user: s, active: !s.active })}>{s.active ? 'Deactivate' : 'Reactivate'}</Button>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap justify-end gap-2">
+                          <Button type="button" variant="secondary" onClick={() => { setMessage(null); setResetMode('email_code'); setResetTempPassword(''); setResetTarget(s); }}>Reset password</Button>
+                          <Button type="button" variant="secondary" onClick={() => { setMessage(null); setUnlockEmailConfirm(''); setUnlockTarget(s); }}>Unlock / clear MFA</Button>
+                          <Button type="button" variant="ghost" disabled={toggleMutation.isPending} onClick={() => toggleMutation.mutate({ user: s, active: !s.active })}>{s.active ? 'Deactivate' : 'Reactivate'}</Button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -216,6 +279,54 @@ export function StaffPage() {
             </div>
           ) : null}
         </Card>
+
+        {resetTarget ? (
+          <div role="dialog" aria-modal="true" aria-labelledby="reset-pw-title">
+            <div className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm" onClick={closeReset} />
+            <div className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl bg-white p-6 shadow-2xl">
+              <h2 id="reset-pw-title" className="text-lg font-semibold text-slate-900">Reset password</h2>
+              <p className="mt-1 text-sm text-slate-600">For <span className="font-medium text-slate-900">{resetTarget.email}</span>.</p>
+              <div className="mt-4 space-y-2 text-sm text-slate-700">
+                <label className="flex items-start gap-2">
+                  <input type="radio" name="reset-mode" className="mt-1" checked={resetMode === 'email_code'} onChange={() => setResetMode('email_code')} />
+                  <span><span className="font-medium text-slate-900">Email a reset code</span> <span className="text-slate-500">(recommended)</span><br /><span className="text-xs text-slate-500">Cognito emails them a code; no password leaves the server.</span></span>
+                </label>
+                <label className="flex items-start gap-2">
+                  <input type="radio" name="reset-mode" className="mt-1" checked={resetMode === 'temp_password'} onChange={() => setResetMode('temp_password')} />
+                  <span><span className="font-medium text-slate-900">Set a temporary password</span><br /><span className="text-xs text-slate-500">One-time login; they must change it at next sign-in.</span></span>
+                </label>
+              </div>
+              {resetMode === 'temp_password' ? (
+                <label className="mt-3 block">
+                  <span className="text-sm font-medium text-slate-800">Temporary password</span>
+                  <input type="text" value={resetTempPassword} onChange={(e) => setResetTempPassword(e.target.value)} placeholder="12+ chars: UPPER, lower, number, symbol (e.g. FrnTest-2026!!)" className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200" />
+                </label>
+              ) : null}
+              <div className="mt-6 flex justify-end gap-2">
+                <Button type="button" variant="secondary" onClick={closeReset}>Cancel</Button>
+                <Button type="button" variant="primary" loading={resetMutation.isPending} disabled={resetMutation.isPending || (resetMode === 'temp_password' && !isStrongTempPassword(resetTempPassword))} onClick={submitReset}>{resetMode === 'temp_password' ? 'Set temporary password' : 'Email reset code'}</Button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {unlockTarget ? (
+          <div role="dialog" aria-modal="true" aria-labelledby="unlock-mfa-title">
+            <div className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm" onClick={closeUnlock} />
+            <div className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl bg-white p-6 shadow-2xl">
+              <h2 id="unlock-mfa-title" className="text-lg font-semibold text-slate-900">Unlock / clear MFA</h2>
+              <p className="mt-2 text-sm text-slate-700">This clears <span className="font-medium text-slate-900">{unlockTarget.email}</span>'s MFA factors and re-enables the login. This is account-takeover-grade — anyone who controls their inbox can then sign in.{unlockTarget.roles.includes('admin') ? <span className="font-medium text-rose-700"> This is an ADMIN account.</span> : null}</p>
+              <label className="mt-4 block">
+                <span className="text-sm font-medium text-slate-800">Type the target email to confirm</span>
+                <input type="text" autoComplete="off" value={unlockEmailConfirm} onChange={(e) => setUnlockEmailConfirm(e.target.value)} placeholder={unlockTarget.email} className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200" />
+              </label>
+              <div className="mt-6 flex justify-end gap-2">
+                <Button type="button" variant="secondary" onClick={closeUnlock}>Cancel</Button>
+                <Button type="button" variant="destructive" loading={unlockMutation.isPending} disabled={unlockMutation.isPending || unlockEmailConfirm.trim().toLowerCase() !== unlockTarget.email.toLowerCase()} onClick={() => unlockMutation.mutate(unlockTarget)}>Clear MFA &amp; unlock</Button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </AppShell>
   );

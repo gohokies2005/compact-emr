@@ -856,6 +856,12 @@ model SignOff {
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version     Int      @default(1)
+  // Byte-binding (#9 Fix 3): the case version that was signed + the sha256 of THAT version's
+  // TXT bytes (the deterministic source of truth — not the DOCX/PDF render). The delivery gate
+  // re-hashes the current TXT and 409s if it no longer matches, so a post-sign edit blocks
+  // delivery until the letter is re-signed. Nullable (older sign-offs predate the columns).
+  signedVersion        Int?    @map("signed_version")
+  signedContentSha256  String? @map("signed_content_sha256")
 
   @@index([caseId])
   @@index([physicianId])

@@ -19,6 +19,7 @@ import {
   isEmailTransportConfigured,
   coverMemoRequirement,
 } from '../services/delivery-config.js';
+import { resolveCurrentTxtWithHash } from '../services/letter-current.js';
 import type { AppDb } from '../services/db-types.js';
 
 /**
@@ -183,6 +184,35 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       const user = currentActor(req);
       const caseId = String(req.params.id);
       const body = (req.body ?? {}) as { emailBody?: unknown };
+
+      // ── BYTE-BINDING DELIVERY GATE (#9 Fix 3) ── The real patient egress. Before composing or
+      // sending, verify the letter has not changed since the physician signed it. We re-hash the
+      // CURRENT version's TXT (deterministic source of truth) and compare to the latest sign-off's
+      // bound hash. If they differ, the letter was edited/approved after sign-off — block delivery
+      // until it is re-signed. (approve creates a new version, so any post-sign approve legitimately
+      // trips this — the intended behavior.) Skip the check only when there is no bound hash to
+      // compare against (legacy sign-off predating byte-binding, or S3/bucket unconfigured).
+      {
+        const bucketName = bucket();
+        if (bucketName !== undefined) {
+          const signOffs = await db.signOff.findMany({ where: { caseId }, orderBy: { signedAt: 'desc' } });
+          const latestSignOff = signOffs.length > 0 ? signOffs[0] : null;
+          if (latestSignOff !== null && typeof latestSignOff.signedContentSha256 === 'string' && latestSignOff.signedContentSha256.length > 0) {
+            const c0 = await db.case.findFirst({ where: { id: caseId } });
+            if (c0 !== null) {
+              const cur = await resolveCurrentTxtWithHash(db, s3(), bucketName, caseId, c0.currentVersion);
+              if (cur !== null && cur.sha256 !== latestSignOff.signedContentSha256) {
+                throw new HttpError(409, 'signed_bytes_changed', 'The letter changed after it was signed. Re-sign before delivering.', {
+                  reason: 'signed_bytes_changed',
+                  caseId,
+                  signedVersion: latestSignOff.signedVersion,
+                  currentVersion: cur.version,
+                });
+              }
+            }
+          }
+        }
+      }
 
       const out = await composeDelivery(caseId);
       const c = await db.case.findFirst({ where: { id: caseId } });

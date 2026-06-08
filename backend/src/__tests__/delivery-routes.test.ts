@@ -47,6 +47,8 @@ interface MakeDbOpts {
   caseExists?: boolean;
   claimType?: string;
   previouslyDenied?: boolean;
+  // Byte-binding gate (#9 Fix 3): sign-off rows the gate reads (latest by signedAt first).
+  signOffs?: ReadonlyArray<{ signedVersion: number | null; signedContentSha256: string | null; signedAt: Date }>;
 }
 
 // Build an AppDb whose email/payment create() ENFORCE the partial unique indexes in-memory: the
@@ -116,6 +118,9 @@ function makeDb(opts: MakeDbOpts = {}) {
     physician: { findFirst: vi.fn(async () => null) },
     email: emailDelegate,
     payment: paymentDelegate,
+    // Byte-binding delivery gate (#9 Fix 3): default = no sign-off rows → gate is a no-op (pass).
+    // Tests that exercise the gate inject signOff rows via opts.signOffs.
+    signOff: { findMany: vi.fn(async () => opts.signOffs ?? []) },
     activityLog: { create: vi.fn(async () => ({})) },
     $transaction: vi.fn(async (fn: (t: unknown) => unknown) => fn({ email: emailDelegate, payment: paymentDelegate, activityLog: { create: vi.fn(async () => ({})) } })),
   } as unknown as AppDb;

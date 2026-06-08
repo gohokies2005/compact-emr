@@ -17,10 +17,11 @@ import {
   VeteranNotFoundError,
   writeBundleToS3,
 } from '../services/drafter-bundle.js';
-import { isDrafterArtifactS3Key } from '../services/s3-key-safety.js';
+import { isDrafterArtifactS3Key, buildLetterRevisionKey } from '../services/s3-key-safety.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import type { RenderInvoker } from './letter.js';
 
 let cachedS3Client: S3Client | null = null;
 function getS3ForArtifacts(): S3Client {
@@ -804,12 +805,67 @@ function haltItem(reasonCode: string): string {
 }
 
 /**
+ * Worker-router deps. renderLetter + s3 + bucketName are injected so the /complete mirror can
+ * BACKFILL a missing DOCX (#9 Fix 4): the FRN drafter's artifactDocxS3Key is optional, but a
+ * LetterRevision must point at all three artifacts. When the docx is absent we read the TXT and
+ * render the trio into the letter-revisions/v<N>/ keyspace, then mirror the rendered docx key.
+ * All optional + injected so unit tests stub them (and so a render-less env still functions —
+ * it just can't backfill, in which case the mirror falls back to the legacy null docx).
+ */
+export interface DrafterWorkerRouterDeps {
+  renderLetter?: RenderInvoker;
+  s3?: S3Client;
+  bucketName?: string;
+}
+
+/**
  * Internal drafter worker routes. Auth via `requireDrafterPrincipal` (separate
  * DRAFTER_INVOKE_TOKEN, not the shared INTERNAL_WORKER_TOKEN). Server mounts these under
  * `/api/v1` with the drafter-principal middleware in front.
  */
-export function createDrafterWorkerRouter(db: AppDb): Router {
+export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDeps = {}): Router {
   const router = Router();
+
+  // Backfill a missing DOCX for a completing drafter run so the mirrored LetterRevision can carry
+  // all three non-null artifact keys (#9 Fix 4). Returns the docx key to persist:
+  //   • parsed.artifactDocxS3Key when the worker already produced one (the common case), else
+  //   • a freshly-rendered letter-revisions/<caseId>/v<N>/letter.docx key (TXT → render Lambda).
+  // Renders the full trio (the Lambda always does) into the letter-revisions keyspace and returns
+  // the docx key. Throws (502) when no docx exists AND we cannot render one — never persist a
+  // revision that points at a missing artifact.
+  async function resolveDocxKeyForMirror(args: {
+    caseId: string;
+    version: number;
+    parentVersion: number;
+    txtKey: string;
+    docxKey: string | null | undefined;
+  }): Promise<string> {
+    if (typeof args.docxKey === 'string' && args.docxKey.trim() !== '') return args.docxKey;
+    const bucketName = deps.bucketName ?? process.env.PHI_BUCKET_NAME;
+    if (deps.renderLetter === undefined || deps.s3 === undefined || bucketName === undefined) {
+      throw new HttpError(502, 'internal_error', 'Drafter run produced no DOCX and DOCX backfill is not configured; refusing to mirror a letter revision with a missing artifact.', { reason: 'docx_backfill_unavailable', caseId: args.caseId, version: args.version });
+    }
+    // Read the TXT (the source of truth) and render the trio into the letter-revisions keyspace.
+    const obj = await deps.s3.send(new GetObjectCommand({ Bucket: bucketName, Key: args.txtKey }));
+    if (obj.Body === undefined) throw new HttpError(502, 'internal_error', 'Drafter TXT object had no body; cannot backfill DOCX.', { reason: 'txt_read_failed', caseId: args.caseId, key: args.txtKey });
+    const letterText = await obj.Body.transformToString('utf-8');
+    const c = await db.case.findFirst({ where: { id: args.caseId } });
+    const veteran = c !== null ? await db.veteran.findUnique({ where: { id: c.veteranId } }) : null;
+    const keys = {
+      txtKey: buildLetterRevisionKey(args.caseId, args.version, 'txt'),
+      pdfKey: buildLetterRevisionKey(args.caseId, args.version, 'pdf'),
+      docxKey: buildLetterRevisionKey(args.caseId, args.version, 'docx'),
+    };
+    const caseData = {
+      id: args.caseId,
+      veteran_name: veteran !== null ? `${veteran.firstName} ${veteran.lastName}`.trim() : '',
+      veteran_last: veteran?.lastName ?? '',
+      claimed_condition: c?.claimedCondition ?? '',
+    };
+    const rendered = await deps.renderLetter({ caseData, letterText, version: args.version, draft: true, bucket: bucketName, keys });
+    if (!rendered.ok) throw new HttpError(502, 'internal_error', 'DOCX backfill render failed; refusing to mirror a letter revision with a missing artifact.', { reason: 'docx_backfill_render_failed', caseId: args.caseId, version: args.version });
+    return keys.docxKey;
+  }
 
   /**
    * POST /api/v1/internal/drafter/jobs/:id/progress
@@ -934,6 +990,14 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
         // below). RN-cancelled jobs were already 409'd above.
         const eligibleForResurrect = existing.state === 'failed';
         if (eligibleForResurrect && incomingIsRealLetter) {
+          // #9 Fix 4: guarantee a non-null DOCX for the mirrored LetterRevision (backfill if absent).
+          const mirrorDocxKey = await resolveDocxKeyForMirror({
+            caseId: existing.caseId,
+            version: existing.version,
+            parentVersion: existing.parentVersion ?? existing.version,
+            txtKey: parsed.artifactTxtS3Key,
+            docxKey: parsed.artifactDocxS3Key,
+          });
           const resurrected = await db.$transaction(async (tx) => {
             const job = await tx.draftJob.update({
               where: { id: jobId },
@@ -941,7 +1005,7 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
                 state: 'done',
                 artifactPdfS3Key: parsed.artifactPdfS3Key,
                 artifactTxtS3Key: parsed.artifactTxtS3Key,
-                ...(parsed.artifactDocxS3Key !== undefined ? { artifactDocxS3Key: parsed.artifactDocxS3Key } : {}),
+                artifactDocxS3Key: mirrorDocxKey,
                 manifestSnapshot: parsed.manifest,
                 gradeSidecarJson: parsed.gradeSidecar,
                 ...(parsed.costUsd !== undefined ? { costUsd: parsed.costUsd } : {}),
@@ -975,8 +1039,8 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
                   parentVersion: existing.parentVersion ?? existing.version,
                   source: 'drafter_run',
                   artifactTxtS3Key: parsed.artifactTxtS3Key,
-                  artifactPdfS3Key: parsed.artifactPdfS3Key ?? null,
-                  artifactDocxS3Key: parsed.artifactDocxS3Key ?? null,
+                  artifactPdfS3Key: parsed.artifactPdfS3Key,
+                  artifactDocxS3Key: mirrorDocxKey,
                   editedBy: SERVICE_ACTORS.DRAFTER,
                   editorRole: 'drafter',
                   sanityJson: null,
@@ -1067,6 +1131,19 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
       const triageToPhysician = parsed.runComplete && parsed.shipRecommendation === 'ship';
       const nextCaseStatus = parsed.runComplete ? 'rn_review' : 'drafting';
 
+      // #9 Fix 4: the mirrored LetterRevision must carry a non-null DOCX. The FRN drafter's docx
+      // key is optional; when absent, backfill by rendering the TXT into the letter-revisions
+      // keyspace BEFORE the transaction (the render does S3 PutObjects + a sync Lambda call).
+      // artifactPdfS3Key/artifactTxtS3Key are required non-empty by parseCompleteBody, so only the
+      // docx can be missing. Falls through to the existing docx key when the worker produced one.
+      const mirrorDocxKey = await resolveDocxKeyForMirror({
+        caseId: existing.caseId,
+        version: existing.version,
+        parentVersion: existing.parentVersion ?? existing.version,
+        txtKey: parsed.artifactTxtS3Key,
+        docxKey: parsed.artifactDocxS3Key,
+      });
+
       const updated = await db.$transaction(async (tx) => {
         const job = await tx.draftJob.update({
           where: { id: jobId },
@@ -1076,7 +1153,7 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
             gradeSidecarJson: parsed.gradeSidecar,
             artifactPdfS3Key: parsed.artifactPdfS3Key,
             artifactTxtS3Key: parsed.artifactTxtS3Key,
-            ...(parsed.artifactDocxS3Key !== undefined ? { artifactDocxS3Key: parsed.artifactDocxS3Key } : {}),
+            artifactDocxS3Key: mirrorDocxKey,
             ...(parsed.failureClass !== undefined ? { failureClass: parsed.failureClass } : {}),
             // Prisma Decimal accepts a number or string — pass the validated number through.
             ...(parsed.costUsd !== undefined ? { costUsd: parsed.costUsd } : {}),
@@ -1144,8 +1221,8 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
               parentVersion: existing.parentVersion ?? existing.version,
               source: 'drafter_run',
               artifactTxtS3Key: parsed.artifactTxtS3Key,
-              artifactPdfS3Key: parsed.artifactPdfS3Key ?? null,
-              artifactDocxS3Key: parsed.artifactDocxS3Key ?? null,
+              artifactPdfS3Key: parsed.artifactPdfS3Key,
+              artifactDocxS3Key: mirrorDocxKey,
               editedBy: SERVICE_ACTORS.DRAFTER,
               editorRole: 'drafter',
               sanityJson: null,

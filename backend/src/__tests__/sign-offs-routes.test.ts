@@ -82,7 +82,7 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physicianBySub?: R
     return physiciansBySub[sub] ?? null;
   });
   const activityLogCreate = vi.fn(async () => ({}));
-  const signOffCreate = vi.fn(async (args: { data: { caseId: string; physicianId: string; answersJson: Record<string, unknown>; notes: string | null } }) => {
+  const signOffCreate = vi.fn(async (args: { data: { caseId: string; physicianId: string; answersJson: Record<string, unknown>; notes: string | null; signedVersion?: number | null; signedContentSha256?: string | null } }) => {
     const now = new Date();
     const row: SignOffRecord = {
       id: `SO-${nextId++}`,
@@ -94,6 +94,8 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physicianBySub?: R
       createdAt: now,
       updatedAt: now,
       version: 1,
+      signedVersion: (args.data as { signedVersion?: number | null }).signedVersion ?? null,
+      signedContentSha256: (args.data as { signedContentSha256?: string | null }).signedContentSha256 ?? null,
     };
     signOffs.unshift(row);
     return row;
@@ -236,6 +238,7 @@ describe('sign-offs routes', () => {
     const initial: SignOffRecord = {
       id: 'SO-0', caseId: 'CASE-1', physicianId: 'PHYS-001', signedAt: now,
       answersJson: { q1: true }, notes: null, createdAt: now, updatedAt: now, version: 1,
+      signedVersion: null, signedContentSha256: null,
     };
     const { db } = makeDb(baseCase(), { initialSignOffs: [initial] });
     const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/sign-offs');

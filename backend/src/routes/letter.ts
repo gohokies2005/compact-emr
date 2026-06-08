@@ -82,6 +82,20 @@ interface CurrentLetter {
   docxKey: string | null;
 }
 
+/**
+ * Atomic triple-artifact invariant (#9 Fix 4): a LetterRevision MUST point at all three
+ * non-null/non-empty artifact keys {txt, pdf, docx}. Throw (502) BEFORE any persist so a partial
+ * render can never produce a LetterRevision row that points at a missing artifact. This is a
+ * structural belt — the editor paths already build all three keys + render them — but it makes
+ * the invariant impossible to regress (e.g. a future caller that forgets one key).
+ */
+function assertTripleArtifacts(keys: { txtKey?: string | null; pdfKey?: string | null; docxKey?: string | null }, ctx: { caseId: string; version: number }): asserts keys is { txtKey: string; pdfKey: string; docxKey: string } {
+  const missing = (['txtKey', 'pdfKey', 'docxKey'] as const).filter((k) => typeof keys[k] !== 'string' || (keys[k] as string).trim() === '');
+  if (missing.length > 0) {
+    throw new HttpError(502, 'internal_error', 'Refusing to persist a letter revision with a missing artifact key.', { reason: 'partial_artifacts', caseId: ctx.caseId, version: ctx.version, missing });
+  }
+}
+
 export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
   const router = Router();
   const s3 = (): S3Client => deps.s3 ?? new S3Client({});
@@ -203,6 +217,8 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // the revision if render succeeds, so a LetterRevision row never points at missing S3.
       const rendered = await deps.renderLetter({ caseData, letterText: cleaned, version: newVersion, draft: true, bucket: bucketName, keys });
       if (!rendered.ok) throw new HttpError(502, 'internal_error', 'Letter render failed; nothing saved.', { reason: 'render_failed', caseId, version: newVersion });
+      // Atomic triple-artifact invariant (#9 Fix 4): never persist a revision missing an artifact key.
+      assertTripleArtifacts(keys, { caseId, version: newVersion });
 
       try {
         await db.$transaction(async (tx) => {
@@ -290,6 +306,8 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         const caseData = { id: caseId, veteran_name: `${veteran.firstName} ${veteran.lastName}`.trim(), veteran_last: veteran.lastName, claimed_condition: c.claimedCondition };
         const rendered = await deps.renderLetter({ caseData, letterText: applied.newText, version: newVersion, draft: true, bucket: bucketName, keys });
         if (!rendered.ok) throw new HttpError(502, 'internal_error', 'Render failed; nothing saved.', { reason: 'render_failed', caseId });
+        // Atomic triple-artifact invariant (#9 Fix 4).
+        assertTripleArtifacts(keys, { caseId, version: newVersion });
         try {
           await db.$transaction(async (tx) => {
             await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: c.currentVersion, source: 'surgical_ai', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: warnings } });
@@ -422,6 +440,8 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // Version-match guard (Ryan's safety requirement): the final artifact MUST be the version
       // we're advancing to — never a stale one.
       if (rendered.version !== newVersion) throw new HttpError(500, 'internal_error', 'Render version mismatch; refusing to approve.', { caseId, expected: newVersion, got: rendered.version });
+      // Atomic triple-artifact invariant (#9 Fix 4): the final letter must carry all three artifacts.
+      assertTripleArtifacts(keys, { caseId, version: newVersion });
 
       try {
         await db.$transaction(async (tx) => {

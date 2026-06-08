@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import { type S3Client } from '@aws-sdk/client-s3';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
@@ -6,10 +7,18 @@ import { parseSignOffCreate, isSignOffAffirmative } from '../services/sign-off-v
 import { resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor } from '../services/request-actor.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
+import { resolveCurrentTxtWithHash } from '../services/letter-current.js';
 import type { AppDb } from '../services/db-types.js';
 
-export function createSignOffsRouter(db: AppDb): Router {
+export interface SignOffsRouterDeps {
+  s3?: S3Client;
+  bucketName?: string;
+}
+
+export function createSignOffsRouter(db: AppDb, deps: SignOffsRouterDeps = {}): Router {
   const router = Router();
+  const s3 = (): S3Client | undefined => deps.s3;
+  const bucket = (): string | undefined => deps.bucketName ?? process.env.PHI_BUCKET_NAME;
 
   /**
    * POST /api/v1/cases/:id/sign-off
@@ -29,7 +38,7 @@ export function createSignOffsRouter(db: AppDb): Router {
       const caseId = String(req.params.id);
       const parsed = parseSignOffCreate(req.body);
 
-      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true, assignedPhysicianId: true } });
+      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true, assignedPhysicianId: true, currentVersion: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
 
       // Affirmativeness gate (audit 2026-06-07): a sign-off ATTESTS the letter is ready — every item must
@@ -71,6 +80,23 @@ export function createSignOffsRouter(db: AppDb): Router {
         physicianId = c.assignedPhysicianId;
       }
 
+      // Byte-binding (#9 Fix 3): resolve the CURRENT version's TXT (the deterministic source of
+      // truth) and bind this sign-off to sha256(TXT) + the version. The delivery gate re-hashes the
+      // current TXT and 409s if it changed after sign-off, so any later edit/approve blocks delivery
+      // until the letter is re-signed. Best-effort: if S3 isn't configured (local dev) or no letter is
+      // resolvable, store nulls — the delivery gate treats a null hash as "no byte check" (back-compat).
+      let signedVersion: number | null = null;
+      let signedContentSha256: string | null = null;
+      const bucketName = bucket();
+      const s3Client = s3();
+      if (s3Client !== undefined && bucketName !== undefined) {
+        const cur = await resolveCurrentTxtWithHash(db, s3Client, bucketName, caseId, c.currentVersion);
+        if (cur !== null) {
+          signedVersion = cur.version;
+          signedContentSha256 = cur.sha256;
+        }
+      }
+
       const created = await db.$transaction(async (tx) => {
         const row = await tx.signOff.create({
           data: {
@@ -78,6 +104,8 @@ export function createSignOffsRouter(db: AppDb): Router {
             physicianId,
             answersJson: parsed.answers,
             notes: parsed.notes,
+            signedVersion,
+            signedContentSha256,
           },
         });
         await tx.activityLog.create({

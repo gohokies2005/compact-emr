@@ -22,7 +22,7 @@ const TIER_RANK: Record<string, number> = { high: 3, moderate: 2, low: 1 };
 // Shared by suggestPathway (the advisory "Anticipated" line) and computeStrategyPreview (the effective-
 // anchor scoring) — so the rubric and the suggestion are computed off the SAME derived anchor and can
 // never contradict each other (architect QA 2026-06-07: the Stocks self-contradiction).
-function bestGrantedScPair(input: StrategyPreviewInput): PairMatch | null {
+export function bestGrantedScPair(input: StrategyPreviewInput): PairMatch | null {
   let best: PairMatch | null = null;
   const score = (s: PairMatch): number => (TIER_RANK[s.tier] ?? 0) * 1e6 + (s.imoWinPct ?? s.winPct) * 1e3 + s.n;
   for (const sc of input.serviceConnectedConditions) {

@@ -9,6 +9,8 @@ import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { deriveIntakeFields, isRecognizedSecondaryAnchor } from '../services/intake-derive.js';
+import { bestGrantedScPair } from '../services/strategy-preview.js';
+import { findPair } from '../services/cdsEngine.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
 import { candidateAddresses, decideVeteranMatch, deriveEmailId, makeSnippet, normalizeEmailAddress } from '../services/email-matching.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
@@ -738,24 +740,37 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       const derived = deriveIntakeFields(i.rawAnswersJson);
       const c = await db.case.findFirst({
         where: { id: i.assignedCaseId },
-        select: { id: true, upstreamScCondition: true, framingChoice: true, veteranStatement: true, claimedCondition: true },
+        select: {
+          id: true, upstreamScCondition: true, framingChoice: true, veteranStatement: true, claimedCondition: true,
+          veteran: { select: { scConditions: { select: { condition: true, status: true } } } },
+        },
       });
       if (c === null) continue;
-      const cc = c as { id: string; upstreamScCondition: string | null; framingChoice: string | null; veteranStatement: string | null; claimedCondition: string };
+      const cc = c as unknown as { id: string; upstreamScCondition: string | null; framingChoice: string | null; veteranStatement: string | null; claimedCondition: string; veteran: { scConditions: Array<{ condition: string; status: string }> } | null };
+      const grantedSc = (cc.veteran?.scConditions ?? []).filter((s) => s.status === 'service_connected').map((s) => s.condition);
       const data: Record<string, unknown> = {};
       if (derived.veteranTheory && (cc.veteranStatement ?? '').trim().length === 0) data.veteranStatement = derived.veteranTheory;
-      // Anchor reconciliation: a garbage anchor (set, but not a recognized condition — from the loose v1
-      // parse) is replaced by a clean one if available, else reverted to direct. A null anchor is filled
-      // only when a clean one is found. A valid existing anchor (recognized) is left untouched.
-      const currentGarbage = cc.upstreamScCondition !== null && !isRecognizedSecondaryAnchor(cc.upstreamScCondition);
-      if (derived.upstreamCondition) {
-        if (cc.upstreamScCondition === null || currentGarbage) {
+      // Anchor: keep a SCOREABLE stored anchor (resolves to an atlas pair). Otherwise write the AUTHORITATIVE
+      // anchor — the granted-SC condition with the best Board pair to the claimed condition — so the STORED
+      // value matches what the card computes (effective anchor) AND what the drafter receives. Fall back to
+      // the text-parse, then direct. (Same precedence as computeStrategyPreview, persisted.)
+      const storedScoreable = cc.upstreamScCondition !== null && findPair(cc.upstreamScCondition, cc.claimedCondition) !== null;
+      if (!storedScoreable) {
+        const authoritative = bestGrantedScPair({
+          claimedCondition: cc.claimedCondition, claimType: 'secondary', framingChoice: cc.framingChoice,
+          upstreamScCondition: null, serviceConnectedConditions: grantedSc, activeProblems: [],
+        });
+        const aggravation = /aggravat/.test((cc.framingChoice ?? '').toLowerCase());
+        if (authoritative !== null) {
+          data.upstreamScCondition = authoritative.upstream;
+          data.framingChoice = aggravation ? 'aggravation' : 'secondary';
+        } else if (derived.upstreamCondition) {
           data.upstreamScCondition = derived.upstreamCondition;
           data.framingChoice = derived.framing ?? 'secondary';
+        } else if (cc.upstreamScCondition !== null && !isRecognizedSecondaryAnchor(cc.upstreamScCondition)) {
+          data.upstreamScCondition = null;
+          data.framingChoice = 'direct';
         }
-      } else if (currentGarbage) {
-        data.upstreamScCondition = null;
-        data.framingChoice = 'direct';
       }
       if (Object.keys(data).length > 0) {
         await db.case.update({ where: { id: cc.id }, data: data as never });

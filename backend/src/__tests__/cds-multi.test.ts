@@ -17,7 +17,7 @@ function base(over: Partial<CdsMultiInput> = {}): CdsMultiInput {
 
 describe('evaluateCdsMulti', () => {
   it('(a) picks the better-odds member as overall + sets driverCondition', () => {
-    // PTSD -> OSA is 89.2% accept; PTSD -> Hypertension is 85% accept. OSA wins on odds.
+    // PTSD -> OSA is 82.1% accept; PTSD -> Hypertension is 66.7% caution. OSA wins on odds.
     const r = evaluateCdsMulti(base({
       claimedConditions: ['Hypertension', 'Obstructive sleep apnea'],
       activeProblems: ['Hypertension', 'Obstructive sleep apnea'],
@@ -25,10 +25,10 @@ describe('evaluateCdsMulti', () => {
     expect(r.perCondition).toHaveLength(2);
     expect(r.driverCondition).toBe('Obstructive sleep apnea');
     expect(r.overall.verdict).toBe('accept');
-    expect(r.overall.oddsPct).toBe(89.2);
+    expect(r.overall.oddsPct).toBe(82.1);
     // The non-driver member is still evaluated and reported.
     const htn = r.perCondition.find((p) => p.condition === 'Hypertension');
-    expect(htn?.result.oddsPct).toBe(85);
+    expect(htn?.result.oddsPct).toBe(66.7);
   });
 
   it('(a) order-independent: driver is the better member regardless of array order', () => {
@@ -37,16 +37,16 @@ describe('evaluateCdsMulti', () => {
       activeProblems: ['Obstructive sleep apnea', 'Hypertension'],
     }));
     expect(r.driverCondition).toBe('Obstructive sleep apnea');
-    expect(r.overall.oddsPct).toBe(89.2);
+    expect(r.overall.oddsPct).toBe(82.1);
   });
 
   it('(b) all-reject set stays reject overall', () => {
-    // Two pairs both below the supportable threshold (real fallback pairs < 50%).
+    // Pair below the supportable threshold (Hip -> Knee is 33.3% in the curated atlas).
     const r = evaluateCdsMulti(base({
       upstreamScCondition: 'Hip',
       serviceConnectedConditions: ['Hip'],
-      claimedConditions: ['Cervical / neck'],
-      activeProblems: ['Cervical / neck'],
+      claimedConditions: ['Knee'],
+      activeProblems: ['Knee'],
     }));
     expect(r.overall.verdict).toBe('reject');
     expect(r.perCondition.every((p) => p.result.verdict === 'reject')).toBe(true);
@@ -74,13 +74,13 @@ describe('evaluateCdsMulti', () => {
   });
 
   it('prefers any numeric oddsPct over a null-odds caution member', () => {
-    // OSA (89.2% accept) vs an unmatched caution (null odds). The numeric member drives.
+    // OSA (82.1% accept) vs an unmatched caution (null odds). The numeric member drives.
     const r = evaluateCdsMulti(base({
       claimedConditions: ['Unspecified respiratory / sleep condition', 'Obstructive sleep apnea'],
       activeProblems: ['Unspecified respiratory / sleep condition', 'Obstructive sleep apnea'],
     }));
     expect(r.driverCondition).toBe('Obstructive sleep apnea');
-    expect(r.overall.oddsPct).toBe(89.2);
+    expect(r.overall.oddsPct).toBe(82.1);
   });
 
   it('empty claimedConditions evaluates defensively as a single empty-condition eval', () => {
@@ -97,7 +97,7 @@ describe('evaluateCdsMulti', () => {
       claimedConditions: ['Obstructive sleep apnea', 'Sleep apnea'],
       activeProblems: ['Obstructive sleep apnea', 'Sleep apnea'],
     }));
-    expect(r.overall.oddsPct).toBe(89.2);
+    expect(r.overall.oddsPct).toBe(82.1);
     expect(r.driverCondition).toBe('Obstructive sleep apnea');
   });
 });

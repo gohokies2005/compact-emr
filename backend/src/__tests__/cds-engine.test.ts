@@ -11,10 +11,10 @@ const base: CdsEngineInput = {
 };
 
 describe('cdsEngine', () => {
-  it('accepts a strong BVA pair (PTSD -> OSA, imo_win_pct 89.2)', () => {
+  it('accepts a strong BVA pair (PTSD -> OSA, imo_win_pct 82.1)', () => {
     const r = evaluateCds({ ...base });
     expect(r.verdict).toBe('accept');
-    expect(r.oddsPct).toBe(89.2);
+    expect(r.oddsPct).toBe(82.1);
     expect(r.bva.matched).toBe(true);
     expect(r.bva.upstream).toBe('PTSD');
     expect(r.hardGate.triggered).toBe(false);

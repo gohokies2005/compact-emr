@@ -425,7 +425,11 @@ export function createDrafterClientRouter(db: AppDb): Router {
       // files couldn't be auto-read, the RN may still proceed with a logged reason (the chart simply
       // drafts without those files). Names the blocking files + canOverride so the UI shows the
       // override button + what's blocking, never a blind "N files need review" with no recourse.
-      if (!chartReadiness.ready && parsed.acknowledgeMissingDocs !== true) {
+      // A Gate-2 RESUME (rnDecision present) is the RN's explicit "draft anyway" decision made at the halt
+      // panel — it bypasses the missing-docs gate too, so a parked case is NEVER an unbypassable dead-end
+      // (Ryan HARD RULE). 2026-06-08: "Draft anyway (override)" 409'd HERE because it didn't acknowledge
+      // unread files, and the Gate-2 panel has no further override — a failure that cannot happen.
+      if (!chartReadiness.ready && parsed.acknowledgeMissingDocs !== true && parsed.rnDecision === undefined) {
         throw new HttpError(409, 'conflict', `${chartReadiness.manualSummaryRequired} file(s) could not be automatically read. Add a manual summary, or override to draft without them.`, {
           caseId,
           manualSummaryRequired: chartReadiness.manualSummaryRequired,
@@ -450,7 +454,7 @@ export function createDrafterClientRouter(db: AppDb): Router {
         // Distinguish "the chart is still being built from the records" (a wait, not a fault) from
         // a genuine missing essential. Both block, both overridable (never a dead-end).
         const stillBuilding = readiness.buildState === 'ocr_in_progress' || readiness.buildState === 'extracting';
-        if (parsed.acknowledgeMissingDocs !== true) {
+        if (parsed.acknowledgeMissingDocs !== true && parsed.rnDecision === undefined) {
           throw new HttpError(
             409,
             stillBuilding ? 'chart_not_ready' : 'essential_docs_missing',
@@ -555,6 +559,11 @@ export function createDrafterClientRouter(db: AppDb): Router {
               },
             },
           });
+          // Mark the case 'drafting' the moment a job is enqueued (ANY path, not just a Gate-2 resume) so
+          // the Cases list shows "Drafting", not the stale prior status — a draft takes ~20 min and the
+          // team needs to see it's in progress (Ryan 2026-06-08: Hamilton-Dorsey was drafting but read
+          // "Intake"). /progress keeps it 'drafting'; /complete sets rn_review.
+          await tx.case.update({ where: { id: caseId }, data: { status: 'drafting' } });
           // Gate-2 resume: persist the RN's decision into the chart-visible decision log BEFORE
           // the job goes out (spec §183 — reason logged + shown in chart before re-enqueue).
           if (parsed.rnDecision !== undefined) {
@@ -572,11 +581,6 @@ export function createDrafterClientRouter(db: AppDb): Router {
                 rnUser: rd.rnUser ?? actor.sub,
               },
             });
-            // Architect QA blocker fix: a Gate-2 resume MUST move the case out of the parked
-            // status (needs_rn_decision / needs_records) into 'drafting' — else the halt panel
-            // never clears and the case stops polling, stranding the RN. (drafter /progress will
-            // keep it 'drafting'; /complete then sets rn_review.)
-            await tx.case.update({ where: { id: caseId }, data: { status: 'drafting' } });
           }
           return job;
         });

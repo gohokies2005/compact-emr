@@ -33,3 +33,16 @@ export function buildSystemPrompt(): string {
 const dest = path.join(__dirname, '..', 'src', 'advisory', 'systemPrompt.ts');
 fs.writeFileSync(dest, out);
 console.log(`vendored ${dest}: prompt ${md.length}B + canonical_facts ${cf.length}B`);
+
+// Also vendor the runtime CJS modules that live alongside the prompt source. These are loaded at
+// RUNTIME from the copied vendor tree (createRequire, __dirname-relative), so they must stay in sync
+// with the flatratenexus source. sanitizeAnswer.js is the deterministic plain-text cleaner the EMR runs
+// over every model answer (strips markdown / internal field names / any $50-refund sentence).
+const SERVICES_SRC = path.join(SRC, '..', '..', 'services', 'advisory');
+const VENDOR_SERVICES = path.join(__dirname, '..', 'src', 'advisory', 'vendor', 'app', 'services', 'advisory');
+for (const f of ['sanitizeAnswer.js']) {
+  const from = path.join(SERVICES_SRC, f);
+  const to = path.join(VENDOR_SERVICES, f);
+  fs.copyFileSync(from, to);
+  console.log(`vendored ${to}: ${fs.statSync(to).size}B`);
+}

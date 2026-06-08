@@ -14,6 +14,7 @@ import { invokeAdvisory } from '../advisory/bedrockClient.js';
 import { buildSystemPrompt } from '../advisory/systemPrompt.js';
 import { stubRetrieve, type RetrieveFn } from '../advisory/retrieveContract.js';
 import { realRetrieve, realRetrieveAvailable } from '../advisory/realRetrieve.js';
+import { vendoredSanitize } from '../advisory/vendoredSanitize.js';
 import { answerQuestion, type AnswerDeps, type ChartSliceLike, type InvokeResultLike } from '../advisory/advisoryAnswer.js';
 
 interface RequestActor { readonly sub: string; readonly role: Role; }
@@ -31,6 +32,7 @@ export interface AdvisoryRouterDeps {
   buildChartSlice?: (db: AppDb, caseId: string) => Promise<ChartSliceLike | null>;
   invoke?: (systemPrompt: string, userContent: string) => Promise<InvokeResultLike>;
   systemPrompt?: string;
+  sanitize?: (s: string) => string;
 }
 
 export function createAdvisoryRouter(db: AppDb, overrides: AdvisoryRouterDeps = {}): Router {
@@ -40,6 +42,7 @@ export function createAdvisoryRouter(db: AppDb, overrides: AdvisoryRouterDeps = 
   const buildSliceFn = overrides.buildChartSlice ?? buildChartSlice;
   const invoke = overrides.invoke ?? ((s: string, u: string) => invokeAdvisory(s, u));
   const systemPrompt = overrides.systemPrompt ?? buildSystemPrompt();
+  const sanitize = overrides.sanitize ?? vendoredSanitize;
 
   router.post(
     '/cases/:id/advisory/ask',
@@ -58,6 +61,7 @@ export function createAdvisoryRouter(db: AppDb, overrides: AdvisoryRouterDeps = 
         buildChartSlice: (cid: string) => buildSliceFn(db, cid),
         invoke,
         systemPrompt,
+        sanitize,
       };
 
       let outcome;

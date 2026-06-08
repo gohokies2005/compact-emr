@@ -93,4 +93,18 @@ describe('answerQuestion (orchestration)', () => {
       expect(r.guidance).toMatch(/not grounded/i);
     }
   });
+  it('applies the injected sanitizer to the model answer (markdown strip)', async () => {
+    const d = deps({
+      invoke: async () => ({ text: '**Bold** and *italic* answer', costUsd: 0.01, stopReason: 'end_turn', usage: {} }),
+      sanitize: (s) => s.replace(/\*\*(.+?)\*\*/g, '$1').replace(/\*(.+?)\*/g, '$1'),
+    });
+    const r = await answerQuestion(d, { caseId: 'CLM-1', question: 'q' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.answer).toBe('Bold and italic answer');
+  });
+  it('no sanitizer = identity (model text returned verbatim)', async () => {
+    const r = await answerQuestion(deps(), { caseId: 'CLM-1', question: 'q' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.answer).toBe('GROUNDED ANSWER');
+  });
 });

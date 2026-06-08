@@ -76,6 +76,10 @@ export interface AnswerDeps {
   buildChartSlice: (caseId: string) => Promise<ChartSliceLike | null>;
   invoke: (systemPrompt: string, userContent: string) => Promise<InvokeResultLike>;
   systemPrompt: string;
+  // Deterministic plain-text cleaner applied to the model answer before it leaves the orchestrator
+  // (strips markdown / internal field names / any $50-refund sentence — the model still emits these
+  // despite the prompt rule). Injected so the unit tests stay vendor-tree-free; defaults to identity.
+  sanitize?: (s: string) => string;
 }
 export interface AnswerArgs {
   caseId: string;
@@ -109,9 +113,10 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
   }
 
   const res = await deps.invoke(deps.systemPrompt, userContent);
+  const clean = deps.sanitize ? deps.sanitize(res.text) : res.text;
   return {
     ok: true,
-    answer: res.text,
+    answer: clean,
     citations: extractCitations(retrieval.chunks),
     status: retrieval.status,
     guidance: statusGuidance(retrieval.status),

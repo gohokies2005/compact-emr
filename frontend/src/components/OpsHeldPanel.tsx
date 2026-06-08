@@ -111,7 +111,7 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
           <h2 className="text-base font-semibold text-slate-900">Drafting was interrupted</h2>
           <p className="mt-1 text-sm text-slate-600">
             This draft stopped partway and saved a partial letter. You can open the partial as-is, or
-            re-run the drafter to finish it.
+            re-draft from scratch — the drafter can't resume a partial, so a re-run starts the whole letter over.
           </p>
           <p className="mt-2 text-sm text-slate-500">{operatorMessage(c, job)}</p>
         </div>
@@ -128,9 +128,9 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
             variant="secondary"
             loading={rerunMutation.isPending}
             disabled={rerunMutation.isPending}
-            onClick={() => { if (window.confirm('Re-run the drafter to finish this letter? This creates a new letter version and costs another drafting run.')) rerunMutation.mutate(); }}
+            onClick={() => { if (window.confirm('Start a FULL new draft from scratch? The drafter cannot resume the partial — this re-drafts the entire letter (new version, another ~20-min run).')) rerunMutation.mutate(); }}
           >
-            Re-run drafter to finish
+            Re-draft from scratch
           </Button>
 
           {isAdmin ? (

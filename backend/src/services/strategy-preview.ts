@@ -140,6 +140,33 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   // was falsely passing (physician review 2026-06-07). proposedMechanism = inServiceEvent ?? veteranStatement.
   const hasInServiceHook = (input.proposedMechanism ?? '').trim().length > 0;
 
+  // CHANGE 1 — TIER RESCUE (Option A): a THIN-sample pair (tier !== 'high', i.e. n<~40) whose grant rate
+  // is a near-miss (40% <= grantPct < 50%) leans on the established mechanism rather than reading as a flat
+  // "Thin" — the Board record is thin, not adverse. A thin sample that's clearly low (<40%) STAYS Thin; a
+  // ROBUST pair (tier==='high') keeps its verdict-driven tier (robust-and-low stays Thin). Only applies to
+  // a matched pair, never to a hard gate (Stop) or the no-pathway case. (owner-approved 2026-06-07)
+  const grantPct = cds.bva.grantPct;
+  const thinSampleRescue =
+    cds.bva.matched &&
+    cds.bva.tier !== 'high' &&
+    grantPct != null &&
+    grantPct >= 40 &&
+    grantPct < 50;
+
+  // CHANGE 5 — clean grant-rate string off the OVERALL grant_pct (granted/(granted+denied)), NOT the IMO
+  // sub-rate. "Granted in <num> of <n> decided Board appeals (<grantPct>%)". Unmatched pair -> non-BVA copy.
+  const grantString =
+    cds.bva.matched && grantPct != null && cds.bva.n != null
+      ? `Granted in ${Math.round((cds.bva.n * grantPct) / 100)} of ${cds.bva.n} decided Board appeals (${grantPct}%)`
+      : 'No Board odds — normal for a direct or novel claim; rests on the record + literature';
+
+  // Annotate ANY thin-sample pair whose displayed overall grant rate is under 50% but which does NOT read
+  // as Thin (rescued near-miss, OR caution lifted by the IMO-supported sub-rate, e.g. Lumbar->Ankle 33% but
+  // Plausible) — so the low % is never an UNEXPLAINED gap next to a Plausible/Strong tier (the contradiction
+  // Ryan flagged). A ROBUST low pair (tier==='high', e.g. Hip->Knee 33%) stays Thin and is NOT annotated —
+  // there the low % IS the adverse signal and the bare number is correct. (2026-06-07)
+  const thinLowGrantNote = cds.bva.matched && cds.bva.tier !== 'high' && grantPct != null && grantPct < 50;
+
   const criteria: StrategyCriterion[] = [
     {
       key: 'diagnosis',
@@ -176,17 +203,23 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     {
       key: 'strength',
       label: 'No adverse strength signal',
-      pass: cds.verdict !== 'reject', // ✗ ONLY when the engine actively recommends reject (a real low-odds pair)
-      detail: cds.oddsPct != null
-        ? `${cds.oddsPct}% Board signal (relative ranking, not a win probability)`
-        : 'No Board odds — normal for a direct or novel claim; rests on the record + literature',
+      // ✗ ONLY when the engine actively recommends reject AND the pair wasn't rescued as a thin near-miss —
+      // a rescued Plausible must not show an adverse ✗ (it rests on mechanism, thin Board sample).
+      pass: cds.verdict !== 'reject' || thinSampleRescue,
+      detail: cds.bva.matched
+        ? thinLowGrantNote
+          ? `${grantString} — thin Board sample; rests on the established mechanism`
+          : grantString
+        : grantString,
     },
   ];
 
   let tier: StrategyTier;
   if (gate.triggered) tier = 'Stop';
   else if (cds.verdict === 'accept') tier = 'Strong';
-  else if (cds.verdict === 'reject') tier = 'Thin';
+  // A verdict-reject pair is normally Thin — UNLESS it's a thin-sample near-miss, which we rescue to
+  // Plausible (lean on mechanism; the Board record is thin, not adverse). See thinSampleRescue above.
+  else if (cds.verdict === 'reject') tier = thinSampleRescue ? 'Plausible' : 'Thin';
   // caution: Plausible normally; Thin (not Stop) when a real gap exists — a SECONDARY claim with no Board
   // pair (rely on literature), OR a DIRECT claim with no in-service hook on file (we don't know the nexus
   // story yet). NEVER Stop on absent data — Stop is only a hard gate above. (FIX 2026-06-07)

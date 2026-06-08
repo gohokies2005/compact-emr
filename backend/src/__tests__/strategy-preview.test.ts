@@ -93,6 +93,64 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
     expect(computeStrategyPreview(input({}))).toEqual(computeStrategyPreview(input({})));
   });
 
+  // ---- CHANGE 5: clean overall grant rate + raw count on the strength criterion ----
+  it('strength criterion shows the OVERALL grant rate + raw count (Granted in X of N decided Board appeals)', () => {
+    // Knee -> lumbar/back: grant_pct 61.6, n 487 -> round(487*0.616)=300.
+    const r = computeStrategyPreview(input({
+      claimedCondition: 'lumbar back', upstreamScCondition: 'knee',
+      serviceConnectedConditions: ['knee'], activeProblems: ['lumbar back'],
+    }));
+    const strength = r.criteria.find((c) => c.key === 'strength')!;
+    expect(strength.detail).toBe('Granted in 300 of 487 decided Board appeals (61.6%)');
+    expect(strength.detail).not.toContain('Board signal');
+    expect(strength.detail).not.toContain('relative ranking');
+  });
+
+  it('strength detail falls back to non-BVA copy on an unmatched (direct / no-pair) claim', () => {
+    const r = computeStrategyPreview(input({
+      claimType: 'direct', framingChoice: 'direct', claimedCondition: 'GERD / Gastritis',
+      upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'],
+      proposedMechanism: 'onset during service after a deployment exposure',
+    }));
+    const strength = r.criteria.find((c) => c.key === 'strength')!;
+    expect(strength.detail).toContain('No Board odds');
+  });
+
+  // ---- CHANGE 1: thin-sample near-miss rescue (Option A) ----
+  // A knee->back-shaped, recognized pairing is NEVER Thin (owner's explicit red line).
+  it('knee -> back (robust, n=487, 61.6%) is never Thin/Stop — lands Strong', () => {
+    const r = computeStrategyPreview(input({
+      claimedCondition: 'lumbar back', upstreamScCondition: 'knee',
+      serviceConnectedConditions: ['knee'], activeProblems: ['lumbar back'],
+    }));
+    expect(r.tier).not.toBe('Thin');
+    expect(r.tier).not.toBe('Stop');
+    expect(r.tier).toBe('Strong');
+  });
+
+  it('thin sample + near-miss grant rate (DM2 -> OSA, n=15, 46.7%) rescues Thin -> Plausible', () => {
+    const r = computeStrategyPreview(input({
+      claimedCondition: 'obstructive sleep apnea', upstreamScCondition: 'diabetes type 2',
+      serviceConnectedConditions: ['diabetes type 2'], activeProblems: ['obstructive sleep apnea'],
+    }));
+    expect(r.tier).toBe('Plausible');
+    // The rescued tier must NOT show an adverse ✗ on strength — it rests on mechanism.
+    const strength = r.criteria.find((c) => c.key === 'strength')!;
+    expect(strength.pass).toBe(true);
+    expect(strength.detail).toContain('thin Board sample');
+    expect(strength.detail).toContain('Granted in 7 of 15 decided Board appeals (46.7%)');
+  });
+
+  it('robust-and-low pair (Hip -> Knee, tier high, 33.3%) is NOT rescued — stays Thin with an adverse ✗', () => {
+    const r = computeStrategyPreview(input({
+      claimedCondition: 'knee', upstreamScCondition: 'hip',
+      serviceConnectedConditions: ['hip'], activeProblems: ['knee'],
+    }));
+    expect(r.tier).toBe('Thin');
+    const strength = r.criteria.find((c) => c.key === 'strength')!;
+    expect(strength.pass).toBe(false);
+  });
+
   it('builds a readable primary argument + surfaces the proposed mechanism + 5 criteria', () => {
     const r = computeStrategyPreview(input({ proposedMechanism: 'weight gain from PTSD meds worsened airway collapse' }));
     expect(r.primaryArgument).toContain('OSA');

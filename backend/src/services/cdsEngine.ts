@@ -27,7 +27,7 @@ export interface CdsResult {
   oddsPct: number | null;
   summary: string;
   hardGate: { triggered: boolean; rule: string | null; detail: string | null };
-  bva: { matched: boolean; upstream: string | null; claimed: string | null; n: number | null; tier: 'high' | 'moderate' | 'low' | null; winPct: number | null; imoWinPct: number | null };
+  bva: { matched: boolean; upstream: string | null; claimed: string | null; n: number | null; tier: 'high' | 'moderate' | 'low' | null; winPct: number | null; grantPct: number | null; imoWinPct: number | null };
   checkedAt: string;
   engineVersion: string;
 }
@@ -168,8 +168,8 @@ export function evaluateCds(input: CdsEngineInput): CdsResult {
   const claimedKey = upstreamKey ? matchKey(input.claimedCondition, Object.keys(PAIRS[upstreamKey])) : null;
   const stats = upstreamKey && claimedKey ? PAIRS[upstreamKey][claimedKey] : null;
   const bva = stats
-    ? { matched: true, upstream: upstreamKey, claimed: claimedKey, n: stats.n, tier: stats.tier, winPct: stats.win_pct, imoWinPct: stats.imo_win_pct }
-    : { matched: false, upstream: upstreamKey, claimed: null, n: null, tier: null, winPct: null, imoWinPct: null };
+    ? { matched: true, upstream: upstreamKey, claimed: claimedKey, n: stats.n, tier: stats.tier, winPct: stats.win_pct, grantPct: stats.grant_pct, imoWinPct: stats.imo_win_pct }
+    : { matched: false, upstream: upstreamKey, claimed: null, n: null, tier: null, winPct: null, grantPct: null, imoWinPct: null };
 
   // ---- Layer A: hard gates (obvious no) ----
   const barred = barredTheory(input);

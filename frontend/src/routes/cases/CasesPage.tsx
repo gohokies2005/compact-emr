@@ -28,9 +28,9 @@ const CLAIM_TYPE_OPTIONS = Object.entries(CLAIM_TYPE_LABELS) as [ClaimType, stri
 const PAGE_SIZES = [25, 50, 100];
 const CASE_COLUMNS: readonly { readonly key: string; readonly label: string }[] = [
   { key: 'id', label: 'Case' }, { key: 'veteran', label: 'Veteran' }, { key: 'condition', label: 'Condition' },
-  { key: 'type', label: 'Type' }, { key: 'status', label: 'Status' }, { key: 'note', label: 'Note' }, { key: 'physician', label: 'Physician' }, { key: 'rn', label: 'RN' }, { key: 'submitted', label: 'Submitted' }, { key: 'updated', label: 'Updated' }, { key: 'version', label: 'v' },
+  { key: 'type', label: 'Type' }, { key: 'status', label: 'Status' }, { key: 'records', label: 'Records' }, { key: 'note', label: 'Note' }, { key: 'physician', label: 'Physician' }, { key: 'rn', label: 'RN' }, { key: 'submitted', label: 'Submitted' }, { key: 'updated', label: 'Updated' }, { key: 'version', label: 'v' },
 ];
-const caseSortType = (key: string): ColType => (key === 'updated' || key === 'submitted' ? 'date' : key === 'version' ? 'number' : 'text');
+const caseSortType = (key: string): ColType => (key === 'updated' || key === 'submitted' ? 'date' : key === 'version' || key === 'records' ? 'number' : 'text');
 const caseSortValue = (key: string) => (c: CaseLite): unknown => {
   switch (key) {
     case 'id': return c.id;
@@ -38,6 +38,7 @@ const caseSortValue = (key: string) => (c: CaseLite): unknown => {
     case 'condition': return c.claimedCondition;
     case 'type': return CLAIM_TYPE_LABELS[c.claimType];
     case 'status': return CASE_STATUS_LABELS[c.status];
+    case 'records': return c.recordsUploaded ? 1 : 0; // sort: records-in (1) vs awaiting (0)
     case 'note': return c.quickNote ?? '';
     case 'physician': return c.assignedPhysician?.fullName ?? '';
     case 'rn': return c.assignedRn?.email ?? '';
@@ -112,10 +113,10 @@ export function CasesPage() {
   function exportCsv() {
     // Cases is server-paginated, so this exports the CURRENT page only (after filters + sort).
     if (pageTruncated) console.warn(`cases CSV export: current page only (${pageRows.length} of ${total}); backend full-export is a follow-up.`);
-    const headers = ['Case ID', 'Veteran', 'Condition', 'Type', 'Status', 'Physician', 'RN', 'Submitted', 'Updated', 'Version'];
+    const headers = ['Case ID', 'Veteran', 'Condition', 'Type', 'Status', 'Records', 'Physician', 'RN', 'Submitted', 'Updated', 'Version'];
     const matrix = rows.map((c) => [
       c.id, c.veteran ? `${c.veteran.lastName}, ${c.veteran.firstName}` : c.veteranId, c.claimedCondition,
-      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.assignedPhysician?.fullName ?? '', c.assignedRn?.email ?? '', c.createdAt, c.updatedAt, c.version,
+      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.recordsUploaded ? 'Records in' : 'Awaiting records', c.assignedPhysician?.fullName ?? '', c.assignedRn?.email ?? '', c.createdAt, c.updatedAt, c.version,
     ]);
     exportRowsToCsv(`cases-export-${new Date().toISOString().slice(0, 10)}.csv`, headers, matrix);
   }
@@ -161,6 +162,7 @@ export function CasesPage() {
             <td className="px-4 py-3 text-slate-700">{formatConditionLabel(c.claimedCondition)}</td>
             <td className="px-4 py-3 text-slate-600">{CLAIM_TYPE_LABELS[c.claimType]}</td>
             <td className="px-4 py-3"><CaseStatusBadge status={c.status} /></td>
+            <td className="px-4 py-3"><RecordsChip recordsUploaded={c.recordsUploaded} /></td>
             <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
               {c.quickNote ? (
                 <button type="button" title={c.quickNote} aria-label={`Quick note: ${c.quickNote}`} className="text-amber-500 hover:text-amber-600" onClick={() => setNoteCase(c)}>
@@ -210,6 +212,16 @@ export function CasesPage() {
       />
     ) : null}
   </div></AppShell>;
+}
+
+// RECORDS chip: binary "veteran-uploaded records present" signal. Green "Records in" once the
+// case has >=1 real uploaded document (Stage 2 done); amber/gray "Awaiting records" while we're
+// still Stage-1-only. Styled to match CaseStatusBadge (rounded-full pill, text-xs font-medium).
+// `undefined` (older API response without the field) renders as awaiting — the conservative default.
+function RecordsChip({ recordsUploaded }: { readonly recordsUploaded: boolean | undefined }) {
+  return recordsUploaded
+    ? <span className="inline-flex items-center rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-700" title="At least one veteran-uploaded record is on file (Stage 2 complete).">Records in</span>
+    : <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-700" title="No uploaded records yet — waiting on the veteran's files (Stage-1 only).">Awaiting records</span>;
 }
 
 // Epic/Cerner-style quick-note popup: overwrite scratchpad + a last-editor stamp. "Delete" clears it

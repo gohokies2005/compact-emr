@@ -55,7 +55,41 @@ const CASE_LITE_SELECT = {
       email: true,
     },
   },
+  // RECORDS signal (binary): does the case have >=1 veteran-UPLOADED document, EXCLUDING the
+  // two auto-generated docs? A filtered relation count (Prisma >=4.3; installed 6.19.x) is the
+  // cleanest + EXACT read — it adds no rows to the payload and is NOT bounded by a take:N window,
+  // so the yes/no is reliable regardless of how many docs a case has. We exclude:
+  //   - the generated intake summary — s3Key ENDS with 'Intake_Summary.pdf' (canonical generated
+  //     key `cases/<id>/<uuid>-Intake_Summary.pdf`; mirrors isIntakeSummaryPath's `intake_summary\.pdf$`)
+  //   - the auto-assembled physician Doctor Pack — s3Key CONTAINS 'Doctor_Pack' or 'DoctorPack'
+  // recordsUploaded (below) = recordCount > 0.
+  _count: {
+    select: {
+      documents: {
+        where: {
+          NOT: [
+            { s3Key: { endsWith: 'Intake_Summary.pdf' } },
+            { s3Key: { contains: 'Doctor_Pack' } },
+            { s3Key: { contains: 'DoctorPack' } },
+          ],
+        },
+      },
+    },
+  },
 };
+
+/**
+ * Map a CASE_LITE_SELECT row to the list-item DTO: lift the filtered real-record count (the
+ * `_count.documents` from the filtered relation count) to a top-level `recordCount` and a binary
+ * `recordsUploaded`, and drop the internal `_count` from the wire shape. So a list item is exactly
+ * { ...case, recordCount, recordsUploaded }. Accepts the loosely-typed Prisma-select result.
+ */
+function withRecordsSignal(row: Record<string, unknown>): Record<string, unknown> {
+  const { _count, ...rest } = row;
+  const count = (_count as { documents?: number } | undefined)?.documents;
+  const recordCount = typeof count === 'number' ? count : 0;
+  return { ...rest, recordCount, recordsUploaded: recordCount > 0 };
+}
 
 /**
  * Phase 5.1: extracted to `services/request-actor.ts`. Local alias preserved so call sites
@@ -232,7 +266,7 @@ export function createCasesRouter(db: AppDb): Router {
         return [count, rows] as const;
       });
 
-      res.json({ data: cases, page, pageSize, total });
+      res.json({ data: cases.map((c) => withRecordsSignal(c as unknown as Record<string, unknown>)), page, pageSize, total });
     }),
   );
 
@@ -321,7 +355,7 @@ export function createCasesRouter(db: AppDb): Router {
         return row;
       });
 
-      res.status(201).json({ data: created });
+      res.status(201).json({ data: withRecordsSignal(created as unknown as Record<string, unknown>) });
     }),
   );
 
@@ -375,7 +409,7 @@ export function createCasesRouter(db: AppDb): Router {
         return row;
       });
 
-      res.json({ data: updated });
+      res.json({ data: withRecordsSignal(updated as unknown as Record<string, unknown>) });
     }),
   );
 
@@ -532,7 +566,7 @@ export function createCasesRouter(db: AppDb): Router {
         return row;
       });
 
-      res.json({ data: updated });
+      res.json({ data: withRecordsSignal(updated as unknown as Record<string, unknown>) });
     }),
   );
 
@@ -597,7 +631,7 @@ export function createCasesRouter(db: AppDb): Router {
         return row;
       });
 
-      res.json({ data: updated });
+      res.json({ data: withRecordsSignal(updated as unknown as Record<string, unknown>) });
     }),
   );
 
@@ -637,7 +671,7 @@ export function createCasesRouter(db: AppDb): Router {
         return row;
       });
 
-      res.json({ data: updated });
+      res.json({ data: withRecordsSignal(updated as unknown as Record<string, unknown>) });
     }),
   );
 

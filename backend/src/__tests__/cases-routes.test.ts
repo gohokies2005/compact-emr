@@ -164,6 +164,67 @@ describe('cases routes', () => {
     expect(spies.caseFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 10 }));
   });
 
+  // === RECORDS signal (binary: veteran-uploaded records present vs Stage-1-only) ===
+
+  it('queries a FILTERED documents _count that excludes the intake summary + doctor pack', async () => {
+    const { db, spies } = makeDb();
+    await request(appFor(db)).get('/api/v1/cases');
+    // The select must carry a filtered relation count whose NOT-clause drops both auto-gen docs.
+    const firstCall = spies.caseFindMany.mock.calls[0] as unknown as Array<{ select?: { _count?: { select?: { documents?: { where?: { NOT?: unknown[] } } } } } }>;
+    const call = firstCall?.[0];
+    const not = call?.select?._count?.select?.documents?.where?.NOT;
+    expect(not).toEqual([
+      { s3Key: { endsWith: 'Intake_Summary.pdf' } },
+      { s3Key: { contains: 'Doctor_Pack' } },
+      { s3Key: { contains: 'DoctorPack' } },
+    ]);
+  });
+
+  it('recordsUploaded=false (recordCount 0) for a case with ONLY an Intake_Summary.pdf', async () => {
+    const { db } = makeDb();
+    // Prisma applies the NOT-filter, so the intake-summary-only case returns documents count 0.
+    (db.case.findMany as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { ...baseCase(), _count: { documents: 0 } },
+    ]);
+    const res = await request(appFor(db)).get('/api/v1/cases');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].recordsUploaded).toBe(false);
+    expect(res.body.data[0].recordCount).toBe(0);
+    // Internal _count is stripped from the wire shape.
+    expect(res.body.data[0]._count).toBeUndefined();
+  });
+
+  it('recordsUploaded=true (recordCount>0) for a case with a real uploaded record', async () => {
+    const { db } = makeDb();
+    (db.case.findMany as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { ...baseCase(), _count: { documents: 2 } },
+    ]);
+    const res = await request(appFor(db)).get('/api/v1/cases');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].recordsUploaded).toBe(true);
+    expect(res.body.data[0].recordCount).toBe(2);
+  });
+
+  it('recordsUploaded=false for a doctor-pack-only case (false-positive guard)', async () => {
+    const { db } = makeDb();
+    // A case whose only docs are the intake summary + doctor pack → filtered count is 0.
+    (db.case.findMany as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { ...baseCase(), _count: { documents: 0 } },
+    ]);
+    const res = await request(appFor(db)).get('/api/v1/cases');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].recordsUploaded).toBe(false);
+  });
+
+  it('defaults recordsUploaded=false when _count is absent (defensive)', async () => {
+    // The default mock returns a row WITHOUT _count — must not throw, defaults to false/0.
+    const { db } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].recordsUploaded).toBe(false);
+    expect(res.body.data[0].recordCount).toBe(0);
+  });
+
   it('gets a single case with relations', async () => {
     const { db, spies } = makeDb();
     const res = await request(appFor(db)).get('/api/v1/cases/CASE-1');

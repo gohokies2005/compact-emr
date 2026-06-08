@@ -31,6 +31,11 @@ export interface CaseLite {
   readonly veteran?: CaseVeteranLite | null;
   readonly assignedPhysician?: CasePhysicianLite | null;
   readonly assignedRn?: AssignedRnLite | null;
+  // RECORDS signal (binary): true once the case has >=1 veteran-UPLOADED document, EXCLUDING the
+  // auto-generated intake summary and physician Doctor Pack. recordCount is that filtered count.
+  // Lets the Cases list show "Records in" vs "Awaiting records" at a glance (Stage 2 done vs Stage-1-only).
+  readonly recordsUploaded?: boolean;
+  readonly recordCount?: number;
 }
 
 export interface QuickNote { readonly id: string; readonly quickNote: string | null; readonly quickNoteBy: string | null; readonly quickNoteAt: string | null; }

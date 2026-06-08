@@ -107,11 +107,17 @@ describe('OpsHeldPanel', () => {
     });
   });
 
-  it('renders the ops hold and re-run button', () => {
+  it('renders the interrupted-draft panel and re-run button in plain language', () => {
     renderPanel();
 
-    expect(screen.getByText('Held in the ops queue')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Re-run drafter' })).toBeInTheDocument();
+    expect(screen.getByText('Drafting was interrupted')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /This draft stopped partway and saved a partial letter\. You can open the partial as-is, or re-run the drafter to finish it\./,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Re-run drafter to finish' })).toBeInTheDocument();
+    // The case-specific operator message still renders beneath the plain-language summary.
     expect(
       screen.getByText(
         "We've paused this one for a closer look. Nothing's lost - your work is saved and we've flagged it for the team.",
@@ -123,7 +129,7 @@ describe('OpsHeldPanel', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     renderPanel();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Re-run drafter' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Re-run drafter to finish' }));
 
     await waitFor(() => {
       expect(postDraftMock).toHaveBeenCalledWith('CASE-2');
@@ -135,7 +141,7 @@ describe('OpsHeldPanel', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     renderPanel();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Re-run drafter' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Re-run drafter to finish' }));
 
     expect(postDraftMock).not.toHaveBeenCalled();
     confirmSpy.mockRestore();

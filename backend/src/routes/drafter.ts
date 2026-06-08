@@ -8,7 +8,6 @@ import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import { getDraftReadiness } from '../services/draft-readiness.js';
 import { publishDraftJobQueued } from '../services/draft-job-queue.js';
-import { DRAFT_JOB_WATCHER_SWEPT_MESSAGE } from '../services/draft-job-constants.js';
 import {
   buildDrafterBundle,
   buildJobBundleS3Key,
@@ -909,33 +908,32 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
         ) {
           throw new HttpError(409, 'conflict', 'DraftJob was cancelled by the RN — artifacts discarded.', { jobId, cancelled: true });
         }
-        const hasArtifacts =
-          typeof existing.artifactPdfS3Key === 'string' &&
-          existing.artifactPdfS3Key.length > 0 &&
-          typeof existing.artifactTxtS3Key === 'string' &&
-          existing.artifactTxtS3Key.length > 0;
-        if (hasArtifacts) {
-          // Genuine duplicate terminal callback — the row already carries artifacts. Reject.
-          throw new HttpError(409, 'conflict', `DraftJob is already in terminal state '${existing.state}'`, {
-            jobId,
-            state: existing.state,
-          });
-        }
-
-        // RESURRECT (2026-06-06): the stuck-job watcher FALSE-POSITIVE-reaped this job (marked it
-        // 'failed'), but the worker actually finished a real letter and is now posting it. Merging
-        // artifacts onto the 'failed' row alone is NOT enough — resolveCurrent() reads
-        // Case.currentVersion, so the letter would stay unreachable (the RN sees "paused/failed"
-        // while the letter sits in S3). Run the SAME case transition the happy path uses so the
-        // letter SURFACES. Keyed on the EXACT watcher errorMessage (NOT failureClass='system', which
-        // RN-cancel also uses) + a genuine completion (runComplete + both artifact keys). Cancelled
-        // jobs were already 409'd above. KEEP IN SYNC with the happy-path completion below.
-        const wasWatcherSwept = existing.errorMessage === DRAFT_JOB_WATCHER_SWEPT_MESSAGE;
         const incomingIsRealLetter =
           parsed.runComplete === true &&
           typeof parsed.artifactPdfS3Key === 'string' && parsed.artifactPdfS3Key.length > 0 &&
           typeof parsed.artifactTxtS3Key === 'string' && parsed.artifactTxtS3Key.length > 0;
-        if (wasWatcherSwept && incomingIsRealLetter) {
+
+        // RESURRECT (2026-06-06; race fix 2026-06-07): the stuck-job watcher FALSE-POSITIVE-reaped
+        // this job (marked it 'failed'), but the worker actually finished a real letter and is now
+        // posting it. Merging artifacts onto the 'failed' row alone is NOT enough — resolveCurrent()
+        // reads Case.currentVersion, so the letter would stay unreachable (the RN sees "paused/failed"
+        // while the letter sits in S3). Run the SAME case transition the happy path uses so the letter
+        // SURFACES. KEEP IN SYNC with the happy-path completion below.
+        //
+        // 2026-06-07 reconcile fix (CLM-A355D7A822 / Hamilton-Dorsey): this MUST run BEFORE the
+        // duplicate-artifacts 409 below. When the FIRST run's SIGTERM handler uploaded a PARTIAL
+        // letter, the late-artifact-recovery branch already merged both artifact keys onto the swept
+        // row AND overwrote errorMessage. So by the time the SQS-redelivered run posts the REAL
+        // completed letter, (a) the row carries artifacts → the old hasArtifacts guard 409'd it first,
+        // and (b) errorMessage no longer equals DRAFT_JOB_WATCHER_SWEPT_MESSAGE → wasWatcherSwept was
+        // false. Both defeated resurrect, so the case stayed in 'drafting'/paused and OpsHeldPanel
+        // never cleared despite a B+/ship v2 in S3. Fix: a 'failed' row (i.e. a swept/abandoned run
+        // that never reached a REAL completion — happy-path completions are state='done') is eligible
+        // to be SUPERSEDED by a genuine completed letter, regardless of partial artifacts or a
+        // mutated errorMessage. state='done' rows are NOT eligible (true completed duplicate → 409
+        // below). RN-cancelled jobs were already 409'd above.
+        const eligibleForResurrect = existing.state === 'failed';
+        if (eligibleForResurrect && incomingIsRealLetter) {
           const resurrected = await db.$transaction(async (tx) => {
             const job = await tx.draftJob.update({
               where: { id: jobId },
@@ -1001,6 +999,24 @@ export function createDrafterWorkerRouter(db: AppDb): Router {
           });
           res.json({ data: resurrected, resurrected: true });
           return;
+        }
+
+        // Duplicate-terminal-callback guard. Reached only when the incoming body is NOT a real
+        // completed letter that supersedes a 'failed' row (that case resurrected above). If the row
+        // already carries both artifact keys, this is a redundant callback (a true completed-run
+        // duplicate, or a repeat partial SIGTERM POST) — there is nothing new to merge. Reject so we
+        // don't re-write artifacts/operatorMessage on every retry. The late-artifact MERGE below is
+        // for the first partial callback landing on a swept row whose keys are still NULL.
+        const hasArtifacts =
+          typeof existing.artifactPdfS3Key === 'string' &&
+          existing.artifactPdfS3Key.length > 0 &&
+          typeof existing.artifactTxtS3Key === 'string' &&
+          existing.artifactTxtS3Key.length > 0;
+        if (hasArtifacts) {
+          throw new HttpError(409, 'conflict', `DraftJob is already in terminal state '${existing.state}'`, {
+            jobId,
+            state: existing.state,
+          });
         }
 
         const recovered = await db.$transaction(async (tx) => {

@@ -230,6 +230,63 @@ describe('POST /internal/drafter/jobs/:id/complete — late-artifact recovery', 
     expect(tx.activityLog.create.mock.calls[0]?.[0]?.data?.action).toBe('draft_job_resurrected');
   });
 
+  it('RESURRECTS a swept job that already merged PARTIAL artifacts + a mutated errorMessage when a REAL letter arrives (CLM-A355D7A822 race)', async () => {
+    // Real incident: the FIRST run's SIGTERM uploaded a PARTIAL letter, so the late-artifact-recovery
+    // branch had already merged both artifact keys onto the swept 'failed' row AND overwritten
+    // errorMessage. The SQS-redelivered run then posted the REAL completed v2 letter. The OLD guards
+    // 409'd it (row has artifacts) and would not have matched on errorMessage — so the case stayed in
+    // 'drafting'/paused and OpsHeldPanel never cleared. A 'failed' row must be supersedable by a real
+    // completion even with partial artifacts present and errorMessage no longer the watcher string.
+    const { db, tx, job, caseRow: cr } = makeDb(
+      jobRow({
+        state: 'failed',
+        errorMessage: 'Run did not complete (swept at SIGTERM). A partial letter is available — open as-is.',
+        artifactPdfS3Key: 'drafter-artifacts/CASE-1/v15/partial.pdf',
+        artifactTxtS3Key: 'drafter-artifacts/CASE-1/v15/partial.txt',
+        completedAt: new Date('2026-05-28T00:10:00.000Z'),
+      }),
+      caseRow({ status: 'drafting', currentVersion: 14, operatorState: 'paused' }),
+    );
+    const caseVersionBefore = cr.version;
+
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send(completeBody({ runComplete: true, operatorState: 'ready', gradeSidecar: { probative_score: 8, grade: 'B+', ship_recommendation: 'ship' } }));
+
+    expect(res.status).toBe(200);
+    expect(res.body.resurrected).toBe(true);
+    expect(job.state).toBe('done');
+    // The real completed artifacts overwrite the partial ones.
+    expect(job.artifactPdfS3Key).toBe('drafter-artifacts/CASE-1/v15/v15.pdf');
+    expect(job.errorMessage).toBeNull();
+    expect(cr.currentVersion).toBe(15);
+    expect(cr.status).toBe('rn_review');
+    expect(cr.runComplete).toBe(true);
+    expect(cr.version).toBe(caseVersionBefore + 1);
+    expect(tx.activityLog.create.mock.calls[0]?.[0]?.data?.action).toBe('draft_job_resurrected');
+  });
+
+  it('still 409s a genuine completed-run duplicate (state=done + artifacts) — NOT eligible for resurrect', async () => {
+    // Regression guard for the reordered logic: only 'failed' rows are supersedable. A real prior
+    // completion (state='done') with artifacts is a true duplicate and must still be rejected.
+    const { db, tx } = makeDb(
+      jobRow({
+        state: 'done',
+        artifactPdfS3Key: 'drafter-artifacts/CASE-1/v15/v15.pdf',
+        artifactTxtS3Key: 'drafter-artifacts/CASE-1/v15/v15.txt',
+        completedAt: new Date('2026-05-28T00:08:00.000Z'),
+      }),
+      caseRow({ status: 'rn_review' }),
+    );
+
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send(completeBody({ runComplete: true, operatorState: 'ready', gradeSidecar: { probative_score: 9, grade: 'A', ship_recommendation: 'ship' } }));
+
+    expect(res.status).toBe(409);
+    expect(tx.activityLog.create).not.toHaveBeenCalled();
+  });
+
   it('does NOT resurrect a watcher-swept job whose /complete is NOT a real completion (runComplete=false → merge only)', async () => {
     const { job, caseRow: cr, db } = makeDb(
       jobRow({ state: 'failed', errorMessage: DRAFT_JOB_WATCHER_SWEPT_MESSAGE, completedAt: new Date('2026-05-28T00:10:00.000Z') }),

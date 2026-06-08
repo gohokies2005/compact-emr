@@ -108,14 +108,18 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
     <Card className="rounded-lg border border-amber-200 bg-white p-6 shadow-sm">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold text-slate-900">Held in the ops queue</h2>
-          <p className="mt-1 text-sm text-slate-600">{operatorMessage(c, job)}</p>
+          <h2 className="text-base font-semibold text-slate-900">Drafting was interrupted</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            This draft stopped partway and saved a partial letter. You can open the partial as-is, or
+            re-run the drafter to finish it.
+          </p>
+          <p className="mt-2 text-sm text-slate-500">{operatorMessage(c, job)}</p>
         </div>
 
         <div className="flex flex-wrap gap-2">
           {hasLetter && onViewLetter ? (
             <Button type="button" variant="primary" onClick={onViewLetter}>
-              View letter
+              Open partial as-is
             </Button>
           ) : null}
 
@@ -124,9 +128,9 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
             variant="secondary"
             loading={rerunMutation.isPending}
             disabled={rerunMutation.isPending}
-            onClick={() => { if (window.confirm('Re-run the drafter? This creates a new letter version and costs another drafting run. Re-run only if a prior run is genuinely unusable.')) rerunMutation.mutate(); }}
+            onClick={() => { if (window.confirm('Re-run the drafter to finish this letter? This creates a new letter version and costs another drafting run.')) rerunMutation.mutate(); }}
           >
-            Re-run drafter
+            Re-run drafter to finish
           </Button>
 
           {isAdmin ? (

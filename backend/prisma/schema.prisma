@@ -373,6 +373,7 @@ model Case {
   letterRevisions   LetterRevision[]
   deliveryTokens    DeliveryToken[]
   caseMessages      CaseMessage[]
+  staffMessages     StaffMessage[]
   draftDecisions    DraftDecision[]
 
   @@index([veteranId])
@@ -491,6 +492,69 @@ model CaseMessage {
   @@index([caseId, createdAt])
   @@index([caseId, readAt])
   @@map("case_messages")
+}
+
+// Internal STAFF messaging (admin/ops_staff/physician), NEVER veteran-facing. Distinct from the flat
+// 2-party CaseMessage (which is left untouched): this is a multi-recipient, threaded model with a
+// separate per-recipient read/archive state row. A "thread" = all StaffMessages sharing threadId +
+// the StaffMessageRecipient set for that threadId. Threaded, reply-all-only in v1; immutable
+// (never edited/hard-deleted). caseId (optional) makes a thread case-collaboration-visible to anyone
+// with case access — onDelete SetNull so a deleted case detaches the thread instead of destroying it.
+model StaffMessage {
+  id        String   @id @default(uuid())
+  threadId  String   @map("thread_id") // groups a thread; the first message's id seeds it
+  caseId    String?  @map("case_id")   // optional case-link; null = recipient-only visibility
+  authorSub String   @map("author_sub") // Cognito sub of the author
+  subject   String?  // set on the first message of a thread; null on replies
+  body      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  case        Case?                     @relation(fields: [caseId], references: [id], onDelete: SetNull)
+  attachments StaffMessageAttachment[]
+
+  @@index([threadId])
+  @@index([caseId])
+  @@index([createdAt])
+  @@map("staff_messages")
+}
+
+// Per-recipient participation + read/archive state for a thread (one row per (threadId, recipientSub)).
+// kind = 'to' | 'cc'. readAt = per-recipient read marker (set when the user opens the thread); archivedAt
+// = per-user archive (un-archives on a new reply). Recipients are append-only (audited via ActivityLog).
+// No FK to StaffMessage: this row is keyed to the THREAD (threadId), not a single message.
+model StaffMessageRecipient {
+  id           String    @id @default(uuid())
+  threadId     String    @map("thread_id")
+  recipientSub String    @map("recipient_sub") // Cognito sub of the recipient
+  kind         String    @db.VarChar(4) // 'to' | 'cc'
+  addedBySub   String    @map("added_by_sub")
+  addedAt      DateTime  @default(now()) @map("added_at") @db.Timestamptz(6)
+  readAt       DateTime? @map("read_at") @db.Timestamptz(6)
+  archivedAt   DateTime? @map("archived_at") @db.Timestamptz(6)
+
+  @@unique([threadId, recipientSub], map: "staff_message_recipients_thread_recipient_uq")
+  @@index([recipientSub, readAt]) // unread-badge query: my threads with a null readAt
+  @@index([threadId])
+  @@map("staff_message_recipients")
+}
+
+// File attachment bound to a single StaffMessage. All-or-nothing with the message (the message is not
+// visible until every attachment is uploaded + validated). sizeBytes is BigInt (mirrors Document).
+// Immutable. FK cascade with the message.
+model StaffMessageAttachment {
+  id           String   @id @default(uuid())
+  messageId    String   @map("message_id")
+  filename     String
+  contentType  String   @map("content_type")
+  sizeBytes    BigInt   @map("size_bytes")
+  s3Key        String   @unique @map("s3_key")
+  uploadedBySub String  @map("uploaded_by_sub")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  message StaffMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@map("staff_message_attachments")
 }
 
 model Document {

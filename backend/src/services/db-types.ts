@@ -164,6 +164,71 @@ export interface CaseMessageDelegate {
   updateMany(args: unknown): Promise<{ count: number }>;
 }
 
+// ── Staff messaging (NEW; distinct from the flat 2-party CaseMessage) ────────────────────────────
+// Internal admin/ops_staff/physician messaging: multi-recipient, threaded (threadId), immutable, with
+// a separate per-recipient read/archive state row. The flat CaseMessage model is left untouched.
+export interface StaffMessageRecord {
+  id: string;
+  threadId: string;
+  caseId: string | null;
+  authorSub: string;
+  subject: string | null;
+  body: string;
+  createdAt: Date;
+}
+
+export interface StaffMessageDelegate {
+  findMany(args: unknown): Promise<readonly StaffMessageRecord[]>;
+  findFirst(args: unknown): Promise<StaffMessageRecord | null>;
+  findUnique(args: unknown): Promise<StaffMessageRecord | null>;
+  count(args: unknown): Promise<number>;
+  create(args: unknown): Promise<StaffMessageRecord>;
+}
+
+export interface StaffMessageRecipientRecord {
+  id: string;
+  threadId: string;
+  recipientSub: string;
+  kind: string; // 'to' | 'cc'
+  addedBySub: string;
+  addedAt: Date;
+  readAt: Date | null;
+  archivedAt: Date | null;
+}
+
+export interface StaffMessageRecipientDelegate {
+  findMany(args: unknown): Promise<readonly StaffMessageRecipientRecord[]>;
+  findFirst(args: unknown): Promise<StaffMessageRecipientRecord | null>;
+  findUnique(args: unknown): Promise<StaffMessageRecipientRecord | null>;
+  count(args: unknown): Promise<number>;
+  create(args: unknown): Promise<StaffMessageRecipientRecord>;
+  createMany(args: unknown): Promise<{ count: number }>;
+  update(args: unknown): Promise<StaffMessageRecipientRecord>;
+  updateMany(args: unknown): Promise<{ count: number }>;
+}
+
+export interface StaffMessageAttachmentRecord {
+  id: string;
+  messageId: string;
+  filename: string;
+  contentType: string;
+  // Prisma returns BigInt for size_bytes; typed loosely here (mirrors how Document's BigInt is handled
+  // — Number(x) wherever it crosses an API boundary).
+  sizeBytes: unknown;
+  s3Key: string;
+  uploadedBySub: string;
+  createdAt: Date;
+}
+
+export interface StaffMessageAttachmentDelegate {
+  findMany(args: unknown): Promise<readonly StaffMessageAttachmentRecord[]>;
+  findFirst(args: unknown): Promise<StaffMessageAttachmentRecord | null>;
+  findUnique(args: unknown): Promise<StaffMessageAttachmentRecord | null>;
+  create(args: unknown): Promise<StaffMessageAttachmentRecord>;
+  update(args: unknown): Promise<StaffMessageAttachmentRecord>;
+  updateMany(args: unknown): Promise<{ count: number }>;
+}
+
 // ── Delivery workflow: Email + Payment (additive) ───────────────────────────────────────────────
 // The Prisma models already exist (emails / payments tables). These hand-written delegates expose
 // the minimal surface the delivery route needs (find existing rows for idempotency + create).
@@ -277,6 +342,9 @@ export interface AppDbTransaction {
   documentPage: DocumentPageDelegate;
   letterRevision: LetterRevisionDelegate;
   caseMessage: CaseMessageDelegate;
+  staffMessage: StaffMessageDelegate;
+  staffMessageRecipient: StaffMessageRecipientDelegate;
+  staffMessageAttachment: StaffMessageAttachmentDelegate;
   email: EmailDelegate;
   monitoredMailbox: MonitoredMailboxDelegate;
   deliveryToken: DeliveryTokenDelegate;

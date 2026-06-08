@@ -7,6 +7,7 @@ import { currentActor } from '../services/request-actor.js';
 import { composeCredentialBlock } from '../services/credential-block.js';
 import type { AppDb, Role } from '../services/db-types.js';
 import type { CognitoAdmin, StaffCredential } from '../services/cognito-admin.js';
+import { assertCognitoPasswordPolicy } from '../services/cognito-admin.js';
 
 const ASSIGNABLE_ROLES: readonly Role[] = ['admin', 'ops_staff', 'physician'];
 // Setting a user inactive while they hold in-flight work would strand it (mirrors physicians.ts).
@@ -73,12 +74,9 @@ function parseStaffCreate(body: unknown): ParsedStaffCreate {
   if (credKind === 'invite') {
     credential = { kind: 'invite' };
   } else if (credKind === 'temp_password') {
-    const pw = body.tempPassword;
-    // Must satisfy the Cognito pool policy (min 12 + upper + lower + number + symbol) so we fail
-    // with a clean 400 here instead of a 502 InvalidPasswordException from Cognito.
-    if (typeof pw !== 'string' || pw.length < 12 || !/[A-Z]/.test(pw) || !/[a-z]/.test(pw) || !/[0-9]/.test(pw) || !/[^A-Za-z0-9]/.test(pw)) {
-      throw new HttpError(400, 'bad_request', 'tempPassword must be at least 12 characters with an uppercase letter, a lowercase letter, a number, and a symbol', { field: 'tempPassword' });
-    }
+    // Shared policy check (min 12 + upper + lower + number + symbol) so the staff-create and
+    // temp-password-reset paths can't drift — fails with a clean 400 instead of a Cognito 502.
+    const pw = assertCognitoPasswordPolicy(body.tempPassword);
     credential = { kind: 'temp_password', password: pw };
   } else {
     throw new HttpError(400, 'bad_request', "credential must be 'invite' or 'temp_password'", { field: 'credential' });
@@ -259,6 +257,117 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
         data: { actorUserId: currentActor(req).id, action: body.active ? 'staff_reactivated' : 'staff_deactivated', detailsJson: { userId: id, email: current.email } },
       });
       res.json({ data: { id: updated.id, email: updated.email, name: updated.name, active: updated.active, roles: current.roles.map((r) => r.role), version: updated.version } });
+    }),
+  );
+
+  // Reset a staff member's password. Default = Cognito emails a reset code (no plaintext ever
+  // leaves the server). Opt-in {mode:'temp_password', tempPassword} sets a known one-login temp
+  // password (FORCE_CHANGE_PASSWORD). The password is NEVER echoed in the response.
+  router.post(
+    '/users/:id/reset-password',
+    requireRole(['admin']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const cognito = deps.cognito;
+      if (cognito === undefined) throw new HttpError(503, 'internal_error', 'Staff provisioning is not configured in this environment.', { reason: 'cognito_unconfigured' });
+      const id = String(req.params.id);
+      const user = await db.appUser.findUnique({ where: { id }, include: { roles: true } });
+      if (user === null) throw new HttpError(404, 'not_found', 'Staff user not found', { userId: id });
+
+      const body = isRecord(req.body) ? req.body : {};
+      const mode = body.mode === 'temp_password' ? 'temp_password' : 'email_code';
+      if (mode === 'temp_password') {
+        const pw = assertCognitoPasswordPolicy(body.tempPassword);
+        await cognito.setTempPassword(user.email, pw);
+      } else {
+        await cognito.resetPasswordEmail(user.email);
+      }
+
+      // Audit AFTER the Cognito call succeeds, BEFORE responding (matches POST /users ordering).
+      await db.activityLog.create({
+        data: { actorUserId: currentActor(req).id, action: 'staff_password_reset', detailsJson: { userId: id, email: user.email, mode } },
+      });
+      res.json({ data: { id: user.id, email: user.email, mode } });
+    }),
+  );
+
+  // Unlock a staff member locked out of MFA (lost authenticator/phone): clear both MFA factors and
+  // re-enable the login in one call. targetIsAdmin is recorded for audit visibility of admin resets.
+  router.post(
+    '/users/:id/unlock',
+    requireRole(['admin']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const cognito = deps.cognito;
+      if (cognito === undefined) throw new HttpError(503, 'internal_error', 'Staff provisioning is not configured in this environment.', { reason: 'cognito_unconfigured' });
+      const id = String(req.params.id);
+      const user = await db.appUser.findUnique({ where: { id }, include: { roles: true } });
+      if (user === null) throw new HttpError(404, 'not_found', 'Staff user not found', { userId: id });
+      const targetIsAdmin = user.roles.some((r) => r.role === 'admin');
+
+      await cognito.clearMfa(user.email);
+
+      await db.activityLog.create({
+        data: { actorUserId: currentActor(req).id, action: 'staff_mfa_cleared', detailsJson: { userId: id, email: user.email, targetIsAdmin } },
+      });
+      res.json({ data: { id: user.id, email: user.email, targetIsAdmin } });
+    }),
+  );
+
+  // Link an existing (orphaned) physician credential profile to a Cognito login. The profile was
+  // created credential-only (cognitoSub null) so nobody can log into it. This create-or-finds the
+  // Cognito user, mints an AppUser so the login carries the physician role (not a role-less login),
+  // and stamps cognitoSub onto the EXISTING Physician row — preserving its NPI/signature/credential
+  // block, which avoids the duplicate-NPI 409 that re-creating via POST /users would hit.
+  router.post(
+    '/physicians/:id/link-login',
+    requireRole(['admin']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const cognito = deps.cognito;
+      if (cognito === undefined) throw new HttpError(503, 'internal_error', 'Staff provisioning is not configured in this environment.', { reason: 'cognito_unconfigured' });
+      const id = String(req.params.id);
+      const physician = await db.physician.findUnique({ where: { id } });
+      if (physician === null) throw new HttpError(404, 'not_found', 'Physician profile not found', { physicianId: id });
+      if (physician.cognitoSub !== null) {
+        throw new HttpError(409, 'conflict', 'This physician profile is already linked to a login.', { physicianId: id });
+      }
+
+      const body = isRecord(req.body) ? req.body : {};
+      let credential: StaffCredential;
+      if (body.credential === 'temp_password') {
+        credential = { kind: 'temp_password', password: assertCognitoPasswordPolicy(body.tempPassword) };
+      } else {
+        credential = { kind: 'invite' };
+      }
+
+      // Cognito FIRST (idempotent create-or-find), then DB.
+      let sub: string;
+      try {
+        ({ sub } = await cognito.provisionUser({ email: physician.email, groups: ['physician'], credential }));
+      } catch (e: unknown) {
+        const err = e as { name?: string; message?: string };
+        console.error(JSON.stringify({ msg: 'physician_link_cognito_error', name: err?.name, message: (err?.message ?? '').slice(0, 300) }));
+        throw new HttpError(502, 'internal_error', `Cognito provisioning failed: ${err?.name ?? 'error'}`, { reason: 'cognito_error' });
+      }
+
+      // AppUser keyed on the sub so the login carries the physician role.
+      const role: Role = 'physician';
+      const user = await db.appUser.upsert({
+        where: { cognitoSub: sub },
+        update: { email: physician.email, name: physician.fullName, active: true },
+        create: { cognitoSub: sub, email: physician.email, name: physician.fullName, active: true },
+      });
+      await db.appUserRole.upsert({
+        where: { userId_role: { userId: user.id, role } },
+        update: {},
+        create: { userId: user.id, role },
+      });
+
+      // Stamp the login onto the EXISTING physician row (preserves NPI/signature/credential block).
+      await db.physician.update({ where: { id }, data: { cognitoSub: sub } }).catch(rethrowUnique);
+
+      await db.activityLog.create({
+        data: { actorUserId: currentActor(req).id, action: 'physician_login_linked', detailsJson: { physicianId: id, email: physician.email, targetSub: sub, credential: credential.kind } },
+      });
+      res.json({ data: { physicianId: id, cognitoSub: sub, email: physician.email, appUserId: user.id, credential: credential.kind } });
     }),
   );
 

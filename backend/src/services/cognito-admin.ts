@@ -20,10 +20,41 @@ import {
   AdminSetUserPasswordCommand,
   AdminEnableUserCommand,
   AdminDisableUserCommand,
+  AdminResetUserPasswordCommand,
+  AdminSetUserMFAPreferenceCommand,
   UsernameExistsException,
 } from '@aws-sdk/client-cognito-identity-provider';
+import { HttpError } from '../http/errors.js';
 
 export type StaffCredential = { kind: 'invite' } | { kind: 'temp_password'; password: string };
+
+/**
+ * Validate a candidate password against the Cognito pool policy (min 12 + upper + lower + number +
+ * symbol) BEFORE handing it to Cognito, so a weak password fails with a clean 400 here instead of a
+ * 502 InvalidPasswordException from Cognito. Returns the validated password (trimmed of nothing — a
+ * leading/trailing space is a legal password char). Throws an HttpError(400) on failure.
+ *
+ * Shared by the staff-create path (parseStaffCreate) and the temp-password reset path so the two
+ * can never drift.
+ */
+export function assertCognitoPasswordPolicy(pw: unknown): string {
+  if (
+    typeof pw !== 'string' ||
+    pw.length < 12 ||
+    !/[A-Z]/.test(pw) ||
+    !/[a-z]/.test(pw) ||
+    !/[0-9]/.test(pw) ||
+    !/[^A-Za-z0-9]/.test(pw)
+  ) {
+    throw new HttpError(
+      400,
+      'bad_request',
+      'tempPassword must be at least 12 characters with an uppercase letter, a lowercase letter, a number, and a symbol',
+      { field: 'tempPassword' },
+    );
+  }
+  return pw;
+}
 
 export interface ProvisionCognitoUserInput {
   readonly email: string;
@@ -36,6 +67,12 @@ export interface CognitoAdmin {
   provisionUser(input: ProvisionCognitoUserInput): Promise<{ sub: string }>;
   /** Enable/disable the login (offboarding). Identified by email = Username in our pool. */
   setUserEnabled(email: string, enabled: boolean): Promise<void>;
+  /** Trigger Cognito to email the user a password-reset code. No plaintext leaves the server. */
+  resetPasswordEmail(email: string): Promise<void>;
+  /** Set a known temp password that forces a change at next login (Permanent:false). */
+  setTempPassword(email: string, password: string): Promise<void>;
+  /** Clear both MFA factors AND re-enable the login, so a locked+disabled user recovers in one call. */
+  clearMfa(email: string): Promise<void>;
 }
 
 export function makeCognitoAdmin(userPoolId: string): CognitoAdmin {
@@ -93,6 +130,33 @@ export function makeCognitoAdmin(userPoolId: string): CognitoAdmin {
       await client.send(enabled
         ? new AdminEnableUserCommand({ UserPoolId: userPoolId, Username: email })
         : new AdminDisableUserCommand({ UserPoolId: userPoolId, Username: email }));
+    },
+
+    async resetPasswordEmail(email: string): Promise<void> {
+      // Cognito emails the user a reset code via the pool's configured message flow. No password
+      // material is generated or returned server-side — this is the safe default reset path.
+      await client.send(new AdminResetUserPasswordCommand({ UserPoolId: userPoolId, Username: email }));
+    },
+
+    async setTempPassword(email: string, password: string): Promise<void> {
+      // Permanent:false => Cognito puts the user into FORCE_CHANGE_PASSWORD; the temp password works
+      // for exactly one login, after which the user must set their own.
+      await client.send(new AdminSetUserPasswordCommand({
+        UserPoolId: userPoolId, Username: email, Password: password, Permanent: false,
+      }));
+    },
+
+    async clearMfa(email: string): Promise<void> {
+      // Body lifted from infra/lambda/break-glass-mfa-reset.ts: disable both MFA factors so a user
+      // locked out by a lost authenticator/phone can sign in again.
+      await client.send(new AdminSetUserMFAPreferenceCommand({
+        UserPoolId: userPoolId,
+        Username: email,
+        SMSMfaSettings: { Enabled: false, PreferredMfa: false },
+        SoftwareTokenMfaSettings: { Enabled: false, PreferredMfa: false },
+      }));
+      // THEN re-enable: a user disabled by offboarding (or auto-disabled) recovers in this one call.
+      await client.send(new AdminEnableUserCommand({ UserPoolId: userPoolId, Username: email }));
     },
   };
 }

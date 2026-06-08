@@ -41,6 +41,9 @@ function makeCognito(over: Partial<CognitoAdmin> = {}): CognitoAdmin {
   return {
     provisionUser: vi.fn(async () => ({ sub: 'new-sub-123' })),
     setUserEnabled: vi.fn(async () => undefined),
+    resetPasswordEmail: vi.fn(async () => undefined),
+    setTempPassword: vi.fn(async () => undefined),
+    clearMfa: vi.fn(async () => undefined),
     ...over,
   };
 }
@@ -213,6 +216,41 @@ describe('PATCH /users/:id — deactivate', () => {
 
   it('404 when the user does not exist', async () => {
     const res = await request(appFor(makeDb({ byId: null }).db, makeCognito())).patch('/api/v1/users/NOPE').send({ version: 1, active: false });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /physicians/:id/link-login — link an orphaned credential profile to a login', () => {
+  beforeEach(() => { mockUser = { sub: 'a-sub', roles: ['admin'] }; });
+
+  it('links an orphan (cognitoSub null): provisions Cognito, mints AppUser role, stamps cognitoSub, preserves NPI, audits', async () => {
+    const { db, physician, appUserRole, activityLog } = makeDb();
+    physician.findUnique.mockResolvedValue({ id: 'PH-1', email: 'doc@x.test', fullName: 'Dr X, DO', npi: '1112223334', cognitoSub: null });
+    physician.update.mockResolvedValue({ id: 'PH-1', cognitoSub: 'new-sub-123' });
+    const cognito = makeCognito();
+    const res = await request(appFor(db, cognito)).post('/api/v1/physicians/PH-1/link-login').send({ credential: 'invite' });
+    expect(res.status).toBe(200);
+    expect(cognito.provisionUser).toHaveBeenCalledWith({ email: 'doc@x.test', groups: ['physician'], credential: { kind: 'invite' } });
+    expect(appUserRole.upsert).toHaveBeenCalled(); // login carries the physician role (not role-less)
+    // UPDATE only stamps cognitoSub — NPI never in the update payload (preserved, avoids the dup-NPI 409)
+    expect(physician.update).toHaveBeenCalledWith({ where: { id: 'PH-1' }, data: { cognitoSub: 'new-sub-123' } });
+    expect(activityLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'physician_login_linked' }) }));
+    expect(res.body.data.cognitoSub).toBe('new-sub-123');
+  });
+
+  it('409 already_linked when the profile already has a cognitoSub (no Cognito call)', async () => {
+    const { db, physician } = makeDb();
+    physician.findUnique.mockResolvedValue({ id: 'PH-1', email: 'doc@x.test', fullName: 'Dr X', npi: '1112223334', cognitoSub: 'already-linked-sub' });
+    const cognito = makeCognito();
+    const res = await request(appFor(db, cognito)).post('/api/v1/physicians/PH-1/link-login').send({ credential: 'invite' });
+    expect(res.status).toBe(409);
+    expect(cognito.provisionUser).not.toHaveBeenCalled();
+  });
+
+  it('404 when the physician profile does not exist', async () => {
+    const { db, physician } = makeDb();
+    physician.findUnique.mockResolvedValue(null);
+    const res = await request(appFor(db, makeCognito())).post('/api/v1/physicians/PH-1/link-login').send({ credential: 'invite' });
     expect(res.status).toBe(404);
   });
 });

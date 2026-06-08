@@ -234,6 +234,8 @@ export class ApiStack extends Stack {
         'cognito-idp:AdminSetUserPassword',
         'cognito-idp:AdminEnableUser',
         'cognito-idp:AdminDisableUser',
+        'cognito-idp:AdminResetUserPassword',
+        'cognito-idp:AdminSetUserMFAPreference',
       ],
       resources: [props.userPool.userPoolArn],
     }));

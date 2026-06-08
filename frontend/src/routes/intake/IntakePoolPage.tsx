@@ -7,8 +7,8 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import { formatRelativeTime } from '../../lib/date';
 import {
-  assignIntake, dismissIntake, getIntake, intakeKind, listIntakes, retryIntake, restoreIntake,
-  type IntakeDetail, type IntakeListItem, type AssignIntakeInput,
+  assignIntake, dismissIntake, getIntake, getIntakeSummary, intakeKind, listIntakes, retryIntake, restoreIntake,
+  type IntakeDetail, type IntakeFile, type IntakeListItem, type AssignIntakeInput,
 } from '../../api/intakes';
 import { listVeterans } from '../../api/veterans';
 import { listCases } from '../../api/cases';
@@ -61,7 +61,17 @@ function conditionsLikelySame(a: string, b: string): boolean {
   return ta.length > 0 && tb.length > 0 && ta.some((w) => tb.includes(w));
 }
 
-type SortKey = 'name' | 'profile' | 'condition' | 'files' | 'received' | 'status';
+// STAGE derivation (Ryan 2026-06-08): make the Stage-1 vs Stage-2 split explicit instead of forcing
+// the RN to infer it from the file count — a Stage-2 submission that arrives with NO uploaded files
+// would otherwise look identical to a Stage-1. Count only real veteran-uploaded RECORD files: the
+// auto-generated Intake_Summary.pdf is our own artifact, not a record, so it doesn't promote to
+// Stage 2. >=1 record file ⇒ "Stage 2 · records in"; 0 ⇒ "Stage 1 · awaiting files".
+const isGeneratedSummary = (name: string | undefined): boolean => /(^|[/\\])?intake[_\s-]*summary\.pdf$/i.test((name ?? '').trim());
+function recordFileCount(files: readonly IntakeFile[] | null | undefined): number {
+  return (files ?? []).filter((f) => !isGeneratedSummary(f.name)).length;
+}
+
+type SortKey = 'name' | 'profile' | 'condition' | 'files' | 'stage' | 'received' | 'status';
 
 function sortRows(rows: readonly IntakeListItem[], key: SortKey, dir: 1 | -1): IntakeListItem[] {
   const val = (r: IntakeListItem): string | number => {
@@ -70,6 +80,7 @@ function sortRows(rows: readonly IntakeListItem[], key: SortKey, dir: 1 | -1): I
       case 'profile': return r.veteranMatch ? 0 : 1; // existing profiles first when ascending
       case 'condition': return (r.submittedCondition ?? '').toLowerCase();
       case 'files': return r.fileManifestJson?.length ?? 0;
+      case 'stage': return recordFileCount(r.fileManifestJson) >= 1 ? 2 : 1;
       case 'received': return new Date(r.createdAt).getTime();
       case 'status': return r.status;
     }
@@ -120,7 +131,7 @@ export function IntakePoolPage() {
           <Card className="p-0">
             <table className="min-w-full divide-y divide-slate-200 text-sm">
               <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr>
-                <Th k="name" label="Name" /><Th k="profile" label="Profile" /><Th k="condition" label="Condition" /><Th k="files" label="Files" /><Th k="received" label="Received" /><Th k="status" label="Status" />
+                <Th k="name" label="Name" /><Th k="profile" label="Profile" /><Th k="condition" label="Condition" /><Th k="files" label="Files" /><Th k="stage" label="Stage" /><Th k="received" label="Received" /><Th k="status" label="Status" />
               </tr></thead>
               <tbody className="divide-y divide-slate-100">
                 {rows.map((r) => (
@@ -131,6 +142,7 @@ export function IntakePoolPage() {
                       : <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">New</span>}</td>
                     <td className="px-4 py-2 text-slate-700">{r.submittedCondition ? formatConditionLabel(r.submittedCondition) : '—'}</td>
                     <td className="px-4 py-2 text-slate-600">{(r.fileManifestJson?.length ?? 0)} file(s)</td>
+                    <td className="px-4 py-2"><StageCell recordCount={recordFileCount(r.fileManifestJson)} /></td>
                     <td className="px-4 py-2 text-slate-500">{formatRelativeTime(r.createdAt)}</td>
                     <td className="px-4 py-2"><StatusChip s={r.status} retry={r.retryCount} /></td>
                   </tr>
@@ -144,6 +156,14 @@ export function IntakePoolPage() {
       {selectedId ? <IntakeDrawer id={selectedId} onClose={() => setSelectedId(null)} /> : null}
     </AppShell>
   );
+}
+
+// STAGE cell: explicit Stage-1 (no record files yet) vs Stage-2 (>=1 uploaded record). Neutral slate
+// text (no christmas-tree fills, consistent with the Cases list) — the words carry the signal.
+function StageCell({ recordCount }: { readonly recordCount: number }) {
+  return recordCount >= 1
+    ? <span className="text-xs font-medium text-slate-600" title={`${recordCount} uploaded record file(s) on this intake.`}>Stage 2 · records in</span>
+    : <span className="text-xs font-medium text-slate-500" title="No uploaded record files yet — awaiting the veteran's documents.">Stage 1 · awaiting files</span>;
 }
 
 function StatusChip({ s, retry }: { readonly s: string; readonly retry: number }) {
@@ -205,6 +225,11 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
 
   const [fileKeys, setFileKeys] = useState<Set<string>>(new Set(intake.files.filter((f) => typeof f.s3Key === 'string').map((f) => f.s3Key!)));
   const [result, setResult] = useState<{ attached: number; failed: { name?: string; reason: string }[] } | null>(null);
+
+  // The auto-generated Intake Summary PDF (full Stage-1/2 Q&A) — viewable from the pool BEFORE we
+  // create the profile/case. Generated-if-missing server-side; not a veteran-uploaded record, so it
+  // doesn't count toward the Stage-2 record total. Only meaningful once the intake has answers fetched.
+  const summary = useQuery({ queryKey: ['intake-summary', intake.id], queryFn: () => getIntakeSummary(intake.id), enabled: intake.status === 'ready', retry: false });
 
   const vetSearch = useQuery({ queryKey: ['intake-vetsearch', vetQuery], queryFn: () => listVeterans(vetQuery), enabled: vetMode === 'existing' && vetQuery.trim().length >= 2 });
   const vetCases = useQuery({ queryKey: ['intake-vetcases', vetId], queryFn: () => listCases({ veteranId: vetId!, page: 1, pageSize: 25 }), enabled: vetMode === 'existing' && vetId !== null });
@@ -301,9 +326,26 @@ function IntakeAssign({ intake, onAssigned, onChanged }: { readonly intake: Inta
         ) : null}
       </div>
 
+      {/* Auto-generated intake summary — viewable BEFORE assigning. Not a veteran record. */}
+      <div>
+        <div className="text-sm font-semibold text-slate-800">Intake summary (auto-generated)</div>
+        <div className="mt-2 flex items-center gap-2 text-sm">
+          {summary.isLoading ? (
+            <span className="inline-flex items-center gap-2 text-slate-500"><Spinner /> Preparing summary…</span>
+          ) : summary.data ? (
+            <a className="inline-flex items-center gap-1 text-indigo-600 hover:underline" href={summary.data.data.previewUrl} target="_blank" rel="noreferrer">
+              📄 Intake_Summary.pdf
+            </a>
+          ) : (
+            <span className="text-xs text-slate-500">No answers captured for this submission yet.</span>
+          )}
+          {summary.data ? <span className="text-xs text-slate-400">the full Stage-1/2 Q&amp;A — not a veteran-uploaded record</span> : null}
+        </div>
+      </div>
+
       {/* Files */}
       <div>
-        <div className="text-sm font-semibold text-slate-800">Files ({intake.files.length})</div>
+        <div className="text-sm font-semibold text-slate-800">Uploaded files ({intake.files.length})</div>
         <ul className="mt-2 space-y-1">
           {intake.files.map((f) => {
             // Jotform/S3 often store .txt (and others) with a wrong/empty content-type, so also accept by

@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
-import { GetObjectCommand, CopyObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand, CopyObjectCommand, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
@@ -109,6 +109,56 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     }
     const [withMatch] = await withVeteranMatch([row]);
     res.json({ data: { ...withMatch, files } });
+  }));
+
+  // GET /intakes/:id/summary — the auto-generated Intake Summary PDF for an UNASSIGNED intake, so the
+  // RN can VIEW the full Stage-1/2 Q&A from the pool BEFORE creating a profile/case (Ryan: "could
+  // stage 1 have 1 file — the PDF that is made — so we can see it before we create the profile").
+  // Lazy + cached: if the intake-scoped object already exists in S3 we just presign it; otherwise we
+  // render it from rawAnswersJson ONCE and store it. The key lives OUTSIDE cases/ (intake-summaries/)
+  // so it is never a Document, never enters the record-file count, and never affects chart-readiness.
+  // It is NOT a veteran-uploaded record — it's the generated summary, kept clearly separate.
+  router.get('/intakes/:id/summary', requireRole(['admin', 'ops_staff']), asyncHandler(async (req: Request, res: Response) => {
+    if (deps.s3 === undefined || deps.bucketName === undefined || deps.bucketName.length === 0) {
+      throw new HttpError(503, 'internal_error', 'Document storage is not configured.', { reason: 'no_bucket' });
+    }
+    const intakeId = String(req.params.id);
+    const rawRow = await db.intake.findUnique({ where: { id: intakeId } });
+    if (rawRow === null) throw new HttpError(404, 'not_found', 'Intake not found.', { intakeId });
+    const s3 = deps.s3 as { send: (cmd: unknown) => Promise<unknown> };
+    const bucket = deps.bucketName;
+    // Intake-scoped, stable key (one per intake) — distinct prefix so it never lives under cases/ and
+    // never counts as an uploaded record. Re-using the same key makes the generate-once cache trivial.
+    const summaryKey = `intake-summaries/${intakeId}.pdf`;
+
+    // Cache hit: object already rendered → just presign and serve (no regeneration on every view).
+    let exists = false;
+    try {
+      await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: summaryKey }));
+      exists = true;
+    } catch { /* miss (404/NotFound) → render below; any other error also falls through to render */ }
+
+    if (!exists) {
+      const row = fillIntakeDerived(rawRow as unknown as Record<string, unknown>);
+      const rawAnswers = (row as { rawAnswersJson?: unknown }).rawAnswersJson;
+      if (!rawAnswers || typeof rawAnswers !== 'object') {
+        throw new HttpError(422, 'bad_request', 'This intake has no captured answers to summarize.', { intakeId });
+      }
+      const im = row as { submittedName?: string | null; submittedCondition?: string | null; submittedFormTitle?: string | null; submittedAt?: Date | string | null };
+      const submittedAt = im.submittedAt instanceof Date
+        ? im.submittedAt.toISOString().slice(0, 10)
+        : (typeof im.submittedAt === 'string' ? im.submittedAt.slice(0, 10) : undefined);
+      const pdf = await renderIntakeSummaryPdf(rawAnswers, {
+        veteranName: im.submittedName ?? undefined,
+        condition: im.submittedCondition ?? undefined,
+        formTitle: im.submittedFormTitle ?? undefined,
+        submittedAt,
+      });
+      await s3.send(new PutObjectCommand({ Bucket: bucket, Key: summaryKey, Body: Buffer.from(pdf), ContentType: 'application/pdf', ServerSideEncryption: 'aws:kms' }));
+    }
+
+    const url = await getSignedUrl(s3 as never, new GetObjectCommand({ Bucket: bucket, Key: summaryKey }) as never, { expiresIn: PREVIEW_TTL_SECONDS });
+    res.json({ data: { name: 'Intake_Summary.pdf', contentType: 'application/pdf', previewUrl: url, generated: !exists } });
   }));
 
   // POST /intakes/:id/dismiss { reason } — spam/dupe; keep the row for audit.

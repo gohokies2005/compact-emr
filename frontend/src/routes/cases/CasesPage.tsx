@@ -4,7 +4,6 @@ import { Link, useNavigate } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { formatRelativeTime } from '../../lib/date';
 import { listCases, deleteCase, restoreCase, updateQuickNote, type CaseLite } from '../../api/cases';
@@ -150,9 +149,9 @@ export function CasesPage() {
     <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
       <table className="min-w-full divide-y divide-slate-200 text-sm">
         <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr>
-          {CASE_COLUMNS.map((col) => <th key={col.key} className="px-4 py-3" aria-sort={ariaSort(col.key)}>
-            <button type="button" className="flex items-center gap-1 uppercase tracking-wide hover:text-slate-700" onClick={() => onHeaderClick(col.key)}>{col.label}{indicator(col.key)}</button>
-          </th>)}
+          {CASE_COLUMNS.map((col) => { const centered = col.key === 'status' || col.key === 'records'; return <th key={col.key} className="px-4 py-3" aria-sort={ariaSort(col.key)}>
+            <button type="button" className={`flex items-center gap-1 uppercase tracking-wide hover:text-slate-700${centered ? ' mx-auto' : ''}`} onClick={() => onHeaderClick(col.key)}>{col.label}{indicator(col.key)}</button>
+          </th>; })}
           <th className="px-4 py-3" />
         </tr></thead>
         <tbody className="divide-y divide-slate-100">
@@ -161,8 +160,8 @@ export function CasesPage() {
             <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`} onClick={(e) => e.stopPropagation()}>{formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}</Link></td>
             <td className="px-4 py-3 text-slate-700">{formatConditionLabel(c.claimedCondition)}</td>
             <td className="px-4 py-3 text-slate-600">{CLAIM_TYPE_LABELS[c.claimType]}</td>
-            <td className="px-4 py-3"><CaseStatusBadge status={c.status} /></td>
-            <td className="px-4 py-3"><RecordsChip recordsUploaded={c.recordsUploaded} /></td>
+            <td className="px-4 py-3 text-center"><span className="text-xs font-medium text-slate-600">{CASE_STATUS_LABELS[c.status]}</span></td>
+            <td className="px-4 py-3 text-center"><RecordsChip recordsUploaded={c.recordsUploaded} /></td>
             <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
               {c.quickNote ? (
                 <button type="button" title={c.quickNote} aria-label={`Quick note: ${c.quickNote}`} className="text-amber-500 hover:text-amber-600" onClick={() => setNoteCase(c)}>
@@ -177,7 +176,7 @@ export function CasesPage() {
             <td className="px-4 py-3 text-slate-500" title={new Date(c.createdAt).toLocaleString()}>{formatRelativeTime(c.createdAt)}</td>
             <td className="px-4 py-3 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
             <td className="px-4 py-3 text-slate-400">{c.version}</td>
-            <td className="px-4 py-3 text-right">
+            <td className="px-4 py-3 text-right whitespace-nowrap">
               {archived ? (
                 <button type="button" className="text-xs font-medium text-indigo-600 hover:text-indigo-700 disabled:opacity-50" disabled={restoreMut.isPending}
                   onClick={(e) => { e.stopPropagation(); restoreMut.mutate(c.id); }}>Restore</button>
@@ -214,14 +213,15 @@ export function CasesPage() {
   </div></AppShell>;
 }
 
-// RECORDS chip: binary "veteran-uploaded records present" signal. Green "Records in" once the
-// case has >=1 real uploaded document (Stage 2 done); amber/gray "Awaiting records" while we're
-// still Stage-1-only. Styled to match CaseStatusBadge (rounded-full pill, text-xs font-medium).
+// RECORDS chip: binary "veteran-uploaded records present" signal. "Records in" once the case has
+// >=1 real uploaded document (Stage 2 done); "Awaiting records" while we're still Stage-1-only.
+// NEUTRAL by design (Ryan 2026-06-08, "christmas tree") — the Cases list deliberately drops the
+// green/amber fills and renders calm centered slate text; the label still carries the meaning.
 // `undefined` (older API response without the field) renders as awaiting — the conservative default.
 function RecordsChip({ recordsUploaded }: { readonly recordsUploaded: boolean | undefined }) {
   return recordsUploaded
-    ? <span className="inline-flex items-center rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-700" title="At least one veteran-uploaded record is on file (Stage 2 complete).">Records in</span>
-    : <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-700" title="No uploaded records yet — waiting on the veteran's files (Stage-1 only).">Awaiting records</span>;
+    ? <span className="text-xs font-medium text-slate-600" title="At least one veteran-uploaded record is on file (Stage 2 complete).">Records in</span>
+    : <span className="text-xs font-medium text-slate-500" title="No uploaded records yet — waiting on the veteran's files (Stage-1 only).">Awaiting records</span>;
 }
 
 // Epic/Cerner-style quick-note popup: overwrite scratchpad + a last-editor stamp. "Delete" clears it

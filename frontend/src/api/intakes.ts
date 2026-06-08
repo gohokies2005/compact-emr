@@ -42,6 +42,18 @@ export async function getIntake(id: string): Promise<{ data: IntakeDetail }> {
   return apiGet(`/api/v1/intakes/${encodeURIComponent(id)}`);
 }
 
+export interface IntakeSummary {
+  readonly name: string;
+  readonly contentType: string;
+  readonly previewUrl: string;
+  readonly generated: boolean;
+}
+// The auto-generated Intake Summary PDF (full Stage-1/2 Q&A), viewable from the pool BEFORE assigning.
+// Generated-if-missing server-side and presigned; not a veteran-uploaded record.
+export async function getIntakeSummary(id: string): Promise<{ data: IntakeSummary }> {
+  return apiGet(`/api/v1/intakes/${encodeURIComponent(id)}/summary`);
+}
+
 export interface NewVeteranInput {
   readonly id: string;
   readonly firstName: string;

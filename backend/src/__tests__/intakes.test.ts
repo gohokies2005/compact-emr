@@ -1,6 +1,7 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
+import { S3Client } from '@aws-sdk/client-s3';
 import { createIntakesRouter } from '../routes/intakes.js';
 
 function appFor(intake: unknown, deps: Record<string, unknown> = {}) {
@@ -45,6 +46,85 @@ describe('intakes pool API', () => {
     const update = vi.fn(async () => ({}));
     await request(appFor({ findUnique, update })).post('/api/v1/intakes/i1/retry').expect(200);
     expect(update).toHaveBeenCalledWith({ where: { id: 'i1' }, data: { status: 'pending', errorMessage: null, retryCount: 3 } });
+  });
+});
+
+// ───────────────────────── SUMMARY (lazy generate-if-missing) ─────────────────────────
+
+// The summary endpoint PRESIGNS, which needs a real S3Client (the presigner reads client.config /
+// middleware). Use a real client but override .send so we control HeadObject/PutObject responses.
+function summaryApp(db: unknown, s3send: (cmd: unknown) => Promise<unknown>) {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => { (req as { user?: unknown }).user = { sub: 'rn-1', email: 'rn@e.com', roles: ['ops_staff'] }; next(); });
+  const s3 = new S3Client({ region: 'us-east-1', credentials: { accessKeyId: 'test', secretAccessKey: 'test' } });
+  (s3 as unknown as { send: (cmd: unknown) => Promise<unknown> }).send = s3send;
+  app.use('/api/v1', createIntakesRouter(db as never, { s3: s3 as never, bucketName: 'phi-bucket' }));
+  return app;
+}
+const READY_WITH_ANSWERS = {
+  id: 'i1', status: 'ready', submittedName: 'Marcus Justice', submittedCondition: 'unspecified_genitourinary', submittedFormTitle: 'Stage 2',
+  rawAnswersJson: {
+    q1: { type: 'control_textbox', name: 's2_dob_s1', text: 'Date of Birth', answer: '08/13/1985' },
+    q2: { type: 'control_textarea', name: 's2_why_s1', text: 'Why connected', answer: 'urinary symptoms since service' },
+  },
+};
+
+// AWS SDK throws a NotFound-shaped error when HeadObject misses.
+function notFound() { const e = new Error('NotFound'); (e as { name: string }).name = 'NotFound'; return e; }
+
+describe('intakes summary (generate-if-missing)', () => {
+  it('GENERATES the summary on a cache MISS (Head 404 → render → PutObject) and returns a presigned URL', async () => {
+    const sent: string[] = [];
+    const s3send = vi.fn(async (cmd: unknown) => {
+      const ctor = (cmd as { constructor: { name: string } }).constructor.name;
+      sent.push(ctor);
+      if (ctor === 'HeadObjectCommand') throw notFound(); // miss → render
+      return {};
+    });
+    const db = { intake: { findUnique: async () => READY_WITH_ANSWERS } };
+    const res = await request(summaryApp(db, s3send)).get('/api/v1/intakes/i1/summary').expect(200);
+    expect(sent).toContain('HeadObjectCommand'); // checked the cache
+    expect(sent).toContain('PutObjectCommand');  // rendered + stored
+    expect(res.body.data.generated).toBe(true);
+    expect(res.body.data.contentType).toBe('application/pdf');
+    expect(typeof res.body.data.previewUrl).toBe('string');
+  });
+
+  it('SERVES from cache on a HIT (Head succeeds → no PutObject, just presign)', async () => {
+    const sent: string[] = [];
+    const s3send = vi.fn(async (cmd: unknown) => { sent.push((cmd as { constructor: { name: string } }).constructor.name); return {}; });
+    const db = { intake: { findUnique: async () => READY_WITH_ANSWERS } };
+    const res = await request(summaryApp(db, s3send)).get('/api/v1/intakes/i1/summary').expect(200);
+    expect(sent).toContain('HeadObjectCommand');
+    expect(sent).not.toContain('PutObjectCommand'); // cache hit → no regeneration
+    expect(res.body.data.generated).toBe(false);
+    expect(typeof res.body.data.previewUrl).toBe('string');
+  });
+
+  it('uses an intake-scoped key OUTSIDE cases/ so the summary never counts as a record', async () => {
+    let putKey = '';
+    const s3send = vi.fn(async (cmd: unknown) => {
+      const c = cmd as { constructor: { name: string }; input?: { Key?: string } };
+      if (c.constructor.name === 'HeadObjectCommand') throw notFound();
+      if (c.constructor.name === 'PutObjectCommand') putKey = c.input?.Key ?? '';
+      return {};
+    });
+    const db = { intake: { findUnique: async () => READY_WITH_ANSWERS } };
+    await request(summaryApp(db, s3send)).get('/api/v1/intakes/i1/summary').expect(200);
+    expect(putKey).toBe('intake-summaries/i1.pdf');
+    expect(putKey.startsWith('cases/')).toBe(false);
+  });
+
+  it('404s when the intake does not exist', async () => {
+    const db = { intake: { findUnique: async () => null } };
+    await request(summaryApp(db, vi.fn(async () => ({})))).get('/api/v1/intakes/nope/summary').expect(404);
+  });
+
+  it('422s when the intake has no captured answers to summarize', async () => {
+    const db = { intake: { findUnique: async () => ({ id: 'i1', status: 'ready', rawAnswersJson: null }) } };
+    const s3send = vi.fn(async (cmd: unknown) => { if ((cmd as { constructor: { name: string } }).constructor.name === 'HeadObjectCommand') throw notFound(); return {}; });
+    await request(summaryApp(db, s3send)).get('/api/v1/intakes/i1/summary').expect(422);
   });
 });
 

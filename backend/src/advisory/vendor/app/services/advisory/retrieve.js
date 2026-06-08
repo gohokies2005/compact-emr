@@ -85,45 +85,39 @@ function resolveStat(question, caseConditions) {
 }
 
 // ---- semantic (live pgvector) ----------------------------------------------
-async function embedQuery(bedrockClient, text, InvokeModelCommand) {
-  // InvokeModelCommand is INJECTED by the EMR wrapper so esbuild bundles the SDK into the Lambda — this
-  // vendored module is loaded OUTSIDE the bundle and can't resolve @aws-sdk at runtime (would crash
-  // MODULE_NOT_FOUND). Falls back to require() for local/non-Lambda use. [EMR drop-in edit 2026-06-07.]
-  const Cmd = InvokeModelCommand || require('@aws-sdk/client-bedrock-runtime').InvokeModelCommand;
+async function embedQuery(bedrockClient, text) {
+  const { InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
   const body = JSON.stringify({ inputText: String(text).slice(0, 8000), dimensions: 1024, normalize: true });
-  const res = await bedrockClient.send(new Cmd({
+  const res = await bedrockClient.send(new InvokeModelCommand({
     modelId: 'amazon.titan-embed-text-v2:0', contentType: 'application/json', accept: 'application/json', body,
   }));
   const out = JSON.parse(Buffer.from(res.body).toString('utf8'));
   return out.embedding;
 }
-async function semanticSearch(pgClient, qvec, caseConditions) {
+async function semanticSearch(pgClient, qvec) {
   const qstr = '[' + qvec.join(',') + ']';
-  // folder-check: does the curated library cover an asked condition? (strong coverage signal)
-  let folderCovered = false;
-  if (caseConditions && caseConditions.length) {
-    const fc = await pgClient.query('SELECT 1 FROM advisory.ref_chunk WHERE condition = ANY($1) LIMIT 1', [caseConditions]);
-    folderCovered = (fc.rows || []).length > 0;
-  }
-  const where = folderCovered ? 'WHERE condition = ANY($2)' : '';
-  const params = folderCovered ? [qstr, caseConditions] : [qstr];
+  // PURE embedding kNN — the QUESTION's embedding finds the right condition's chunks.
+  // Do NOT hard-filter by the chart's problem list (caseConditions): an osteoarthritis question on a
+  // veteran who ALSO has hypertension was getting HTN-only literature because the WHERE filter restricted
+  // to the bound chart's conditions instead of the asked one. (Bug fix 2026-06-07.) At 1,316 chunks the
+  // kNN is fast + accurate; coverage is judged by cosine, not by the chart.
   const sql = `SELECT id, text, source, citation, condition, library_path, letter_citable, `
-    + `1 - (embedding <=> $1::vector) AS score FROM advisory.ref_chunk ${where} `
+    + `1 - (embedding <=> $1::vector) AS score FROM advisory.ref_chunk `
     + `ORDER BY embedding <=> $1::vector LIMIT ${SEM_K}`;
-  const res = await pgClient.query(sql, params);
+  const res = await pgClient.query(sql, [qstr]);
   const chunks = (res.rows || []).map((row) => ({
     text: row.text, source: row.source || 'semantic', citation: row.citation,
     metadata: { id: row.id, condition: row.condition, library_path: row.library_path, score: Number(row.score) },
     letter_citable: row.letter_citable !== false,
   }));
   const topScore = chunks.length ? chunks[0].metadata.score : 0;
-  return { chunks, folderCovered, topScore };
+  return { chunks, topScore };
 }
 
 // ---- main ------------------------------------------------------------------
 async function retrieve(input, clients = {}) {
   const { question = '', caseConditions = [] } = input || {};
-  const { pgClient, bedrockClient, InvokeModelCommand } = clients;
+  const { pgClient, bedrockClient } = clients;
   const errors = [], notes = [], chunks = [], mode_ran = [];
   let stats, coverage_gap;
 
@@ -149,12 +143,12 @@ async function retrieve(input, clients = {}) {
       errors.push('semantic unavailable: pgClient/bedrockClient not injected'); // backend outage, NOT no-coverage
     } else {
       try {
-        const qvec = await embedQuery(bedrockClient, question, InvokeModelCommand);
-        const sem = await semanticSearch(pgClient, qvec, caseConditions);
+        const qvec = await embedQuery(bedrockClient, question);
+        const sem = await semanticSearch(pgClient, qvec);
         semanticRan = true;
-        covered = sem.folderCovered || sem.topScore >= RELEVANCE_FLOOR;
-        if (covered) { chunks.push(...sem.chunks); notes.push(`semantic: ${sem.chunks.length} chunks, top=${sem.topScore.toFixed(3)}${sem.folderCovered ? ', folder-covered' : ''}`); }
-        else notes.push(`semantic: weak (top=${sem.topScore.toFixed(3)} < ${RELEVANCE_FLOOR}, no folder) — treating as no coverage`);
+        covered = sem.topScore >= RELEVANCE_FLOOR;
+        if (covered) { chunks.push(...sem.chunks); notes.push(`semantic: ${sem.chunks.length} chunks, top=${sem.topScore.toFixed(3)}`); }
+        else notes.push(`semantic: weak (top=${sem.topScore.toFixed(3)} < ${RELEVANCE_FLOOR}) — treating as no coverage`);
       } catch (e) { errors.push(`semantic failed: ${e.message}`); } // errored, NOT confirmed no-coverage
     }
 

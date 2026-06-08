@@ -32,6 +32,17 @@ export class AuthStack extends Stack {
         requireUppercase: true,
         requireSymbols: true,
       },
+      // Send Cognito auth email (invites, password resets, MFA) via SES on the verified
+      // flatratenexus.com domain instead of COGNITO_DEFAULT (which silently dropped mail to the
+      // domain — no SPF/DKIM alignment + ~50/day cap). Domain DKIM-verified in SES 2026-06-08.
+      // Sandbox delivers to any @flatratenexus.com recipient (verified domain); production access
+      // (pending) only needed for non-flatratenexus.com addresses.
+      email: cognito.UserPoolEmail.withSES({
+        fromEmail: 'no-reply@flatratenexus.com',
+        fromName: 'Flat Rate Nexus',
+        sesRegion: 'us-east-1',
+        sesVerifiedDomain: 'flatratenexus.com',
+      }),
     });
 
     this.userPoolClient = this.userPool.addClient('WebClient', {

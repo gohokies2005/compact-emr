@@ -67,12 +67,19 @@ function statsChunk(r) {
     letter_citable: false,
   };
 }
-/** Resolve a BVA stat ONLY for a real pair (or an explicit psych-anchor question). Never a wrong-pair row. */
+/** Resolve a BVA stat ONLY for a real pair (or an explicit psych-anchor question). Never a wrong-pair row.
+ *  PRECEDENCE: an EXPLICIT pair named in the QUESTION wins — the RN asked about THAT pair, not whatever
+ *  case happens to be bound. caseConditions are a FALLBACK only when the question does not name a pair.
+ *  (Bug fix 2026-06-07: the old chart-first precedence let an unrelated bound case override the asked pair,
+ *  so "stats for migraines secondary to OSA" returned NULL — or a wrong pair — on any non-matching case.) */
 function resolveStat(question, caseConditions) {
   const parsed = parsePair(question);
+  // The question explicitly named upstream -> claimed: honor it, never let the bound chart override it.
+  if (parsed.upstream && parsed.claimed) { const r = pairLookup(parsed.upstream, parsed.claimed); return r.found ? r : null; }
+  // Vague question -> fall back to the bound chart conditions to infer the pair.
   const claimed = (caseConditions.length ? resolveCondition(caseConditions[caseConditions.length - 1]) : null) || parsed.claimed;
   const upstream = (caseConditions.length >= 2 ? resolveCondition(caseConditions[0]) : null) || parsed.upstream;
-  if (upstream && claimed) { const r = pairLookup(upstream, claimed); return r.found ? r : null; }
+  if (upstream && claimed && upstream !== claimed) { const r = pairLookup(upstream, claimed); return r.found ? r : null; }
   if (claimed && PSYCH_RE.test(question)) { const r = psychRollup(claimed); return r.found ? r : null; }
   return null; // no clear pair -> attach NO stat (do not force a rollup)
 }

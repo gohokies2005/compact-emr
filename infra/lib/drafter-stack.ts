@@ -12,6 +12,8 @@ import {
   aws_sqs as sqs,
   aws_cloudwatch as cloudwatch,
   aws_applicationautoscaling as appscaling,
+  aws_events as events,
+  aws_events_targets as targets,
 } from 'aws-cdk-lib';
 import type { CompactEmrConfig } from './config.js';
 
@@ -262,6 +264,41 @@ export class DrafterStack extends Stack {
       evaluationPeriods: 1,
       datapointsToAlarm: 1,
       cooldown: Duration.minutes(1),
+    });
+
+    // ===== Task-stop forensics: persistently log WHY each drafter task stops =====
+    // When a drafter Fargate task STOPS (OOMKilled, deployment-drain, scale-in, crash, etc.),
+    // ECS emits an "ECS Task State Change" event whose detail carries stoppedReason, stopCode,
+    // containers[].reason, and the task ARN. We capture that full event into a dedicated log
+    // group so the NEXT drafter freeze has a definitive recorded cause instead of a guess.
+    //
+    // Purely additive: a new LogGroup + EventBridge Rule + the rule's CloudWatch-Logs target.
+    // It does NOT touch the task definition, service, image, autoscaling, or env — so it cannot
+    // replace or restart the running task.
+    const taskStopLogGroup = new logs.LogGroup(this, 'DrafterTaskStopLogGroup', {
+      logGroupName: `/compact-emr-${config.envName}/drafter-task-stops`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      // Ephemeral forensic stream — DESTROY in non-prod to match the repo's other transient
+      // log groups; RETAIN in prod so the stop history survives a stack teardown.
+      removalPolicy: config.envName === 'prod' ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
+    });
+
+    // Match ONLY this drafter cluster's tasks reaching lastStatus STOPPED. Scoping on
+    // clusterArn keeps every other ECS task-state-change (other stacks/clusters) out.
+    new events.Rule(this, 'DrafterTaskStopRule', {
+      ruleName: `compact-emr-${config.envName}-drafter-task-stop`,
+      description: 'Capture ECS Task State Change STOPPED events for the drafter cluster (stoppedReason/stopCode forensics).',
+      eventPattern: {
+        source: ['aws.ecs'],
+        detailType: ['ECS Task State Change'],
+        detail: {
+          clusterArn: [cluster.clusterArn],
+          lastStatus: ['STOPPED'],
+        },
+      },
+      // CloudWatchLogGroup target (CDK 2.x) writes the full event JSON and auto-provisions the
+      // log-group resource policy granting events.amazonaws.com PutLogEvents.
+      targets: [new targets.CloudWatchLogGroup(taskStopLogGroup)],
     });
 
     // ===== Outputs the drafter window needs =====

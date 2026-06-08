@@ -19,10 +19,12 @@ import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { EmailLogPanel } from '../../components/EmailLogPanel';
+import { ChartNotesPanel } from '../veterans/ChartNotesPanel';
+import { ConditionsPanel, MedicationsPanel, ProblemsPanel } from '../../components/ClinicalChartPanels';
 import { listCaseEmails } from '../../api/emails';
 import { getArtifactPdfUrl, postDraft, cancelDraftJob } from '../../api/drafter';
 import { listClarifications } from '../../api/cases';
-import { listDocuments, reocrDocument } from '../../api/veterans';
+import { getVeteran, listDocuments, reocrDocument } from '../../api/veterans';
 import { PdfViewerModal, type ViewableDoc } from '../../components/PdfViewerModal';
 import { formatConditionLabel } from '../../lib/conditionLabel';
 import { Gate1ChecklistModal } from '../../components/Gate1ChecklistModal';
@@ -52,7 +54,11 @@ export function decidePollIntervalMs(status: CaseStatus | undefined): number | f
 
 // Activity (never-built placeholder) + Corrections (backing table is never written) removed to
 // declutter (Ryan 2026-06-06). Clarifications kept — it's a live RN/physician Q&A feature.
-type TabId = 'overview' | 'drafts' | 'clarifications' | 'documents' | 'emails' | 'messages';
+// The case is a claim ON a veteran, so the case page also surfaces the veteran's clinical chart
+// (SC Conditions / Active Problems / Medications / Staff Notes) — the SAME add/edit/delete panels
+// the veteran chart uses, operating on the same veteran data via the same API. Ordered to mirror the
+// veteran page's clinical tabs (SC Conditions, Active Problems, Medications, Staff Notes). (Ryan 2026-06-08.)
+type TabId = 'overview' | 'drafts' | 'clarifications' | 'documents' | 'emails' | 'messages' | 'conditions' | 'problems' | 'medications' | 'notes';
 const TABS: readonly TabItem<TabId>[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'drafts', label: 'Draft jobs' },
@@ -60,6 +66,10 @@ const TABS: readonly TabItem<TabId>[] = [
   { id: 'documents', label: 'Documents' },
   { id: 'emails', label: 'Email' },
   { id: 'messages', label: 'Messages' },
+  { id: 'conditions', label: 'Service Connected Conditions' },
+  { id: 'problems', label: 'Active Problems' },
+  { id: 'medications', label: 'Medications' },
+  { id: 'notes', label: 'Staff Notes' },
 ];
 
 function serverErrorMessage(err: unknown): string | undefined {
@@ -209,7 +219,14 @@ export function CaseDetailPage() {
     <div className="rounded-lg border border-slate-200 bg-white p-6">
       <div className="flex flex-col justify-between gap-4 lg:flex-row">
         <div>
-          <h1 className="text-3xl font-bold text-slate-900">{formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}</h1>
+          {/* The veteran name links to that veteran's main chart (/veterans/:id, id = the MRN /
+              c.veteranId — same route as the "chart" link below). Underline-on-hover keeps it
+              clearly clickable without shouting. (Ryan 2026-06-08.) */}
+          <h1 className="text-3xl font-bold text-slate-900">
+            <Link to={`/veterans/${encodeURIComponent(c.veteranId)}`} className="rounded decoration-2 underline-offset-4 hover:text-indigo-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" title="Open this veteran's chart">
+              {formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}
+            </Link>
+          </h1>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-base text-slate-700"><EditableClaimCondition c={c} onSave={(v) => patch.mutate({ version: c.version, claimedCondition: v })} /><CaseStatusBadge status={c.status} /></div>
           {(() => {
             const v = c.veteran;
@@ -388,7 +405,7 @@ export function CaseDetailPage() {
     ) : null}
 
     <div className="rounded-lg border border-slate-200 bg-white">
-      <TabBar tabs={tabsWithBadge} active={tab} onChange={setTab} />
+      <TabBar tabs={tabsWithBadge} active={tab} onChange={setTab} className="flex-wrap" />
       <div className="p-4">
         {tab === 'overview' ? (
           <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
@@ -400,6 +417,13 @@ export function CaseDetailPage() {
         {tab === 'messages' ? (
           <CaseMessagesPanel caseId={caseId} assignedRn={c.assignedRn ?? null} assignedPhysician={c.assignedPhysician ?? null} />
         ) : null}
+        {/* Clinical chart tabs — same veteran data + same panels as the veteran chart page. The case
+            carries the veteran id (c.veteranId); the clinical sections fetch the veteran detail and
+            mutate it directly, so edits here and on the veteran chart are the same records. */}
+        {tab === 'conditions' ? <VeteranClinicalTab veteranId={c.veteranId} section="conditions" /> : null}
+        {tab === 'problems' ? <VeteranClinicalTab veteranId={c.veteranId} section="problems" /> : null}
+        {tab === 'medications' ? <VeteranClinicalTab veteranId={c.veteranId} section="medications" /> : null}
+        {tab === 'notes' ? <ChartNotesPanel veteranId={c.veteranId} /> : null}
       </div>
     </div>
 
@@ -530,6 +554,22 @@ function DraftJobsTab({ caseId }: { readonly caseId: string }) {
   // stays visible (muted + tooltip) for traceability — View letter still uses jobId, not this.
   const total = rows.length;
   return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Draft</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th><th className="px-4 py-2">Letter</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d, i) => { const viewable = d.state === 'done' || d.state === 'failed'; return <tr key={d.id} className={`hover:bg-slate-50 ${viewable ? 'cursor-pointer' : ''}`} onClick={viewable ? () => viewVersion(d.id) : undefined}><td className="px-4 py-2"><span className="font-medium text-slate-800">Draft #{total - i}</span> <span className="ml-1 text-xs text-slate-400" title={`Internal letter version ${d.version}`}>v{d.version}</span></td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td><td className="px-4 py-2">{viewable ? <button type="button" className="font-medium text-indigo-600 hover:underline" onClick={(e) => { e.stopPropagation(); viewVersion(d.id); }}>View letter</button> : <span className="text-slate-400">—</span>}</td></tr>; })}</tbody></table></div>;
+}
+
+// Veteran clinical-chart sections, mounted on the case page. Fetches the same veteran detail the
+// veteran chart uses (['veteran', veteranId]) and renders the same SC Conditions / Active Problems /
+// Medications panels with full add/edit/delete. invalidate() refetches the shared query so an edit
+// made here is reflected on the veteran chart and vice-versa.
+function VeteranClinicalTab({ veteranId, section }: { readonly veteranId: string; readonly section: 'conditions' | 'problems' | 'medications' }) {
+  const qc = useQueryClient();
+  const veteran = useQuery({ queryKey: ['veteran', veteranId], queryFn: () => getVeteran(veteranId), enabled: veteranId.length > 0 });
+  const invalidate = async () => { await qc.invalidateQueries({ queryKey: ['veteran', veteranId] }); };
+  if (veteran.isLoading) return <div className="text-sm text-slate-500">Loading chart…</div>;
+  if (!veteran.data) return <EmptyState title="Chart unavailable" message="The veteran's chart could not be loaded." />;
+  const v = veteran.data.data;
+  if (section === 'conditions') return <ConditionsPanel veteranId={veteranId} rows={v.scConditions} onChange={invalidate} />;
+  if (section === 'problems') return <ProblemsPanel veteranId={veteranId} rows={v.activeProblems} onChange={invalidate} />;
+  return <MedicationsPanel veteranId={veteranId} rows={v.activeMedications} onChange={invalidate} />;
 }
 
 function DocumentsTab({ veteranId, caseId }: { readonly veteranId: string; readonly caseId: string }) {

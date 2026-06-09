@@ -190,13 +190,15 @@ export function CaseDetailPage() {
   if (caseQuery.isLoading) return <AppShell><div className="text-sm text-slate-500">Loading case…</div></AppShell>;
   if (!caseQuery.data) return <AppShell><EmptyState title="Case not found" message="The requested case could not be loaded." /></AppShell>;
   const c = caseQuery.data.data;
-  // From rn_review, "Send to doctor for review" (in the RN review panel) is the path to
-  // physician_review — drop the redundant generic "Move to physician review" header button.
-  const nextStatuses = allowedNextStatusesForRole(role, c.status)
-    .filter((to) => !(c.status === 'rn_review' && to === 'physician_review'))
-    // "Move to drafting" is a bare status flip with no action — Redraft / Send to Drafter / the
-    // Gate-2 resume are the real paths. Drop it (Ryan 2026-06-05: "seems pointless").
-    .filter((to) => to !== 'drafting');
+  // Only offer transitions a human should actually DRIVE from the header. Everything else here is either a
+  // bare status flip (no real action) or a machine-only state, so it's redundant/misleading (Ryan 2026-06-08):
+  //   - physician_review: the RN-review panel's "Send to doctor for review" is the SINGLE correct path, and
+  //     it requires a completed draft — a bare header button is meaningless (esp. with no draft).
+  //   - drafting: a bare flip; Redraft / Send to Drafter / the Gate-2 resume are the real paths.
+  //   - needs_records / needs_rn_decision: machine-only — the drafter's Gate-2 /halt parks the case there.
+  //     A human flags a records gap with an "Awaiting records" note, not a status move.
+  const HUMAN_MOVE_DENYLIST: readonly CaseStatus[] = ['physician_review', 'drafting', 'needs_records', 'needs_rn_decision'];
+  const nextStatuses = allowedNextStatusesForRole(role, c.status).filter((to) => !HUMAN_MOVE_DENYLIST.includes(to));
   // CDS retired from the workflow (Ryan 2026-06-03): it no longer gates sign-off. A stale
   // cdsVerdict='reject' must NOT hide the sign-off button (the CDS panel is gone, so there'd be no
   // explanation and no way to recover — an RN/physician dead-end). (architect MF-2)

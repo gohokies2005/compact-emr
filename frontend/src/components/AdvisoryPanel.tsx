@@ -10,9 +10,6 @@ import { Card } from './ui/Card';
 // Collapsed by default (just the cue) so it never clutters the sign-off screen; the Q&A thread is saved
 // and re-renders when the case is reopened.
 
-const DISCLAIMER =
-  'Decision support only — not a medical opinion. A physician is the overseer; verify before relying on any answer. Internal Board figures are a relative ranking signal, never a win probability, and never for a letter or the veteran.';
-
 function ThreadEntry({ item }: { readonly item: AdvisoryThreadItem }) {
   return (
     <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
@@ -76,10 +73,6 @@ export function AdvisoryPanel({ caseId }: { readonly caseId: string }) {
 
       {open ? (
         <div className="space-y-4 border-t border-slate-100 p-5">
-          <div className="rounded-md border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-3 text-xs text-amber-900">
-            {DISCLAIMER}
-          </div>
-
           {items.length > 0 ? (
             <div className="space-y-3">
               {items.map((it) => (

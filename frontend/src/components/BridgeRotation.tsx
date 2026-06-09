@@ -20,7 +20,11 @@ export function BridgeRotation({
   readonly children?: ReactNode;
   readonly className?: string;
 }) {
-  const [index, setIndex] = useState(0);
+  // Start on a random bridge each mount so every visit shows a different one (a login is seen far
+  // shorter than the 5-min interval, so a fixed start would only ever show the first image).
+  const [index, setIndex] = useState(() =>
+    bridgeImages.length > 0 ? Math.floor(Math.random() * bridgeImages.length) : 0
+  );
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {

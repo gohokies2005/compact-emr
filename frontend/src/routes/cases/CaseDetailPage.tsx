@@ -294,6 +294,7 @@ export function CaseDetailPage() {
               <div className="flex items-start gap-2">
                 <textarea className="input min-h-[2.5rem] max-w-xl flex-1" value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} placeholder="e.g. Awaiting records — VA C-file requested 6/8" autoFocus />
                 <RowAction onClick={() => noteMut.mutate(noteDraft.trim())} disabled={noteMut.isPending}>Save</RowAction>
+                {c.quickNote ? <RowAction kind="danger" onClick={() => noteMut.mutate('')} disabled={noteMut.isPending}>Clear</RowAction> : null}
                 <RowAction kind="danger" onClick={() => setNoteEditing(false)}>Cancel</RowAction>
               </div>
             ) : c.quickNote ? (

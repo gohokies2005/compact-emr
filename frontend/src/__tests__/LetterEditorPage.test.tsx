@@ -5,12 +5,13 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LetterEditorPage } from '../routes/cases/LetterEditorPage';
 import { applySurgicalAi, approveLetter, declineLetter, getLetter, previewSurgicalAi, saveLetter } from '../api/letter';
-import { getCase } from '../api/cases';
+import { getCase, signOffCase } from '../api/cases';
 import { ConflictError, ServiceUnavailableError } from '../api/client';
 
 vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { readonly children: ReactNode }) => <div>{children}</div> }));
 vi.mock('../api/letter', () => ({ getLetter: vi.fn(), saveLetter: vi.fn(), previewSurgicalAi: vi.fn(), applySurgicalAi: vi.fn(), approveLetter: vi.fn(), declineLetter: vi.fn() }));
-vi.mock('../api/cases', () => ({ getCase: vi.fn() }));
+// signOffCase is exercised by the SignOffPopup the Approve button now opens (architect fix 2026-06-08).
+vi.mock('../api/cases', () => ({ getCase: vi.fn(), signOffCase: vi.fn() }));
 
 const getLetterMock = vi.mocked(getLetter);
 const getCaseMock = vi.mocked(getCase);
@@ -19,6 +20,12 @@ const previewMock = vi.mocked(previewSurgicalAi);
 const applyMock = vi.mocked(applySurgicalAi);
 const approveMock = vi.mocked(approveLetter);
 const declineMock = vi.mocked(declineLetter);
+const signOffMock = vi.mocked(signOffCase);
+
+// findByText under the FULL suite's parallel load can exceed the 1000ms default poll window
+// (the mutation chain: mutate -> mock resolve -> onSuccess/onError -> setState -> re-render).
+// A generous explicit timeout makes these deterministic without weakening any assertion.
+const FIND = { timeout: 5000 } as const;
 
 const opsLetter = {
   version: 4,
@@ -52,7 +59,16 @@ beforeEach(() => {
   applyMock.mockResolvedValue({ data: { version: 6, txt: 'Applied limited edit.', warnings: [] } });
   approveMock.mockResolvedValue({ data: { version: 5, status: 'delivered', finalPdfKey: 'drafter-artifacts/CASE-1/v5/letter.pdf' } });
   declineMock.mockResolvedValue({ data: { status: 'correction_requested' } });
+  signOffMock.mockResolvedValue({ data: { id: 'SO-1', caseId: 'CASE-1' } as unknown as Awaited<ReturnType<typeof signOffCase>>['data'] });
 });
+
+// Drives the SignOffPopup the Approve button opens: answer all 5 questions "Yes", submit.
+async function completeSignOff() {
+  // The popup renders one "Yes" button per attestation (5) plus a final "Submit sign-off".
+  const yesButtons = await screen.findAllByRole('button', { name: 'Yes' }, FIND);
+  for (const btn of yesButtons) fireEvent.click(btn);
+  fireEvent.click(screen.getByRole('button', { name: 'Submit sign-off' }));
+}
 
 describe('LetterEditorPage', () => {
   it('loads and renders the editor (ops_staff) WITH surgical-AI parity but NO sign-off', async () => {
@@ -68,30 +84,36 @@ describe('LetterEditorPage', () => {
     expect(screen.queryByRole('button', { name: 'Decline and send back to RN' })).not.toBeInTheDocument();
   });
 
+  // Save is disabled until the loaded version commits (a post-paint useEffect sets baseVersion).
+  // Clicking before that throws "Letter version is missing" and the save mock is never called —
+  // THE flake. Wait for the ENABLED button, then click, so the mutation actually fires.
+  async function clickSave() {
+    const saveBtn = await screen.findByRole('button', { name: 'Save new version' }, FIND);
+    await waitFor(() => expect(saveBtn).toBeEnabled(), FIND);
+    fireEvent.click(saveBtn);
+  }
+
   it('saves a new version and shows rule/detail warnings', async () => {
     renderPage();
-    await screen.findByText('Frank_Armand_OSA_v4');
-    fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
-    await waitFor(() => { expect(saveLetterMock).toHaveBeenCalledWith('CASE-1', { base_version: 4, txt: 'This is **bold** letter text.' }); });
-    expect(await screen.findByText('Saved version 5.')).toBeInTheDocument();
+    await clickSave();
+    await waitFor(() => { expect(saveLetterMock).toHaveBeenCalledWith('CASE-1', { base_version: 4, txt: 'This is **bold** letter text.' }); }, FIND);
+    expect(await screen.findByText('Saved version 5.', undefined, FIND)).toBeInTheDocument();
     expect(screen.getByText('Letter appears unusually short.')).toBeInTheDocument();
   });
 
   it('reloads on a stale save (ConflictError)', async () => {
     saveLetterMock.mockRejectedValueOnce(new ConflictError());
     renderPage();
-    await screen.findByText('Frank_Armand_OSA_v4');
-    fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
-    expect(await screen.findByText('This letter was changed elsewhere. Reloaded the latest version.')).toBeInTheDocument();
+    await clickSave();
+    expect(await screen.findByText('This letter was changed elsewhere. Reloaded the latest version.', undefined, FIND)).toBeInTheDocument();
     expect(getLetterMock).toHaveBeenCalledTimes(2);
   });
 
   it('shows "not available" on a 503 save', async () => {
     saveLetterMock.mockRejectedValueOnce(new ServiceUnavailableError());
     renderPage();
-    await screen.findByText('Frank_Armand_OSA_v4');
-    fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
-    expect(await screen.findByText('Letter service is not available in this environment.')).toBeInTheDocument();
+    await clickSave();
+    expect(await screen.findByText('Letter service is not available in this environment.', undefined, FIND)).toBeInTheDocument();
   });
 
   it('physician previews + applies surgical AI (opaque proposal + string preview)', async () => {
@@ -116,12 +138,53 @@ describe('LetterEditorPage', () => {
     expect(await screen.findByText('Surgical AI is not available in this environment.')).toBeInTheDocument();
   });
 
-  it('physician approves the letter', async () => {
+  it('physician approves via sign-off: Approve opens the sign-off popup, signing off finalizes', async () => {
     getLetterMock.mockResolvedValueOnce({ data: physicianLetter });
     renderPage();
     await screen.findByText('AI surgical edit');
+    // The bare Approve no longer calls /approve directly (that 409'd sign_off_required). It opens
+    // the sign-off popup; approve fires only AFTER a complete sign-off. (architect fix 2026-06-08.)
     fireEvent.click(screen.getByRole('button', { name: 'Approve letter' }));
+    expect(await screen.findByText('Physician sign-off', undefined, FIND)).toBeInTheDocument();
+    expect(approveMock).not.toHaveBeenCalled(); // not until the physician signs off
+    await completeSignOff();
+    await waitFor(() => { expect(signOffMock).toHaveBeenCalledWith('CASE-1', expect.objectContaining({ answers: expect.objectContaining({ records_reviewed: true }) })); });
     await waitFor(() => { expect(approveMock).toHaveBeenCalledWith('CASE-1'); });
+  });
+
+  it('approve onError splits by reason: 409 sign_off_required → actionable copy', async () => {
+    getLetterMock.mockResolvedValueOnce({ data: physicianLetter });
+    // Backend maps a missing sign-off to 409 { reason: 'sign_off_required' } → ConflictError(details).
+    approveMock.mockRejectedValueOnce(new ConflictError({ reason: 'sign_off_required' }));
+    renderPage();
+    await screen.findByText('AI surgical edit');
+    fireEvent.click(screen.getByRole('button', { name: 'Approve letter' }));
+    await screen.findByText('Physician sign-off', undefined, FIND);
+    await completeSignOff();
+    expect(await screen.findByText('Sign off on the letter before approving.', undefined, FIND)).toBeInTheDocument();
+  });
+
+  it('approve onError splits by reason: 409 chart_not_ready → actionable copy', async () => {
+    getLetterMock.mockResolvedValueOnce({ data: physicianLetter });
+    // Chart-readiness 409 carries blockingFiles (no `reason`); the split detects that form too.
+    approveMock.mockRejectedValueOnce(new ConflictError({ blockingFiles: ['records.pdf'] }));
+    renderPage();
+    await screen.findByText('AI surgical edit');
+    fireEvent.click(screen.getByRole('button', { name: 'Approve letter' }));
+    await screen.findByText('Physician sign-off', undefined, FIND);
+    await completeSignOff();
+    expect(await screen.findByText("The chart isn't ready yet — finish reviewing the records, then approve.", undefined, FIND)).toBeInTheDocument();
+  });
+
+  it('approve onError: 503 render unavailable → not-available copy', async () => {
+    getLetterMock.mockResolvedValueOnce({ data: physicianLetter });
+    approveMock.mockRejectedValueOnce(new ServiceUnavailableError());
+    renderPage();
+    await screen.findByText('AI surgical edit');
+    fireEvent.click(screen.getByRole('button', { name: 'Approve letter' }));
+    await screen.findByText('Physician sign-off', undefined, FIND);
+    await completeSignOff();
+    expect(await screen.findByText('Letter render is not available in this environment.', undefined, FIND)).toBeInTheDocument();
   });
 
   it('physician declines and sends back to RN', async () => {

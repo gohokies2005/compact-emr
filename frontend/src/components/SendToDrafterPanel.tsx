@@ -4,6 +4,7 @@ import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { Spinner } from './ui/Spinner';
 import { getChartReadiness } from '../api/chart-readiness';
+import { viewDocument } from '../api/veterans';
 import { postDraft, type DraftRequestInput, type DraftConcurrencyResult } from '../api/drafter';
 import { ConflictError } from '../api/client';
 import { Gate1ChecklistModal } from './Gate1ChecklistModal';
@@ -62,7 +63,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   // override and draft anyway with a logged reason (Ryan HARD RULE: EVERYTHING must be overridable).
   // Still runs Gate-1 first (the dx/event checklist must not be skipped just because a file was unreadable).
   function overrideAndDraft() {
-    const reason = window.prompt('Draft anyway? Type a brief reason (logged on the case). The drafter will run without the file(s) that could not be read.');
+    const reason = window.prompt("This file couldn't be read. Briefly describe what it shows (e.g. 'ResMed usage report — 7.1 hrs/night, AHI 4.2') so it's logged on the case and the team knows what's in it. The drafter will run without the image itself.");
     if (reason === null || reason.trim().length === 0) return;
     const ov = { acknowledgeMissingDocs: true, overrideReason: reason.trim() };
     if (gate1Enabled) { setPendingOverride(ov); setGate1Open(true); }
@@ -81,6 +82,18 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
     const base = filePath.split('/').pop() || filePath;
     return base.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i, '');
   };
+
+  // Let the RN SEE the file that failed OCR — presign an inline view URL (same mechanism as the
+  // chart's PdfViewer) and open it in a new tab, so they can read it and override with a real
+  // description (Ryan 2026-06-06, Yorde: a bare "couldn't read" with no way to look is useless).
+  async function openBlockingFile(id: string) {
+    try {
+      const res = await viewDocument(id);
+      window.open(res.data.downloadUrl, '_blank', 'noopener,noreferrer');
+    } catch {
+      window.alert('Could not open the file for viewing. Try the chart Documents tab.');
+    }
+  }
 
   const draftError = draftMutation.error;
   const draftErrorMessage = draftError
@@ -145,7 +158,20 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
                 </p>
                 <ul className="mt-2 list-disc space-y-0.5 pl-5 text-sm font-medium text-amber-900">
                   {blockingFiles.map((f) => (
-                    <li key={f.id ?? f.filePath} className="break-all">{fileName(f.filePath)}</li>
+                    <li key={f.id ?? f.filePath} className="break-all">
+                      {f.id ? (
+                        <button
+                          type="button"
+                          onClick={() => void openBlockingFile(f.id as string)}
+                          className="rounded underline decoration-amber-400 decoration-2 underline-offset-2 hover:text-amber-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                          title="Open this file to see what couldn't be read"
+                        >
+                          {fileName(f.filePath)}
+                        </button>
+                      ) : (
+                        fileName(f.filePath)
+                      )}
+                    </li>
                   ))}
                 </ul>
               </>

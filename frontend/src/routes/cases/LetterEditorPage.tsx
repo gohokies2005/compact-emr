@@ -7,6 +7,7 @@ import { Card } from '../../components/ui/Card';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import { LetterEditor } from '../../components/LetterEditor';
+import { SignOffPopup } from '../../components/SignOffPopup';
 import { getCase } from '../../api/cases';
 import { letterFilename } from '../../lib/letterFilename';
 import { ConflictError, ServiceUnavailableError, SurgicalEditUnappliableError } from '../../api/client';
@@ -20,6 +21,25 @@ import {
   type LetterWarning,
   type SurgicalProposal,
 } from '../../api/letter';
+
+// Turns an approve failure into an actionable physician-facing message. The render Lambda being
+// unconfigured surfaces as a 503 (ServiceUnavailableError); the approve gates are 409s carrying a
+// `details.reason` on ConflictError.current (sign_off_required / chart_not_ready / etc.). The
+// chart-readiness 409 uses error CODE 'chart_not_ready' and its details carry `blockingFiles`
+// rather than a `reason`, so detect either form. (architect diagnosis 2026-06-08)
+export function describeApproveError(error: unknown): string {
+  if (error instanceof ServiceUnavailableError) return 'Letter render is not available in this environment.';
+  if (error instanceof ConflictError) {
+    const details = error.current as { reason?: string; blockingFiles?: unknown } | undefined;
+    const reason = details?.reason;
+    if (reason === 'sign_off_required') return 'Sign off on the letter before approving.';
+    if (reason === 'sign_off_not_affirmative') return 'The sign-off has a "No" answer — resolve it or send the case back to the RN before approving.';
+    if (reason === 'chart_not_ready' || (Array.isArray(details?.blockingFiles) && details.blockingFiles.length > 0)) {
+      return "The chart isn't ready yet — finish reviewing the records, then approve.";
+    }
+  }
+  return 'Letter could not be approved (a sign-off + a ready chart are required). Please retry.';
+}
 
 function WarningList({ warnings }: { readonly warnings: readonly LetterWarning[] }) {
   if (warnings.length === 0) return null;
@@ -52,6 +72,7 @@ export function LetterEditorPage() {
   const [proposalCostUsd, setProposalCostUsd] = useState<number | null>(null);
   const [declineOpen, setDeclineOpen] = useState(false);
   const [declineReason, setDeclineReason] = useState('');
+  const [signOffOpen, setSignOffOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const navigate = useNavigate();
 
@@ -65,6 +86,9 @@ export function LetterEditorPage() {
   const role = letter?.role;
   const canOpsEdit = role === 'ops_staff' || role === 'admin';
   const canPhysicianAct = role === 'physician' || role === 'admin';
+  // "/cases/:id" is admin/ops-only (App.tsx) — a physician landing there hits the role guard → /403.
+  // Route a physician back to their review page instead (same target as the physician queue's Review link).
+  const backTo = role === 'physician' ? `/p/review/${encodeURIComponent(caseId)}` : `/cases/${encodeURIComponent(caseId)}`;
 
   // Case detail (veteran name + condition) drives the filename-style title. Read-only; if it
   // hasn't loaded yet we fall back to a generic title.
@@ -159,7 +183,11 @@ export function LetterEditorPage() {
       ]);
       navigate('/p/queue'); // back to the physician queue after approving (Ryan 2026-06-04)
     },
-    onError: (error: unknown) => setMessage(error instanceof ServiceUnavailableError ? 'Letter render is not available in this environment.' : 'Letter could not be approved (a sign-off + a ready chart are required). Please retry.'),
+    // Split the failure by the backend's reason so the physician sees an ACTIONABLE message,
+    // not a lumped "sign-off + ready chart required" guess. The render Lambda being unconfigured
+    // is a 503; the sign-off + chart gates are 409s whose `details.reason` (carried on
+    // ConflictError.current) names the exact block. (architect diagnosis 2026-06-08)
+    onError: (error: unknown) => setMessage(describeApproveError(error)),
   });
 
   const declineMutation = useMutation({
@@ -197,7 +225,7 @@ export function LetterEditorPage() {
         <Card className="p-6">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <Link to={`/cases/${encodeURIComponent(caseId)}`} className="text-sm text-slate-500 hover:text-slate-800">Back to case</Link>
+              <Link to={backTo} className="text-sm text-slate-500 hover:text-slate-800">Back to case</Link>
               <h1 className="mt-2 text-2xl font-semibold text-slate-950" title="Last name, first name, condition, version">{fileName ?? 'Letter'}</h1>
               <p className="mt-1 text-sm text-slate-600">Version {baseVersion ?? letter.version} &middot; {role}</p>
             </div>
@@ -205,8 +233,8 @@ export function LetterEditorPage() {
               <Button type="button" variant="secondary" onClick={() => setZoom((z) => Math.max(0.8, Math.round((z - 0.1) * 10) / 10))}>Zoom out</Button>
               <Button type="button" variant="secondary" onClick={() => setZoom((z) => Math.min(1.4, Math.round((z + 0.1) * 10) / 10))}>Zoom in</Button>
               {letter.rendered.pdfUrl ? <a href={letter.rendered.pdfUrl} target="_blank" rel="noreferrer"><Button type="button" variant="secondary">Open PDF</Button></a> : null}
-              {letter.rendered.docxUrl ? <a href={letter.rendered.docxUrl} target="_blank" rel="noreferrer"><Button type="button" variant="secondary">Open DOCX</Button></a> : null}
-              <Button type="button" variant="secondary" onClick={() => navigate(`/cases/${encodeURIComponent(caseId)}`)}>Close</Button>
+              {letter.rendered.docxUrl ? <a href={letter.rendered.docxUrl} target="_blank" rel="noreferrer"><Button type="button" variant="secondary" title="Downloads the editable Word source of the letter">Download Word (.docx)</Button></a> : null}
+              <Button type="button" variant="secondary" onClick={() => navigate(backTo)}>Close</Button>
             </div>
           </div>
         </Card>
@@ -221,8 +249,12 @@ export function LetterEditorPage() {
             {canOpsEdit || canPhysicianAct ? (
               <Card className="p-6">
                 <h2 className="text-base font-semibold text-slate-900">Editing</h2>
-                <p className="mt-1 text-sm text-slate-600">Type directly in the letter (locked regions are greyed). Save creates a new version.</p>
-                <Button type="button" variant="primary" className="mt-4 w-full" loading={saveMutation.isPending} disabled={saveMutation.isPending} onClick={() => saveMutation.mutate()}>Save new version</Button>
+                <p className="mt-1 text-sm text-slate-600">Type directly in the letter (locked regions are greyed).</p>
+                <p className="mt-2 text-sm text-slate-600">Save creates a new version of the letter. It does <span className="font-medium">not</span> send it back to the RN — use {canPhysicianAct ? '“Decline and send back to RN” below' : 'the send-back action'} for that.</p>
+                {/* Disabled until the loaded version commits (the useEffect that sets baseVersion
+                    runs after first paint). Without this a click in that window throws "Letter
+                    version is missing" and silently no-ops the save. (architect de-flake 2026-06-08.) */}
+                <Button type="button" variant="primary" className="mt-4 w-full" loading={saveMutation.isPending} disabled={saveMutation.isPending || baseVersion === null} onClick={() => saveMutation.mutate()}>Save new version</Button>
               </Card>
             ) : null}
 
@@ -250,10 +282,15 @@ export function LetterEditorPage() {
                   </div>
                 ) : null}
 
-                {/* Approve / Decline — physician (or admin) only; an RN never signs off a letter. */}
+                {/* Approve / Decline — physician (or admin) only; an RN never signs off a letter.
+                    Approve OPENS the sign-off popup first (the backend /approve 409s with
+                    sign_off_required unless a sign-off exists). On a successful sign-off we chain
+                    the approve mutation — mirrors PhysicianReviewPage's onSignedOff. (architect
+                    diagnosis 2026-06-08: the bare Approve button always 409'd because no sign-off
+                    UI existed here.) */}
                 {canPhysicianAct ? (
                   <div className="mt-6 flex flex-col gap-2 border-t border-slate-200 pt-4">
-                    <Button type="button" variant="primary" className="w-full" loading={approveMutation.isPending} disabled={approveMutation.isPending} onClick={() => approveMutation.mutate()}>Approve letter</Button>
+                    <Button type="button" variant="primary" className="w-full" loading={approveMutation.isPending} disabled={approveMutation.isPending} onClick={() => setSignOffOpen(true)}>Approve letter</Button>
                     <Button type="button" variant="secondary" className="w-full" onClick={() => setDeclineOpen(true)}>Decline and send back to RN</Button>
                   </div>
                 ) : null}
@@ -261,6 +298,23 @@ export function LetterEditorPage() {
             ) : null}
           </aside>
         </div>
+
+        {/* Physician sign-off → approve. The popup RECORDS the sign-off; onSignedOff then chains
+            the approve mutation (finalize → 'delivered' → back to the queue). Same wiring as
+            PhysicianReviewPage. */}
+        {canPhysicianAct ? (
+          <SignOffPopup
+            caseId={caseId}
+            open={signOffOpen}
+            onClose={() => setSignOffOpen(false)}
+            onSignedOff={async () => {
+              // Chain finalize after the sign-off is recorded. approveMutation.onError already sets
+              // an actionable message (e.g. chart not ready); swallow the rejection here so the
+              // popup's onSuccess doesn't surface a duplicate/unhandled error.
+              try { await approveMutation.mutateAsync(); } catch { /* handled by approveMutation.onError */ }
+            }}
+          />
+        ) : null}
 
         {declineOpen ? (
           <div role="dialog" aria-modal="true" aria-labelledby="decline-letter-title">

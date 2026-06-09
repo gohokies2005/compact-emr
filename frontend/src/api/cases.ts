@@ -94,6 +94,9 @@ export async function createCase(veteranId: string, input: CreateCaseInput): Pro
 }
 
 export interface CaseDetail extends Case {
+  readonly quickNote?: string | null;
+  readonly quickNoteBy?: string | null;
+  readonly quickNoteAt?: string | null;
   readonly veteran?: CaseVeteranLite | null;
   readonly assignedPhysician?: CasePhysicianLite | null;
   readonly assignedRn?: AssignedRnLite | null;

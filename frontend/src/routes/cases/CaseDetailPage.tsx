@@ -41,7 +41,7 @@ import { SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone, formatNameLastFirst } from '../../lib/format';
 import {
-  deleteCase, getCase, listDraftJobs, patchCase, transitionCaseStatus,
+  deleteCase, getCase, listDraftJobs, patchCase, transitionCaseStatus, updateQuickNote,
   type CaseDetail, type PatchCaseInput, type TransitionInput,
 } from '../../api/cases';
 import type { CaseStatus, Role } from '../../types/prisma';
@@ -130,6 +130,17 @@ export function CaseDetailPage() {
     mutationFn: (input: PatchCaseInput) => patchCase(caseId, input),
     onSuccess: () => refetch(),
     onError: async (err) => { if (err instanceof ConflictError) { await refetch(); window.alert('This case was modified elsewhere. Reloaded the latest version — please retry your edit.'); } },
+  });
+
+  // Sticky scratch-note on the case (Epic/Cerner-style) — the team's free-text tracker, e.g.
+  // "Awaiting records — VA C-file requested 6/8". Replaces the phantom "Move to needs records" button
+  // (Ryan 2026-06-08): a records gap is a note someone tracks, not a status flip.
+  const [noteEditing, setNoteEditing] = useState(false);
+  const [noteDraft, setNoteDraft] = useState('');
+  const noteMut = useMutation({
+    mutationFn: (note: string) => updateQuickNote(caseId, note),
+    onSuccess: () => { refetch(); setNoteEditing(false); },
+    onError: (e: unknown) => window.alert(`Could not save the note — ${describeApiError(e)}.`),
   });
 
   const del = useMutation({
@@ -276,6 +287,24 @@ export function CaseDetailPage() {
             return bits.length ? <p className="mt-2 text-sm text-steel">{bits.join('  ·  ')}</p> : null;
           })()}
           <p className="mt-1 text-xs text-harbor">Case {c.id} · {c.claimType} · <Link className="text-navy" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>chart</Link> · updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
+          {/* Sticky scratch-note — the team's free-text tracker (e.g. "Awaiting records — C-file requested
+              6/8"). The positive replacement for the old phantom "Move to needs records" button. */}
+          <div className="mt-3">
+            {noteEditing ? (
+              <div className="flex items-start gap-2">
+                <textarea className="input min-h-[2.5rem] max-w-xl flex-1" value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} placeholder="e.g. Awaiting records — VA C-file requested 6/8" autoFocus />
+                <RowAction onClick={() => noteMut.mutate(noteDraft.trim())} disabled={noteMut.isPending}>Save</RowAction>
+                <RowAction kind="danger" onClick={() => setNoteEditing(false)}>Cancel</RowAction>
+              </div>
+            ) : c.quickNote ? (
+              <button type="button" onClick={() => { setNoteDraft(c.quickNote ?? ''); setNoteEditing(true); }} className="inline-flex max-w-xl items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-left text-sm text-amber-900 hover:bg-amber-100" title="Edit note">
+                <span className="mt-px text-[10px] font-semibold uppercase tracking-wide text-amber-700">Note</span>
+                <span>{c.quickNote}{c.quickNoteBy ? <span className="ml-1 text-xs text-amber-700/70">— {c.quickNoteBy}{c.quickNoteAt ? ` · ${formatRelativeTime(c.quickNoteAt)}` : ''}</span> : null}</span>
+              </button>
+            ) : (
+              <button type="button" onClick={() => { setNoteDraft(''); setNoteEditing(true); }} className="text-xs font-medium text-steel hover:text-navy">+ Add a note (e.g. awaiting records)</button>
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap items-start gap-2">
           {/* View letter only when the review panel (which has its own "Open PDF") isn't showing —

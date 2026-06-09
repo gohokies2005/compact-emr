@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { Button } from './ui/Button';
-import { Card } from './ui/Card';
+import { TabSection } from './ui/TabSection';
+import { StatusChip } from './ui/StatusChip';
 import { EmptyState } from './ui/EmptyState';
 import { Spinner } from './ui/Spinner';
 import { ForbiddenError } from '../api/client';
@@ -109,28 +110,29 @@ export function CaseMessagesPanel({ caseId, assignedRn, assignedPhysician }: Cas
 
   if (threadsQuery.isError && threadsQuery.error instanceof ForbiddenError) {
     return (
-      <Card>
+      <TabSection bodyClassName="p-6">
         <EmptyState message="Messages are not available for this case." />
-      </Card>
+      </TabSection>
     );
   }
 
   return (
-    <Card>
+    <TabSection>
+      <div className="p-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <h2 className="text-base font-semibold text-slate-900">Case messages</h2>
+            <h2 className="text-base font-semibold text-navyDeep">Case messages</h2>
             {unreadCount > 0 ? (
-              <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-medium text-blue-800">{`${unreadCount} unread`}</span>
+              <StatusChip tone="info">{`${unreadCount} unread`}</StatusChip>
             ) : null}
           </div>
-          <p className="mt-1 text-sm text-slate-600">
+          <p className="mt-1 text-sm text-steel">
             Staff threads linked to this case. RN and physician collaboration; clinical details are allowed here.
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <Link to="/inbox" className="text-sm font-medium text-indigo-600 hover:text-indigo-700">
+          <Link to="/inbox" className="text-sm font-medium text-navy hover:text-navyDeep">
             Open in Inbox →
           </Link>
           <Button type="button" variant="primary" onClick={() => setComposing(true)}>
@@ -140,7 +142,7 @@ export function CaseMessagesPanel({ caseId, assignedRn, assignedPhysician }: Cas
       </div>
 
       {threadsQuery.isLoading ? (
-        <div className="mt-6 flex items-center gap-2 text-sm text-slate-500">
+        <div className="mt-6 flex items-center gap-2 text-sm text-steel">
           <Spinner />
           Loading messages
         </div>
@@ -163,20 +165,20 @@ export function CaseMessagesPanel({ caseId, assignedRn, assignedPhysician }: Cas
               aria-current={t.threadId === activeThreadId ? 'true' : undefined}
               className={`flex w-full flex-col gap-0.5 rounded-lg border px-3 py-2 text-left transition ${
                 t.threadId === activeThreadId
-                  ? 'border-indigo-300 bg-indigo-50'
-                  : 'border-slate-200 bg-white hover:bg-slate-50'
+                  ? 'border-aegis bg-navy/10'
+                  : 'border-aegis bg-ivory hover:bg-mistSoft'
               }`}
             >
               <div className="flex items-center gap-2">
-                {t.unread ? <span className="h-2 w-2 shrink-0 rounded-full bg-indigo-500" aria-label="Unread" /> : null}
+                {t.unread ? <span className="h-2 w-2 shrink-0 rounded-full bg-navy" aria-label="Unread" /> : null}
                 <span
-                  className={`flex-1 truncate text-sm ${t.unread ? 'font-semibold text-slate-900' : 'font-medium text-slate-700'}`}
+                  className={`flex-1 truncate text-sm ${t.unread ? 'font-semibold text-navyDeep' : 'font-medium text-slateInk'}`}
                 >
                   {t.subject ?? '(no subject)'}
                 </span>
-                <span className="shrink-0 text-xs text-slate-400">{formatRelativeTime(t.lastMessageAt)}</span>
+                <span className="shrink-0 text-xs text-steel">{formatRelativeTime(t.lastMessageAt)}</span>
               </div>
-              <p className="truncate text-xs text-slate-500">
+              <p className="truncate text-xs text-steel">
                 {senderLabel(t.lastAuthorSub, directory)}: {t.lastMessageBody}
               </p>
             </button>
@@ -188,7 +190,7 @@ export function CaseMessagesPanel({ caseId, assignedRn, assignedPhysician }: Cas
         <ThreadView
           threadId={activeThreadId}
           directory={directory}
-          className="mt-6 border-t border-slate-200 pt-6"
+          className="mt-6 border-t border-aegis pt-6"
           onReplied={() => threadsQuery.refetch()}
         />
       ) : null}
@@ -205,6 +207,7 @@ export function CaseMessagesPanel({ caseId, assignedRn, assignedPhysician }: Cas
           }}
         />
       ) : null}
-    </Card>
+      </div>
+    </TabSection>
   );
 }

@@ -5,6 +5,10 @@ import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
+import { TabSection } from '../../components/ui/TabSection';
+import { DataRow } from '../../components/ui/DataRow';
+import { StatusChip, type ChipTone } from '../../components/ui/StatusChip';
+import { RowAction } from '../../components/ui/RowAction';
 import { TabBar, type TabItem } from '../../components/ui/TabBar';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { ClarificationsPanel } from '../../components/ClarificationsPanel';
@@ -504,7 +508,7 @@ function OverviewTab({ c, onSave, saving }: { readonly c: CaseDetail; readonly o
   // old client-side sum over the truncated take:5 c.draftJobs list missed older cost-bearing runs
   // and showed "—" (Ryan 2026-06-04). null === no recorded cost on any job → honest "—".
   const draftingCost = c.draftingCostUsd ?? null;
-  return <div className="divide-y divide-slate-100">
+  return <div className="divide-y divide-aegis">
     <InlineEditRow label="Framing" value={c.framingChoice ?? ''} saving={saving} onSave={(v) => onSave('framingChoice', v)} />
     <InlineEditRow label="Upstream SC condition" value={c.upstreamScCondition ?? ''} saving={saving} onSave={(v) => onSave('upstreamScCondition', v)} />
     <InlineEditRow label="Veteran statement" value={c.veteranStatement ?? ''} multiline saving={saving} onSave={(v) => onSave('veteranStatement', v)} />
@@ -527,8 +531,8 @@ function InlineEditRow({ label, value, multiline = false, saving, onSave }: { re
     <div className="flex items-start justify-between gap-4">
       <span className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</span>
       {editing
-        ? <div className="flex gap-2"><button type="button" className="text-xs text-slate-500" onClick={() => setEditing(false)}>Cancel</button><button type="button" className="text-xs text-indigo-600" onClick={save} disabled={saving}>Save</button></div>
-        : <button type="button" aria-label={`Edit ${label}`} className="text-xs text-indigo-600" onClick={start}>Edit</button>}
+        ? <div className="flex gap-2"><RowAction className="text-steel hover:text-slateInk" onClick={() => setEditing(false)}>Cancel</RowAction><RowAction onClick={save} disabled={saving}>Save</RowAction></div>
+        : <RowAction aria-label={`Edit ${label}`} onClick={start}>Edit</RowAction>}
     </div>
     {editing
       ? (multiline
@@ -574,7 +578,7 @@ function DraftJobsTab({ caseId }: { readonly caseId: string }) {
       window.alert('No letter PDF for that version — it may not have finished drafting.');
     }
   }
-  if (q.isLoading) return <div className="text-sm text-slate-500">Loading draft jobs…</div>;
+  if (q.isLoading) return <div className="text-sm text-steel">Loading draft jobs…</div>;
   const rows = q.data?.data ?? [];
   if (!rows.length) return <EmptyState title="No draft jobs" message="No drafting runs have been enqueued for this case." />;
   // Rows arrive version-desc (newest first). The raw DB version is inflated by the /draft pileup
@@ -582,7 +586,47 @@ function DraftJobsTab({ caseId }: { readonly caseId: string }) {
   // oldest run = "Draft #1" … newest = "Draft #N". attempt = rows.length - index. The raw version
   // stays visible (muted + tooltip) for traceability — View letter still uses jobId, not this.
   const total = rows.length;
-  return <div className="overflow-hidden rounded-lg border border-slate-200"><table className="min-w-full divide-y divide-slate-200 text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-2">Draft</th><th className="px-4 py-2">State</th><th className="px-4 py-2">Enqueued</th><th className="px-4 py-2">Started</th><th className="px-4 py-2">Completed</th><th className="px-4 py-2">Letter</th></tr></thead><tbody className="divide-y divide-slate-100">{rows.map((d, i) => { const viewable = d.state === 'done' || d.state === 'failed'; return <tr key={d.id} className={`hover:bg-slate-50 ${viewable ? 'cursor-pointer' : ''}`} onClick={viewable ? () => viewVersion(d.id) : undefined}><td className="px-4 py-2"><span className="font-medium text-slate-800">Draft #{total - i}</span> <span className="ml-1 text-xs text-slate-400" title={`Internal letter version ${d.version}`}>v{d.version}</span></td><td className="px-4 py-2">{d.state}</td><td className="px-4 py-2 text-slate-500">{formatRelativeTime(d.enqueuedAt)}</td><td className="px-4 py-2 text-slate-500">{d.startedAt ? formatRelativeTime(d.startedAt) : '—'}</td><td className="px-4 py-2 text-slate-500">{d.completedAt ? formatRelativeTime(d.completedAt) : '—'}</td><td className="px-4 py-2">{viewable ? <button type="button" className="font-medium text-indigo-600 hover:underline" onClick={(e) => { e.stopPropagation(); viewVersion(d.id); }}>View letter</button> : <span className="text-slate-400">—</span>}</td></tr>; })}</tbody></table></div>;
+  return (
+    <TabSection>
+      {rows.map((d, i) => {
+        const viewable = d.state === 'done' || d.state === 'failed';
+        const meta = [
+          `enqueued ${formatRelativeTime(d.enqueuedAt)}`,
+          d.startedAt ? `started ${formatRelativeTime(d.startedAt)}` : null,
+          d.completedAt ? `completed ${formatRelativeTime(d.completedAt)}` : null,
+        ].filter(Boolean).join(' · ');
+        return (
+          <DataRow
+            key={d.id}
+            {...(viewable ? { onClick: () => viewVersion(d.id) } : {})}
+            lead={<><span className="font-medium text-slateInk">Draft #{total - i}</span> <span className="ml-1 text-xs text-steel" title={`Internal letter version ${d.version}`}>v{d.version}</span></>}
+            meta={meta}
+            trailing={
+              <>
+                <StatusChip tone={draftStateTone(d.state)}>{d.state}</StatusChip>
+                {viewable ? <RowAction onClick={(e) => { e.stopPropagation(); viewVersion(d.id); }}>View letter</RowAction> : null}
+              </>
+            }
+          />
+        );
+      })}
+    </TabSection>
+  );
+}
+
+// Draft-job state → Aegis chip tone. done = good, failed/cancelled = bad, running = active,
+// queued = info, halted = warn, anything else = neutral.
+function draftStateTone(state: string): ChipTone {
+  switch (state) {
+    case 'done': return 'good';
+    case 'failed':
+    case 'cancelled':
+    case 'canceled': return 'bad';
+    case 'running': return 'active';
+    case 'queued': return 'info';
+    case 'halted': return 'warn';
+    default: return 'neutral';
+  }
 }
 
 // Veteran clinical-chart sections, mounted on the case page. Fetches the same veteran detail the
@@ -608,29 +652,31 @@ function DocumentsTab({ veteranId, caseId }: { readonly veteranId: string; reado
   const all = q.data?.data ?? [];
   const docs = all.filter((d) => d.caseId === caseId); // this claim's files
   return (
-    <div className="rounded-lg border border-slate-200 bg-white">
-      <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-        <h3 className="text-sm font-semibold text-slate-800">Documents on this claim</h3>
-        <Link className="text-xs text-indigo-600 hover:underline" to={`/veterans/${encodeURIComponent(veteranId)}#documents`}>Manage all veteran documents →</Link>
-      </div>
-      {q.isLoading ? (
-        <div className="p-6 text-sm text-slate-500">Loading documents…</div>
-      ) : docs.length === 0 ? (
-        <EmptyState title="No documents on this claim" message="Files assigned to this claim (including the auto-generated Intake Summary) appear here. Click any file to view it in-page." />
-      ) : (
-        <div className="divide-y divide-slate-100">
-          {docs.map((d) => (
-            <div key={d.id} className="flex items-center justify-between gap-3 px-4 py-3 text-sm">
-              <button className="flex flex-1 items-center justify-between gap-3 text-left hover:bg-slate-50" onClick={() => setViewDoc({ id: d.id, filename: d.filename, contentType: d.contentType })}>
-                <span className="text-indigo-700">{d.filename}</span>
-                <span className="text-slate-500">{d.docTag ?? 'Other'} · {formatRelativeTime(d.uploadedAt)}</span>
-              </button>
-              <button type="button" className="shrink-0 text-xs font-medium text-slate-500 hover:text-indigo-600 disabled:opacity-50" disabled={reocr.isPending} title="Re-run OCR (Textract → Claude fallback) — use if this file shows as unreadable" onClick={() => reocr.mutate(d.id)}>Re-run OCR</button>
-            </div>
-          ))}
-        </div>
-      )}
+    <>
+      <TabSection
+        title="Documents on this claim"
+        action={<Link className="text-xs font-medium text-navy transition-colors hover:text-navyDeep" to={`/veterans/${encodeURIComponent(veteranId)}#documents`}>Manage all veteran documents →</Link>}
+        {...(q.isLoading || docs.length === 0 ? { bodyClassName: 'p-4' } : {})}
+      >
+        {q.isLoading ? (
+          <div className="text-sm text-steel">Loading documents…</div>
+        ) : docs.length === 0 ? (
+          <EmptyState title="No documents on this claim" message="Files assigned to this claim (including the auto-generated Intake Summary) appear here. Click any file to view it in-page." />
+        ) : (
+          docs.map((d) => (
+            <DataRow
+              key={d.id}
+              onClick={() => setViewDoc({ id: d.id, filename: d.filename, contentType: d.contentType })}
+              lead={d.filename}
+              meta={`${d.docTag ?? 'Other'} · ${formatRelativeTime(d.uploadedAt)}`}
+              trailing={
+                <RowAction disabled={reocr.isPending} title="Re-run OCR (Textract → Claude fallback) — use if this file shows as unreadable" onClick={(e) => { e.stopPropagation(); reocr.mutate(d.id); }}>Re-run OCR</RowAction>
+              }
+            />
+          ))
+        )}
+      </TabSection>
       <PdfViewerModal doc={viewDoc} onClose={() => setViewDoc(null)} />
-    </div>
+    </>
   );
 }

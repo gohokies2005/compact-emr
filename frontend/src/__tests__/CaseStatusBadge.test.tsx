@@ -9,10 +9,11 @@ describe('CaseStatusBadge', () => {
   });
 
   it('applies the status color token', () => {
+    // `paid` maps onto the shared StatusChip `good` tone (Aegis emerald) — chip palette unified.
     render(<CaseStatusBadge status="paid" />);
     const badge = screen.getByText('Paid');
-    expect(badge.className).toContain('bg-emerald-200');
-    expect(badge.className).toContain('font-semibold');
+    expect(badge.className).toContain('bg-emerald-50');
+    expect(badge.className).toContain('text-emerald-700');
   });
 
   it('merges a caller className', () => {

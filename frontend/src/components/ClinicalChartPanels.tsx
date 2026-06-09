@@ -2,6 +2,10 @@ import { useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
+import { TabSection } from './ui/TabSection';
+import { DataRow } from './ui/DataRow';
+import { StatusChip, type ChipTone } from './ui/StatusChip';
+import { RowAction } from './ui/RowAction';
 import { ConditionSelect } from './ConditionSelect';
 import { ConflictError } from '../api/client';
 import {
@@ -51,6 +55,15 @@ function scStatusClass(status: ScConditionStatus): string {
   if (status === 'denied') return 'text-rose-700';
   return 'text-emerald-700';
 }
+// Chip tone mirroring the claim status: established SC = good, denied = bad, pending = warn.
+function scStatusTone(status: ScConditionStatus): ChipTone {
+  if (status === 'pending') return 'warn';
+  if (status === 'denied') return 'bad';
+  return 'good';
+}
+function scStatusLabel(status: ScConditionStatus): string {
+  return SC_STATUS_OPTIONS.find((o) => o.value === status)?.label ?? status;
+}
 
 export function ConditionsPanel({ veteranId, rows, onChange }: { readonly veteranId: string; readonly rows: readonly ScCondition[]; readonly onChange: () => Promise<void> }) {
   const [condition, setCondition] = useState(''); const [dcCode, setDcCode] = useState(''); const [status, setStatus] = useState<ScConditionStatus>('service_connected');
@@ -65,7 +78,7 @@ export function ConditionsPanel({ veteranId, rows, onChange }: { readonly vetera
     </div>
     {rows.length === 0
       ? <EmptyState title="Nothing recorded yet" message="Add the first condition above." />
-      : <div className="divide-y divide-slate-100">{dedupByCondition(rows, (r) => r.condition, (r) => r.status).map((r) => <ScConditionRow key={r.id} row={r} onChange={onChange} onDelete={() => { if (window.confirm('Remove this SC condition?')) del.mutate(r.id); }} />)}</div>}
+      : <TabSection>{dedupByCondition(rows, (r) => r.condition, (r) => r.status).map((r) => <ScConditionRow key={r.id} row={r} onChange={onChange} onDelete={() => { if (window.confirm('Remove this SC condition?')) del.mutate(r.id); }} />)}</TabSection>}
   </div>;
 }
 
@@ -77,13 +90,16 @@ function ScConditionRow({ row, onChange, onDelete }: { readonly row: ScCondition
     onSuccess: () => onChange(),
     onError: async (err) => { if (err instanceof ConflictError) { await onChange(); window.alert('This condition was updated elsewhere. Reloaded — please retry.'); } },
   });
-  return <div className="flex items-center justify-between py-3 text-sm">
-    <div className="flex gap-6 text-slate-700"><span>{row.condition}</span>{row.dcCode ? <span className="text-slate-500">DC {row.dcCode}</span> : null}{row.ratingPct != null ? <span className="text-slate-500">{row.ratingPct}%</span> : null}</div>
-    <div className="flex items-center gap-4">
+  const meta = [row.dcCode ? `DC ${row.dcCode}` : null, row.ratingPct != null ? `${row.ratingPct}%` : null].filter(Boolean).join(' · ');
+  return <DataRow
+    lead={row.condition}
+    {...(meta ? { meta } : {})}
+    trailing={<>
+      <StatusChip tone={scStatusTone(row.status)}>{scStatusLabel(row.status)}</StatusChip>
       <select className={`input w-48 text-xs font-medium ${scStatusClass(row.status)}`} value={row.status} disabled={update.isPending} onChange={(e) => update.mutate(e.target.value as ScConditionStatus)} aria-label={`Claim status for ${row.condition}`}>{SC_STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
-      <button className="text-rose-600" onClick={onDelete}>Delete</button>
-    </div>
-  </div>;
+      <RowAction kind="danger" onClick={onDelete}>Delete</RowAction>
+    </>}
+  />;
 }
 
 export function ProblemsPanel({ veteranId, rows, onChange }: { readonly veteranId: string; readonly rows: readonly ActiveProblem[]; readonly onChange: () => Promise<void> }) {
@@ -96,4 +112,15 @@ export function MedicationsPanel({ veteranId, rows, onChange }: { readonly veter
   return <div className="space-y-4"><div className="flex gap-2"><input className="input" placeholder="Medication" value={drugName} onChange={(e) => setDrugName(e.target.value)} /><Button size="sm" onClick={() => add.mutate()} disabled={!drugName}>Add</Button></div><Rows rows={rows.map((r) => ({ id: r.id, cols: [r.drugName, r.dose ?? '', r.frequency ?? ''], onDelete: () => { if (window.confirm('Remove this medication?')) del.mutate(r.id); } }))} /></div>;
 }
 
-function Rows({ rows }: { readonly rows: readonly { readonly id: string; readonly cols: readonly string[]; readonly onDelete: () => void }[] }) { if (!rows.length) return <EmptyState title="Nothing recorded yet" message="Add the first item above." />; return <div className="divide-y divide-slate-100">{rows.map((r) => <div className="flex items-center justify-between py-3 text-sm" key={r.id}><div className="flex gap-6 text-slate-700">{r.cols.map((c, i) => <span key={`${r.id}-${i}`}>{c}</span>)}</div><button className="text-rose-600" onClick={r.onDelete}>Delete</button></div>)}</div>; }
+function Rows({ rows }: { readonly rows: readonly { readonly id: string; readonly cols: readonly string[]; readonly onDelete: () => void }[] }) {
+  if (!rows.length) return <EmptyState title="Nothing recorded yet" message="Add the first item above." />;
+  return <TabSection>{rows.map((r) => {
+    const meta = r.cols.slice(1).filter((c) => c.length > 0).join(' · ');
+    return <DataRow
+      key={r.id}
+      lead={r.cols[0] ?? ''}
+      {...(meta ? { meta } : {})}
+      trailing={<RowAction kind="danger" onClick={r.onDelete}>Delete</RowAction>}
+    />;
+  })}</TabSection>;
+}

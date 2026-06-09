@@ -3,6 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { Spinner } from './ui/Spinner';
+import { TabSection } from './ui/TabSection';
+import { StatusChip, type ChipTone } from './ui/StatusChip';
 import { ConflictError } from '../api/client';
 import {
   createClarification,
@@ -28,15 +30,16 @@ const AUDIENCE_OPTIONS: readonly {
   readonly label: string;
   readonly className: string;
 }[] = [
-  { value: 'physician', label: 'Physician', className: 'border-indigo-200 bg-indigo-50 text-indigo-700' },
-  { value: 'ops_staff', label: 'Ops staff', className: 'border-slate-200 bg-slate-100 text-slate-700' },
-  { value: 'veteran',   label: 'Veteran',   className: 'border-blue-200 bg-blue-50 text-blue-700' },
+  { value: 'physician', label: 'Physician', className: 'border-aegis bg-navy/10 text-navyDeep' },
+  { value: 'ops_staff', label: 'Ops staff', className: 'border-aegis bg-mist text-navyDeep' },
+  { value: 'veteran',   label: 'Veteran',   className: 'border-aegis bg-mistSoft text-navy' },
 ];
 
-const STATUS_CLASSES: Record<ClarificationStatus, string> = {
-  open: 'border-amber-200 bg-amber-50 text-amber-700',
-  resolved: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  dismissed: 'border-slate-200 bg-slate-100 text-slate-700',
+// Status pill tone: open clarifications still need attention (warn), closed ones are settled (good/neutral).
+const STATUS_TONE: Record<ClarificationStatus, ChipTone> = {
+  open: 'warn',
+  resolved: 'good',
+  dismissed: 'neutral',
 };
 
 interface ClarificationsPanelProps {
@@ -149,11 +152,12 @@ export function ClarificationsPanel({ caseId }: ClarificationsPanelProps) {
   }
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+    <TabSection>
+      <div className="p-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold text-slate-800">Clarifications</h2>
-          <p className="mt-1 text-sm text-slate-500">Raise, track, and resolve case-specific clarification requests.</p>
+          <h2 className="text-base font-semibold text-navyDeep">Clarifications</h2>
+          <p className="mt-1 text-sm text-steel">Raise, track, and resolve case-specific clarification requests.</p>
         </div>
         <Button type="button" variant="primary" onClick={() => setShowForm((c) => !c)}>Raise clarification</Button>
       </div>
@@ -161,20 +165,20 @@ export function ClarificationsPanel({ caseId }: ClarificationsPanelProps) {
       <div className="mt-4 flex flex-wrap gap-2">
         {FILTERS.map((option) => (
           <button key={option.value} type="button" onClick={() => setFilter(option.value)}
-            className={`rounded-full border px-3 py-1 text-sm ${filter === option.value ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}>
+            className={`rounded-full border px-3 py-1 text-sm ${filter === option.value ? 'border-aegis bg-navy/10 text-navyDeep' : 'border-aegis bg-ivory text-steel hover:bg-mistSoft'}`}>
             {option.label}
           </button>
         ))}
       </div>
 
       {showForm ? (
-        <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+        <div className="mt-4 rounded-lg border border-aegis bg-foam p-4">
           <div>
-            <div className="text-sm font-medium text-slate-800">Audience</div>
+            <div className="text-sm font-medium text-navyDeep">Audience</div>
             <div className="mt-2 flex flex-wrap gap-2">
               {AUDIENCE_OPTIONS.map((option) => (
                 <button key={option.value} type="button" onClick={() => setAudience(option.value)}
-                  className={`rounded-full border px-3 py-1 text-sm ${audience === option.value ? option.className : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}>
+                  className={`rounded-full border px-3 py-1 text-sm ${audience === option.value ? option.className : 'border-aegis bg-ivory text-steel hover:bg-mistSoft'}`}>
                   {option.label}
                 </button>
               ))}
@@ -182,17 +186,17 @@ export function ClarificationsPanel({ caseId }: ClarificationsPanelProps) {
           </div>
 
           {audience === 'veteran' ? (
-            <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
+            <div className="mt-4 rounded-lg border border-aegis bg-mistSoft p-3 text-sm text-navy">
               This will appear in the records request the veteran receives.
             </div>
           ) : null}
 
           <label className="mt-4 block">
-            <span className="text-sm font-medium text-slate-800">Question</span>
+            <span className="text-sm font-medium text-navyDeep">Question</span>
             <textarea value={question} onChange={(e) => setQuestion(e.target.value)} rows={4} maxLength={800}
-              className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+              className="mt-2 w-full rounded-lg border border-aegis px-3 py-2 text-sm text-slateInk shadow-sm focus:border-navy focus:outline-none focus:ring-2 focus:ring-mist"
               placeholder="What needs to be clarified before this case can move forward?" />
-            <span className="mt-1 block text-xs text-slate-500">{question.length}/800</span>
+            <span className="mt-1 block text-xs text-steel">{question.length}/800</span>
           </label>
 
           <div className="mt-4 flex justify-end gap-2">
@@ -211,7 +215,7 @@ export function ClarificationsPanel({ caseId }: ClarificationsPanelProps) {
       ) : null}
 
       {clarificationsQuery.isLoading ? (
-        <div className="mt-6 flex items-center gap-2 text-sm text-slate-500"><Spinner /> Loading clarifications</div>
+        <div className="mt-6 flex items-center gap-2 text-sm text-steel"><Spinner /> Loading clarifications</div>
       ) : null}
 
       {!clarificationsQuery.isLoading && visibleClarifications.length === 0 ? (
@@ -224,30 +228,28 @@ export function ClarificationsPanel({ caseId }: ClarificationsPanelProps) {
             const expanded = expandedIds.includes(clarification.id);
             const isOpen = clarification.status === 'open';
             return (
-              <article key={clarification.id} className="rounded-lg border border-slate-200 bg-white p-4">
+              <article key={clarification.id} className="rounded-lg border border-aegis bg-ivory p-4">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${audienceClassName(clarification.audience)}`}>
                         {audienceLabel(clarification.audience)}
                       </span>
-                      <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${STATUS_CLASSES[clarification.status]}`}>
-                        {statusLabel(clarification.status)}
-                      </span>
-                      <span className="text-xs text-slate-500">Raised {formatRelativeTime(clarification.createdAt)}</span>
+                      <StatusChip tone={STATUS_TONE[clarification.status]}>{statusLabel(clarification.status)}</StatusChip>
+                      <span className="text-xs text-steel">Raised {formatRelativeTime(clarification.createdAt)}</span>
                     </div>
-                    <p className="mt-3 whitespace-pre-wrap text-sm text-slate-800">{visibleQuestion(clarification.question, expanded)}</p>
+                    <p className="mt-3 whitespace-pre-wrap text-sm text-slateInk">{visibleQuestion(clarification.question, expanded)}</p>
                     {shouldTruncateQuestion(clarification.question) ? (
-                      <button type="button" onClick={() => toggleExpanded(clarification.id)} className="mt-2 text-sm font-medium text-slate-600 hover:text-slate-900">
+                      <button type="button" onClick={() => toggleExpanded(clarification.id)} className="mt-2 text-sm font-medium text-steel hover:text-navyDeep">
                         {expanded ? 'Show less' : 'Show more'}
                       </button>
                     ) : null}
                     {clarification.status !== 'open' ? (
-                      <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-                        <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Resolution</div>
-                        <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{clarification.resolution?.trim() || 'No resolution note provided.'}</p>
+                      <div className="mt-3 rounded-lg border border-aegis bg-foam p-3">
+                        <div className="text-xs font-medium uppercase tracking-wide text-steel">Resolution</div>
+                        <p className="mt-1 whitespace-pre-wrap text-sm text-slateInk">{clarification.resolution?.trim() || 'No resolution note provided.'}</p>
                         {clarification.resolvedAt ? (
-                          <p className="mt-2 text-xs text-slate-500">Closed {formatRelativeTime(clarification.resolvedAt)}</p>
+                          <p className="mt-2 text-xs text-steel">Closed {formatRelativeTime(clarification.resolvedAt)}</p>
                         ) : null}
                       </div>
                     ) : null}
@@ -267,18 +269,18 @@ export function ClarificationsPanel({ caseId }: ClarificationsPanelProps) {
 
       {resolving ? (
         <div role="dialog" aria-modal="true" aria-labelledby="resolve-clarification-title">
-          <div className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm" />
-          <div className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-lg bg-white p-6 shadow-2xl">
-            <h3 id="resolve-clarification-title" className="text-lg font-semibold text-slate-900">
+          <div className="fixed inset-0 z-40 bg-navyDeep/40 backdrop-blur-sm" />
+          <div className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-lg bg-ivory p-6 shadow-2xl">
+            <h3 id="resolve-clarification-title" className="text-lg font-semibold text-navyDeep">
               {resolutionStatus === 'resolved' ? 'Resolve clarification' : 'Dismiss clarification'}
             </h3>
-            <p className="mt-2 whitespace-pre-wrap text-sm text-slate-600">{resolving.question}</p>
+            <p className="mt-2 whitespace-pre-wrap text-sm text-steel">{resolving.question}</p>
             <label className="mt-4 block">
-              <span className="text-sm font-medium text-slate-800">Resolution note (optional)</span>
+              <span className="text-sm font-medium text-navyDeep">Resolution note (optional)</span>
               <textarea value={resolution} onChange={(e) => setResolution(e.target.value)} rows={4} maxLength={800}
-                className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                className="mt-2 w-full rounded-lg border border-aegis px-3 py-2 text-sm text-slateInk shadow-sm focus:border-navy focus:outline-none focus:ring-2 focus:ring-mist"
                 placeholder="Optional resolution note." />
-              <span className="mt-1 block text-xs text-slate-500">{resolution.length}/800</span>
+              <span className="mt-1 block text-xs text-steel">{resolution.length}/800</span>
             </label>
             <div className="mt-6 flex justify-end gap-2">
               <Button type="button" variant="secondary"
@@ -293,6 +295,7 @@ export function ClarificationsPanel({ caseId }: ClarificationsPanelProps) {
           </div>
         </div>
       ) : null}
-    </div>
+      </div>
+    </TabSection>
   );
 }

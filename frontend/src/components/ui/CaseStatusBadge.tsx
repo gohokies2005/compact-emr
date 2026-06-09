@@ -1,24 +1,26 @@
-import { clsx } from 'clsx';
-import { twMerge } from 'tailwind-merge';
 import type { CaseStatus } from '../../types/prisma';
 import { CASE_STATUS_LABELS } from '../../lib/caseStatus';
+import { StatusChip, type ChipTone } from './StatusChip';
 
-const STATUS_CLASSES: Record<CaseStatus, string> = {
-  intake: 'bg-slate-100 text-slate-700',
-  records: 'bg-amber-100 text-amber-700',
-  viability: 'bg-blue-100 text-blue-700',
-  drafting: 'bg-purple-100 text-purple-700',
-  rn_review: 'bg-indigo-100 text-indigo-700',
-  physician_review: 'bg-pink-100 text-pink-700',
-  correction_requested: 'bg-orange-100 text-orange-700',
-  correction_review: 'bg-fuchsia-100 text-fuchsia-700',
-  delivered: 'bg-emerald-100 text-emerald-700',
-  paid: 'bg-emerald-200 text-emerald-900 font-semibold',
-  rejected: 'bg-rose-100 text-rose-700',
-  needs_rn_decision: 'bg-amber-200 text-amber-900 font-semibold',
-  needs_records: 'bg-amber-100 text-amber-800',
+// The ~13 ad-hoc color pairs collapse onto the 6 shared Aegis chip tones. Prop API is unchanged
+// (status + optional className) so every caller renders identically in behavior; only the visual
+// palette moves to the design system.
+const STATUS_TONES: Record<CaseStatus, ChipTone> = {
+  intake: 'neutral',
+  records: 'warn',
+  viability: 'info',
+  drafting: 'active',
+  rn_review: 'info',
+  physician_review: 'active',
+  correction_requested: 'warn',
+  correction_review: 'active',
+  delivered: 'good',
+  paid: 'good',
+  rejected: 'bad',
+  needs_rn_decision: 'warn',
+  needs_records: 'warn',
 };
 
 export function CaseStatusBadge({ status, className }: { readonly status: CaseStatus; readonly className?: string }) {
-  return <span className={twMerge(clsx('inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium', STATUS_CLASSES[status], className))}>{CASE_STATUS_LABELS[status]}</span>;
+  return <StatusChip tone={STATUS_TONES[status]} {...(className ? { className } : {})}>{CASE_STATUS_LABELS[status]}</StatusChip>;
 }

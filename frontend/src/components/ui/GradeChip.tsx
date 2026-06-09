@@ -1,11 +1,15 @@
 import type { Grade } from '../../types/prisma';
+import { StatusChip, type ChipTone } from './StatusChip';
 
-// Color logic moved here from PhysicianLetterReadyPanel so grade rendering has one source.
-function gradeClassName(grade: string | null | undefined): string {
-  if (!grade) return 'bg-slate-100 text-slate-700';
-  if (grade.startsWith('A')) return 'bg-emerald-100 text-emerald-800';
-  if (grade === 'B+' || grade === 'B') return 'bg-blue-100 text-blue-800';
-  return 'bg-slate-100 text-slate-700';
+// Grade → Aegis tone. A/B = good, C = warn, D/F = bad, unknown/ungraded = neutral. Replaces the
+// ad-hoc emerald/blue/slate pairs; the StatusChip carries the shared shape + palette.
+function gradeTone(grade: string | null | undefined): ChipTone {
+  if (!grade) return 'neutral';
+  const head = grade[0]?.toUpperCase();
+  if (head === 'A' || head === 'B') return 'good';
+  if (head === 'C') return 'warn';
+  if (head === 'D' || head === 'F') return 'bad';
+  return 'neutral';
 }
 
 interface GradeChipProps {
@@ -35,8 +39,8 @@ export function GradeChip({ grade, synthesizedFloor, reason }: GradeChipProps) {
     );
   }
   return (
-    <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${gradeClassName(grade)}`}>
+    <StatusChip tone={gradeTone(grade)} className="px-2.5 py-1">
       Grade: {grade ?? 'Not graded'}
-    </span>
+    </StatusChip>
   );
 }

@@ -2,6 +2,9 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
+import { TabSection } from '../../components/ui/TabSection';
+import { DataRow } from '../../components/ui/DataRow';
+import { RowAction } from '../../components/ui/RowAction';
 import { useAuth } from '../../auth/useAuth';
 import { ConflictError } from '../../api/client';
 import { formatRelativeTime } from '../../lib/date';
@@ -25,9 +28,9 @@ export function ChartNotesPanel({ veteranId }: { readonly veteranId: string }) {
       <div className="flex justify-end"><Button size="sm" onClick={() => create.mutate(draft.trim())} disabled={!draft.trim()} loading={create.isPending}>Save note</Button></div>
     </div>
     <div className="mt-4">
-      {notesQuery.isLoading ? <p className="text-sm text-slate-500">Loading notes…</p> : null}
+      {notesQuery.isLoading ? <p className="text-sm text-steel">Loading notes…</p> : null}
       {!notesQuery.isLoading && notes.length === 0 ? <EmptyState title="No notes yet" message="No notes yet. Add the first one above." /> : null}
-      <div className="divide-y divide-slate-100">{notes.map((n) => <NoteRow key={n.id} note={n} canEdit={user?.role === 'admin' || n.createdBy === user?.sub} canDelete={user?.role === 'admin'} onChanged={invalidate} />)}</div>
+      {notes.length > 0 ? <TabSection>{notes.map((n) => <NoteRow key={n.id} note={n} canEdit={user?.role === 'admin' || n.createdBy === user?.sub} canDelete={user?.role === 'admin'} onChanged={invalidate} />)}</TabSection> : null}
     </div>
   </div>;
 }
@@ -42,15 +45,18 @@ function NoteRow({ note, canEdit, canDelete, onChanged }: { readonly note: Chart
   });
   const del = useMutation({ mutationFn: () => deleteChartNote(note.id), onSuccess: () => onChanged() });
 
-  return <div className="py-3">
-    {editing
-      ? <div className="space-y-2"><textarea className="input min-h-20" maxLength={MAX} value={draft} onChange={(e) => setDraft(e.target.value)} /><div className="flex justify-end gap-2"><button type="button" className="text-xs text-slate-500" onClick={() => { setDraft(note.body); setEditing(false); }}>Cancel</button><button type="button" className="text-xs text-indigo-600" onClick={() => patch.mutate()} disabled={!draft.trim() || patch.isPending}>Save</button></div></div>
-      : <p className="whitespace-pre-wrap text-sm text-slate-800">{note.body}</p>}
-    <div className="mt-1 flex items-center justify-between">
-      <span className="text-xs text-slate-400">Added by {note.createdBy} · {formatRelativeTime(note.createdAt)}</span>
-      {!editing
-        ? <div className="flex gap-3">{canEdit ? <button type="button" aria-label="Edit note" className="text-xs text-indigo-600" onClick={() => { setDraft(note.body); setEditing(true); }}>Edit</button> : null}{canDelete ? <button type="button" aria-label="Delete note" className="text-xs text-rose-600" onClick={() => { if (window.confirm('Delete this note?')) del.mutate(); }}>Delete</button> : null}</div>
-        : null}
-    </div>
-  </div>;
+  if (editing) {
+    return <div className="px-5 py-3.5">
+      <div className="space-y-2"><textarea className="input min-h-20" maxLength={MAX} value={draft} onChange={(e) => setDraft(e.target.value)} /><div className="flex justify-end gap-2"><RowAction onClick={() => { setDraft(note.body); setEditing(false); }}>Cancel</RowAction><RowAction onClick={() => patch.mutate()} disabled={!draft.trim() || patch.isPending}>Save</RowAction></div></div>
+      <div className="mt-1"><span className="text-xs text-steel">Added by {note.createdBy} · {formatRelativeTime(note.createdAt)}</span></div>
+    </div>;
+  }
+  return <DataRow
+    lead={<span className="block whitespace-pre-wrap font-normal text-slateInk">{note.body}</span>}
+    meta={`Added by ${note.createdBy} · ${formatRelativeTime(note.createdAt)}`}
+    {...((canEdit || canDelete) ? { trailing: <>
+      {canEdit ? <RowAction aria-label="Edit note" onClick={() => { setDraft(note.body); setEditing(true); }}>Edit</RowAction> : null}
+      {canDelete ? <RowAction kind="danger" aria-label="Delete note" onClick={() => { if (window.confirm('Delete this note?')) del.mutate(); }}>Delete</RowAction> : null}
+    </> } : {})}
+  />;
 }

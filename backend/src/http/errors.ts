@@ -9,6 +9,7 @@ export type ErrorCode =
   | 'gone'
   | 'chart_not_ready'
   | 'essential_docs_missing'
+  | 'signed_bytes_changed'
   | 'internal_error';
 
 export interface ErrorEnvelope {

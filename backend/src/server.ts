@@ -91,7 +91,16 @@ export function createApp(options: CreateAppOptions = {}) {
   // real Blue Button OCR line-text is single-digit KB/page, so a 1,182-page record lands ~3-10MB.
   const internalJson = express.json({ limit: '50mb' });
   app.use('/api/v1', internalJson, requireServicePrincipal(), createInternalWorkerRouter(db));
-  app.use('/api/v1', internalJson, requireDrafterPrincipal(), createDrafterWorkerRouter(db));
+  // Drafter worker callbacks. renderLetter + S3 injected so /complete can BACKFILL a missing DOCX
+  // (#9 Fix 4) — the mirrored LetterRevision must carry all three artifacts. When RENDER_LAMBDA_NAME
+  // is unset (render-less env) backfill is unavailable; a docx-less completion then 502s rather than
+  // mirroring a revision with a missing artifact (callers retry once the renderer is configured).
+  const drafterRenderLambdaName = process.env.RENDER_LAMBDA_NAME;
+  app.use('/api/v1', internalJson, requireDrafterPrincipal(), createDrafterWorkerRouter(db, {
+    ...(drafterRenderLambdaName ? { renderLetter: makeRenderInvoker(drafterRenderLambdaName) } : {}),
+    s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
+    bucketName: process.env.PHI_BUCKET_NAME,
+  }));
 
   // Public, secret-gated Jotform webhook (doorbell). Mounted BEFORE the authenticateJwt client
   // routes (it has no Cognito) with its OWN urlencoded parser scoped to this subtree — Jotform
@@ -122,7 +131,12 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), createStaffMessagesRouter(db, { s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) as unknown as { send: (cmd: unknown) => Promise<unknown> }, bucketName: process.env.PHI_BUCKET_NAME }));
   app.use('/api/v1', authenticateJwt(), createCdsRouter(db));
   app.use('/api/v1', authenticateJwt(), createLookupRouter());
-  app.use('/api/v1', authenticateJwt(), createSignOffsRouter(db));
+  // Sign-off byte-binding (#9 Fix 3) reads the current letter TXT from S3 to hash it; S3 + bucket
+  // injected so the hash is stored at sign-off time (null when S3 is unconfigured — no byte gate).
+  app.use('/api/v1', authenticateJwt(), createSignOffsRouter(db, {
+    s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
+    bucketName: process.env.PHI_BUCKET_NAME,
+  }));
   app.use('/api/v1', authenticateJwt(), createClarificationsRouter(db));
   app.use('/api/v1', authenticateJwt(), createViabilityRouter(db));
   app.use('/api/v1', authenticateJwt(), createChartReadinessRouter(db));

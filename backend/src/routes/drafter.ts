@@ -409,6 +409,13 @@ export function createDrafterClientRouter(db: AppDb): Router {
       const c = await db.case.findFirst({ where: { id: caseId } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
 
+      // Require BOTH reviewers assigned before a draft can run (Ryan 2026-06-09): a draft shouldn't spend
+      // cloud $ until a physician AND an RN liaison own the case.
+      if (!c.assignedPhysicianId || !c.assignedRnId) {
+        const missing = [!c.assignedPhysicianId ? 'a physician' : null, !c.assignedRnId ? 'an RN liaison' : null].filter(Boolean).join(' and ');
+        throw new HttpError(400, 'bad_request', `Assign ${missing} before drafting.`, { caseId, reason: 'assignment_required', assignedPhysicianId: c.assignedPhysicianId, assignedRnId: c.assignedRnId });
+      }
+
       const inFlight = await db.draftJob.findFirst({
         where: { caseId, state: { in: ['queued', 'running'] as const } },
       });

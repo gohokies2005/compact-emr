@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
@@ -185,6 +185,7 @@ function KeyDocReviewQueue() {
 // one place rather than hunting case-by-case. (Ryan 2026-06-04: "a nurse cue ... for final
 // invoice, upload and release.") Clicking a row opens the case where the release actions live.
 function DeliveryReleaseQueue() {
+  const navigate = useNavigate();
   const queueQuery = useQuery({
     queryKey: ['rn', 'release-queue'],
     queryFn: () => listCases({ status: 'delivered', page: 1, pageSize: 50 }),
@@ -220,18 +221,34 @@ function DeliveryReleaseQueue() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {rows.map((c) => (
-              <tr key={c.id}>
-                <td className="px-4 py-2 font-medium text-slate-900">{c.id}</td>
-                <td className="px-4 py-2 text-slate-700">{c.veteran ? `${c.veteran.lastName}, ${c.veteran.firstName}` : c.veteranId}</td>
-                <td className="px-4 py-2 text-slate-700">{c.claimedCondition}</td>
-                <td className="px-4 py-2"><CaseStatusBadge status={c.status} /></td>
-                <td className="px-4 py-2 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
-                <td className="px-4 py-2 text-right">
-                  <Link className="text-indigo-600 hover:underline" to={`/cases/${encodeURIComponent(c.id)}`}>Invoice + release</Link>
-                </td>
-              </tr>
-            ))}
+            {rows.map((c) => {
+              const caseHref = `/cases/${encodeURIComponent(c.id)}`;
+              return (
+                <tr
+                  key={c.id}
+                  role="link"
+                  tabIndex={0}
+                  aria-label={`Open case ${c.id}`}
+                  onClick={() => navigate(caseHref)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      navigate(caseHref);
+                    }
+                  }}
+                  className="cursor-pointer hover:bg-mistSoft focus:bg-mistSoft focus:outline-none"
+                >
+                  <td className="px-4 py-2 font-medium text-slate-900">{c.id}</td>
+                  <td className="px-4 py-2 text-slate-700">{c.veteran ? `${c.veteran.lastName}, ${c.veteran.firstName}` : c.veteranId}</td>
+                  <td className="px-4 py-2 text-slate-700">{c.claimedCondition}</td>
+                  <td className="px-4 py-2"><CaseStatusBadge status={c.status} /></td>
+                  <td className="px-4 py-2 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
+                  <td className="px-4 py-2 text-right">
+                    <Link className="text-indigo-600 hover:underline" to={caseHref} onClick={(e) => e.stopPropagation()}>Invoice + release</Link>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

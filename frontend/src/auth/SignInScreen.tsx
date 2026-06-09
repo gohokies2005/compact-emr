@@ -58,18 +58,28 @@ export function SignInScreen() {
         </section>
       </div>
 
-      {/* Right: serene rotating WA bridge banner with a calm overlay. */}
+      {/* Right: serene rotating WA bridge banner with a calm overlay. The motto bubble is placed
+          PER-IMAGE (textAnchor) so it lands over a calm/dark patch of water or sky on each of the 5
+          bridges rather than over the span/towers. */}
       <div className="relative hidden lg:block lg:w-[54%]">
         <BridgeRotation>
-          <div className="flex h-full w-full flex-col justify-center px-14">
-            <div className="max-w-md rounded-2xl bg-slate-950/30 p-8 backdrop-blur-md">
-              <p className="text-2xl font-light leading-relaxed text-white sm:text-3xl">
-                {"We don't just build letters — we build the bridge between service and diagnosis."}
-              </p>
-              <div className="mt-5 h-[2px] w-12 rounded-full bg-brass" aria-hidden="true" />
-              <p className="mt-4 text-base text-white/75">Built for evidence. Backed by physicians.</p>
-            </div>
-          </div>
+          {(bridge) => {
+            const anchor = bridge?.textAnchor ?? 'left';
+            // Horizontal placement of the bubble column per the active image's calm zone.
+            const justify =
+              anchor === 'right' ? 'justify-end' : anchor === 'center' ? 'justify-center' : 'justify-start';
+            return (
+              <div className={`flex h-full w-full items-center px-14 ${justify}`}>
+                <div className="max-w-md rounded-2xl bg-slate-950/30 p-8 backdrop-blur-md">
+                  <p className="text-2xl font-light leading-relaxed text-white sm:text-3xl">
+                    {"We don't just build letters — we build the bridge between service and diagnosis."}
+                  </p>
+                  <div className="mt-5 h-[2px] w-12 rounded-full bg-brass" aria-hidden="true" />
+                  <p className="mt-4 text-base text-white/75">Built for evidence. Backed by physicians.</p>
+                </div>
+              </div>
+            );
+          }}
         </BridgeRotation>
       </div>
     </main>

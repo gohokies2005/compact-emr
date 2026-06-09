@@ -15,9 +15,14 @@ interface SendToDrafterPanelProps {
   readonly claimType?: string;
   readonly claimedCondition?: string;
   readonly draftAttempt?: number;
+  // A draft requires BOTH a physician and an RN liaison assigned (Ryan 2026-06-09). When either is
+  // explicitly false the button disables + a note points to the Assignments panel. Undefined = not
+  // gated (back-compat with unit tests that don't pass assignment state).
+  readonly physicianAssigned?: boolean;
+  readonly rnAssigned?: boolean;
 }
 
-export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftAttempt }: SendToDrafterPanelProps) {
+export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftAttempt, physicianAssigned, rnAssigned }: SendToDrafterPanelProps) {
   const queryClient = useQueryClient();
 
   const readinessQuery = useQuery({
@@ -84,6 +89,10 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
       : 'The drafter could not be started. Please retry.'
     : null;
 
+  // Require both reviewers assigned before drafting (Ryan 2026-06-09). Undefined props (unit tests) = not gated.
+  const needsAssignment = physicianAssigned === false || rnAssigned === false;
+  const missingAssignment = [physicianAssigned === false ? 'a physician' : null, rnAssigned === false ? 'an RN liaison' : null].filter(Boolean).join(' and ');
+
   return (
     <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       {/* Pre-draft strategy preview — catch a crazy pathway before spending on a draft. While the chart is
@@ -99,13 +108,16 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
         <Button
           type="button"
           variant="primary"
-          disabled={!ready}
+          disabled={!ready || needsAssignment}
           loading={draftMutation.isPending}
           onClick={startDraft}
         >
           Send to Drafter
         </Button>
       </div>
+      {needsAssignment ? (
+        <p className="mt-3 text-sm font-medium text-amber-700">Assign {missingAssignment} before drafting — use the Assignments panel below.</p>
+      ) : null}
 
       <div className="mt-5">
         {readinessQuery.isLoading ? (

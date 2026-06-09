@@ -1,15 +1,17 @@
 import { useQuery } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Card } from '../../components/ui/Card';
 import { Spinner } from '../../components/ui/Spinner';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
+import { BridgeRotation } from '../../components/BridgeRotation';
 import { listCases } from '../../api/cases';
 import { formatRelativeTime } from '../../lib/date';
 import { formatNameLastFirst } from '../../lib/format';
 
 export function PhysicianQueuePage() {
+  const navigate = useNavigate();
   const queueQuery = useQuery({
     queryKey: ['physician', 'queue'],
     queryFn: () => listCases({ status: 'physician_review', page: 1, pageSize: 50 }),
@@ -19,10 +21,18 @@ export function PhysicianQueuePage() {
 
   return (
     <AppShell>
-      <div className="mb-8">
-        <h1 className="text-2xl font-semibold text-slate-900">Physician queue</h1>
-        <p className="mt-2 text-sm text-slate-500">Cases awaiting physician review.</p>
-      </div>
+      {/* Ambient maritime hero — same calm bridge band the dashboard carries, to steady the
+          doctor's working surface. Queue chrome only; never behind a letter editor or chart. */}
+      <section className="relative mb-8 overflow-hidden rounded-2xl border border-aegis shadow-aegis-card">
+        <BridgeRotation caption={false} className="h-40 sm:h-48">
+          <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-navyDeep/85 via-navyDeep/50 to-transparent" />
+          <div className="relative flex h-full flex-col justify-center px-7">
+            <p className="text-xs font-medium uppercase tracking-[0.25em] text-brassSoft">Aegis</p>
+            <h1 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">Physician queue</h1>
+            <p className="mt-1 text-sm text-white/75">Cases awaiting your review</p>
+          </div>
+        </BridgeRotation>
+      </section>
 
       <Card className="p-0">
         {queueQuery.isLoading ? (
@@ -47,24 +57,44 @@ export function PhysicianQueuePage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {rows.map((c) => (
-                  <tr key={c.id}>
-                    <td className="px-4 py-2 font-medium text-slate-900">{c.id}</td>
-                    <td className="px-4 py-2 text-slate-700">
-                      {formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}
-                    </td>
-                    <td className="px-4 py-2 text-slate-700">{c.claimedCondition}</td>
-                    <td className="px-4 py-2">
-                      <CaseStatusBadge status={c.status} />
-                    </td>
-                    <td className="px-4 py-2 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
-                    <td className="px-4 py-2 text-right">
-                      <Link className="text-indigo-600 hover:underline" to={`/p/review/${encodeURIComponent(c.id)}`}>
-                        Review
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
+                {rows.map((c) => {
+                  const reviewHref = `/p/review/${encodeURIComponent(c.id)}`;
+                  return (
+                    <tr
+                      key={c.id}
+                      role="link"
+                      tabIndex={0}
+                      aria-label={`Review case ${c.id}`}
+                      onClick={() => navigate(reviewHref)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          navigate(reviewHref);
+                        }
+                      }}
+                      className="cursor-pointer hover:bg-mistSoft focus:bg-mistSoft focus:outline-none"
+                    >
+                      <td className="px-4 py-2 font-medium text-slate-900">{c.id}</td>
+                      <td className="px-4 py-2 text-slate-700">
+                        {formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}
+                      </td>
+                      <td className="px-4 py-2 text-slate-700">{c.claimedCondition}</td>
+                      <td className="px-4 py-2">
+                        <CaseStatusBadge status={c.status} />
+                      </td>
+                      <td className="px-4 py-2 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
+                      <td className="px-4 py-2 text-right">
+                        <Link
+                          className="text-indigo-600 hover:underline"
+                          to={reviewHref}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          Review
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

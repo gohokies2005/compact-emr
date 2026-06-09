@@ -1,6 +1,13 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { clsx } from 'clsx';
-import { bridgeImages } from '../data/bridgeImages';
+import { bridgeImages, type BridgeImage } from '../data/bridgeImages';
+
+/**
+ * Children may be plain nodes OR a render-prop that receives the currently-displayed bridge so an
+ * overlay (e.g. the login motto bubble) can position itself per-image over a calm area. `bridge` is
+ * undefined only in the degenerate empty-set case.
+ */
+type BridgeChildren = ReactNode | ((bridge: BridgeImage | undefined) => ReactNode);
 
 const ROTATE_MS = 5 * 60 * 1000; // rotate every 5 minutes
 
@@ -18,7 +25,7 @@ export function BridgeRotation({
   className,
   caption = true
 }: {
-  readonly children?: ReactNode;
+  readonly children?: BridgeChildren;
   readonly className?: string;
   readonly caption?: boolean;
 }) {
@@ -40,6 +47,7 @@ export function BridgeRotation({
 
   const bridge = bridgeImages[index];
   const showImage = bridge && !failed;
+  const renderedChildren = typeof children === 'function' ? children(bridge) : children;
 
   return (
     <div className={clsx('relative h-full w-full overflow-hidden bg-navyDeep', className)}>
@@ -64,7 +72,7 @@ export function BridgeRotation({
       />
 
       {/* Overlay content (e.g. the login tagline) rendered above the imagery. */}
-      {children ? <div className="relative h-full w-full">{children}</div> : null}
+      {renderedChildren ? <div className="relative h-full w-full">{renderedChildren}</div> : null}
 
       {/* Calm caption: bridge name + location, lower-left. Suppressed on ambient surfaces (caption={false}). */}
       {caption && bridge ? (

@@ -369,7 +369,7 @@ export function CaseDetailPage() {
             <InFlightDrafterPanel job={latestDraftJob} onCancel={() => cancelDraft.mutate(latestDraftJob.id)} cancelling={cancelDraft.isPending} concurrency={liveConcurrency} />
           ) : null}
 
-          {canSendFirstDraft ? <SendToDrafterPanel caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} /> : null}
+          {canSendFirstDraft ? <SendToDrafterPanel caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} /> : null}
 
           {!inFlightDraft && canSeePhysicianReadyPanel && latestDraftJob ? (
             <PhysicianLetterReadyPanel

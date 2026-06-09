@@ -18,7 +18,7 @@ beforeEach(() => { window.history.pushState({}, '', '/'); });
 test('renders sign-in for unauthenticated users without console errors', async () => {
   const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
   render(<App />);
-  expect(await screen.findByText('Secure staff sign-in')).toBeInTheDocument();
+  expect(await screen.findByText('For those who served.')).toBeInTheDocument();
   expect(errorSpy).not.toHaveBeenCalled();
   errorSpy.mockRestore();
 });

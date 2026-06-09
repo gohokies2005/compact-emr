@@ -26,7 +26,7 @@ function renderWithAuth(value: AuthContextValue) {
 }
 
 describe('ProtectedRoute', () => {
-  test('unauthenticated users see sign-in', () => { renderWithAuth(baseAuth); expect(screen.getByText('Secure staff sign-in')).toBeInTheDocument(); });
+  test('unauthenticated users see sign-in', () => { renderWithAuth(baseAuth); expect(screen.getByText('For those who served.')).toBeInTheDocument(); });
   test('wrong role redirects to 403', async () => { renderWithAuth({ ...baseAuth, user: { sub: 's', email: 'doc@example.com', roles: ['physician'], role: 'physician' }, role: 'physician' }); expect(await screen.findByText('403 — No access')).toBeInTheDocument(); });
   test('allowed role renders child', () => { renderWithAuth({ ...baseAuth, user: { sub: 's', email: 'admin@example.com', roles: ['admin'], role: 'admin' }, role: 'admin' }); expect(screen.getByText('Allowed content')).toBeInTheDocument(); });
 });

@@ -2,8 +2,35 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: light; }
-body { margin: 0; min-width: 320px; min-height: 100vh; background: #f8fafc; color: #0f172a; }
+/*
+ * Aegis maritime design tokens — single source of truth (mirrors tailwind.config.js colors).
+ * Pacific-Northwest / Puget Sound feel: misty water, soft maritime blues, muted brass, ivory surfaces.
+ */
+:root {
+  color-scheme: light;
+
+  --aegis-navy: #315F83;
+  --aegis-navy-deep: #244A68;
+  --aegis-harbor: #6F8EA5;
+  --aegis-mist: #DCE8EF;
+  --aegis-mist-soft: #EEF4F7;
+  --aegis-foam: #F8F7F3;
+  --aegis-ivory: #FCFAF6;
+  --aegis-steel: #748393;
+  --aegis-slate: #334155;
+  --aegis-brass: #C4A86F;
+  --aegis-brass-soft: #E4D2A3;
+  --aegis-border: rgba(49, 95, 131, 0.12);
+
+  /* Elevation + radius conventions */
+  --aegis-shadow-panel: 0 12px 40px rgba(49, 95, 131, 0.08);
+  --aegis-shadow-card: 0 8px 24px rgba(49, 95, 131, 0.06);
+  --aegis-shadow-soft: 0 4px 16px rgba(49, 95, 131, 0.05);
+  --aegis-radius: 24px;
+  --aegis-radius-lg: 28px;
+}
+
+body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--aegis-foam); color: var(--aegis-slate); }
 button, input { font: inherit; }
 
 .input {

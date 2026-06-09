@@ -53,7 +53,6 @@ export function BridgeRotation({
           src={bridge.src}
           alt={`${bridge.name}, ${bridge.location}`}
           className="absolute inset-0 h-full w-full object-cover"
-          style={{ objectPosition: 'center 35%' }}
           onError={() => setFailed(true)}
         />
       ) : null}

@@ -450,6 +450,7 @@ export interface DraftJobDelegate {
   findMany(args: unknown): Promise<readonly DraftJobRecord[]>;
   findFirst(args: unknown): Promise<DraftJobRecord | null>;
   findUnique(args: unknown): Promise<DraftJobRecord | null>;
+  count(args: unknown): Promise<number>;
   create(args: unknown): Promise<DraftJobRecord>;
   update(args: unknown): Promise<DraftJobRecord>;
 }
@@ -612,6 +613,11 @@ export interface SignOffRecord {
   createdAt: Date;
   updatedAt: Date;
   version: number;
+  // Byte-binding (#9 Fix 3): the version signed + the sha256 of that version's TXT bytes.
+  // Nullable — sign-offs created before the columns existed carry null (the delivery gate
+  // skips the byte check when null, preserving back-compat).
+  signedVersion: number | null;
+  signedContentSha256: string | null;
 }
 
 export interface SignOffDelegate {

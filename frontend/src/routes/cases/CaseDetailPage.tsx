@@ -22,7 +22,7 @@ import { EmailLogPanel } from '../../components/EmailLogPanel';
 import { ChartNotesPanel } from '../veterans/ChartNotesPanel';
 import { ConditionsPanel, MedicationsPanel, ProblemsPanel } from '../../components/ClinicalChartPanels';
 import { listCaseEmails } from '../../api/emails';
-import { getArtifactPdfUrl, postDraft, cancelDraftJob } from '../../api/drafter';
+import { getArtifactPdfUrl, postDraft, cancelDraftJob, getDraftConcurrency, type DraftConcurrencyResult } from '../../api/drafter';
 import { getLetter } from '../../api/letter';
 import { listClarifications } from '../../api/cases';
 import { getVeteran, listDocuments, reocrDocument } from '../../api/veterans';
@@ -106,6 +106,21 @@ export function CaseDetailPage() {
     enabled: caseId.length > 0,
   });
   const openClarificationCount = openClarificationsQuery.data?.data.length ?? 0;
+
+  // Queue-position concurrency for the in-flight panel. Seeded from the POST /draft 201 (written into
+  // this cache by the redraft / Send-to-Drafter mutations) and refreshed via GET /draft-concurrency on
+  // the SAME visible-tab poll the case page already runs — no new poll loop. Enabled only while a draft
+  // is queued/running (status 'drafting'); idle otherwise so it costs nothing post-draft.
+  const draftActive = caseQuery.data?.data?.status === 'drafting';
+  const concurrencyQuery = useQuery({
+    queryKey: ['case', caseId, 'draft-concurrency'],
+    queryFn: () => getDraftConcurrency(caseId),
+    enabled: caseId.length > 0 && draftActive,
+    refetchInterval: draftActive ? 8000 : false,
+    refetchIntervalInBackground: false,
+  });
+  const liveConcurrency = concurrencyQuery.data?.data.concurrency ?? null;
+
   const refetch = () => qc.invalidateQueries({ queryKey: ['case', caseId] });
 
   const patch = useMutation({
@@ -134,7 +149,13 @@ export function CaseDetailPage() {
   // confirm + the backend's in-flight 409. (Ryan 2026-06-04: "lost the ability to redraft".)
   const redraft = useMutation({
     mutationFn: (guidance?: string) => postDraft(caseId, guidance ? { strategyOverride: guidance } : {}),
-    onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
+    onSuccess: async (res) => {
+      // Seed the queue-position panel from the 201's concurrency block so the RN sees their place in
+      // line immediately, before the first GET /draft-concurrency poll lands.
+      const concurrency = res.data.concurrency ?? null;
+      qc.setQueryData<{ data: DraftConcurrencyResult }>(['case', caseId, 'draft-concurrency'], { data: { concurrency } });
+      await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]);
+    },
     // Surface the REAL reason (status + server message), never a canned guess — the redraft
     // endpoint's HttpErrors aren't logged server-side, so this alert is the only place the reason
     // appears. A 409 honestly covers both "already in flight" and "chart not ready yet" (we don't
@@ -311,7 +332,7 @@ export function CaseDetailPage() {
       return (
         <>
           {inFlightDraft && latestDraftJob ? (
-            <InFlightDrafterPanel job={latestDraftJob} onCancel={() => cancelDraft.mutate(latestDraftJob.id)} cancelling={cancelDraft.isPending} />
+            <InFlightDrafterPanel job={latestDraftJob} onCancel={() => cancelDraft.mutate(latestDraftJob.id)} cancelling={cancelDraft.isPending} concurrency={liveConcurrency} />
           ) : null}
 
           {canSendFirstDraft ? <SendToDrafterPanel caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} /> : null}

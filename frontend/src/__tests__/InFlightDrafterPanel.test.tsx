@@ -95,3 +95,66 @@ describe('InFlightDrafterPanel', () => {
     expect(screen.getByText("We've paused this one for a closer look.")).toBeInTheDocument();
   });
 });
+
+// QUEUED mode — the cross-case queue-position indicator. The case is already status='drafting' the
+// instant a job enqueues; this panel keeps the user honestly informed until the job flips to running.
+// A queued job has no startedAt yet — omit it (the type is optional, not nullable).
+const { startedAt: _omitStartedAt, ...baseJobNoStart } = baseJob;
+const queuedJob: InFlightDraftJob = { ...baseJobNoStart, state: 'queued', currentPhase: null };
+
+describe('InFlightDrafterPanel — QUEUED mode', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('shows the precise "#N in line" copy ONLY when running === max && queuedAhead >= 1', () => {
+    render(<InFlightDrafterPanel job={queuedJob} concurrency={{ running: 6, max: 6, queuedAhead: 2, queuePosition: 3 }} />);
+    expect(screen.getByText('Your letter is in line to start.')).toBeInTheDocument();
+    // The position is rendered inline; assert the #3 appears in the line copy.
+    expect(screen.getByText(/#3/)).toBeInTheDocument();
+    expect(screen.getByText(/busy with other letters/)).toBeInTheDocument();
+    // It must NOT show the progress bar / "Step X of 6" while queued.
+    expect(screen.queryByText(/Step \d of 6/)).not.toBeInTheDocument();
+  });
+
+  it('shows the generic "getting ready" copy when running < max (cold start warming up)', () => {
+    render(<InFlightDrafterPanel job={queuedJob} concurrency={{ running: 2, max: 6, queuedAhead: 0, queuePosition: 1 }} />);
+    expect(screen.getByText('Getting ready to draft.')).toBeInTheDocument();
+    expect(screen.queryByText('Your letter is in line to start.')).not.toBeInTheDocument();
+    expect(screen.queryByText(/#1/)).not.toBeInTheDocument();
+  });
+
+  it('shows the generic copy when at max but nothing is actually ahead (queuedAhead === 0)', () => {
+    render(<InFlightDrafterPanel job={queuedJob} concurrency={{ running: 6, max: 6, queuedAhead: 0, queuePosition: 1 }} />);
+    expect(screen.getByText('Getting ready to draft.')).toBeInTheDocument();
+  });
+
+  it('shows the generic copy when concurrency is null/unknown', () => {
+    render(<InFlightDrafterPanel job={queuedJob} concurrency={null} />);
+    expect(screen.getByText('Getting ready to draft.')).toBeInTheDocument();
+  });
+
+  it('falls back to the generic copy once a frozen "#N" sits unchanged past ~2 min', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-25T12:00:00.000Z'));
+    const concurrency = { running: 6, max: 6, queuedAhead: 2, queuePosition: 3 } as const;
+    const { rerender } = render(<InFlightDrafterPanel job={queuedJob} concurrency={concurrency} />);
+    // Fresh: precise position shows.
+    expect(screen.getByText('Your letter is in line to start.')).toBeInTheDocument();
+
+    // Position never advances for >2 min — the 1s tick + an unchanged-position rerender flips it to
+    // the calm generic copy (a stuck "#N" reads as more broken than silence).
+    act(() => { vi.advanceTimersByTime(2 * 60 * 1000 + 1000); });
+    rerender(<InFlightDrafterPanel job={queuedJob} concurrency={concurrency} />);
+    expect(screen.getByText('Getting ready to draft.')).toBeInTheDocument();
+    expect(screen.queryByText('Your letter is in line to start.')).not.toBeInTheDocument();
+  });
+
+  it('switches to the progress bar automatically when the job flips to running', () => {
+    const { rerender } = render(<InFlightDrafterPanel job={queuedJob} concurrency={{ running: 6, max: 6, queuedAhead: 2, queuePosition: 3 }} />);
+    expect(screen.getByText('Your letter is in line to start.')).toBeInTheDocument();
+
+    rerender(<InFlightDrafterPanel job={{ ...queuedJob, state: 'running', currentPhase: 'drafter' }} concurrency={null} />);
+    expect(screen.getByText('Drafting the letter')).toBeInTheDocument();
+    expect(screen.getByText('Step 3 of 6 — Writing the draft')).toBeInTheDocument();
+    expect(screen.queryByText('Your letter is in line to start.')).not.toBeInTheDocument();
+  });
+});

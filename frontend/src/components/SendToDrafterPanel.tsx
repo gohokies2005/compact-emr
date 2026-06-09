@@ -4,7 +4,7 @@ import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { Spinner } from './ui/Spinner';
 import { getChartReadiness } from '../api/chart-readiness';
-import { postDraft, type DraftRequestInput } from '../api/drafter';
+import { postDraft, type DraftRequestInput, type DraftConcurrencyResult } from '../api/drafter';
 import { ConflictError } from '../api/client';
 import { Gate1ChecklistModal } from './Gate1ChecklistModal';
 import { StrategyPreviewCard } from './StrategyPreviewCard';
@@ -28,7 +28,11 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
 
   const draftMutation = useMutation({
     mutationFn: (input?: DraftRequestInput) => postDraft(caseId, input ?? {}),
-    onSuccess: async () => {
+    onSuccess: async (res) => {
+      // Seed the queue-position panel from the 201's concurrency block so the RN sees their place in
+      // line the instant the draft is queued, before the first GET /draft-concurrency poll lands.
+      const concurrency = res.data.concurrency ?? null;
+      queryClient.setQueryData<{ data: DraftConcurrencyResult }>(['case', caseId, 'draft-concurrency'], { data: { concurrency } });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
         queryClient.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }),

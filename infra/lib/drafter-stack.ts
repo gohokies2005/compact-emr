@@ -16,6 +16,7 @@ import {
   aws_events_targets as targets,
 } from 'aws-cdk-lib';
 import type { CompactEmrConfig } from './config.js';
+import { DRAFTER_MAX_CONCURRENCY } from './drafter-constants.js';
 
 export interface DrafterStackProps extends StackProps {
   config: CompactEmrConfig;
@@ -229,10 +230,13 @@ export class DrafterStack extends Stack {
     // message (in-flight / NotVisible) the depth stays >= 1, keeping the task alive until it
     // deletes the message on /complete. Cold start adds ~2-4 min before a queued job is picked up
     // (alarm period + image pull) — fine for the 15-20 min async drafting run.
-    // maxCapacity 6: lets a batch of independent drafts (distinct caseId = distinct FIFO group) fan
-    // out instead of serializing (2026-06-06). Hard ceiling is the Fargate On-Demand vCPU quota (30)
-    // ÷ 4 vCPU/task = 7 tasks; 6 leaves headroom. For >7, request an AWS quota increase (L-3032A538).
-    const scaling = service.autoScaleTaskCount({ minCapacity: 0, maxCapacity: 6 });
+    // maxCapacity DRAFTER_MAX_CONCURRENCY (=6): lets a batch of independent drafts (distinct caseId =
+    // distinct FIFO group) fan out instead of serializing (2026-06-06). Hard ceiling is the Fargate
+    // On-Demand vCPU quota (30) ÷ 4 vCPU/task = 7 tasks; 6 leaves headroom. For >7, request an AWS
+    // quota increase (L-3032A538). The SAME const is injected as DRAFTER_MAX_CONCURRENCY on the API
+    // Lambda (api-stack.ts) so the queue-position UI's "drafter is full" threshold can never drift
+    // from this ceiling. NEVER hardcode the number in a second place.
+    const scaling = service.autoScaleTaskCount({ minCapacity: 0, maxCapacity: DRAFTER_MAX_CONCURRENCY });
     const queueDepth = new cloudwatch.MathExpression({
       expression: 'visible + inflight',
       label: 'DraftJobQueueDepth',

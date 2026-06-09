@@ -1,6 +1,10 @@
 import { PrismaClient } from '@prisma/client';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
-import { DRAFT_JOB_WATCHER_SWEPT_MESSAGE } from '../services/draft-job-constants.js';
+import {
+  DRAFT_JOB_WATCHER_SWEPT_MESSAGE,
+  STALE_THRESHOLD_MS,
+  MAX_LIFETIME_MS,
+} from '../services/draft-job-constants.js';
 
 /**
  * Architect QA F6: stuck-Fargate-task watcher.
@@ -35,12 +39,10 @@ import { DRAFT_JOB_WATCHER_SWEPT_MESSAGE } from '../services/draft-job-constants
  * Scheduled by EventBridge every 5 minutes from the WorkersStack rule.
  */
 
-const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 min — running job, no heartbeat => crashed
+// STALE_THRESHOLD_MS (running job, no heartbeat => crashed) and MAX_LIFETIME_MS (absolute in-flight
+// lifetime cap) are now imported from draft-job-constants.ts — the SINGLE source shared with the
+// draft-concurrency count so the reaper and the slot-counter agree on what "stale" means.
 const QUEUE_ABANDON_MS = 120 * 60 * 1000; // 2h — queued job that never got claimed (backstop only)
-// ABSOLUTE cap: nothing legit drafts this long (longest real run ~15.5 min), so ANY in-flight job older
-// than this is dead regardless of state/heartbeat — catches a 'running' job that NEVER heartbeated (NULL
-// lastHeartbeatAt evades the heartbeat clause). (Ryan 2026-06-07: "just have it dump and clear after that".)
-const MAX_LIFETIME_MS = 60 * 60 * 1000; // 60 min
 const BATCH_LIMIT = 100; // per invocation; lifecycle: 100 * (60/5) = 1200/hr max sweep rate
 
 let cachedPrisma: PrismaClient | null = null;

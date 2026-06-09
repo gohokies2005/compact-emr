@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Card } from './ui/Card';
 import { Button } from './ui/Button';
 import type { DraftJob, DraftJobPhase } from '../types/prisma';
+import type { DraftConcurrency } from '../api/drafter';
 
 export interface InFlightDraftJob extends DraftJob {
   readonly currentPhase?: string | null;
@@ -15,7 +16,15 @@ interface InFlightDrafterPanelProps {
   readonly job: InFlightDraftJob;
   readonly onCancel?: () => void;
   readonly cancelling?: boolean;
+  // Queue-position snapshot (seeded from the POST /draft 201, refreshed via GET /draft-concurrency on
+  // the existing case poll). Drives the QUEUED-mode copy. Absent/null while running or unknown.
+  readonly concurrency?: DraftConcurrency | null;
 }
+
+// A queued job whose #N-in-line hasn't advanced for this long is treated as "frozen" — we drop the
+// stale position and show the generic "getting ready" copy. A stuck "#N" reads as more broken than
+// silence. (~2 min per the design.)
+const FROZEN_POSITION_MS = 2 * 60 * 1000;
 
 interface DraftStep {
   readonly index: 1 | 2 | 3 | 4 | 5 | 6;
@@ -134,8 +143,102 @@ function isTakingLonger(job: InFlightDraftJob): boolean {
   return state.includes('hold') || state.includes('retry') || state.includes('paused');
 }
 
-export function InFlightDrafterPanel({ job, onCancel, cancelling }: InFlightDrafterPanelProps) {
+// QUEUED mode — shown before the job flips to 'running'. The case is already status='drafting' the
+// instant a job enqueues; this panel keeps the user honestly informed while the drafter spins up a
+// worker (cold start ~2-4 min) or works through a genuine backlog. When the poll catches the job
+// flipping to 'running', InFlightDrafterPanel renders the progress bar instead — no special handling.
+function QueuedDrafterPanel({
+  concurrency,
+  showPrecisePosition,
+  onCancel,
+  cancelling,
+}: {
+  readonly concurrency: DraftConcurrency | null | undefined;
+  readonly showPrecisePosition: boolean;
+  readonly onCancel?: (() => void) | undefined;
+  readonly cancelling?: boolean | undefined;
+}) {
+  // Precise "#N in line" ONLY when the drafter is genuinely full (running === max) AND this job is
+  // actually behind someone (queuedAhead >= 1) AND the position isn't frozen. Otherwise the cap is
+  // just an autoscaler ceiling warming up a cold-start worker — claiming "all N in use" would be
+  // dishonest, so show the calm generic "getting ready" copy.
+  const precise =
+    showPrecisePosition &&
+    concurrency != null &&
+    concurrency.running === concurrency.max &&
+    concurrency.queuedAhead >= 1;
+
+  return (
+    <Card className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-slate-900">
+            {precise ? 'Your letter is in line to start.' : 'Getting ready to draft.'}
+          </h2>
+          {precise ? (
+            <p className="mt-2 text-sm text-slate-600">
+              The drafter is busy with other letters right now. Yours is about <span className="font-semibold text-slate-900">#{concurrency!.queuePosition}</span> in line and will start on its own — no action needed. Usually clears within a few minutes.
+            </p>
+          ) : (
+            <p className="mt-2 text-sm text-slate-600">
+              Your letter is queued and will start automatically in the next few minutes. You can leave this page — it&rsquo;ll keep going.
+            </p>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
+            In line
+          </div>
+          {onCancel ? (
+            <Button variant="secondary" size="sm" disabled={cancelling ?? false} loading={cancelling ?? false}
+              onClick={() => { if (window.confirm('Cancel this draft? It stops the EMR from waiting on this run and lets you re-send. (Halting the cloud run mid-way is being wired with the drafter.)')) onCancel(); }}>
+              Cancel draft
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+export function InFlightDrafterPanel({ job, onCancel, cancelling, concurrency }: InFlightDrafterPanelProps) {
+  // ALL hooks run unconditionally, before any early return — the queued/running branch is chosen
+  // AFTER (Rules of Hooks). A single 1s tick drives BOTH the queued frozen-position fallback and the
+  // running elapsed timer; whichever branch renders uses it.
   const step = useMemo(() => resolveStep(job), [job]);
+
+  // Track whether the queued #N-in-line has advanced. If it sits unchanged past FROZEN_POSITION_MS we
+  // stop trusting it (the generic copy is calmer than a stuck "#N").
+  const queuePosition = concurrency?.queuePosition;
+  const positionSeenAtRef = useRef<{ position: number | undefined; at: number }>({ position: queuePosition, at: Date.now() });
+  if (positionSeenAtRef.current.position !== queuePosition) {
+    positionSeenAtRef.current = { position: queuePosition, at: Date.now() };
+  }
+
+  // Tick every second so the elapsed timer counts up LIVE and the frozen-position fallback fires even
+  // when no poll re-renders the parent (otherwise "running 0s" / "#N" sits frozen between polls).
+  // (architect I2, 2026-06-03)
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceTick((n) => (n + 1) % 1_000_000), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // QUEUED mode — before the job flips to 'running'. When the poll catches the flip, the progress
+  // bar below renders instead, automatically.
+  if (job.state === 'queued') {
+    const positionFresh = Date.now() - positionSeenAtRef.current.at < FROZEN_POSITION_MS;
+    return (
+      <QueuedDrafterPanel
+        concurrency={concurrency}
+        showPrecisePosition={positionFresh}
+        onCancel={onCancel}
+        cancelling={cancelling}
+      />
+    );
+  }
+
   const takingLonger = isTakingLonger(job);
   const operatorMessage = job.operatorMessage?.trim();
   // Sanity cap on the elapsed timer: a run "running" far past the normal window is almost always a
@@ -146,14 +249,6 @@ export function InFlightDrafterPanel({ job, onCancel, cancelling }: InFlightDraf
   const elapsedMin = Number.isNaN(startMs) ? 0 : (Date.now() - startMs) / 60000;
   // Only "stuck" when NOT actively retrying — a retrying job is legitimately "still working".
   const looksStuck = elapsedMin > 40 && !takingLonger;
-
-  // Tick every second so the elapsed timer counts up LIVE, not only when the poll re-renders the
-  // parent (otherwise it sits frozen at "running 0s" between polls). (architect I2, 2026-06-03)
-  const [, forceTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => forceTick((n) => (n + 1) % 1_000_000), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   return (
     <Card className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">

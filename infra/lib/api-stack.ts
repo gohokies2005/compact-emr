@@ -22,6 +22,7 @@ import {
   aws_ecr as ecr,
 } from 'aws-cdk-lib';
 import type { CompactEmrConfig } from './config.js';
+import { DRAFTER_MAX_CONCURRENCY } from './drafter-constants.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -122,6 +123,11 @@ export class ApiStack extends Stack {
         DRAFT_QUEUE_URL: props.draftQueue.queueUrl,
         DOCTOR_PACK_QUEUE_URL: props.doctorPackQueue.queueUrl,
         DRAFT_JOB_QUEUE_URL: props.draftJobQueue.queueUrl,
+        // Drafter concurrency cap, mirrored from the SAME const that sets the Fargate autoscaler
+        // maxCapacity in drafter-stack.ts. The draft-concurrency endpoint reads this to tell a
+        // queued draft whether the drafter is genuinely full (running === max). Single source ⇒ the
+        // UI threshold can never drift from the real ceiling. Backend falls back to 6 if unset.
+        DRAFTER_MAX_CONCURRENCY: String(DRAFTER_MAX_CONCURRENCY),
         CHART_EXTRACT_QUEUE_URL: props.chartExtractQueue.queueUrl,
         JOTFORM_INGEST_QUEUE_URL: props.jotformIngestQueue.queueUrl,
         // Shared secret in the Jotform webhook URL path (enables the webhook to accept). Populated

@@ -8,6 +8,7 @@ import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import { getDraftReadiness } from '../services/draft-readiness.js';
 import { publishDraftJobQueued } from '../services/draft-job-queue.js';
+import { getDraftConcurrency, type DraftConcurrency } from '../services/draft-concurrency.js';
 import {
   buildDrafterBundle,
   buildJobBundleS3Key,
@@ -606,7 +607,46 @@ export function createDrafterClientRouter(db: AppDb): Router {
         rnDecision: parsed.rnDecision ?? null,
       });
 
-      res.status(201).json({ data: { job: created, publish: publishResult, bundle: { s3Key: bundleS3Key, sizeBytes: upload.sizeBytes } } });
+      // Queue-position indicator: fold a concurrency snapshot into the 201 so the click knows its
+      // place in line IMMEDIATELY (cross-case only — a case can't queue behind itself; the in-flight
+      // 409 above guarantees that). Computed from the DraftJob table only. Never block the enqueue on
+      // this read — a concurrency-count hiccup must not fail a successfully-queued draft.
+      let concurrency: DraftConcurrency | null = null;
+      try {
+        concurrency = await getDraftConcurrency(db.draftJob, created.enqueuedAt);
+      } catch {
+        concurrency = null;
+      }
+      res.status(201).json({ data: { job: created, publish: publishResult, bundle: { s3Key: bundleS3Key, sizeBytes: upload.sizeBytes }, concurrency } });
+    }),
+  );
+
+  /**
+   * GET /api/v1/cases/:id/draft-concurrency  (admin / ops_staff / physician)
+   *
+   * Thin read for the queue-position poll: returns the live concurrency snapshot for this case's
+   * newest in-flight (queued or running) DraftJob. The InFlightDrafterPanel refreshes this on the
+   * SAME case poll the page already runs (no new poll loop) so a queued draft's "#N in line" stays
+   * truthful until it flips to running. No in-flight job → concurrency is null (nothing to show).
+   */
+  router.get(
+    '/cases/:id/draft-concurrency',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      // Newest in-flight job for this case (the one the panel is showing). version-desc so the most
+      // recent attempt wins. Only queued/running jobs have a meaningful queue position.
+      const job = await db.draftJob.findFirst({
+        where: { caseId, state: { in: ['queued', 'running'] } },
+        orderBy: { version: 'desc' },
+        select: { id: true, state: true, enqueuedAt: true },
+      });
+      if (job === null) {
+        res.json({ data: { concurrency: null } });
+        return;
+      }
+      const concurrency = await getDraftConcurrency(db.draftJob, job.enqueuedAt);
+      res.json({ data: { jobId: job.id, state: job.state, concurrency } });
     }),
   );
 

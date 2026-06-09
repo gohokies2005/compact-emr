@@ -46,9 +46,34 @@ export async function postGate1Attestations(caseId: string, draftAttempt: number
   return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/draft-decisions`, { draftAttempt, items });
 }
 
+// Queue-position snapshot computed by the backend from the DraftJob table. `running` excludes
+// zombie (crashed-but-unreaped) jobs; `max` is the drafter's concurrency ceiling. When running===max
+// and queuedAhead>=1 the drafter is genuinely full and this job is waiting in line.
+export interface DraftConcurrency {
+  readonly running: number;
+  readonly max: number;
+  readonly queuedAhead: number;
+  readonly queuePosition: number;
+}
+
 export interface DraftPublishResult {
   readonly job: unknown;
   readonly publish: unknown;
+  // Folded into the POST /draft 201 so the click knows its place in line immediately. null when the
+  // count could not be computed (never fails the enqueue).
+  readonly concurrency?: DraftConcurrency | null;
+}
+
+// Thin poll read for the queue-position panel: the live concurrency snapshot for this case's newest
+// in-flight DraftJob. concurrency is null when no queued/running job exists for the case.
+export interface DraftConcurrencyResult {
+  readonly jobId?: string;
+  readonly state?: string;
+  readonly concurrency: DraftConcurrency | null;
+}
+
+export async function getDraftConcurrency(caseId: string): Promise<{ data: DraftConcurrencyResult }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/draft-concurrency`);
 }
 
 export async function postDraft(

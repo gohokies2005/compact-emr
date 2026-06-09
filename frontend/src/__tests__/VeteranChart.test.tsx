@@ -20,12 +20,14 @@ describe('VeteranChart', () => {
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/veterans/TEST-001']}><Routes><Route path="/veterans/:id" element={<VeteranChart />} /></Routes></MemoryRouter></QueryClientProvider>);
     expect(await screen.findByText('Smith, John')).toBeInTheDocument();
     expect(screen.getByText((text) => text.includes('MRN TEST-001'))).toBeInTheDocument();
-    // The previously-buried tables are now top-level tabs, in owner-specified order.
-    expect(screen.getByRole('tab', { name: 'FRN Claims' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Staff Notes' })).toBeInTheDocument();
+    // The chart mirrors the claim page: a leading Claims tab + the SHARED vet-scoped sections.
+    expect(screen.getByRole('tab', { name: 'Claims' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Documents' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Service Connected Conditions' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Active Problems' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Medications' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Staff Notes' })).toBeInTheDocument();
+    // The claim-scoped Email tab is dropped from the veteran chart (it belongs to a claim).
+    expect(screen.queryByRole('tab', { name: 'Email' })).not.toBeInTheDocument();
   });
 });

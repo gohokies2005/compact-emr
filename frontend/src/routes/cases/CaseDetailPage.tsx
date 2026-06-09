@@ -37,6 +37,7 @@ import { useAuth } from '../../auth/useAuth';
 import { ConflictError, describeApiError } from '../../api/client';
 import { letterFilename } from '../../lib/letterFilename';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
+import { SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone, formatNameLastFirst } from '../../lib/format';
 import {
@@ -61,20 +62,18 @@ export function decidePollIntervalMs(status: CaseStatus | undefined): number | f
 // declutter (Ryan 2026-06-06). Clarifications kept — it's a live RN/physician Q&A feature.
 // The case is a claim ON a veteran, so the case page also surfaces the veteran's clinical chart
 // (SC Conditions / Active Problems / Medications / Staff Notes) — the SAME add/edit/delete panels
-// the veteran chart uses, operating on the same veteran data via the same API. Ordered to mirror the
-// veteran page's clinical tabs (SC Conditions, Active Problems, Medications, Staff Notes). (Ryan 2026-06-08.)
-type TabId = 'overview' | 'drafts' | 'clarifications' | 'documents' | 'emails' | 'messages' | 'conditions' | 'problems' | 'medications' | 'notes';
+// the veteran chart uses, operating on the same veteran data via the same API. The vet-scoped portion
+// (Documents + the clinical sections) is sourced from the shared SHARED_TABS list so the claim page and
+// the veteran chart can't drift; the claim page prepends Overview + its claim-scoped tabs (Draft jobs,
+// Clarifications, Email, Messages). (architect design 2026-06-08.)
+type TabId = 'overview' | 'drafts' | 'clarifications' | 'emails' | 'messages' | SharedTabId;
 const TABS: readonly TabItem<TabId>[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'drafts', label: 'Draft jobs' },
   { id: 'clarifications', label: 'Clarifications' },
-  { id: 'documents', label: 'Documents' },
   { id: 'emails', label: 'Email' },
   { id: 'messages', label: 'Messages' },
-  { id: 'conditions', label: 'Service Connected Conditions' },
-  { id: 'problems', label: 'Active Problems' },
-  { id: 'medications', label: 'Medications' },
-  { id: 'notes', label: 'Staff Notes' },
+  ...SHARED_TABS,
 ];
 
 function serverErrorMessage(err: unknown): string | undefined {

@@ -15,7 +15,7 @@ const TIER_CHIP: Record<StrategyTier, { cls: string; label: string }> = {
   Stop: { cls: 'bg-rose-100 text-rose-800', label: 'Review needed' },
 };
 
-export function StrategyPreviewCard({ caseId }: { readonly caseId: string }) {
+export function StrategyPreviewCard({ caseId, chartReady }: { readonly caseId: string; readonly chartReady?: boolean }) {
   const q = useQuery({
     queryKey: ['case', caseId, 'strategy-preview'],
     queryFn: () => getStrategyPreview(caseId),
@@ -26,8 +26,12 @@ export function StrategyPreviewCard({ caseId }: { readonly caseId: string }) {
   const p = q.data?.data;
   if (!p || !p.evaluable) return null; // quiet on load/error and on untriaged cases
 
-  const chip = TIER_CHIP[p.tier];
-  const concerning = p.tier === 'Stop' || p.tier === 'Thin';
+  // While the chart is still scanning, the data-dependent checks (esp. diagnosis, which reads the extracted
+  // problem list) aren't confirmed yet — show a neutral "analyzing" state instead of a premature ✗ / a
+  // "Review needed" tier that flips to ✓ once OCR lands a minute later (Ryan 2026-06-08).
+  const unconfirmed = chartReady === false;
+  const chip = unconfirmed ? { cls: 'bg-slate-100 text-slate-500', label: 'Analyzing chart…' } : TIER_CHIP[p.tier];
+  const concerning = !unconfirmed && (p.tier === 'Stop' || p.tier === 'Thin');
   const rec = p.recommendedPathway;
 
   return (
@@ -55,12 +59,22 @@ export function StrategyPreviewCard({ caseId }: { readonly caseId: string }) {
       </button>
       {showDetail || concerning ? (
         <ul className="mt-2 space-y-1">
-          {p.criteria.map((c) => (
-            <li key={c.key} className="flex items-start gap-2 text-xs">
-              <span className={c.pass ? 'flex-none text-emerald-600' : 'flex-none text-rose-600'} aria-hidden="true">{c.pass ? '✓' : '✗'}</span>
-              <span className="text-slate-600"><span className="font-medium">{c.label}.</span> {c.detail}</span>
-            </li>
-          ))}
+          {p.criteria.map((c) => {
+            const pending = unconfirmed && !c.pass; // not yet confirmed while the chart is still scanning
+            return (
+              <li key={c.key} className="flex items-start gap-2 text-xs">
+                {pending ? (
+                  <span className="flex-none text-slate-300" aria-hidden="true">○</span>
+                ) : (
+                  <span className={c.pass ? 'flex-none text-emerald-600' : 'flex-none text-rose-600'} aria-hidden="true">{c.pass ? '✓' : '✗'}</span>
+                )}
+                <span className="text-slate-600">
+                  <span className="font-medium">{c.label}.</span>{' '}
+                  {pending ? <span className="italic text-slate-400">checking the chart…</span> : c.detail}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       ) : null}
     </div>

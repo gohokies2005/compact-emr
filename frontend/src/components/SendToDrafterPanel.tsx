@@ -86,8 +86,9 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
 
   return (
     <Card className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-      {/* Pre-draft strategy preview — catch a crazy pathway before spending on a draft. */}
-      <StrategyPreviewCard caseId={caseId} />
+      {/* Pre-draft strategy preview — catch a crazy pathway before spending on a draft. While the chart is
+          still scanning, the card neutralizes its checks (no premature "no dx" ✗) — chart-readiness drives it. */}
+      <StrategyPreviewCard caseId={caseId} chartReady={ready} />
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-base font-semibold text-slate-900">Send to Drafter</h2>

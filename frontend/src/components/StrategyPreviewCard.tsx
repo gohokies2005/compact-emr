@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getStrategyPreview, type StrategyTier } from '../api/strategy-preview';
+import { StatusChip, type ChipTone } from './ui/StatusChip';
 
 // Pre-draft strategy section. NEUTRAL by design (architect/nurse/UI review 2026-06-07): it never wears a
 // blocker color and never gates the button — that's chart-readiness' job. The only color here is a small
@@ -8,11 +9,12 @@ import { getStrategyPreview, type StrategyTier } from '../api/strategy-preview';
 // veteran's own stated theory, and the 5 checks collapsed behind a disclosure (auto-shown only when the
 // tier is concerning). One verdict, no conflicting traffic lights.
 
-const TIER_CHIP: Record<StrategyTier, { cls: string; label: string }> = {
-  Strong: { cls: 'bg-emerald-100 text-emerald-800', label: 'Strong' },
-  Plausible: { cls: 'bg-sky-100 text-sky-800', label: 'Plausible' },
-  Thin: { cls: 'bg-amber-100 text-amber-800', label: 'Thin — review' },
-  Stop: { cls: 'bg-rose-100 text-rose-800', label: 'Review needed' },
+// Advisory tier chip → shared Aegis StatusChip tone. Strong=good, Plausible=info, Thin=warn, Stop=bad.
+const TIER_CHIP: Record<StrategyTier, { tone: ChipTone; label: string }> = {
+  Strong: { tone: 'good', label: 'Strong' },
+  Plausible: { tone: 'info', label: 'Plausible' },
+  Thin: { tone: 'warn', label: 'Thin — review' },
+  Stop: { tone: 'bad', label: 'Review needed' },
 };
 
 export function StrategyPreviewCard({ caseId, chartReady }: { readonly caseId: string; readonly chartReady?: boolean }) {
@@ -30,12 +32,12 @@ export function StrategyPreviewCard({ caseId, chartReady }: { readonly caseId: s
   // problem list) aren't confirmed yet — show a neutral "analyzing" state instead of a premature ✗ / a
   // "Review needed" tier that flips to ✓ once OCR lands a minute later (Ryan 2026-06-08).
   const unconfirmed = chartReady === false;
-  const chip = unconfirmed ? { cls: 'bg-slate-100 text-slate-500', label: 'Analyzing chart…' } : TIER_CHIP[p.tier];
+  const chip: { tone: ChipTone; label: string } = unconfirmed ? { tone: 'neutral', label: 'Analyzing chart…' } : TIER_CHIP[p.tier];
   const concerning = !unconfirmed && (p.tier === 'Stop' || p.tier === 'Thin');
   const rec = p.recommendedPathway;
 
   return (
-    <div className="mb-5 border-b border-slate-100 pb-4">
+    <div className="mb-5 border-b border-aegis pb-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-sm text-slate-800"><span className="font-medium">Argument:</span> {p.primaryArgument}</div>
@@ -49,9 +51,9 @@ export function StrategyPreviewCard({ caseId, chartReady }: { readonly caseId: s
             <div className="mt-1 text-sm text-slate-600"><span className="font-medium">Veteran’s theory:</span> {p.proposedMechanism}</div>
           ) : null}
         </div>
-        <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${chip.cls}`} title="Advisory only — does not block drafting">
-          {chip.label}
-        </span>
+        <StatusChip tone={chip.tone} className="shrink-0">
+          <span title="Advisory only — does not block drafting">{chip.label}</span>
+        </StatusChip>
       </div>
 
       <button type="button" onClick={() => setShowDetail((s) => !s)} className="mt-2 text-xs text-slate-400 hover:text-slate-600">

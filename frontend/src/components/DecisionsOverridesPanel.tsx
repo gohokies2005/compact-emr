@@ -51,21 +51,21 @@ export function DecisionsOverridesPanel({ caseId }: { readonly caseId: string })
   const rows = q.data?.data ?? [];
   if (rows.length === 0) return null;
   return (
-    <div className="rounded-lg border border-slate-200 bg-white">
-      <div className="border-b border-slate-200 px-4 py-3">
-        <h3 className="text-sm font-semibold text-slate-800">Decisions &amp; overrides</h3>
-        <p className="mt-0.5 text-xs text-slate-500">A plain-language record of every checklist confirmation, automated check, and RN override on this case.</p>
+    <div className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
+      <div className="border-b border-aegis px-4 py-3">
+        <h3 className="text-sm font-semibold text-navyDeep">Decisions &amp; overrides</h3>
+        <p className="mt-0.5 text-xs text-harbor">A plain-language record of every checklist confirmation, automated check, and RN override on this case.</p>
       </div>
-      <div className="divide-y divide-slate-100">
+      <div className="divide-y divide-mist">
         {rows.map((d) => {
           const { text, by } = describeDecision(d);
           return (
             <div key={d.id} className="px-4 py-3 text-sm">
               <div className="flex items-start justify-between gap-3">
-                <span className="text-slate-800">{text}</span>
-                <span className="shrink-0 text-xs text-slate-400">{by} · {formatRelativeTime(d.createdAt)}</span>
+                <span className="text-navyDeep">{text}</span>
+                <span className="shrink-0 text-xs text-harbor">{by} · {formatRelativeTime(d.createdAt)}</span>
               </div>
-              {d.reason ? <p className="mt-1 text-slate-600">“{d.reason}”</p> : null}
+              {d.reason ? <p className="mt-1 text-steel">“{d.reason}”</p> : null}
             </div>
           );
         })}

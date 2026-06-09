@@ -105,15 +105,15 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
   });
 
   return (
-    <Card className="rounded-lg border border-amber-200 bg-white p-6 shadow-sm">
+    <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold text-slate-900">Drafting was interrupted</h2>
-          <p className="mt-1 text-sm text-slate-600">
+          <h2 className="text-base font-semibold text-navyDeep">Drafting was interrupted</h2>
+          <p className="mt-1 text-sm text-steel">
             This draft stopped partway and saved a partial letter. You can open the partial as-is, or
             re-draft from scratch — the drafter can't resume a partial, so a re-run starts the whole letter over.
           </p>
-          <p className="mt-2 text-sm text-slate-500">{operatorMessage(c, job)}</p>
+          <p className="mt-2 text-sm text-steel">{operatorMessage(c, job)}</p>
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -149,15 +149,15 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
 
       <button
         type="button"
-        className="mt-4 text-sm font-medium text-slate-600 hover:text-slate-900"
+        className="mt-4 text-sm font-medium text-steel hover:text-navyDeep"
         onClick={() => setDetailsOpen((current) => !current)}
       >
         Details {detailsOpen ? '▴' : '▾'}
       </button>
 
       {detailsOpen ? (
-        <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
-          <div className="grid gap-2 text-sm text-slate-700 sm:grid-cols-3">
+        <div className="mt-4 rounded-2xl border border-aegis bg-mistSoft p-4">
+          <div className="grid gap-2 text-sm text-steel sm:grid-cols-3">
             <div><GradeChip grade={c.grade} synthesizedFloor={job?.gradeSidecarJson?.synthesized_floor} reason={job?.gradeSidecarJson?.synthesized_floor_reason} /></div>
             <div>Ship recommendation: {c.shipRecommendation ?? 'Unknown'}</div>
             <div>Operator state: {c.operatorState ?? 'Unknown'}</div>
@@ -166,7 +166,7 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
           {phases.length > 0 ? (
             <div className="mt-4 space-y-2">
               {phases.map(([phaseId, phase]) => (
-                <div key={phaseId} className="rounded-md bg-white p-3 text-sm text-slate-700">
+                <div key={phaseId} className="rounded-xl bg-ivory p-3 text-sm text-steel">
                   <span className="font-medium">{phase.summary ?? phase.status ?? 'Phase complete'}</span>
                 </div>
               ))}

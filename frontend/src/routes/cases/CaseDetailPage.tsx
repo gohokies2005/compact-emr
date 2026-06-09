@@ -249,14 +249,14 @@ export function CaseDetailPage() {
         ✓ Physician signed off — letter finalized{c.status === 'paid' ? ' and paid' : ' and ready for delivery'}.
       </div>
     ) : null}
-    <div className="rounded-lg border border-slate-200 bg-white p-6">
+    <div className="rounded-2xl border border-aegis bg-ivory px-6 py-5 shadow-aegis-panel">
       <div className="flex flex-col justify-between gap-4 lg:flex-row">
         <div>
           {/* The veteran name links to that veteran's main chart (/veterans/:id, id = the MRN /
               c.veteranId — same route as the "chart" link below). Underline-on-hover keeps it
               clearly clickable without shouting. (Ryan 2026-06-08.) */}
-          <h1 className="text-3xl font-bold text-slate-900">
-            <Link to={`/veterans/${encodeURIComponent(c.veteranId)}`} className="rounded decoration-2 underline-offset-4 hover:text-indigo-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500" title="Open this veteran's chart">
+          <h1 className="text-2xl font-semibold tracking-tight text-navyDeep">
+            <Link to={`/veterans/${encodeURIComponent(c.veteranId)}`} className="rounded decoration-2 underline-offset-4 hover:text-navy hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-navy" title="Open this veteran's chart">
               {formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}
             </Link>
           </h1>
@@ -274,9 +274,9 @@ export function CaseDetailPage() {
               v?.phone ? formatPhone(v.phone) : null,
               v?.address || null,
             ].filter(Boolean);
-            return bits.length ? <p className="mt-2 text-sm text-slate-600">{bits.join('  ·  ')}</p> : null;
+            return bits.length ? <p className="mt-2 text-sm text-steel">{bits.join('  ·  ')}</p> : null;
           })()}
-          <p className="mt-1 text-xs text-slate-400">Case {c.id} · {c.claimType} · <Link className="text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>chart</Link> · updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
+          <p className="mt-1 text-xs text-harbor">Case {c.id} · {c.claimType} · <Link className="text-navy" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>chart</Link> · updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
         </div>
         <div className="flex flex-wrap items-start gap-2">
           {/* View letter only when the review panel (which has its own "Open PDF") isn't showing —
@@ -437,7 +437,7 @@ export function CaseDetailPage() {
       <DeliveryPanel caseId={caseId} onVerifyLetter={openLetterPdf} hasLetterPdf={!!viewableLetterJob} />
     ) : null}
 
-    <div className="rounded-lg border border-slate-200 bg-white">
+    <div className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       <TabBar tabs={tabsWithBadge} active={tab} onChange={setTab} className="flex-wrap" />
       <div className="p-4">
         {tab === 'overview' ? (

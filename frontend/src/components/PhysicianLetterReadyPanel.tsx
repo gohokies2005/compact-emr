@@ -58,13 +58,13 @@ export function PhysicianLetterReadyPanel({
   const pdfKey = job.artifactPdfS3Key ?? null;
 
   return (
-    <Card className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+    <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold text-slate-900">
+          <h2 className="text-base font-semibold text-navyDeep">
             {onSendToDoctor ? 'Review the letter, then send to the doctor' : 'Letter is ready for your review'}
           </h2>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-600">
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-steel">
             <GradeChip grade={grade} synthesizedFloor={job.gradeSidecarJson?.synthesized_floor} reason={job.gradeSidecarJson?.synthesized_floor_reason} />
             <span>
               Probative score: {typeof score === 'number' ? `${score}/10` : 'Not scored'}
@@ -103,12 +103,12 @@ export function PhysicianLetterReadyPanel({
 
       {hints.length > 0 ? (
         <div className="mt-6">
-          <h3 className="text-sm font-semibold text-slate-800">
+          <h3 className="text-sm font-semibold text-navyDeep">
             Top {hints.length === 1 ? 'thing' : `${hints.length} things`} to consider:
           </h3>
           <ul className="mt-3 space-y-2">
             {hints.map((hint, index) => (
-              <li key={`${hint.section ?? 'section'}-${index}`} className="text-sm text-slate-700">
+              <li key={`${hint.section ?? 'section'}-${index}`} className="text-sm text-steel">
                 <span className="text-slate-400">{'• '}</span>
                 <span className="font-medium">Section {hint.section ?? 'review'} — </span>
                 {/* Shown in full — never truncated (Ryan 2026-06-04). */}
@@ -120,7 +120,7 @@ export function PhysicianLetterReadyPanel({
       ) : null}
 
       {canSendBack ? (
-        <div className="mt-6 flex justify-end border-t border-slate-200 pt-4">
+        <div className="mt-6 flex justify-end border-t border-aegis pt-4">
           <Button type="button" variant="ghost" onClick={() => setSendBackOpen(true)}>
             Send back to RN
           </Button>

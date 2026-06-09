@@ -57,24 +57,24 @@ export function CaseAssignmentPanel({ caseId, version, assignedPhysician, assign
   return (
     <Card>
       <div>
-        <h2 className="text-base font-semibold text-slate-900">Assignments</h2>
-        <p className="mt-1 text-sm text-slate-600">Assign the physician reviewer and the RN liaison for this case.</p>
+        <h2 className="text-base font-semibold text-navyDeep">Assignments</h2>
+        <p className="mt-1 text-sm text-steel">Assign the physician reviewer and the RN liaison for this case.</p>
       </div>
 
-      {message ? <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">{message}</div> : null}
+      {message ? <div className="mt-4 rounded-xl border border-aegis bg-mistSoft p-3 text-sm text-steel">{message}</div> : null}
 
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-          <div className="text-sm font-semibold text-slate-900">Assigned physician</div>
-          <p className="mt-1 text-sm text-slate-600">{assignedPhysician ? `${assignedPhysician.fullName} · ${assignedPhysician.email}` : 'No physician assigned.'}</p>
+        <div className="rounded-2xl border border-aegis bg-mistSoft p-4">
+          <div className="text-sm font-semibold text-navyDeep">Assigned physician</div>
+          <p className="mt-1 text-sm text-steel">{assignedPhysician ? `${assignedPhysician.fullName} · ${assignedPhysician.email}` : 'No physician assigned.'}</p>
           <label className="mt-4 block">
-            <span className="text-sm font-medium text-slate-800">Assign or reassign physician</span>
-            <select value={selectedPhysicianId} onChange={(e) => { setSelectedPhysicianId(e.target.value); setMessage(null); }} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200">
+            <span className="text-sm font-medium text-navyDeep">Assign or reassign physician</span>
+            <select value={selectedPhysicianId} onChange={(e) => { setSelectedPhysicianId(e.target.value); setMessage(null); }} className="mt-2 w-full rounded-lg border border-aegis bg-ivory px-3 py-2 text-sm text-navyDeep shadow-sm focus:border-navy focus:outline-none focus:ring-2 focus:ring-navy/30">
               <option value="">Select physician</option>
               {physicians.map((p) => <option key={p.id} value={p.id}>{p.fullName} · {p.specialty}</option>)}
             </select>
           </label>
-          {physiciansQuery.isLoading ? <div className="mt-3 flex items-center gap-2 text-sm text-slate-500"><Spinner />Loading physicians</div> : null}
+          {physiciansQuery.isLoading ? <div className="mt-3 flex items-center gap-2 text-sm text-steel"><Spinner />Loading physicians</div> : null}
           <div className="mt-4">
             <Button type="button" variant="primary" loading={assignPhysicianMutation.isPending} disabled={!canAssignPhysician} onClick={() => assignPhysicianMutation.mutate()}>
               {assignedPhysician ? 'Reassign physician' : 'Assign physician'}
@@ -82,17 +82,17 @@ export function CaseAssignmentPanel({ caseId, version, assignedPhysician, assign
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-          <div className="text-sm font-semibold text-slate-900">Assigned RN liaison</div>
-          <p className="mt-1 text-sm text-slate-600">{assignedRn ? assignedRn.email : 'No RN liaison assigned.'}</p>
+        <div className="rounded-2xl border border-aegis bg-mistSoft p-4">
+          <div className="text-sm font-semibold text-navyDeep">Assigned RN liaison</div>
+          <p className="mt-1 text-sm text-steel">{assignedRn ? assignedRn.email : 'No RN liaison assigned.'}</p>
           <label className="mt-4 block">
-            <span className="text-sm font-medium text-slate-800">Assign or reassign RN</span>
-            <select value={selectedRnId} aria-label="Assign or reassign RN" onChange={(e) => { setSelectedRnId(e.target.value); setMessage(null); }} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200">
+            <span className="text-sm font-medium text-navyDeep">Assign or reassign RN</span>
+            <select value={selectedRnId} aria-label="Assign or reassign RN" onChange={(e) => { setSelectedRnId(e.target.value); setMessage(null); }} className="mt-2 w-full rounded-lg border border-aegis bg-ivory px-3 py-2 text-sm text-navyDeep shadow-sm focus:border-navy focus:outline-none focus:ring-2 focus:ring-navy/30">
               <option value="">Select RN liaison</option>
               {rns.map((u) => <option key={u.id} value={u.id}>{u.email}</option>)}
             </select>
           </label>
-          {rnsQuery.isLoading ? <div className="mt-3 flex items-center gap-2 text-sm text-slate-500"><Spinner />Loading staff</div> : null}
+          {rnsQuery.isLoading ? <div className="mt-3 flex items-center gap-2 text-sm text-steel"><Spinner />Loading staff</div> : null}
           <div className="mt-4">
             <Button type="button" variant="primary" loading={assignRnMutation.isPending} disabled={!canAssignRn} onClick={() => assignRnMutation.mutate()}>
               {assignedRn ? 'Reassign RN' : 'Assign RN'}

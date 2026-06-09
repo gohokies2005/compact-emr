@@ -49,7 +49,7 @@ export function Gate2HaltPanel({ c, job, onChanged }: { readonly c: CaseDetail; 
   // gray washes out on amber). The switch (recommended stronger fit) gets the one filled emphasis.
   const amberOutline = 'border border-amber-300 bg-white text-amber-900 shadow-sm hover:bg-amber-50';
   return (
-    <Card className="rounded-lg border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-5">
+    <Card className="rounded-2xl border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-5 shadow-aegis-card">
       <div className="flex items-center gap-2">
         <svg className="h-5 w-5 flex-none text-amber-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.515 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>
         <h2 className="text-base font-semibold text-amber-900">Drafting paused — your decision needed</h2>

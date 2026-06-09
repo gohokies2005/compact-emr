@@ -63,12 +63,11 @@ export function SignInScreen() {
         <BridgeRotation>
           <div className="flex h-full w-full flex-col justify-center px-14">
             <div className="max-w-md rounded-2xl bg-slate-950/30 p-8 backdrop-blur-md">
-              <h2 className="text-3xl font-light tracking-wide text-white">Calm. Focused. Protected.</h2>
-              <div className="mt-4 h-[2px] w-12 rounded-full bg-brass" aria-hidden="true" />
-              <p className="mt-4 text-lg font-light leading-relaxed text-white">
+              <p className="text-2xl font-light leading-relaxed text-white sm:text-3xl">
                 {"We don't just build letters — we build the bridge between service and diagnosis."}
               </p>
-              <p className="mt-3 text-sm text-white/70">Built for evidence. Backed by physicians.</p>
+              <div className="mt-5 h-[2px] w-12 rounded-full bg-brass" aria-hidden="true" />
+              <p className="mt-4 text-base text-white/75">Built for evidence. Backed by physicians.</p>
             </div>
           </div>
         </BridgeRotation>

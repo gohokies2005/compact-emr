@@ -47,9 +47,16 @@ export function BridgeRotation({
           src={bridge.src}
           alt={`${bridge.name}, ${bridge.location}`}
           className="absolute inset-0 h-full w-full object-cover"
+          style={{ objectPosition: 'center 35%' }}
           onError={() => setFailed(true)}
         />
       ) : null}
+
+      {/* Soft bottom scrim — eases caption legibility + calms any text baked into the source art. */}
+      <div
+        aria-hidden="true"
+        className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-black/45 to-transparent"
+      />
 
       {/* Overlay content (e.g. the login tagline) rendered above the imagery. */}
       {children ? <div className="relative h-full w-full">{children}</div> : null}

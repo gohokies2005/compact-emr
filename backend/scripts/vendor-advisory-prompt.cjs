@@ -34,15 +34,38 @@ const dest = path.join(__dirname, '..', 'src', 'advisory', 'systemPrompt.ts');
 fs.writeFileSync(dest, out);
 console.log(`vendored ${dest}: prompt ${md.length}B + canonical_facts ${cf.length}B`);
 
-// Also vendor the runtime CJS modules that live alongside the prompt source. These are loaded at
-// RUNTIME from the copied vendor tree (createRequire, __dirname-relative), so they must stay in sync
-// with the flatratenexus source. sanitizeAnswer.js is the deterministic plain-text cleaner the EMR runs
-// over every model answer (strips markdown / internal field names / any $50-refund sentence).
-const SERVICES_SRC = path.join(SRC, '..', '..', 'services', 'advisory');
-const VENDOR_SERVICES = path.join(__dirname, '..', 'src', 'advisory', 'vendor', 'app', 'services', 'advisory');
-for (const f of ['sanitizeAnswer.js']) {
-  const from = path.join(SERVICES_SRC, f);
-  const to = path.join(VENDOR_SERVICES, f);
+// Also vendor the runtime CJS modules + data files that live alongside the prompt source. These are
+// loaded at RUNTIME from the copied vendor tree (createRequire, __dirname-relative), so they must stay in
+// sync with the flatratenexus source. retrieve.js is the ASYNC real retriever (pgvector kNN + BVA
+// live-SQL + Titan query-embed); it lazy-requires its helpers + reads the data files by __dirname-relative
+// path, so EVERY file it touches must be vendored. sanitizeAnswer.js is the deterministic plain-text
+// cleaner the EMR runs over every model answer (strips markdown / internal field names / any $50-refund
+// sentence). The vendor tree mirrors the flatratenexus repo layout so the relative requires resolve.
+const PROJECT_ROOT = path.join(SRC, '..', '..', '..'); // flatratenexus-project/ (SRC = <root>/app/config/advisory)
+const VENDOR_ROOT = path.join(__dirname, '..', 'src', 'advisory', 'vendor');
+
+// [src-relative-to-PROJECT_ROOT] copied to the same relative path under the vendor tree.
+const VENDOR_FILES = [
+  // config (data the prompt + retriever read)
+  'app/config/advisory/canonical_facts.json',
+  'app/config/advisory/intent_recipes.json',
+  'app/config/advisory/bva_condition_map.json',
+  // advisory services (retrieve.js is now ASYNC) + its helpers
+  'app/services/advisory/retrieve.js',
+  'app/services/advisory/sanitizeAnswer.js',
+  'app/services/advisory/intentRouter.js',
+  'app/services/advisory/bvaConditionMatch.js',
+  'app/services/advisory/bvaPairLookup.js',
+  'app/services/advisory/advisoryLiteratureLookup.js',
+  // citation fallback (PubMed no-coverage path)
+  'app/services/citationFallback.js',
+  // BVA pair atlas (read by bvaPairLookup)
+  'references/bva_secondary_pairs.json',
+];
+for (const rel of VENDOR_FILES) {
+  const from = path.join(PROJECT_ROOT, rel);
+  const to = path.join(VENDOR_ROOT, rel);
+  fs.mkdirSync(path.dirname(to), { recursive: true });
   fs.copyFileSync(from, to);
   console.log(`vendored ${to}: ${fs.statSync(to).size}B`);
 }

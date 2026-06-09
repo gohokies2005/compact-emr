@@ -1,0 +1,59 @@
+{
+  "_meta": {
+    "purpose": "Canonical facts for the RN advisory AI tool. The SINGLE SOURCE OF TRUTH that resolves the known doc conflicts (stale $350 pricing, first-person voice, anonymity/no-photo, Internal-Medicine). Every advisory answer defers to this over any other doc.",
+    "source_of_record": "docs/training/source/FRN_RN_Email_Response_Playbook.md Attachment L",
+    "sync_rule": "When pricing/scope/voice/policy changes, update Attachment L + CLAUDE.md + RN FAQ + THIS file in the same change so they never drift.",
+    "last_synced": "2026-06-06"
+  },
+  "pricing": {
+    "record_review_fee_usd": 50,
+    "record_review_credited_toward_letter": false,
+    "record_review_fee_refundable": false,
+    "record_review_refund_rule": "The $50 record review fee is NON-REFUNDABLE. NEVER tell a veteran (or imply) that it is refunded if we decline. Any refund is the physician's private, out-of-band, case-by-case decision — never stated as policy. Route any refund question to Dr. Ryan / the Team Lead; do not quote a refund.",
+    "letter_fee_usd": 500,
+    "first_time_total_usd": 550,
+    "returning_client_total_usd": 500,
+    "returning_client_pays_review_fee": false,
+    "never_quote": [350, 400],
+    "grandfathered_350_note": "Grandfathered rate for pre-2026-05-25 pipeline/returning customers ONLY, charged via the EMR's dedicated button. Never quote to anyone else.",
+    "refund_guarantee_days": 30,
+    "refund_guarantee_scope": "Defective letter WE delivered, NOT a VA denial of a sound opinion. Delivered-letter refunds escalate to Team Lead / Dr. Ryan."
+  },
+  "scope": {
+    "service": "Independent medical opinion (nexus letter) by record review only.",
+    "no": ["exams", "telehealth", "phone", "video", "DBQs"],
+    "physician_patient_relationship": false,
+    "one_condition_per_letter": true,
+    "shared_mechanism_exception": "Rare; doctor's call only.",
+    "we_do_not": ["file claims", "advise filing/appeal strategy", "complete VA forms", "talk to the VA", "predict ratings"],
+    "that_is_whose_job": "VSO",
+    "excluded_states": ["Oregon", "Utah"]
+  },
+  "timeline": {
+    "turnaround": "14 business days from COMPLETE records",
+    "post_delivery_guarantee_days": 30,
+    "rule": "Quote specifics, never 'soon'. Never promise a date the doctor has not committed to."
+  },
+  "records": {
+    "upload_link": "hipaa.jotform.com/260804641700146",
+    "we_need": ["current diagnosis", "in-service event/exposure"],
+    "we_supply": "the medical literature (occasionally one specific number)",
+    "do_not_re_ask": "Anything the VA already conceded (current dx already conceded, TERA/noise exposure already conceded)."
+  },
+  "voice_identity": {
+    "voice": "team 'we' / 'our team' (NOT first-person 'I')",
+    "sign_off": "Flat Rate Nexus",
+    "public_physician_name": "Dr. Ryan or Dr. Ryan K.",
+    "never_use_in_vet_facing": "Kasky",
+    "sayable_truth": "A board-certified physician reviews and signs every letter.",
+    "photos_ok": true,
+    "never_publish": ["NPI", "medical license number", "physical address"]
+  },
+  "positioning": {
+    "async_online": "A feature, not a flaw. Never disparage our own model.",
+    "competitor_pricing_usd": "1500-5000+",
+    "our_position": "the affordable, physician-reviewed option",
+    "red_flags_in_other_services": ["template letters", "no record review", "guaranteed approvals", "no physician credentials", "prices over $1,000"]
+  },
+  "crisis_line": "988 then press 1, or text 838255"
+}

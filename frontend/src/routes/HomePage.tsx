@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../auth/useAuth';
 import { AppShell } from '../layout/AppShell';
 import { Card } from '../components/ui/Card';
+import { BridgeRotation } from '../components/BridgeRotation';
 import { Spinner } from '../components/ui/Spinner';
 import {
   listCases,
@@ -107,13 +108,23 @@ export function HomePage() {
 
   const physicianReviewTotal = physicianReviewCount.data?.total ?? 0;
   const veteransTotal = veteransQuery.data?.data.length ?? 0;
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
 
   return (
     <AppShell>
-      <div className="mb-8">
-        <h1 className="text-2xl font-semibold text-slate-900">Home</h1>
-        <p className="mt-2 text-sm text-slate-500">Daily workflow at a glance.</p>
-      </div>
+      {/* Ambient maritime hero — the bridge rotation lives here (caption suppressed; this is backdrop, not a
+          photo to study). Dashboard chrome only — never behind a clinical chart. */}
+      <section className="relative mb-8 overflow-hidden rounded-2xl border border-aegis shadow-aegis-card">
+        <BridgeRotation caption={false} className="h-40 sm:h-48">
+          <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-navyDeep/85 via-navyDeep/50 to-transparent" />
+          <div className="relative flex h-full flex-col justify-center px-7">
+            <p className="text-xs font-medium uppercase tracking-[0.25em] text-brassSoft">Aegis</p>
+            <h1 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">{greeting}</h1>
+            <p className="mt-1 text-sm text-white/75">Daily workflow at a glance.</p>
+          </div>
+        </BridgeRotation>
+      </section>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
         <DashboardCard

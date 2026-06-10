@@ -118,8 +118,21 @@ describe('getDraftReadiness (db gather)', () => {
     const docs = rawDocs.map((d, i) => ({ id: `d${i}`, s3Key: `k${i}`, filename: d.filename, docTag: d.docTag }));
     const readStatuses = docs.map((d) => ({ filePath: d.s3Key, terminalStatus: 'read' }));
     const run = { triggerHash: computeTriggerHash(docs, readStatuses), status: opts.runStatus ?? 'complete' };
+    // case.findFirst serves BOTH getDraftReadiness's own row read AND deriveCaseFramingForCase's
+    // select (which pulls the veteran.scConditions relation). The relation must agree with the
+    // scCondition.findMany result — a real Prisma db can never disagree with itself, so the mock
+    // must not either (the SSOT consumption rewire reads the anchor list from the relation).
+    const caseRowWithRelation = opts.caseRow == null ? null : {
+      id: 'CLM-1',
+      upstreamScCondition: null,
+      veteranStatement: null,
+      veteran: {
+        scConditions: (opts.granted ?? []).map((_, i) => ({ condition: `Granted condition ${i + 1}`, ratingPct: 10, status: 'service_connected' })),
+      },
+      ...(opts.caseRow as Record<string, unknown>),
+    };
     return {
-      case: { findFirst: async () => opts.caseRow },
+      case: { findFirst: async () => caseRowWithRelation },
       veteran: { findFirst: async () => ({ noScConditionsConfirmed: opts.noScConfirmed ?? false }) },
       scCondition: { findMany: async () => opts.granted ?? [] },
       activeProblem: { findMany: async () => opts.problems ?? [] },

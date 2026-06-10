@@ -20,6 +20,8 @@
 
 import { normalizeName } from './chart-extractor.js';
 import { deriveChartBuildState, type ChartBuildState } from './chart-build-state.js';
+import { deriveCaseFramingForCase } from './case-framing-stamp.js';
+import type { CaseFraming } from './case-framing.js';
 import type { AppDb } from './db-types.js';
 
 export type ClaimType = 'initial' | 'supplemental' | 'hlr' | 'appeal_bva';
@@ -28,6 +30,13 @@ export interface DraftReadinessInput {
   claimType: ClaimType;
   /** The drafter framing: 'secondary' means the claim needs an established SC primary to attach to. */
   framingChoice: string | null;
+  /**
+   * SSOT caseFraming (v1) — when present and recognized, the framing/anchor reads below use it
+   * instead of the legacy exact-string framingChoice check and the raw grantedScCount (build plan
+   * §2.5: consumers read the SSOT object, never re-run the framing regex / status re-filter).
+   * Absent or unknown version → byte-identical legacy behavior (the baseline test locks it).
+   */
+  caseFraming?: CaseFraming | null;
   claimedCondition: string;
   claimedConditions: string[];
   inServiceEvent: string | null;
@@ -63,6 +72,12 @@ export interface DraftReadinessResult {
   /** Where the chart-build pipeline is. Only 'chart_ready' evaluates real missing-docs; the other
    *  states mean "still building" (or a surfaced failure), never a false "documents missing". */
   buildState: ChartBuildState;
+  /**
+   * The SSOT framing object the evaluation used (when derivable) — the Gate-1 pre-fill feed
+   * (work order Task 3: sc_conditions ← grantedScAnchors) and the provenance display
+   * (Task 5: source = rn_set / derived / text_parse_fallback / default_direct).
+   */
+  caseFraming?: CaseFraming;
 }
 
 const APPEAL_TYPES: ReadonlySet<ClaimType> = new Set<ClaimType>(['supplemental', 'hlr', 'appeal_bva']);
@@ -91,14 +106,26 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
   const items: ReadinessItem[] = [];
   const claimedAll = [input.claimedCondition, ...input.claimedConditions].filter(Boolean);
 
-  // 1. Service-connected PRIMARY — required ONLY for a SECONDARY claim (it needs an established
+  // SSOT consumption (version-gated, fail-open): a recognized v1 caseFraming supplies the framing
+  // theory + the granted-anchor list; 'undetermined' is treated like absence for THEORY decisions
+  // (schema rule) but its anchor list is still readable. Absent/unknown version → legacy reads.
+  const cf = input.caseFraming?.version === 1 ? input.caseFraming : undefined;
+  const ssotTheory = cf !== undefined && cf.framing !== 'undetermined' ? cf.framing : null;
+  const grantedCount = cf !== undefined ? cf.grantedScAnchors.length : input.grantedScCount;
+
+  // 1. Service-connected PRIMARY — required ONLY for a SECONDARY-type claim (it needs an established
   //    service-connected condition to attach to). A direct/initial claim does NOT need a prior SC,
   //    so we don't add the item at all for those (no false block). Three-way for secondary:
   //    grants on file → present; confirmed-none → not viable as secondary; neither → upload it.
-  const isSecondary = input.framingChoice === 'secondary';
+  //    With the SSOT present, 'aggravation' (3.310(b)-pathway label) also requires the anchor —
+  //    a deliberate widening vs the legacy exact-'secondary' check (work order Task 2; the
+  //    dormant DRAFT_READINESS_GATE 409 stays off, and the RN can override the item regardless).
+  const isSecondary = ssotTheory !== null
+    ? ssotTheory === 'secondary' || ssotTheory === 'aggravation'
+    : input.framingChoice === 'secondary';
   if (isSecondary) {
-    if (input.grantedScCount >= 1) {
-      items.push({ key: 'sc_conditions', label: 'Service-connected primary', present: true, basis: `${input.grantedScCount} granted SC condition(s) on file` });
+    if (grantedCount >= 1) {
+      items.push({ key: 'sc_conditions', label: 'Service-connected primary', present: true, basis: `${grantedCount} granted SC condition(s) on file` });
     } else if (input.noScConditionsConfirmed) {
       items.push({
         key: 'sc_conditions', label: 'Service-connected primary', present: false,
@@ -142,16 +169,25 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
     });
   }
 
-  // 4. In-service event — a recorded event OR a service record (DD-214 / STR) on file.
+  // 4. In-service event — a recorded event OR a service record (DD-214 / STR) on file. Under the
+  //    SSOT, a secondary/aggravation claim anchored on a GRANTED SC primary is satisfied by the
+  //    anchor itself: per 38 CFR 3.310 the claim attaches to the service-connected primary, not to
+  //    a fresh in-service event (mirrors the drafter Gate-2 anchor rule that fixed the Hatfield
+  //    false-halt — work order Task 3).
   {
     const hasEventText = (input.inServiceEvent ?? '').trim().length > 0;
     const hasServiceDoc = hasDoc(input.documents, SERVICE_DOC);
-    const present = hasEventText || hasServiceDoc;
+    const anchor = isSecondary && ssotTheory !== null && cf !== undefined ? cf.grantedScAnchors[0] : undefined;
+    const anchorSatisfies = anchor !== undefined;
+    const present = hasEventText || hasServiceDoc || anchorSatisfies;
     items.push({
       key: 'in_service_event',
       label: 'In-service event / service record',
       present,
-      basis: hasEventText ? 'in-service event recorded on case' : hasServiceDoc ? 'DD-214 / service record on file' : 'no in-service event or service record',
+      basis: hasEventText ? 'in-service event recorded on case'
+        : hasServiceDoc ? 'DD-214 / service record on file'
+        : anchorSatisfies ? `satisfied by granted SC anchor ${anchor.condition}${anchor.ratingPct !== null ? ` (${anchor.ratingPct}%)` : ''}`
+        : 'no in-service event or service record',
       ...(present ? {} : {
         message: 'Essential documents missing: The in-service event is not documented. Please upload the DD-214 or service treatment record showing the in-service event and redraft.',
       }),
@@ -166,7 +202,7 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
 
   // evaluateDraftReadiness is the chart_ready evaluator; getDraftReadiness only calls it once the
   // build state is chart_ready.
-  return { ready, items, missing, summary, buildState: 'chart_ready' };
+  return { ready, items, missing, summary, buildState: 'chart_ready', ...(cf !== undefined ? { caseFraming: cf } : {}) };
 }
 
 /** Plain RN-facing result for a case whose chart isn't finished building yet (or failed). The door
@@ -227,9 +263,14 @@ export async function getDraftReadiness(db: AppDb, caseId: string): Promise<Draf
   const { state } = deriveChartBuildState(documents, readStatuses, latestRun);
   if (state !== 'chart_ready') return buildingResult(state);
 
+  // Live-derive the SSOT framing through the ONE shared derivation (architect QA: consumers call
+  // the producer function, never a second regex). Null (raced delete) → legacy path, fail-open.
+  const caseFraming = await deriveCaseFramingForCase(db, caseId);
+
   return evaluateDraftReadiness({
     claimType: c.claimType,
     framingChoice: c.framingChoice,
+    caseFraming,
     claimedCondition: c.claimedCondition,
     claimedConditions: c.claimedConditions ?? [],
     inServiceEvent: c.inServiceEvent,

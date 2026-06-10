@@ -1,4 +1,5 @@
 import type { CaseRecord, CdsVerdict } from './db-types.js';
+import type { CaseFraming } from './case-framing.js';
 
 export type ViabilityVerdict = 'go' | 'clarify' | 'needs_from_vet' | 'not_viable';
 
@@ -26,6 +27,13 @@ export interface ViabilityInput {
    *  entirely — otherwise a permanently-stale 'not_yet_run' would degrade every new case to
    *  'clarify' with a "Run CDS" recommendation pointing at a removed panel (dead-end). */
   readonly cdsEnabled?: boolean;
+  /**
+   * SSOT caseFraming (v1, build plan §2.5) — when present and recognized, the secondary-framing
+   * and upstream reads use it instead of the legacy `/secondary|aggravat/` regex on framingChoice
+   * (which DISAGREED with draft-readiness's exact-match — the intra-EMR divergence this closes).
+   * Absent / unknown version / 'undetermined' theory → byte-identical legacy behavior.
+   */
+  readonly caseFraming?: CaseFraming | null;
 }
 
 export interface ViabilityResult {
@@ -105,7 +113,16 @@ export function evaluateViabilityGate(input: ViabilityInput): ViabilityResult {
     recommendations.push('Run CDS from the Case Detail panel to surface the BVA odds and any hard gates.');
   }
 
-  if (isSecondary(input.caseRow.framingChoice) && !input.caseRow.upstreamScCondition) {
+  // SSOT consumption (version-gated, fail-open): a recognized v1 theory replaces the legacy regex;
+  // the SSOT's upstream (which carries the producer's recovered anchor on 'derived') replaces the
+  // raw row read — so a case whose anchor the producer already recovered no longer false-warns.
+  const cf = input.caseFraming?.version === 1 ? input.caseFraming : undefined;
+  const ssotTheory = cf !== undefined && cf.framing !== 'undetermined' ? cf.framing : null;
+  const secondaryFramed = ssotTheory !== null
+    ? ssotTheory === 'secondary' || ssotTheory === 'aggravation'
+    : isSecondary(input.caseRow.framingChoice);
+  const upstream = cf !== undefined ? cf.upstreamScCondition : input.caseRow.upstreamScCondition;
+  if (secondaryFramed && !upstream) {
     blockers.push({
       code: 'no_upstream_for_secondary',
       severity: 'warn',

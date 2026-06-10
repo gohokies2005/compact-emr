@@ -62,17 +62,23 @@ async function persistFramingWhenNull(db: AppDb, row: CaseRowForFraming, cf: Cas
 }
 
 /**
- * Derive caseFraming for the case and return a copy of the bundle with it stamped. Fail-open by
- * construction: if the case row vanished (raced delete), the bundle is returned UNSTAMPED — every
- * consumer treats absence as "use legacy derivation", so a missing stamp can never break a draft.
+ * THE shared Case-row → caseFraming derivation (architect QA 2026-06-10: one row→input mapping for
+ * every consumer, so the stamp + the request-time consumers — viability gate, strategy preview,
+ * draft readiness — cannot drift into N hand-written mappings). Returns null when the case row
+ * doesn't exist; callers fail open to their legacy derivations on null.
+ *
+ * Request-time consumers calling this LIVE and the draft-time stamp reading the same function may
+ * see different values if the Case row changed in between — that is BY DESIGN: the stamp is the
+ * value AT DRAFT TIME; the cards are advisory request-time reads of the same single derivation.
  */
-export async function stampCaseFraming(
-  db: AppDb,
-  caseId: string,
-  bundle: DrafterBundle,
-  opts: { readonly persist: boolean },
-): Promise<DrafterBundle> {
-  const c = await db.case.findFirst({
+export async function deriveCaseFramingForCase(db: AppDb, caseId: string): Promise<CaseFraming | null> {
+  const c = await fetchCaseRowForFraming(db, caseId);
+  if (c === null) return null;
+  return deriveForRow(c);
+}
+
+async function fetchCaseRowForFraming(db: AppDb, caseId: string): Promise<CaseRowForFraming | null> {
+  return await db.case.findFirst({
     where: { id: caseId },
     select: {
       id: true,
@@ -84,9 +90,10 @@ export async function stampCaseFraming(
       veteran: { select: { scConditions: { select: { condition: true, ratingPct: true, status: true } } } },
     },
   }) as unknown as CaseRowForFraming | null;
-  if (c === null) return bundle;
+}
 
-  const caseFraming = deriveCaseFraming(
+function deriveForRow(c: CaseRowForFraming): CaseFraming {
+  return deriveCaseFraming(
     {
       claimedCondition: c.claimedCondition,
       claimType: c.claimType as ProducerClaimType,
@@ -100,7 +107,22 @@ export async function stampCaseFraming(
       status: String(s.status),
     })),
   );
+}
 
+/**
+ * Derive caseFraming for the case and return a copy of the bundle with it stamped. Fail-open by
+ * construction: if the case row vanished (raced delete), the bundle is returned UNSTAMPED — every
+ * consumer treats absence as "use legacy derivation", so a missing stamp can never break a draft.
+ */
+export async function stampCaseFraming(
+  db: AppDb,
+  caseId: string,
+  bundle: DrafterBundle,
+  opts: { readonly persist: boolean },
+): Promise<DrafterBundle> {
+  const c = await fetchCaseRowForFraming(db, caseId);
+  if (c === null) return bundle;
+  const caseFraming = deriveForRow(c);
   if (opts.persist) {
     await persistFramingWhenNull(db, c, caseFraming);
   }

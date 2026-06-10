@@ -3,6 +3,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { evaluateViabilityGate } from '../services/viability-gate.js';
+import { deriveCaseFramingForCase } from '../services/case-framing-stamp.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -40,14 +41,17 @@ export function createViabilityRouter(db: AppDb): Router {
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
 
       const cw = c as typeof c & { veteranId: string };
-      const [activeProblems, fileRows] = await Promise.all([
+      const [activeProblems, fileRows, caseFraming] = await Promise.all([
         db.activeProblem.findMany({ where: { veteranId: cw.veteranId }, select: { problem: true } }),
         db.fileReadStatus.findMany({ where: { caseId } }),
+        // SSOT framing via the ONE shared derivation; null → the gate falls open to legacy reads.
+        deriveCaseFramingForCase(db, caseId),
       ]);
 
       const chartReadiness = evaluateChartReadiness(fileRows);
 
       const result = evaluateViabilityGate({
+        caseFraming,
         caseRow: {
           id: c.id,
           status: c.status,

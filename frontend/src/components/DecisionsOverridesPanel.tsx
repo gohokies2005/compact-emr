@@ -46,6 +46,21 @@ function describeDecision(d: DraftDecision): { text: string; by: string } {
   }
 }
 
+/**
+ * PRECEDENCE (work order Task 5, audit D1): the Gate-2 automated check reads the actual documents,
+ * so it is the authority over a human checkbox. A Gate-1 "RN confirmed ✓" whose item a LATER Gate-2
+ * finding could not confirm renders as superseded — not as an equal, contradicting log line. A
+ * re-attestation AFTER the Gate-2 finding is newer evidence and is not struck.
+ */
+function isSuperseded(d: DraftDecision, rows: readonly DraftDecision[]): boolean {
+  if (d.gate !== 1 || d.decision !== 'yes') return false;
+  return rows.some((r) =>
+    r.gate === 2
+    && r.item === d.item
+    && (r.decision === 'no' || r.decision === 'pause')
+    && new Date(r.createdAt).getTime() > new Date(d.createdAt).getTime());
+}
+
 export function DecisionsOverridesPanel({ caseId }: { readonly caseId: string }) {
   const q = useQuery({ queryKey: ['case', caseId, 'draft-decisions'], queryFn: () => getDraftDecisions(caseId), enabled: caseId.length > 0 });
   const rows = q.data?.data ?? [];
@@ -59,12 +74,16 @@ export function DecisionsOverridesPanel({ caseId }: { readonly caseId: string })
       <div className="divide-y divide-mist">
         {rows.map((d) => {
           const { text, by } = describeDecision(d);
+          const superseded = isSuperseded(d, rows);
           return (
             <div key={d.id} className="px-4 py-3 text-sm">
               <div className="flex items-start justify-between gap-3">
-                <span className="text-navyDeep">{text}</span>
+                <span className={superseded ? 'text-harbor line-through decoration-harbor/60' : 'text-navyDeep'}>{text}</span>
                 <span className="shrink-0 text-xs text-harbor">{by} · {formatRelativeTime(d.createdAt)}</span>
               </div>
+              {superseded ? (
+                <p className="mt-1 text-xs font-medium text-amber-700">Superseded — a later automated document check could not confirm this. See the AI check entry.</p>
+              ) : null}
               {d.reason ? <p className="mt-1 text-steel">“{d.reason}”</p> : null}
             </div>
           );

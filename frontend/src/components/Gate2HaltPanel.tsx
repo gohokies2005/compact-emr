@@ -8,11 +8,31 @@ import type { DraftJob, Gate2HaltPayload } from '../types/prisma';
 
 /**
  * Gate-2 halt screen — shown when the pre-draft dx/event verification PARKED the case
- * (status needs_rn_decision / needs_records). Renders the plain-English reason + any switch
- * proposal and gives the RN actionable buttons (NEVER a dead-end): override + draft as-is,
+ * (status needs_rn_decision / needs_records). Renders the plain-English reason + the per-finding
+ * verdict breakdown (what the automated check found, with its evidence quote) + any switch
+ * proposal, and gives the RN actionable buttons (NEVER a dead-end): override + draft as-is,
  * switch to the better-fit dx, "records are in — re-run", or pause to gather records. Each is
  * logged + shown in the Decisions panel.
  */
+
+/** One gate finding row: tri-state verdict (found / not_found / uncertain) + optional evidence. */
+function FindingRow({ label, verdict, evidence }: { readonly label: string; readonly verdict: string; readonly evidence?: string | null | undefined }) {
+  const v = verdict === 'found' ? { icon: '✓', cls: 'text-green-700', text: 'Found' }
+    : verdict === 'not_found' ? { icon: '✗', cls: 'text-red-700', text: 'Not found' }
+    : { icon: '?', cls: 'text-amber-700', text: 'Uncertain' };
+  return (
+    <li className="flex items-start gap-2">
+      <span className={`mt-0.5 w-4 flex-none text-center font-bold ${v.cls}`} aria-hidden="true">{v.icon}</span>
+      <span>
+        <span className="font-medium text-slate-800">{label}:</span>{' '}
+        <span className={`font-semibold ${v.cls}`}>{v.text}</span>
+        {evidence && evidence.trim().length > 0 ? (
+          <span className="block text-xs text-slate-600">&ldquo;{evidence.trim()}&rdquo;</span>
+        ) : null}
+      </span>
+    </li>
+  );
+}
 export function Gate2HaltPanel({ c, job, onChanged }: { readonly c: CaseDetail; readonly job?: DraftJob; readonly onChanged: () => void | Promise<void> }) {
   const payload: Gate2HaltPayload = (job?.haltPayloadJson as Gate2HaltPayload | null | undefined) ?? {};
   const message = payload.plainEnglish || payload.operatorMessage || c.operatorMessage || 'The pre-draft verification could not confirm the diagnosis and/or in-service event. Decide how to proceed.';
@@ -55,6 +75,16 @@ export function Gate2HaltPanel({ c, job, onChanged }: { readonly c: CaseDetail; 
         <h2 className="text-base font-semibold text-amber-900">Drafting paused — your decision needed</h2>
       </div>
       <p className="mt-2 text-sm text-amber-900">{message}</p>
+      {payload.claimedDxFound || payload.inServiceEventFound ? (
+        <ul className="mt-3 space-y-1.5 rounded-md border border-amber-200 bg-white p-3 text-sm">
+          {payload.claimedDxFound ? (
+            <FindingRow label="Diagnosis of the claimed condition" verdict={payload.claimedDxFound} evidence={payload.claimedDxEvidence} />
+          ) : null}
+          {payload.inServiceEventFound ? (
+            <FindingRow label="In-service event / SC anchor" verdict={payload.inServiceEventFound} evidence={payload.inServiceEventEvidence} />
+          ) : null}
+        </ul>
+      ) : null}
       {sw !== null ? (
         <div className="mt-3 rounded-md border border-amber-300 bg-white p-3 text-sm text-slate-700">
           <span className="font-semibold">Possible stronger fit: </span>

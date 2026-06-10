@@ -103,8 +103,12 @@ export interface Gate2HaltPayload {
   readonly haltGate?: string;
   readonly reasonCode?: string;
   readonly plainEnglish?: string;
-  readonly claimedDxFound?: string;
-  readonly inServiceEventFound?: string;
+  /** Tri-state gate verdicts: 'found' | 'not_found' | 'uncertain' (drafter dxVerificationGate). */
+  readonly claimedDxFound?: string | null;
+  readonly inServiceEventFound?: string | null;
+  /** PHI-scrubbed short quote + source doc backing each verdict (drafter-worker postDxGateHalt). */
+  readonly claimedDxEvidence?: string | null;
+  readonly inServiceEventEvidence?: string | null;
   readonly switchProposal?: Gate2SwitchProposal | null;
   readonly operatorMessage?: string;
 }

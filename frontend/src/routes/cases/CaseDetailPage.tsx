@@ -494,7 +494,7 @@ export function CaseDetailPage() {
 
     {/* In-chart decisions/overrides audit — plain-language, pinned to the very bottom of the case
         screen (Ryan 2026-06-06). Self-hides when empty. */}
-    <DecisionsOverridesPanel caseId={caseId} />
+    <DecisionsOverridesPanel caseId={caseId} caseVersion={c.version} />
 
     {pendingTo ? <TransitionModal caseId={caseId} from={c.status} to={pendingTo} version={c.version} onClose={() => setPendingTo(null)} onDone={async () => { setPendingTo(null); await refetch(); }} /> : null}
     <SignOffPopup caseId={caseId} open={signOffOpen} onClose={() => setSignOffOpen(false)} onSignedOff={refetch} />

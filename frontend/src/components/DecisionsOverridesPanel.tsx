@@ -1,5 +1,8 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getDraftDecisions, type DraftDecision } from '../api/drafter';
+import { getDraftReadiness } from '../api/draft-readiness';
+import { patchCase } from '../api/cases';
+import { describeApiError } from '../api/client';
 import { formatRelativeTime } from '../lib/date';
 
 /**
@@ -61,15 +64,65 @@ function isSuperseded(d: DraftDecision, rows: readonly DraftDecision[]): boolean
     && new Date(r.createdAt).getTime() > new Date(d.createdAt).getTime());
 }
 
-export function DecisionsOverridesPanel({ caseId }: { readonly caseId: string }) {
+const FRAMING_SOURCE_LABEL: Record<string, string> = {
+  rn_set: 'set by RN',
+  derived: 'auto-derived from the granted SC conditions',
+  text_parse_fallback: 'parsed from the veteran’s intake wording',
+  default_direct: 'default (direct)',
+};
+
+export function DecisionsOverridesPanel({ caseId, caseVersion }: { readonly caseId: string; readonly caseVersion?: number }) {
+  const qc = useQueryClient();
   const q = useQuery({ queryKey: ['case', caseId, 'draft-decisions'], queryFn: () => getDraftDecisions(caseId), enabled: caseId.length > 0 });
+  // Same cache key as the Gate-1 modal's feed — one fetch serves both surfaces.
+  const readinessQ = useQuery({ queryKey: ['case', caseId, 'draft-readiness'], queryFn: () => getDraftReadiness(caseId), enabled: caseId.length > 0 });
+  const cf = readinessQ.data?.data.caseFraming;
+
+  const editFraming = useMutation({
+    mutationFn: (input: { framingChoice: string | null; upstreamScCondition: string | null }) => {
+      if (caseVersion === undefined) throw new Error('case version unavailable');
+      return patchCase(caseId, { version: caseVersion, ...input });
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['case', caseId] }),
+    onError: (e: unknown) => window.alert(`Could not update the framing — ${describeApiError(e)}`),
+  });
+
+  function onEditFraming() {
+    if (cf === undefined) return;
+    const framing = window.prompt('Framing (secondary / aggravation / direct — blank to clear):', cf.framingChoice ?? cf.framing);
+    if (framing === null) return;
+    const f = framing.trim().toLowerCase();
+    if (f.length > 0 && !['secondary', 'aggravation', 'direct'].includes(f)) {
+      window.alert('Framing must be secondary, aggravation, or direct (or blank to clear).');
+      return;
+    }
+    const upstream = window.prompt('Upstream SC condition (blank to clear):', cf.upstreamScCondition ?? '');
+    if (upstream === null) return;
+    editFraming.mutate({ framingChoice: f.length > 0 ? f : null, upstreamScCondition: upstream.trim().length > 0 ? upstream.trim() : null });
+  }
+
   const rows = q.data?.data ?? [];
-  if (rows.length === 0) return null;
+  // Provenance is worth showing even before any decision exists (the RN sets framing pre-draft);
+  // hide the panel only when BOTH the log and the framing feed are empty.
+  if (rows.length === 0 && cf === undefined) return null;
   return (
     <div className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       <div className="border-b border-aegis px-4 py-3">
         <h3 className="text-sm font-semibold text-navyDeep">Decisions &amp; overrides</h3>
         <p className="mt-0.5 text-xs text-harbor">A plain-language record of every checklist confirmation, automated check, and RN override on this case.</p>
+        {cf !== undefined ? (
+          <p className="mt-2 text-xs text-harbor">
+            <span className="font-semibold text-navyDeep">Framing:</span>{' '}
+            <span className="font-medium">{cf.framing}</span>
+            {' · '}{FRAMING_SOURCE_LABEL[cf.source] ?? cf.source}
+            {cf.upstreamScCondition !== null ? <> · anchor: {cf.upstreamScCondition}</> : null}
+            {caseVersion !== undefined ? (
+              <button type="button" className="ml-2 rounded border border-aegis px-1.5 py-0.5 text-xs text-navyDeep hover:bg-mist" disabled={editFraming.isPending} onClick={onEditFraming}>
+                Edit framing
+              </button>
+            ) : null}
+          </p>
+        ) : null}
       </div>
       <div className="divide-y divide-mist">
         {rows.map((d) => {

@@ -1,6 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { postGate1Attestations } from '../api/drafter';
+import { getDraftReadiness, type ReadinessItem } from '../api/draft-readiness';
 import { describeApiError } from '../api/client';
 
 type Answer = 'yes' | 'no' | 'override' | 'not_applicable';
@@ -11,7 +13,29 @@ interface Item { readonly key: string; readonly label: string; readonly allowNA?
  * Every shown item must be Yes, Override+reason, or (SC-conditions) Not applicable. A "No" blocks
  * with a one-line next step. Attestations are written to the chart (draft_decisions, gate=1) BEFORE
  * the draft is enqueued. Gate-2 (the AI dx/event check) is the backstop for a lazy attestation.
+ *
+ * PRE-FILL (work order Task 3, audit D1 — "the dropdown checklist reads nothing"): the modal seeds
+ * its answers from the draft-readiness GET (the document-level evidence + the SSOT caseFraming), so
+ * the RN confirms findings WITH the evidence shown instead of attesting blind. The RN still writes
+ * the attestation — every radio stays editable, present-evidence pre-selects Yes, ABSENT evidence
+ * deliberately leaves the radio UNSET (a prompt to decide, never an auto-"No" that trains bulk
+ * overriding). Feed absent / chart still building → byte-identical blank modal (fail-open).
  */
+
+// readiness item key → Gate-1 checklist item key
+const READINESS_TO_GATE1: Record<string, string> = {
+  current_diagnosis: 'dx_present',
+  in_service_event: 'in_service_event',
+  sc_conditions: 'sc_conditions',
+  denial_letter: 'prior_denial',
+};
+
+const SOURCE_LABEL: Record<string, string> = {
+  rn_set: 'set by RN',
+  derived: 'auto-derived from the granted SC conditions',
+  text_parse_fallback: 'parsed from the veteran’s intake wording',
+  default_direct: 'default (direct)',
+};
 export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draftAttempt, onConfirmed, onClose }: {
   readonly caseId: string;
   readonly claimType: string;
@@ -37,6 +61,41 @@ export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draft
   const [reasons, setReasons] = useState<Record<string, string>>({});
   const [guidance, setGuidance] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // The pre-fill feed. Loading/error/still-building all degrade to today's blank modal.
+  const readinessQuery = useQuery({
+    queryKey: ['case', caseId, 'draft-readiness'],
+    queryFn: () => getDraftReadiness(caseId),
+    enabled: caseId.length > 0,
+  });
+  const readiness = readinessQuery.data?.data;
+
+  const byGate1Key = useMemo(() => {
+    const m: Record<string, ReadinessItem> = {};
+    if (readiness?.buildState === 'chart_ready') {
+      for (const it of readiness.items ?? []) {
+        const g = READINESS_TO_GATE1[it.key];
+        if (g !== undefined) m[g] = it;
+      }
+    }
+    return m;
+  }, [readiness]);
+
+  // One-shot seed: present evidence pre-selects Yes; the merge keeps any answer the RN already
+  // clicked ({...seed, ...prev} — prev wins), and the ref stops a background refetch re-seeding
+  // over an RN who cleared a box. Both are load-bearing (architect plan risk 3).
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current) return;
+    if (readiness?.buildState !== 'chart_ready') return;
+    const seed: Record<string, Answer> = {};
+    for (const i of items) {
+      const ev = byGate1Key[i.key];
+      if (ev !== undefined && ev.present) seed[i.key] = 'yes';
+    }
+    if (Object.keys(seed).length > 0) setAnswers((prev) => ({ ...seed, ...prev }));
+    seededRef.current = true;
+  }, [readiness, items, byGate1Key]);
 
   const anyNo = items.some((i) => answers[i.key] === 'no');
   const allResolved = items.every((i) => {
@@ -69,10 +128,23 @@ export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draft
       <div className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg bg-white p-6 shadow-2xl" style={{ maxHeight: '85vh' }}>
         <h2 className="text-base font-semibold text-slate-900">Before we draft</h2>
         <p className="mt-1 text-sm text-slate-500">Confirm each item before starting the draft.</p>
+        {readiness?.caseFraming !== undefined ? (
+          <p className="mt-1 text-xs text-slate-500">
+            Framing: <span className="font-semibold">{readiness.caseFraming.framing}</span>
+            {' · '}{SOURCE_LABEL[readiness.caseFraming.source] ?? readiness.caseFraming.source}
+            {readiness.caseFraming.upstreamScCondition !== null ? <> · anchor: {readiness.caseFraming.upstreamScCondition}</> : null}
+          </p>
+        ) : null}
         <div className="mt-4 space-y-4">
           {items.map((i) => (
             <div key={i.key} className="rounded-lg border border-slate-200 p-3">
               <p className="text-sm text-slate-800">{i.label}</p>
+              {byGate1Key[i.key] !== undefined ? (
+                <p className={`mt-1 text-xs ${byGate1Key[i.key]!.present ? 'text-emerald-700' : 'text-amber-700'}`}>
+                  <span aria-hidden="true">{byGate1Key[i.key]!.present ? '✓ ' : '⚠ '}</span>
+                  {byGate1Key[i.key]!.present ? byGate1Key[i.key]!.basis : (byGate1Key[i.key]!.message ?? byGate1Key[i.key]!.basis)}
+                </p>
+              ) : null}
               <div className="mt-2 flex flex-wrap gap-3 text-sm">
                 {(['yes', 'no', 'override', ...(i.allowNA ? ['not_applicable'] as Answer[] : [])] as Answer[]).map((opt) => (
                   <label key={opt} className="flex items-center gap-1">

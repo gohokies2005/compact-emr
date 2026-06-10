@@ -1,0 +1,4 @@
+# Vendored cross-repo contract — byte-identical to the drafter repo's canonical copy, sha256-pinned
+# in backend/src/__tests__/case-framing.test.ts. Git must NEVER rewrite its line endings (a CRLF
+# normalization changes the bytes and trips the pin — caught live 2026-06-10 on a stash round-trip).
+backend/src/config/caseFraming.v1.schema.json -text

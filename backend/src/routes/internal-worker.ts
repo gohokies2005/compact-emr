@@ -8,9 +8,8 @@ import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
-import { deriveIntakeFields, isRecognizedSecondaryAnchor } from '../services/intake-derive.js';
-import { bestGrantedScPair } from '../services/strategy-preview.js';
-import { findPair } from '../services/cdsEngine.js';
+import { deriveIntakeFields } from '../services/intake-derive.js';
+import { deriveFramingFromEvidence } from '../services/case-framing.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
 import { candidateAddresses, decideVeteranMatch, deriveEmailId, makeSnippet, normalizeEmailAddress } from '../services/email-matching.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
@@ -750,27 +749,33 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       const grantedSc = (cc.veteran?.scConditions ?? []).filter((s) => s.status === 'service_connected').map((s) => s.condition);
       const data: Record<string, unknown> = {};
       if (derived.veteranTheory && (cc.veteranStatement ?? '').trim().length === 0) data.veteranStatement = derived.veteranTheory;
-      // Anchor: keep a SCOREABLE stored anchor (resolves to an atlas pair). Otherwise write the AUTHORITATIVE
-      // anchor — the granted-SC condition with the best Board pair to the claimed condition — so the STORED
-      // value matches what the card computes (effective anchor) AND what the drafter receives. Fall back to
-      // the text-parse, then direct. (Same precedence as computeStrategyPreview, persisted.)
-      const storedScoreable = cc.upstreamScCondition !== null && findPair(cc.upstreamScCondition, cc.claimedCondition) !== null;
-      if (!storedScoreable) {
-        const authoritative = bestGrantedScPair({
-          claimedCondition: cc.claimedCondition, claimType: 'secondary', framingChoice: cc.framingChoice,
-          upstreamScCondition: null, serviceConnectedConditions: grantedSc, activeProblems: [],
-        });
-        const aggravation = /aggravat/.test((cc.framingChoice ?? '').toLowerCase());
-        if (authoritative !== null) {
-          data.upstreamScCondition = authoritative.upstream;
-          data.framingChoice = aggravation ? 'aggravation' : 'secondary';
-        } else if (derived.upstreamCondition) {
-          data.upstreamScCondition = derived.upstreamCondition;
-          data.framingChoice = derived.framing ?? 'secondary';
-        } else if (cc.upstreamScCondition !== null && !isRecognizedSecondaryAnchor(cc.upstreamScCondition)) {
-          data.upstreamScCondition = null;
-          data.framingChoice = 'direct';
-        }
+      // Anchor: the SHARED SSOT evidence ladder (case-framing.ts deriveFramingFromEvidence) — the same
+      // derivation the bundle producer uses, so the backfill and the stamped bundle.caseFraming can never
+      // diverge (SSOT build plan §5.2; a second independent derivation is the bug class this eliminates).
+      // Branch→write mapping preserves the original :753-773 behavior exactly:
+      //   storedScoreable (derived + upstream unchanged)        → no write (keep the stored anchor)
+      //   authoritative   (derived + upstream changed)          → write upstream + secondary/aggravation
+      //   text-parse hint (text_parse_fallback)                 → write upstream + parsed framing
+      //   garbage stored anchor (default_direct + cleared)      → write null + 'direct'
+      //   nothing fired   (default_direct, nothing to clear)    → no write
+      const decision = deriveFramingFromEvidence({
+        claimedCondition: cc.claimedCondition,
+        upstreamScCondition: cc.upstreamScCondition,
+        grantedScConditionNames: grantedSc,
+        aggravationWording: /aggravat/.test((cc.framingChoice ?? '').toLowerCase()),
+        textParseHint: derived.upstreamCondition
+          ? { upstream: derived.upstreamCondition, framing: derived.framing ?? 'secondary' }
+          : undefined,
+      });
+      if (decision.source === 'derived' && decision.upstreamScCondition !== cc.upstreamScCondition) {
+        data.upstreamScCondition = decision.upstreamScCondition;
+        data.framingChoice = decision.framing;
+      } else if (decision.source === 'text_parse_fallback') {
+        data.upstreamScCondition = decision.upstreamScCondition;
+        data.framingChoice = decision.framing;
+      } else if (decision.source === 'default_direct' && decision.upstreamScCondition === null && cc.upstreamScCondition !== null) {
+        data.upstreamScCondition = null;
+        data.framingChoice = 'direct';
       }
       if (Object.keys(data).length > 0) {
         await db.case.update({ where: { id: cc.id }, data: data as never });

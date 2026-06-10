@@ -2,6 +2,7 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { evaluateChartReadiness } from './chart-readiness.js';
 import type { AppDb } from './db-types.js';
+import type { CaseFraming } from './case-framing.js';
 
 /**
  * Architect QA F1: drafter materialization bundle.
@@ -66,6 +67,12 @@ export interface DrafterBundle {
     readonly generatedAt: string;
     readonly schemaVersion: '2';
   };
+  /**
+   * SSOT case framing (caseFraming.v1.schema.json) — stamped at ROUTE level by
+   * case-framing-stamp.ts, never by buildDrafterBundle (which stays pure-read).
+   * Optional: absence = consumers fail-open to their legacy derivations.
+   */
+  readonly caseFraming?: CaseFraming;
 }
 
 /**

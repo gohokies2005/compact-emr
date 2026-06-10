@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://flatratenexus.local/schemas/caseFraming.v1.schema.json",
+  "title": "bundle.caseFraming (SSOT v1)",
+  "description": "Single-source-of-truth case framing object stamped by the EMR bundle producer onto bundle.caseFraming and consumed READ-ONLY by every drafter/EMR framing+SC consumer. ABSENCE/unknown-version = fail-open to each consumer's legacy derivation, byte-identical. See docs/SSOT_CASEFRAMING_BUILD_PLAN_2026-06-10.md. LOCKED: framing:'aggravation' is the data-level pathway label ONLY; the 3.306-vs-3.310(b) regulatory mechanism choice is framingGate's, downstream. The SSOT never encodes a CFR citation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "framing",
+    "grantedScAnchors",
+    "upstreamScCondition",
+    "framingChoice",
+    "claimType",
+    "source",
+    "derivedAt"
+  ],
+  "properties": {
+    "version": {
+      "description": "Contract version. v1 = 1. A consumer that does not recognize the version MUST treat the whole object as absent (fail-open to legacy). Independent of bundle BUNDLE_SCHEMA_VERSION.",
+      "type": "integer",
+      "const": 1
+    },
+    "framing": {
+      "description": "Data-level pathway label (NOT a CFR reg citation). 'undetermined' = producer could not decide; consumers treat it like absence for THEORY decisions but may still read grantedScAnchors.",
+      "type": "string",
+      "enum": ["direct", "secondary", "aggravation", "undetermined"]
+    },
+    "grantedScAnchors": {
+      "description": "0..N granted service-connected primaries. STRICT filter: only entries whose source status lowercased === 'service_connected'. Denied/pending/claimed/deferred excluded by the producer. Deduped by normalized condition, self-anchor excluded, ordered by descending ratingPct then condition asc. Empty array is valid and meaningful (no granted anchor).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["condition", "ratingPct", "status"],
+        "properties": {
+          "condition": {
+            "description": "Verbatim condition text. Non-empty.",
+            "type": "string",
+            "minLength": 1
+          },
+          "ratingPct": {
+            "description": "Integer 0..100 or null when unknown.",
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "status": {
+            "description": "Always literally 'service_connected' — the strict-filter guarantee. A non-strict producer fails the contract test here.",
+            "type": "string",
+            "const": "service_connected"
+          }
+        }
+      }
+    },
+    "upstreamScCondition": {
+      "description": "RN-named upstream primary verbatim, else null. Mirrors EMR Case.upstreamScCondition.",
+      "type": ["string", "null"]
+    },
+    "framingChoice": {
+      "description": "RN hand-set pathway value verbatim, else null. Mirrors EMR Case.framingChoice. When non-null, drives source='rn_set' (top of precedence) and must NEVER be clobbered by the producer.",
+      "type": ["string", "null"],
+      "enum": ["secondary", "aggravation", "direct", null]
+    },
+    "claimType": {
+      "description": "PATHWAY (not THEORY) — the procedural posture of the VA claim. Mirrors the EMR producer's Case.claimType, which is REQUIRED/non-null and whose Prisma enum is EXACTLY {initial, supplemental, hlr, appeal_bva} (compact-emr-work backend/prisma/schema.prisma). The enum is pinned tight to the sole producer's domain so a producer that emits anything else (e.g. a drafter-legacy framing string like 'secondary'/'direct'/'presumptive') FAILS the contract test rather than silently validating. Framing/THEORY ('secondary'/'aggravation'/'direct') is carried by the separate `framing` field — never by claimType. NOTE: the consumer-side default `c.claimType || 'secondary'` at dxVerificationGate.js:77 is LEGACY consumer behavior on the drafter bundle's own case object; it does NOT describe the producer (EMR claimType is non-nullable, so the producer never defaults).",
+      "type": "string",
+      "enum": ["initial", "supplemental", "hlr", "appeal_bva"]
+    },
+    "source": {
+      "description": "Provenance of the `framing` value per the precedence ladder. rn_set > derived > text_parse_fallback > default_direct.",
+      "type": "string",
+      "enum": ["rn_set", "derived", "text_parse_fallback", "default_direct"]
+    },
+    "derivedAt": {
+      "description": "ISO-8601 UTC timestamp of when the EMR producer computed this object.",
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

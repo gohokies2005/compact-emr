@@ -7,6 +7,7 @@ import { currentActor } from '../services/request-actor.js';
 import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import { getDraftReadiness } from '../services/draft-readiness.js';
+import { stampCaseFraming } from '../services/case-framing-stamp.js';
 import { publishDraftJobQueued } from '../services/draft-job-queue.js';
 import { getDraftConcurrency, type DraftConcurrency } from '../services/draft-concurrency.js';
 import {
@@ -351,9 +352,11 @@ export function createDrafterClientRouter(db: AppDb): Router {
         }
         throw err;
       });
+      // SSOT stamp (no persist — a debug/ops GET never mutates the Case row).
+      const stamped = await stampCaseFraming(db, caseId, bundle, { persist: false });
 
       const s3Key = buildManualBundleS3Key(caseId);
-      const upload = await writeBundleToS3(bucket, s3Key, bundle, 'manual');
+      const upload = await writeBundleToS3(bucket, s3Key, stamped, 'manual');
       const presigned = await presignBundleUrl(bucket, s3Key);
 
       res.json({
@@ -522,8 +525,10 @@ export function createDrafterClientRouter(db: AppDb): Router {
         }
         throw err;
       });
+      // SSOT stamp + only-when-null Case persist (the real draft path is a mutating POST).
+      const stamped = await stampCaseFraming(db, caseId, bundle, { persist: true });
       const bundleS3Key = buildJobBundleS3Key(caseId, jobId);
-      const upload = await writeBundleToS3(bucket, bundleS3Key, bundle, 'job');
+      const upload = await writeBundleToS3(bucket, bundleS3Key, stamped, 'job');
       // F1c bundle-size CloudWatch signal (Ryan 2026-05-26): structured log per /draft so
       // ops can track when bundles approach the soft cap. Independent of the warn-line
       // which only fires above threshold.

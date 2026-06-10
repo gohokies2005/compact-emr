@@ -36,6 +36,13 @@ interface CaseRowForFraming {
  * null = unframed; internal-worker only writes 'direct' when clearing a garbage anchor, which the
  * backfill endpoint continues to own). 'undetermined' is never persisted — that's an explicit
  * "could not decide", not a value.
+ *
+ * KNOWN ASYMMETRY (architect QA 2026-06-10, intentional): the stamp adapter only FILLS null
+ * columns — it never CLEARS a non-null garbage upstreamScCondition the way the backfill endpoint's
+ * 4th branch does. A garbage row value therefore survives a draft: the BUNDLE carries the corrected
+ * framing (direct, upstream null) while the row stays dirty until the admin backfill runs. Clearing
+ * from a draft path would be a write the RN didn't ask for on a non-null column — the only-when-null
+ * contract is stricter on purpose.
  */
 async function persistFramingWhenNull(db: AppDb, row: CaseRowForFraming, cf: CaseFraming): Promise<void> {
   const data: Record<string, unknown> = {};

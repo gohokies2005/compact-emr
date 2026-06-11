@@ -9,6 +9,7 @@ import { postDraft, type DraftRequestInput, type DraftConcurrencyResult } from '
 import { ConflictError } from '../api/client';
 import { Gate1ChecklistModal } from './Gate1ChecklistModal';
 import { StrategyPreviewCard } from './StrategyPreviewCard';
+import { CaseViabilityCard } from './CaseViabilityCard';
 
 interface SendToDrafterPanelProps {
   readonly caseId: string;
@@ -111,6 +112,9 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
       {/* Pre-draft strategy preview — catch a crazy pathway before spending on a draft. While the chart is
           still scanning, the card neutralizes its checks (no premature "no dx" ✗) — chart-readiness drives it. */}
       <StrategyPreviewCard caseId={caseId} chartReady={ready} />
+      {/* P4 anchor-viability pre-screen (info-light) — DARK behind EMR_CASE_VIABILITY_ENABLED
+          (the GET returns null while off → renders nothing). Advisory; never gates the button. */}
+      <CaseViabilityCard caseId={caseId} />
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-base font-semibold text-navyDeep">Send to Drafter</h2>

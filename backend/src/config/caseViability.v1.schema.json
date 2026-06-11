@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://flatratenexus.local/schemas/caseViability.v1.schema.json",
+  "title": "bundle.caseViability (SSOT v1)",
+  "description": "Per-claimed-condition viability assessment, SIBLING block to caseFraming (NOT a v2 extension — different cardinality). Stamped by deriveCaseViability in the same POST /draft pass; read READ-ONLY by the RN panel, Ask Aegis, the drafter, and the public tool. ABSENCE/unknown-version = fail-open (card shows 'viability read unavailable', producer stamps nothing). derivedAt is OPTIONAL+route-stamped (resolver is pure/deterministic; website omits it). NEVER carries a BVA %, IMO rate, or pair-atlas tier in any vet/RN-facing string (CLAUDE.md #17). See docs/ANCHOR_VIABILITY_INTEGRATION_DESIGN_2026-06-10.md §1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version", "claimed_canonical", "viability", "best_anchor", "alternatives",
+    "why", "missing_fact", "presumptive_redirect", "graveyard_redirect",
+    "excluded_traps", "confidence", "mode", "table_version", "table_content_hash"
+  ],
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "claimed_canonical": { "type": ["string", "null"] },
+    "viability": { "type": "string", "enum": ["strong", "moderate", "conditional", "weak", "abstain", "redirect"] },
+    "best_anchor": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["upstream_canonical","upstream_verbatim","M_static","M_eff","E","tier","basis","is_granted_sc","mechanism_class","requires"],
+      "properties": {
+        "upstream_canonical": { "type": "string", "minLength": 1 },
+        "upstream_verbatim":  { "type": "string" },
+        "M_static": { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "M_eff":    { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "E":        { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "tier": { "type": "string", "enum": ["blessed","conditional","chain","plausible","excluded"] },
+        "basis": { "type": ["string", "null"] },
+        "is_granted_sc": { "type": "boolean" },
+        "mechanism_class": { "type": ["string", "null"] },
+        "requires": { "type": ["string", "null"] },
+        "mechanism_member": { "type": "string" }
+      }
+    },
+    "alternatives": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["upstream_canonical","M_eff","tier","is_granted_sc"],
+        "properties": {
+          "upstream_canonical": { "type": "string", "minLength": 1 },
+          "M_eff": { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+          "tier": { "type": "string", "enum": ["blessed","conditional","chain","plausible","excluded"] },
+          "is_granted_sc": { "type": "boolean" }
+        }
+      }
+    },
+    "why": { "type": "string" },
+    "missing_fact": { "type": ["string", "null"] },
+    "presumptive_redirect": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["path","note","advisory"],
+      "properties": {
+        "path": { "type": "string" },
+        "note": { "type": "string" },
+        "advisory": { "type": "boolean" }
+      }
+    },
+    "graveyard_redirect": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["dead_anchor","redirect_to","rationale","redirect_blocked"],
+      "properties": {
+        "dead_anchor": { "type": "string" },
+        "redirect_to": { "type": "string" },
+        "rationale": { "type": "string" },
+        "redirect_blocked": { "type": "boolean" }
+      }
+    },
+    "excluded_traps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["upstream_canonical","reason"],
+        "properties": {
+          "upstream_canonical": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "confidence": { "type": "string", "enum": ["high", "low"] },
+    "mode": { "type": "string", "enum": ["info_light", "chart_refined"] },
+    "table_version": { "type": ["string", "null"] },
+    "table_content_hash": { "type": ["string", "null"], "const": "58f9c315340214c27867995ddaf0bf0f9dcc9e08b48d8178ae111023e21b401f" },
+    "derivedAt": { "type": "string", "format": "date-time" }
+  }
+}

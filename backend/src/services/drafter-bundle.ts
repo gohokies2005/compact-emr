@@ -3,6 +3,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { evaluateChartReadiness } from './chart-readiness.js';
 import type { AppDb } from './db-types.js';
 import type { CaseFraming } from './case-framing.js';
+import type { CaseViability } from './case-viability.js';
 
 /**
  * Architect QA F1: drafter materialization bundle.
@@ -73,6 +74,13 @@ export interface DrafterBundle {
    * Optional: absence = consumers fail-open to their legacy derivations.
    */
   readonly caseFraming?: CaseFraming;
+  /**
+   * SSOT anchor viability (caseViability.v1.schema.json) — SIBLING block to caseFraming, stamped
+   * at ROUTE level by case-viability-stamp.ts in the same pass, DARK behind
+   * EMR_CASE_VIABILITY_ENABLED. Worker copy-through (build plan §3.4): the Fargate drafter
+   * wrapper reads bundle.caseViability if present; absence = legacy.
+   */
+  readonly caseViability?: CaseViability;
 }
 
 /**

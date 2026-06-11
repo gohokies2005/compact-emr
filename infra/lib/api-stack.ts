@@ -139,6 +139,11 @@ export class ApiStack extends Stack {
         // (non-destructive). Controlled by cdk.json context `chart_autofill` (default off = shadow).
         // The draft-readiness DOOR (DRAFT_READINESS_GATE) stays separate + off until the popup ships.
         CHART_AUTOFILL: (this.node.tryGetContext('chart_autofill') as string | undefined) ?? 'off',
+        // P4 anchor-viability surface (caseViability v1) — bundle stamp + RN CaseViabilityCard.
+        // Ships DARK: cdk.json context `case_viability_enabled` (default 'false'). Activation
+        // sequence (build plan §3.5): staging ON → smoke + Playwright green → flip prod. Revert =
+        // context→'false' + deploy (the backend reads it at request time; no image rebuild).
+        EMR_CASE_VIABILITY_ENABLED: (this.node.tryGetContext('case_viability_enabled') as string | undefined) ?? 'false',
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue
@@ -197,6 +202,10 @@ export class ApiStack extends Stack {
               // files by __dirname-relative path), so copy the whole tree next to the handler. The wrapper
               // loads it at runtime from <task>/advisory-vendor.
               `node ${q(helper)} ${q(inputDir + '/backend/src/advisory/vendor')} ${q(outputDir + '/advisory-vendor')}`,
+              // P4 anchor-viability: the vendored CJS resolver + table are NOT bundled (the
+              // resolver reads its table by __dirname-relative path) — copy them next to the
+              // handler; case-viability.ts loads <task>/anchor-vendor at runtime (advisory pattern).
+              `node ${q(helper)} ${q(inputDir + '/backend/src/vendor')} ${q(outputDir + '/anchor-vendor')}`,
             ];
           },
         },

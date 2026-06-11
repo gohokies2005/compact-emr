@@ -323,6 +323,12 @@ model Case {
   priorDecisionDate   DateTime?  @map("prior_decision_date") @db.Date
   framingChoice       String?    @map("framing_choice")
   upstreamScCondition String?    @map("upstream_sc_condition")
+  // P4 anchor-viability snapshot (caseViability v1, build plan §3.2): written ONLY-WHEN-NULL by
+  // the POST /draft stamp (persistViabilityWhenNull — never clobbers an RN override), dark behind
+  // EMR_CASE_VIABILITY_ENABLED. Band ∈ {strong,moderate,conditional,weak,abstain,redirect};
+  // anchor = best_anchor.upstream_canonical (null for redirect/abstain — no anchor persisted).
+  caseViabilityBand   String?    @map("case_viability_band") @db.VarChar(16)
+  caseViabilityAnchor String?    @map("case_viability_anchor")
   veteranStatement    String?    @map("veteran_statement")
   inServiceEvent      String?    @map("in_service_event")
   status              CaseStatus @default(intake)

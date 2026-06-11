@@ -2,3 +2,9 @@
 # in backend/src/__tests__/case-framing.test.ts. Git must NEVER rewrite its line endings (a CRLF
 # normalization changes the bytes and trips the pin — caught live 2026-06-10 on a stash round-trip).
 backend/src/config/caseFraming.v1.schema.json -text
+
+# P4 anchor-viability vendor set + schema — same contract: byte-identical to the drafter repo's
+# canonical copies (scripts/vendor-anchor-table.mjs is the ONLY writer), sha256-pinned in
+# backend/src/__tests__/anchor-table-pin.test.ts. A CRLF normalization trips the pin.
+backend/src/config/caseViability.v1.schema.json -text
+backend/src/vendor/** -text

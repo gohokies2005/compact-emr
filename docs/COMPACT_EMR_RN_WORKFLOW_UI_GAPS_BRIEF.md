@@ -38,6 +38,11 @@ Trace and complete the full operator path. Backend endpoints exist for each; con
 
 ---
 
+## RN workflow addition (2026-06-11): viability pre-screen
+The P4 anchor-viability **CaseViabilityCard** (Send-to-Drafter panel, under the strategy preview; dark behind `EMR_CASE_VIABILITY_ENABLED`) adds a **viability pre-screen** step to the RN flow: intake → **viability pre-screen (info-light card)** → records gathering (driven by `missing_fact`) → chart parse → Gate-1 → Send to Drafter → **Gate-2 supersedes** → draft. Full RN guidance: **`docs/RN_VIABILITY_PRESCREEN.md`**.
+
+---
+
 ## Notes for the UI builder
 - All API shapes are in `frontend/src/api/*.ts` (already typed) and `frontend/src/types/prisma.ts`. Backend routes in `backend/src/routes/`.
 - Auth: Cognito (pool `us-east-1_z8OFZyBiS`, client `6oqus36g485ebaj61hjem6q43s`). Roles: `admin`, `ops_staff`, `physician`.

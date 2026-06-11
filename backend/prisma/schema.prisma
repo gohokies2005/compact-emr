@@ -293,7 +293,10 @@ model ChartExtractionRun {
   id           String    @id @default(uuid())
   caseId       String    @map("case_id")
   veteranId    String    @map("veteran_id")
-  triggerHash  String    @map("trigger_hash") @db.VarChar(64)
+  // 128 (was 64): a FORCED reprocess run (keystone 4b) stores `<sha256>:manual:<requestId>` —
+  // the base hash stays prefix-recoverable so deriveChartBuildState can tie the forced run back
+  // to the current doc set (sha256 hex 64 + ':manual:' 8 + uuid 36 = 108).
+  triggerHash  String    @map("trigger_hash") @db.VarChar(128)
   status       String    @default("queued") // queued | running | complete | failed
   itemsWritten Int       @default(0) @map("items_written")
   itemsSkipped Int       @default(0) @map("items_skipped")
@@ -333,6 +336,16 @@ model Case {
   // anchor = best_anchor.upstream_canonical (null for redirect/abstain — no anchor persisted).
   caseViabilityBand   String?    @map("case_viability_band") @db.VarChar(16)
   caseViabilityAnchor String?    @map("case_viability_anchor")
+  // Stamp provenance (keystone pkg 5): who last wrote each stamped field group — 'derived'
+  // (machine derivation: only-when-null persist, intake derive, backfill, restamp hook) or
+  // 'manual' (RN/staff set: case PATCH/create, CDS run). NULL = legacy/unknown provenance and is
+  // IMMUTABLE to auto-refresh (conservative: a pre-migration value is presumed possibly RN-set).
+  // The post-merge restamp hook (keystone 4c) may overwrite a field group ONLY when its source
+  // === 'derived'. framing source covers the framingChoice+upstreamScCondition PAIR; viability
+  // covers caseViabilityBand+caseViabilityAnchor; cds covers cdsVerdict/cdsOddsPct/cdsRationale.
+  framingStampSource   String?   @map("framing_stamp_source") @db.VarChar(16)
+  viabilityStampSource String?   @map("viability_stamp_source") @db.VarChar(16)
+  cdsStampSource       String?   @map("cds_stamp_source") @db.VarChar(16)
   veteranStatement    String?    @map("veteran_statement")
   inServiceEvent      String?    @map("in_service_event")
   status              CaseStatus @default(intake)
@@ -472,6 +485,19 @@ model LetterRevision {
   editorRole        String               @map("editor_role") // cognito group: physician|ops_staff|admin
   sanityJson        Json?                @map("sanity_json")  // warn-only sanity findings snapshot
   createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  // ── Doctor-pay columns (docs/DOCTOR_PAY_BUILD_PLAN_2026-06-11.md) — meaningful on
+  // source='approved_final' rows (the canonical completion event); default/null elsewhere. ──
+  // Billing letter type: nexus_letter | nexus_memo. Plain string (not an enum) so a future type
+  // needs no migration — mirrors the deliberate plain-string choice on ScCondition.source.
+  letterType        String               @default("nexus_letter") @map("letter_type") @db.VarChar(16)
+  // Immutable pay attribution: the ASSIGNED signing physician at approve time (never the clicker —
+  // an admin may click approve on the physician's behalf). Snapshot so a later case reassignment
+  // never moves past earnings. Null on pre-feature rows → pay falls back to the live
+  // case.assignedPhysicianId join.
+  signingPhysicianId String?             @map("signing_physician_id")
+  // Rate-at-completion snapshot in integer CENTS, frozen at approve so a future rate change never
+  // rewrites closed months. Null on pre-feature rows → resolved via the rate config at query time.
+  payCents          Int?                 @map("pay_cents")
   case              Case                 @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
   // Optimistic-concurrency backstop: two saves against the same base_version both compute
@@ -480,6 +506,8 @@ model LetterRevision {
   @@unique([caseId, version], map: "letter_revisions_case_version_uq")
   @@index([caseId])
   @@index([caseId, version])
+  // Doctor-pay window scan: approved_final rows by completion instant.
+  @@index([source, createdAt], map: "letter_revisions_pay_idx")
   @@map("letter_revisions")
 }
 

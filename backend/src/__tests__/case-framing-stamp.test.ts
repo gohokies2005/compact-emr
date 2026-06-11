@@ -2,7 +2,7 @@
 // persist guard and the raced-delete fail-open are the highest-risk paths in the SSOT producer —
 // a bug here silently overwrites an RN's hand-set framing or kills a draft on a vanished row.
 import { describe, it, expect } from 'vitest';
-import { stampCaseFraming } from '../services/case-framing-stamp.js';
+import { refreshDerivedFraming, stampCaseFraming } from '../services/case-framing-stamp.js';
 import type { DrafterBundle } from '../services/drafter-bundle.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -14,6 +14,7 @@ interface CaseRowFixture {
   claimType: string;
   framingChoice: string | null;
   upstreamScCondition: string | null;
+  framingStampSource: string | null;
   veteranStatement: string | null;
   veteran: { scConditions: Array<{ condition: string; ratingPct: number | null; status: string }> } | null;
 }
@@ -41,6 +42,7 @@ function hatfieldRow(overrides: Partial<CaseRowFixture> = {}): CaseRowFixture {
     claimType: 'supplemental',
     framingChoice: null,
     upstreamScCondition: null,
+    framingStampSource: null,
     veteranStatement: null,
     veteran: { scConditions: [{ condition: 'Anxiety', ratingPct: 70, status: 'service_connected' }] },
     ...overrides,
@@ -56,7 +58,8 @@ describe('stampCaseFraming', () => {
     expect(out.caseFraming?.source).toBe('derived');
     expect(out.bundleMeta).toEqual(BUNDLE.bundleMeta); // original bundle fields preserved
     expect(updates).toHaveLength(1);
-    expect(updates[0]?.data).toEqual({ framingChoice: 'secondary', upstreamScCondition: 'Anxiety / GAD' });
+    // pkg 5: a FULL-pair machine write stamps framingStampSource='derived' (refreshable later).
+    expect(updates[0]?.data).toEqual({ framingChoice: 'secondary', upstreamScCondition: 'Anxiety / GAD', framingStampSource: 'derived' });
   });
 
   it('NEVER clobbers RN-set values: non-null framingChoice + upstream → zero writes', async () => {
@@ -74,13 +77,13 @@ describe('stampCaseFraming', () => {
     expect(updates).toHaveLength(0);
   });
 
-  it('partial fill: RN named a scoreable upstream but no framingChoice → only framingChoice persists', async () => {
+  it('partial fill: RN named a scoreable upstream but no framingChoice → only framingChoice persists, NO provenance stamp (mixed provenance stays legacy-null = immutable)', async () => {
     const { db, updates } = fakeDb(hatfieldRow({ upstreamScCondition: 'PTSD' }));
     const out = await stampCaseFraming(db, 'case-1', BUNDLE, { persist: true });
     expect(out.caseFraming?.source).toBe('derived');
     expect(out.caseFraming?.upstreamScCondition).toBe('PTSD'); // scoreable stored anchor kept
     expect(updates).toHaveLength(1);
-    expect(updates[0]?.data).toEqual({ framingChoice: 'secondary' });
+    expect(updates[0]?.data).toEqual({ framingChoice: 'secondary' }); // exact: no framingStampSource
   });
 
   it('derived direct is NOT persisted (column stays null = unframed)', async () => {
@@ -134,5 +137,76 @@ describe('stampCaseFraming', () => {
     expect(out.caseFraming?.framing).toBe('direct');
     expect(out.caseFraming?.upstreamScCondition).toBeNull(); // bundle view is corrected
     expect(updates).toHaveLength(0); // row left for the backfill endpoint to clean
+  });
+});
+
+// Keystone 4c/5 — the refresh rule: derived → overwritable; manual + legacy-null → immutable;
+// null COLUMNS still fill. This is what the post-merge restamp hook calls.
+describe('refreshDerivedFraming (pkg 5 overwrite rule)', () => {
+  it("source='derived': a STALE machine-stamped pair is overwritten by the fresh derivation", async () => {
+    // Stored pair points at Tinnitus (stale — stamped before the Anxiety SC row merged in).
+    const { db, updates } = fakeDb(hatfieldRow({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'Tinnitus',
+      framingStampSource: 'derived',
+    }));
+    const out = await refreshDerivedFraming(db, 'case-1');
+    expect(out).toBe('overwritten');
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.data).toEqual({ framingChoice: 'secondary', upstreamScCondition: 'Anxiety / GAD', framingStampSource: 'derived' });
+  });
+
+  it("source='manual' (RN-set) is NEVER overwritten", async () => {
+    const { db, updates } = fakeDb(hatfieldRow({
+      framingChoice: 'aggravation',
+      upstreamScCondition: 'Tinnitus',
+      framingStampSource: 'manual',
+    }));
+    expect(await refreshDerivedFraming(db, 'case-1')).toBe('skipped');
+    expect(updates).toHaveLength(0);
+  });
+
+  it('legacy NULL source with non-null values is immutable (presumed possibly RN-set)', async () => {
+    const { db, updates } = fakeDb(hatfieldRow({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'Tinnitus',
+      framingStampSource: null,
+    }));
+    expect(await refreshDerivedFraming(db, 'case-1')).toBe('skipped');
+    expect(updates).toHaveLength(0);
+  });
+
+  it('NULL source with NULL columns fills like draft time (+ the derived stamp)', async () => {
+    const { db, updates } = fakeDb(hatfieldRow()); // all-null pair, anchor derivable
+    expect(await refreshDerivedFraming(db, 'case-1')).toBe('filled');
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.data).toEqual({ framingChoice: 'secondary', upstreamScCondition: 'Anxiety / GAD', framingStampSource: 'derived' });
+  });
+
+  it("source='derived' but the fresh derivation is direct/unpersistable → left alone (no clearing write)", async () => {
+    const { db, updates } = fakeDb(hatfieldRow({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'Anxiety / GAD',
+      framingStampSource: 'derived',
+      veteran: { scConditions: [] }, // anchor vanished — fresh derivation can't produce a pair
+    }));
+    expect(await refreshDerivedFraming(db, 'case-1')).toBe('skipped');
+    expect(updates).toHaveLength(0);
+  });
+
+  it("source='derived' with an UNCHANGED fresh derivation writes nothing (idempotent)", async () => {
+    const { db, updates } = fakeDb(hatfieldRow({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'Anxiety / GAD',
+      framingStampSource: 'derived',
+    }));
+    expect(await refreshDerivedFraming(db, 'case-1')).toBe('skipped');
+    expect(updates).toHaveLength(0);
+  });
+
+  it('raced delete fails open (skipped, no throw)', async () => {
+    const { db, updates } = fakeDb(null);
+    expect(await refreshDerivedFraming(db, 'case-1')).toBe('skipped');
+    expect(updates).toHaveLength(0);
   });
 });

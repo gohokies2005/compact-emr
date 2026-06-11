@@ -475,12 +475,21 @@ export interface LetterRevisionRecord {
   editorRole: string;
   sanityJson: unknown;
   createdAt: Date;
+  // Doctor-pay columns (20260705000000_doctor_pay): stamped by the approve path on
+  // source='approved_final' rows; default/null elsewhere. Optional so the many test factories
+  // that mirror this projection stay valid (same convention as PhysicianRecord.avatarS3Key) —
+  // the pay route reads them through its own narrow projection (routes/pay.ts).
+  letterType?: string;
+  signingPhysicianId?: string | null;
+  payCents?: number | null;
 }
 
 export interface LetterRevisionDelegate {
   findMany(args: unknown): Promise<readonly LetterRevisionRecord[]>;
   findFirst(args: unknown): Promise<LetterRevisionRecord | null>;
   create(args: unknown): Promise<LetterRevisionRecord>;
+  // Doctor-pay: admin-only memo-tag PATCH (routes/pay.ts) re-types an approved_final row.
+  update(args: unknown): Promise<LetterRevisionRecord>;
 }
 
 export interface CorrectionDelegate {

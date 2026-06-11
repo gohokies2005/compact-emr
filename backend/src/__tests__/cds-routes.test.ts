@@ -82,7 +82,9 @@ describe('cds routes', () => {
     expect(res.body.data.oddsPct).toBe(82.1);
     expect(res.body.data.driverCondition).toBe('Obstructive sleep apnea');
     expect(res.body.data.perCondition).toHaveLength(1);
-    expect(caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ cdsVerdict: 'accept', cdsOddsPct: 82 }) }));
+    // pkg 5: the RN-triggered run is an explicit staff action → cdsStampSource='manual'
+    // (immutable to the post-merge restamp hook).
+    expect(caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ cdsVerdict: 'accept', cdsOddsPct: 82, cdsStampSource: 'manual' }) }));
     expect(activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'cds_evaluated' }) }));
   });
 

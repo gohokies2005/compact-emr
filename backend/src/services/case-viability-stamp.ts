@@ -59,25 +59,69 @@ export async function deriveCaseViabilityForCase(db: AppDb, caseId: string): Pro
   }
 }
 
+/** The persisted anchor value for a band: redirect/abstain never commit an anchor. */
+function anchorForBand(cv: CaseViability): string | null {
+  return cv.viability === 'redirect' || cv.viability === 'abstain'
+    ? null
+    : cv.best_anchor?.upstream_canonical ?? null;
+}
+
 /**
  * Only-when-null persist (build plan §3.2): write the band + best-anchor snapshot onto the Case
  * row ONLY when BOTH columns are currently null — never clobbers an RN override. The anchor is
  * NOT persisted for redirect/abstain bands (no committed anchor for a parked/redirected case).
+ * Provenance (keystone pkg 5): the write always covers the FULL band+anchor group, so it always
+ * stamps viabilityStampSource='derived'. Returns whether it wrote.
  */
-async function persistViabilityWhenNull(db: AppDb, caseId: string, cv: CaseViability): Promise<void> {
+async function persistViabilityWhenNull(db: AppDb, caseId: string, cv: CaseViability): Promise<boolean> {
   const row = (await db.case.findFirst({
     where: { id: caseId },
     select: { caseViabilityBand: true, caseViabilityAnchor: true } as never,
   })) as unknown as { caseViabilityBand: string | null; caseViabilityAnchor: string | null } | null;
-  if (row === null) return;
-  if (row.caseViabilityBand !== null || row.caseViabilityAnchor !== null) return;
-  const anchor = cv.viability === 'redirect' || cv.viability === 'abstain'
-    ? null
-    : cv.best_anchor?.upstream_canonical ?? null;
+  if (row === null) return false;
+  if (row.caseViabilityBand !== null || row.caseViabilityAnchor !== null) return false;
   await db.case.update({
     where: { id: caseId },
-    data: { caseViabilityBand: cv.viability, caseViabilityAnchor: anchor } as never,
+    data: { caseViabilityBand: cv.viability, caseViabilityAnchor: anchorForBand(cv), viabilityStampSource: 'derived' } as never,
   });
+  return true;
+}
+
+/**
+ * Keystone 4c/5 — refresh the viability stamp after the chart changed (new merged SC rows can
+ * change the anchor set). Overwrite rule (pkg 5): only a `viabilityStampSource === 'derived'`
+ * band+anchor may be overwritten; 'manual' and null (legacy/unknown) are immutable to
+ * auto-refresh; null COLUMNS still fill via the same only-when-null contract as draft time.
+ * Respects the EMR_CASE_VIABILITY_ENABLED dark flag — the hook must never be the thing that
+ * activates a dark surface. (The stored band columns never feed the derivation, so no
+ * as-if-null re-derive is needed here, unlike framing.)
+ */
+export async function refreshDerivedViability(db: AppDb, caseId: string): Promise<'overwritten' | 'filled' | 'skipped'> {
+  if (!caseViabilityEnabled()) return 'skipped';
+  const row = (await db.case.findFirst({
+    where: { id: caseId },
+    select: { caseViabilityBand: true, caseViabilityAnchor: true, viabilityStampSource: true } as never,
+  })) as unknown as { caseViabilityBand: string | null; caseViabilityAnchor: string | null; viabilityStampSource: string | null } | null;
+  if (row === null) return 'skipped'; // raced delete — fail open
+  if (row.viabilityStampSource === 'manual') return 'skipped';
+
+  const cv = await deriveCaseViabilityForCase(db, caseId);
+  if (cv === null) return 'skipped'; // fail open (vendor load / DB hiccup — already logged loud)
+
+  if (row.viabilityStampSource === 'derived') {
+    const anchor = anchorForBand(cv);
+    if (cv.viability !== row.caseViabilityBand || anchor !== row.caseViabilityAnchor) {
+      await db.case.update({
+        where: { id: caseId },
+        data: { caseViabilityBand: cv.viability, caseViabilityAnchor: anchor, viabilityStampSource: 'derived' } as never,
+      });
+      return 'overwritten';
+    }
+    return 'skipped';
+  }
+
+  // null source: legacy non-null values stay untouched; both-null fills exactly like draft time.
+  return (await persistViabilityWhenNull(db, caseId, cv)) ? 'filled' : 'skipped';
 }
 
 /**

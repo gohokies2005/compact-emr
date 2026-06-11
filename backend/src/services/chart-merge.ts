@@ -29,6 +29,12 @@ export interface MergePlan {
   skippedDuplicate: number;
 }
 
+// TEST-LOCK (keystone pkg 6): the dedup correctness of this merge lives in normalizeName
+// (chart-extractor.ts) — qualifier stripping, parenthetical-abbrev stripping, and the synonym
+// fold all happen THERE. planMerge only keys on it. Extend canonicalization in normalizeName,
+// never by adding a second normalization here (chart-extractor.test.ts + chart-merge.test.ts
+// lock the contract: manual rows always win; no insert whose canonical key matches an existing
+// row of the same category; within-run duplicates collapse).
 function key(category: ExtractCategory, name: string): string {
   return `${category}::${normalizeName(name)}`;
 }

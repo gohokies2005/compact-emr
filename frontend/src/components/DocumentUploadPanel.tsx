@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { presignDocument, recordDocument, uploadToPresignedUrl } from '../api/veterans';
+import { reprocessCase } from '../api/cases';
 import { ACCEPT_ATTR, classifyEntry, isZip, uploadErrorReason, type CandidateResult } from '../routes/veterans/documentUpload';
 import type { Case } from '../types/prisma';
 
@@ -71,6 +72,36 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
     return { items, skipped };
   }
 
+  // Keystone 4b — case-level reprocess: re-OCR every doc on the claim that lacks a terminal read
+  // status + force a chart re-extract (salted triggerHash). Lives here so the SAME button surfaces
+  // in BOTH Documents tabs (the chart's dropdown variant and the case page's pinned variant).
+  // Errors are NEVER silent — the real reason lands in the status line (standing rule).
+  async function onReprocess() {
+    if (!targetCaseId) { setStatus('Create or select a case before reprocessing.'); return; }
+    setBusy(true);
+    try {
+      setStatus('Reprocessing documents…');
+      const { data } = await reprocessCase(targetCaseId);
+      const parts = [`re-OCR queued for ${data.reocrQueued} file${data.reocrQueued === 1 ? '' : 's'}`];
+      parts.push(
+        data.extractEnqueued
+          ? 'chart re-extract queued'
+          : data.extractReason === 'ocr_in_progress'
+            ? 'chart re-extract will run when OCR finishes'
+            : `chart re-extract not queued (${data.extractReason ?? 'unknown'})`,
+      );
+      if (data.reocrFailed && data.reocrFailed.length > 0) {
+        parts.push(`${data.reocrFailed.length} re-OCR failed — ${data.reocrFailed.map((f) => `${f.documentId}: ${f.reason}`).join('; ')}`);
+      }
+      setStatus(`Reprocess: ${parts.join('; ')}.`);
+      await onUploaded();
+    } catch (err) {
+      setStatus(`Reprocess failed: ${uploadErrorReason(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // Batch driver: validate the case, expand the selection, then upload sequentially with progress.
   async function onFiles(fileList: FileList | null) {
     const files = fileList ? Array.from(fileList) : [];
@@ -114,6 +145,15 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
         ) : null}
         <select aria-label="Document tag" className="input" value={docTag} onChange={(e) => setDocTag(e.target.value)}>{DOC_TAGS.map((t) => <option key={t}>{t}</option>)}</select>
         <input aria-label="Upload documents" className="text-sm" type="file" multiple accept={ACCEPT_ATTR} disabled={busy} onChange={(e) => { void onFiles(e.target.files); e.target.value = ''; }} />
+        <button
+          type="button"
+          className="self-start rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+          title="Re-OCR any stuck files on this claim and re-run chart extraction"
+          disabled={busy}
+          onClick={() => { void onReprocess(); }}
+        >
+          Reprocess documents
+        </button>
       </div>
       {status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}
     </>

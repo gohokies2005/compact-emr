@@ -136,9 +136,16 @@ export class ApiStack extends Stack {
         // secret on deploy; the friendly-name form resolves reliably + is env-portable. (2026-06-04.)
         JOTFORM_WEBHOOK_SECRET: `{{resolve:secretsmanager:compact-emr-${props.config.envName}/jotform-webhook-secret:SecretString}}`,
         // Chart auto-extract: 'on' makes the merge endpoint WRITE extracted rows into the chart
-        // (non-destructive). Controlled by cdk.json context `chart_autofill` (default off = shadow).
+        // (non-destructive: planMerge protects manual + prior-extracted rows; the keystone pkg-6
+        // dedup guard in normalizeName collapses the PTSD-variant explosion). DEFAULT IS NOW 'on'
+        // (keystone pkg 6 flip, Ryan-authorized conditioned on the guard). KILL SWITCH: cdk.json
+        // context `chart_autofill: "off"` or `cdk deploy --context chart_autofill=off` → back to
+        // shadow mode (extract + record, zero chart writes). DEPLOY IMPLICATION: this env rides the
+        // API task def — the flip takes effect on the next API-stack deploy, after which EVERY
+        // completing extraction writes rows into live charts (staging first, eyeball a real case's
+        // resultJson, then prod).
         // The draft-readiness DOOR (DRAFT_READINESS_GATE) stays separate + off until the popup ships.
-        CHART_AUTOFILL: (this.node.tryGetContext('chart_autofill') as string | undefined) ?? 'off',
+        CHART_AUTOFILL: (this.node.tryGetContext('chart_autofill') as string | undefined) ?? 'on',
         // P4 anchor-viability surface (caseViability v1) — bundle stamp + RN CaseViabilityCard.
         // Ships DARK: cdk.json context `case_viability_enabled` (default 'false'). Activation
         // sequence (build plan §3.5): staging ON → smoke + Playwright green → flip prod. Revert =

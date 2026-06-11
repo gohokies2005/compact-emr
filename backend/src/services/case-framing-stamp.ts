@@ -23,6 +23,8 @@ interface CaseRowForFraming {
   readonly claimType: string;
   readonly framingChoice: string | null;
   readonly upstreamScCondition: string | null;
+  /** 'derived' | 'manual' | null(legacy/unknown — immutable to auto-refresh). Keystone pkg 5. */
+  readonly framingStampSource: string | null;
   readonly veteranStatement: string | null;
   readonly veteran: { readonly scConditions: ReadonlyArray<{ condition: string; ratingPct: number | null; status: string }> } | null;
 }
@@ -44,7 +46,7 @@ interface CaseRowForFraming {
  * from a draft path would be a write the RN didn't ask for on a non-null column — the only-when-null
  * contract is stricter on purpose.
  */
-async function persistFramingWhenNull(db: AppDb, row: CaseRowForFraming, cf: CaseFraming): Promise<void> {
+async function persistFramingWhenNull(db: AppDb, row: CaseRowForFraming, cf: CaseFraming): Promise<'none' | 'partial' | 'full'> {
   const data: Record<string, unknown> = {};
   if (
     row.framingChoice === null
@@ -56,9 +58,53 @@ async function persistFramingWhenNull(db: AppDb, row: CaseRowForFraming, cf: Cas
   if (row.upstreamScCondition === null && cf.upstreamScCondition !== null) {
     data['upstreamScCondition'] = cf.upstreamScCondition;
   }
-  if (Object.keys(data).length > 0) {
-    await db.case.update({ where: { id: row.id }, data: data as never });
+  if (Object.keys(data).length === 0) return 'none';
+  // Provenance (keystone pkg 5): stamp 'derived' ONLY when the FULL pair was machine-written.
+  // A partial fill (one column was already non-null — e.g. an RN typed the upstream and the
+  // derivation filled framingChoice) is MIXED provenance: leave the source null = legacy =
+  // immutable-to-refresh, so a later auto-refresh can never clobber the RN-typed half.
+  const full = 'framingChoice' in data && 'upstreamScCondition' in data;
+  if (full) data['framingStampSource'] = 'derived';
+  await db.case.update({ where: { id: row.id }, data: data as never });
+  return full ? 'full' : 'partial';
+}
+
+/** Refresh outcome shared by the three stamp groups (consumed by the 4c post-merge hook). */
+export type StampRefreshOutcome = 'overwritten' | 'filled' | 'skipped';
+
+/**
+ * Keystone 4c/5 — refresh the framing stamp after the chart changed (new merged SC rows).
+ * Overwrite rule (pkg 5): only a `framingStampSource === 'derived'` pair may be overwritten;
+ * 'manual' (RN-set) and null (legacy/unknown) are immutable to auto-refresh. Null COLUMNS are
+ * still fair game via the same fill-when-null contract the draft-time stamp uses.
+ *
+ * The 'derived' path re-derives AS IF the stamped pair were null: deriveCaseFraming mirrors a
+ * non-null framingChoice as rn_set, so re-deriving naively would just echo the stale stamp back.
+ * It writes only a PERSISTABLE fresh value (secondary/aggravation with an upstream); a fresh
+ * derivation of direct/undetermined leaves the stamped value alone (clearing is the admin
+ * backfill's job — same asymmetry as the draft-time stamp, documented above).
+ */
+export async function refreshDerivedFraming(db: AppDb, caseId: string): Promise<StampRefreshOutcome> {
+  const c = await fetchCaseRowForFraming(db, caseId);
+  if (c === null) return 'skipped'; // raced delete — fail open
+  if (c.framingStampSource === 'manual') return 'skipped';
+
+  if (c.framingStampSource === 'derived') {
+    const fresh = deriveForRow({ ...c, framingChoice: null, upstreamScCondition: null });
+    const persistable = (fresh.framing === 'secondary' || fresh.framing === 'aggravation') && fresh.upstreamScCondition !== null;
+    if (persistable && (fresh.framing !== c.framingChoice || fresh.upstreamScCondition !== c.upstreamScCondition)) {
+      await db.case.update({
+        where: { id: c.id },
+        data: { framingChoice: fresh.framing, upstreamScCondition: fresh.upstreamScCondition, framingStampSource: 'derived' } as never,
+      });
+      return 'overwritten';
+    }
+    return 'skipped';
   }
+
+  // null source: legacy non-null values stay untouched; null columns fill exactly like draft time.
+  const wrote = await persistFramingWhenNull(db, c, deriveForRow(c));
+  return wrote === 'none' ? 'skipped' : 'filled';
 }
 
 /**
@@ -86,6 +132,7 @@ async function fetchCaseRowForFraming(db: AppDb, caseId: string): Promise<CaseRo
       claimType: true,
       framingChoice: true,
       upstreamScCondition: true,
+      framingStampSource: true,
       veteranStatement: true,
       veteran: { select: { scConditions: { select: { condition: true, ratingPct: true, status: true } } } },
     },

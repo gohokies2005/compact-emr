@@ -213,21 +213,82 @@ export function normalizeForQuoteMatch(s: string): string {
 }
 
 /**
- * Normalized dedup key for the non-destructive merge. Lowercase, collapse whitespace, strip
- * trailing punctuation, and fold a small synonym set so "OSA" and "Obstructive sleep apnea"
- * dedup together. The worker uses (category + normalizeName) to skip manual + prior-auto rows.
+ * Normalized dedup key for the non-destructive merge (keystone pkg 6 extends this layer — the
+ * dedup correctness of planMerge lives HERE). Lowercase, collapse whitespace, strip trailing
+ * punctuation, strip a trailing single-token parenthetical abbreviation ("(PTSD)"), strip
+ * identity-neutral qualifier suffixes (", chronic"), then fold the synonym table — so the
+ * CLM-A355D7A822 explosion ("PTSD" / "PTSD, chronic" / "Posttraumatic stress disorder (PTSD)")
+ * collapses to ONE key. The worker uses (category + normalizeName) to skip manual + prior-auto rows.
+ *
+ * SCOPE GUARD — compound labels are NOT split: "PTSD and anxiety" is TWO conditions; splitting
+ * on "and" would silently drop the anxiety. It stays its own honest row, deduping only against an
+ * identical compound (decision (a), build plan pkg 6; the ICD-10/DC-keyed split is the explicitly
+ * deferred later phase). Every synonym entry must be reviewed against false-merge: prefer
+ * under-collapsing (a cosmetic dup row) to over-collapsing (a LOST condition — letter-correctness).
+ */
+
+/**
+ * Trailing qualifier suffixes that don't change condition identity. Applied repeatedly so
+ * "ptsd, chronic, unspecified" still reduces. Data-driven so the LATER ICD-10 model can supersede.
+ */
+const QUALIFIER_SUFFIXES: readonly string[] = [', chronic', ', acute', ', unspecified', ', nos', ' nos'];
+
+/**
+ * Synonym fold table (data-driven; the LATER ICD-10/DC-keyed model supersedes this). Keys are the
+ * post-strip lowercase form; values are the canonical label. Direction notes:
+ *   - abbreviation ↔ expansion entries (osa/htn/gerd/tbi/copd) are identity-safe.
+ *   - PTSD spelling variants (posttraumatic / post traumatic / post-traumatic) are ONE condition.
+ *   - mental-health umbrella: depression/MDD variants fold to major depressive disorder; anxiety
+ *     variants fold to anxiety disorder. GAD is kept SEPARATE from bare "anxiety" (an anxiety-NOS
+ *     row is not necessarily GAD — folding would over-claim a specific diagnosis).
+ *   - dm2 folds; "diabetes mellitus type 1" deliberately has NO entry (must never fold into type 2).
  */
 const NAME_SYNONYMS: Record<string, string> = {
   osa: 'obstructive sleep apnea',
   ptsd: 'post-traumatic stress disorder',
   'chronic post-traumatic stress disorder': 'post-traumatic stress disorder',
+  'posttraumatic stress disorder': 'post-traumatic stress disorder',
+  'post traumatic stress disorder': 'post-traumatic stress disorder',
   htn: 'hypertension',
   dm2: 'diabetes mellitus type 2',
+  'diabetes mellitus, type 2': 'diabetes mellitus type 2',
+  'type 2 diabetes mellitus': 'diabetes mellitus type 2',
   hld: 'hyperlipidemia',
+  mdd: 'major depressive disorder',
+  'major depression': 'major depressive disorder',
+  depression: 'major depressive disorder',
+  'depressive disorder': 'major depressive disorder',
+  anxiety: 'anxiety disorder',
+  'anxiety state': 'anxiety disorder',
+  gad: 'generalized anxiety disorder',
+  gerd: 'gastroesophageal reflux disease',
+  'gastro-esophageal reflux disease': 'gastroesophageal reflux disease',
+  tbi: 'traumatic brain injury',
+  copd: 'chronic obstructive pulmonary disease',
 };
 
+/**
+ * Strip ONE trailing parenthetical abbreviation: a single token of 2-12 letters/digits with no
+ * internal spaces — "(ptsd)", "(gerd)", "(copd)". A spaced parenthetical like "(type 2)" is NOT
+ * stripped (it can be identity-bearing). Anchored at end-of-string so a mid-name parenthetical
+ * survives.
+ */
+function stripTrailingAbbrevParen(s: string): string {
+  return s.replace(/\s*\([a-z0-9&.\/-]{2,12}\)$/, '').trim();
+}
+
 export function normalizeName(name: string): string {
-  const base = name.toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:]+$/, '').trim();
+  let base = name.toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:]+$/, '').trim();
+  // Reduce to a fixed point: qualifier and parenthetical strips can unmask each other
+  // ("posttraumatic stress disorder (ptsd), chronic" needs the paren strip AFTER ", chronic").
+  let prev: string;
+  do {
+    prev = base;
+    base = stripTrailingAbbrevParen(base).replace(/[.,;:]+$/, '').trim();
+    for (const suffix of QUALIFIER_SUFFIXES) {
+      if (base.endsWith(suffix)) base = base.slice(0, -suffix.length).replace(/[.,;:]+$/, '').trim();
+    }
+  } while (base !== prev);
   return NAME_SYNONYMS[base] ?? base;
 }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeTriggerHash, deriveChartBuildState, EXTRACTED_SOURCE } from '../chart-build-state.js';
+import { computeTriggerHash, deriveChartBuildState, runMatchesHash, EXTRACTED_SOURCE } from '../chart-build-state.js';
 
 const docs = [{ id: 'd1', s3Key: 'cases/c/k1' }, { id: 'd2', s3Key: 'cases/c/k2' }];
 const bothRead = [
@@ -26,6 +26,38 @@ describe('computeTriggerHash', () => {
     const a = computeTriggerHash(docs, bothRead);
     const b = computeTriggerHash(docs, [bothRead[0]!, { filePath: 'cases/c/k2', terminalStatus: 'manual_summary_required' }]);
     expect(a).not.toBe(b);
+  });
+
+  // Keystone 4b — the salt contract. The NO-SALT lock is load-bearing: every non-force caller
+  // (the /pages trigger, draft-readiness) must produce a byte-identical hash to the historical one.
+  it('LOCK: no salt / undefined salt / empty salt are byte-identical bare sha256 hex', () => {
+    const a = computeTriggerHash(docs, bothRead);
+    expect(computeTriggerHash(docs, bothRead, undefined)).toBe(a);
+    expect(computeTriggerHash(docs, bothRead, '')).toBe(a);
+    expect(a).toMatch(/^[0-9a-f]{64}$/); // bare hex — no separator ever appears unsalted
+  });
+  it('salted form is `<baseHash>:<salt>` — base prefix-recoverable, deterministic per salt, unique across salts', () => {
+    const base = computeTriggerHash(docs, bothRead);
+    const salted = computeTriggerHash(docs, bothRead, 'manual:req-1');
+    expect(salted).toBe(`${base}:manual:req-1`);
+    expect(computeTriggerHash(docs, bothRead, 'manual:req-1')).toBe(salted); // deterministic within a request
+    expect(computeTriggerHash(docs, bothRead, 'manual:req-2')).not.toBe(salted); // unique across requests
+  });
+  it('salted hash fits the widened VarChar(128) column (sha256 + ":manual:" + uuid = 108)', () => {
+    const salted = computeTriggerHash(docs, bothRead, 'manual:123e4567-e89b-12d3-a456-426614174000');
+    expect(salted.length).toBe(108);
+    expect(salted.length).toBeLessThanOrEqual(128);
+  });
+});
+
+describe('runMatchesHash (forced-run prefix match)', () => {
+  it('matches exact and salted-prefix, rejects a different doc set', () => {
+    const base = computeTriggerHash(docs, bothRead);
+    const other = computeTriggerHash([docs[0]!], [bothRead[0]!]);
+    expect(runMatchesHash(base, base)).toBe(true);
+    expect(runMatchesHash(`${base}:manual:req-1`, base)).toBe(true);
+    expect(runMatchesHash(other, base)).toBe(false);
+    expect(runMatchesHash(`${other}:manual:req-1`, base)).toBe(false);
   });
 });
 
@@ -61,5 +93,22 @@ describe('deriveChartBuildState', () => {
     const rs = [bothRead[0]!, { filePath: 'cases/c/k2', terminalStatus: 'manual_summary_required' }];
     const h = computeTriggerHash(docs, rs);
     expect(deriveChartBuildState(docs, rs, { triggerHash: h, status: 'complete' }).state).toBe('chart_ready');
+  });
+
+  // Keystone 4b DOOR-WEDGE GUARD: a completed FORCED (salted) run of the current doc set must
+  // count as chart_ready — without the prefix match it would strand the door in 'extracting'
+  // forever (the salted hash never equals the unsalted currentHash).
+  it('chart_ready when a FORCED (salted) run of the current doc set is complete', () => {
+    const salted = computeTriggerHash(docs, bothRead, 'manual:req-1');
+    expect(deriveChartBuildState(docs, bothRead, { triggerHash: salted, status: 'complete' }).state).toBe('chart_ready');
+  });
+  it('extracting while the forced (salted) run is queued/running; extract_failed when it failed', () => {
+    const salted = computeTriggerHash(docs, bothRead, 'manual:req-1');
+    expect(deriveChartBuildState(docs, bothRead, { triggerHash: salted, status: 'queued' }).state).toBe('extracting');
+    expect(deriveChartBuildState(docs, bothRead, { triggerHash: salted, status: 'failed' }).state).toBe('extract_failed');
+  });
+  it('a forced run from a STALE doc set does not count for the current one', () => {
+    const staleSalted = computeTriggerHash([docs[0]!], [bothRead[0]!], 'manual:req-1');
+    expect(deriveChartBuildState(docs, bothRead, { triggerHash: staleSalted, status: 'complete' }).state).toBe('extracting');
   });
 });

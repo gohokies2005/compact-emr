@@ -8,6 +8,11 @@ vi.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: vi.fn(async () => 'https://signed.example/upload'),
 }));
 
+// The reprocess route's force-extract reaches the SQS publisher — keep tests hermetic.
+vi.mock('../services/chart-extract-queue.js', () => ({
+  publishChartExtractQueued: vi.fn(async () => undefined),
+}));
+
 function appFor(prisma: unknown, role: 'admin' | 'ops_staff' | 'physician' = 'ops_staff') {
   process.env.AUTH_TEST_JWT_SECRET = 'test-secret';
   process.env.AUTH_TEST_ISSUER = 'compact-emr-tests';
@@ -79,5 +84,108 @@ describe('document routes', () => {
   it('rejects a physician deleting documents', async () => {
     const prisma = { document: { findUnique: vi.fn() } };
     await request(appFor(prisma, 'physician')).delete('/api/v1/documents/doc-1').expect(403);
+  });
+});
+
+// Keystone 4b — POST /cases/:id/reprocess: re-OCR every doc lacking a terminal read status
+// (shared CopyObject nudge) + force a chart re-extract via the salted triggerHash.
+describe('POST /cases/:id/reprocess', () => {
+  function appWithS3(prisma: unknown, role: 'admin' | 'ops_staff' | 'physician' = 'ops_staff') {
+    const s3Send = vi.fn(async () => ({}));
+    const app = express();
+    app.use(express.json());
+    app.use(async (req, _res, next) => {
+      req.user = { sub: 'user-1', email: 'user@example.com', roles: [role] };
+      next();
+    });
+    app.use('/api/v1', createDocumentsRouter({ prisma: prisma as never, s3: { send: s3Send } as never, bucketName: 'test-phi-bucket' }));
+    return { app, s3Send };
+  }
+
+  function reprocessPrisma(over: { readStatuses?: { filePath: string; terminalStatus: string }[]; runCreateThrowsP2002?: boolean } = {}) {
+    const runCreates: Record<string, unknown>[] = [];
+    const activityCreates: Record<string, unknown>[] = [];
+    const prisma = {
+      case: { findFirst: vi.fn(async () => ({ id: 'CASE-1', veteranId: 'VET-1' })) },
+      document: {
+        findMany: vi.fn(async () => [
+          { id: 'doc-terminal', s3Key: 'cases/CASE-1/a.pdf', contentType: 'application/pdf' },
+          { id: 'doc-stuck', s3Key: 'cases/CASE-1/b.pdf', contentType: 'application/pdf' },
+        ]),
+      },
+      fileReadStatus: {
+        findMany: vi.fn(async () => over.readStatuses ?? [
+          { filePath: 'cases/CASE-1/a.pdf', terminalStatus: 'read' },
+          // b.pdf has NO terminal row — the orphan-race victim
+        ]),
+      },
+      chartExtractionRun: {
+        create: vi.fn(async (args: { data: Record<string, unknown> }) => {
+          if (over.runCreateThrowsP2002) { const err = new Error('unique'); (err as Error & { code?: string }).code = 'P2002'; throw err; }
+          runCreates.push(args.data);
+          return args.data;
+        }),
+        delete: vi.fn(async () => ({})),
+      },
+      activityLog: { create: vi.fn(async (args: { data: Record<string, unknown> }) => { activityCreates.push(args.data); return args.data; }) },
+    };
+    return { prisma, runCreates, activityCreates };
+  }
+
+  it('re-OCRs ONLY the doc lacking a terminal read status and reports the structured summary', async () => {
+    const { prisma, activityCreates } = reprocessPrisma();
+    const { app, s3Send } = appWithS3(prisma);
+    const res = await request(app).post('/api/v1/cases/CASE-1/reprocess').expect(200);
+
+    expect(res.body.data.reocrQueued).toBe(1); // b.pdf only — a.pdf is terminal
+    expect(s3Send).toHaveBeenCalledTimes(1); // one CopyObject nudge
+    // Not all docs terminal (b.pdf pending) → the force honestly waits for the natural trigger.
+    expect(res.body.data.extractEnqueued).toBe(false);
+    expect(res.body.data.extractReason).toBe('ocr_in_progress');
+    expect(typeof res.body.data.requestId).toBe('string');
+    expect(activityCreates[0]).toMatchObject({ action: 'case_reprocessed', caseId: 'CASE-1', veteranId: 'VET-1' });
+  });
+
+  it('all-terminal wedge: re-OCRs nothing but FORCE-enqueues a fresh salted run', async () => {
+    const { prisma, runCreates } = reprocessPrisma({
+      readStatuses: [
+        { filePath: 'cases/CASE-1/a.pdf', terminalStatus: 'read' },
+        { filePath: 'cases/CASE-1/b.pdf', terminalStatus: 'manual_summary_required' },
+      ],
+    });
+    const { app, s3Send } = appWithS3(prisma);
+    const res = await request(app).post('/api/v1/cases/CASE-1/reprocess').expect(200);
+
+    expect(res.body.data.reocrQueued).toBe(0);
+    expect(s3Send).not.toHaveBeenCalled();
+    expect(res.body.data.extractEnqueued).toBe(true);
+    // The salted hash carries the request id → `<sha256>:manual:<requestId>` (keystone 4b format).
+    expect(String(runCreates[0]?.['triggerHash'])).toMatch(new RegExp(`^[0-9a-f]{64}:manual:${res.body.data.requestId}$`));
+  });
+
+  it('a P2002 on the salted insert reports already_enqueued, never a 500 (the mind-the-P2002 catch)', async () => {
+    const { prisma } = reprocessPrisma({
+      readStatuses: [
+        { filePath: 'cases/CASE-1/a.pdf', terminalStatus: 'read' },
+        { filePath: 'cases/CASE-1/b.pdf', terminalStatus: 'read' },
+      ],
+      runCreateThrowsP2002: true,
+    });
+    const { app } = appWithS3(prisma);
+    const res = await request(app).post('/api/v1/cases/CASE-1/reprocess').expect(200);
+    expect(res.body.data.extractEnqueued).toBe(false);
+    expect(res.body.data.extractReason).toBe('already_enqueued');
+  });
+
+  it('404 on an unknown case', async () => {
+    const prisma = { case: { findFirst: vi.fn(async () => null) } };
+    const { app } = appWithS3(prisma);
+    await request(app).post('/api/v1/cases/NOPE/reprocess').expect(404);
+  });
+
+  it('rejects a physician (admin/ops_staff only)', async () => {
+    const { prisma } = reprocessPrisma();
+    const { app } = appWithS3(prisma, 'physician');
+    await request(app).post('/api/v1/cases/CASE-1/reprocess').expect(403);
   });
 });

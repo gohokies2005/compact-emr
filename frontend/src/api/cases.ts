@@ -387,3 +387,19 @@ export async function listKeyDocsNeedingReview(limit?: number): Promise<{ data: 
   const qs = typeof limit === 'number' ? `?limit=${encodeURIComponent(String(limit))}` : '';
   return apiGet(`/api/v1/rn/key-docs-needing-review${qs}`);
 }
+
+// Keystone 4b — case-level reprocess: re-OCR every document lacking a terminal read status (the
+// shared CopyObject nudge) + force a chart re-extract via a salted triggerHash. Idempotent;
+// admin/ops_staff. extractEnqueued=false with extractReason='ocr_in_progress' means the re-OCR'd
+// docs will re-trigger extraction naturally when they finish reading.
+export interface ReprocessSummary {
+  readonly reocrQueued: number;
+  readonly reocrFailed?: readonly { documentId: string; reason: string }[];
+  readonly extractEnqueued: boolean;
+  readonly extractReason?: string;
+  readonly requestId: string;
+}
+
+export async function reprocessCase(caseId: string): Promise<{ data: ReprocessSummary }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/reprocess`, {});
+}

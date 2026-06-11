@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { CopyObjectCommand, DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Router, type Request, type Response } from 'express';
 import type { PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../db/client.js';
 import { requireRole } from '../auth/roles.js';
 import { isCaseDocumentS3Key } from '../services/s3-key-safety.js';
+import { nudgeDocumentReocr } from '../services/document-reocr.js';
+import { TERMINAL_READ_STATUSES } from '../services/chart-build-state.js';
+import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
+import type { AppDb } from '../services/db-types.js';
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const UPLOAD_TTL_SECONDS = 5 * 60;
@@ -198,15 +202,82 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
     const document = await prisma.document.findUnique({ where: { id: String(req.params.id) }, select: { id: true, s3Key: true, contentType: true } });
     if (!document) return error(res, 404, 'document_not_found', 'Document was not found.');
-    await s3.send(new CopyObjectCommand({
-      Bucket: bucketName,
-      Key: document.s3Key,
-      CopySource: `${bucketName}/${document.s3Key}`,
-      MetadataDirective: 'REPLACE',
-      ServerSideEncryption: 'aws:kms',
-      ...(document.contentType ? { ContentType: document.contentType } : {}),
-    }));
+    await nudgeDocumentReocr(s3, bucketName, document);
     res.json({ data: { ok: true, reocrTriggered: true } });
+  });
+
+  // POST /cases/:id/reprocess — keystone 4b: the case-level "unstick everything" button. Two
+  // idempotent actions in one call:
+  //   1. RE-OCR every document on the case that has NO terminal FileReadStatus (the orphan-race /
+  //      lost-callback victims) via the shared CopyObject nudge — same primitive as
+  //      /documents/:id/reocr, one copy (document-reocr.ts).
+  //   2. FORCE a chart re-extract by salting the triggerHash (`<hash>:manual:<requestId>`), which
+  //      breaks BOTH the all-terminal wedge's P2002 silent-skip AND the "same doc set → no new
+  //      run" latch. The force RIDES THE EXISTING TRIGGER: if docs are still mid-OCR (including
+  //      ones nudged in action 1), the enqueue honestly reports 'ocr_in_progress' and the next
+  //      /pages completion re-triggers extraction naturally.
+  // requestId is minted once per request → the salt is deterministic within the request (a retry
+  // P2002s into 'already_enqueued', benign) and unique across requests (a new reprocess always
+  // forces a fresh run). Cost note: a forced extract spends real Anthropic tokens — RN-triggered
+  // only, never automatic; the run row records costUsd as usual.
+  router.post('/cases/:id/reprocess', requireRole(['admin', 'ops_staff']), async (req, res) => {
+    if (!bucketName) return error(res, 500, 'missing_bucket_config', 'PHI_BUCKET_NAME is not configured.');
+    const caseId = String(req.params.id);
+    const caseRow = await prisma.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true } });
+    if (!caseRow) return error(res, 404, 'case_not_found', 'Case was not found.');
+
+    const [documents, readStatuses] = await Promise.all([
+      prisma.document.findMany({ where: { caseId }, select: { id: true, s3Key: true, contentType: true } }),
+      prisma.fileReadStatus.findMany({ where: { caseId }, select: { filePath: true, terminalStatus: true } }),
+    ]);
+    const terminalKeys = new Set(
+      readStatuses.filter((r) => TERMINAL_READ_STATUSES.has(r.terminalStatus)).map((r) => r.filePath),
+    );
+
+    // Action 1 — nudge every doc with no terminal read outcome. Per-file failures are collected,
+    // never silent (a doc whose nudge failed would otherwise look "reprocessed" and stay stuck).
+    let reocrQueued = 0;
+    const reocrFailed: { documentId: string; reason: string }[] = [];
+    for (const doc of documents) {
+      if (terminalKeys.has(doc.s3Key)) continue;
+      try {
+        await nudgeDocumentReocr(s3, bucketName, doc);
+        reocrQueued += 1;
+      } catch (err) {
+        reocrFailed.push({ documentId: doc.id, reason: err instanceof Error ? err.message : 'copy failed' });
+      }
+    }
+
+    // Action 2 — force the extract with a salted hash (see computeTriggerHash's salt contract).
+    const requestId = randomUUID();
+    const extract = await maybeEnqueueChartExtract(prisma as unknown as AppDb, caseId, { forceSalt: `manual:${requestId}` });
+
+    await prisma.activityLog.create({
+      data: {
+        caseId,
+        veteranId: caseRow.veteranId,
+        actorUserId: req.user?.sub,
+        action: 'case_reprocessed',
+        detailsJson: {
+          caseId,
+          requestId,
+          reocrQueued,
+          ...(reocrFailed.length > 0 ? { reocrFailed } : {}),
+          extractEnqueued: extract.enqueued,
+          ...(extract.reason !== undefined ? { extractReason: extract.reason } : {}),
+        },
+      },
+    });
+
+    res.json({
+      data: {
+        reocrQueued,
+        ...(reocrFailed.length > 0 ? { reocrFailed } : {}),
+        extractEnqueued: extract.enqueued,
+        ...(extract.reason !== undefined ? { extractReason: extract.reason } : {}),
+        requestId,
+      },
+    });
   });
 
   // Delete a misuploaded file (Ryan 2026-06-04: "if a file were ever accidentally uploaded to the

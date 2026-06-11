@@ -133,6 +133,56 @@ describe('normalizeName (dedup key + synonym folding)', () => {
   it('strips trailing punctuation and collapses whitespace', () => {
     expect(normalizeName('Low Back Pain.')).toBe('low back pain');
   });
+
+  // Keystone pkg 6 — the CLM-A355D7A822 explosion: the same condition under 3 spellings must
+  // collapse to ONE key (the named acceptance), while the compound stays its own honest row.
+  it('collapses the CLM-A355D7A822 PTSD variants to ONE canonical key', () => {
+    const canonical = normalizeName('PTSD');
+    expect(normalizeName('PTSD, chronic')).toBe(canonical);
+    expect(normalizeName('Posttraumatic stress disorder (PTSD)')).toBe(canonical);
+    expect(normalizeName('Post traumatic stress disorder')).toBe(canonical);
+    expect(normalizeName('Post-traumatic stress disorder')).toBe(canonical);
+    expect(canonical).toBe('post-traumatic stress disorder');
+  });
+  it('"PTSD and anxiety" stays DISTINCT — a compound is two conditions, never silently folded (decision (a))', () => {
+    expect(normalizeName('PTSD and anxiety')).toBe('ptsd and anxiety');
+    expect(normalizeName('PTSD and anxiety')).not.toBe(normalizeName('PTSD'));
+  });
+  it('strips identity-neutral qualifier suffixes, repeatedly', () => {
+    expect(normalizeName('Tinnitus, unspecified')).toBe('tinnitus');
+    expect(normalizeName('PTSD, chronic, unspecified')).toBe('post-traumatic stress disorder');
+    expect(normalizeName('Anxiety NOS')).toBe(normalizeName('anxiety disorder'));
+  });
+  it('strips only a trailing SINGLE-TOKEN parenthetical — a spaced parenthetical is identity-bearing', () => {
+    expect(normalizeName('Gastroesophageal reflux disease (GERD)')).toBe('gastroesophageal reflux disease');
+    expect(normalizeName('Diabetes mellitus (type 2)')).toBe('diabetes mellitus (type 2)'); // NOT stripped
+  });
+  it('paren strip still applies after a qualifier strip (fixed-point reduction)', () => {
+    expect(normalizeName('Posttraumatic stress disorder (PTSD), chronic')).toBe('post-traumatic stress disorder');
+  });
+  it('mental-health umbrella folds: depression/MDD variants together; anxiety variants together; GAD separate', () => {
+    expect(normalizeName('MDD')).toBe('major depressive disorder');
+    expect(normalizeName('Depression')).toBe('major depressive disorder');
+    expect(normalizeName('Major depression')).toBe('major depressive disorder');
+    expect(normalizeName('Anxiety')).toBe('anxiety disorder');
+    // bare anxiety must NOT fold into GAD (an anxiety-NOS row is not necessarily GAD)
+    expect(normalizeName('GAD')).toBe('generalized anxiety disorder');
+    expect(normalizeName('Anxiety')).not.toBe(normalizeName('GAD'));
+  });
+  it('NEVER over-collapses diabetes types: type 1 stays distinct from the dm2 fold', () => {
+    expect(normalizeName('DM2')).toBe('diabetes mellitus type 2');
+    expect(normalizeName('Diabetes mellitus, type 2')).toBe('diabetes mellitus type 2');
+    expect(normalizeName('Diabetes mellitus type 1')).toBe('diabetes mellitus type 1');
+    expect(normalizeName('Diabetes mellitus type 1')).not.toBe(normalizeName('DM2'));
+  });
+  it('regression: all six original synonyms still fold', () => {
+    expect(normalizeName('OSA')).toBe('obstructive sleep apnea');
+    expect(normalizeName('PTSD')).toBe('post-traumatic stress disorder');
+    expect(normalizeName('Chronic post-traumatic stress disorder')).toBe('post-traumatic stress disorder');
+    expect(normalizeName('HTN')).toBe('hypertension');
+    expect(normalizeName('DM2')).toBe('diabetes mellitus type 2');
+    expect(normalizeName('HLD')).toBe('hyperlipidemia');
+  });
 });
 
 describe('dispositionForConfidence (auto-fill gate)', () => {

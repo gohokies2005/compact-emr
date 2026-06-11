@@ -8,6 +8,7 @@ import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
+import { refreshDerivedStamps } from '../services/case-stamp-refresh.js';
 import { deriveIntakeFields } from '../services/intake-derive.js';
 import { deriveFramingFromEvidence } from '../services/case-framing.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
@@ -632,6 +633,26 @@ export function createInternalWorkerRouter(db: AppDb): Router {
 
       const items = coerceExtractedItems(rawItems);
       const result = await applyExtractionMerge(db, { caseId, veteranId: c.veteranId, runId, items, costUsd });
+
+      // Keystone 4c — post-merge restamp hook: new chart rows can stale the derived framing/
+      // viability/cds stamps from an earlier draft. Re-derive + restamp under the pkg-5 provenance
+      // rule (only 'derived'-sourced values may be overwritten; 'manual' and legacy-null never).
+      // Log-only try/catch AFTER the merge committed — a restamp failure can never fail this
+      // worker callback. (refreshDerivedStamps also isolates per-group internally.)
+      if (result.written > 0) {
+        try {
+          const stamps = await refreshDerivedStamps(db, caseId);
+          console.log(JSON.stringify({ msg: 'post-merge restamp', caseId, runId, written: result.written, ...stamps }));
+        } catch (err) {
+          console.error(JSON.stringify({
+            msg: 'post-merge restamp failed (merge unaffected)',
+            caseId,
+            runId,
+            error: err instanceof Error ? err.message : String(err),
+          }));
+        }
+      }
+
       res.json({ data: result });
     }),
   );
@@ -777,6 +798,10 @@ export function createInternalWorkerRouter(db: AppDb): Router {
         data.upstreamScCondition = null;
         data.framingChoice = 'direct';
       }
+      // Provenance (keystone pkg 5): every branch above is machine-derived (evidence ladder /
+      // intake text-parse / garbage-clear) → stamp 'derived' whenever the pair is written, so the
+      // post-merge restamp hook may refresh these backfilled values later.
+      if ('framingChoice' in data) data.framingStampSource = 'derived';
       if (Object.keys(data).length > 0) {
         await db.case.update({ where: { id: cc.id }, data: data as never });
         changes.push({ caseId: cc.id, condition: cc.claimedCondition, ...data });

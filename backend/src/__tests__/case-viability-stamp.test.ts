@@ -3,7 +3,7 @@
 // flag helper. Mirrors case-framing-stamp.test.ts — a bug here silently overwrites an RN override
 // or kills a draft on a vanished row.
 import { afterEach, describe, it, expect } from 'vitest';
-import { caseViabilityEnabled, deriveCaseViabilityForCase, stampCaseViability } from '../services/case-viability-stamp.js';
+import { caseViabilityEnabled, deriveCaseViabilityForCase, refreshDerivedViability, stampCaseViability } from '../services/case-viability-stamp.js';
 import type { DrafterBundle } from '../services/drafter-bundle.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -18,6 +18,7 @@ interface CaseRowFixture {
   veteranStatement: string | null;
   caseViabilityBand: string | null;
   caseViabilityAnchor: string | null;
+  viabilityStampSource: string | null;
   veteran: { scConditions: Array<{ condition: string; ratingPct: number | null; status: string }> } | null;
 }
 
@@ -47,6 +48,7 @@ function osaRow(overrides: Partial<CaseRowFixture> = {}): CaseRowFixture {
     veteranStatement: null,
     caseViabilityBand: null,
     caseViabilityAnchor: null,
+    viabilityStampSource: null,
     veteran: {
       scConditions: [
         { condition: 'Anxiety', ratingPct: 70, status: 'service_connected' },
@@ -107,7 +109,8 @@ describe('stampCaseViability', () => {
     expect(out.caseViability?.derivedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/); // route-stamped (G3)
     expect(out.bundleMeta).toEqual(BUNDLE.bundleMeta); // original bundle fields preserved
     expect(updates).toHaveLength(1);
-    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'moderate', caseViabilityAnchor: 'Anxiety / GAD' });
+    // pkg 5: the band+anchor group is always written whole → always stamps 'derived'.
+    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'moderate', caseViabilityAnchor: 'Anxiety / GAD', viabilityStampSource: 'derived' });
   });
 
   it('ONLY-WHEN-NULL: a non-null caseViabilityBand (RN override) → zero writes, bundle still stamped', async () => {
@@ -136,7 +139,7 @@ describe('stampCaseViability', () => {
     const out = await stampCaseViability(db, 'case-1', BUNDLE, { persist: true });
     expect(out.caseViability?.viability).toBe('abstain');
     expect(updates).toHaveLength(1);
-    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'abstain', caseViabilityAnchor: null });
+    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'abstain', caseViabilityAnchor: null, viabilityStampSource: 'derived' });
   });
 
   it('aggravation-only HTN+PTSD (was graveyard-abstain) persists conditional band + the PTSD anchor', async () => {
@@ -149,7 +152,7 @@ describe('stampCaseViability', () => {
     expect(out.caseViability?.best_anchor?.aggravation_only).toBe(true);
     expect(out.caseViability?.graveyard_redirect).toBeNull();
     expect(updates).toHaveLength(1);
-    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'conditional', caseViabilityAnchor: 'PTSD' });
+    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'conditional', caseViabilityAnchor: 'PTSD', viabilityStampSource: 'derived' });
   });
 
   it('fail-open: raced case delete (findFirst null) returns the bundle UNSTAMPED, no throw', async () => {
@@ -157,6 +160,63 @@ describe('stampCaseViability', () => {
     const out = await stampCaseViability(db, 'case-1', BUNDLE, { persist: true });
     expect(out).toBe(BUNDLE);
     expect(out.caseViability).toBeUndefined();
+    expect(updates).toHaveLength(0);
+  });
+});
+
+// Keystone 4c/5 — the viability refresh rule (called by the post-merge restamp hook).
+describe('refreshDerivedViability (pkg 5 overwrite rule)', () => {
+  afterEach(() => { delete process.env['EMR_CASE_VIABILITY_ENABLED']; });
+
+  it('respects the dark flag: EMR_CASE_VIABILITY_ENABLED unset → skipped, zero reads/writes', async () => {
+    const { db, updates } = fakeDb(osaRow({ viabilityStampSource: 'derived', caseViabilityBand: 'weak' }));
+    expect(await refreshDerivedViability(db, 'case-1')).toBe('skipped');
+    expect(updates).toHaveLength(0);
+  });
+
+  it("source='derived': a STALE machine-stamped band is overwritten by the fresh derivation", async () => {
+    process.env['EMR_CASE_VIABILITY_ENABLED'] = 'true';
+    // Stamped 'weak' before the Anxiety SC row merged in; fresh derivation says moderate/Anxiety.
+    const { db, updates } = fakeDb(osaRow({
+      caseViabilityBand: 'weak',
+      caseViabilityAnchor: null,
+      viabilityStampSource: 'derived',
+    }));
+    expect(await refreshDerivedViability(db, 'case-1')).toBe('overwritten');
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'moderate', caseViabilityAnchor: 'Anxiety / GAD', viabilityStampSource: 'derived' });
+  });
+
+  it("source='manual' is NEVER overwritten", async () => {
+    process.env['EMR_CASE_VIABILITY_ENABLED'] = 'true';
+    const { db, updates } = fakeDb(osaRow({ caseViabilityBand: 'weak', viabilityStampSource: 'manual' }));
+    expect(await refreshDerivedViability(db, 'case-1')).toBe('skipped');
+    expect(updates).toHaveLength(0);
+  });
+
+  it('legacy NULL source with a non-null band is immutable (presumed possibly RN-set)', async () => {
+    process.env['EMR_CASE_VIABILITY_ENABLED'] = 'true';
+    const { db, updates } = fakeDb(osaRow({ caseViabilityBand: 'weak', viabilityStampSource: null }));
+    expect(await refreshDerivedViability(db, 'case-1')).toBe('skipped');
+    expect(updates).toHaveLength(0);
+  });
+
+  it('NULL source with both columns null fills like draft time (+ the derived stamp)', async () => {
+    process.env['EMR_CASE_VIABILITY_ENABLED'] = 'true';
+    const { db, updates } = fakeDb(osaRow());
+    expect(await refreshDerivedViability(db, 'case-1')).toBe('filled');
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'moderate', caseViabilityAnchor: 'Anxiety / GAD', viabilityStampSource: 'derived' });
+  });
+
+  it("source='derived' with an UNCHANGED fresh derivation writes nothing (idempotent)", async () => {
+    process.env['EMR_CASE_VIABILITY_ENABLED'] = 'true';
+    const { db, updates } = fakeDb(osaRow({
+      caseViabilityBand: 'moderate',
+      caseViabilityAnchor: 'Anxiety / GAD',
+      viabilityStampSource: 'derived',
+    }));
+    expect(await refreshDerivedViability(db, 'case-1')).toBe('skipped');
     expect(updates).toHaveLength(0);
   });
 });

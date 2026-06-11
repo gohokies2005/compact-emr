@@ -243,6 +243,13 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
           // defaulted to "direct" when they said "secondary to X". The assign-drawer values still win.
           ...(derived.upstreamCondition ? { upstreamScCondition: derived.upstreamCondition, framingChoice: derived.framing } : {}),
           ...parsed, veteranId: vId,
+          // Provenance (keystone pkg 5): drawer-typed framing wins and is staff-set → 'manual';
+          // otherwise an intake-derived pair is machine-written → 'derived' (refreshable later).
+          ...(parsed.framingChoice !== undefined || parsed.upstreamScCondition !== undefined
+            ? { framingStampSource: 'manual' }
+            : derived.upstreamCondition
+              ? { framingStampSource: 'derived' }
+              : {}),
         } as never });
         cId = (created as { id: string }).id;
         cond = (parsed as { claimedCondition?: string }).claimedCondition ?? '';

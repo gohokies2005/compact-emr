@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DocumentUploadPanel } from '../components/DocumentUploadPanel';
 import { presignDocument, recordDocument, uploadToPresignedUrl } from '../api/veterans';
+import { reprocessCase } from '../api/cases';
 import { ACCEPT_ATTR, MAX_BYTES } from '../routes/veterans/documentUpload';
 import type { Case } from '../types/prisma';
 
@@ -18,6 +19,11 @@ vi.mock('../api/veterans', () => ({
   presignDocument: vi.fn(async () => { calls.push('presign'); return { data: { uploadUrl: 'https://s3.test/upload', requiredHeaders: { 'Content-Type': 'application/pdf' }, s3Key: 'cases/CASE-9/uuid-a.pdf' } }; }),
   uploadToPresignedUrl: vi.fn(async () => { calls.push('put'); }),
   recordDocument: vi.fn(async () => { calls.push('record'); return { data: { id: 'DOC-1' } }; }),
+}));
+
+// Keystone 4b — the case-level reprocess action (re-OCR stuck files + force chart re-extract).
+vi.mock('../api/cases', () => ({
+  reprocessCase: vi.fn(async () => ({ data: { reocrQueued: 2, extractEnqueued: false, extractReason: 'ocr_in_progress', requestId: 'req-1' } })),
 }));
 
 // expandSelection imports JSZip dynamically; vitest intercepts the dynamic import too. The mock zip
@@ -133,5 +139,49 @@ describe('DocumentUploadPanel — dropdown variant (veteran chart)', () => {
     await userEvent.upload(fileInput(), new File(['x'], 'a.pdf', { type: 'application/pdf' }));
     expect(await screen.findByText('Create or select a case before uploading.')).toBeInTheDocument();
     expect(presign).not.toHaveBeenCalled();
+  });
+});
+
+// Keystone 4b — the Reprocess button rides the SHARED panel so it surfaces in BOTH Documents tabs
+// (pinned case-page variant AND the chart's dropdown variant) without touching CaseDetailPage.
+describe('DocumentUploadPanel — Reprocess documents (keystone 4b)', () => {
+  const reprocess = vi.mocked(reprocessCase);
+
+  it('pinned variant: calls reprocessCase with the pinned caseId and surfaces the structured summary', async () => {
+    const onUploaded = vi.fn();
+    render(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={onUploaded} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
+
+    expect(reprocess).toHaveBeenCalledWith('CASE-9');
+    expect(await screen.findByText(/Reprocess: re-OCR queued for 2 files; chart re-extract will run when OCR finishes\./)).toBeInTheDocument();
+    expect(onUploaded).toHaveBeenCalledTimes(1); // refresh the doc list after the nudge
+  });
+
+  it('dropdown variant: reprocesses the SELECTED claim', async () => {
+    render(<DocumentUploadPanel veteranId="VET-1" cases={TWO_CASES} onUploaded={vi.fn()} />);
+    await userEvent.selectOptions(screen.getByLabelText('Assign to claim'), 'C-2');
+    await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
+    await waitFor(() => expect(reprocess).toHaveBeenCalledWith('C-2'));
+  });
+
+  it('reports a queued extract when the force enqueued immediately (all-terminal wedge case)', async () => {
+    reprocess.mockResolvedValueOnce({ data: { reocrQueued: 0, extractEnqueued: true, requestId: 'req-2' } });
+    render(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
+    expect(await screen.findByText(/Reprocess: re-OCR queued for 0 files; chart re-extract queued\./)).toBeInTheDocument();
+  });
+
+  it('surfaces the API failure reason loudly (NO-SILENT-ERRORS)', async () => {
+    reprocess.mockRejectedValueOnce({ response: { status: 404, data: { error: { code: 'case_not_found', message: 'Case was not found.' } } } });
+    render(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
+    expect(await screen.findByText(/Reprocess failed: Case was not found\./)).toBeInTheDocument();
+  });
+
+  it('refuses with no case selected and says so', async () => {
+    render(<DocumentUploadPanel veteranId="VET-1" cases={[]} onUploaded={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
+    expect(await screen.findByText('Create or select a case before reprocessing.')).toBeInTheDocument();
+    expect(reprocess).not.toHaveBeenCalled();
   });
 });

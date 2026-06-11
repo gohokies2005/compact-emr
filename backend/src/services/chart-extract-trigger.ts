@@ -19,7 +19,18 @@ function isUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: string }).code === 'P2002';
 }
 
-export async function maybeEnqueueChartExtract(db: AppDb, caseId: string): Promise<{ enqueued: boolean; reason?: string }> {
+export interface ChartExtractTriggerOptions {
+  /**
+   * Keystone 4b (reprocess endpoint): salt for a FORCED re-extract. The stored triggerHash becomes
+   * `<baseHash>:<salt>` (salt format `manual:<requestId>`), so the INSERT-as-mutex creates a FRESH
+   * run where the unsalted hash would P2002-no-op against a prior run of the same doc set. The
+   * all-terminal gate still applies — when docs are mid-OCR the force returns 'ocr_in_progress'
+   * and the next /pages completion re-triggers naturally (the force "rides the existing trigger").
+   */
+  readonly forceSalt?: string;
+}
+
+export async function maybeEnqueueChartExtract(db: AppDb, caseId: string, opts: ChartExtractTriggerOptions = {}): Promise<{ enqueued: boolean; reason?: string }> {
   const c = (await db.case.findFirst({ where: { id: caseId } })) as { veteranId: string } | null;
   if (c === null) return { enqueued: false, reason: 'case_not_found' };
 
@@ -33,7 +44,7 @@ export async function maybeEnqueueChartExtract(db: AppDb, caseId: string): Promi
   const allTerminal = docs.every((d) => terminalKeys.has(d.s3Key));
   if (!allTerminal) return { enqueued: false, reason: 'ocr_in_progress' };
 
-  const triggerHash = computeTriggerHash(docs, readStatuses);
+  const triggerHash = computeTriggerHash(docs, readStatuses, opts.forceSalt);
   const runId = randomUUID();
 
   // INSERT-AS-MUTEX on the unique (caseId, triggerHash). P2002 → another doc-completion already

@@ -38,6 +38,10 @@ export interface ViabilityBestAnchor {
   readonly requires: string | null;
   /** Present ONLY after a 4.130 psych collapse (build plan G6 — the Hatfield shape). */
   readonly mechanism_member?: string;
+  /** Present (true) only on a 3.310(b) aggravation-only re-characterized pair (FRN engine 5d04b62). */
+  readonly aggravation_only?: boolean;
+  /** Present (true) only alongside aggravation_only — direct causation is reliably denied (best_anchor only). */
+  readonly causation_denied?: boolean;
 }
 
 export interface ViabilityAlternative {
@@ -45,6 +49,8 @@ export interface ViabilityAlternative {
   readonly M_eff: number | null;
   readonly tier: AnchorTier;
   readonly is_granted_sc: boolean;
+  /** Present (true) only on a 3.310(b) aggravation-only re-characterized pair (FRN engine 5d04b62). */
+  readonly aggravation_only?: boolean;
 }
 
 export interface ViabilityPresumptiveRedirect {

@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { getCaseViability, type ViabilityBand } from '../api/case-viability';
-import { StatusChip, type ChipTone } from './ui/StatusChip';
+import { getCaseViability } from '../api/case-viability';
+import { StatusChip } from './ui/StatusChip';
+import { BAND_CHIP } from '../lib/viabilityChip';
 
 // RN anchor-viability panel (build plan §4.3) — pattern-mirrors StrategyPreviewCard: advisory only,
 // never wears a blocker color, never gates the Send-to-Drafter button (Gate-2 SUPERSEDES it on any
@@ -14,14 +15,7 @@ import { StatusChip, type ChipTone } from './ui/StatusChip';
 // `confidence` is a band/mode signal, NOT a physician-review attestation (R6) — no "physician
 // reviewed" wording appears here.
 
-const BAND_CHIP: Record<ViabilityBand, { tone: ChipTone; label: string }> = {
-  strong: { tone: 'good', label: 'Strong' },
-  moderate: { tone: 'good', label: 'Moderate' },
-  conditional: { tone: 'warn', label: 'Conditional' },
-  weak: { tone: 'bad', label: 'Weak' },
-  abstain: { tone: 'neutral', label: 'Needs RN review' },
-  redirect: { tone: 'info', label: 'Redirect' },
-};
+// BAND_CHIP moved to lib/viabilityChip.ts (P1 2026-06-11) — one map shared with StrategyPreviewCard.
 
 export function CaseViabilityCard({ caseId }: { readonly caseId: string }) {
   const q = useQuery({

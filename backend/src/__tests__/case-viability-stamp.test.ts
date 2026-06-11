@@ -124,16 +124,32 @@ describe('stampCaseViability', () => {
     expect(updates).toHaveLength(0);
   });
 
-  it('abstain band persists band but NEVER an anchor (graveyard-blocked HTN+PTSD)', async () => {
+  // FIXTURE FLIP (P1a re-vendor 2026-06-11): HTN+PTSD no longer abstains — the graveyard entry was
+  // removed and the pair re-characterized AGGRAVATION-ONLY → conditional (FRN 5d04b62/0ebb73e/8c141ec,
+  // Ryan ratified). The abstain-persist intent now rides the umbrella fixture; the HTN shape gets its
+  // own persist lock right below.
+  it('abstain band persists band but NEVER an anchor (umbrella "sleep-wake disorder" → abstain)', async () => {
+    const { db, updates } = fakeDb(osaRow({
+      claimedCondition: 'sleep-wake disorder',
+      veteran: { scConditions: [{ condition: 'PTSD', ratingPct: 70, status: 'service_connected' }] },
+    }));
+    const out = await stampCaseViability(db, 'case-1', BUNDLE, { persist: true });
+    expect(out.caseViability?.viability).toBe('abstain');
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'abstain', caseViabilityAnchor: null });
+  });
+
+  it('aggravation-only HTN+PTSD (was graveyard-abstain) persists conditional band + the PTSD anchor', async () => {
     const { db, updates } = fakeDb(osaRow({
       claimedCondition: 'Hypertension',
       veteran: { scConditions: [{ condition: 'PTSD', ratingPct: 70, status: 'service_connected' }] },
     }));
     const out = await stampCaseViability(db, 'case-1', BUNDLE, { persist: true });
-    expect(out.caseViability?.viability).toBe('abstain');
-    expect(out.caseViability?.graveyard_redirect?.redirect_blocked).toBe(true);
+    expect(out.caseViability?.viability).toBe('conditional');
+    expect(out.caseViability?.best_anchor?.aggravation_only).toBe(true);
+    expect(out.caseViability?.graveyard_redirect).toBeNull();
     expect(updates).toHaveLength(1);
-    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'abstain', caseViabilityAnchor: null });
+    expect(updates[0]?.data).toEqual({ caseViabilityBand: 'conditional', caseViabilityAnchor: 'PTSD' });
   });
 
   it('fail-open: raced case delete (findFirst null) returns the bundle UNSTAMPED, no throw', async () => {

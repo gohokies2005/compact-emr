@@ -29,7 +29,9 @@
         "is_granted_sc": { "type": "boolean" },
         "mechanism_class": { "type": ["string", "null"] },
         "requires": { "type": ["string", "null"] },
-        "mechanism_member": { "type": "string" }
+        "mechanism_member": { "type": "string" },
+        "aggravation_only": { "type": "boolean", "const": true },
+        "causation_denied": { "type": "boolean", "const": true }
       }
     },
     "alternatives": {
@@ -42,7 +44,8 @@
           "upstream_canonical": { "type": "string", "minLength": 1 },
           "M_eff": { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
           "tier": { "type": "string", "enum": ["blessed","conditional","chain","plausible","excluded"] },
-          "is_granted_sc": { "type": "boolean" }
+          "is_granted_sc": { "type": "boolean" },
+          "aggravation_only": { "type": "boolean", "const": true }
         }
       }
     },

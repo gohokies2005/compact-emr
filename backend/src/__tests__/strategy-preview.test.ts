@@ -16,8 +16,10 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
   const cases: Array<{ name: string; over: Partial<StrategyPreviewInput>; tier: string }> = [
     { name: 'OSA secondary to PTSD = Strong (known strong Board pair)', over: {}, tier: 'Strong' },
     // DIRECT claim with no Board pair must NEVER Stop — the false-Stop bug Ryan caught (GERD/OSA direct).
-    // WITH an in-service hook on file -> Plausible; WITHOUT -> Thin (we don't know the nexus story yet).
-    { name: 'direct claim WITH in-service hook, no Board pair = Plausible (NEVER Stop)', over: { claimType: 'direct', claimedCondition: 'GERD / Gastritis', framingChoice: 'direct', upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'], proposedMechanism: 'onset during service after a deployment exposure' }, tier: 'Plausible' },
+    // P1e 3-state: only a DOCUMENTED inServiceEvent makes the hook green -> Plausible; a veteran
+    // statement alone is AMBER -> Thin (the Porter fix); neither -> Thin.
+    { name: 'direct claim WITH DOCUMENTED in-service event, no Board pair = Plausible (NEVER Stop)', over: { claimType: 'direct', claimedCondition: 'GERD / Gastritis', framingChoice: 'direct', upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'], inServiceEvent: 'onset during service after a deployment exposure', proposedMechanism: 'onset during service after a deployment exposure' }, tier: 'Plausible' },
+    { name: 'direct claim with veteran STATEMENT ONLY (no documented event) = Thin, never Plausible (Porter)', over: { claimType: 'direct', claimedCondition: 'GERD / Gastritis', framingChoice: 'direct', upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'], veteranStatement: 'I was exposed to burn pits and my reflux started then', proposedMechanism: 'I was exposed to burn pits and my reflux started then' }, tier: 'Thin' },
     { name: 'direct claim with NO in-service hook = Thin (flag the missing nexus story, not Stop)', over: { claimType: 'direct', claimedCondition: 'GERD / Gastritis', framingChoice: 'direct', upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'] }, tier: 'Thin' },
     // SECONDARY claim with no Board pair = Thin ("rely on literature"), not Stop — absence of data ≠ impossible.
     { name: 'secondary, no Board pair = Thin (not Stop)', over: { claimedCondition: 'blindness', upstreamScCondition: 'knee', serviceConnectedConditions: ['knee'], activeProblems: ['blindness'] }, tier: 'Thin' },
@@ -93,27 +95,49 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
     expect(computeStrategyPreview(input({}))).toEqual(computeStrategyPreview(input({})));
   });
 
-  // ---- CHANGE 5: clean overall grant rate + raw count on the strength criterion ----
-  it('strength criterion shows the OVERALL grant rate + raw count (Granted in X of N decided Board appeals)', () => {
-    // Knee -> lumbar/back: grant_pct 61.6, n 487 -> round(487*0.616)=300.
-    const r = computeStrategyPreview(input({
-      claimedCondition: 'lumbar back', upstreamScCondition: 'knee',
-      serviceConnectedConditions: ['knee'], activeProblems: ['lumbar back'],
-    }));
+  // ---- P1 re-source (2026-06-11): band wording replaces the two BVA-pair-atlas strings ----
+  it('strength criterion renders the viability-engine why VERBATIM when threaded in (band wording, no numbers)', () => {
+    const why = 'Strong: service-connected PTSD is a dominant recognized cause of Obstructive sleep apnea.';
+    const r = computeStrategyPreview(input({ viability: { band: 'strong', why } }));
     const strength = r.criteria.find((c) => c.key === 'strength')!;
-    expect(strength.detail).toBe('Granted in 300 of 487 decided Board appeals (61.6%)');
-    expect(strength.detail).not.toContain('Board signal');
-    expect(strength.detail).not.toContain('relative ranking');
+    expect(strength.detail).toBe(why);
   });
 
-  it('strength detail falls back to non-BVA copy on an unmatched (direct / no-pair) claim', () => {
+  it('strength detail fails open to plain non-numeric copy when the viability read is unavailable (null)', () => {
+    const r = computeStrategyPreview(input({ viability: null }));
+    const strength = r.criteria.find((c) => c.key === 'strength')!;
+    expect(strength.detail).toContain('Viability read unavailable');
+  });
+
+  it('strength detail on a DIRECT claim is plain non-numeric copy (the engine answers anchors, not direct claims)', () => {
     const r = computeStrategyPreview(input({
       claimType: 'direct', framingChoice: 'direct', claimedCondition: 'GERD / Gastritis',
       upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'],
-      proposedMechanism: 'onset during service after a deployment exposure',
+      inServiceEvent: 'onset during service after a deployment exposure',
     }));
     const strength = r.criteria.find((c) => c.key === 'strength')!;
-    expect(strength.detail).toContain('No Board odds');
+    expect(strength.detail).toContain('Not applicable to a direct claim');
+  });
+
+  // THE LOCK (Ryan item 2/5): no raw BVA n / % / win-rate / atlas tier may serialize ANYWHERE in the
+  // payload — matched secondary, rescued thin pair, unmatched secondary, or direct. The exact strings
+  // Ryan named ("n=60, tier high", "Granted in 45 of 60 decided Board appeals (75%)") are the regression.
+  it('NO-BVA-STRING LOCK: no n=, decided Board appeals, %, or tier-word serializes in any criterion/payload', () => {
+    const payloads = [
+      input({}), // matched strong pair (PTSD -> OSA)
+      input({ claimedCondition: 'lumbar back', upstreamScCondition: 'knee', serviceConnectedConditions: ['knee'], activeProblems: ['lumbar back'], viability: { band: 'moderate', why: 'Moderate: recognized pathway.' } }),
+      input({ claimedCondition: 'obstructive sleep apnea', upstreamScCondition: 'diabetes type 2', serviceConnectedConditions: ['diabetes type 2'], activeProblems: ['obstructive sleep apnea'] }), // rescued thin pair
+      input({ claimedCondition: 'blindness', upstreamScCondition: 'knee', serviceConnectedConditions: ['knee'], activeProblems: ['blindness'] }), // unmatched
+      input({ claimType: 'direct', framingChoice: 'direct', claimedCondition: 'GERD', upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'], inServiceEvent: 'deployment exposure' }),
+    ];
+    for (const p of payloads) {
+      const json = JSON.stringify(computeStrategyPreview(p));
+      expect(json).not.toMatch(/\bn=\d/);
+      expect(json).not.toMatch(/decided Board appeals/i);
+      expect(json).not.toMatch(/\d+(\.\d+)?%/);
+      expect(json).not.toMatch(/tier (high|moderate|low)/i);
+      expect(json).not.toMatch(/IMO \d/i);
+    }
   });
 
   // ---- CHANGE 1: thin-sample near-miss rescue (Option A) ----
@@ -128,17 +152,18 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
     expect(r.tier).toBe('Strong');
   });
 
-  it('thin sample + near-miss grant rate (DM2 -> OSA, n=15, 46.7%) rescues Thin -> Plausible', () => {
+  it('thin sample + near-miss grant rate (DM2 -> OSA) rescues Thin -> Plausible (internal numbers; none serialize)', () => {
     const r = computeStrategyPreview(input({
       claimedCondition: 'obstructive sleep apnea', upstreamScCondition: 'diabetes type 2',
       serviceConnectedConditions: ['diabetes type 2'], activeProblems: ['obstructive sleep apnea'],
     }));
     expect(r.tier).toBe('Plausible');
-    // The rescued tier must NOT show an adverse ✗ on strength — it rests on mechanism.
+    // The rescued tier must NOT show an adverse ✗ on strength — it rests on mechanism. The detail is
+    // now band-sourced / fail-open plain copy (P1 re-source) — the grant numbers never serialize.
     const strength = r.criteria.find((c) => c.key === 'strength')!;
     expect(strength.pass).toBe(true);
-    expect(strength.detail).toContain('thin Board sample');
-    expect(strength.detail).toContain('Granted in 7 of 15 decided Board appeals (46.7%)');
+    expect(strength.detail).not.toMatch(/\d+(\.\d+)?%/);
+    expect(strength.detail).not.toMatch(/decided Board appeals/i);
   });
 
   it('robust-and-low pair (Hip -> Knee, tier high, 33.3%) is NOT rescued — stays Thin with an adverse ✗', () => {
@@ -149,6 +174,49 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
     expect(r.tier).toBe('Thin');
     const strength = r.criteria.find((c) => c.key === 'strength')!;
     expect(strength.pass).toBe(false);
+  });
+
+  // ---- P1e: 3-state in-service criterion (the Porter fix) ----
+  it('DIRECT + veteranStatement only: event criterion pass:false with tone:"amber" (distinct from red), tier Thin', () => {
+    const r = computeStrategyPreview(input({
+      claimType: 'direct', framingChoice: 'direct', claimedCondition: 'GERD / Gastritis',
+      upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'],
+      veteranStatement: 'burn pit exposure on deployment', inServiceEvent: null,
+      proposedMechanism: 'burn pit exposure on deployment',
+    }));
+    expect(r.tier).toBe('Thin'); // NEVER Plausible on an amber-only hook
+    const ev = r.criteria.find((c) => c.key === 'anchor')!;
+    expect(ev.pass).toBe(false);
+    expect(ev.tone).toBe('amber');
+    expect(ev.detail).toMatch(/not yet corroborated/i);
+    expect(ev.detail).toMatch(/DD-214/);
+    // The statement still DISPLAYS — it just no longer satisfies the check.
+    expect(r.proposedMechanism).toBe('burn pit exposure on deployment');
+  });
+
+  it('DIRECT + documented inServiceEvent: event criterion pass:true (green, no tone), tier Plausible', () => {
+    const r = computeStrategyPreview(input({
+      claimType: 'direct', framingChoice: 'direct', claimedCondition: 'GERD / Gastritis',
+      upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'],
+      inServiceEvent: 'STR 2009-04: treated for reflux after deployment', veteranStatement: null,
+    }));
+    expect(r.tier).toBe('Plausible');
+    const ev = r.criteria.find((c) => c.key === 'anchor')!;
+    expect(ev.pass).toBe(true);
+    expect(ev.tone).toBeUndefined();
+    expect(ev.detail).toMatch(/documented in the record/i);
+  });
+
+  it('DIRECT + neither field: event criterion pass:false with NO tone (red), tier Thin', () => {
+    const r = computeStrategyPreview(input({
+      claimType: 'direct', framingChoice: 'direct', claimedCondition: 'GERD / Gastritis',
+      upstreamScCondition: null, serviceConnectedConditions: [], activeProblems: ['GERD'],
+      inServiceEvent: null, veteranStatement: null,
+    }));
+    expect(r.tier).toBe('Thin');
+    const ev = r.criteria.find((c) => c.key === 'anchor')!;
+    expect(ev.pass).toBe(false);
+    expect(ev.tone).toBeUndefined();
   });
 
   it('builds a readable primary argument + surfaces the proposed mechanism + 5 criteria', () => {

@@ -141,6 +141,12 @@ function resolveAnchorEligibility(upstreamText, claimedText) {
 
   const isChain = row.eligibility === 'chain';
   const isConditional = row.eligibility === 'conditional';
+  // §3.3 causation-denied override: re-characterize a high-denial pair to
+  // 3.310(b) aggravation-only (basis the table can't carry — PTSD→HTN has only a
+  // 3.310a row). Applied HERE so every consumer that resolves eligibility
+  // (assessClaimViability, framingGate.rankAnchorCandidates/drafter) sees the
+  // aggravation framing consistently.
+  const aggOnly = Object.prototype.hasOwnProperty.call(_AGGRAVATION_ONLY, `${clC}|${upC}`);
   return {
     upstream_canonical: upC,
     claimed_canonical: clC,
@@ -151,7 +157,9 @@ function resolveAnchorEligibility(upstreamText, claimedText) {
     M_static: typeof row.m_static === 'number' ? row.m_static : null,
     E: typeof row.e === 'number' ? row.e : null,
     tier: row.tier != null ? row.tier : row.eligibility,
-    basis: row.basis != null ? row.basis : null,
+    basis: aggOnly ? '3.310b' : (row.basis != null ? row.basis : null),
+    aggravation_only: aggOnly || undefined,
+    causation_denied: aggOnly || undefined,
     requires: row.requires != null ? row.requires : null,
     mechanism_class: row.mechanism_class != null ? row.mechanism_class : null,
     // Only `plausible` rows are mechanism_unconfirmed; blessed/conditional/chain
@@ -257,14 +265,49 @@ const _PRESUMPTIVE = {
   'Chronic fatigue syndrome': { path: 'GW_3317', service_flag: 'gulf_war_theater', note: 'Gulf War presumptive (38 CFR 3.317). File presumptive; secondary held as fallback.' },
 };
 
-// §3.2 graveyard / redirect — claimed|upstream pairings the VA reliably DENIES
-// regardless of mechanism (rater institutional knowledge the literature can't
-// supply). Ryan's D2 decision = REDIRECT to a better-granting theory. SEED set
-// (the classic HTN-secondary-to-PTSD); the full list is rater-curated and
-// migrates to a table `graveyard` field in v2.2.
-const _GRAVEYARD = {
-  'Hypertension|PTSD': { redirect_to: 'Obstructive sleep apnea', rationale: 'The VA reliably denies hypertension as directly secondary to PTSD regardless of mechanism. Reroute through OSA (OSA→HTN) when OSA is service-connected.' },
+// §3.2 graveyard / redirect — claimed|upstream pairings where the anchor is
+// DEAD: the secondary is held as fallback only and the case parks (abstain)
+// when no better-granting redirect target is service-connected.
+//
+// EMPTIED 2026-06-11 (Ryan ratified "OSA-first WITH the PTSD-only guard").
+// 'Hypertension|PTSD' was previously here and was WRONG: it made PTSD→HTN a dead
+// anchor, so a veteran with HTN + service-connected PTSD but NO OSA got abstain
+// (auto-kill) — the exact failure the PCP panel warned against. "OSA-first" is
+// the right intent but it is a RANKING preference (OSA leads PTSD when both are
+// SC), NOT a graveyard: PTSD→HTN stays a VIABLE second-line anchor on its own.
+// That is now expressed via preference_rank (OSA-first) + the conditional
+// PTSD→HTN row staying eligible (the guard). The graveyard MECHANISM is kept for
+// genuinely dead anchors; the map is just empty today.
+const _GRAVEYARD = {};
+
+// §3.3 causation-denied / aggravation-only — claimed|upstream pairings where the
+// VA reliably DENIES the direct CAUSATION theory, but the AGGRAVATION theory
+// (38 CFR 3.310(b)) remains defensible. Ryan 2026-06-11: "if denial is high,
+// don't offer it as connection, keep only as aggravating factor as a secondary
+// argument." This RE-CHARACTERIZES the pair — basis → 3.310(b), flagged
+// aggravation_only + causation_denied, demoted below causation-capable anchors
+// in the ranker (a causation theory leads when one is service-connected) — but
+// the pair stays VIABLE (distinct from a graveyard, which was dead). The §VII
+// opinion for such a pair is "aggravated by", NOT "caused by", and drops the
+// 3.310(a) causation prong. SEED set; rater-curated; migrates to a table
+// `causation_denied` field in v2.2. Key = "claimed|upstream".
+const _AGGRAVATION_ONLY = {
+  'Hypertension|PTSD': { rationale: 'The VA reliably denies hypertension as directly CAUSED by PTSD. Argue 3.310(b) aggravation of pre-existing/essential hypertension as a secondary theory; lead with a causation anchor (e.g. OSA) when one is service-connected.' },
+  // Ryan 2026-06-11: PTSD aggravates/triggers but does not CAUSE these de novo
+  // (asthma = airway hyperreactivity, usually atopic/early-onset; psoriasis =
+  // immune-mediated/genetic). Stress is a well-documented FLARE/aggravator for
+  // both, so 3.310(b) aggravation is the defensible theory and direct causation
+  // invites denial. (These two carry both basis rows in the table; this drops
+  // the causation prong intentionally rather than by row-order accident.)
+  'Asthma|PTSD': { rationale: 'PTSD/chronic stress aggravates and triggers asthma (sympathetic/HPA-driven bronchial hyperreactivity, worse control) but does not cause it de novo. Argue 3.310(b) aggravation; direct causation invites denial.' },
+  'Psoriasis|PTSD': { rationale: 'PTSD/chronic stress is a recognized psoriasis flare trigger and aggravator, but psoriasis is immune-mediated/genetic and not caused de novo by PTSD. Argue 3.310(b) aggravation; direct causation invites denial.' },
 };
+function isAggravationOnly(claimedText, upstreamText) {
+  const clC = _canon(claimedText);
+  const upC = _canon(upstreamText);
+  if (!clC || !upC) return false;
+  return Object.prototype.hasOwnProperty.call(_AGGRAVATION_ONLY, `${clC}|${upC}`);
+}
 
 // Umbrella claimed labels that REQUIRE phenotype resolution before ranking
 // (§3.5) — ranking the umbrella averages distinct phenotypes to a wrong M.
@@ -311,6 +354,11 @@ function _whyLine(band, best, claimedC, presumptive, graveyard) {
   if (presumptive && presumptive.hard) return `Redirect: a presumptive path may apply (${presumptive.note}).`;
   if (!best) return `No service-connected condition currently anchors ${claimedC}. Consider whether another condition is service-connected, or a presumptive path applies.`;
   const up = best.upstream_canonical;
+  // §3.3 aggravation-only: the VA reliably denies direct causation, so frame as
+  // aggravation (3.310(b)) — a secondary argument, never "caused by".
+  if (best.aggravation_only) {
+    return `Aggravation only: argue that service-connected ${up} AGGRAVATED ${claimedC} under 38 CFR 3.310(b) (a secondary argument); do NOT argue direct causation — the VA reliably denies it. Lead with a causation anchor if one is service-connected.`;
+  }
   switch (band) {
     case 'strong': return `Strong: service-connected ${up} is a dominant recognized cause of ${claimedC}.`;
     case 'moderate': return `Moderate: service-connected ${up} is a recognized cause of ${claimedC}; a solid path${best.requires ? ', stronger once the supporting record is confirmed' : ''}.`;
@@ -425,13 +473,16 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
       factConfirmed,
       in_table: r.in_table,
       physician_reviewed: r.physician_reviewed === true,
+      aggravation_only: r.aggravation_only === true,
     });
   }
 
   // §5.1 collapse co-class 4.130 psych anchors to the STRONGEST applicable member.
+  // Tiebreak mirrors the main ranker incl. causation-first (so a causation-capable
+  // psych member is kept over an equal-M aggravation-only one — architect QA 2026-06-11).
   const psych = resolved.filter(a => _PSYCH_4130.has(a.upstream_canonical));
   if (psych.length > 1) {
-    psych.sort((a, b) => (b.M_eff - a.M_eff) || ((b.E || 0) - (a.E || 0)) || a.upstream_canonical.localeCompare(b.upstream_canonical));
+    psych.sort((a, b) => (b.M_eff - a.M_eff) || ((b.E || 0) - (a.E || 0)) || ((a.aggravation_only ? 1 : 0) - (b.aggravation_only ? 1 : 0)) || a.upstream_canonical.localeCompare(b.upstream_canonical));
     const keep = psych[0];
     keep.mechanism_member = keep.upstream_canonical;   // bind drafter prose to this member
     const drop = new Set(psych.slice(1).map(a => a.upstream_canonical));
@@ -447,11 +498,23 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
     return shell;
   }
 
-  // Rank: M_eff desc, then E desc, then tier-strength desc, then alpha (total order).
+  // Rank: M_eff desc, then E desc, then tier-strength desc, then the curated
+  // preference_rank order (panel-ratified anchor ordering for this claimed
+  // condition — e.g. OSA-first for Hypertension), then alpha (total order).
+  // preference_rank is a TIEBREAK among equally-strong anchors, never an
+  // override of M_eff/E/tier: a higher-M anchor still wins on merit. An anchor
+  // absent from the list sorts after every ranked one (index = Infinity).
+  const _prefOrder = preferenceRankFor(clC);
+  const _prefIdx = (u) => { const i = _prefOrder.indexOf(u); return i < 0 ? Infinity : i; };
   resolved.sort((a, b) =>
     (b.M_eff - a.M_eff)
     || ((b.E || 0) - (a.E || 0))
     || ((_ELIGIBILITY_STRENGTH[b.tier] || 0) - (_ELIGIBILITY_STRENGTH[a.tier] || 0))
+    // §3.3 causation-first: an aggravation-only anchor is a SECONDARY argument —
+    // at equal merit a causation-capable anchor leads it (TIEBREAK, not an
+    // override; a higher-M aggravation-only pair still wins on M above).
+    || ((a.aggravation_only ? 1 : 0) - (b.aggravation_only ? 1 : 0))
+    || (_prefIdx(a.upstream_canonical) - _prefIdx(b.upstream_canonical))
     || a.upstream_canonical.localeCompare(b.upstream_canonical));
 
   const best = resolved[0];
@@ -479,6 +542,7 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
   if (best.mechanism_member) shell.best_anchor.mechanism_member = best.mechanism_member;
   shell.alternatives = resolved.slice(1).map(a => ({
     upstream_canonical: a.upstream_canonical, M_eff: a.M_eff, tier: a.tier, is_granted_sc: a.is_granted_sc,
+    aggravation_only: a.aggravation_only === true ? true : undefined,
   }));
   // missing_fact: the pair-keyed record that would RAISE the band.
   if ((band === 'conditional') && best.requires) shell.missing_fact = best.requires;
@@ -499,6 +563,8 @@ function _publicAnchor(a) {
     E: a.E,
     tier: a.tier,
     basis: a.basis,
+    aggravation_only: a.aggravation_only === true ? true : undefined,
+    causation_denied: a.aggravation_only === true ? true : undefined,
     is_granted_sc: a.is_granted_sc,
     mechanism_class: a.mechanism_class,
     requires: a.requires,
@@ -540,11 +606,51 @@ function _requiredFactPresent(requiresText, mechanismClass, documentedFacts) {
   return false;
 }
 
+// §3.2 companion for consumer-side suggestion surfaces (the website blank-state
+// "common anchors" list, LLM grounding "sound" lists): the upstreams the graveyard
+// map forbids as anchors for this claimed condition. preferenceRankFor /
+// eligibleUpstreamsFor are structurally BLIND to the graveyard (it is a code seed,
+// not a table eligibility value), so any surface that suggests anchors from those
+// functions MUST subtract this set — otherwise it recommends a known-losing theory
+// (architect QA C1, 2026-06-11: HTN blank-state suggested PTSD, the exact pairing
+// _GRAVEYARD exists to suppress). Pure; no table read (graveyard is code-seeded).
+function graveyardUpstreamsFor(claimedText) {
+  const clC = _canon(claimedText);
+  if (!clC) return [];
+  const out = [];
+  for (const k of Object.keys(_GRAVEYARD)) {
+    const i = k.indexOf('|');
+    if (i > 0 && k.slice(0, i) === clC) out.push(k.slice(i + 1));
+  }
+  return out;
+}
+
+// §3.3 — the AGGRAVATION-ONLY analog of graveyardUpstreamsFor. The public
+// vet-facing tool must SUBTRACT these from its "common anchors / connection"
+// suggestions: Ryan 2026-06-11 "if denial is high, don't OFFER it as a
+// connection" — a causation-denied pair (PTSD→HTN) is an internal drafter
+// aggravation argument, never a connection we suggest to a veteran. NOTE: with
+// _GRAVEYARD now empty, graveyardUpstreamsFor returns [] — consumers that relied
+// on it to suppress PTSD→HTN MUST switch to (or also subtract) this set. Pure.
+function aggravationOnlyUpstreamsFor(claimedText) {
+  const clC = _canon(claimedText);
+  if (!clC) return [];
+  const out = [];
+  for (const k of Object.keys(_AGGRAVATION_ONLY)) {
+    const i = k.indexOf('|');
+    if (i > 0 && k.slice(0, i) === clC) out.push(k.slice(i + 1));
+  }
+  return out;
+}
+
 module.exports = {
   resolveAnchorEligibility,
   assessClaimViability,
   preferenceRankFor,
   eligibleUpstreamsFor,
+  isAggravationOnly,
+  aggravationOnlyUpstreamsFor,
+  graveyardUpstreamsFor,
   tableVersion,
   tableContentHash,
   setArtifact,        // inject a table object (Worker vendor / tests) — bypasses fs

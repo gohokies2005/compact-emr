@@ -1,4 +1,5 @@
 import { apiGet } from './client';
+import type { CaseViability } from './case-viability';
 
 export type StrategyTier = 'Strong' | 'Plausible' | 'Thin' | 'Stop';
 
@@ -7,6 +8,8 @@ export interface StrategyCriterion {
   readonly label: string;
   readonly pass: boolean;
   readonly detail: string;
+  /** 'amber' = distinct caution state (veteran-stated-only in-service hook) — renders △, not a red ✗. */
+  readonly tone?: 'amber';
 }
 
 export interface PathwaySuggestion {
@@ -25,6 +28,11 @@ export interface StrategyPreview {
   readonly tier: StrategyTier;
   readonly criteria: readonly StrategyCriterion[];
   readonly summary: string;
+  /**
+   * The viability-engine read riding the same response (P1 re-source 2026-06-11) — band-drives the
+   * headline chip on secondary claims. null/absent = fail-open → legacy criteria copy.
+   */
+  readonly viability?: CaseViability | null;
 }
 
 export function getStrategyPreview(caseId: string): Promise<{ data: StrategyPreview }> {

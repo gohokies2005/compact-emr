@@ -34,6 +34,9 @@ export function bestGrantedScPair(input: StrategyPreviewInput): PairMatch | null
 }
 
 // Deterministic pathway recommender: the strongest granted-SC Board pairing to the claimed condition.
+// The basis string is PLAIN LANGUAGE — no raw BVA n / tier / win-rate ever renders on the card or in
+// the payload (P1 re-source 2026-06-11; the internal pair numbers still rank candidates, they just
+// never serialize).
 export function suggestPathway(input: StrategyPreviewInput): PathwaySuggestion {
   const best = bestGrantedScPair(input);
   if (best === null) return { kind: 'direct', anchor: null, basis: null, differsFromCurrent: false };
@@ -43,7 +46,7 @@ export function suggestPathway(input: StrategyPreviewInput): PathwaySuggestion {
   return {
     kind: 'secondary',
     anchor: best.upstream,
-    basis: `Board pairing n=${best.n}, tier ${best.tier}${best.imoWinPct != null ? `, IMO ${best.imoWinPct}%` : ''}`,
+    basis: 'established secondary pathway',
     differsFromCurrent: differs,
   };
 }
@@ -55,6 +58,12 @@ export interface StrategyCriterion {
   readonly label: string;
   readonly pass: boolean;
   readonly detail: string;
+  /**
+   * Distinct AMBER state (P1e 3-state in-service check, 2026-06-11): the criterion is not satisfied
+   * but is not a flat red ✗ either — e.g. a veteran-stated-but-uncorroborated in-service exposure.
+   * Absent = the existing binary ✓/✗ rendering.
+   */
+  readonly tone?: 'amber';
 }
 
 export interface StrategyPreview {
@@ -77,7 +86,19 @@ export interface StrategyPreviewInput {
   readonly upstreamScCondition: string | null;
   readonly serviceConnectedConditions: readonly string[];
   readonly activeProblems: readonly string[];
-  readonly proposedMechanism?: string | null; // the veteran's stated theory / in-service event
+  /** DISPLAY ONLY (the "Veteran's theory" line) — never feeds the pass/fail of any check (P1e). */
+  readonly proposedMechanism?: string | null;
+  /** The EXTRACTION-CORROBORATED in-service event — the only thing that turns the hook green (P1e). */
+  readonly inServiceEvent?: string | null;
+  /** The veteran's own statement — shown, and AMBER on the hook check, but never a pass (the Porter fix). */
+  readonly veteranStatement?: string | null;
+  /**
+   * The viability-engine read for this case (band + one-line why), threaded in by the route from
+   * deriveCaseViabilityForCase (flag-free, fail-open null). Sources the pathway/strength WORDING —
+   * the deterministic cds gates keep driving the ✓/✗ booleans. Never carries a BVA n/%/win-rate
+   * (structural in the resolver).
+   */
+  readonly viability?: { readonly band: string; readonly why: string } | null;
 }
 
 function framingLabel(framingChoice: string | null): string {
@@ -135,10 +156,17 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   const isSecondary = input.claimType.toLowerCase().includes('secondary')
     || effectiveAnchor != null
     || /secondary|aggravat/.test((input.framingChoice ?? '').toLowerCase());
-  // A direct claim's whole case is the in-service event/onset + the veteran's account of it. No hook on
-  // file = we don't yet know the nexus story — the #1 pre-draft gap for a direct claim, and why everything
-  // was falsely passing (physician review 2026-06-07). proposedMechanism = inServiceEvent ?? veteranStatement.
-  const hasInServiceHook = (input.proposedMechanism ?? '').trim().length > 0;
+  // A direct claim's whole case is the in-service event/onset + the veteran's account of it. 3-STATE
+  // (P1e, the Porter fix 2026-06-11): "documented" keys ONLY on the extraction-corroborated
+  // inServiceEvent — a veteran's unverified statement alone is AMBER (shown, never a pass), and
+  // neither is "absent" red. The old boolean let veteranStatement satisfy the green check and the
+  // tier read "Plausible" on an uncorroborated story. If the document-pipeline lane later adds a
+  // stronger corroboration signal, widen 'documented' to include it then.
+  type InServiceState = 'documented' | 'stated_only' | 'absent';
+  const inServiceState: InServiceState =
+    (input.inServiceEvent ?? '').trim().length > 0 ? 'documented'
+      : (input.veteranStatement ?? '').trim().length > 0 ? 'stated_only'
+        : 'absent';
 
   // CHANGE 1 — TIER RESCUE (Option A): a THIN-sample pair (tier !== 'high', i.e. n<~40) whose grant rate
   // is a near-miss (40% <= grantPct < 50%) leans on the established mechanism rather than reading as a flat
@@ -153,19 +181,11 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     grantPct >= 40 &&
     grantPct < 50;
 
-  // CHANGE 5 — clean grant-rate string off the OVERALL grant_pct (granted/(granted+denied)), NOT the IMO
-  // sub-rate. "Granted in <num> of <n> decided Board appeals (<grantPct>%)". Unmatched pair -> non-BVA copy.
-  const grantString =
-    cds.bva.matched && grantPct != null && cds.bva.n != null
-      ? `Granted in ${Math.round((cds.bva.n * grantPct) / 100)} of ${cds.bva.n} decided Board appeals (${grantPct}%)`
-      : 'No Board odds — normal for a direct or novel claim; rests on the record + literature';
-
-  // Annotate ANY thin-sample pair whose displayed overall grant rate is under 50% but which does NOT read
-  // as Thin (rescued near-miss, OR caution lifted by the IMO-supported sub-rate, e.g. Lumbar->Ankle 33% but
-  // Plausible) — so the low % is never an UNEXPLAINED gap next to a Plausible/Strong tier (the contradiction
-  // Ryan flagged). A ROBUST low pair (tier==='high', e.g. Hip->Knee 33%) stays Thin and is NOT annotated —
-  // there the low % IS the adverse signal and the bare number is correct. (2026-06-07)
-  const thinLowGrantNote = cds.bva.matched && cds.bva.tier !== 'high' && grantPct != null && grantPct < 50;
+  // P1 RE-SOURCE (2026-06-11, Ryan items 2+5): the two BVA-pair-atlas strings ("Established Board
+  // pathway … (n=60, tier high)" and "Granted in 45 of 60 decided Board appeals (75%)") are GONE —
+  // no raw BVA n / % / win-rate / tier ever serializes. The pathway/strength TEXT is band-sourced
+  // plain language (the viability engine's one-line why); the cds booleans keep driving the ✓/✗.
+  const viabilityWhy = (input.viability?.why ?? '').trim();
 
   const criteria: StrategyCriterion[] = [
     {
@@ -178,11 +198,17 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     },
     {
       key: 'anchor',
-      label: isSecondary ? 'Service-connected anchor present' : 'In-service event / veteran account on file',
-      pass: isSecondary ? !noAnchor : hasInServiceHook,
+      label: isSecondary ? 'Service-connected anchor present' : 'In-service event documented',
+      pass: isSecondary ? !noAnchor : inServiceState === 'documented',
+      // AMBER (3rd state): stated-but-uncorroborated — displayed distinctly, never a pass (P1e).
+      ...(!isSecondary && inServiceState === 'stated_only' ? { tone: 'amber' as const } : {}),
       detail: isSecondary
         ? (noAnchor ? (gate.detail ?? 'No service-connected anchor') : `Anchored on ${effectiveAnchor}`)
-        : (hasInServiceHook ? 'Veteran account / in-service event on file' : 'No in-service event or veteran account on file yet — confirm the nexus hook before drafting'),
+        : inServiceState === 'documented'
+          ? 'In-service event documented in the record'
+          : inServiceState === 'stated_only'
+            ? 'Veteran states an in-service exposure — not yet corroborated in the record; verify the DD-214/service records before drafting.'
+            : 'No in-service event or veteran account on file yet — confirm the nexus hook before drafting',
     },
     {
       key: 'plausible',
@@ -192,13 +218,13 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     },
     {
       key: 'pathway',
-      label: isSecondary ? 'Established Board pathway for the pairing' : 'Board pairing (secondary claims only)',
+      label: isSecondary ? 'Recognized secondary pathway for the pairing' : 'Secondary pathway (secondary claims only)',
       pass: isSecondary ? cds.bva.matched : true, // N/A for direct claims — never a ✗ for absent secondary data
       detail: !isSecondary
-        ? 'Direct claim — a Board secondary-pairing does not apply'
+        ? 'Direct claim — a secondary pathway does not apply'
         : cds.bva.matched
-          ? `${cds.bva.upstream} → ${cds.bva.claimed} (n=${cds.bva.n}, tier ${cds.bva.tier})`
-          : 'No Board pair on record — would rely on medical literature; confirm the theory is sound',
+          ? `Recognized secondary pathway: ${cds.bva.upstream} → ${cds.bva.claimed}`
+          : 'No recognized pathway on record — would rely on medical literature; confirm the theory is sound',
     },
     {
       key: 'strength',
@@ -206,11 +232,14 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
       // ✗ ONLY when the engine actively recommends reject AND the pair wasn't rescued as a thin near-miss —
       // a rescued Plausible must not show an adverse ✗ (it rests on mechanism, thin Board sample).
       pass: cds.verdict !== 'reject' || thinSampleRescue,
-      detail: cds.bva.matched
-        ? thinLowGrantNote
-          ? `${grantString} — thin Board sample; rests on the established mechanism`
-          : grantString
-        : grantString,
+      // Band-sourced wording: the viability engine's one-line why (its band word leads the line, e.g.
+      // "Strong: …" / "Aggravation only: …"). Fail-open (viability null) and direct claims get plain
+      // non-numeric copy — never a Board count or rate.
+      detail: !isSecondary
+        ? 'Not applicable to a direct claim — strength rests on the record and the medical literature'
+        : viabilityWhy.length > 0
+          ? viabilityWhy
+          : 'Viability read unavailable — rests on the established mechanism and the medical literature',
     },
   ];
 
@@ -224,10 +253,22 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   // pair (rely on literature), OR a DIRECT claim with no in-service hook on file (we don't know the nexus
   // story yet). NEVER Stop on absent data — Stop is only a hard gate above. (FIX 2026-06-07)
   else if (isSecondary && !cds.bva.matched) tier = 'Thin';
-  else if (!isSecondary && !hasInServiceHook) tier = 'Thin';
+  // An amber-only hook (stated_only) must NEVER read "Plausible" — both stated_only and absent
+  // yield Thin on a direct claim until the in-service event is corroborated (P1e, the Porter fix).
+  else if (!isSecondary && inServiceState !== 'documented') tier = 'Thin';
   else tier = 'Plausible';
 
   const mech = (input.proposedMechanism ?? '').trim();
+  // cds.summary carries raw BVA stats ("Accept: 82.1% IMO BVA win rate (… n=688, tier high)") —
+  // it must NEVER serialize (P1 no-BVA-string lock). Band-sourced why when available, else a plain
+  // verdict line. cdsEngine itself is untouched (other consumers keep their richer summary).
+  const plainSummary = viabilityWhy.length > 0
+    ? viabilityWhy
+    : cds.verdict === 'accept'
+      ? 'Recognized pathway with no adverse signal on record.'
+      : cds.verdict === 'reject'
+        ? 'Adverse signal on record — review the pathway before drafting.'
+        : 'Verify the theory against the record before drafting.';
   return {
     evaluable: input.claimedCondition.trim().length > 0,
     primaryArgument: buildPrimaryArgument(input, effectiveAnchor),
@@ -236,6 +277,6 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     tier,
     recommendedPathway: suggestPathway(input),
     criteria,
-    summary: cds.summary,
+    summary: plainSummary,
   };
 }

@@ -9,6 +9,7 @@ import { HttpError } from '../http/errors.js';
 import type { AppDb } from '../services/db-types.js';
 import { computeStrategyPreview } from '../services/strategy-preview.js';
 import { deriveCaseFramingForCase } from '../services/case-framing-stamp.js';
+import { deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
 
 interface CaseForPreview {
   claimType: string | null;
@@ -57,6 +58,13 @@ export function createStrategyPreviewRouter(db: AppDb): Router {
       const cf = await deriveCaseFramingForCase(db, caseId);
       const useSsot = cf !== null && cf.version === 1;
 
+      // P1 re-source (2026-06-11): the viability-engine read sources the card's pathway/strength
+      // WORDING and rides the response as `viability`. Deliberately NOT gated on
+      // caseViabilityEnabled() — deriveCaseViabilityForCase is flag-free and fail-open (null);
+      // only the /viability-card route and the bundle stamp read that flag. On null the card
+      // falls back to the legacy criteria copy.
+      const viability = await deriveCaseViabilityForCase(db, caseId);
+
       const preview = computeStrategyPreview({
         claimedCondition: c.claimedCondition,
         claimType: c.claimType ?? '',
@@ -73,10 +81,14 @@ export function createStrategyPreviewRouter(db: AppDb): Router {
             .map((s) => s.condition),
         activeProblems: (c.veteran?.activeProblems ?? []).map((p) => p.problem),
         // Prefer the veteran's OWN stated theory for display ("why I think this is connected", even if
-        // wildly wrong — Ryan 2026-06-07); fall back to the extracted in-service event.
+        // wildly wrong — Ryan 2026-06-07); fall back to the extracted in-service event. DISPLAY ONLY —
+        // the pass/fail of the in-service check reads the two distinct fields below (P1e 3-state).
         proposedMechanism: c.veteranStatement ?? c.inServiceEvent ?? null,
+        inServiceEvent: c.inServiceEvent ?? null,
+        veteranStatement: c.veteranStatement ?? null,
+        viability: viability === null ? null : { band: viability.viability, why: viability.why },
       });
-      res.json({ data: preview });
+      res.json({ data: { ...preview, viability } });
     }),
   );
   return router;

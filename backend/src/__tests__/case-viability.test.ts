@@ -87,7 +87,11 @@ function validate(node: any, val: any, pathStr: string, errs: string[]): string[
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 function expectSchemaValid(obj: CaseViability): void {
-  expect(validate(schema, obj, '$', [])).toEqual([]);
+  // Validate the WIRE shape (JSON round-trip): the engine emits optional flags as
+  // `x === true ? true : undefined`, and JSON.stringify DROPS undefined-valued keys — the schema
+  // contract is over serialized JSON, not the in-memory object (P1a re-vendor 2026-06-11; the same
+  // applies to the drafter-side contract test when it adopts the aggravation_only schema).
+  expect(validate(schema, JSON.parse(JSON.stringify(obj)), '$', [])).toEqual([]);
 }
 
 const anchors = (...names: string[]): Array<{ condition: string }> => names.map((condition) => ({ condition }));
@@ -176,14 +180,33 @@ describe('deriveCaseViability — §5 golden bands (schema-validated)', () => {
     expectSchemaValid(out);
   });
 
-  it('Graveyard (blocked): Hypertension + [PTSD] → abstain, graveyard_redirect.redirect_blocked=true (§3.2 dead anchor + no granted target → park)', () => {
+  // GOLDEN FLIP (P1a re-vendor at FRN HEAD ≥73095d9, 2026-06-11): Hypertension|PTSD was REMOVED
+  // from the engine graveyard (_GRAVEYARD is now empty) and re-characterized as AGGRAVATION-ONLY
+  // via _AGGRAVATION_ONLY (FRN commits 5d04b62 / 0ebb73e / 8c141ec, Ryan ratified). The old
+  // expectation (abstain + graveyard_redirect.redirect_blocked) encoded the pre-rewrite behavior;
+  // the band now lands conditional on a 3.310(b) aggravation argument with causation denied.
+  it('Aggravation-only (was graveyard): Hypertension + [PTSD] → conditional, basis 3.310b, aggravation_only, NO graveyard redirect', () => {
     const out = deriveCaseViability('Hypertension', anchors('PTSD'));
-    expect(out.viability).toBe('abstain');
-    expect(out.graveyard_redirect).not.toBeNull();
-    expect(out.graveyard_redirect?.redirect_blocked).toBe(true);
-    expect(out.graveyard_redirect?.dead_anchor).toBe('PTSD');
-    expect(out.graveyard_redirect?.redirect_to).toBe('Obstructive sleep apnea');
-    expect(out.best_anchor).toBeNull();
+    expect(out.viability).toBe('conditional');
+    expect(out.graveyard_redirect).toBeNull();
+    expect(out.best_anchor).not.toBeNull();
+    expect(out.best_anchor?.upstream_canonical).toBe('PTSD');
+    expect(out.best_anchor?.basis).toBe('3.310b');
+    expect(out.best_anchor?.aggravation_only).toBe(true);
+    expect(out.best_anchor?.causation_denied).toBe(true);
+    expect(out.why).toMatch(/aggravat/i);
+    expect(out.why).toMatch(/3\.310/);
+    expectSchemaValid(out);
+  });
+
+  it('Aggravation-only golden #2: Asthma + [PTSD] → conditional + aggravation_only (locks the second re-characterization — a table edit cannot silently drop it)', () => {
+    const out = deriveCaseViability('Asthma', anchors('PTSD'));
+    expect(out.viability).toBe('conditional');
+    expect(out.best_anchor?.upstream_canonical).toBe('PTSD');
+    expect(out.best_anchor?.basis).toBe('3.310b');
+    expect(out.best_anchor?.aggravation_only).toBe(true);
+    expect(out.best_anchor?.causation_denied).toBe(true);
+    expect(out.why).toMatch(/aggravat/i);
     expectSchemaValid(out);
   });
 

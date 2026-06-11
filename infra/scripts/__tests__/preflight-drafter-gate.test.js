@@ -328,11 +328,16 @@ describe('unit: helpers', () => {
     expect(validateSchema(artifact)).toEqual([]);
   });
 
-  it('GATED_FILESET is the locked v1.1 set (25) in order', () => {
-    expect(GATED_FILESET).toHaveLength(25);
+  it('GATED_FILESET is the producer-synced v1.1 set (29, 2026-06-11 sync) in order', () => {
+    expect(GATED_FILESET).toHaveLength(29);
     expect(GATED_FILESET[0]).toBe('app/scripts/run-letter-pipeline.js');
     expect(GATED_FILESET[9]).toBe('app/services/routingResolver.js'); // last of the original 10
-    expect(GATED_FILESET[24]).toBe('references/medical_literature/curated/routing.json'); // data file LAST
+    // The 4 promotions the 2026-06-11 sync added (R4 drift fix):
+    expect(GATED_FILESET[15]).toBe('app/services/conditionCanon.js');
+    expect(GATED_FILESET[19]).toBe('app/services/draftingGuidance.js');
+    expect(GATED_FILESET[20]).toBe('app/services/forbiddenWordPass.js');
+    expect(GATED_FILESET[23]).toBe('app/services/opinionSentence.js');
+    expect(GATED_FILESET[28]).toBe('references/medical_literature/curated/routing.json'); // data file LAST
   });
 
   it('ENFORCER_GATE_MAJOR is 1', () => {

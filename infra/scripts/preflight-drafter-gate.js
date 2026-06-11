@@ -42,8 +42,13 @@ export const FUTURE_SKEW_MS = 60 * 60 * 1000; // 1h
  */
 // v1.1 LOCKED (2026-05-30) — must byte-match the producer's app/scripts/_c0-fileset.js
 // GATED_FILESET (path list AND order). Order is load-bearing: computeFilesetHash concatenates
-// raw Buffers in THIS order. Code modules first (original 10, then the 14 output-determining
+// raw Buffers in THIS order. Code modules first (original 10, then the output-determining
 // promotions), data file LAST. Per shared/outbox/2026-05-30_C0_GATED_FILESET_v1.1_LOCKED.md.
+// SYNCED 25→29 (2026-06-11, drafter window): producer added conditionCanon.js (2026-06-10
+// framingGate canon extraction), draftingGuidance.js, forbiddenWordPass.js, opinionSentence.js
+// (drafter35-38 era promotions that never got mirrored here — R4 would have hard-blocked any
+// v1.1 per-file artifact since then, proving the enforcer wasn't run for the drafter39 deploy).
+// Producer remains the SSOT for this list; re-sync on every producer fileset change.
 export const GATED_FILESET = [
   'app/scripts/run-letter-pipeline.js',
   'app/scripts/drafter-worker.js',
@@ -60,11 +65,15 @@ export const GATED_FILESET = [
   'app/services/cavcRegistry.js',
   'app/services/citationAuditor.js',
   'app/services/citationRegistry.js',
+  'app/services/conditionCanon.js',
   'app/services/conditionFormat.js',
   'app/services/conditionTemplates.js',
   'app/services/deprecatedPhrases.js',
+  'app/services/draftingGuidance.js',
+  'app/services/forbiddenWordPass.js',
   'app/services/linter.js',
   'app/services/llm/client.js',
+  'app/services/opinionSentence.js',
   'app/services/pipelineCheck.js',
   'app/services/roleRunnerApi.js',
   'app/services/sectionAssembler.js',

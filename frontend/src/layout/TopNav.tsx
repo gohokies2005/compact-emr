@@ -23,6 +23,14 @@ const navItems: readonly { label: string; href: string; roles: readonly Role[] }
   { label: 'Queue', href: '/p/queue', roles: ['physician'] },
   { label: 'Letters', href: '/p/letters', roles: ['physician'] }
 ];
+
+// Physicians get a dedicated ordered nav: Queue (their landing) | Letters | Inbox (Ryan 2026-06-10
+// P2.2). Filtering the shared array would render the shared Inbox row first. Staff order unchanged.
+const physicianNavItems: readonly { label: string; href: string }[] = [
+  { label: 'Queue', href: '/p/queue' },
+  { label: 'Letters', href: '/p/letters' },
+  { label: 'Inbox', href: '/inbox' }
+];
 // Badge renders the inbox unread count. Split into its own component (only mounted when a QueryClient
 // is present) so the nav — which renders on every page — never crashes a provider-less unit test.
 function InboxBadge() {
@@ -34,6 +42,6 @@ function InboxBadge() {
 export function TopNav() {
   const { role } = useAuth();
   const hasClient = useHasQueryClient();
-  const visibleItems = role ? navItems.filter((item) => item.roles.includes(role)) : [];
+  const visibleItems = role === 'physician' ? physicianNavItems : role ? navItems.filter((item) => item.roles.includes(role)) : [];
   return <header className="border-b border-aegis bg-ivory/95 backdrop-blur-sm shadow-aegis-soft"><div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4"><div className="flex items-center gap-6"><NavLink to="/" aria-label="Aegis home" className="shrink-0"><AegisLogo /></NavLink><nav className="hidden items-center gap-1 md:flex">{visibleItems.map((item) => <NavLink key={item.href} to={item.href} className={({ isActive }) => `relative rounded-lg px-3 py-2 text-sm font-medium transition-colors ${isActive ? 'bg-mist text-navyDeep' : 'text-steel hover:bg-mistSoft hover:text-navyDeep'}`}><span className="inline-flex items-center gap-1.5">{item.label}{item.href === '/inbox' && hasClient ? <InboxBadge /> : null}</span></NavLink>)}</nav></div><UserMenu /></div></header>;
 }

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AppShell } from '../../layout/AppShell';
+import { BridgeRotation } from '../../components/BridgeRotation';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { getInbox } from '../../api/messaging';
@@ -56,11 +57,24 @@ export function InboxPage() {
 
   return (
     <AppShell>
+      {/* Ambient bridge band — Inbox is one of the three MAIN physician tabs (Ryan 2026-06-10 P2.3).
+          The page is shared with staff; the band shows for everyone (it already does on the staff
+          dashboard). Wrapper mirrors PhysicianQueuePage. */}
+      <section className="relative mb-8 overflow-hidden rounded-2xl border border-aegis shadow-aegis-card">
+        <BridgeRotation caption={false} className="h-40 sm:h-48">
+          <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-navyDeep/85 via-navyDeep/50 to-transparent" />
+          <div className="relative flex h-full flex-col justify-center px-7">
+            <p className="text-xs font-medium uppercase tracking-[0.25em] text-brassSoft">Aegis</p>
+            <h1 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">Inbox</h1>
+            <p className="mt-1 text-sm text-white/75">Staff-to-staff messages</p>
+          </div>
+        </BridgeRotation>
+      </section>
+
       <div className="space-y-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-slate-900">Inbox</h1>
-            <p className="text-sm text-slate-500">Staff-to-staff messages. Optionally link a case.</p>
+            <p className="text-sm text-slate-500">Optionally link a case to a message.</p>
           </div>
           <div className="flex items-center gap-3">
             <label className="flex items-center gap-2 text-sm text-slate-600">

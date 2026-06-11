@@ -5,6 +5,7 @@ import { Card } from '../../components/ui/Card';
 import { Spinner } from '../../components/ui/Spinner';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
+import { BridgeRotation } from '../../components/BridgeRotation';
 import { listCases, type CaseLite } from '../../api/cases';
 import { formatRelativeTime } from '../../lib/date';
 import { formatNameLastFirst } from '../../lib/format';
@@ -27,10 +28,18 @@ export function PhysicianLettersPage() {
 
   return (
     <AppShell>
-      <div className="mb-8">
-        <h1 className="text-2xl font-semibold text-slate-900">My letters</h1>
-        <p className="mt-2 text-sm text-slate-500">Delivered and paid letters.</p>
-      </div>
+      {/* Same ambient bridge band as the Queue — every MAIN physician tab carries it; it never
+          mounts inside a claim/letter view (Ryan 2026-06-10 P2.3). Wrapper mirrors PhysicianQueuePage. */}
+      <section className="relative mb-8 overflow-hidden rounded-2xl border border-aegis shadow-aegis-card">
+        <BridgeRotation caption={false} className="h-40 sm:h-48">
+          <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-navyDeep/85 via-navyDeep/50 to-transparent" />
+          <div className="relative flex h-full flex-col justify-center px-7">
+            <p className="text-xs font-medium uppercase tracking-[0.25em] text-brassSoft">Aegis</p>
+            <h1 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">My letters</h1>
+            <p className="mt-1 text-sm text-white/75">Delivered and paid letters</p>
+          </div>
+        </BridgeRotation>
+      </section>
 
       <Card className="p-0">
         {loading ? (

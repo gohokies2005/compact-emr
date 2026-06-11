@@ -50,7 +50,7 @@ export function BridgeRotation({
   const renderedChildren = typeof children === 'function' ? children(bridge) : children;
 
   return (
-    <div className={clsx('relative h-full w-full overflow-hidden bg-navyDeep', className)}>
+    <div data-bridge="true" className={clsx('relative h-full w-full overflow-hidden bg-navyDeep', className)}>
       {/* Graceful fallback gradient — always present, sits behind the photo. */}
       <div
         aria-hidden="true"

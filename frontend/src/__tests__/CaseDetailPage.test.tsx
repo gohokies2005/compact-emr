@@ -60,7 +60,8 @@ describe('CaseDetailPage', () => {
     expect(await screen.findByText('Hypertension')).toBeInTheDocument();
     expect(screen.getByText('Physician review')).toBeInTheDocument(); // status badge
     // From physician_review, an admin may move to delivered / correction_requested / rejected.
-    expect(screen.getByRole('button', { name: /move to delivered/i })).toBeInTheDocument();
+    // The 'delivered' enum displays as "Ready for delivery" (post-approve, pre-payment).
+    expect(screen.getByRole('button', { name: /move to ready for delivery/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /reject \+ soft delete/i })).toBeInTheDocument();
   });
 

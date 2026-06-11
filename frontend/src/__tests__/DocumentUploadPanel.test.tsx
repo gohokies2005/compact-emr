@@ -1,0 +1,137 @@
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { DocumentUploadPanel } from '../components/DocumentUploadPanel';
+import { presignDocument, recordDocument, uploadToPresignedUrl } from '../api/veterans';
+import { ACCEPT_ATTR, MAX_BYTES } from '../routes/veterans/documentUpload';
+import type { Case } from '../types/prisma';
+
+// Keystone Package 3 — shared upload core extracted from the veteran chart's DocumentsPanel.
+// These tests pin the contract: presign → S3 PUT → record call ORDER, the pinned-caseId variant
+// (case page) vs the dropdown variant (chart), zip expansion, the 50 MB cap, .txt acceptance
+// (Package 2 fold), and verbatim per-file error surfacing (NO-SILENT-ERRORS).
+
+// Call-order ledger shared by the three mocked steps.
+const calls: string[] = [];
+
+vi.mock('../api/veterans', () => ({
+  presignDocument: vi.fn(async () => { calls.push('presign'); return { data: { uploadUrl: 'https://s3.test/upload', requiredHeaders: { 'Content-Type': 'application/pdf' }, s3Key: 'cases/CASE-9/uuid-a.pdf' } }; }),
+  uploadToPresignedUrl: vi.fn(async () => { calls.push('put'); }),
+  recordDocument: vi.fn(async () => { calls.push('record'); return { data: { id: 'DOC-1' } }; }),
+}));
+
+// expandSelection imports JSZip dynamically; vitest intercepts the dynamic import too. The mock zip
+// carries one junk __MACOSX entry (skipped) and one real PDF entry (uploaded).
+vi.mock('jszip', () => ({
+  default: {
+    loadAsync: vi.fn(async () => ({
+      files: {
+        '__MACOSX/inner.pdf': { name: '__MACOSX/inner.pdf', dir: false, _data: { uncompressedSize: 10 }, async: async () => new Blob(['0123456789'], { type: 'application/pdf' }) },
+        'records/inner.pdf': { name: 'records/inner.pdf', dir: false, _data: { uncompressedSize: 10 }, async: async () => new Blob(['0123456789'], { type: 'application/pdf' }) },
+      },
+    })),
+  },
+}));
+
+const presign = vi.mocked(presignDocument);
+const put = vi.mocked(uploadToPresignedUrl);
+const record = vi.mocked(recordDocument);
+
+const TWO_CASES = [
+  { id: 'C-1', claimedCondition: 'PTSD' },
+  { id: 'C-2', claimedCondition: 'Knee strain' },
+] as unknown as readonly Case[];
+
+function fileInput(): HTMLInputElement {
+  return screen.getByLabelText('Upload documents');
+}
+
+beforeEach(() => { vi.clearAllMocks(); calls.length = 0; });
+
+describe('DocumentUploadPanel — pinned-caseId variant (case page)', () => {
+  it('renders NO case selector and presigns + records with the pinned caseId, in presign → PUT → record order', async () => {
+    const onUploaded = vi.fn();
+    render(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={onUploaded} />);
+
+    // Pinned: the claim dropdown must not exist; the docTag select stays.
+    expect(screen.queryByLabelText('Assign to claim')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Document tag')).toBeInTheDocument();
+
+    await userEvent.upload(fileInput(), new File(['x'], 'a.pdf', { type: 'application/pdf' }));
+
+    expect(await screen.findByText(/1 uploaded\./)).toBeInTheDocument();
+    expect(presign).toHaveBeenCalledWith('VET-1', expect.objectContaining({ caseId: 'CASE-9', filename: 'a.pdf', contentType: 'application/pdf' }));
+    expect(record).toHaveBeenCalledWith('VET-1', expect.objectContaining({ caseId: 'CASE-9', filename: 'a.pdf', s3Key: 'cases/CASE-9/uuid-a.pdf', docTag: 'Other' }));
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(['presign', 'put', 'record']); // the load-bearing order: never record before the bytes are in S3
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts a .txt file (Package 2 fold) — the accept attr includes .txt and the upload presigns as text/plain', async () => {
+    render(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    expect(fileInput().getAttribute('accept')).toBe(ACCEPT_ATTR);
+    expect(ACCEPT_ATTR).toContain('.txt');
+    expect(ACCEPT_ATTR).toContain('text/plain');
+
+    // userEvent.upload applies the accept attr — this upload would be silently filtered out if
+    // .txt were missing from it, so the assertion below also guards the picker filter itself.
+    await userEvent.upload(fileInput(), new File(['hello'], 'note.txt', { type: 'text/plain' }));
+
+    expect(await screen.findByText(/1 uploaded\./)).toBeInTheDocument();
+    expect(presign).toHaveBeenCalledWith('VET-1', expect.objectContaining({ filename: 'note.txt', contentType: 'text/plain' }));
+  });
+
+  it('expands a .zip client-side: junk entries skipped, real entries uploaded individually', async () => {
+    render(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    await userEvent.upload(fileInput(), new File(['PK'], 'records.zip', { type: 'application/zip' }));
+
+    expect(await screen.findByText(/1 uploaded, 1 skipped/)).toBeInTheDocument();
+    expect(presign).toHaveBeenCalledTimes(1); // the zip itself is never uploaded — only its one real entry
+    expect(presign).toHaveBeenCalledWith('VET-1', expect.objectContaining({ filename: 'inner.pdf', contentType: 'application/pdf' }));
+  });
+
+  it('skips a file over the 50 MB cap without presigning', async () => {
+    render(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    const big = new File(['x'], 'huge.pdf', { type: 'application/pdf' });
+    Object.defineProperty(big, 'size', { value: MAX_BYTES + 1 });
+    await userEvent.upload(fileInput(), big);
+
+    expect(await screen.findByText(/Nothing to upload — 1 skipped/)).toBeInTheDocument();
+    expect(presign).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the per-file API failure reason verbatim in the status line (NO-SILENT-ERRORS)', async () => {
+    const apiMessage = 'Only PDF, JPG, PNG, DOC, and DOCX uploads are supported.';
+    presign.mockRejectedValueOnce({ response: { status: 400, data: { error: { code: 'unsupported_content_type', message: apiMessage } } } });
+    render(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    await userEvent.upload(fileInput(), new File(['x'], 'a.pdf', { type: 'application/pdf' }));
+
+    expect(await screen.findByText((t) => t.includes('1 failed') && t.includes(`a.pdf: ${apiMessage}`))).toBeInTheDocument();
+    expect(record).not.toHaveBeenCalled(); // the failed file is never recorded
+  });
+});
+
+describe('DocumentUploadPanel — dropdown variant (veteran chart)', () => {
+  it('renders the claim selector defaulting to the first case and presigns with it', async () => {
+    render(<DocumentUploadPanel veteranId="VET-1" cases={TWO_CASES} onUploaded={vi.fn()} />);
+    const select = screen.getByLabelText('Assign to claim');
+    expect(select).toHaveValue('C-1');
+
+    await userEvent.upload(fileInput(), new File(['x'], 'a.pdf', { type: 'application/pdf' }));
+    await waitFor(() => expect(presign).toHaveBeenCalledWith('VET-1', expect.objectContaining({ caseId: 'C-1' })));
+  });
+
+  it('presigns with the SELECTED case after the dropdown changes', async () => {
+    render(<DocumentUploadPanel veteranId="VET-1" cases={TWO_CASES} onUploaded={vi.fn()} />);
+    await userEvent.selectOptions(screen.getByLabelText('Assign to claim'), 'C-2');
+    await userEvent.upload(fileInput(), new File(['x'], 'a.pdf', { type: 'application/pdf' }));
+    await waitFor(() => expect(presign).toHaveBeenCalledWith('VET-1', expect.objectContaining({ caseId: 'C-2' })));
+  });
+
+  it('refuses to upload with no case available and says so', async () => {
+    render(<DocumentUploadPanel veteranId="VET-1" cases={[]} onUploaded={vi.fn()} />);
+    await userEvent.upload(fileInput(), new File(['x'], 'a.pdf', { type: 'application/pdf' }));
+    expect(await screen.findByText('Create or select a case before uploading.')).toBeInTheDocument();
+    expect(presign).not.toHaveBeenCalled();
+  });
+});

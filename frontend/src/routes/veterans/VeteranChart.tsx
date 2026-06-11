@@ -5,7 +5,7 @@ import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { TabBar, type TabItem } from '../../components/ui/TabBar';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { deleteDocument, getVeteran, listDocuments, presignDocument, recordDocument, updateVeteran, uploadToPresignedUrl, type UpdateVeteranInput, type VeteranDetail } from '../../api/veterans';
+import { deleteDocument, getVeteran, listDocuments, updateVeteran, type UpdateVeteranInput, type VeteranDetail } from '../../api/veterans';
 import { PdfViewerModal } from '../../components/PdfViewerModal';
 import { ConditionsPanel, MedicationsPanel, ProblemsPanel } from '../../components/ClinicalChartPanels';
 import { ConflictError, describeApiError } from '../../api/client';
@@ -14,11 +14,9 @@ import { useAuth } from '../../auth/useAuth';
 import { NewClaimModal } from '../cases/NewClaimModal';
 import { ChartNotesPanel } from './ChartNotesPanel';
 import { SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
-import { classifyEntry, isZip, uploadErrorReason, type CandidateResult } from './documentUpload';
+import { DocumentUploadPanel } from '../../components/DocumentUploadPanel';
 import { formatDateOnly, formatPhone, formatNameLastFirst } from '../../lib/format';
 import type { Case, Document, Role } from '../../types/prisma';
-
-const DOC_TAGS = ['STR', 'DBQ', 'C&P', 'Lay Statement', 'Other'];
 
 // The chart mirrors the claim page's tabs (architect design 2026-06-08): a leading Claims tab (the
 // veteran's claim list) followed by the SHARED vet-scoped sections (Documents + the clinical chart),
@@ -70,90 +68,16 @@ export function VeteranChart() {
 }
 
 
-interface UploadItem { readonly filename: string; readonly contentType: string; readonly sizeBytes: number; readonly blob: Blob; }
-
 function DocumentsPanel({ veteranId, cases, documents, onChange }: { readonly veteranId: string; readonly cases: readonly Case[]; readonly documents: readonly Document[]; readonly onChange: () => Promise<void> }) {
-  const [caseId, setCaseId] = useState(cases[0]?.id ?? ''); const [docTag, setDocTag] = useState('Other'); const [status, setStatus] = useState('');
-  const [busy, setBusy] = useState(false);
   const [viewDoc, setViewDoc] = useState<Document | null>(null); // in-page PDF viewer
   // Delete a misuploaded file (Ryan 2026-06-04). Removes the file + its parsed text from the
   // veteran's chart for ALL claims (the drafter bundle is veteran-wide), so the confirm is explicit.
   const del = useMutation({ mutationFn: deleteDocument, onSuccess: onChange, onError: () => window.alert('Could not delete the file. Please retry.') });
 
-  // Upload one already-classified item via the existing presign -> upload -> record flow.
-  // Throws on failure so the batch driver can record a per-file error without aborting the batch.
-  async function uploadOne(item: UploadItem) {
-    const presigned = await presignDocument(veteranId, { caseId, filename: item.filename, contentType: item.contentType, sizeBytes: item.sizeBytes });
-    await uploadToPresignedUrl(presigned.data.uploadUrl, new File([item.blob], item.filename, { type: item.contentType }), presigned.data.requiredHeaders);
-    await recordDocument(veteranId, { caseId, filename: item.filename, contentType: item.contentType, sizeBytes: item.sizeBytes, s3Key: presigned.data.s3Key, docTag });
-  }
-
-  // Expand the user's selection into upload candidates: zips are unpacked client-side, plain
-  // files pass through. Returns { items, skipped } where skipped carries the reason per file.
-  async function expandSelection(files: readonly File[]): Promise<{ items: UploadItem[]; skipped: { name: string; reason: string }[] }> {
-    const items: UploadItem[] = [];
-    const skipped: { name: string; reason: string }[] = [];
-    const reasonText: Record<string, string> = { directory_or_junk: 'skipped (folder/system file)', unsupported_type: 'unsupported type', too_large: 'over 50 MB' };
-    const note = (r: CandidateResult & { ok: false }) => skipped.push({ name: r.path.split('/').pop() ?? r.path, reason: reasonText[r.reason] ?? 'skipped' });
-
-    for (const file of files) {
-      if (isZip(file)) {
-        const { default: JSZip } = await import('jszip');
-        const zip = await JSZip.loadAsync(file);
-        const entries = Object.values(zip.files);
-        for (const entry of entries) {
-          const metaSize = (entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0;
-          const cls = classifyEntry({ path: entry.name, sizeBytes: metaSize, isDir: entry.dir });
-          if (!cls.ok) { note(cls); continue; }
-          // Realize the blob, then re-check size against the true byte length (zip metadata can be
-          // missing/zero in some JSZip builds).
-          const blob = await entry.async('blob');
-          const recheck = classifyEntry({ path: entry.name, sizeBytes: blob.size, isDir: entry.dir });
-          if (!recheck.ok) { note(recheck); continue; }
-          items.push({ filename: recheck.candidate.path, contentType: recheck.candidate.contentType, sizeBytes: blob.size, blob });
-        }
-      } else {
-        const cls = classifyEntry({ path: file.name, sizeBytes: file.size, explicitType: file.type });
-        if (!cls.ok) { note(cls); continue; }
-        items.push({ filename: cls.candidate.path, contentType: cls.candidate.contentType, sizeBytes: file.size, blob: file });
-      }
-    }
-    return { items, skipped };
-  }
-
-  // Batch driver: validate the case, expand the selection, then upload sequentially with progress.
-  async function onFiles(fileList: FileList | null) {
-    const files = fileList ? Array.from(fileList) : [];
-    if (files.length === 0) return;
-    if (!caseId) { setStatus('Create or select a case before uploading.'); return; }
-    setBusy(true);
-    try {
-      setStatus('Reading selection…');
-      const { items, skipped } = await expandSelection(files);
-      if (items.length === 0) { setStatus(`Nothing to upload — ${skipped.length} skipped (unsupported/too large).`); return; }
-      let uploaded = 0; const failed: { name: string; reason: string }[] = [];
-      for (let i = 0; i < items.length; i += 1) {
-        const item = items[i];
-        if (!item) continue;
-        setStatus(`Uploading ${i + 1} of ${items.length}… (${item.filename})`);
-        try { await uploadOne(item); uploaded += 1; }
-        catch (err) { failed.push({ name: item.filename, reason: uploadErrorReason(err) }); }
-      }
-      const parts = [`${uploaded} uploaded`];
-      if (skipped.length > 0) parts.push(`${skipped.length} skipped (unsupported/too large)`);
-      // Surface the actual per-file failure reason — an upload that fails silently is the same
-      // as "I uploaded but see nothing." Show the real cause so the RN can act on it.
-      if (failed.length > 0) parts.push(`${failed.length} failed — ${failed.map((f) => `${f.name}: ${f.reason}`).join('; ')}`);
-      setStatus(parts.join(', ') + '.');
-      await onChange();
-    } catch (err) {
-      setStatus(`Upload failed: ${err instanceof Error ? err.message : 'unexpected error'}.`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return <div id="documents"><p className="text-sm text-slate-500">Upload one or more files, or a .zip — PDF, JPG, PNG, DOC, DOCX (max 50 MB each).</p><div className="mt-4 flex flex-col gap-3 sm:flex-row"><select className="input" value={caseId} onChange={(e) => setCaseId(e.target.value)}>{cases.map((c) => <option key={c.id} value={c.id}>{c.id} — {c.claimedCondition}</option>)}</select><select className="input" value={docTag} onChange={(e) => setDocTag(e.target.value)}>{DOC_TAGS.map((t) => <option key={t}>{t}</option>)}</select><input className="text-sm" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.zip,application/pdf,image/jpeg,image/png,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,application/x-zip-compressed" disabled={busy} onChange={(e) => { void onFiles(e.target.files); e.target.value = ''; }} /></div>{status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}<div className="mt-4 divide-y divide-slate-100">{documents.map((d) => <div key={d.id} className="flex items-center justify-between gap-3 py-3 text-sm"><button className="flex flex-1 items-center justify-between gap-3 text-left hover:bg-slate-50" onClick={() => setViewDoc(d)}><span>{d.filename}</span><span className="text-slate-500">{d.docTag ?? 'Other'} · {d.uploadedAt}{(d as { caseId?: string }).caseId ? ` · ${(d as { caseId?: string }).caseId}` : ''}</span></button><button type="button" className="shrink-0 rounded px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-50" disabled={del.isPending} onClick={() => { if (window.confirm(`Delete "${d.filename}"? This removes the file and its parsed text from this veteran's chart for ALL of their claims. Use this only for a file uploaded to the wrong chart.`)) del.mutate(d.id); }}>Delete</button></div>)}</div><PdfViewerModal doc={viewDoc} onClose={() => setViewDoc(null)} /></div>;
+  // Upload core (presign → S3 PUT → record, zip expansion, 50 MB cap, per-file error surfacing)
+  // extracted to the shared DocumentUploadPanel (Keystone Package 3) — the chart keeps its case
+  // DROPDOWN variant (no pinned caseId); the case page mounts the same panel with caseId pinned.
+  return <div id="documents"><DocumentUploadPanel veteranId={veteranId} cases={cases} onUploaded={onChange} /><div className="mt-4 divide-y divide-slate-100">{documents.map((d) => <div key={d.id} className="flex items-center justify-between gap-3 py-3 text-sm"><button className="flex flex-1 items-center justify-between gap-3 text-left hover:bg-slate-50" onClick={() => setViewDoc(d)}><span>{d.filename}</span><span className="text-slate-500">{d.docTag ?? 'Other'} · {d.uploadedAt}{(d as { caseId?: string }).caseId ? ` · ${(d as { caseId?: string }).caseId}` : ''}</span></button><button type="button" className="shrink-0 rounded px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-50" disabled={del.isPending} onClick={() => { if (window.confirm(`Delete "${d.filename}"? This removes the file and its parsed text from this veteran's chart for ALL of their claims. Use this only for a file uploaded to the wrong chart.`)) del.mutate(d.id); }}>Delete</button></div>)}</div><PdfViewerModal doc={viewDoc} onClose={() => setViewDoc(null)} /></div>;
 }
 // FRN claims: clicking a claim row OPENS it (that's the instinct — Ryan 2026-06-06). Editing the
 // claimed condition lives on the claim's own page (click the condition under the patient's name there),

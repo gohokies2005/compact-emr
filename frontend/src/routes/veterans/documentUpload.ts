@@ -12,6 +12,12 @@ export const ALLOWED_TYPES = [
 
 export const MAX_BYTES = 50 * 1024 * 1024;
 
+// HTML file-picker filter for the upload <input>. Kept HERE (next to ALLOWED_TYPES) so the picker
+// filter and the JS validation cannot drift: .txt was accepted by classifyEntry but missing from the
+// accept attr, so the OS picker greyed out .txt files the upload path could handle (Package 2/3 fold,
+// 2026-06-11). .zip appears only here — zips are expanded client-side, never uploaded as-is.
+export const ACCEPT_ATTR = '.pdf,.jpg,.jpeg,.png,.doc,.docx,.txt,.zip,application/pdf,image/jpeg,image/png,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,application/zip,application/x-zip-compressed';
+
 // Extension -> contentType for files unpacked from a zip (a JSZip entry has no MIME type) and as a
 // fallback for OS file pickers that hand us an empty `file.type`.
 const EXT_TO_TYPE: Record<string, (typeof ALLOWED_TYPES)[number]> = {

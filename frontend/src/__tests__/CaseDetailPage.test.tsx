@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CaseDetailPage } from '../routes/cases/CaseDetailPage';
 import { getCase } from '../api/cases';
 import { getLetter } from '../api/letter';
+import { presignDocument, recordDocument } from '../api/veterans';
 
 vi.mock('../auth/useAuth', () => ({ useAuth: () => ({ user: { sub: 's', email: 'a@x.com', roles: ['admin'], role: 'admin' } }) }));
 vi.mock('../api/cases', () => ({
@@ -33,6 +34,10 @@ vi.mock('../api/veterans', () => ({
   addScCondition: vi.fn(), updateScCondition: vi.fn(), deleteScCondition: vi.fn(),
   addProblem: vi.fn(), deleteProblem: vi.fn(),
   addMedication: vi.fn(), deleteMedication: vi.fn(),
+  // Upload fns the shared DocumentUploadPanel imports (Keystone Package 3: case-page upload).
+  presignDocument: vi.fn(async () => ({ data: { uploadUrl: 'https://s3.test/upload', requiredHeaders: {}, s3Key: 'cases/CASE-1/uuid-a.pdf' } })),
+  uploadToPresignedUrl: vi.fn(async () => undefined),
+  recordDocument: vi.fn(async () => ({ data: { id: 'DOC-1' } })),
 }));
 vi.mock('../api/chart-notes', () => ({
   listChartNotes: vi.fn(async () => ({ data: [] })),
@@ -83,6 +88,23 @@ describe('CaseDetailPage', () => {
     await userEvent.click(screen.getByRole('tab', { name: 'Service Connected Conditions' }));
     expect(await screen.findByText('PTSD')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add' })).toBeInTheDocument();
+  });
+
+  // Keystone Package 3 — the Documents tab mounts the shared uploader with THIS case pre-pinned:
+  // no claim dropdown, and the presign/record calls carry the page's own caseId. The chart link
+  // ("Manage all veteran documents") stays as the secondary path.
+  it('Documents tab uploads with the caseId pre-pinned (no claim dropdown) and keeps the chart link', async () => {
+    renderPage();
+    await screen.findByText('Hypertension');
+    await userEvent.click(screen.getByRole('tab', { name: 'Documents' }));
+
+    expect(await screen.findByText('Upload to this claim')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Assign to claim')).not.toBeInTheDocument(); // pinned → no dropdown
+    expect(screen.getByRole('link', { name: /manage all veteran documents/i })).toHaveAttribute('href', '/veterans/VET-1#documents');
+
+    await userEvent.upload(screen.getByLabelText('Upload documents'), new File(['x'], 'a.pdf', { type: 'application/pdf' }));
+    await waitFor(() => expect(presignDocument).toHaveBeenCalledWith('VET-1', expect.objectContaining({ caseId: 'CASE-1', filename: 'a.pdf' })));
+    await waitFor(() => expect(recordDocument).toHaveBeenCalledWith('VET-1', expect.objectContaining({ caseId: 'CASE-1', s3Key: 'cases/CASE-1/uuid-a.pdf' })));
   });
 
   it('links the veteran name in the header to the veteran chart route', async () => {

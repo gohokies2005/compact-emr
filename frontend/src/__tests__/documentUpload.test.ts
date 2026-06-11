@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyEntry, inferContentType, isJunkPath, isZip, extensionOf, MAX_BYTES, uploadErrorReason } from '../routes/veterans/documentUpload';
+import { ACCEPT_ATTR, classifyEntry, inferContentType, isJunkPath, isZip, extensionOf, MAX_BYTES, uploadErrorReason } from '../routes/veterans/documentUpload';
 
 describe('documentUpload helpers', () => {
   it('infers contentType from extension when MIME is empty', () => {
@@ -64,6 +64,19 @@ describe('documentUpload helpers', () => {
     expect(uploadErrorReason(new Error('boom'))).toBe('boom');
     // last-resort fallback
     expect(uploadErrorReason(undefined)).toBe('unexpected error');
+  });
+
+  it('keeps the file-picker accept attr in sync with the JS validation — .txt must stay in BOTH', () => {
+    // Regression guard (Package 2/3 fold, 2026-06-11): classifyEntry accepted .txt while the picker's
+    // accept attr omitted it, so the OS dialog greyed out files the upload path could handle.
+    expect(ACCEPT_ATTR).toContain('.txt');
+    expect(ACCEPT_ATTR).toContain('text/plain');
+    expect(inferContentType('summary.txt')).toBe('text/plain');
+    // Every extension the picker advertises (except .zip, which is expanded client-side) must classify.
+    for (const ext of ['.pdf', '.jpg', '.jpeg', '.png', '.doc', '.docx', '.txt']) {
+      expect(ACCEPT_ATTR).toContain(ext);
+      expect(inferContentType(`file${ext}`)).not.toBeNull();
+    }
   });
 
   it('detects zip files by MIME or extension', () => {

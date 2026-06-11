@@ -21,6 +21,7 @@ import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
 import { DecisionsOverridesPanel } from '../../components/DecisionsOverridesPanel';
 import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
+import { DocumentUploadPanel } from '../../components/DocumentUploadPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { EmailLogPanel } from '../../components/EmailLogPanel';
@@ -482,7 +483,7 @@ export function CaseDetailPage() {
         ) : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
         {tab === 'clarifications' ? <ClarificationsPanel caseId={caseId} /> : null}
-        {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} /> : null}
+        {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} role={role} /> : null}
         {tab === 'emails' ? <EmailLogPanel queryKey={['case', caseId, 'emails']} fetcher={() => listCaseEmails(caseId)} scope="claim" /> : null}
         {tab === 'messages' ? (
           <CaseMessagesPanel caseId={caseId} assignedRn={c.assignedRn ?? null} assignedPhysician={c.assignedPhysician ?? null} />
@@ -685,14 +686,27 @@ function VeteranClinicalTab({ veteranId, section }: { readonly veteranId: string
   return <MedicationsPanel veteranId={veteranId} rows={v.activeMedications} onChange={invalidate} />;
 }
 
-function DocumentsTab({ veteranId, caseId }: { readonly veteranId: string; readonly caseId: string }) {
+function DocumentsTab({ veteranId, caseId, role }: { readonly veteranId: string; readonly caseId: string; readonly role: Role }) {
+  const qc = useQueryClient();
   const q = useQuery({ queryKey: ['documents', veteranId], queryFn: () => listDocuments(veteranId), enabled: veteranId.length > 0 });
   const [viewDoc, setViewDoc] = useState<ViewableDoc | null>(null);
   const reocr = useMutation({ mutationFn: reocrDocument, onSuccess: () => window.alert('Re-running OCR on this file (Textract → Claude fallback). Refresh in a minute to see it read.') });
   const all = q.data?.data ?? [];
   const docs = all.filter((d) => d.caseId === caseId); // this claim's files
+  // Upload presign/record is OPS-gated server-side (documents.ts) — mirror it here so a physician
+  // sees the read-only list, never an upload control that 403s on presign. (Keystone Package 3.)
+  const canUpload = role === 'admin' || role === 'ops_staff';
   return (
     <>
+      {/* Case-page upload, caseId PRE-PINNED (Keystone Package 3): same shared presign → S3 PUT →
+          record flow as the veteran chart, but every file lands on THIS claim — no case dropdown.
+          The "Manage all veteran documents" chart link below stays as the secondary path. The
+          invalidate refreshes ['documents', veteranId], so this tab AND the chart both update. */}
+      {canUpload ? (
+        <TabSection title="Upload to this claim" className="mb-4" bodyClassName="p-4">
+          <DocumentUploadPanel veteranId={veteranId} caseId={caseId} onUploaded={async () => { await qc.invalidateQueries({ queryKey: ['documents', veteranId] }); }} />
+        </TabSection>
+      ) : null}
       <TabSection
         title="Documents on this claim"
         action={<Link className="text-xs font-medium text-navy transition-colors hover:text-navyDeep" to={`/veterans/${encodeURIComponent(veteranId)}#documents`}>Manage all veteran documents →</Link>}

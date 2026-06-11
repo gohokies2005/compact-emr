@@ -124,6 +124,22 @@ def start_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
 
     doc = _resolve_document(key)
     if not doc:
+        # Package 4a orphan-race fix (raise-for-retry): a cases/ upload fires this Lambda the
+        # instant the S3 object lands, but the Document row is recorded by the API a beat later
+        # (recordDocument), so the by-s3-key lookup can 404 on a perfectly good upload. Returning
+        # success here silently dropped the file — the configured async retry never fired.
+        # Raising lets the Lambda async retry (retryAttempts: 2, ~1min/~2min backoff) re-resolve
+        # after the row lands; the retry delay IS the grace period (no in-handler sleep). A
+        # genuinely dead key (Document deleted) exhausts the retries and lands in the ocr-start
+        # onFailure DLQ (workers-stack.ts), whose depth alarm makes it loud, never silent.
+        # HARD SCOPE GUARD: raise for cases/ ONLY — intake/ already returned above (no Document
+        # exists by design; raising there would break parse-at-intake), and any other prefix
+        # keeps the original skip-with-success behavior.
+        if key.startswith("cases/"):
+            raise RuntimeError(
+                f"no resolvable document for s3 key {key} yet (recordDocument may not have "
+                f"landed); raising so the Lambda async retry re-resolves it"
+            )
         print(f"skipping key with no resolvable document: {key}")
         return {"started": []}
     document_id = doc["documentId"]

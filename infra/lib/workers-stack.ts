@@ -11,6 +11,7 @@ import {
   aws_iam as iam,
   aws_kms as kms,
   aws_lambda as lambda,
+  aws_lambda_destinations as destinations,
   aws_lambda_event_sources as eventSources,
   aws_lambda_nodejs as nodejs,
   aws_logs as logs,
@@ -283,6 +284,38 @@ export class WorkersStack extends Stack {
     }));
     phiBucket.grantRead(ocrStart);
     documentsKey.grantDecrypt(ocrStart);
+
+    // ===== Package 4a orphan-race fix: ocr-start async-failure DLQ + depth alarm =====
+    // ocr-start now RAISES on an unresolvable cases/ key (the Document row lands a beat after
+    // the S3 object — recordDocument race), so the Lambda async retry re-resolves it. A
+    // genuinely dead key (Document deleted) exhausts the retries and would then VANISH — the
+    // exact silent-skip class this package kills. The onFailure destination captures the
+    // exhausted event in a DLQ; the alarm below makes it loud. Standard (non-FIFO) queue:
+    // Lambda async destinations don't support FIFO.
+    const ocrStartDlq = new sqs.Queue(this, 'OcrStartDlq', {
+      queueName: `compact-emr-${config.envName}-ocr-start-dlq`,
+      retentionPeriod: Duration.days(14),
+    });
+    ocrStart.configureAsyncInvoke({
+      onFailure: new destinations.SqsDestination(ocrStartDlq),
+      retryAttempts: 2, // explicit (the async-invoke default) — the retry backoff IS the orphan-race grace
+    });
+
+    // Loud, not silent (mirrors JotformSweepErrorsAlarm below): any message in the DLQ means a
+    // cases/ upload was never OCR'd after all retries. No SNS action wired yet — console/
+    // dashboard-visible like the other worker alarms; wire an ops topic when one exists.
+    new cloudwatch.Alarm(this, 'OcrStartDlqDepthAlarm', {
+      alarmName: `compact-emr-${config.envName}-ocr-start-dlq-depth`,
+      alarmDescription: 'An ocr-start async invocation exhausted its retries and landed in the DLQ — a cases/ upload has no resolvable Document (deleted, or recordDocument never ran) and was NOT OCRd. Inspect compact-emr-' + config.envName + '-ocr-start-dlq messages for the S3 key, then re-fire OCR (CopyObject-onto-self) once the Document exists.',
+      metric: ocrStartDlq.metricApproximateNumberOfMessagesVisible({
+        statistic: 'Maximum',
+        period: Duration.minutes(5),
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     // EventBridge rule: PUT into cases/ OR intake/ in the PHI bucket fires the OCR start.
     // C2: case uploads write `cases/<caseId>/<uuid>-<filename>` (documents.ts:99 /

@@ -305,3 +305,70 @@ def test_build_native_pages_chunks_oversize_text(monkeypatch):
     pages = handler._build_native_pages("abcdefghijKLMNOPQRSTuv")
     assert [p["text"] for p in pages] == ["abcdefghij", "KLMNOPQRST", "uv"]
     assert [p["pageNumber"] for p in pages] == [1, 2, 3]
+
+
+# ===== Package 4a: orphan-race fix — raise-for-retry on unresolvable cases/ keys =====
+# The Document row lands a beat AFTER the S3 object (recordDocument race), so the by-s3-key
+# lookup can 404 on a perfectly good upload. Returning success silently dropped the file;
+# raising lets the Lambda async retry (retryAttempts: 2) re-resolve once the row exists.
+# HARD SCOPE GUARD (the highest-risk regression per the plan): ONLY cases/ raises —
+# intake/ has no Document by design and must keep returning cleanly.
+
+def test_unresolvable_cases_key_raises_for_async_retry(rig, monkeypatch):
+    rig["doc"] = None  # _resolve_document → None: the 404/no-row outcome
+    monkeypatch.setattr(handler, "_resolve_document", lambda key: rig["doc"])
+
+    with pytest.raises(RuntimeError, match=r"no resolvable document .*cases/C1/u18-race\.pdf"):
+        handler.start_handler(_event("cases/C1/u18-race.pdf"), None)
+
+    # Nothing was posted or flagged — the event must surface to Lambda for the async retry,
+    # not get half-processed first.
+    assert rig["pages"] == [] and rig["failed"] == []
+
+
+def test_unresolvable_intake_key_does_not_raise(rig, monkeypatch):
+    """Regression guard for the scope mistake: intake/ objects legitimately have no Document
+    (parse-at-intake caches to IntakePage) — the orphan-race raise must never reach them. Even
+    when the intake ocr-start record fails (the intake no-doc analog), the handler returns
+    cleanly so the file falls through to assign-time OCR."""
+    rig["doc"] = None
+    resolve_calls = []
+    monkeypatch.setattr(handler, "_resolve_document", lambda key: (resolve_calls.append(key), rig["doc"])[1])
+
+    def _record_fails(intake_s3_key, job_tag):
+        raise RuntimeError("intake ocr-start record failed: 500")
+
+    monkeypatch.setattr(handler, "_post_intake_ocr_start", _record_fails)
+
+    result = handler.start_handler(_event("intake/I1/upload.pdf"), None)  # must NOT raise
+
+    assert result == {"started": []}
+    assert resolve_calls == []  # intake/ branches off BEFORE the by-s3-key lookup
+    assert rig["pages"] == [] and rig["failed"] == []
+
+
+def test_unresolvable_non_cases_non_intake_key_keeps_skip_behavior(rig, monkeypatch):
+    """A key under any OTHER prefix (defensive: the rule only matches cases/ + intake/, but a
+    manual test-invoke or future rule edit shouldn't retry-loop) keeps the old skip-with-success."""
+    rig["doc"] = None
+    monkeypatch.setattr(handler, "_resolve_document", lambda key: rig["doc"])
+
+    result = handler.start_handler(_event("scratch/manual-test.pdf"), None)  # must NOT raise
+
+    assert result == {"started": []}
+    assert rig["pages"] == [] and rig["failed"] == []
+
+
+def test_event_with_no_bucket_or_key_still_returns_success(rig):
+    """The malformed-event early-return sits ABOVE the raise and must keep returning success —
+    retrying a bucket-less event can never resolve anything."""
+    assert handler.start_handler({"detail": {}}, None) == {"started": []}
+
+
+def test_resolved_cases_key_is_unaffected_by_the_orphan_raise(rig, monkeypatch):
+    """A resolvable Document rides the exact pre-4a path: native .txt reads post pages, no raise."""
+    rig["with_bytes"](b"Resolved fine: lumbar strain, chronic.")
+    result = handler.start_handler(_event("cases/C1/u19-resolved.txt"), None)
+    assert result["started"] == []
+    assert result["native"] == "txt"
+    assert len(rig["pages"]) == 1 and rig["failed"] == []

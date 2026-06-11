@@ -11,7 +11,6 @@ import { StatusChip, type ChipTone } from '../../components/ui/StatusChip';
 import { RowAction } from '../../components/ui/RowAction';
 import { TabBar, type TabItem } from '../../components/ui/TabBar';
 import { SignOffPopup } from '../../components/SignOffPopup';
-import { ClarificationsPanel } from '../../components/ClarificationsPanel';
 import { InFlightDrafterPanel, type InFlightDraftJob } from '../../components/InFlightDrafterPanel';
 import { SendToDrafterPanel } from '../../components/SendToDrafterPanel';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
@@ -30,7 +29,6 @@ import { ConditionsPanel, MedicationsPanel, ProblemsPanel } from '../../componen
 import { listCaseEmails } from '../../api/emails';
 import { getArtifactPdfUrl, postDraft, cancelDraftJob, getDraftConcurrency, type DraftConcurrencyResult } from '../../api/drafter';
 import { getLetter } from '../../api/letter';
-import { listClarifications } from '../../api/cases';
 import { getVeteran, listDocuments, reocrDocument } from '../../api/veterans';
 import { PdfViewerModal, type ViewableDoc } from '../../components/PdfViewerModal';
 import { formatConditionLabel } from '../../lib/conditionLabel';
@@ -39,9 +37,9 @@ import { useAuth } from '../../auth/useAuth';
 import { ConflictError, describeApiError } from '../../api/client';
 import { letterFilename } from '../../lib/letterFilename';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
-import { SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
+import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
 import { formatRelativeTime } from '../../lib/date';
-import { formatDateOnly, formatPhone, formatNameLastFirst } from '../../lib/format';
+import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
 import {
   deleteCase, getCase, listDraftJobs, patchCase, transitionCaseStatus, updateQuickNote,
   type CaseDetail, type PatchCaseInput, type TransitionInput,
@@ -61,18 +59,21 @@ export function decidePollIntervalMs(status: CaseStatus | undefined): number | f
 }
 
 // Activity (never-built placeholder) + Corrections (backing table is never written) removed to
-// declutter (Ryan 2026-06-06). Clarifications kept — it's a live RN/physician Q&A feature.
+// declutter (Ryan 2026-06-06). Clarifications tab removed too (UI sweep P2b, Ryan item 12) — the
+// panel/route/api client all stay (backend `clarifications` route is still mounted), only the tab +
+// its mount are gone from this page.
 // The case is a claim ON a veteran, so the case page also surfaces the veteran's clinical chart
 // (SC Conditions / Active Problems / Medications / Staff Notes) — the SAME add/edit/delete panels
-// the veteran chart uses, operating on the same veteran data via the same API. The vet-scoped portion
+// the veteran chart uses, operating on the same veteran data via the same API. The vet-scoped tail
 // (Documents + the clinical sections) is sourced from the shared SHARED_TABS list so the claim page and
-// the veteran chart can't drift; the claim page prepends Overview + its claim-scoped tabs (Draft jobs,
-// Clarifications, Email, Messages). (architect design 2026-06-08.)
-type TabId = 'overview' | 'drafts' | 'clarifications' | 'emails' | 'messages' | SharedTabId;
+// the veteran chart can't drift; the claim page prepends Overview + its claim-scoped tabs.
+// Order is Ryan-specified (item 12): Overview, Draft jobs, Staff Notes, Email, Messages, then the
+// shared tail (Documents, SC Conditions, Active Problems, Medications).
+type TabId = 'overview' | 'drafts' | 'notes' | 'emails' | 'messages' | SharedTabId;
 const TABS: readonly TabItem<TabId>[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'drafts', label: 'Draft jobs' },
-  { id: 'clarifications', label: 'Clarifications' },
+  NOTES_TAB,
   { id: 'emails', label: 'Email' },
   { id: 'messages', label: 'Messages' },
   ...SHARED_TABS,
@@ -105,13 +106,6 @@ export function CaseDetailPage() {
     refetchInterval: (query) => decidePollIntervalMs(query.state.data?.data?.status),
     refetchIntervalInBackground: false,
   });
-  const openClarificationsQuery = useQuery({
-    queryKey: ['case', caseId, 'clarifications', 'open'],
-    queryFn: () => listClarifications(caseId, 'open'),
-    enabled: caseId.length > 0,
-  });
-  const openClarificationCount = openClarificationsQuery.data?.data.length ?? 0;
-
   // Queue-position concurrency for the in-flight panel. Seeded from the POST /draft 201 (written into
   // this cache by the redraft / Send-to-Drafter mutations) and refreshed via GET /draft-concurrency on
   // the SAME visible-tab poll the case page already runs — no new poll loop. Enabled only while a draft
@@ -256,12 +250,6 @@ export function CaseDetailPage() {
     }
   }
 
-  const tabsWithBadge = TABS.map((t) =>
-    t.id === 'clarifications' && openClarificationCount > 0
-      ? { ...t, label: `Clarifications (${openClarificationCount})` }
-      : t,
-  );
-
   return <AppShell><div className="space-y-6">
     {c.status === 'delivered' || c.status === 'paid' ? (
       <div className="rounded-lg border border-emerald-300 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-900">
@@ -327,6 +315,19 @@ export function CaseDetailPage() {
         </div>
       </div>
     </div>
+
+    {/* Refund signal moved INTO the chart (UI sweep P2c, Ryan item 13): Refunds left the staff nav,
+        so this amber strip is where ops/admin learn a case is refund-relevant. refundEligible is set
+        only via an explicit case PATCH (there is NO automatic wiring from the reject flow), so the
+        banner appears only on deliberately marked cases. Physicians don't handle money, so it is
+        staff-only. The /refunds page itself is admin-only by URL now — only the admin gets the
+        link, ops sees the plain banner. */}
+    {c.refundEligible && (role === 'admin' || role === 'ops_staff') ? (
+      <div className="rounded-lg border border-amber-300 bg-amber-50 px-5 py-3 text-sm text-amber-900">
+        <span className="font-semibold">Refund-eligible:</span> this case is marked refund-eligible — check before promising or processing anything.
+        {role === 'admin' ? <> <Link to="/refunds" className="font-medium underline underline-offset-2 hover:text-amber-950">Open refunds</Link></> : null}
+      </div>
+    ) : null}
 
     {/* CDS panel retired from the workflow (Ryan 2026-06-03). Backend route is flag-guarded off
         (CDS_ENABLED); the engine code is kept. Re-add this panel if CDS is re-enabled. */}
@@ -438,20 +439,32 @@ export function CaseDetailPage() {
             />
           ) : null}
 
+          {/* Pryor 7(a) (UI sweep, 2026-06-11): an RN opening a physician_review case read the edit
+              panel below as "I must act" and saved over the letter the doctor was about to review.
+              State the situation plainly: the case is in the doctor's queue, and any save becomes
+              what the doctor reviews (currentVersion pointer — the doctor always gets the newest). */}
+          {role === 'ops_staff' && c.status === 'physician_review' ? (
+            <div className="rounded-lg border border-sky-200 bg-sky-50 px-5 py-3 text-sm text-sky-900">
+              This case is in {c.assignedPhysician ? `Dr. ${formatPhysicianLastName(c.assignedPhysician.fullName)}'s` : "the physician's"} queue — no action is needed from you. Any letter save you make is what the doctor will review.
+            </div>
+          ) : null}
+
           {/* RN letter-edit entry. The physician/admin reach the editor via the ready panel above;
               an RN (ops_staff) otherwise has no entry to it. Ryan 2026-06-04: "RNs need the ability
               to edit letters too ... by hand or AI surgically before sending to doc." Shown when a
               letter exists, the run is not in flight, and the status is editable (drafting /
               physician_review / correction_review — matches the backend EDITABLE_STATUSES). Editing
               creates a NEW version; the version-safety in /draft + currentVersion pointer ensure the
-              doctor always reviews the newest version. */}
+              doctor always reviews the newest version. Copy reads as AVAILABILITY, not instruction
+              (Pryor 7(a) — the old imperative phrasing read like a required step). */}
           {!inFlightDraft && role === 'ops_staff' && viewableLetterJob &&
             (c.status === 'drafting' || c.status === 'physician_review' || c.status === 'correction_review') ? (
             <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
               <h2 className="text-base font-semibold text-slate-900">Edit {letterFilename(c.veteran?.lastName, c.veteran?.firstName, c.claimedCondition, c.currentVersion ?? c.version)}</h2>
               <p className="mt-1 text-sm text-slate-600">
-                Revise the letter by hand or with an AI surgical edit — same tools the physician has.
-                Save creates a new version, and the doctor reviews the newest version.
+                If a change is needed, you can revise the letter — by hand or with an AI surgical
+                edit, the same tools the physician has. Saving creates a new version, and the doctor
+                always reviews the newest version.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 {/* View letter lives in the page header — not duplicated here. */}
@@ -476,13 +489,12 @@ export function CaseDetailPage() {
     ) : null}
 
     <div className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
-      <TabBar tabs={tabsWithBadge} active={tab} onChange={setTab} className="flex-wrap" />
+      <TabBar tabs={TABS} active={tab} onChange={setTab} className="flex-wrap" />
       <div className="p-4">
         {tab === 'overview' ? (
           <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
         ) : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
-        {tab === 'clarifications' ? <ClarificationsPanel caseId={caseId} /> : null}
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} role={role} /> : null}
         {tab === 'emails' ? <EmailLogPanel queryKey={['case', caseId, 'emails']} fetcher={() => listCaseEmails(caseId)} scope="claim" /> : null}
         {tab === 'messages' ? (

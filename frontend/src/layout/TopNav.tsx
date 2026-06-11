@@ -17,8 +17,9 @@ const navItems: readonly { label: string; href: string; roles: readonly Role[] }
   { label: 'Physicians', href: '/physicians', roles: ['admin'] },
   { label: 'Staff', href: '/staff', roles: ['admin'] },
   { label: 'Email Setup', href: '/email-settings', roles: ['admin'] },
+  // Refunds dropped from the nav (UI sweep P2c, Ryan item 13) — the refund signal now lives on the
+  // case page as a per-chart banner; /refunds stays reachable by URL for admin (App.tsx route).
   { label: 'Activity', href: '/activity', roles: ['admin'] },
-  { label: 'Refunds', href: '/refunds', roles: ['admin', 'ops_staff'] },
   { label: 'Compensation', href: '/compensation', roles: ['admin'] },
   { label: 'Costs', href: '/costs', roles: ['admin'] },
   { label: 'Metrics', href: '/metrics', roles: ['admin'] }

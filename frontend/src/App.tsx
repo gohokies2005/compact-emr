@@ -45,7 +45,9 @@ export function App() {
     <Route path="/staff" element={<ProtectedRoute requiredRole={['admin']}><StaffPage /></ProtectedRoute>} />
     <Route path="/email-settings" element={<ProtectedRoute requiredRole={['admin']}><MailboxesPage /></ProtectedRoute>} />
     <Route path="/activity" element={<ProtectedRoute requiredRole={['admin']}><ActivityPage /></ProtectedRoute>} />
-    <Route path="/refunds" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><RefundsPage /></ProtectedRoute>} />
+    {/* Refunds left the staff nav (UI sweep P2c) — admin-only by direct URL now; the per-case
+        refund banner on CaseDetailPage is how ops staff see the refund signal. */}
+    <Route path="/refunds" element={<ProtectedRoute requiredRole={['admin']}><RefundsPage /></ProtectedRoute>} />
     <Route path="/compensation" element={<ProtectedRoute requiredRole={['admin']}><CompensationPage /></ProtectedRoute>} />
     <Route path="/metrics" element={<ProtectedRoute requiredRole={['admin']}><MetricsPage /></ProtectedRoute>} />
     <Route path="/costs" element={<ProtectedRoute requiredRole={['admin']}><CostsPage /></ProtectedRoute>} />

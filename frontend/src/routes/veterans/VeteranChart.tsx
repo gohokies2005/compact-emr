@@ -13,20 +13,22 @@ import { createCase, type CreateCaseInput } from '../../api/cases';
 import { useAuth } from '../../auth/useAuth';
 import { NewClaimModal } from '../cases/NewClaimModal';
 import { ChartNotesPanel } from './ChartNotesPanel';
-import { SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
+import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
 import { DocumentUploadPanel } from '../../components/DocumentUploadPanel';
 import { formatDateOnly, formatPhone, formatNameLastFirst } from '../../lib/format';
 import type { Case, Document, Role } from '../../types/prisma';
 
 // The chart mirrors the claim page's tabs (architect design 2026-06-08): a leading Claims tab (the
-// veteran's claim list) followed by the SHARED vet-scoped sections (Documents + the clinical chart),
-// sourced from the same SHARED_TABS list the claim page uses so the two can't drift. The claim-scoped
-// tabs (Draft jobs / Clarifications / Email / Messages) are dropped — they belong to a claim, not a
-// veteran. (Email-on-chart is intentionally NOT carried over: a vet-scope email/thread query is out of
-// scope for this structural change.)
-type ChartTab = 'claims' | SharedTabId;
+// veteran's claim list), then Staff Notes (explicit — Ryan's item-12 order puts it near the top on
+// both pages), then the SHARED vet-scoped tail (Documents + the clinical chart), sourced from the
+// same SHARED_TABS list the claim page uses so the two can't drift. The claim-scoped tabs
+// (Draft jobs / Email / Messages) are dropped — they belong to a claim, not a veteran. (Email-on-chart
+// is intentionally NOT carried over: a vet-scope email/thread query is out of scope.)
+// Order (item 12): Claims, Staff Notes, Documents, SC Conditions, Active Problems, Medications.
+type ChartTab = 'claims' | 'notes' | SharedTabId;
 const CHART_TABS: readonly TabItem<ChartTab>[] = [
   { id: 'claims', label: 'Claims' },
+  NOTES_TAB,
   ...SHARED_TABS,
 ];
 

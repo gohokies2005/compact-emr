@@ -9,8 +9,11 @@ import { CaseDetailPage } from '../routes/cases/CaseDetailPage';
 import { getCase } from '../api/cases';
 import { getLetter } from '../api/letter';
 import { presignDocument, recordDocument } from '../api/veterans';
+import type { Role } from '../types/prisma';
 
-vi.mock('../auth/useAuth', () => ({ useAuth: () => ({ user: { sub: 's', email: 'a@x.com', roles: ['admin'], role: 'admin' } }) }));
+// Mutable role (TopNav.test pattern) — the P2 banner tests flip between admin and ops_staff.
+let mockRole: Role = 'admin';
+vi.mock('../auth/useAuth', () => ({ useAuth: () => ({ user: { sub: 's', email: 'a@x.com', roles: [mockRole], role: mockRole } }) }));
 vi.mock('../api/cases', () => ({
   getCase: vi.fn(async () => ({ data: {
     id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'Hypertension', claimType: 'initial',
@@ -22,7 +25,6 @@ vi.mock('../api/cases', () => ({
   } })),
   patchCase: vi.fn(), transitionCaseStatus: vi.fn(), deleteCase: vi.fn(),
   listDraftJobs: vi.fn(async () => ({ data: [] })), listCorrections: vi.fn(async () => ({ data: [] })),
-  listClarifications: vi.fn(async () => ({ data: [] })),
 }));
 // Clinical tabs fetch the veteran detail; Staff Notes lists chart notes. Stub both so the case page's
 // new chart tabs render without hitting the network.
@@ -74,6 +76,25 @@ describe('CaseDetailPage', () => {
     // The 'delivered' enum displays as "Ready for delivery" (post-approve, pre-payment).
     expect(screen.getByRole('button', { name: /move to ready for delivery/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /reject \+ soft delete/i })).toBeInTheDocument();
+  });
+
+  // UI sweep P2 (Ryan item 12): the claim-page tab order is locked, Clarifications is gone (tab +
+  // panel mount removed; the panel component, api client, and backend route all remain), and the
+  // shared TabBar is sticky so the bar survives a long-panel scroll.
+  it('locks the claim tab order, drops Clarifications, and renders a sticky tab bar', async () => {
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
+      'Overview', 'Draft jobs', 'Staff Notes', 'Email', 'Messages',
+      'Documents', 'Service Connected Conditions', 'Active Problems', 'Medications',
+    ]);
+    expect(screen.queryByRole('tab', { name: /clarifications/i })).not.toBeInTheDocument();
+    // Sticky = class assertion (P2a): pinned to the scroll parent, opaque, above panel content.
+    const tablist = screen.getByRole('tablist');
+    expect(tablist.className).toContain('sticky');
+    expect(tablist.className).toContain('top-0');
+    expect(tablist.className).toContain('z-10');
+    expect(tablist.className).toContain('bg-ivory');
   });
 
   it('exposes the veteran clinical chart tabs on the case page', async () => {
@@ -170,5 +191,84 @@ describe('CaseDetailPage — letter viewing (CLM-BBFCB3F8CE)', () => {
     const alerted = String(alertSpy.mock.calls[0]?.[0]);
     expect(alerted).toContain(`server returned 404: ${missingMsg}`);
     expect(alerted).not.toBe('Could not open the letter PDF. If it keeps failing, flag this case to Dr. Ryan.');
+  });
+});
+
+// ── UI sweep P2 banners (2026-06-11): per-chart refund strip + Pryor physician-queue notice ──
+
+function mockCase(overrides: Record<string, unknown> = {}) {
+  (getCase as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ data: {
+    id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'Hypertension', claimType: 'initial',
+    status: 'physician_review', cdsVerdict: 'not_yet_run', refundEligible: false, currentVersion: 1,
+    framingChoice: 'secondary', upstreamScCondition: 'PTSD', veteranStatement: '', inServiceEvent: '',
+    createdAt: '2026-05-01T00:00:00Z', updatedAt: new Date(Date.now() - 3_600_000).toISOString(), version: 2,
+    veteran: { id: 'VET-1', firstName: 'Jane', lastName: 'Doe', email: 'j@x.com' }, assignedPhysician: null,
+    documents: [], draftJobs: [], corrections: [], emails: [], payments: [],
+    ...overrides,
+  } });
+}
+
+describe('CaseDetailPage — refund banner (P2c, item 13)', () => {
+  afterEach(() => { mockRole = 'admin'; vi.restoreAllMocks(); });
+
+  it('shows the amber refund strip on a refund-eligible case (admin gets the /refunds link)', async () => {
+    mockRole = 'admin';
+    mockCase({ refundEligible: true });
+    renderPage();
+    expect(await screen.findByText(/marked refund-eligible/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /open refunds/i })).toHaveAttribute('href', '/refunds');
+  });
+
+  it('ops_staff sees the refund strip too (the signal survives the nav removal) — without the admin link', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ refundEligible: true });
+    renderPage();
+    expect(await screen.findByText(/marked refund-eligible/i)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /open refunds/i })).not.toBeInTheDocument();
+  });
+
+  it('self-hides when the case is not refund-eligible', async () => {
+    mockRole = 'admin';
+    mockCase({ refundEligible: false });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.queryByText(/refund-eligible/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('CaseDetailPage — physician-queue banner (Pryor 7a)', () => {
+  afterEach(() => { mockRole = 'admin'; vi.restoreAllMocks(); });
+
+  const pryor = { id: 'PHY-1', fullName: 'John Pryor, MD', email: 'pryor@x.test' };
+
+  it("ops_staff on a physician_review case sees the queue banner with the doctor's name", async () => {
+    mockRole = 'ops_staff';
+    mockCase({ assignedPhysician: pryor });
+    renderPage();
+    expect(await screen.findByText(/in Dr\. Pryor's queue/)).toBeInTheDocument();
+    expect(screen.getByText(/any letter save you make is what the doctor will review/i)).toBeInTheDocument();
+  });
+
+  it('falls back to "the physician\'s queue" when no physician is assigned', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ assignedPhysician: null });
+    renderPage();
+    expect(await screen.findByText(/in the physician's queue/)).toBeInTheDocument();
+  });
+
+  it('does NOT render for admin', async () => {
+    mockRole = 'admin';
+    mockCase({ assignedPhysician: pryor });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.queryByText(/queue — no action is needed/i)).not.toBeInTheDocument();
+  });
+
+  it('does NOT render on an rn_review case', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ status: 'rn_review', assignedPhysician: pryor });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.queryByText(/queue — no action is needed/i)).not.toBeInTheDocument();
   });
 });

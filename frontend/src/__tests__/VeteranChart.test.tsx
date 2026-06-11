@@ -20,14 +20,16 @@ describe('VeteranChart', () => {
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/veterans/TEST-001']}><Routes><Route path="/veterans/:id" element={<VeteranChart />} /></Routes></MemoryRouter></QueryClientProvider>);
     expect(await screen.findByText('Smith, John')).toBeInTheDocument();
     expect(screen.getByText((text) => text.includes('MRN TEST-001'))).toBeInTheDocument();
-    // The chart mirrors the claim page: a leading Claims tab + the SHARED vet-scoped sections.
-    expect(screen.getByRole('tab', { name: 'Claims' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Documents' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Service Connected Conditions' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Active Problems' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Medications' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Staff Notes' })).toBeInTheDocument();
+    // Vet-file tab ORDER lock (UI sweep P2b, Ryan item 12): Claims, Staff Notes, then the shared
+    // tail (Documents, SC Conditions, Active Problems, Medications) — only tabs a VETERAN owns.
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
+      'Claims', 'Staff Notes', 'Documents', 'Service Connected Conditions', 'Active Problems', 'Medications',
+    ]);
     // The claim-scoped Email tab is dropped from the veteran chart (it belongs to a claim).
     expect(screen.queryByRole('tab', { name: 'Email' })).not.toBeInTheDocument();
+    // Sticky tab bar (P2a) — class assertion on the shared TabBar.
+    const tablist = screen.getByRole('tablist');
+    expect(tablist.className).toContain('sticky');
+    expect(tablist.className).toContain('top-0');
   });
 });

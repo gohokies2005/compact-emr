@@ -62,5 +62,12 @@ describe('TopNav ordering', () => {
     // Physician-only tabs never leak into the staff nav.
     expect(labels).not.toContain('Letters in Queue');
     expect(labels).not.toContain('Completed Letters');
+    // P2c (Ryan item 13): Refunds left the nav — the refund signal lives on the case page now.
+    expect(labels).not.toContain('Refunds');
+  });
+
+  it('admin nav has no Refunds entry either (route stays admin-reachable by URL only)', () => {
+    renderNav('admin');
+    expect(navLabels()).not.toContain('Refunds');
   });
 });

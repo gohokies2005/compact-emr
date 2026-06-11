@@ -12,6 +12,7 @@ import {
 } from '../services/case-validation.js';
 import {
   canRolePerformCaseStatusTransition,
+  isCaseStatus,
   isValidCaseStatusTransition,
   requiredRolesForCaseStatusTransition,
 } from '../services/case-status-transitions.js';
@@ -107,22 +108,13 @@ function parsePositiveQueryInt(value: unknown, defaultValue: number, maxValue: n
 
 function parseOptionalCaseStatus(value: unknown): CaseStatus | undefined {
   if (typeof value !== 'string') return undefined;
-  const statuses: readonly CaseStatus[] = [
-    'intake',
-    'records',
-    'viability',
-    'drafting',
-    'physician_review',
-    'correction_requested',
-    'correction_review',
-    'delivered',
-    'paid',
-    'rejected',
-  ];
-  if (!statuses.includes(value as CaseStatus)) {
+  // Validate against the canonical CASE_STATUSES list. A hand-copied allow-list here silently
+  // drifted from the enum (missing rn_review + the two Gate-2 halt statuses), so the Cases
+  // dropdown 400'd on options it offered.
+  if (!isCaseStatus(value)) {
     throw new HttpError(400, 'bad_request', 'status filter is invalid', { field: 'status' });
   }
-  return value as CaseStatus;
+  return value;
 }
 
 function optionalStringQuery(value: unknown): string | undefined {

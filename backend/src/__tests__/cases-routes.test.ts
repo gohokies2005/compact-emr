@@ -3,6 +3,7 @@ import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCasesRouter } from '../routes/cases.js';
+import { CASE_STATUSES } from '../services/case-status-transitions.js';
 import type { AppDb, CaseRecord, Role } from '../services/db-types.js';
 
 // The request user shape the routes actually read off req.user (Cognito JWT claims).
@@ -424,6 +425,22 @@ describe('cases routes', () => {
   it.each([['123-45-6789'], ['call 555-123-4567 back'], ['veteran@example.com confirmed']])('rejects PHI-shaped transitionReason %s', async (transitionReason) => {
     const { db } = makeDb(baseCase({ status: 'intake', version: 1 }));
     const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({ from: 'intake', to: 'records', version: 1, transitionReason });
+    expect(res.status).toBe(400);
+  });
+
+  // Regression for the status-filter drift: the route's hand-copied allow-list was missing
+  // rn_review + the two Gate-2 halt statuses, so the Cases dropdown 400'd on options it offered.
+  // The filter now validates against the canonical CASE_STATUSES list; every enum value must be
+  // accepted or a newly added status would 400 its own dropdown again.
+  it.each(CASE_STATUSES.map((s) => [s]))('accepts ?status=%s on GET /cases (no enum drift)', async (status) => {
+    const { db } = makeDb();
+    const res = await request(appFor(db)).get(`/api/v1/cases?status=${status}`);
+    expect(res.status).toBe(200);
+  });
+
+  it('still rejects an unknown status filter with 400', async () => {
+    const { db } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?status=not_a_status');
     expect(res.status).toBe(400);
   });
 });

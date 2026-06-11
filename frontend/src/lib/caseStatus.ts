@@ -26,7 +26,10 @@ export const CASE_STATUS_LABELS: Record<CaseStatus, string> = {
   physician_review: 'Physician review',
   correction_requested: 'Correction requested',
   correction_review: 'Correction review',
-  delivered: 'Delivered',
+  // 'delivered' is the approve-transition target (physician approved, pre-payment). Nothing has
+  // gone to the veteran yet — real delivery happens after Stripe payment ('paid'). Label only;
+  // the enum value stays (transition map, delivery route, payment reconciliation all key on it).
+  delivered: 'Ready for delivery',
   paid: 'Paid',
   rejected: 'Rejected',
   needs_rn_decision: 'Needs RN decision',

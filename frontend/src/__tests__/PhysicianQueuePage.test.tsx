@@ -5,10 +5,16 @@ import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PhysicianQueuePage } from '../routes/physician/PhysicianQueuePage';
 import { listCases, type CaseLite } from '../api/cases';
+import { getPhysicianMe } from '../api/physicians';
 
 vi.mock('../api/cases', async () => {
   const actual = await vi.importActual<typeof import('../api/cases')>('../api/cases');
   return { ...actual, listCases: vi.fn() };
+});
+
+vi.mock('../api/physicians', async () => {
+  const actual = await vi.importActual<typeof import('../api/physicians')>('../api/physicians');
+  return { ...actual, getPhysicianMe: vi.fn() };
 });
 
 vi.mock('../layout/AppShell', () => ({
@@ -16,6 +22,7 @@ vi.mock('../layout/AppShell', () => ({
 }));
 
 const listCasesMock = vi.mocked(listCases);
+const getPhysicianMeMock = vi.mocked(getPhysicianMe);
 
 const row: CaseLite = {
   id: 'CASE-1',
@@ -47,6 +54,7 @@ function renderQueue() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getPhysicianMeMock.mockResolvedValue({ data: { id: 'PH-1', fullName: 'Jane Smith, DO', credentials: 'DO' } });
 });
 
 describe('PhysicianQueuePage', () => {
@@ -66,5 +74,23 @@ describe('PhysicianQueuePage', () => {
     renderQueue();
 
     expect(await screen.findByText('Queue is clear')).toBeInTheDocument();
+  });
+
+  // P4: personalized hero — "Good <tod>, Dr. <LastName>" from /physicians/me, with the
+  // "Physician queue" framing below it.
+  it('greets the physician as Dr. <LastName> with the Physician queue subtitle', async () => {
+    listCasesMock.mockResolvedValue({ data: [], page: 1, pageSize: 50, total: 0 });
+    renderQueue();
+
+    expect(await screen.findByText(/^Good (morning|afternoon|evening), Dr\. Smith$/)).toBeInTheDocument();
+    expect(screen.getByText(/Physician queue/)).toBeInTheDocument();
+  });
+
+  it('falls back to the plain greeting when /physicians/me fails', async () => {
+    listCasesMock.mockResolvedValue({ data: [], page: 1, pageSize: 50, total: 0 });
+    getPhysicianMeMock.mockRejectedValue(new Error('404 not_found'));
+    renderQueue();
+
+    expect(await screen.findByText(/^Good (morning|afternoon|evening)$/)).toBeInTheDocument();
   });
 });

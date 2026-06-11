@@ -24,11 +24,14 @@ const navItems: readonly { label: string; href: string; roles: readonly Role[] }
   { label: 'Metrics', href: '/metrics', roles: ['admin'] }
 ];
 
-// Physicians get a dedicated ordered nav: Queue (their landing) | Letters | Inbox (Ryan 2026-06-10
-// P2.2). Filtering the shared array would render the shared Inbox row first. Staff order unchanged.
+// Physicians get a dedicated ordered nav (Ryan 2026-06-10 P2.2; renamed + split 2026-06-11 P4):
+// LEFT group "Letters in Queue" (their landing) | "Completed Letters"; Inbox renders RIGHT-aligned
+// next to the identity cluster (physicianRightNavItems below). Staff order/layout unchanged.
 const physicianNavItems: readonly { label: string; href: string }[] = [
-  { label: 'Queue', href: '/p/queue' },
-  { label: 'Letters', href: '/p/letters' },
+  { label: 'Letters in Queue', href: '/p/queue' },
+  { label: 'Completed Letters', href: '/p/letters' }
+];
+const physicianRightNavItems: readonly { label: string; href: string }[] = [
   { label: 'Inbox', href: '/inbox' }
 ];
 // Badge renders the inbox unread count. Split into its own component (only mounted when a QueryClient
@@ -39,9 +42,31 @@ function InboxBadge() {
   return <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-navy px-1.5 py-0.5 text-xs font-semibold text-white">{unreadCount}</span>;
 }
 
+const navLinkClass = ({ isActive }: { isActive: boolean }) =>
+  `relative rounded-lg px-3 py-2 text-sm font-medium transition-colors ${isActive ? 'bg-mist text-navyDeep' : 'text-steel hover:bg-mistSoft hover:text-navyDeep'}`;
+
 export function TopNav() {
   const { role } = useAuth();
   const hasClient = useHasQueryClient();
   const visibleItems = role === 'physician' ? physicianNavItems : role ? navItems.filter((item) => item.roles.includes(role)) : [];
-  return <header className="border-b border-aegis bg-ivory/95 backdrop-blur-sm shadow-aegis-soft"><div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4"><div className="flex items-center gap-6"><NavLink to="/" aria-label="Aegis home" className="shrink-0"><AegisLogo /></NavLink><nav className="hidden items-center gap-1 md:flex">{visibleItems.map((item) => <NavLink key={item.href} to={item.href} className={({ isActive }) => `relative rounded-lg px-3 py-2 text-sm font-medium transition-colors ${isActive ? 'bg-mist text-navyDeep' : 'text-steel hover:bg-mistSoft hover:text-navyDeep'}`}><span className="inline-flex items-center gap-1.5">{item.label}{item.href === '/inbox' && hasClient ? <InboxBadge /> : null}</span></NavLink>)}</nav></div><UserMenu /></div></header>;
+  const rightItems = role === 'physician' ? physicianRightNavItems : [];
+  const renderItem = (item: { label: string; href: string }) => (
+    <NavLink key={item.href} to={item.href} className={navLinkClass}>
+      <span className="inline-flex items-center gap-1.5">{item.label}{item.href === '/inbox' && hasClient ? <InboxBadge /> : null}</span>
+    </NavLink>
+  );
+  return (
+    <header className="border-b border-aegis bg-ivory/95 backdrop-blur-sm shadow-aegis-soft">
+      <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
+        <div className="flex items-center gap-6">
+          <NavLink to="/" aria-label="Aegis home" className="shrink-0"><AegisLogo /></NavLink>
+          <nav className="hidden items-center gap-1 md:flex">{visibleItems.map(renderItem)}</nav>
+        </div>
+        <div className="flex items-center gap-4">
+          {rightItems.length > 0 ? <div className="hidden items-center gap-1 md:flex">{rightItems.map(renderItem)}</div> : null}
+          <UserMenu />
+        </div>
+      </div>
+    </header>
+  );
 }

@@ -32,11 +32,25 @@ function renderNav(role: Role) {
 }
 
 describe('TopNav ordering', () => {
-  // Ryan 2026-06-10 P2.2: physician tab order is Queue (far left) | Letters | Inbox. The shared
-  // nav array's filter order rendered Inbox first — locked here so it can't regress.
-  it('physician sees Queue | Letters | Inbox in that order', () => {
+  // Ryan 2026-06-11 P4: physician tabs renamed to "Letters in Queue" | "Completed Letters" and
+  // Inbox moved to the RIGHT cluster next to the identity block. Locked here so neither the
+  // labels nor the left/right split can regress.
+  it('physician left nav is Letters in Queue | Completed Letters; Inbox right-aligned outside it', () => {
     renderNav('physician');
-    expect(navLabels()).toEqual(['Queue', 'Letters', 'Inbox']);
+    expect(navLabels()).toEqual(['Letters in Queue', 'Completed Letters']);
+    const inbox = screen.getByRole('link', { name: 'Inbox' });
+    const nav = screen.getByRole('navigation');
+    // Inbox lives in the right cluster — outside the left <nav> and AFTER the left tabs in DOM order.
+    expect(nav.contains(inbox)).toBe(false);
+    const leftLinks = within(nav).getAllByRole('link');
+    const lastLeft = leftLinks[leftLinks.length - 1]!;
+    expect(lastLeft.compareDocumentPosition(inbox) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Full header order (logo excluded): the renamed tabs, then Inbox by the identity cluster.
+    const headerLabels = screen
+      .getAllByRole('link')
+      .filter((a) => a.getAttribute('aria-label') !== 'Aegis home')
+      .map((a) => a.textContent ?? '');
+    expect(headerLabels).toEqual(['Letters in Queue', 'Completed Letters', 'Inbox']);
   });
 
   it('staff nav order is unchanged (Home first, Inbox in its shared slot)', () => {
@@ -46,7 +60,7 @@ describe('TopNav ordering', () => {
     expect(labels).toContain('Inbox');
     expect(labels).toContain('Cases');
     // Physician-only tabs never leak into the staff nav.
-    expect(labels).not.toContain('Queue');
-    expect(labels).not.toContain('Letters');
+    expect(labels).not.toContain('Letters in Queue');
+    expect(labels).not.toContain('Completed Letters');
   });
 });

@@ -1,3 +1,4 @@
+import axios from 'axios';
 import { apiGet, apiPost, apiPatch } from './client';
 
 // Staff directory + provisioning. Mirrors the backend /users contract.
@@ -59,10 +60,61 @@ export interface MeUser {
   readonly email: string;
   readonly name: string | null;
   readonly roles: readonly string[];
+  // Freshly presigned GET for the avatar image; null when no avatar is set (render the
+  // silhouette fallback). Short TTL — refetch /users/me rather than caching the URL long-term.
+  readonly avatarUrl: string | null;
 }
 
 export async function getMe(): Promise<{ data: MeUser }> {
   return apiGet<{ data: MeUser }>('/api/v1/users/me');
+}
+
+// ---- P3 avatar upload (presign -> PUT -> register; mirrors the physician-signature flow) ----
+
+export const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+const AVATAR_CONTENT_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
+
+/** Client-side pre-flight; the server re-validates both rules on presign. Null = OK. */
+export function validateAvatarFile(file: File): string | null {
+  if (!(AVATAR_CONTENT_TYPES as readonly string[]).includes(file.type)) {
+    return 'Avatar must be a PNG, JPEG, or WebP image.';
+  }
+  if (file.size > MAX_AVATAR_BYTES) return 'Avatar must be 2 MB or smaller.';
+  return null;
+}
+
+export interface PresignedAvatarUpload {
+  readonly uploadUrl: string;
+  readonly s3Key: string;
+  readonly expiresInSeconds: number;
+  readonly requiredHeaders: Record<string, string>;
+}
+
+export interface AttachedAvatar {
+  readonly id: string;
+  readonly email: string;
+  readonly name: string | null;
+  readonly version: number;
+  readonly avatarUrl: string | null;
+}
+
+export async function presignUserAvatar(
+  id: string,
+  input: { contentType: string; sizeBytes: number },
+): Promise<{ data: PresignedAvatarUpload }> {
+  return apiPost(`/api/v1/users/${encodeURIComponent(id)}/avatar/presign`, input);
+}
+
+export async function attachUserAvatar(id: string, input: { s3Key: string }): Promise<{ data: AttachedAvatar }> {
+  return apiPost(`/api/v1/users/${encodeURIComponent(id)}/avatar`, input);
+}
+
+export async function uploadAndAttachUserAvatar(id: string, file: File): Promise<{ data: AttachedAvatar }> {
+  const problem = validateAvatarFile(file);
+  if (problem !== null) throw new Error(problem);
+  const presign = await presignUserAvatar(id, { contentType: file.type, sizeBytes: file.size });
+  await axios.put(presign.data.uploadUrl, file, { headers: presign.data.requiredHeaders });
+  return attachUserAvatar(id, { s3Key: presign.data.s3Key });
 }
 
 export async function createStaff(input: CreateStaffInput): Promise<{ data: CreatedStaff }> {

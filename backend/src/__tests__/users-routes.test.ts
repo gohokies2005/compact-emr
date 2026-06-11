@@ -113,7 +113,8 @@ describe('GET /users/me — caller identity (AppUser id, not the Cognito sub)', 
     mockUser = { sub: 'rn-sub', roles: ['ops_staff'] };
     const res = await request(appFor(makeDb().db, makeCognito())).get('/api/v1/users/me');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual({ id: 'U-RN', email: 'rn@x.test', name: 'RN', roles: ['ops_staff'] });
+    // avatarUrl is null here: the row has no avatarS3Key (presigned-GET coverage lives in users-avatar.test.ts).
+    expect(res.body.data).toEqual({ id: 'U-RN', email: 'rn@x.test', name: 'RN', roles: ['ops_staff'], avatarUrl: null });
     expect(res.body.data).not.toHaveProperty('cognitoSub');
   });
 

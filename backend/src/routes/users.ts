@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Router, type Request, type Response } from 'express';
 import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
@@ -6,7 +8,8 @@ import { HttpError } from '../http/errors.js';
 import { currentActor } from '../services/request-actor.js';
 import { IN_FLIGHT_CASE_STATUSES } from '../services/case-status-transitions.js';
 import { composeCredentialBlock } from '../services/credential-block.js';
-import type { AppDb, Role } from '../services/db-types.js';
+import { buildUserAvatarKey, isUserAvatarS3Key } from '../services/s3-key-safety.js';
+import type { AppDb, AppUserRecord, Role } from '../services/db-types.js';
 import type { CognitoAdmin, StaffCredential } from '../services/cognito-admin.js';
 import { assertCognitoPasswordPolicy } from '../services/cognito-admin.js';
 
@@ -14,8 +17,52 @@ const ASSIGNABLE_ROLES: readonly Role[] = ['admin', 'ops_staff', 'physician'];
 const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const NPI_PATTERN = /^\d{10}$/;
 
+// P3 avatar upload (UI sweep 2026-06-11): png/jpg/webp, <= 2 MB, presign-PUT -> register ->
+// presigned-GET — mirrors the physician-signature flow (physicians.ts). Extension is derived
+// server-side from the validated contentType, never from a client-supplied filename.
+const AVATAR_TTL_SECONDS = 5 * 60;
+const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
+const AVATAR_CONTENT_TYPES: Record<string, 'png' | 'jpg' | 'webp'> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+};
+
 interface UsersRouterDeps {
   cognito?: CognitoAdmin;
+  s3?: S3Client;
+  bucketName?: string;
+}
+
+interface ParsedAvatarPresign { contentType: string; ext: 'png' | 'jpg' | 'webp'; sizeBytes: number }
+
+function parseAvatarPresign(body: unknown): ParsedAvatarPresign {
+  if (!isRecord(body)) throw new HttpError(400, 'bad_request', 'Request body must be an object');
+  const contentType = body.contentType;
+  const ext = typeof contentType === 'string' ? AVATAR_CONTENT_TYPES[contentType] : undefined;
+  if (typeof contentType !== 'string' || ext === undefined) {
+    throw new HttpError(400, 'bad_request', 'Avatar must be a PNG, JPEG, or WebP image (image/png, image/jpeg, image/webp).', { field: 'contentType', value: contentType });
+  }
+  const sizeBytes = body.sizeBytes;
+  if (typeof sizeBytes !== 'number' || !Number.isInteger(sizeBytes) || sizeBytes <= 0 || sizeBytes > MAX_AVATAR_BYTES) {
+    throw new HttpError(400, 'bad_request', 'sizeBytes must be a positive integer up to 2 MB', { field: 'sizeBytes', maxBytes: MAX_AVATAR_BYTES });
+  }
+  return { contentType, ext, sizeBytes };
+}
+
+/**
+ * Self-or-admin gate for the avatar endpoints: any staff member may set THEIR OWN avatar
+ * (target row's cognitoSub === caller's sub); admins may set anyone's. Wider than the
+ * admin-only signature route by design — the identity block is an all-roles surface.
+ */
+async function requireSelfOrAdmin(db: AppDb, req: Request, targetUserId: string): Promise<AppUserRecord> {
+  const actor = currentActor(req);
+  const target = await db.appUser.findUnique({ where: { id: targetUserId } });
+  if (target === null) throw new HttpError(404, 'not_found', 'Staff user not found', { userId: targetUserId });
+  if (target.cognitoSub !== actor.sub && !actor.roles.includes('admin')) {
+    throw new HttpError(403, 'forbidden', 'You can only change your own avatar (admins may change any).', { userId: targetUserId });
+  }
+  return target;
 }
 
 interface PhysicianProfileInput {
@@ -115,6 +162,20 @@ function parseStaffCreate(body: unknown): ParsedStaffCreate {
  */
 export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router {
   const router = Router();
+  const s3 = (): S3Client => deps.s3 ?? new S3Client({});
+  const bucket = (): string | undefined => deps.bucketName ?? process.env.PHI_BUCKET_NAME;
+
+  // Presigned GET for an avatar key, or null when unset/unconfigured. NEVER throws — the
+  // identity block must render (silhouette fallback) even if S3 presigning is unavailable.
+  async function avatarUrlFor(avatarS3Key: string | null): Promise<string | null> {
+    const bucketName = bucket();
+    if (avatarS3Key === null || bucketName === undefined) return null;
+    try {
+      return await getSignedUrl(s3(), new GetObjectCommand({ Bucket: bucketName, Key: avatarS3Key }), { expiresIn: AVATAR_TTL_SECONDS });
+    } catch {
+      return null;
+    }
+  }
 
   router.get(
     '/users',
@@ -149,7 +210,44 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
       if (me === null) {
         throw new HttpError(404, 'not_found', 'No staff profile maps to this login (the Cognito user has no AppUser row). Ask an admin to provision your staff account.', { cognitoSub: actor.sub });
       }
-      res.json({ data: { id: me.id, email: me.email, name: me.name, roles: me.roles.map((r) => r.role) } });
+      res.json({ data: { id: me.id, email: me.email, name: me.name, roles: me.roles.map((r) => r.role), avatarUrl: await avatarUrlFor(me.avatarS3Key ?? null) } });
+    }),
+  );
+
+  // Avatar upload: presign -> client PUTs the image -> register the key (mirrors the physician
+  // signature trio, scoped self-or-admin instead of admin-only). Display is the freshly-presigned
+  // avatarUrl on /users/me — no separate download endpoint needed for the nav identity block.
+  router.post(
+    '/users/:id/avatar/presign',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const bucketName = bucket();
+      if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured');
+      const id = String(req.params.id);
+      await requireSelfOrAdmin(db, req, id);
+      const { contentType, ext, sizeBytes } = parseAvatarPresign(req.body);
+      const s3Key = buildUserAvatarKey(id, randomUUID(), ext);
+      const uploadUrl = await getSignedUrl(s3(), new PutObjectCommand({
+        Bucket: bucketName, Key: s3Key, ContentType: contentType, ContentLength: sizeBytes, ServerSideEncryption: 'aws:kms',
+      }), { expiresIn: AVATAR_TTL_SECONDS });
+      res.json({ data: { uploadUrl, s3Key, expiresInSeconds: AVATAR_TTL_SECONDS, requiredHeaders: { 'content-type': contentType, 'x-amz-server-side-encryption': 'aws:kms' } } });
+    }),
+  );
+
+  router.post(
+    '/users/:id/avatar',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const id = String(req.params.id);
+      const target = await requireSelfOrAdmin(db, req, id);
+      const s3Key = typeof (req.body as Record<string, unknown> | undefined)?.s3Key === 'string' ? (req.body as Record<string, string>).s3Key : '';
+      // The echoed key must match the safe pattern AND this user's own prefix — a leaked token
+      // can't register a row pointing at another user's (or any other) phiBucket key.
+      if (!isUserAvatarS3Key(s3Key) || !s3Key.startsWith(`avatars/${id}/`)) {
+        throw new HttpError(400, 'bad_request', 's3Key does not match the safe avatars/<userId>/<uuid>.<ext> pattern for this user.', { field: 's3Key' });
+      }
+      const updated = await db.appUser.update({ where: { id: target.id }, data: { avatarS3Key: s3Key, version: { increment: 1 } } });
+      res.json({ data: { id: updated.id, email: updated.email, name: updated.name, version: updated.version, avatarUrl: await avatarUrlFor(s3Key) } });
     }),
   );
 

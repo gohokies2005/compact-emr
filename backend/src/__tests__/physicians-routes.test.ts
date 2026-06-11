@@ -34,7 +34,11 @@ function makeDb(opts: { inFlight?: number } = {}) {
   };
   const physician = {
     findMany: vi.fn(async () => [...store.values()]),
-    findUnique: vi.fn(async (a: { where: { id: string } }) => store.get(a.where.id) ?? null),
+    findUnique: vi.fn(async (a: { where: { id?: string; cognitoSub?: string } }) => {
+      // /physicians/me resolves by cognitoSub (resolveCurrentPhysician); everything else by id.
+      if (a.where.cognitoSub !== undefined) return [...store.values()].find((p) => p.cognitoSub === a.where.cognitoSub) ?? null;
+      return store.get(a.where.id as string) ?? null;
+    }),
     findFirst: vi.fn(),
     create: vi.fn(async (a: { data: Record<string, unknown> }) => {
       const d = a.data;
@@ -196,5 +200,57 @@ describe('physician profile routes (D1)', () => {
     const res = await request(appFor(db)).post(`/api/v1/physicians/${created.id}/signature`).send({ s3Key: key });
     expect(res.status).toBe(200);
     expect(res.body.data.hasSignature).toBe(true);
+  });
+});
+
+// P4 (UI sweep 2026-06-11): GET /physicians/me — the caller's own Physician row by cognito sub.
+// Mirrors /users/me: open to any authenticated staff role, returns only the caller's row, 404
+// (not 500) when no active Physician row maps so the UI degrades to the plain greeting.
+describe('GET /physicians/me — caller physician identity', () => {
+  it('resolves the caller\'s own row and splits credentials off fullName', async () => {
+    const { db, store } = makeDb();
+    seedPhysician(store); // fullName 'Dr. Jane Doe, MD', cognitoSub 'sub-jane'
+    mockUser = { sub: 'sub-jane', roles: ['physician'] };
+    const res = await request(appFor(db)).get('/api/v1/physicians/me');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ id: 'PHYS-1', fullName: 'Dr. Jane Doe, MD', credentials: 'MD' });
+  });
+
+  it('credentials is null when fullName carries no comma suffix', async () => {
+    const { db, store } = makeDb();
+    seedPhysician(store, { id: 'PHYS-2', cognitoSub: 'sub-plain', fullName: 'Jane Smith', npi: '2223334445', email: 'js@x.test' });
+    mockUser = { sub: 'sub-plain', roles: ['physician'] };
+    const res = await request(appFor(db)).get('/api/v1/physicians/me');
+    expect(res.status).toBe(200);
+    expect(res.body.data.credentials).toBeNull();
+  });
+
+  it('404 when no Physician row maps to the login (clear degrade signal)', async () => {
+    const { db } = makeDb();
+    mockUser = { sub: 'ghost-sub', roles: ['physician'] };
+    const res = await request(appFor(db)).get('/api/v1/physicians/me');
+    expect(res.status).toBe(404);
+    expect(res.body.error.message).toMatch(/No physician profile maps/i);
+  });
+
+  it('404 when the mapped physician is inactive (resolveCurrentPhysician contract)', async () => {
+    const { db, store } = makeDb();
+    seedPhysician(store, { active: false });
+    mockUser = { sub: 'sub-jane', roles: ['physician'] };
+    expect((await request(appFor(db)).get('/api/v1/physicians/me')).status).toBe(404);
+  });
+
+  it('is NOT captured by /physicians/:id — a physician can hit /me but not /:id', async () => {
+    const { db, store } = makeDb();
+    const created = seedPhysician(store);
+    mockUser = { sub: 'sub-jane', roles: ['physician'] };
+    // /physicians/:id is admin+ops_staff only; if 'me' were captured by :id this would 403 too.
+    expect((await request(appFor(db)).get(`/api/v1/physicians/${created.id}`)).status).toBe(403);
+    expect((await request(appFor(db)).get('/api/v1/physicians/me')).status).toBe(200);
+  });
+
+  it('401 unauthenticated', async () => {
+    mockUser = undefined;
+    expect((await request(appFor(makeDb().db)).get('/api/v1/physicians/me')).status).toBe(401);
   });
 });

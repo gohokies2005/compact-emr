@@ -35,7 +35,7 @@ export function PhysicianLettersPage() {
           <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-navyDeep/85 via-navyDeep/50 to-transparent" />
           <div className="relative flex h-full flex-col justify-center px-7">
             <p className="text-xs font-medium uppercase tracking-[0.25em] text-brassSoft">Aegis</p>
-            <h1 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">My letters</h1>
+            <h1 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">Completed Letters</h1>
             <p className="mt-1 text-sm text-white/75">Delivered and paid letters</p>
           </div>
         </BridgeRotation>

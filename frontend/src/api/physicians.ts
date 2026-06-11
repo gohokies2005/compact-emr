@@ -65,6 +65,20 @@ export async function listPhysicians(): Promise<{ data: readonly PhysicianPublic
   return apiGet('/api/v1/physicians');
 }
 
+// The caller's OWN Physician row (resolved server-side by cognito sub; mirrors /users/me). 404s
+// when the login has no active Physician mapping; callers must degrade gracefully (plain
+// greeting / email-only identity). fullName is the credentialed display name ("Jane Smith, DO");
+// credentials is the comma-suffix split server-side so the client renders, never parses.
+export interface PhysicianMe {
+  readonly id: string;
+  readonly fullName: string;
+  readonly credentials: string | null;
+}
+
+export async function getPhysicianMe(): Promise<{ data: PhysicianMe }> {
+  return apiGet('/api/v1/physicians/me');
+}
+
 export async function getPhysician(id: string): Promise<{ data: PhysicianPublic }> {
   return apiGet(`/api/v1/physicians/${encodeURIComponent(id)}`);
 }

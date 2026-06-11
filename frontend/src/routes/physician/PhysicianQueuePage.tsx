@@ -7,8 +7,10 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { BridgeRotation } from '../../components/BridgeRotation';
 import { listCases } from '../../api/cases';
+import { getPhysicianMe } from '../../api/physicians';
 import { formatRelativeTime } from '../../lib/date';
-import { formatNameLastFirst } from '../../lib/format';
+import { formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
+import { timeOfDayGreeting } from '../../lib/greeting';
 
 export function PhysicianQueuePage() {
   const navigate = useNavigate();
@@ -16,8 +18,13 @@ export function PhysicianQueuePage() {
     queryKey: ['physician', 'queue'],
     queryFn: () => listCases({ status: 'physician_review', page: 1, pageSize: 50 }),
   });
+  // Personalized hero (P4): "Good <tod>, Dr. <LastName>" from the caller's own Physician row.
+  // retry:false — a 404 (no Physician mapping) falls back to the plain greeting, never blocks.
+  const physicianMeQuery = useQuery({ queryKey: ['physicians', 'me'], queryFn: getPhysicianMe, retry: false, staleTime: 60_000 });
 
   const rows = queueQuery.data?.data ?? [];
+  const greeting = timeOfDayGreeting();
+  const lastName = formatPhysicianLastName(physicianMeQuery.data?.data.fullName);
 
   return (
     <AppShell>
@@ -28,8 +35,8 @@ export function PhysicianQueuePage() {
           <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-navyDeep/85 via-navyDeep/50 to-transparent" />
           <div className="relative flex h-full flex-col justify-center px-7">
             <p className="text-xs font-medium uppercase tracking-[0.25em] text-brassSoft">Aegis</p>
-            <h1 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">Physician queue</h1>
-            <p className="mt-1 text-sm text-white/75">Cases awaiting your review</p>
+            <h1 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">{lastName ? `${greeting}, Dr. ${lastName}` : greeting}</h1>
+            <p className="mt-1 text-sm text-white/75">Physician queue — letters awaiting your review</p>
           </div>
         </BridgeRotation>
       </section>

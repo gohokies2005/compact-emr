@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildUserAvatarKey,
   isCaseDocumentS3Key,
   isDoctorPackS3Key,
   isDrafterArtifactS3Key,
   isDrafterExportS3Key,
+  isUserAvatarS3Key,
 } from '../services/s3-key-safety.js';
 
 /**
@@ -102,5 +104,48 @@ describe('isDrafterExportS3Key', () => {
 
   it('rejects non-JSON extension', () => {
     expect(isDrafterExportS3Key('drafter-exports/CASE-1/foo.pdf')).toBe(false);
+  });
+});
+
+describe('isUserAvatarS3Key (P3 identity/avatar)', () => {
+  it('accepts canonical avatar keys for each allowed extension', () => {
+    expect(isUserAvatarS3Key('avatars/U-1/a1b2c3d4-e5f6-7890-abcd-ef1234567890.png')).toBe(true);
+    expect(isUserAvatarS3Key('avatars/U-1/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jpg')).toBe(true);
+    expect(isUserAvatarS3Key('avatars/U-1/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jpeg')).toBe(true);
+    expect(isUserAvatarS3Key('avatars/U-1/a1b2c3d4-e5f6-7890-abcd-ef1234567890.webp')).toBe(true);
+  });
+
+  it('rejects path-traversal', () => {
+    expect(isUserAvatarS3Key('avatars/../physician-signatures/leak.png')).toBe(false);
+    expect(isUserAvatarS3Key('avatars/U-1/../../leak.png')).toBe(false);
+  });
+
+  it('rejects wrong prefix', () => {
+    expect(isUserAvatarS3Key('cases/U-1/a1b2c3d4.png')).toBe(false);
+    expect(isUserAvatarS3Key('physician-signatures/U-1/a1b2-signature.png')).toBe(false);
+  });
+
+  it('rejects wrong extension and uppercase-hex uuid slot', () => {
+    expect(isUserAvatarS3Key('avatars/U-1/a1b2c3d4.svg')).toBe(false);
+    expect(isUserAvatarS3Key('avatars/U-1/a1b2c3d4.exe')).toBe(false);
+    expect(isUserAvatarS3Key('avatars/U-1/NOTHEX.png')).toBe(false);
+  });
+
+  it('rejects nested subdirectory in the filename slot and non-string input', () => {
+    expect(isUserAvatarS3Key('avatars/U-1/sub/a1b2.png')).toBe(false);
+    expect(isUserAvatarS3Key(null)).toBe(false);
+    expect(isUserAvatarS3Key(42)).toBe(false);
+  });
+});
+
+describe('buildUserAvatarKey', () => {
+  it('builds a key the validator accepts', () => {
+    const key = buildUserAvatarKey('U-1', 'a1b2c3d4-e5f6-7890-abcd-ef1234567890', 'webp');
+    expect(key).toBe('avatars/U-1/a1b2c3d4-e5f6-7890-abcd-ef1234567890.webp');
+    expect(isUserAvatarS3Key(key)).toBe(true);
+  });
+
+  it('throws on a userId that would escape the avatars/ subtree', () => {
+    expect(() => buildUserAvatarKey('../etc', 'a1b2c3d4', 'png')).toThrow(/invalid key/);
   });
 });

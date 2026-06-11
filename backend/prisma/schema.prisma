@@ -117,6 +117,10 @@ model AppUser {
   cognitoSub  String   @unique @map("cognito_sub")
   email       String   @unique
   name        String?  @db.VarChar(120)
+  // P3 identity/avatar (UI sweep 2026-06-11): avatars/<userId>/<uuid>.<ext> in the PHI bucket.
+  // Presign-PUT -> register -> presigned-GET, mirroring the physician-signature flow. Nullable —
+  // absent renders the silhouette fallback.
+  avatarS3Key String?  @map("avatar_s3_key")
   active      Boolean  @default(true)
   roles       AppUserRole[]
   assignedCases Case[]  @relation("CaseAssignedRn")
@@ -667,6 +671,10 @@ model Physician {
   email                String
   phone                String?
   signatureImageS3Key  String?  @map("signature_image_s3_key")
+  // P3 identity/avatar: per-Ryan decision the avatar column lives on BOTH AppUser and Physician
+  // (matches the signature-on-Physician pattern). The current upload surface writes the AppUser
+  // column; this one is reserved for a physician-identity-keyed avatar (no write path yet).
+  avatarS3Key          String?  @map("avatar_s3_key")
   credentialBlockJson  Json?    @map("credential_block_json")
   active               Boolean  @default(true)
   createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)

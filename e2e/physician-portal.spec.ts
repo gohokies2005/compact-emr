@@ -27,12 +27,16 @@ test.describe('physician portal chrome', () => {
     await expect(page).toHaveURL(/\/p\/queue$/);
   });
 
-  test('physician nav order is Queue | Letters | Inbox', async ({ page }) => {
+  test('physician nav: Letters in Queue | Completed Letters left, Inbox right-aligned by the identity cluster', async ({ page }) => {
     test.skip(true, PHYSICIAN_SKIP);
     await login(page);
+    // P4 renames + split: the left <nav> carries only the two letter tabs; Inbox renders in the
+    // right cluster next to the identity block (outside the <nav> landmark).
     const nav = page.getByRole('navigation');
     const labels = await nav.getByRole('link').allTextContents();
-    expect(labels).toEqual(['Queue', 'Letters', 'Inbox']);
+    expect(labels).toEqual(['Letters in Queue', 'Completed Letters']);
+    await expect(page.getByRole('link', { name: 'Inbox' })).toBeVisible();
+    expect(await nav.getByRole('link', { name: 'Inbox' }).count()).toBe(0);
   });
 
   test('banner present on Queue + Letters, absent inside a review view', async ({ page }) => {

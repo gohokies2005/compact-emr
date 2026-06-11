@@ -6,6 +6,8 @@ import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb, PhysicianRecord } from '../services/db-types.js';
+import { currentActor } from '../services/request-actor.js';
+import { resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { parsePhysicianPatch, parseSignaturePresign } from '../services/physician-validation.js';
 import { buildPhysicianSignatureKey, isPhysicianSignatureS3Key } from '../services/s3-key-safety.js';
 import { composeCredentialBlock, parseCredentialBlock } from '../services/credential-block.js';
@@ -67,6 +69,24 @@ export function createPhysiciansRouter(db: AppDb, deps: PhysiciansRouterDeps = {
   router.get('/physicians', requireRole(['admin', 'ops_staff']), asyncHandler(async (_req: Request, res: Response) => {
     const rows = await db.physician.findMany({ orderBy: { fullName: 'asc' } });
     res.json({ data: rows.map(toPublic) });
+  }));
+
+  // Who am I (physician edition)? Resolves the CALLER's Physician row from the JWT's cognito sub —
+  // mirrors GET /users/me (open to any authenticated staff role, only ever returns the caller's own
+  // row, 404 when no mapping so the UI degrades instead of crashing). Gives the identity block +
+  // physician greeting a clean credentialed display name without parsing on the client of record.
+  // MUST be registered BEFORE /physicians/:id or Express would capture 'me' as an id.
+  router.get('/physicians/me', requireRole(['admin', 'ops_staff', 'physician']), asyncHandler(async (req: Request, res: Response) => {
+    const actor = currentActor(req);
+    const me = await resolveCurrentPhysician(db, actor.sub);
+    if (me === null) {
+      throw new HttpError(404, 'not_found', 'No physician profile maps to this login (no active Physician row carries this Cognito sub).', { cognitoSub: actor.sub });
+    }
+    // fullName is the credentialed display name ("Jane Smith, DO"); credentials = the suffix after
+    // the first comma when present (null otherwise). Kept as data so the client renders, not parses.
+    const commaAt = me.fullName.indexOf(',');
+    const credentials = commaAt >= 0 ? me.fullName.slice(commaAt + 1).trim() || null : null;
+    res.json({ data: { id: me.id, fullName: me.fullName, credentials } });
   }));
 
   router.get('/physicians/:id', requireRole(['admin', 'ops_staff']), asyncHandler(async (req: Request, res: Response) => {

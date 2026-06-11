@@ -69,6 +69,9 @@ export interface AppUserRecord {
   cognitoSub: string;
   email: string;
   name: string | null;
+  // avatars/<userId>/<uuid>.<ext> in the PHI bucket; null/absent -> silhouette fallback in the
+  // UI. Optional so the many test factories that mirror this projection stay valid.
+  avatarS3Key?: string | null;
   active: boolean;
   roles: Array<{ role: string }>;
   version: number;
@@ -517,6 +520,10 @@ export interface PhysicianRecord {
   email: string;
   phone: string | null;
   signatureImageS3Key: string | null;
+  // Reserved physician-identity avatar (P3 migration adds the column on both AppUser and
+  // Physician); the current upload surface writes the AppUser column only. Optional so the
+  // many test factories that mirror this projection stay valid.
+  avatarS3Key?: string | null;
   // Prisma Json? — render-authoritative per-signer credential facts (D2). Untrusted at this
   // boundary; narrow with credential-block.parseCredentialBlock before use.
   credentialBlockJson: unknown;

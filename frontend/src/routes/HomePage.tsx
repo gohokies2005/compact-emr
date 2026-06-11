@@ -11,6 +11,9 @@ import {
   listKeyDocsNeedingReview,
 } from '../api/cases';
 import { listVeterans } from '../api/veterans';
+import { getMe } from '../api/users';
+import { timeOfDayGreeting } from '../lib/greeting';
+import { formatFirstName } from '../lib/format';
 import type { CaseStatus } from '../types/prisma';
 
 type Tone = 'default' | 'amber';
@@ -92,6 +95,10 @@ export function HomePage() {
     queryFn: () => listVeterans(''),
   });
 
+  // Personalized hero greeting (P4): first name from /users/me. retry:false — a 404 (no AppUser
+  // row) just falls back to the plain greeting, never blocks the dashboard.
+  const meQuery = useQuery({ queryKey: ['users', 'me'], queryFn: getMe, retry: false, staleTime: 60_000 });
+
   // Physician redirect must come after hooks so hook order stays stable.
   if (role === 'physician') return <Navigate to="/p/queue" replace />;
 
@@ -108,8 +115,8 @@ export function HomePage() {
 
   const physicianReviewTotal = physicianReviewCount.data?.total ?? 0;
   const veteransTotal = veteransQuery.data?.data.length ?? 0;
-  const hour = new Date().getHours();
-  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const greeting = timeOfDayGreeting();
+  const firstName = formatFirstName(meQuery.data?.data.name);
 
   return (
     <AppShell>
@@ -120,7 +127,7 @@ export function HomePage() {
           <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-navyDeep/85 via-navyDeep/50 to-transparent" />
           <div className="relative flex h-full flex-col justify-center px-7">
             <p className="text-xs font-medium uppercase tracking-[0.25em] text-brassSoft">Aegis</p>
-            <h1 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">{greeting}</h1>
+            <h1 className="mt-1 text-2xl font-semibold text-white sm:text-3xl">{firstName ? `${greeting}, ${firstName}` : greeting}</h1>
             <p className="mt-1 text-sm text-white/75">Daily workflow at a glance.</p>
           </div>
         </BridgeRotation>

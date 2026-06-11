@@ -99,6 +99,27 @@ export function isPhysicianSignatureS3Key(s3Key: unknown): s3Key is string {
   return /^physician-signatures\/[a-zA-Z0-9_-]+\/[a-f0-9-]+-signature\.png$/.test(s3Key);
 }
 
+/**
+ * avatars/<userId>/<uuid>.(png|jpg|jpeg|webp) — a staff/physician profile avatar (P3 identity
+ * block). Distinct, non-case prefix in the PHI bucket (covered by the existing bucket-wide
+ * grant — no CDK change). The presign endpoint computes the key server-side; this guards the
+ * inbound key on the register callback before it is persisted on the AppUser row or
+ * dereferenced by the presigned-GET in /users/me.
+ */
+export function isUserAvatarS3Key(s3Key: unknown): s3Key is string {
+  if (!isPathTraversalSafe(s3Key)) return false;
+  return /^avatars\/[a-zA-Z0-9_-]+\/[a-f0-9-]+\.(png|jpg|jpeg|webp)$/.test(s3Key);
+}
+
+/** Build the canonical user-avatar key. Throws if inputs would produce an unsafe key. */
+export function buildUserAvatarKey(userId: string, uuid: string, ext: 'png' | 'jpg' | 'webp'): string {
+  const key = `avatars/${userId}/${uuid}.${ext}`;
+  if (!isUserAvatarS3Key(key)) {
+    throw new Error(`buildUserAvatarKey produced an invalid key for userId=${JSON.stringify(userId)}`);
+  }
+  return key;
+}
+
 /** Build the canonical physician-signature key. Throws if inputs would produce an unsafe key. */
 export function buildPhysicianSignatureKey(physicianId: string, uuid: string): string {
   const key = `physician-signatures/${physicianId}/${uuid}-signature.png`;

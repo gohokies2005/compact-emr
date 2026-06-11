@@ -48,3 +48,37 @@ export function formatNameLastFirst(
   if (last && first) return `${last}, ${first}`;
   return last || first || fallback;
 }
+
+/**
+ * First name from a stored display name ("Riley Staffer, RN" -> "Riley") for the personalized
+ * dashboard greeting (P4). Token 0 of the whitespace split; empty string when there's nothing
+ * usable so callers can fall back to the plain greeting.
+ */
+export function formatFirstName(name: string | null | undefined): string {
+  if (typeof name !== 'string') return '';
+  return name.trim().split(/\s+/)[0] ?? '';
+}
+
+// Trailing credential tokens that may ride on a physician display name WITHOUT a comma
+// ("Jane Smith DO"). The comma form ("Jane Smith, DO, FACS") is handled by the comma split.
+const CREDENTIAL_TOKEN = /^(?:M\.?D\.?|D\.?O\.?|RN|NP|PA(?:-C)?|Ph\.?D\.?|DPT|DC|OD|DDS|DMD|FNP|APRN|MBBS|MPH|MSN|BSN)\.?$/i;
+
+/**
+ * Last name for "Dr. <LastName>" greetings from a credentialed physician display name (P4).
+ * "Jane Smith, DO" -> "Smith"; "Dr. Jane Smith-Jones, MD, FACS" -> "Smith-Jones"; "Jane Smith DO"
+ * -> "Smith"; single token returned as-is; empty/null -> '' (caller falls back to the plain
+ * greeting). Deliberately simple and unit-tested — swap for a server-provided structured name
+ * if a future Physician row carries one.
+ */
+export function formatPhysicianLastName(fullName: string | null | undefined): string {
+  if (typeof fullName !== 'string') return '';
+  // Everything before the first comma is the name; after it are credentials.
+  const base = (fullName.split(',')[0] ?? '').trim();
+  const tokens = base.split(/\s+/).filter(Boolean);
+  // Strip comma-less trailing credentials ("Jane Smith DO"), but never strip down to nothing.
+  // Uppercase-only (plus PhD) so a real mixed-case surname like "Do" is never eaten.
+  const isCredential = (t: string | undefined): boolean =>
+    t !== undefined && CREDENTIAL_TOKEN.test(t) && (t === t.toUpperCase() || /^ph\.?d\.?$/i.test(t));
+  while (tokens.length > 1 && isCredential(tokens[tokens.length - 1])) tokens.pop();
+  return tokens[tokens.length - 1] ?? '';
+}

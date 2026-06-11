@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { formatChartSlice, type ChartSliceData } from '../chartSlice.js';
+import type { CaseFraming } from '../../services/case-framing.js';
 
 const base: ChartSliceData = {
   claimType: 'secondary',
@@ -9,6 +10,10 @@ const base: ChartSliceData = {
   scConditions: [{ condition: 'PTSD', status: 'service_connected', ratingPct: 70, dcCode: '9411' }],
   activeProblems: [{ problem: 'Obesity', icd10: 'E66.9', notes: 'BMI 34' }],
   activeMedications: [{ drugName: 'sertraline', indication: 'PTSD' }],
+  veteranStatement: null,
+  inServiceEvent: null,
+  caseFraming: null,
+  documentDigest: null,
 };
 
 describe('formatChartSlice', () => {
@@ -37,5 +42,56 @@ describe('formatChartSlice', () => {
 
   it('omits the medications block when there are none', () => {
     expect(formatChartSlice({ ...base, activeMedications: [] }).text).not.toContain('Active medications:');
+  });
+
+  it('renders the veteran statement + in-service event sections when present, capped + collapsed', () => {
+    const { text } = formatChartSlice({
+      ...base,
+      veteranStatement: 'I have trouble  sleeping\n\nsince my deployment.',
+      inServiceEvent: 'Convoy IED blast in Iraq, 2007.',
+    });
+    expect(text).toContain("Veteran's statement (lay narrative):");
+    expect(text).toContain('I have trouble sleeping since my deployment.'); // whitespace collapsed
+    expect(text).toContain('Stated in-service event/exposure:');
+    expect(text).toContain('Convoy IED blast in Iraq, 2007.');
+  });
+
+  it('caps an over-long veteran statement with an ellipsis', () => {
+    const { text } = formatChartSlice({ ...base, veteranStatement: 'w'.repeat(2000) });
+    const run = (text.match(/w+/g) ?? []).reduce((a, b) => Math.max(a, b.length), 0);
+    expect(run).toBe(1200);
+    expect(text).toContain('…');
+  });
+
+  it('omits narrative sections entirely when null/blank', () => {
+    const { text } = formatChartSlice({ ...base, veteranStatement: '   ', inServiceEvent: null });
+    expect(text).not.toContain("Veteran's statement");
+    expect(text).not.toContain('Stated in-service event');
+  });
+
+  it('renders the system-derived case framing block', () => {
+    const framing: CaseFraming = {
+      version: 1,
+      framing: 'secondary',
+      grantedScAnchors: [{ condition: 'PTSD', ratingPct: 70, status: 'service_connected' }],
+      upstreamScCondition: 'PTSD',
+      framingChoice: 'secondary',
+      claimType: 'initial',
+      source: 'derived',
+      derivedAt: '2026-06-11T00:00:00.000Z',
+    };
+    const { text } = formatChartSlice({ ...base, caseFraming: framing });
+    expect(text).toContain('Case framing (system-derived):');
+    expect(text).toContain('theory: secondary; claimType: initial; source: derived');
+    expect(text).toContain('upstream SC condition: PTSD');
+    expect(text).toContain('RN framing choice: secondary');
+    expect(text).toContain('granted SC anchors: PTSD (70%)');
+  });
+
+  it('inlines the document digest block when present', () => {
+    const digest = 'Documents on file: 2 (1 extracted)\n  - rating.pdf · — · extracted · 3pp';
+    const { text } = formatChartSlice({ ...base, documentDigest: digest });
+    expect(text).toContain('Documents on file: 2 (1 extracted)');
+    expect(text).toContain('- rating.pdf · — · extracted · 3pp');
   });
 });

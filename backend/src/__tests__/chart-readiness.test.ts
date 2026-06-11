@@ -4,6 +4,7 @@ import {
   classifyReadAttempt,
   corruptedTokenRatio,
   evaluateChartReadiness,
+  isEffectivelyRead,
   isValidManualSummary,
   MANUAL_SUMMARY_MIN_LEN,
   READ_THRESHOLD_RATIO,
@@ -227,6 +228,83 @@ describe('evaluateChartReadiness', () => {
     ]);
     expect(r.ready).toBe(false);
     expect(r.blockingFiles).toHaveLength(1);
+  });
+
+  // ── isEffectivelyRead — the shared queue predicate (Package 1 (H), 2026-06-11) ────────────
+  // THE row-level branch logic of evaluateChartReadiness, extracted so the files-pending-manual
+  // routes (and later doctor-pack inclusion) share one copy. The parity lock below is the
+  // load-bearing guard: the predicate and the evaluator must NEVER diverge.
+
+  describe('isEffectivelyRead', () => {
+    it('true for terminalStatus read', () => {
+      expect(isEffectivelyRead(row({ terminalStatus: 'read' }))).toBe(true);
+    });
+
+    it('true for a generated intake-summary path regardless of stored status', () => {
+      expect(isEffectivelyRead(row({
+        terminalStatus: 'manual_summary_required',
+        filePath: 'cases/CASE-1/uuid-Intake_Summary.pdf',
+        attemptsJson: [{ method: 'native_pdf_text', wordCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 < 20)' }],
+      }))).toBe(true);
+    });
+
+    it('true for manual_summary_provided with a valid (>= 40 char) summary', () => {
+      expect(isEffectivelyRead(row({
+        terminalStatus: 'manual_summary_provided',
+        manualSummary: 'Rating decision dated 2024 confirming PTSD service connection at 70 percent.',
+      }))).toBe(true);
+    });
+
+    it('false for manual_summary_provided with an invalid/short summary and a failing attempt (defense-in-depth)', () => {
+      expect(isEffectivelyRead(row({
+        terminalStatus: 'manual_summary_provided',
+        manualSummary: 'too short',
+        attemptsJson: [{ method: 'tesseract_ocr', wordCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 < 20)' }],
+      }))).toBe(false);
+    });
+
+    it(`retro-heal: true for manual_summary_required whose stored last attempt passes CURRENT thresholds (25 words / 0.0)`, () => {
+      // The live-regression class: classified under the OLD 40-word gate, passes the current 20.
+      expect(isEffectivelyRead(row({
+        terminalStatus: 'manual_summary_required',
+        attemptsJson: [{ method: 'textract', wordCount: 25, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (25 < 40)' }],
+      }))).toBe(true);
+    });
+
+    it('false when the stored attempt is below the current word threshold', () => {
+      expect(isEffectivelyRead(row({
+        terminalStatus: 'manual_summary_required',
+        attemptsJson: [{ method: 'textract', wordCount: READ_THRESHOLD_WORDS - 1, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words' }],
+      }))).toBe(false);
+    });
+
+    it('false for a genuinely garbled attempt (high word count, ratio above threshold)', () => {
+      expect(isEffectivelyRead(row({
+        terminalStatus: 'manual_summary_required',
+        attemptsJson: [{ method: 'tesseract_ocr', wordCount: 120, corruptedTokenRatio: 0.21, attemptedAt: '2026-06-10T00:00:00Z', note: 'garbled' }],
+      }))).toBe(false);
+    });
+
+    it('false for manual_summary_required with no attempts recorded', () => {
+      expect(isEffectivelyRead(row({ terminalStatus: 'manual_summary_required', attemptsJson: [] }))).toBe(false);
+    });
+
+    it('PARITY LOCK: isEffectivelyRead(row) === evaluateChartReadiness([row]).ready for every branch', () => {
+      const samples: FileReadStatusRecord[] = [
+        row({ terminalStatus: 'read' }),
+        row({ terminalStatus: 'manual_summary_required' }),
+        row({ terminalStatus: 'manual_summary_required', filePath: 'cases/C/uuid-Intake_Summary.pdf' }),
+        row({ terminalStatus: 'manual_summary_provided', manualSummary: 'A perfectly valid forty-plus character manual summary by the RN.' }),
+        row({ terminalStatus: 'manual_summary_provided', manualSummary: 'too short' }),
+        row({ terminalStatus: 'manual_summary_provided', manualSummary: 'too short', attemptsJson: [{ method: 'textract', wordCount: 25, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: null }] }),
+        row({ terminalStatus: 'manual_summary_required', attemptsJson: [{ method: 'textract', wordCount: 37, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (37 < 40)' }] }),
+        row({ terminalStatus: 'manual_summary_required', attemptsJson: [{ method: 'tesseract_ocr', wordCount: 120, corruptedTokenRatio: 0.21, attemptedAt: '2026-06-10T00:00:00Z', note: 'garbled' }] }),
+        row({ terminalStatus: 'manual_summary_required', attemptsJson: [{ method: 'textract', wordCount: READ_THRESHOLD_WORDS - 1, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: null }] }),
+      ];
+      for (const sample of samples) {
+        expect(isEffectivelyRead(sample), `parity diverged for ${sample.terminalStatus} / ${sample.filePath}`).toBe(evaluateChartReadiness([sample]).ready);
+      }
+    });
   });
 
   it('captures lastAttempt context for blocking rows when available', () => {

@@ -183,6 +183,36 @@ function lastAttemptPassesCurrentThresholds(row: FileReadStatusRecord): boolean 
   );
 }
 
+/**
+ * Shared row-level readiness predicate — Package 1 (H), 2026-06-11.
+ *
+ * TRUE when a file-read-status row needs NO RN attention under CURRENT thresholds, i.e. it is
+ * effectively read by any of the four branches:
+ *   1. A generated intake-summary PDF (a doc WE generate from the form answers — always valid; a
+ *      sparse intake yields a short PDF that trips the word threshold; it must never block
+ *      drafting or send an RN to manual review). Matches the GENERATED key precisely (minted as
+ *      `cases/<id>/<uuid>-Intake_Summary.pdf`), NOT a loose substring, so a real uploaded
+ *      "Nursing Intake Summary" record is never masked. (QA #5.)
+ *   2. terminalStatus 'read' — a machine successfully extracted text.
+ *   3. 'manual_summary_provided' with a VALID (>= 40 char) summary — defense-in-depth: a
+ *      provided-status row with a missing/short summary does NOT count.
+ *   4. The stored LAST attempt passes the CURRENT thresholds — the retroactive 40→20 heal (see
+ *      the reconciliation doc comment above): terminalStatus is written once, so old-threshold
+ *      rows self-heal at evaluation time with no DB write.
+ *
+ * This is THE single copy of the branch logic: evaluateChartReadiness CALLS it, and the
+ * files-pending-manual queue routes (per-case + cross-case /rn) filter through it so the queue
+ * always agrees with the gate. NEVER fork a parallel copy — raw terminalStatus reads that bypass
+ * this predicate are exactly the divergence class that made 15/16 queue rows false positives.
+ * (Doctor-pack inclusion consolidates onto it in Package 7.)
+ */
+export function isEffectivelyRead(row: FileReadStatusRecord): boolean {
+  if (isIntakeSummaryPath(row.filePath)) return true;
+  if (row.terminalStatus === 'read') return true;
+  if (row.terminalStatus === 'manual_summary_provided' && isValidManualSummary(row.manualSummary)) return true;
+  return lastAttemptPassesCurrentThresholds(row);
+}
+
 export function evaluateChartReadiness(rows: readonly FileReadStatusRecord[]): ChartReadinessResult {
   const blockers: ChartReadinessBlocker[] = [];
   let read = 0;
@@ -190,46 +220,27 @@ export function evaluateChartReadiness(rows: readonly FileReadStatusRecord[]): C
   let provided = 0;
 
   for (const row of rows) {
-    // The Intake Summary is a doc WE generate from the form answers — always valid (a sparse intake
-    // yields a short PDF that trips the <40-word read threshold). It must never block drafting or
-    // send an RN to manual review. Match the GENERATED key precisely (it's minted as
-    // `cases/<id>/<uuid>-Intake_Summary.pdf`, so the key ends with '-Intake_Summary.pdf') — NOT a
-    // loose substring, so a real uploaded "Nursing Intake Summary" record is never masked. (QA #5.)
-    if (isIntakeSummaryPath(row.filePath)) {
-      read++;
+    if (isEffectivelyRead(row)) {
+      // Count classification (informational): a valid RN summary counts as 'provided'; every other
+      // effectively-read branch — intake summary, machine 'read', or the retroactive threshold
+      // heal — counts as 'read'. (Intake summaries count as 'read' even when a summary also exists,
+      // matching the pre-refactor branch order.)
+      if (!isIntakeSummaryPath(row.filePath) && row.terminalStatus === 'manual_summary_provided' && isValidManualSummary(row.manualSummary)) {
+        provided++;
+      } else {
+        read++;
+      }
       continue;
     }
-    if (row.terminalStatus === 'read') {
-      read++;
-    } else if (row.terminalStatus === 'manual_summary_provided') {
-      // Defense-in-depth: if status claims provided but summary is missing / too short, treat as required.
-      if (isValidManualSummary(row.manualSummary)) {
-        provided++;
-      } else if (lastAttemptPassesCurrentThresholds(row)) {
-        // The machine read actually passes the current thresholds — no summary needed.
-        read++;
-      } else {
-        required++;
-        blockers.push({
-          fileReadStatusId: row.id,
-          filePath: row.filePath,
-          terminalStatus: 'manual_summary_required',
-          lastAttempt: lastAttemptOf(row),
-        });
-      }
-    } else if (lastAttemptPassesCurrentThresholds(row)) {
-      // Stored 'manual_summary_required' under the OLD (40-word) threshold, but the recorded
-      // attempt passes the CURRENT one — retroactively treat as read (see doc comment above).
-      read++;
-    } else {
-      required++;
-      blockers.push({
-        fileReadStatusId: row.id,
-        filePath: row.filePath,
-        terminalStatus: row.terminalStatus,
-        lastAttempt: lastAttemptOf(row),
-      });
-    }
+    required++;
+    blockers.push({
+      fileReadStatusId: row.id,
+      filePath: row.filePath,
+      // A 'manual_summary_provided' row with a missing/short summary still REQUIRES one
+      // (defense-in-depth) — surface it as such so the RN UI queues it.
+      terminalStatus: row.terminalStatus === 'manual_summary_provided' ? 'manual_summary_required' : row.terminalStatus,
+      lastAttempt: lastAttemptOf(row),
+    });
   }
 
   return {

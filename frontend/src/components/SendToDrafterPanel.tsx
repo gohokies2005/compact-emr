@@ -11,6 +11,7 @@ import { Gate1ChecklistModal } from './Gate1ChecklistModal';
 import { StrategyPreviewCard } from './StrategyPreviewCard';
 import { CaseViabilityCard } from './CaseViabilityCard';
 import { ManualSummaryForm } from './ManualSummaryForm';
+import { documentFileName } from '../lib/documentFileName';
 
 interface SendToDrafterPanelProps {
   readonly caseId: string;
@@ -88,12 +89,8 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   const blockingFileCount = blockingFiles.length;
   // The original filename (basename of the S3 key) so the RN knows EXACTLY which file to re-upload or
   // re-OCR — a bare "1 file(s) could not be read" with no name is useless (Ryan 2026-06-06, Yorde).
-  // Show the human filename, not the raw S3 key: keys are minted `cases/<id>/<uuid>-<originalname>`, so
-  // strip the dir + the leading uuid- prefix (a 36-char GUID wrapping across 3 lines tells a human nothing).
-  const fileName = (filePath: string): string => {
-    const base = filePath.split('/').pop() || filePath;
-    return base.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i, '');
-  };
+  // The basename+uuid-strip lives in lib/documentFileName (shared with the RN queue — Package 1 (J)).
+  const fileName = documentFileName;
 
   // Let the RN SEE the file that failed OCR — presign an inline view URL (same mechanism as the
   // chart's PdfViewer) and open it in a new tab, so they can read it and override with a real

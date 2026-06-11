@@ -321,6 +321,14 @@ export interface FileReadStatus {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly version: number;
+  // Queue enrichment (Package 1 (J), 2026-06-11) — present on the files-pending-manual payloads.
+  // veteranName ("Last, First") + claimedCondition tell the RN WHO/WHAT; documentId is the matching
+  // chart Document (null when the file was deleted — render plain text, not a dead link); fileName
+  // is the human filename (uuid prefix stripped server-side). All optional for back-compat.
+  readonly veteranName?: string | null;
+  readonly claimedCondition?: string | null;
+  readonly documentId?: string | null;
+  readonly fileName?: string | null;
 }
 
 export async function listFilesPendingManualForCase(caseId: string): Promise<{ data: readonly FileReadStatus[] }> {

@@ -6,6 +6,7 @@ import { currentActor } from '../services/request-actor.js';
 import {
   classifyReadAttempt,
   evaluateChartReadiness,
+  isEffectivelyRead,
   isIntakeSummaryPath,
   MANUAL_SUMMARY_MIN_LEN,
 } from '../services/chart-readiness.js';
@@ -13,7 +14,21 @@ import {
   parseManualSummary,
   parseReadAttempt,
 } from '../services/file-read-validation.js';
-import type { AppDb, FileReadAttempt } from '../services/db-types.js';
+import type { AppDb, FileReadAttempt, FileReadStatusRecord } from '../services/db-types.js';
+
+// The s3Key is minted `cases/<caseId>/<uuid>-<OriginalName.ext>` (documents presign). Recover the
+// human filename for queue rows: basename minus the leading uuid- prefix (a 36-char GUID wrapping
+// across three lines tells an RN nothing). Falls back to the basename (or the whole path) on
+// legacy/odd keys — never throws. Mirrors the frontend lib/documentFileName helper.
+function originalFileName(filePath: string): string {
+  const base = filePath.split('/').pop() ?? filePath;
+  return base.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i, '');
+}
+
+// Candidate statuses for the pending queues: a stored 'read' row is ALWAYS effectively read, so
+// only the other two can possibly need RN attention (provided-with-invalid-summary still queues —
+// defense-in-depth parity with evaluateChartReadiness).
+const PENDING_CANDIDATE_STATUSES = ['manual_summary_required', 'manual_summary_provided'] as const;
 
 export function createChartReadinessRouter(db: AppDb): Router {
   const router = Router();
@@ -148,7 +163,13 @@ export function createChartReadinessRouter(db: AppDb): Router {
   /**
    * GET /api/v1/cases/:id/files-pending-manual
    *
-   * Convenience list for the RN UI — only the rows in 'manual_summary_required'.
+   * Convenience list for the RN UI — the rows that actually need a manual summary.
+   *
+   * Package 1 (H), 2026-06-11: derives the list through the SAME evaluator semantics as
+   * GET /chart-readiness (shared isEffectivelyRead: retro-heal + intake-summary + summary
+   * validity) plus the same liveKeys reconcile, instead of a raw terminalStatus read — a
+   * healed/reconciled/orphaned file NEVER appears in the queue. Rows carry documentId (the
+   * matching chart Document, for the clickable presigned view) + fileName (the human filename).
    */
   router.get(
     '/cases/:id/files-pending-manual',
@@ -156,20 +177,36 @@ export function createChartReadinessRouter(db: AppDb): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const caseId = String(req.params.id);
       const rows = await db.fileReadStatus.findMany({
-        where: { caseId, terminalStatus: 'manual_summary_required' },
+        where: { caseId, terminalStatus: { in: PENDING_CANDIDATE_STATUSES } },
         orderBy: { lastCheckedAt: 'desc' },
       });
-      res.json({ data: rows });
+      const docs = (await db.document.findMany({ where: { caseId }, select: { id: true, s3Key: true } })) as readonly { id?: string; s3Key: string }[];
+      const liveKeys = new Set(docs.map((d) => d.s3Key));
+      const docIdByKey = new Map(docs.filter((d): d is { id: string; s3Key: string } => typeof d.id === 'string').map((d) => [d.s3Key, d.id]));
+      const pending = rows.filter((r) => liveKeys.has(r.filePath) && !isEffectivelyRead(r));
+      res.json({
+        data: pending.map((r) => ({
+          ...r,
+          documentId: docIdByKey.get(r.filePath) ?? null,
+          fileName: originalFileName(r.filePath),
+        })),
+      });
     }),
   );
 
   /**
    * GET /api/v1/rn/files-pending-manual
    *
-   * Phase 7B-revised Build 2: cross-case queue for the RN. Returns all FileReadStatus rows in
-   * 'manual_summary_required' state across every case, oldest first (FIFO — files waiting
+   * Phase 7B-revised Build 2: cross-case queue for the RN, oldest first (FIFO — files waiting
    * longest get RN attention first). Optionally accepts a `?limit=N` query (default 50,
    * max 200) so the queue stays bounded.
+   *
+   * Package 1 (H)+(J), 2026-06-11: same evaluator-derived filtering as the per-case route above
+   * (shared isEffectivelyRead + liveKeys reconcile — the raw terminalStatus read made 15/16 queue
+   * rows false positives), and each surviving row is ENRICHED with veteranName + claimedCondition
+   * (Case → veteran join) + documentId + fileName so the RN queue shows WHO and WHAT, with a
+   * clickable presigned view. Joins are batched findMany({ id: { in } }) — never per-row.
+   * `total` = the post-filter count (drives the HomePage badge — the honest queue depth).
    */
   router.get(
     '/rn/files-pending-manual',
@@ -182,10 +219,46 @@ export function createChartReadinessRouter(db: AppDb): Router {
         if (Number.isInteger(parsed) && parsed > 0) limit = Math.min(parsed, 200);
       }
       const rows = await db.fileReadStatus.findMany({
-        where: { terminalStatus: 'manual_summary_required' },
+        where: { terminalStatus: { in: PENDING_CANDIDATE_STATUSES } },
         orderBy: { lastCheckedAt: 'asc' },
       });
-      res.json({ data: rows.slice(0, limit), total: rows.length });
+      const candidates = rows.filter((r) => !isEffectivelyRead(r));
+
+      // liveKeys reconcile across the candidate cases (one batched query): an orphaned readiness
+      // row (deleted file) must never queue — GET /chart-readiness already drops these.
+      const candidateCaseIds = [...new Set(candidates.map((r) => r.caseId))];
+      const docs = candidateCaseIds.length === 0
+        ? []
+        : ((await db.document.findMany({
+            where: { caseId: { in: candidateCaseIds } },
+            select: { id: true, s3Key: true },
+          })) as readonly { id?: string; s3Key: string }[]);
+      const liveKeys = new Set(docs.map((d) => d.s3Key));
+      const docIdByKey = new Map(docs.filter((d): d is { id: string; s3Key: string } => typeof d.id === 'string').map((d) => [d.s3Key, d.id]));
+      const pending = candidates.filter((r) => liveKeys.has(r.filePath));
+
+      // Enrich only the returned page (one batched Case→veteran query for the sliced rows).
+      const page: readonly FileReadStatusRecord[] = pending.slice(0, limit);
+      const pageCaseIds = [...new Set(page.map((r) => r.caseId))];
+      const cases = pageCaseIds.length === 0
+        ? []
+        : ((await db.case.findMany({
+            where: { id: { in: pageCaseIds } },
+            select: { id: true, claimedCondition: true, veteran: { select: { firstName: true, lastName: true } } },
+          })) as unknown as readonly { id: string; claimedCondition: string | null; veteran?: { firstName: string; lastName: string } | null }[]);
+      const caseById = new Map(cases.map((c) => [c.id, c]));
+
+      const data = page.map((r) => {
+        const c = caseById.get(r.caseId);
+        return {
+          ...r,
+          veteranName: c?.veteran ? `${c.veteran.lastName}, ${c.veteran.firstName}` : null,
+          claimedCondition: c?.claimedCondition ?? null,
+          documentId: docIdByKey.get(r.filePath) ?? null,
+          fileName: originalFileName(r.filePath),
+        };
+      });
+      res.json({ data, total: pending.length });
     }),
   );
 

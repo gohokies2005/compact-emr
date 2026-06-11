@@ -13,12 +13,33 @@ import {
   listCases,
   listFilesPendingManualGlobal,
   listKeyDocsNeedingReview,
+  type FileReadStatus,
   type KeyDocReviewRow,
 } from '../../api/cases';
+import { viewDocument } from '../../api/veterans';
 import { formatRelativeTime } from '../../lib/date';
+import { documentFileName } from '../../lib/documentFileName';
 
 // ManualSummaryForm extracted to components/ManualSummaryForm.tsx (2026-06-11) so the
 // SendToDrafterPanel blocking-file alert can render it inline too. Same behavior here.
+
+// The human filename for a queue row: prefer the server-enriched fileName (Package 1 (J)), fall
+// back to abbreviating the raw filePath (legacy payloads). documentFileName is idempotent, so
+// running it over an already-stripped server name is safe.
+function pendingFileName(row: FileReadStatus): string {
+  return documentFileName(row.fileName ?? row.filePath);
+}
+
+// Open the pending file in a new tab via the presigned inline view — the RN must be able to SEE
+// the file before summarizing it. Same mechanism as SendToDrafterPanel.openBlockingFile.
+async function openPendingFile(documentId: string) {
+  try {
+    const res = await viewDocument(documentId);
+    window.open(res.data.downloadUrl, '_blank', 'noopener,noreferrer');
+  } catch {
+    window.alert('Could not open the file for viewing. Try the chart Documents tab.');
+  }
+}
 
 function KeyDocReviewQueue() {
   const queryClient = useQueryClient();
@@ -245,23 +266,58 @@ export function RnQueuePage() {
               <ul className="mt-3 space-y-2">
                 {rows.map((row) => {
                   const isActive = row.id === selectedId;
+                  const docId = row.documentId ?? null;
+                  const name = pendingFileName(row);
                   return (
                     <li key={row.id}>
-                      <button
-                        type="button"
+                      {/* Row is a div[role=button] (selection), NOT a <button>, so the filename can be a
+                          real nested button (presigned open) without invalid button-in-button HTML —
+                          same pattern as DeliveryReleaseQueue's clickable rows. */}
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Select ${name}`}
                         onClick={() => setSelectedId(row.id)}
-                        className={`w-full rounded-lg border p-3 text-left text-sm transition ${
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            setSelectedId(row.id);
+                          }
+                        }}
+                        className={`w-full cursor-pointer rounded-lg border p-3 text-left text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${
                           isActive
                             ? 'border-indigo-300 bg-indigo-50 text-indigo-900'
                             : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                         }`}
                       >
-                        <div className="font-mono text-xs text-slate-500">case {row.caseId}</div>
-                        <div className="mt-1 break-words">{row.filePath}</div>
+                        {row.veteranName ? (
+                          <div className="font-medium text-slate-900">
+                            {row.veteranName}
+                            {row.claimedCondition ? <span className="font-normal text-slate-500"> · {row.claimedCondition}</span> : null}
+                          </div>
+                        ) : null}
+                        <div className={`font-mono text-xs text-slate-500 ${row.veteranName ? 'mt-1' : ''}`}>case {row.caseId}</div>
+                        <div className="mt-1 break-words">
+                          {docId ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void openPendingFile(docId);
+                              }}
+                              className="rounded text-left underline decoration-slate-300 decoration-2 underline-offset-2 hover:text-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                              title="Open this file (presigned view)"
+                            >
+                              {name}
+                            </button>
+                          ) : (
+                            name
+                          )}
+                        </div>
                         <div className="mt-1 text-xs text-slate-500">
                           Awaiting since {formatRelativeTime(row.lastCheckedAt)}
                         </div>
-                      </button>
+                      </div>
                     </li>
                   );
                 })}
@@ -272,9 +328,28 @@ export function RnQueuePage() {
               {selected ? (
                 <div className="space-y-4">
                   <div>
-                    <h2 className="text-base font-semibold text-slate-800">{selected.filePath}</h2>
+                    <h2 className="text-base font-semibold text-slate-800">
+                      {selected.documentId ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const docId = selected.documentId;
+                            if (docId) void openPendingFile(docId);
+                          }}
+                          className="rounded text-left underline decoration-slate-300 decoration-2 underline-offset-2 hover:text-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                          title="Open this file (presigned view)"
+                        >
+                          {pendingFileName(selected)}
+                        </button>
+                      ) : (
+                        pendingFileName(selected)
+                      )}
+                    </h2>
                     <p className="mt-1 text-xs text-slate-500">
-                      Case {selected.caseId} · awaiting manual summary since {formatRelativeTime(selected.lastCheckedAt)}
+                      {selected.veteranName ? `${selected.veteranName} · ` : ''}
+                      Case {selected.caseId}
+                      {selected.claimedCondition ? ` · ${selected.claimedCondition}` : ''}
+                      {' '}· awaiting manual summary since {formatRelativeTime(selected.lastCheckedAt)}
                     </p>
                   </div>
                   <ManualSummaryForm

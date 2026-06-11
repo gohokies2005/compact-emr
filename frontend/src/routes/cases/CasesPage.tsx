@@ -5,14 +5,14 @@ import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { CASE_STATUS_LABELS } from '../../lib/caseStatus';
-import { formatRelativeTime } from '../../lib/date';
+import { formatAbsoluteDate, formatRelativeTime } from '../../lib/date';
 import { listCases, deleteCase, restoreCase, updateQuickNote, assignCaseRn, type CaseLite } from '../../api/cases';
 import { describeApiError } from '../../api/client';
 import { listVeterans } from '../../api/veterans';
 import { getMe, listUsers, type StaffUser } from '../../api/users';
 import { useAuth } from '../../auth/useAuth';
 import type { CaseStatus, ClaimType } from '../../types/prisma';
-import { useColumnSort, type ColType } from '../../lib/useColumnSort';
+import { type ColType } from '../../lib/useColumnSort';
 import { exportRowsToCsv } from '../../lib/csv';
 import { formatConditionLabel } from '../../lib/conditionLabel';
 import { formatNameLastFirst } from '../../lib/format';
@@ -54,19 +54,106 @@ const caseSortValue = (key: string) => (c: CaseLite): unknown => {
   }
 };
 
+// === Sticky deterministic sort + sticky filters (Ryan 2026-06-11) ===
+// The backend lists cases by updatedAt DESC, so with no explicit sort the rows RESHUFFLED on every
+// refetch (touching ANY case floats it to the top) — that's the "Submitted column resorts itself"
+// complaint. Fixes, all client-side on this page:
+//   1. Default order = Submitted (createdAt) NEWEST FIRST — the actual timeline.
+//   2. Date columns compare on the EPOCH (Date.parse), NEVER the display string (a display-string
+//      sort would order Sep/Oct/Nov alphabetically — the 9/10/11-out-of-order bug).
+//   3. Equal keys tiebreak on case id ASC, so ties can't jitter between refetches.
+//   4. Sort + filters persist in sessionStorage (per-tab; survives navigating into a claim and
+//      back, resets with a fresh tab). Rows themselves are NOT frozen — react-query refetches
+//      still bring in new cases; only the ORDERING is deterministic.
+interface CasesSortState { readonly key: string; readonly dir: 'asc' | 'desc' }
+const DEFAULT_SORT: CasesSortState = { key: 'submitted', dir: 'desc' };
+const SORT_STORAGE_KEY = 'emr.cases.sort.v1';
+const FILTERS_STORAGE_KEY = 'emr.cases.filters.v1';
+const COLUMN_KEYS = new Set(CASE_COLUMNS.map((c) => c.key));
+
+function loadStoredSort(): CasesSortState {
+  try {
+    const raw = sessionStorage.getItem(SORT_STORAGE_KEY);
+    if (raw) {
+      const v = JSON.parse(raw) as Partial<CasesSortState>;
+      if (typeof v.key === 'string' && COLUMN_KEYS.has(v.key) && (v.dir === 'asc' || v.dir === 'desc')) return { key: v.key, dir: v.dir };
+    }
+  } catch { /* corrupted or unavailable storage → default */ }
+  return DEFAULT_SORT;
+}
+
+interface StoredFilters {
+  readonly status: CaseStatus | '';
+  readonly rnSel: readonly string[];
+  readonly archived: boolean;
+  readonly pageSize: number;
+  readonly veteran: { readonly id: string; readonly label: string } | null;
+}
+function loadStoredFilters(): StoredFilters | null {
+  try {
+    const raw = sessionStorage.getItem(FILTERS_STORAGE_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as Partial<StoredFilters>;
+    const statusOk = v.status === '' || (typeof v.status === 'string' && v.status in CASE_STATUS_LABELS);
+    const rnOk = Array.isArray(v.rnSel) && v.rnSel.every((t) => typeof t === 'string');
+    const vetOk = v.veteran == null || (typeof v.veteran.id === 'string' && typeof v.veteran.label === 'string');
+    if (statusOk && rnOk && vetOk && typeof v.archived === 'boolean' && typeof v.pageSize === 'number' && PAGE_SIZES.includes(v.pageSize)) {
+      return { status: v.status as CaseStatus | '', rnSel: v.rnSel as string[], archived: v.archived, pageSize: v.pageSize, veteran: v.veteran ?? null };
+    }
+  } catch { /* corrupted or unavailable storage → role defaults */ }
+  return null;
+}
+
+function compareCaseValues(a: unknown, b: unknown, type: ColType): number {
+  if (type === 'number') {
+    const na = typeof a === 'number' ? a : Number(a);
+    const nb = typeof b === 'number' ? b : Number(b);
+    return (Number.isFinite(na) ? na : -Infinity) - (Number.isFinite(nb) ? nb : -Infinity);
+  }
+  if (type === 'date') {
+    // EPOCH comparison — the load-bearing line for "sorted by actual timeline".
+    const da = a ? Date.parse(String(a)) : NaN;
+    const db = b ? Date.parse(String(b)) : NaN;
+    return (Number.isNaN(da) ? -Infinity : da) - (Number.isNaN(db) ? -Infinity : db);
+  }
+  const sa = a === null || a === undefined ? '' : String(a);
+  const sb = b === null || b === undefined ? '' : String(b);
+  return sa.localeCompare(sb, undefined, { sensitivity: 'base' });
+}
+
+function sortCases(rows: readonly CaseLite[], sort: CasesSortState): CaseLite[] {
+  const get = caseSortValue(sort.key);
+  const type = caseSortType(sort.key);
+  const dir = sort.dir === 'asc' ? 1 : -1;
+  return rows.slice().sort((ra, rb) => {
+    const primary = dir * compareCaseValues(get(ra), get(rb), type);
+    return primary !== 0 ? primary : ra.id.localeCompare(rb.id); // deterministic tiebreak: id ASC
+  });
+}
+
 export function CasesPage() {
   const navigate = useNavigate();
   const { role } = useAuth();
-  const [status, setStatus] = useState<CaseStatus | ''>('');
+  // Filters rehydrate from sessionStorage so navigating into a claim and back keeps the working
+  // set (parsed ONCE via lazy useState — not per render). Cleared with the tab; page # excluded
+  // on purpose (the reset-to-1 effect below fires on mount and would fight it).
+  const [storedFilters] = useState(loadStoredFilters);
+  const [status, setStatus] = useState<CaseStatus | ''>(storedFilters?.status ?? '');
   const [vetQuery, setVetQuery] = useState('');
-  const [veteran, setVeteran] = useState<{ id: string; label: string } | null>(null);
-  const [archived, setArchived] = useState(false); // show the Archive (soft-deleted claims)
+  const [veteran, setVeteran] = useState<{ id: string; label: string } | null>(storedFilters?.veteran ?? null);
+  const [archived, setArchived] = useState(storedFilters?.archived ?? false); // show the Archive (soft-deleted claims)
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
+  const [pageSize, setPageSize] = useState(storedFilters?.pageSize ?? 25);
   // RN filter (P3.3): [] = "All active" (param omitted). Default: admins see ALL active; everyone
   // else lands on their own cases (B-2). Tokens: RN_ME | RN_UNASSIGNED | <AppUser id>.
   const defaultRnSel: readonly string[] = role === 'admin' ? [] : [RN_ME];
-  const [rnSel, setRnSel] = useState<readonly string[]>(defaultRnSel);
+  const [rnSel, setRnSel] = useState<readonly string[]>(storedFilters?.rnSel ?? defaultRnSel);
+  // Sticky sort: rehydrate (default = Submitted, newest first) + persist on every change.
+  const [sort, setSort] = useState<CasesSortState>(loadStoredSort);
+  useEffect(() => { try { sessionStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sort)); } catch { /* storage unavailable */ } }, [sort]);
+  useEffect(() => {
+    try { sessionStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify({ status, rnSel, archived, pageSize, veteran } satisfies StoredFilters)); } catch { /* storage unavailable */ }
+  }, [status, rnSel, archived, pageSize, veteran]);
 
   // "Me" = my AppUser id (assignedRnId keys on it, NOT the Cognito sub) — resolved once via
   // /users/me. A login without an AppUser row 404s: degrade by hiding [Me] and falling back to
@@ -147,9 +234,20 @@ export function CasesPage() {
     onError: (e: unknown) => window.alert(`Could not assign the RN — ${describeApiError(e)}`),
   });
 
-  const { onHeaderClick, sortRows, ariaSort, indicator } = useColumnSort();
+  // 3-state header cycle, except "default" is now the explicit timeline order (Submitted desc),
+  // not raw server order (server = updatedAt desc, which reshuffles on every touch). On the
+  // Submitted column itself desc IS the default, so it just toggles asc/desc.
+  function onHeaderClick(key: string) {
+    setSort((prev) => {
+      if (prev.key !== key) return { key, dir: 'asc' };
+      if (prev.dir === 'asc') return { key, dir: 'desc' };
+      return key === DEFAULT_SORT.key ? { key, dir: 'asc' } : DEFAULT_SORT;
+    });
+  }
+  const ariaSort = (key: string): 'ascending' | 'descending' | 'none' => (sort.key !== key ? 'none' : sort.dir === 'asc' ? 'ascending' : 'descending');
+  const indicator = (key: string): '' | ' ▲' | ' ▼' => (sort.key !== key ? '' : sort.dir === 'asc' ? ' ▲' : ' ▼');
   const pageRows = cases.data?.data ?? [];
-  const rows = sortRows(pageRows, caseSortValue, caseSortType);
+  const rows = sortCases(pageRows, sort);
   const pageTruncated = total > pageRows.length;
   function exportCsv() {
     // Cases is server-paginated, so this exports the CURRENT page only (after filters + sort).
@@ -217,8 +315,10 @@ export function CasesPage() {
                 <button type="button" aria-label="Assign RN" title="Assign an RN" className="text-base leading-none text-slate-300 hover:text-indigo-600" onClick={() => setAssignCase(c)}>+</button>
               )}
             </td>
-            <td className="px-4 py-3 text-slate-500" title={new Date(c.createdAt).toLocaleString()}>{formatRelativeTime(c.createdAt)}</td>
-            <td className="px-4 py-3 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
+            {/* Submitted = absolute month-name date (Ryan 2026-06-11: "just put by date, not how long ago");
+                Updated stays relative ("for updates keep how long ago"). Hover = full local timestamp. */}
+            <td className="whitespace-nowrap px-4 py-3 text-slate-500" title={new Date(c.createdAt).toLocaleString()}>{formatAbsoluteDate(c.createdAt)}</td>
+            <td className="px-4 py-3 text-slate-500" title={new Date(c.updatedAt).toLocaleString()}>{formatRelativeTime(c.updatedAt)}</td>
             <td className="px-4 py-3 text-slate-400">{c.version}</td>
             <td className="px-4 py-3 text-right whitespace-nowrap">
               {archived ? (

@@ -43,14 +43,14 @@ const CASES_RESULT = {
     {
       id: 'CASE-001', veteranId: 'VET-1', claimedCondition: 'Obstructive sleep apnea', claimType: 'initial',
       status: 'drafting', version: 3, currentVersion: 2, assignedPhysicianId: null, assignedRnId: null, assignedRn: null, refundEligible: false,
-      createdAt: '2026-05-01T00:00:00Z', updatedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+      createdAt: '2026-05-01T12:00:00Z', updatedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
       veteran: { id: 'VET-1', firstName: 'Matthew', lastName: 'Young', email: 'm@example.com' }, assignedPhysician: null,
     },
     {
       id: 'CASE-002', veteranId: 'VET-2', claimedCondition: 'Tinnitus', claimType: 'initial',
       status: 'intake', version: 1, currentVersion: 1, assignedPhysicianId: null, assignedRnId: 'U-SARAH',
       assignedRn: { id: 'U-SARAH', email: 'sarah@x.test', name: 'Sarah Jones' }, refundEligible: false,
-      createdAt: '2026-05-02T00:00:00Z', updatedAt: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+      createdAt: '2026-05-02T12:00:00Z', updatedAt: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
       veteran: { id: 'VET-2', firstName: 'Aaron', lastName: 'Adams', email: 'a@example.com' }, assignedPhysician: null,
     },
   ],
@@ -58,6 +58,7 @@ const CASES_RESULT = {
 };
 
 beforeEach(() => {
+  sessionStorage.clear(); // sticky sort/filters persist per-tab — isolate each test
   mockRole = 'ops_staff';
   listCasesMock.mockReset().mockResolvedValue(CASES_RESULT);
   assignCaseRnMock.mockReset().mockResolvedValue({ data: {} });
@@ -67,7 +68,7 @@ beforeEach(() => {
 
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><MemoryRouter><CasesPage /></MemoryRouter></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><MemoryRouter><CasesPage /></MemoryRouter></QueryClientProvider>);
 }
 
 function openRnDropdown() {
@@ -95,8 +96,8 @@ describe('CasesPage', () => {
     const order = () => screen.getAllByText(/^CASE-00\d$/).map((el) => el.textContent);
     const vetHeader = () => screen.getByRole('button', { name: /Veteran/ });
 
-    // default = server/mock order
-    expect(order()).toEqual(['CASE-001', 'CASE-002']);
+    // default = Submitted newest-first (timeline), NOT raw server order (2026-06-11 sticky sort)
+    expect(order()).toEqual(['CASE-002', 'CASE-001']);
     expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('none');
 
     // 1st click = ascending by veteran name (Aaron Adams < Matthew Young)
@@ -111,10 +112,10 @@ describe('CasesPage', () => {
     expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('descending');
     expect(vetHeader().textContent).toContain('▼');
 
-    // 3rd click = back to default
+    // 3rd click = back to default (Submitted newest-first)
     fireEvent.click(vetHeader());
     expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('none');
-    expect(order()).toEqual(['CASE-001', 'CASE-002']);
+    expect(order()).toEqual(['CASE-002', 'CASE-001']);
   });
 
   // === P3.2: the claim-type FILTER is gone; the Type COLUMN stays ===
@@ -216,5 +217,78 @@ describe('CasesPage', () => {
     // In the popup the staff entries are BUTTONS (the table cell name + filter labels are not).
     fireEvent.click(screen.getByRole('button', { name: 'Sarah Jones' }));
     await waitFor(() => expect(assignCaseRnMock).toHaveBeenCalledWith('CASE-001', { rnUserId: 'U-SARAH', version: 3 }));
+  });
+
+  // === Chunk C (2026-06-11): absolute Submitted date + sticky deterministic sort ===
+
+  it('Submitted shows an absolute month-name date; Updated keeps the relative time', async () => {
+    renderPage();
+    await screen.findByText('CASE-001');
+    // Mock createdAt values are midday UTC so the local date never rolls a day in any test TZ.
+    expect(screen.getByText('May 1, 2026')).toBeInTheDocument();
+    expect(screen.getByText('May 2, 2026')).toBeInTheDocument();
+    // Updated column still renders "how long ago" (mock rows are 3h and 1h old).
+    expect(screen.getByText('3 hours ago')).toBeInTheDocument();
+    expect(screen.getByText('1 hour ago')).toBeInTheDocument();
+  });
+
+  it('sorts Submitted by the actual timestamp (epoch), never the display string — Sep/Oct/Nov stay in timeline order', async () => {
+    const mk = (id: string, iso: string) => ({ ...CASES_RESULT.data[0], id, createdAt: iso, updatedAt: iso });
+    listCasesMock.mockResolvedValue({
+      // Served deliberately scrambled: Sep, Nov, Oct.
+      data: [mk('CASE-SEP', '2025-09-05T12:00:00Z'), mk('CASE-NOV', '2025-11-02T12:00:00Z'), mk('CASE-OCT', '2025-10-09T12:00:00Z')],
+      page: 1, pageSize: 25, total: 3,
+    });
+    renderPage();
+    await screen.findByText('CASE-SEP');
+    const order = () => screen.getAllByText(/^CASE-(SEP|OCT|NOV)$/).map((el) => el.textContent);
+    const submittedHeader = screen.getByRole('button', { name: /Submitted/ });
+    // Default = Submitted newest-first, with the descending indicator visible.
+    expect(submittedHeader.closest('th')?.getAttribute('aria-sort')).toBe('descending');
+    expect(order()).toEqual(['CASE-NOV', 'CASE-OCT', 'CASE-SEP']);
+    // Ascending = oldest first. A display-STRING sort ("Nov 2, 2025" < "Oct 9, 2025" < "Sep 5, 2025")
+    // would invert this — the exact 9/10/11-out-of-order bug Ryan described.
+    fireEvent.click(submittedHeader);
+    expect(order()).toEqual(['CASE-SEP', 'CASE-OCT', 'CASE-NOV']);
+  });
+
+  it('equal timestamps tiebreak on case id ascending, regardless of server order (no refetch jitter)', async () => {
+    const t = '2026-04-10T12:00:00Z';
+    const mk = (id: string) => ({ ...CASES_RESULT.data[0], id, createdAt: t, updatedAt: t });
+    listCasesMock.mockResolvedValue({ data: [mk('CASE-009'), mk('CASE-003')], page: 1, pageSize: 25, total: 2 });
+    renderPage();
+    await screen.findByText('CASE-009');
+    expect(screen.getAllByText(/^CASE-00\d$/).map((el) => el.textContent)).toEqual(['CASE-003', 'CASE-009']);
+  });
+
+  it('sort persists across unmount/remount (sessionStorage): Veteran desc survives navigating away and back', async () => {
+    const first = renderPage();
+    await screen.findByText('CASE-001');
+    const vetHeader = () => screen.getByRole('button', { name: /Veteran/ });
+    fireEvent.click(vetHeader()); // asc
+    fireEvent.click(vetHeader()); // desc → Young (CASE-001) before Adams (CASE-002)
+    expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('descending');
+    first.unmount();
+
+    renderPage(); // simulates navigating to a claim and back (CasesPage remounts)
+    await screen.findByText('CASE-001');
+    expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('descending');
+    // Veteran desc, NOT the default Submitted-desc order (which would put CASE-002 first).
+    expect(screen.getAllByText(/^CASE-00\d$/).map((el) => el.textContent)).toEqual(['CASE-001', 'CASE-002']);
+  });
+
+  it('status filter persists across unmount/remount (sessionStorage)', async () => {
+    const first = renderPage();
+    await screen.findByText('CASE-001');
+    const statusSelect = () => screen.getAllByRole('combobox')[0] as HTMLSelectElement; // first select = Status
+    fireEvent.change(statusSelect(), { target: { value: 'intake' } });
+    await waitFor(() => expect(listCasesMock).toHaveBeenCalledWith(expect.objectContaining({ status: 'intake' })));
+    first.unmount();
+
+    listCasesMock.mockClear();
+    renderPage();
+    await screen.findByText('CASE-001');
+    expect(statusSelect().value).toBe('intake');
+    expect(listCasesMock).toHaveBeenCalledWith(expect.objectContaining({ status: 'intake' }));
   });
 });

@@ -22,3 +22,12 @@ export function formatRelativeTime(isoString: string): string {
   }
   return rtf.format(Math.round(duration), 'years');
 }
+
+// Absolute month-NAME date, e.g. "Jun 9, 2026", in the viewer's local timezone. Deliberately not
+// a numeric format (6/9/26): with Sep/Oct/Nov dates in the list, all-numeric forms are exactly
+// the "9 and 10 and 11 out of order" ambiguity Ryan flagged (2026-06-11). Empty string if unparseable.
+export function formatAbsoluteDate(isoString: string): string {
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}

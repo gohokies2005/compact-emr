@@ -27,6 +27,13 @@ const { classify } = require('./intentRouter');
 const { resolveCondition } = require('./bvaConditionMatch');
 const { pairLookup, psychRollup } = require('./bvaPairLookup');
 const { livePubmedLookup } = require('./advisoryLiteratureLookup');
+const { isViabilityQuery, buildViabilityFacts } = require('./viabilityGrounding');
+
+// Task (f): when AEGIS_VIABILITY_GROUNDING is on AND the question is viability-shaped,
+// inject the DETERMINISTIC viability engine's FACTS block ABOVE the corpus context.
+// DARK by default (flag off). Fail-open: a non-available block degrades to a one-line
+// note; the engine never crashes the ask-path and never fabricates a band.
+const VIABILITY_GROUNDING_ON = process.env.AEGIS_VIABILITY_GROUNDING === 'true';
 
 const SEM_K = 8;             // semantic top-k
 const RELEVANCE_FLOOR = 0.40; // cosine; below this AND no folder match = no coverage (calibrated 2026-06-07)
@@ -127,6 +134,31 @@ async function retrieve(input, clients = {}) {
   const sources = (routed.recipe && routed.recipe.sources) || [];
   notes.push(`intent=${routed.intent} (${routed.confidence})`);
 
+  // --- DETERMINISTIC VIABILITY FACTS (task f; flag-gated + DARK + fail-open) ---
+  // Injected ABOVE the corpus so the model EXPLAINS the engine's ground-truth band/
+  // anchor rather than inferring one. Carries NO BVA/win-rate figures (mechanism
+  // authority only). Never throws past here — buildViabilityFacts is self-contained
+  // fail-open, and this whole block is additionally try/caught.
+  let viability_facts;
+  if (VIABILITY_GROUNDING_ON && isViabilityQuery(question)) {
+    try {
+      const vf = buildViabilityFacts(question);
+      viability_facts = vf.block;
+      // Prepend as the FIRST chunk so any consumer that only reads chunks[] still
+      // sees the engine ground truth ahead of the retrieved corpus.
+      chunks.unshift({
+        text: vf.block,
+        source: 'viability_facts',
+        citation: 'FRN viability engine (deterministic)',
+        metadata: { available: vf.available, deterministic: true },
+        letter_citable: false,
+      });
+      notes.push(`viability_facts: ${vf.available ? 'engine ground-truth injected' : 'not available (fail-open note)'}`);
+    } catch (e) {
+      errors.push(`viability grounding failed (fail-open): ${e.message}`);
+    }
+  }
+
   // --- BVA stats (atlas; file-based, decided-only) — only for a real pair ---
   if (sources.includes('pair_atlas') || sources.includes('condition_atlas') || sources.includes('live_sql')) {
     mode_ran.push('sql');
@@ -181,7 +213,7 @@ async function retrieve(input, clients = {}) {
   else if (hasReal || mode_ran.includes('exact')) status = 'ok';
   else status = 'thin';
 
-  return { status, mode_ran, errors, chunks, stats, notes, coverage_gap };
+  return { status, mode_ran, errors, chunks, stats, notes, coverage_gap, viability_facts };
 }
 
 module.exports = { retrieve, parsePair, resolveStat, RELEVANCE_FLOOR };

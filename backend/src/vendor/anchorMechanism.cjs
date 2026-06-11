@@ -148,6 +148,12 @@ function resolveAnchorEligibility(upstreamText, claimedText) {
         const donorM = typeof donorRow.m_static === 'number' ? donorRow.m_static : null;
         const derivedTier = _demoteTier(donorRow.eligibility, inh.tierShift);
         const derivedM = donorM != null ? Math.max(1, donorM + inh.mShift) : null;
+        // Propagate the donor pair's aggravation-only status (2026-06-11, Aegis-window
+        // catch): PTSD→HTN is _AGGRAVATION_ONLY because the VA reliably denies psych→HTN
+        // DIRECT causation — that applies to ANY psych dx, so the inherited (non-PTSD-trauma)
+        // pair must inherit 3.310(b) aggravation framing too, not the donor row's raw 3.310(a).
+        // The main-path _AGGRAVATION_ONLY override is skipped by this early return, so apply it here.
+        const donorAgg = isAggravationOnly(clC, inh.from);
         return {
           upstream_canonical: upC,
           claimed_canonical: clC,
@@ -156,7 +162,9 @@ function resolveAnchorEligibility(upstreamText, claimedText) {
           M_static: derivedM,
           E: typeof donorRow.e === 'number' ? donorRow.e : null,
           tier: derivedTier,
-          basis: donorRow.basis != null ? donorRow.basis : null,
+          basis: donorAgg ? '3.310b' : (donorRow.basis != null ? donorRow.basis : null),
+          aggravation_only: donorAgg || undefined,
+          causation_denied: donorAgg || undefined,
           requires: inh.requires,
           mechanism_class: donorRow.mechanism_class != null ? donorRow.mechanism_class : null,
           // Derived rows are never "blessed-confirmed" — always defer to physician.

@@ -57,6 +57,13 @@ const VENDOR_FILES = [
   'app/services/advisory/bvaConditionMatch.js',
   'app/services/advisory/bvaPairLookup.js',
   'app/services/advisory/advisoryLiteratureLookup.js',
+  // viability grounding (task f) — retrieve.js top-level-requires it; the engine trio below
+  // completes its lazy require-graph (../anchorMechanism → ./conditionCanon → references table).
+  // DARK in the EMR tab unless AEGIS_VIABILITY_GROUNDING=true is set on the API env.
+  'app/services/advisory/viabilityGrounding.js',
+  'app/services/anchorMechanism.js',
+  'app/services/conditionCanon.js',
+  'references/anchor_mechanism_pairs.json',
   // citation fallback (PubMed no-coverage path)
   'app/services/citationFallback.js',
   // BVA pair atlas (read by bvaPairLookup)

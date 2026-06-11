@@ -3,7 +3,7 @@
     "purpose": "Canonical facts for the RN advisory AI tool. The SINGLE SOURCE OF TRUTH that resolves the known doc conflicts (stale $350 pricing, first-person voice, anonymity/no-photo, Internal-Medicine). Every advisory answer defers to this over any other doc.",
     "source_of_record": "docs/training/source/FRN_RN_Email_Response_Playbook.md Attachment L",
     "sync_rule": "When pricing/scope/voice/policy changes, update Attachment L + CLAUDE.md + RN FAQ + THIS file in the same change so they never drift.",
-    "last_synced": "2026-06-06"
+    "last_synced": "2026-06-11"
   },
   "pricing": {
     "record_review_fee_usd": 50,
@@ -16,8 +16,8 @@
     "returning_client_pays_review_fee": false,
     "never_quote": [350, 400],
     "grandfathered_350_note": "Grandfathered rate for pre-2026-05-25 pipeline/returning customers ONLY, charged via the EMR's dedicated button. Never quote to anyone else.",
-    "refund_guarantee_days": 30,
-    "refund_guarantee_scope": "Defective letter WE delivered, NOT a VA denial of a sound opinion. Delivered-letter refunds escalate to Team Lead / Dr. Ryan."
+    "completion_guarantee_days": 30,
+    "completion_guarantee_scope": "TIMELINE-ONLY: if a letter is not completed within 30 days of our receiving COMPLETE records, the $50 review fee is refunded. This is the ONLY public guarantee. There is NO refund guarantee on delivered letters and NO refund-on-decline. If we delivered something materially defective, we fix it; a VA denial of a properly-drafted opinion is not a defect. Any delivered-letter refund ask escalates to Team Lead / Dr. Ryan — never promised, never refused by the RN."
   },
   "scope": {
     "service": "Independent medical opinion (nexus letter) by record review only.",
@@ -29,9 +29,17 @@
     "that_is_whose_job": "VSO",
     "excluded_states": ["Oregon", "Utah"]
   },
+  "post_denial_supplemental": {
+    "rule": "A returning client who ACTUALLY SUBMITTED our letter and then received a VA denial may receive ONE standalone supplemental opinion (a 'memo') the physician signs, rebutting the stated denial rationale — only when the denial is medically rebuttable. It is a fresh one-page STANDALONE memo, never an addendum bolted onto the original letter.",
+    "free_rebuttable_supplemental": true,
+    "new_theory_or_records": "A new theory or new records is a NEW full-price $500 letter, not a free revision.",
+    "original_letter_refund": "Refund of the original $500 is NOT standard — a VA denial of a sound opinion is not a defect; the letter was the work product they paid for.",
+    "rn_handling": "Escalate to Dr. Ryan with the VA decision letter. The RN does not promise a memo or predict whether a supplemental will succeed; whether one is warranted is the physician's call. Decline-vs-supplemental filing strategy (which review lane) is the VSO's job.",
+    "not_to_be_confused_with": "The 30-day guarantee (pricing.completion_guarantee_scope) is a COMPLETION/timeline guarantee on the $50 review fee only — there is no post-delivery refund guarantee, and a VA denial of a sound opinion is not a defect."
+  },
   "timeline": {
-    "turnaround": "14 business days from COMPLETE records",
-    "post_delivery_guarantee_days": 30,
+    "turnaround": "14 days (two weeks) from COMPLETE records",
+    "completion_guarantee_days": 30,
     "rule": "Quote specifics, never 'soon'. Never promise a date the doctor has not committed to."
   },
   "records": {

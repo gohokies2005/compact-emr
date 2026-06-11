@@ -7,7 +7,7 @@
   "intents": {
     "viability": {
       "label": "Is this case viable / should we take it?",
-      "sources": ["chart_slice", "reject_list", "pair_atlas", "library", "cfr", "pubmed_live_fallback"],
+      "sources": ["chart_slice", "reject_list", "viability_engine", "library", "cfr", "pubmed_live_fallback"],
       "classifier_cues": ["viable", "viability", "should we take", "is this a case", "worth it", "can we help", "case-check", "is this strong enough for us", "decline or accept", "connect", "link to", "related to", "caused by", "aggravated by", "pathway", "framing", "anchor"],
       "retrieval_recipe": [
         "chart slice (read-only): current diagnosis present? in-service event/exposure? if secondary, is the primary service-connected?",

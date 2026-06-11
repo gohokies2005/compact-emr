@@ -170,6 +170,10 @@ export class ApiStack extends Stack {
         SES_FROM_ADDRESS: 'info@flatratenexus.com',                          // must be a VERIFIED SES identity
         DELIVERY_PORTAL_BASE_URL: `https://${props.config.domainName}`,      // /d/<token> lives on the SPA
         DELIVERY_ADMIN_BCC: 'admin@flatratenexus.com',
+        // SES-SANDBOX forwarding mode (Ryan 2026-06-10): all veteran emails delivered to this inbox
+        // instead, [FWD to <real>] prefixed, staff forwards manually within a few hours. Clear the
+        // cdk.json value + deploy to disable once SES production access (case 178094063100860) lands.
+        EMAIL_REDIRECT_ALL_TO: (this.node.tryGetContext('email_redirect_all_to') as string | undefined) ?? '',
         ...(renderImageTag ? { RENDER_LAMBDA_NAME: renderFnName } : {}),
       },
       bundling: {

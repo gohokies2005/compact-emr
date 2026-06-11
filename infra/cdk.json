@@ -2,6 +2,7 @@
   "app": "npx tsx bin/compact-emr.ts",
   "context": {
     "drafter_image_tag": "796869e-drafter39",
+    "email_redirect_all_to": "info@flatratenexus.com",
     "render_image_tag": "81c0046-render-lambda",
     "chart_autofill": "on",
     "staging": {

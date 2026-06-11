@@ -16,6 +16,54 @@ Two handlers in one Lambda artifact:
   Handler pulls the result blocks, groups `LINE` blocks by Page, averages confidence per
   page, and POSTs to `/api/v1/internal/documents/<documentId>/pages`.
 
+**Native text-readers (keystone plan Package 2):** `.txt`, `.docx`, and legacy `.doc` never
+go to Textract. `start_handler` branches on the s3-key EXTENSION (the declared contentType
+arrives as `application/octet-stream`) and reads the bytes directly — `.txt` via BOM-tolerant
+UTF-8 decode, `.docx` via `python-docx` (paragraphs + tables in document order), `.doc` via a
+best-effort ladder (mislabeled-docx → RTF strip → plain-text sniff → flag for the RN with an
+actionable "legacy .doc — ask for PDF/docx" note). Native reads POST through the same
+`/pages` upsert as Textract so the chart-readiness word-count/garble gating applies unchanged.
+
+### Vendored dependencies (`ocr/`)
+
+The OCR Lambdas deploy with `lambda.Code.fromAsset(workers/ocr)` (`infra/lib/workers-stack.ts`)
+— the directory ships AS-IS, with **no bundling step**. Every dependency in
+`ocr/requirements.txt` must therefore be pip-installed INTO `workers/ocr/` with the Lambda
+runtime's platform pinned (Python 3.12, manylinux x86_64). `python-docx` itself is pure
+Python, but it depends on `lxml`, which has compiled C extensions — a wheel built for
+Windows/mac will `ImportError` at cold start and kill every OCR invocation.
+
+Build (run from `workers/ocr/`; re-run whenever `requirements.txt` changes):
+
+```bash
+pip install -r requirements.txt -t . --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12
+```
+
+Then VERIFY the platform before deploying:
+
+```bash
+cat lxml-*.dist-info/WHEEL   # expect: Tag: cp312-cp312-manylinux2014_x86_64 (and/or manylinux_2_17)
+ls lxml/*.so                 # expect: *.cpython-312-x86_64-linux-gnu.so — and NO *.pyd (Windows)
+```
+
+If pip ever refuses the cross-platform install, fall back to
+`pip download -r requirements.txt -d ./_wheels --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12`
+and unzip each wheel into `workers/ocr/`.
+
+`boto3` is NOT vendored — the Lambda Python 3.12 runtime provides it (vendoring it would add
+~80MB of botocore to the asset). The vendored trees (`docx/`, `lxml/`, `typing_extensions.py`,
+`*.dist-info/`) must be present in the checkout at `cdk deploy` time — they ARE the asset.
+
+### Tests (`ocr/`)
+
+```bash
+pip install pytest python-docx   # local-platform python-docx: builds the .docx test fixtures
+python -m pytest workers/ocr -q
+```
+
+`workers/ocr/conftest.py` pins the `docx`/`lxml` imports to your LOCAL site-packages — the
+vendored copies inside `workers/ocr/` are manylinux binaries and cannot import on Windows/mac.
+
 **Env vars required:**
 - `COMPACT_EMR_API_URL` — base URL of the API (e.g. `https://api.emr.flatratenexus.com`)
 - `INTERNAL_WORKER_TOKEN` — shared secret matching the API's `INTERNAL_WORKER_TOKEN`. From
@@ -70,7 +118,8 @@ pages, swap to ECS Fargate per the architect plan's FFC-3.
 ```bash
 # OCR start handler — simulate an S3 event
 cd workers/ocr
-pip install -r requirements.txt
+pip install boto3   # boto3 is runtime-provided in Lambda, so it is NOT in requirements.txt;
+                    # requirements.txt deps are VENDORED into this dir (see "Vendored dependencies")
 export COMPACT_EMR_API_URL=http://localhost:3000
 export INTERNAL_WORKER_TOKEN=local-dev-token-must-be-16+chars
 export COMPLETION_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:textract-completion

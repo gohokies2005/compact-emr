@@ -22,11 +22,22 @@ claude.js ocrSinglePdf: send the file as a base64 document/image, ask for verbat
 restores the local behavior on the cloud side so an unreadable file is auto-read instead of
 dead-ending to the RN queue. Reversible: env CLAUDE_OCR_FALLBACK=off → Textract-only.
 
+NATIVE TEXT-READERS (keystone plan Package 2): `.txt`/`.docx`/`.doc` are not OCR inputs —
+Textract rejects them and Claude vision can't take them, so they used to dead-end to the RN
+queue with a generic flag. start_handler now branches on the s3-key EXTENSION (the declared
+contentType arrives as application/octet-stream — same lesson as intakes.ts
+effectiveContentType) BEFORE Textract: .txt is decoded directly (BOM-tolerant UTF-8),
+.docx is extracted with python-docx (vendored into this directory — see workers/README.md
+"Vendored dependencies"), and legacy .doc gets a best-effort ladder (mislabeled-docx → RTF
+strip → plain-text sniff → flag with an actionable note). Native reads POST through the SAME
+/pages upsert as Textract, so the word-count/garbled chart-readiness gating applies unchanged.
+
 DEPLOYED via workers-stack.ts (compact-emr-<env>-ocr-start / -ocr-completion Lambdas). To run
 locally, see the README at workers/README.md.
 """
 
 import base64
+import io
 import json
 import os
 import re
@@ -124,6 +135,12 @@ def start_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     if doc.get("hasPages"):
         print(f"document {document_id} already has OCR pages; skipping Textract for {key}")
         return {"started": [], "skipped": "already_has_pages"}
+
+    # Package 2: native text-readers. Keyed on the s3-key EXTENSION, not the declared
+    # contentType (which arrives as application/octet-stream). Never starts Textract.
+    ext = _key_extension(key)
+    if ext in _NATIVE_TEXT_EXTS:
+        return _native_read(bucket, key, document_id, ext)
 
     sns_topic = os.environ["COMPLETION_SNS_TOPIC_ARN"]
     sns_role_arn = os.environ["TEXTRACT_SNS_ROLE_ARN"]
@@ -268,7 +285,7 @@ def _post_pages_to_api(document_id: str, pages: list[dict[str, Any]], document_p
             raise RuntimeError(f"API rejected pages upsert: {response.status}")
 
 
-def _post_failed_read_attempt(document_id: str, textract_status: str, job_id: str) -> None:
+def _post_failed_read_attempt(document_id: str, textract_status: str, job_id: str, error_message: str | None = None) -> None:
     """POST a synthetic failed read-attempt to /api/v1/internal/documents/:id/read-attempt-
     failed so the file lands in file_read_status with terminalStatus='manual_summary_required'
     and the RN queue picks it up.
@@ -276,12 +293,16 @@ def _post_failed_read_attempt(document_id: str, textract_status: str, job_id: st
     Without this, a Textract failure (status != SUCCEEDED) leaves the file invisible to the
     chart-readiness gate and the pipeline silently halts. The route resolves documentId →
     caseId + s3Key server-side so the worker doesn't have to round-trip for the caseId.
+
+    `error_message` (optional) is appended to the RN-visible note by the route — the native
+    text-readers use it to make the flag ACTIONABLE (e.g. the legacy-.doc disposition), never
+    a generic "could not read".
     """
     url = f"{_api_base_url()}/api/v1/internal/documents/{document_id}/read-attempt-failed"
-    body = json.dumps({
-        "textractStatus": textract_status,
-        "jobId": job_id,
-    }).encode("utf-8")
+    payload: dict[str, Any] = {"textractStatus": textract_status, "jobId": job_id}
+    if error_message:
+        payload["errorMessage"] = error_message[:2000]  # route caps errorMessage at 2000 chars
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
@@ -294,6 +315,159 @@ def _post_failed_read_attempt(document_id: str, textract_status: str, job_id: st
     with urllib.request.urlopen(req, timeout=30) as response:
         if response.status >= 300:
             raise RuntimeError(f"API rejected failed-read-attempt POST: {response.status}")
+
+
+# ===== Package 2 (F): native text-readers — .txt / .docx / legacy .doc =====
+# These extensions are not OCR inputs (Textract rejects them; Claude vision can't take them),
+# so before this branch they structurally dead-ended to the RN queue. start_handler reads the
+# bytes directly and POSTs through the SAME /pages upsert as Textract — the server-side
+# classifyReadAttempt word-count/garble gating therefore applies to native reads unchanged.
+
+_NATIVE_TEXT_EXTS = {"txt", "docx", "doc"}
+_MAX_PAGE_CHARS = 95_000  # /pages route rejects text over 100k chars/page; chunk with headroom
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # genuine legacy .doc (OLE compound file)
+_LEGACY_DOC_NOTE = "legacy .doc format — ask the veteran for PDF/docx, or summarize manually"
+
+
+def _key_extension(key: str) -> str:
+    """Lower-cased extension of the s3 key's filename segment ('' when none)."""
+    name = key.rsplit("/", 1)[-1]
+    return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+
+def _decode_text_bytes(data: bytes) -> str:
+    """BOM-tolerant text decode. UTF-16 LE/BE BOMs are honored (Windows Notepad exports
+    both), a UTF-8 BOM is stripped, everything else is UTF-8 with errors='replace' — never
+    raises; undecodable bytes become U+FFFD and the readiness garble gate judges the result."""
+    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
+        return data.decode("utf-16", errors="replace")
+    if data.startswith(b"\xef\xbb\xbf"):
+        return data.decode("utf-8-sig", errors="replace")
+    return data.decode("utf-8", errors="replace")
+
+
+def _extract_docx_text(data: bytes) -> str:
+    """python-docx extraction: paragraphs + tables in DOCUMENT ORDER via iter_inner_content
+    (python-docx>=1.1, pinned in requirements.txt). Table rows render as ' | '-joined cells.
+    Lazy import: docx (and its compiled lxml dep) is vendored into this directory for the
+    Lambda asset; importing at module top would tax every non-docx cold start."""
+    from docx import Document as _DocxDocument
+    from docx.table import Table as _DocxTable
+
+    document = _DocxDocument(io.BytesIO(data))
+    parts: list[str] = []
+    for item in document.iter_inner_content():
+        if isinstance(item, _DocxTable):
+            for row in item.rows:
+                cells = [cell.text.strip() for cell in row.cells]
+                if any(cells):
+                    parts.append(" | ".join(cells))
+        elif item.text:
+            parts.append(item.text)
+    return "\n".join(parts).strip()
+
+
+def _strip_rtf(data: bytes) -> str:
+    """CRUDE RTF→text (no dependency): enough for a best-effort read of an RTF masquerading
+    as .doc. Header/font-table residue may survive — the downstream word-count/garble gate
+    decides whether the read is usable, same as any other extraction."""
+    text = data.decode("latin-1", errors="replace")
+    text = re.sub(r"\{\\\*[^{}]*\}", "", text)  # starred destination groups (\*\generator …)
+    text = re.sub(r"\\par[d]?\b", "\n", text)
+    text = re.sub(r"\\(line|row)\b", "\n", text)
+    text = re.sub(r"\\tab\b", "\t", text)
+    text = re.sub(r"\\'([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), text)  # hex escapes
+    text = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", text)  # remaining control words
+    text = re.sub(r"[{}]", "", text)
+    text = re.sub(r"\\([^a-zA-Z])", r"\1", text)  # control symbols (\~ \- \_ …)
+    return text.strip()
+
+
+def _mostly_printable(text: str) -> bool:
+    """Heuristic for 'these bytes are really just text': ≥85% printable/whitespace chars
+    (replacement chars from a lossy decode count AGAINST it) over the first 64KB."""
+    sample = text[:65536]
+    if not sample.strip():
+        return False
+    good = sum(1 for ch in sample if (ch.isprintable() or ch in "\t\n\r\f") and ch != "�")
+    return good / len(sample) >= 0.85
+
+
+def _read_legacy_doc(data: bytes) -> tuple[str | None, str, str, str | None, str]:
+    """Best-effort ladder for legacy `.doc` (Ryan: 'read any form thereof'). Returns
+    (text, method, via, flag_note, flag_status); text=None ⇒ flag for RN with flag_note.
+
+    (i)   try python-docx anyway — catches a real .docx mislabeled .doc (zip magic);
+    (ii)  magic-byte sniffs: RTF header → crude control-word strip; genuine OLE compound
+          file → flag with the ACTIONABLE legacy-.doc note (no OLE reader in the bundle —
+          antiword/libreoffice judged too heavy for a rare format);
+    (iii) mostly-printable bytes → treat as plain text (e.g. a .txt renamed .doc);
+    else  flag with an actionable note. Never silent, never a generic flag."""
+    try:  # (i) mislabeled .docx
+        return _extract_docx_text(data), "native_docx", "python-docx (mislabeled .doc)", None, ""
+    except Exception:  # noqa: BLE001 — not a docx; descend the ladder
+        pass
+    if data.lstrip()[:5].startswith(b"{\\rtf"):  # (ii) RTF masquerading as .doc
+        return _strip_rtf(data), "native_text", "rtf-strip", None, ""
+    if data[:8] == _OLE_MAGIC:  # (ii) genuine OLE .doc — flag, actionably
+        return None, "", "", _LEGACY_DOC_NOTE, "LEGACY_DOC"
+    decoded = _decode_text_bytes(data)
+    if _mostly_printable(decoded):  # (iii) plain text wearing a .doc name
+        return decoded, "native_text", "plain-text-sniff", None, ""
+    return None, "", "", "unreadable .doc — ask the veteran for PDF/docx, or summarize manually", "NATIVE_UNREADABLE"
+
+
+def _build_native_pages(text: str) -> list[dict[str, Any]]:
+    """Form-feed (\\f) page breaks → one /pages entry per page; a no-FF file is a single page.
+    Pages over the route's 100k-char cap are hard-chunked. An all-empty decode still posts one
+    (empty) page so the readiness classifier flags it through the normal threshold path."""
+    segments = [seg.strip("\n\r") for seg in text.split("\f")]
+    segments = [seg for seg in segments if seg.strip()] or [text.strip()]
+    chunks: list[str] = []
+    for seg in segments:
+        if not seg:
+            chunks.append(seg)
+            continue
+        chunks.extend(seg[i : i + _MAX_PAGE_CHARS] for i in range(0, len(seg), _MAX_PAGE_CHARS))
+    return [{"pageNumber": i + 1, "text": chunk, "confidence": None} for i, chunk in enumerate(chunks)]
+
+
+def _native_read(bucket: str, key: str, document_id: str, ext: str) -> dict[str, Any]:
+    """Read a .txt/.docx/.doc directly (no Textract, no Claude) and POST pages. Deterministic
+    parse failures flag for the RN via read-attempt-failed (actionable note, never silent);
+    transient errors (S3 get, API post) propagate so the EventBridge target retries."""
+    data = s3.get_object(Bucket=bucket, Key=key)["Body"].read(MAX_OCR_BYTES + 1)
+    if len(data) > MAX_OCR_BYTES:
+        _post_failed_read_attempt(
+            document_id, "NATIVE_TOO_LARGE", "native-read",
+            error_message=f".{ext} file over {MAX_OCR_BYTES // (1024 * 1024)}MB — split it, convert to PDF, or summarize manually",
+        )
+        print(json.dumps({"msg": "ocr: native read too large; flagged for RN", "documentId": document_id, "ext": ext, "bytes": len(data)}))
+        return {"started": [], "native": ext, "flaggedForRn": True}
+
+    text: str | None
+    note: str | None = None
+    status = "NATIVE_UNREADABLE"
+    if ext == "txt":
+        text, method, via = _decode_text_bytes(data), "native_text", "utf8"
+    elif ext == "docx":
+        try:
+            text, method, via = _extract_docx_text(data), "native_docx", "python-docx"
+        except Exception as exc:  # noqa: BLE001 — deterministic parse failure → RN flag
+            text, method, via = None, "", ""
+            note = f".docx could not be parsed ({type(exc).__name__}) — re-save as PDF or .docx, or summarize manually"
+    else:  # legacy .doc — best-effort ladder
+        text, method, via, note, status = _read_legacy_doc(data)
+
+    if text is None:
+        _post_failed_read_attempt(document_id, status, "native-read", error_message=note)
+        print(json.dumps({"msg": "ocr: native read flagged for RN", "documentId": document_id, "ext": ext, "status": status, "note": note}))
+        return {"started": [], "native": ext, "flaggedForRn": True}
+
+    pages = _build_native_pages(text)
+    _post_pages_to_api(document_id, pages, len(pages))
+    print(json.dumps({"msg": "ocr: native read posted", "documentId": document_id, "ext": ext, "method": method, "via": via, "pages": len(pages), "chars": len(text)}))
+    return {"started": [], "native": ext, "method": method, "via": via, "pages": len(pages)}
 
 
 def _claude_enabled() -> bool:

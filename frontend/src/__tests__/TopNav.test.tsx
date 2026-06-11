@@ -33,11 +33,12 @@ function renderNav(role: Role) {
 
 describe('TopNav ordering', () => {
   // Ryan 2026-06-11 P4: physician tabs renamed to "Letters in Queue" | "Completed Letters" and
-  // Inbox moved to the RIGHT cluster next to the identity block. Locked here so neither the
-  // labels nor the left/right split can regress.
-  it('physician left nav is Letters in Queue | Completed Letters; Inbox right-aligned outside it', () => {
+  // Inbox moved to the RIGHT cluster next to the identity block. Doctor-pay build (same day)
+  // adds "Track pay" third in the LEFT group. Locked here so neither the labels, the order,
+  // nor the left/right split can regress.
+  it('physician left nav is Letters in Queue | Completed Letters | Track pay; Inbox right-aligned outside it', () => {
     renderNav('physician');
-    expect(navLabels()).toEqual(['Letters in Queue', 'Completed Letters']);
+    expect(navLabels()).toEqual(['Letters in Queue', 'Completed Letters', 'Track pay']);
     const inbox = screen.getByRole('link', { name: 'Inbox' });
     const nav = screen.getByRole('navigation');
     // Inbox lives in the right cluster — outside the left <nav> and AFTER the left tabs in DOM order.
@@ -50,7 +51,7 @@ describe('TopNav ordering', () => {
       .getAllByRole('link')
       .filter((a) => a.getAttribute('aria-label') !== 'Aegis home')
       .map((a) => a.textContent ?? '');
-    expect(headerLabels).toEqual(['Letters in Queue', 'Completed Letters', 'Inbox']);
+    expect(headerLabels).toEqual(['Letters in Queue', 'Completed Letters', 'Track pay', 'Inbox']);
   });
 
   it('staff nav order is unchanged (Home first, Inbox in its shared slot)', () => {
@@ -62,6 +63,7 @@ describe('TopNav ordering', () => {
     // Physician-only tabs never leak into the staff nav.
     expect(labels).not.toContain('Letters in Queue');
     expect(labels).not.toContain('Completed Letters');
+    expect(labels).not.toContain('Track pay');
     // P2c (Ryan item 13): Refunds left the nav — the refund signal lives on the case page now.
     expect(labels).not.toContain('Refunds');
   });

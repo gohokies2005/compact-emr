@@ -24,6 +24,7 @@ import { CostsPage } from './routes/CostsPage';
 import { PhysicianQueuePage } from './routes/physician/PhysicianQueuePage';
 import { PhysicianReviewPage } from './routes/physician/PhysicianReviewPage';
 import { PhysicianLettersPage } from './routes/physician/PhysicianLettersPage';
+import { PhysicianPayPage } from './routes/physician/PhysicianPayPage';
 import { RnQueuePage } from './routes/rn/RnQueuePage';
 import { IntakePoolPage } from './routes/intake/IntakePoolPage';
 import { InboxPage } from './routes/inbox/InboxPage';
@@ -54,6 +55,7 @@ export function App() {
     <Route path="/p/queue" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianQueuePage /></ProtectedRoute>} />
     <Route path="/p/review/:caseId" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianReviewPage /></ProtectedRoute>} />
     <Route path="/p/letters" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianLettersPage /></ProtectedRoute>} />
+    <Route path="/p/pay" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianPayPage /></ProtectedRoute>} />
     <Route path="/rn" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><RnQueuePage /></ProtectedRoute>} />
     <Route path="/intake" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><IntakePoolPage /></ProtectedRoute>} />
     <Route path="/inbox" element={<ProtectedRoute requiredRole={['admin', 'ops_staff', 'physician']}><InboxPage /></ProtectedRoute>} />

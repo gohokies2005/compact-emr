@@ -12,6 +12,7 @@ import { buildLetterRevisionKey } from '../services/s3-key-safety.js';
 import { cleanProseForSave, sanityCheckLetterText, computeLockedRanges, type SanityFinding } from '../services/letter-sanity.js';
 import { applyStructuredEdit, type EditProposal } from '../services/letter-edit-apply.js';
 import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from '../services/case-status-transitions.js';
+import { resolveRateCents } from '../services/pay-earnings.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext } from '../services/letter-current.js';
 import {
@@ -446,7 +447,15 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
 
       try {
         await db.$transaction(async (tx) => {
-          await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: c.currentVersion, source: 'approved_final', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: null } });
+          // Doctor-pay stamps (DOCTOR_PAY_BUILD_PLAN §5.6) — written transactionally WITH the
+          // completion so a pay row can never exist without a delivered letter (or vice versa):
+          //  - letterType: the approve path always produces a nexus letter; memos are an
+          //    admin-only manual re-tag (PATCH /letter-revisions/:id/type) until a memo pipeline exists.
+          //  - signingPhysicianId: immutable attribution snapshot = the ASSIGNED signer (already
+          //    proven by the D2 gate above — never the clicker, who may be an admin). Reassignment
+          //    after completion must never move past earnings.
+          //  - payCents: rate-at-completion snapshot — future rate changes never rewrite history.
+          await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: c.currentVersion, source: 'approved_final', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: null, letterType: 'nexus_letter', signingPhysicianId: signer.id, payCents: resolveRateCents('nexus_letter') } });
           await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, status: 'delivered', version: { increment: 1 } } });
           await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_approved', caseId, veteranId: c.veteranId, detailsJson: { version: newVersion, finalArtifact: keys.pdfKey } } });
         });

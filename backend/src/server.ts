@@ -21,6 +21,7 @@ import { createViabilityRouter } from './routes/viability.js';
 import { createChartReadinessRouter } from './routes/chart-readiness.js';
 import { createDoctorPackRouter } from './routes/doctor-pack.js';
 import { createReportsRouter } from './routes/reports.js';
+import { createPayRouter } from './routes/pay.js';
 import { createInternalWorkerRouter } from './routes/internal-worker.js';
 import { createJotformWebhookRouter } from './routes/jotform-webhook.js';
 import { createStripeWebhookRouter } from './routes/stripe-webhook.js';
@@ -162,6 +163,9 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createDoctorPackRouter(db));
   // Admin-only drafting-cost report (per-claim LLM spend aggregated from DraftJob.costUsd).
   app.use('/api/v1', authenticateJwt(), createReportsRouter(db));
+  // Doctor-pay tracking (Track pay tab): physician self-serve earnings + admin per-physician
+  // view + memo-tag stub. ACCURACY-CRITICAL — see docs/DOCTOR_PAY_BUILD_PLAN_2026-06-11.md.
+  app.use('/api/v1', authenticateJwt(), createPayRouter(db));
   // Drafter client routes (Cognito-authenticated): drafter-export + POST /draft.
   app.use('/api/v1', authenticateJwt(), createDrafterClientRouter(db));
   // Letter editor (production mount). renderLetter requires the render Lambda (RENDER_LAMBDA_NAME);

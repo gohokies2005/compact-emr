@@ -203,6 +203,41 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     expect(caseUpdate.data.status).toBe('delivered');
   });
 
+  // ── Doctor-pay stamps (DOCTOR_PAY_BUILD_PLAN §5.6/§7-O) — ACCURACY-CRITICAL: Ryan pays real
+  // checks from these columns. Locked here so a refactor of the approve tx can't silently drop them.
+  it('approve stamps letterType/signingPhysicianId/payCents on the approved_final revision', async () => {
+    const { db, tx } = makeDb();
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(200);
+    const revCreate = (tx.letterRevision.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(revCreate.data.source).toBe('approved_final');
+    expect(revCreate.data.letterType).toBe('nexus_letter'); // approve always produces a letter (memo = manual re-tag)
+    expect(revCreate.data.signingPhysicianId).toBe('PHYS-001'); // the ASSIGNED signer snapshot
+    expect(revCreate.data.payCents).toBe(10000); // rate-at-completion: $100
+  });
+
+  it('approve stamps signingPhysicianId = the ASSIGNED signer even when an ADMIN clicks approve (matrix L: actor is never the payee)', async () => {
+    mockUser = { sub: 'ADMIN-SUB', roles: ['admin'] };
+    const { db, tx } = makeDb();
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(200);
+    const revCreate = (tx.letterRevision.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(revCreate.data.signingPhysicianId).toBe('PHYS-001'); // never 'ADMIN-SUB'
+    expect(revCreate.data.editedBy).toBe('ADMIN-SUB'); // the clicker is recorded separately
+  });
+
+  it('tie-out (matrix O): one approve writes EXACTLY one approved_final revision and one letter_approved log, in the same transaction', async () => {
+    const { db, tx } = makeDb();
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(200);
+    const revCreates = (tx.letterRevision.create as ReturnType<typeof vi.fn>).mock.calls;
+    const logCreates = (tx.activityLog.create as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => (c[0] as { data: { action: string } }).data.action === 'letter_approved');
+    expect(revCreates).toHaveLength(1);
+    expect(logCreates).toHaveLength(1); // divergence here = a code path created one without the other
+    expect((db.$transaction as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+  });
+
   // ── D2 fraud gate ──────────────────────────────────────────────────────────
   it('approve 409 when no physician is assigned', async () => {
     mockUser = { sub: 'ADMIN', roles: ['admin'] };

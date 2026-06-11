@@ -26,11 +26,13 @@ const navItems: readonly { label: string; href: string; roles: readonly Role[] }
 ];
 
 // Physicians get a dedicated ordered nav (Ryan 2026-06-10 P2.2; renamed + split 2026-06-11 P4):
-// LEFT group "Letters in Queue" (their landing) | "Completed Letters"; Inbox renders RIGHT-aligned
-// next to the identity cluster (physicianRightNavItems below). Staff order/layout unchanged.
+// LEFT group "Letters in Queue" (their landing) | "Completed Letters" | "Track pay" (doctor-pay
+// build 2026-06-11); Inbox renders RIGHT-aligned next to the identity cluster
+// (physicianRightNavItems below). Staff order/layout unchanged.
 const physicianNavItems: readonly { label: string; href: string }[] = [
   { label: 'Letters in Queue', href: '/p/queue' },
-  { label: 'Completed Letters', href: '/p/letters' }
+  { label: 'Completed Letters', href: '/p/letters' },
+  { label: 'Track pay', href: '/p/pay' }
 ];
 const physicianRightNavItems: readonly { label: string; href: string }[] = [
   { label: 'Inbox', href: '/inbox' }

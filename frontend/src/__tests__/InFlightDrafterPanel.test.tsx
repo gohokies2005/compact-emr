@@ -117,19 +117,19 @@ describe('InFlightDrafterPanel — QUEUED mode', () => {
 
   it('shows the generic "getting ready" copy when running < max (cold start warming up)', () => {
     render(<InFlightDrafterPanel job={queuedJob} concurrency={{ running: 2, max: 6, queuedAhead: 0, queuePosition: 1 }} />);
-    expect(screen.getByText('Getting ready to draft.')).toBeInTheDocument();
+    expect(screen.getByText('Starting the drafting engine.')).toBeInTheDocument();
     expect(screen.queryByText('Your letter is in line to start.')).not.toBeInTheDocument();
     expect(screen.queryByText(/#1/)).not.toBeInTheDocument();
   });
 
   it('shows the generic copy when at max but nothing is actually ahead (queuedAhead === 0)', () => {
     render(<InFlightDrafterPanel job={queuedJob} concurrency={{ running: 6, max: 6, queuedAhead: 0, queuePosition: 1 }} />);
-    expect(screen.getByText('Getting ready to draft.')).toBeInTheDocument();
+    expect(screen.getByText('Starting the drafting engine.')).toBeInTheDocument();
   });
 
   it('shows the generic copy when concurrency is null/unknown', () => {
     render(<InFlightDrafterPanel job={queuedJob} concurrency={null} />);
-    expect(screen.getByText('Getting ready to draft.')).toBeInTheDocument();
+    expect(screen.getByText('Starting the drafting engine.')).toBeInTheDocument();
   });
 
   it('falls back to the generic copy once a frozen "#N" sits unchanged past ~2 min', () => {
@@ -144,7 +144,7 @@ describe('InFlightDrafterPanel — QUEUED mode', () => {
     // the calm generic copy (a stuck "#N" reads as more broken than silence).
     act(() => { vi.advanceTimersByTime(2 * 60 * 1000 + 1000); });
     rerender(<InFlightDrafterPanel job={queuedJob} concurrency={concurrency} />);
-    expect(screen.getByText('Getting ready to draft.')).toBeInTheDocument();
+    expect(screen.getByText('Starting the drafting engine.')).toBeInTheDocument();
     expect(screen.queryByText('Your letter is in line to start.')).not.toBeInTheDocument();
   });
 

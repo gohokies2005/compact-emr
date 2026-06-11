@@ -143,18 +143,38 @@ function isTakingLonger(job: InFlightDraftJob): boolean {
   return state.includes('hold') || state.includes('retry') || state.includes('paused');
 }
 
+// How long a wake-from-idle realistically takes before the first progress callback: Fargate task
+// provisioning + the ~2.6GB drafter image pull + worker boot. MEASURED 8.5 min on the 2026-06-10
+// Hatfield redraft (clicked 02:11:51Z, first callback 02:20:37Z) — the old "next few minutes" copy
+// made a healthy cold start read as a hung job. Keep this honest if the image slims down.
+const COLD_START_EXPECTATION = 'about 8–10 minutes';
+// Past this, the wait is genuinely abnormal (cold start + margin) — escalate to an amber warning.
+const QUEUED_WORRY_MS = 14 * 60 * 1000;
+
+function waitingLabel(enqueuedAt: string): string {
+  const start = Date.parse(enqueuedAt);
+  if (!Number.isFinite(start)) return 'waiting';
+  const s = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const m = Math.floor(s / 60);
+  return m === 0 ? `waiting ${s % 60}s` : `waiting ${m}m ${s % 60}s`;
+}
+
 // QUEUED mode — shown before the job flips to 'running'. The case is already status='drafting' the
-// instant a job enqueues; this panel keeps the user honestly informed while the drafter spins up a
-// worker (cold start ~2-4 min) or works through a genuine backlog. When the poll catches the job
+// instant a job enqueues; this panel keeps the user honestly informed while the drafter wakes from
+// scale-to-zero (a REAL ~8-10 min: task provisioning + image pull) or works through a genuine
+// backlog. The chip is a LIVE elapsed timer, never a static label — a visibly ticking wait reads as
+// alive; a frozen "In line" reads as broken (Ryan 2026-06-10). When the poll catches the job
 // flipping to 'running', InFlightDrafterPanel renders the progress bar instead — no special handling.
 function QueuedDrafterPanel({
   concurrency,
   showPrecisePosition,
+  enqueuedAt,
   onCancel,
   cancelling,
 }: {
   readonly concurrency: DraftConcurrency | null | undefined;
   readonly showPrecisePosition: boolean;
+  readonly enqueuedAt: string;
   readonly onCancel?: (() => void) | undefined;
   readonly cancelling?: boolean | undefined;
 }) {
@@ -168,12 +188,15 @@ function QueuedDrafterPanel({
     concurrency.running === concurrency.max &&
     concurrency.queuedAhead >= 1;
 
+  const waitedMs = Number.isFinite(Date.parse(enqueuedAt)) ? Date.now() - Date.parse(enqueuedAt) : 0;
+  const worry = waitedMs > QUEUED_WORRY_MS;
+
   return (
     <Card className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-base font-semibold text-slate-900">
-            {precise ? 'Your letter is in line to start.' : 'Getting ready to draft.'}
+            {precise ? 'Your letter is in line to start.' : 'Starting the drafting engine.'}
           </h2>
           {precise ? (
             <p className="mt-2 text-sm text-slate-600">
@@ -181,14 +204,14 @@ function QueuedDrafterPanel({
             </p>
           ) : (
             <p className="mt-2 text-sm text-slate-600">
-              Your letter is queued and will start automatically in the next few minutes. You can leave this page — it&rsquo;ll keep going.
+              The drafting engine is waking up — from idle this takes {COLD_START_EXPECTATION} before drafting begins. It starts on its own; you can leave this page — it&rsquo;ll keep going.
             </p>
           )}
         </div>
 
         <div className="flex items-center gap-2">
           <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
-            In line
+            {waitingLabel(enqueuedAt)}
           </div>
           {onCancel ? (
             <Button variant="secondary" size="sm" disabled={cancelling ?? false} loading={cancelling ?? false}
@@ -198,6 +221,11 @@ function QueuedDrafterPanel({
           ) : null}
         </div>
       </div>
+      {worry ? (
+        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          Still waiting after {Math.round(waitedMs / 60000)} minutes — that&rsquo;s longer than a normal engine start. Refresh the page; if it&rsquo;s still waiting, check the Draft jobs tab or re-send the draft.
+        </div>
+      ) : null}
     </Card>
   );
 }
@@ -207,6 +235,11 @@ export function InFlightDrafterPanel({ job, onCancel, cancelling, concurrency }:
   // AFTER (Rules of Hooks). A single 1s tick drives BOTH the queued frozen-position fallback and the
   // running elapsed timer; whichever branch renders uses it.
   const step = useMemo(() => resolveStep(job), [job]);
+  // Raw manifest step (null when no phase has started). Drives the queued-branch guard below: a
+  // "queued" row whose manifest already shows phases is actually EXECUTING with a lagging state
+  // column — render the progress bar, never the waiting panel, in that case. (2026-06-10 incident:
+  // a healthy running job read as "In line".)
+  const manifestStep = useMemo(() => stepFromManifest((job as { manifestSnapshot?: unknown }).manifestSnapshot), [job]);
 
   // Track whether the queued #N-in-line has advanced. If it sits unchanged past FROZEN_POSITION_MS we
   // stop trusting it (the generic copy is calmer than a stuck "#N").
@@ -226,13 +259,15 @@ export function InFlightDrafterPanel({ job, onCancel, cancelling, concurrency }:
   }, []);
 
   // QUEUED mode — before the job flips to 'running'. When the poll catches the flip, the progress
-  // bar below renders instead, automatically.
-  if (job.state === 'queued') {
+  // bar below renders instead, automatically. Manifest guard: if phases already ran, the job is
+  // executing regardless of what the state column says — fall through to the progress bar.
+  if (job.state === 'queued' && manifestStep === null) {
     const positionFresh = Date.now() - positionSeenAtRef.current.at < FROZEN_POSITION_MS;
     return (
       <QueuedDrafterPanel
         concurrency={concurrency}
         showPrecisePosition={positionFresh}
+        enqueuedAt={job.enqueuedAt}
         onCancel={onCancel}
         cancelling={cancelling}
       />

@@ -93,7 +93,13 @@ export async function createCase(veteranId: string, input: CreateCaseInput): Pro
   return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/cases`, input);
 }
 
+// Pre-flight approve gate flag (GET /cases/:id, physician_review only). Advisory mirror of the
+// POST /letter/approve gates so the physician sees blockers BEFORE attesting; `code` matches the
+// 409 envelope's details.reason verbatim. Absent field = fail-open (no banner).
+export interface ApproveBlocker { readonly code: string; readonly message: string; }
+
 export interface CaseDetail extends Case {
+  readonly approveBlockers?: readonly ApproveBlocker[];
   readonly quickNote?: string | null;
   readonly quickNoteBy?: string | null;
   readonly quickNoteAt?: string | null;

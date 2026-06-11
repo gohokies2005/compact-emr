@@ -1,10 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PhysicianReviewPage } from '../routes/physician/PhysicianReviewPage';
 import { getCase, type CaseDetail } from '../api/cases';
+import { approveLetter } from '../api/letter';
+import { ConflictError } from '../api/client';
 import type { DraftJob } from '../types/prisma';
 
 vi.mock('../api/cases', async () => {
@@ -16,11 +18,27 @@ vi.mock('../api/drafter', () => ({
   getArtifactPdfUrl: vi.fn(),
 }));
 
+vi.mock('../api/letter', () => ({
+  approveLetter: vi.fn(),
+}));
+
 vi.mock('../layout/AppShell', () => ({
   AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
 
+// Stub the attestation popup: when open, expose a single button that fires onSignedOff — the
+// page-level approve chain (the code under test) runs exactly as in production.
+vi.mock('../components/SignOffPopup', () => ({
+  SignOffPopup: ({ open, onSignedOff }: { open: boolean; onSignedOff?: () => void | Promise<void> }) =>
+    open ? (
+      <button type="button" onClick={() => { void onSignedOff?.(); }}>
+        complete sign-off
+      </button>
+    ) : null,
+}));
+
 const getCaseMock = vi.mocked(getCase);
+const approveLetterMock = vi.mocked(approveLetter);
 
 const readyJob: DraftJob = {
   id: 'draft-job-1',
@@ -98,5 +116,68 @@ describe('PhysicianReviewPage', () => {
     expect(
       await screen.findByText('This case is not ready for physician review.'),
     ).toBeInTheDocument();
+  });
+
+  // ── Sign-off incident 2026-06-09 regression: the approve catch must surface the server's REAL
+  // gate message (it was swallowed behind a generic "chart may not be ready" guess — hour lost). ──
+  it('surfaces the 409 approve-gate message VERBATIM in the failure alert (swallowed-error regression)', async () => {
+    const gateMessage = 'Cannot approve: the letter does not name the assigned signing physician (Jane A. Doe, MD). Regenerate or correct the letter so it is authored under the assigned physician, then approve.';
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    getCaseMock.mockResolvedValue({ data: readyCase });
+    approveLetterMock.mockRejectedValue(new ConflictError({ reason: 'signer_name_absent' }, gateMessage, 'conflict'));
+    renderReview();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve and sign' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'complete sign-off' }));
+
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+    const alerted = String(alertSpy.mock.calls[0]?.[0]);
+    expect(alerted).toContain(gateMessage); // the real cause, verbatim
+    expect(alerted).toContain('409');
+    expect(alerted).not.toContain('the chart may not be ready'); // the old generic guess is gone
+    alertSpy.mockRestore();
+  });
+
+  it('keeps a generic-but-real fallback in the alert when the server sent no message', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    getCaseMock.mockResolvedValue({ data: readyCase });
+    approveLetterMock.mockRejectedValue(new ConflictError());
+    renderReview();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve and sign' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'complete sign-off' }));
+
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+    expect(String(alertSpy.mock.calls[0]?.[0])).toContain('the case changed or a job is already running (409)');
+    alertSpy.mockRestore();
+  });
+
+  // ── Fix 3: pre-flight approve blockers banner (advisory; shows the gate messages BEFORE attest) ──
+  it('renders the approve-blockers warning banner when the GET carries approveBlockers', async () => {
+    const gateMessage = 'Cannot approve: the letter does not name the assigned signing physician (Jane A. Doe, MD). Regenerate or correct the letter so it is authored under the assigned physician, then approve.';
+    getCaseMock.mockResolvedValue({
+      data: { ...readyCase, approveBlockers: [{ code: 'signer_name_absent', message: gateMessage }] },
+    });
+    renderReview();
+
+    const banner = await screen.findByRole('alert');
+    expect(banner).toHaveTextContent('Approve will be blocked');
+    expect(banner).toHaveTextContent(gateMessage);
+    // The Approve button stays available — the banner is advisory, the backend gate is authoritative.
+    expect(screen.getByRole('button', { name: 'Approve and sign' })).toBeEnabled();
+  });
+
+  it('FAIL-OPEN: no banner when approveBlockers is absent (older backend) or empty', async () => {
+    getCaseMock.mockResolvedValue({ data: readyCase }); // field absent
+    renderReview();
+    expect(await screen.findByText('Letter is ready for your review')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('no banner when approveBlockers is an empty array (all gates green)', async () => {
+    getCaseMock.mockResolvedValue({ data: { ...readyCase, approveBlockers: [] } });
+    renderReview();
+    expect(await screen.findByText('Letter is ready for your review')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

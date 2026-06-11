@@ -17,6 +17,7 @@ import {
 } from '../services/case-status-transitions.js';
 import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor, type RequestActor } from '../services/request-actor.js';
+import { computeApproveBlockers, type ApproveBlocker, type ApproveBlockerDeps } from '../services/approve-blockers.js';
 
 const CASE_LITE_SELECT = {
   id: true,
@@ -230,7 +231,10 @@ function roleGuardForStatusTransition(db: AppDb) {
   });
 }
 
-export function createCasesRouter(db: AppDb): Router {
+// deps carries S3 (+ bucket) ONLY for the advisory approve-blocker pre-flight on GET /cases/:id
+// (the signer-name check reads the current letter TXT). Optional: when absent the text-dependent
+// checks are skipped and everything else still works (fail-open).
+export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Router {
   const router = Router();
 
 
@@ -317,7 +321,27 @@ export function createCasesRouter(db: AppDb): Router {
       }
       const draftingCostUsd = hasCost ? Math.round((costTotal + Number.EPSILON) * 100) / 100 : null;
 
-      res.json({ data: { ...found, draftingCostUsd } });
+      // Pre-flight approve blockers (sign-off incident 2026-06-09): the physician must see WHY
+      // approve will 409 BEFORE attesting, not after. Advisory mirror of the POST /letter/approve
+      // gates (which stay authoritative); computed ONLY in physician_review — the one status where
+      // the review page shows the Approve button. FAIL-OPEN: any failure omits the field (the page
+      // shows no banner) but logs one structured non-PHI line so the failure itself is never silent.
+      let approveBlockers: ApproveBlocker[] | undefined;
+      if (found.status === 'physician_review') {
+        try {
+          approveBlockers = await computeApproveBlockers(db, found, deps);
+        } catch (error: unknown) {
+          console.warn(JSON.stringify({
+            msg: 'approve_blockers_unavailable',
+            method: req.method,
+            path: req.originalUrl,
+            caseId: id,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
+      }
+
+      res.json({ data: { ...found, draftingCostUsd, ...(approveBlockers !== undefined ? { approveBlockers } : {}) } });
     }),
   );
 

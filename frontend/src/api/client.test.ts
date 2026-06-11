@@ -37,6 +37,23 @@ describe('describeApiError', () => {
     expect(describeApiError(new ConflictError())).toContain('409');
   });
 
+  // Sign-off incident 2026-06-09: the approve 409's precise signer-name-gate message was thrown
+  // away by the interceptor (ConflictError carried only details), so the physician saw a generic
+  // guess and an hour was lost. ConflictError now carries the envelope's message + code and
+  // describeApiError must surface it VERBATIM.
+  it('surfaces the server message verbatim on a ConflictError that carries one', () => {
+    const gateMessage = 'Cannot approve: the letter does not name the assigned signing physician (Jane A. Doe, MD).';
+    const err = new ConflictError({ reason: 'signer_name_absent' }, gateMessage, 'conflict');
+    expect(describeApiError(err)).toBe(`server returned 409: ${gateMessage}`);
+    expect(err.serverCode).toBe('conflict');
+    expect(err.current).toEqual({ reason: 'signer_name_absent' });
+  });
+
+  it('keeps the canned 409 fallback ONLY when the server sent no/blank message', () => {
+    expect(describeApiError(new ConflictError(undefined))).toBe('the case changed or a job is already running (409)');
+    expect(describeApiError(new ConflictError(undefined, '   '))).toBe('the case changed or a job is already running (409)');
+  });
+
   it('falls back to a plain Error message, then to a generic string', () => {
     expect(describeApiError(new Error('boom'))).toBe('boom');
     expect(describeApiError({})).toBe('unknown error');

@@ -16,6 +16,7 @@ import { getCase } from '../../api/cases';
 import { formatNameLastFirst } from '../../lib/format';
 import { getArtifactPdfUrl } from '../../api/drafter';
 import { approveLetter } from '../../api/letter';
+import { describeApiError } from '../../api/client';
 
 export function PhysicianReviewPage() {
   const { caseId: routeCaseId } = useParams();
@@ -48,6 +49,9 @@ export function PhysicianReviewPage() {
 
   const c = caseQuery.data.data;
   const latestDraftJob = (c.draftJobs?.[0] ?? null) as ReadyDraftJob | null;
+  // Pre-flight approve blockers (advisory mirror of the POST /letter/approve gates). Fail-open:
+  // an absent field means no banner — never block the review page on the pre-flight.
+  const approveBlockers = c.approveBlockers ?? [];
 
   const readyForPhysician =
     c.runComplete === true &&
@@ -78,9 +82,13 @@ export function PhysicianReviewPage() {
       await approveLetter(caseId);
       await qc.invalidateQueries({ queryKey: ['case', caseId] });
       navigate('/p/queue');
-    } catch {
+    } catch (e: unknown) {
       await qc.invalidateQueries({ queryKey: ['case', caseId] });
-      window.alert('Sign-off was recorded, but finalizing the letter failed (the chart may not be ready, or render is unavailable). The case stays in review — please retry or flag to Dr. Ryan.');
+      // Sign-off incident 2026-06-09: this catch swallowed the server's precise 409 gate message
+      // (signer-name gate) behind a generic "chart may not be ready" guess — an hour lost. Surface
+      // the REAL cause via the house describeApiError; its canned text remains only as the
+      // fallback when the server sent no message.
+      window.alert(`Sign-off was recorded, but finalizing the letter failed — ${describeApiError(e)}. The case stays in review — resolve the cause above and re-approve, or flag to Dr. Ryan.`);
     }
   };
 
@@ -104,15 +112,31 @@ export function PhysicianReviewPage() {
         </Card>
 
         {readyForPhysician && latestDraftJob ? (
-          <PhysicianLetterReadyPanel
-            c={c}
-            job={latestDraftJob}
-            canSendBack
-            onOpenPdf={openSignedDraftPdf}
-            onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
-            onOpenSignOff={() => setSignOffOpen(true)}
-            onChanged={onChanged}
-          />
+          <>
+            {approveBlockers.length > 0 ? (
+              // Sign-off incident 2026-06-09: the physician completed the whole attestation and
+              // only THEN hit the 409 approve gate. Show the gates' own messages BEFORE attesting.
+              <div role="alert" className="rounded-lg border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-4 text-sm text-amber-900">
+                <p className="font-semibold">
+                  Approve will be blocked — resolve {approveBlockers.length === 1 ? 'this' : 'these'} before signing:
+                </p>
+                <ul className="mt-2 list-disc space-y-1 pl-5">
+                  {approveBlockers.map((b) => (
+                    <li key={b.code}>{b.message}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            <PhysicianLetterReadyPanel
+              c={c}
+              job={latestDraftJob}
+              canSendBack
+              onOpenPdf={openSignedDraftPdf}
+              onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
+              onOpenSignOff={() => setSignOffOpen(true)}
+              onChanged={onChanged}
+            />
+          </>
         ) : (
           <EmptyState
             title="Not ready for review"

@@ -3,7 +3,21 @@ import { fetchAuthSession, signOut } from 'aws-amplify/auth';
 import { env } from '../env';
 
 export class ForbiddenError extends Error { constructor(message = 'Forbidden') { super(message); this.name = 'ForbiddenError'; } }
-export class ConflictError<T = unknown> extends Error { constructor(readonly current?: T) { super('Optimistic locking conflict'); this.name = 'ConflictError'; } }
+// 409. `current` carries the server envelope's error.details (optimistic-lock payloads, gate
+// reasons). serverMessage/serverCode carry the envelope's REAL message + code — the sign-off
+// incident 2026-06-09: the approve 409's precise signer-name-gate message was thrown away here,
+// so every catch downstream could only guess. describeApiError prefers serverMessage when present.
+export class ConflictError<T = unknown> extends Error {
+  readonly serverMessage: string | undefined;
+  readonly serverCode: string | undefined;
+  constructor(readonly current?: T, serverMessage?: string, serverCode?: string) {
+    const real = typeof serverMessage === 'string' && serverMessage.trim().length > 0 ? serverMessage : undefined;
+    super(real ?? 'Optimistic locking conflict');
+    this.name = 'ConflictError';
+    this.serverMessage = real;
+    this.serverCode = serverCode;
+  }
+}
 // 503 from the API (e.g. the letter editor's render/surgical-AI when the render Lambda or
 // Anthropic key isn't configured in this environment). Lets the UI show a calm "not available
 // in this environment" instead of a generic failure.
@@ -83,7 +97,7 @@ apiClient.interceptors.response.use((response) => response, async (error: AxiosE
   // DEV/DEMO ONLY: a 401 in demo mode must not trigger the Amplify sign-out + redirect loop.
   if (error.response?.status === 401 && !env.demoMode) { await signOut(); window.location.assign('/'); }
   if (error.response?.status === 403) throw new ForbiddenError();
-  if (error.response?.status === 409) throw new ConflictError(error.response.data?.error?.details);
+  if (error.response?.status === 409) throw new ConflictError(error.response.data?.error?.details, error.response.data?.error?.message, error.response.data?.error?.code);
   if (error.response?.status === 422) throw new SurgicalEditUnappliableError(error.response.data?.error?.details as { reason?: string; costUsd?: number; proposal?: unknown } | undefined);
   if (error.response?.status === 503) throw new ServiceUnavailableError(error.response.data?.error?.details);
   throw error;
@@ -98,7 +112,13 @@ apiClient.interceptors.response.use((response) => response, async (error: AxiosE
 export function describeApiError(error: unknown): string {
   if (error instanceof ForbiddenError) return 'not permitted for your role (403)';
   if (error instanceof ServiceUnavailableError) return 'not available in this environment (503)';
-  if (error instanceof ConflictError) return 'the case changed or a job is already running (409)';
+  // 409: surface the server's own gate message when it sent one (the approve gates' messages are
+  // precise + actionable); the canned guess survives ONLY when no server message exists.
+  if (error instanceof ConflictError) {
+    return error.serverMessage !== undefined
+      ? `server returned 409: ${error.serverMessage}`
+      : 'the case changed or a job is already running (409)';
+  }
   if (axios.isAxiosError(error)) {
     const status = error.response?.status;
     const serverMsg = (error.response?.data as { error?: { message?: string } } | undefined)?.error?.message;

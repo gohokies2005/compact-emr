@@ -44,6 +44,9 @@ export interface CreateAppOptions {
   db?: AppDb;
 }
 
+// HTTP methods whose HttpError responses get a structured CloudWatch line (see error middleware).
+const MUTATING_METHODS: ReadonlySet<string> = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
+
 // Fail-closed: a production container must never carry the local demo/test bypasses. A leaked
 // AUTH_TEST_JWT_SECRET would let anyone mint a physician/admin token; VITE_DEMO_MODE bypasses
 // Cognito in the frontend. Refuse to boot rather than run a HIPAA system with auth disabled.
@@ -117,7 +120,12 @@ export function createApp(options: CreateAppOptions = {}) {
 
   app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
   app.use('/api/v1', authenticateJwt(), createDocumentsRouter());
-  app.use('/api/v1', authenticateJwt(), createCasesRouter(db));
+  // S3 + bucket feed the advisory approve-blocker pre-flight on GET /cases/:id (the signer-name
+  // check reads the current letter TXT); absent bucket = text checks skipped, never an error.
+  app.use('/api/v1', authenticateJwt(), createCasesRouter(db, {
+    s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
+    bucketName: process.env.PHI_BUCKET_NAME,
+  }));
   app.use('/api/v1', authenticateJwt(), createEmailsRouter(db, { bucketName: process.env.PHI_BUCKET_NAME, s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) }));
   app.use('/api/v1', authenticateJwt(), createMailboxesRouter(db));
   const cognitoUserPoolId = process.env.COGNITO_USER_POOL_ID;
@@ -174,6 +182,24 @@ export function createApp(options: CreateAppOptions = {}) {
 
   app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (isHttpError(error)) {
+      // Sign-off incident 2026-06-09: HttpErrors were returned with NO log line, so the approve
+      // 409s (signer-name gate) were invisible in CloudWatch — the swallowed frontend alert was
+      // the only trace, and an hour was lost. Log one structured line for 4xx/5xx HttpErrors on
+      // MUTATING routes (POST/PATCH/PUT/DELETE): method, path, status, code + the machine
+      // `reason` from details when present. NO PHI: no bodies, and deliberately NOT the human
+      // message/details (those can carry veteran/physician names). GETs and 2xx stay quiet.
+      if (MUTATING_METHODS.has(req.method)) {
+        const details = error.details;
+        const reason = typeof details === 'object' && details !== null ? (details as { reason?: unknown }).reason : undefined;
+        console.warn(JSON.stringify({
+          msg: 'http_error',
+          method: req.method,
+          path: req.originalUrl,
+          status: error.status,
+          code: error.code,
+          ...(typeof reason === 'string' ? { reason } : {}),
+        }));
+      }
       return sendError(res, error.status, error.code, error.message, error.details);
     }
     // P0-2 (live-path sweep): non-HttpError 500s were mapped silently — every live 500 (CORS,

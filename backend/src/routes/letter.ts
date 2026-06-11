@@ -13,6 +13,7 @@ import { cleanProseForSave, sanityCheckLetterText, computeLockedRanges, type San
 import { applyStructuredEdit, type EditProposal } from '../services/letter-edit-apply.js';
 import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from '../services/case-status-transitions.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
+import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext } from '../services/letter-current.js';
 import {
   parseCredentialBlock,
   substituteSignerSentinels,
@@ -123,10 +124,10 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
     }
   }
 
-  async function readTxtFromS3(bucketName: string, key: string): Promise<string> {
-    const obj = await s3().send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
-    if (obj.Body === undefined) throw new HttpError(502, 'internal_error', 'Letter TXT object had no body.', { reason: 'read_failed', key });
-    return obj.Body.transformToString('utf-8');
+  // Delegates to the shared service reader so an S3 NoSuchKey surfaces as a structured 404
+  // ("Letter artifact missing from storage for v<N>…") instead of an unhandled 500 (CLM-BBFCB3F8CE).
+  async function readTxtFromS3(bucketName: string, key: string, ctx?: LetterTxtContext): Promise<string> {
+    return readLetterTxtFromS3(s3(), bucketName, key, ctx);
   }
 
   // ── GET — load the current letter for the editor ──────────────────────────
@@ -146,7 +147,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       const cur = await resolveCurrent(caseId, c.currentVersion);
       if (cur === null) throw new HttpError(404, 'not_found', 'No letter has been drafted for this case yet.', { reason: 'no_letter', caseId });
 
-      const txt = await readTxtFromS3(bucketName, cur.txtKey);
+      const txt = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
       const client = s3();
       const pdfUrl = cur.pdfKey !== null
         ? await getSignedUrl(client, new GetObjectCommand({ Bucket: bucketName, Key: cur.pdfKey }), { expiresIn: PRESIGN_TTL_SECONDS })
@@ -193,7 +194,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       const cur = await resolveCurrent(caseId, c.currentVersion);
       if (cur === null) throw new HttpError(409, 'conflict', 'No current letter to edit.', { reason: 'no_letter', caseId });
 
-      const oldText = await readTxtFromS3(bucketName, cur.txtKey);
+      const oldText = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
       const cleaned = cleanProseForSave(body.txt);
       const warnings: SanityFinding[] = sanityCheckLetterText(oldText, cleaned);
 
@@ -287,7 +288,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
       const cur = await resolveCurrent(caseId, c.currentVersion);
       if (cur === null) throw new HttpError(409, 'conflict', 'No current letter to edit.', { reason: 'no_letter', caseId });
-      const oldText = await readTxtFromS3(bucketName, cur.txtKey);
+      const oldText = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
 
       // ── APPLY a previewed proposal (deterministic, no LLM) ──
       if (body.apply === true) {
@@ -376,7 +377,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
       const cur = await resolveCurrent(caseId, c.currentVersion);
       if (cur === null) throw new HttpError(409, 'conflict', 'No current letter to approve.', { reason: 'no_letter', caseId });
-      const text = await readTxtFromS3(bucketName, cur.txtKey);
+      const text = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
 
       const newVersion = c.currentVersion + 1;
       const keys = {

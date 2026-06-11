@@ -3,13 +3,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { Spinner } from './ui/Spinner';
-import { getChartReadiness } from '../api/chart-readiness';
+import { getChartReadiness, type ChartReadinessBlockingFile } from '../api/chart-readiness';
 import { viewDocument } from '../api/veterans';
 import { postDraft, type DraftRequestInput, type DraftConcurrencyResult } from '../api/drafter';
-import { ConflictError } from '../api/client';
+import { ConflictError, describeApiError } from '../api/client';
 import { Gate1ChecklistModal } from './Gate1ChecklistModal';
 import { StrategyPreviewCard } from './StrategyPreviewCard';
 import { CaseViabilityCard } from './CaseViabilityCard';
+import { ManualSummaryForm } from './ManualSummaryForm';
 
 interface SendToDrafterPanelProps {
   readonly caseId: string;
@@ -44,6 +45,9 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
         queryClient.invalidateQueries({ queryKey: ['case', caseId] }),
         queryClient.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }),
       ]);
+      // Draft started — the override note (if any) was consumed; clear it for next time.
+      setOverrideOpen(false);
+      setOverrideReason('');
     },
   });
 
@@ -63,10 +67,17 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   // Never a dead-end: when the chart isn't ready (e.g. a file couldn't be auto-read), the RN can
   // override and draft anyway with a logged reason (Ryan HARD RULE: EVERYTHING must be overridable).
   // Still runs Gate-1 first (the dx/event checklist must not be skipped just because a file was unreadable).
-  function overrideAndDraft() {
-    const reason = window.prompt("This file couldn't be read. Briefly describe what it shows (e.g. 'ResMed usage report — 7.1 hrs/night, AHI 4.2') so it's logged on the case and the team knows what's in it. The drafter will run without the image itself.");
-    if (reason === null || reason.trim().length === 0) return;
-    const ov = { acknowledgeMissingDocs: true, overrideReason: reason.trim() };
+  //
+  // The reason lives in component STATE (a controlled textarea), not window.prompt — a prompt's
+  // typed text died with the dialog when the POST failed, so the RN retyped it from scratch
+  // (forensics gap (b), 2026-06-11). State survives a failed mutation: the textarea is still
+  // filled after the error, and one click retries.
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [overrideReason, setOverrideReason] = useState('');
+  const trimmedOverrideReason = overrideReason.trim();
+  function confirmOverrideAndDraft() {
+    if (trimmedOverrideReason.length === 0) return;
+    const ov = { acknowledgeMissingDocs: true, overrideReason: trimmedOverrideReason };
     if (gate1Enabled) { setPendingOverride(ov); setGate1Open(true); }
     else draftMutation.mutate(ov);
   }
@@ -96,16 +107,32 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
     }
   }
 
+  // Surface the server's REAL reason (Ryan HARD RULE: no dead-end generics). The 2026-06-11
+  // CLM-BBFCB3F8CE incident: a 400 "Assign a physician and an RN liaison before drafting." collapsed
+  // to "Please retry" — retrying was guaranteed to fail. describeApiError carries the server's own
+  // message; the canned generic survives ONLY when no real reason exists.
   const draftError = draftMutation.error;
+  const describedDraftError = draftError ? describeApiError(draftError) : null;
   const draftErrorMessage = draftError
     ? draftError instanceof ConflictError
       ? 'A drafter run is already in flight for this case.'
-      : 'The drafter could not be started. Please retry.'
+      : describedDraftError && describedDraftError !== 'unknown error'
+        ? `The drafter could not be started — ${describedDraftError}`
+        : 'The drafter could not be started. Please retry.'
     : null;
 
   // Require both reviewers assigned before drafting (Ryan 2026-06-09). Undefined props (unit tests) = not gated.
   const needsAssignment = physicianAssigned === false || rnAssigned === false;
   const missingAssignment = [physicianAssigned === false ? 'a physician' : null, rnAssigned === false ? 'an RN liaison' : null].filter(Boolean).join(' and ');
+  const assignmentHint = `Assign ${missingAssignment} before drafting — use the Assignments panel below.`;
+
+  // manual_summary_required where the file READ fine but carried almost no text (a photo, a one-line
+  // fax cover). "Re-upload it or re-run OCR" is dead-end advice for this class — re-reading the same
+  // near-empty image yields the same result. The right move is a brief manual summary — and the form
+  // renders right here in the alert (per-file, below). The read note (classifyReadAttempt) carries
+  // the class: "too-few-words (NN < threshold)". (CLM-BBFCB3F8CE fix 6; threshold 40→20 2026-06-11.)
+  const isTooFewWords = (f: ChartReadinessBlockingFile): boolean => /too-few-words/i.test(f.lastAttempt?.note ?? '');
+  const allTooFewWords = blockingFileCount > 0 && blockingFiles.every(isTooFewWords);
 
   return (
     <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
@@ -133,7 +160,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
         </Button>
       </div>
       {needsAssignment ? (
-        <p className="mt-3 text-sm font-medium text-amber-700">Assign {missingAssignment} before drafting — use the Assignments panel below.</p>
+        <p className="mt-3 text-sm font-medium text-amber-700">{assignmentHint}</p>
       ) : null}
 
       <div className="mt-5">
@@ -155,28 +182,50 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
             </div>
             {blockingFileCount > 0 ? (
               <>
-                <p className="mt-1 text-sm text-amber-800">
-                  {blockingFileCount === 1 ? 'This file' : `These ${blockingFileCount} files`} could not be
-                  automatically read. Re-upload {blockingFileCount === 1 ? 'it' : 'them'} or re-run OCR from
-                  the chart, or draft anyway — the drafter will run without {blockingFileCount === 1 ? 'it' : 'them'}.
-                </p>
+                {allTooFewWords ? (
+                  <p className="mt-1 text-sm text-amber-800">
+                    {blockingFileCount === 1
+                      ? `This image has too little text to auto-read (${String(blockingFiles[0]?.lastAttempt?.wordCount ?? 0)} words). Open the document and add a brief manual summary below, or draft anyway.`
+                      : `These ${blockingFileCount} images have too little text to auto-read. Open each document and add a brief manual summary below, or draft anyway.`}
+                  </p>
+                ) : (
+                  <p className="mt-1 text-sm text-amber-800">
+                    {blockingFileCount === 1 ? 'This file' : `These ${blockingFileCount} files`} could not be
+                    automatically read. Re-upload {blockingFileCount === 1 ? 'it' : 'them'} or re-run OCR from
+                    the chart, add a brief manual summary below, or draft anyway — the drafter will run
+                    without {blockingFileCount === 1 ? 'it' : 'them'}.
+                  </p>
+                )}
                 <ul className="mt-2 list-disc space-y-0.5 pl-5 text-sm font-medium text-amber-900">
-                  {blockingFiles.map((f) => (
-                    <li key={f.id ?? f.filePath} className="break-all">
-                      {f.id ? (
-                        <button
-                          type="button"
-                          onClick={() => void openBlockingFile(f.id as string)}
-                          className="rounded underline decoration-amber-400 decoration-2 underline-offset-2 hover:text-amber-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
-                          title="Open this file to see what couldn't be read"
-                        >
-                          {fileName(f.filePath)}
-                        </button>
-                      ) : (
-                        fileName(f.filePath)
-                      )}
-                    </li>
-                  ))}
+                  {blockingFiles.map((f) => {
+                    // documentId is the joined chart Document row (the link target for the presigned
+                    // view); legacy payloads carried it as `id`. Either makes the name clickable.
+                    const docId = f.documentId ?? f.id;
+                    return (
+                      <li key={docId ?? f.filePath} className="break-all">
+                        {docId ? (
+                          <button
+                            type="button"
+                            onClick={() => void openBlockingFile(docId)}
+                            className="rounded underline decoration-amber-400 decoration-2 underline-offset-2 hover:text-amber-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                            title="Open this file to see what couldn't be read"
+                          >
+                            {fileName(f.filePath)}
+                          </button>
+                        ) : (
+                          fileName(f.filePath)
+                        )}
+                        {/* The manual-summary form RIGHT AT THE ALERT (Ryan 2026-06-11: "I DONT WANT TO
+                            HAVE TO GO TO DOCUMENTS... HYPERLINK IT RIGHT AT THE ALERT"). On success the
+                            shared form invalidates this case's chart-readiness query → banner clears live. */}
+                        {f.terminalStatus === 'manual_summary_required' && f.fileReadStatusId ? (
+                          <div className="mt-2 mb-3 rounded-lg border border-amber-200 bg-white p-3 font-normal">
+                            <ManualSummaryForm caseId={caseId} fileReadStatusId={f.fileReadStatusId} />
+                          </div>
+                        ) : null}
+                      </li>
+                    );
+                  })}
                 </ul>
               </>
             ) : (
@@ -185,9 +234,39 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
               </p>
             )}
             <div className="mt-3">
-              <Button type="button" variant="secondary" size="sm" className="border border-amber-300 bg-white text-amber-900 shadow-sm hover:bg-amber-50" loading={draftMutation.isPending} onClick={overrideAndDraft}>
-                Override and draft anyway
-              </Button>
+              {/* Gated on assignment exactly like the main Send button — an enabled override here
+                  invited a click guaranteed to 400 (assignment_required). (CLM-BBFCB3F8CE fix 2.) */}
+              {!overrideOpen ? (
+                <Button type="button" variant="secondary" size="sm" className="border border-amber-300 bg-white text-amber-900 shadow-sm hover:bg-amber-50" disabled={needsAssignment} loading={draftMutation.isPending} onClick={() => setOverrideOpen(true)}>
+                  Override and draft anyway
+                </Button>
+              ) : (
+                <div className="rounded-lg border border-amber-200 bg-white p-3">
+                  <label className="block">
+                    <span className="text-sm font-medium text-amber-900">
+                      Briefly describe what the unread file(s) show (e.g. &lsquo;ResMed usage report — 7.1 hrs/night, AHI 4.2&rsquo;) so it&rsquo;s logged on the case. The drafter will run without the file itself.
+                    </span>
+                    <textarea
+                      value={overrideReason}
+                      onChange={(e) => setOverrideReason(e.target.value)}
+                      rows={3}
+                      className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                      placeholder="What does the file show?"
+                    />
+                  </label>
+                  <div className="mt-2 flex items-center justify-end gap-2">
+                    <Button type="button" variant="secondary" size="sm" onClick={() => setOverrideOpen(false)}>
+                      Cancel
+                    </Button>
+                    <Button type="button" variant="primary" size="sm" disabled={needsAssignment || trimmedOverrideReason.length === 0} loading={draftMutation.isPending} onClick={confirmOverrideAndDraft}>
+                      Override and start draft
+                    </Button>
+                  </div>
+                </div>
+              )}
+              {needsAssignment ? (
+                <p className="mt-2 text-sm font-medium text-amber-700">{assignmentHint}</p>
+              ) : null}
             </div>
           </div>
         )}

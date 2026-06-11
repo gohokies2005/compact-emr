@@ -7,115 +7,18 @@ import { Card } from '../../components/ui/Card';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
-import { ConflictError } from '../../api/client';
+import { ManualSummaryForm } from '../../components/ManualSummaryForm';
 import {
   acknowledgeKeyDoc,
   listCases,
   listFilesPendingManualGlobal,
   listKeyDocsNeedingReview,
-  postManualSummary,
-  type FileReadStatus,
   type KeyDocReviewRow,
 } from '../../api/cases';
 import { formatRelativeTime } from '../../lib/date';
 
-const MIN_SUMMARY_CHARS = 40;
-const MAX_SUMMARY_CHARS = 10_000;
-
-function lastAttempt(row: FileReadStatus) {
-  if (row.attemptsJson.length === 0) return null;
-  return row.attemptsJson[row.attemptsJson.length - 1] ?? null;
-}
-
-interface ManualSummaryFormProps {
-  readonly row: FileReadStatus;
-  readonly onResolved: () => void | Promise<void>;
-}
-
-function ManualSummaryForm({ row, onResolved }: ManualSummaryFormProps) {
-  const queryClient = useQueryClient();
-  const [summary, setSummary] = useState('');
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  const trimmedLength = summary.trim().length;
-  const canSubmit = trimmedLength >= MIN_SUMMARY_CHARS && trimmedLength <= MAX_SUMMARY_CHARS;
-
-  const submit = useMutation({
-    mutationFn: () => postManualSummary(row.caseId, row.id, { summary: summary.trim() }),
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['rn', 'files-pending-manual'] }),
-        queryClient.invalidateQueries({ queryKey: ['case', row.caseId] }),
-        queryClient.invalidateQueries({ queryKey: ['case', row.caseId, 'chart-readiness'] }),
-      ]);
-      setSummary('');
-      setErrorMessage(null);
-      await onResolved();
-    },
-    onError: (error: unknown) => {
-      if (error instanceof ConflictError) {
-        setErrorMessage('This file is no longer awaiting manual summary (another user may have cleared it).');
-        return;
-      }
-      const detail = error instanceof Error ? error.message : 'Manual summary could not be saved. Please retry.';
-      setErrorMessage(detail);
-    },
-  });
-
-  const attempt = lastAttempt(row);
-
-  return (
-    <div className="space-y-3">
-      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-        <div className="font-medium uppercase tracking-wide text-slate-500">Why machine reads failed</div>
-        {row.attemptsJson.length === 0 ? (
-          <p className="mt-1">No read attempts recorded yet.</p>
-        ) : (
-          <ul className="mt-1 space-y-1">
-            {row.attemptsJson.map((a, i) => (
-              <li key={i}>
-                <span className="font-mono">{a.method}</span> · words={a.wordCount} · corrupted-ratio={a.corruptedTokenRatio.toFixed(3)}
-                {a.note ? <span className="text-slate-500"> · {a.note}</span> : null}
-              </li>
-            ))}
-          </ul>
-        )}
-        {attempt && attempt.note ? <p className="mt-2 italic">Last failure: {attempt.note}</p> : null}
-      </div>
-
-      <label className="block">
-        <span className="text-sm font-medium text-slate-800">Manual summary</span>
-        <textarea
-          value={summary}
-          onChange={(e) => setSummary(e.target.value)}
-          rows={6}
-          maxLength={MAX_SUMMARY_CHARS}
-          className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-          placeholder="Read the file and summarize the relevant content. Minimum 40 characters. Be concrete: dates, diagnoses, dispositions."
-        />
-        <span className="mt-1 block text-xs text-slate-500">
-          {trimmedLength}/{MAX_SUMMARY_CHARS} (minimum {MIN_SUMMARY_CHARS})
-        </span>
-      </label>
-
-      {errorMessage ? (
-        <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{errorMessage}</div>
-      ) : null}
-
-      <div className="flex items-center justify-end gap-2">
-        <Button
-          type="button"
-          variant="primary"
-          loading={submit.isPending}
-          disabled={!canSubmit || submit.isPending}
-          onClick={() => submit.mutate()}
-        >
-          Save summary
-        </Button>
-      </div>
-    </div>
-  );
-}
+// ManualSummaryForm extracted to components/ManualSummaryForm.tsx (2026-06-11) so the
+// SendToDrafterPanel blocking-file alert can render it inline too. Same behavior here.
 
 function KeyDocReviewQueue() {
   const queryClient = useQueryClient();
@@ -374,7 +277,12 @@ export function RnQueuePage() {
                       Case {selected.caseId} · awaiting manual summary since {formatRelativeTime(selected.lastCheckedAt)}
                     </p>
                   </div>
-                  <ManualSummaryForm row={selected} onResolved={async () => { setSelectedId(null); }} />
+                  <ManualSummaryForm
+                    caseId={selected.caseId}
+                    fileReadStatusId={selected.id}
+                    attempts={selected.attemptsJson}
+                    onResolved={async () => { setSelectedId(null); }}
+                  />
                 </div>
               ) : (
                 <EmptyState title="Select a file" message="Pick a row from the left to read its read-attempt history and write a manual summary." />

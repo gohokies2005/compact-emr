@@ -19,7 +19,12 @@ import type { FileReadStatusRecord, FileTerminalStatus } from './db-types.js';
 
 // ====================== Corrupted-token-ratio detector ======================
 
-const MIN_WORDS_FOR_READ = 40;
+// 40 → 20 (Ryan 2026-06-11): a legible 37-word image (Thomas_OSA_Misc_3.png) blocked drafting —
+// "thats a stupid fail." 20 words still screens out empty photos/fax covers while letting short
+// real documents through. NOTE: terminalStatus is written ONCE at classification time, so the
+// retroactive reconciliation in evaluateChartReadiness (below) is what heals rows classified
+// under the old threshold — lowering this constant alone would not.
+const MIN_WORDS_FOR_READ = 20;
 const GARBLED_RATIO_THRESHOLD = 0.08;
 const MANUAL_SUMMARY_MIN_LENGTH = 40;
 
@@ -82,7 +87,7 @@ export interface ReadAttemptOutcome {
 
 /**
  * Decide whether a read attempt produced usable text. The threshold contract:
- *   - wordCount >= 40 (MIN_WORDS_FOR_READ), AND
+ *   - wordCount >= MIN_WORDS_FOR_READ (20), AND
  *   - corruptedTokenRatio <= 0.08 (GARBLED_RATIO_THRESHOLD)
  *
  * Returns succeeded=true with reason=null when both hold; otherwise succeeded=false with a
@@ -119,6 +124,10 @@ export interface ChartReadinessBlocker {
   readonly filePath: string;
   readonly terminalStatus: FileTerminalStatus;
   readonly lastAttempt: { method: string; wordCount: number; corruptedTokenRatio: number; note: string | null } | null;
+  // The chart Document row matching this file (joined on s3Key by the route) — lets the UI render the
+  // blocking file as a clickable link (presigned view), not a dead name. Optional: the pure evaluator
+  // has no DB access; the GET /chart-readiness route enriches it. (CLM-BBFCB3F8CE fix 5, 2026-06-11.)
+  readonly documentId?: string | null;
 }
 
 export interface ChartReadinessResult {
@@ -150,6 +159,30 @@ export function isIntakeSummaryPath(filePath: unknown): boolean {
   return typeof filePath === 'string' && /intake_summary\.pdf$/i.test(filePath);
 }
 
+/**
+ * Retroactive threshold reconciliation (Ryan 2026-06-11, MIN_WORDS_FOR_READ 40 → 20).
+ *
+ * terminalStatus is written ONCE, at classification time (POST /files/read-attempts →
+ * classifyReadAttempt). Rows classified under the OLD threshold therefore sit at
+ * 'manual_summary_required' forever even though their stored attempt stats would pass today —
+ * lowering the constant does nothing for them on its own. Re-judge the LAST attempt's stored
+ * wordCount/corruptedTokenRatio against the CURRENT thresholds at evaluation time: if it would
+ * succeed now, the row is treated as 'read'. Existing victims (Thomas_OSA_Misc_3.png, 37 words)
+ * self-heal without re-OCR, and because every consumer (drafter gate, sign-off, viability,
+ * letter approve, doctor pack, GET /chart-readiness) derives readiness through this evaluator,
+ * the heal applies everywhere with no DB write or migration.
+ */
+function lastAttemptPassesCurrentThresholds(row: FileReadStatusRecord): boolean {
+  const last = lastAttemptOf(row);
+  if (last === null) return false;
+  return (
+    typeof last.wordCount === 'number' &&
+    typeof last.corruptedTokenRatio === 'number' &&
+    last.wordCount >= MIN_WORDS_FOR_READ &&
+    last.corruptedTokenRatio <= GARBLED_RATIO_THRESHOLD
+  );
+}
+
 export function evaluateChartReadiness(rows: readonly FileReadStatusRecord[]): ChartReadinessResult {
   const blockers: ChartReadinessBlocker[] = [];
   let read = 0;
@@ -172,6 +205,9 @@ export function evaluateChartReadiness(rows: readonly FileReadStatusRecord[]): C
       // Defense-in-depth: if status claims provided but summary is missing / too short, treat as required.
       if (isValidManualSummary(row.manualSummary)) {
         provided++;
+      } else if (lastAttemptPassesCurrentThresholds(row)) {
+        // The machine read actually passes the current thresholds — no summary needed.
+        read++;
       } else {
         required++;
         blockers.push({
@@ -181,6 +217,10 @@ export function evaluateChartReadiness(rows: readonly FileReadStatusRecord[]): C
           lastAttempt: lastAttemptOf(row),
         });
       }
+    } else if (lastAttemptPassesCurrentThresholds(row)) {
+      // Stored 'manual_summary_required' under the OLD (40-word) threshold, but the recorded
+      // attempt passes the CURRENT one — retroactively treat as read (see doc comment above).
+      read++;
     } else {
       required++;
       blockers.push({

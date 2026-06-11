@@ -133,6 +133,27 @@ function appFor(db: AppDb, d: LetterRouterDeps) {
 describe('letter editor routes — surgical-AI / approve / decline', () => {
   beforeEach(() => { mockUser = { sub: 'PHYS-SUB', roles: ['physician'] }; });
 
+  it('GET /letter surfaces an S3 NoSuchKey as the structured 404 (letter_artifact_missing), never a 500', async () => {
+    // CLM-BBFCB3F8CE (2026-06-11): the DraftJob/LetterRevision row pointed at artifacts the draft run
+    // never uploaded; the S3 NoSuchKey escaped as an unhandled 500 → generic dead-end in the UI.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const noSuchKey = new Error('The specified key does not exist.');
+    noSuchKey.name = 'NoSuchKey';
+    const d = deps({ s3: { send: vi.fn(async () => { throw noSuchKey; }) } as unknown as LetterRouterDeps['s3'] });
+    const res = await request(appFor(makeDb().db, d)).get('/api/v1/cases/CASE-1/letter');
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('not_found');
+    expect(res.body.error.message).toBe('Letter artifact missing from storage for v1 — the draft run that created this version never uploaded its files. Re-draft to produce a new letter.');
+    expect(res.body.error.details.reason).toBe('letter_artifact_missing');
+    expect(res.body.error.details.caseId).toBe('CASE-1');
+    expect(res.body.error.details.version).toBe(1);
+    // S3 key redacted to the basename — no bucket path in the envelope.
+    expect(res.body.error.details.s3Key).toBe('letter.txt');
+    // The structured http_error warn fires for the GET (server.ts only logs mutating methods).
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
   it('surgical-ai PROPOSE returns a proposal + preview + cost (no save)', async () => {
     const d = deps();
     const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai').send({ instruction: 'add the DC code' });

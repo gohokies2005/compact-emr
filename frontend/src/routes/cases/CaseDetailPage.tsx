@@ -20,6 +20,7 @@ import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
 import { DecisionsOverridesPanel } from '../../components/DecisionsOverridesPanel';
 import { AdvisoryPanel } from '../../components/AdvisoryPanel';
+import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { EmailLogPanel } from '../../components/EmailLogPanel';
@@ -229,7 +230,12 @@ export function CaseDetailPage() {
   // is what makes "View letter" reliably available in the EMR, no manual pulls (2026-06-04).
   const viewableLetterJob = (c.draftJobs ?? []).find((job) => {
     const j = job as InFlightDraftJob;
-    const hasKey = typeof j.artifactPdfS3Key === 'string' && (j.artifactPdfS3Key as string).length > 0;
+    const key = typeof j.artifactPdfS3Key === 'string' ? j.artifactPdfS3Key : null;
+    // Cheap DB-corruption sanity gate (Seam-B era rows held a .txt key in the PDF field —
+    // CLM-BBFCB3F8CE forensics 2026-06-11): a non-.pdf key in the PDF field means this job's
+    // letter can never open as a PDF — treat it as non-viewable rather than dead-ending a click.
+    if (key !== null && key.length > 0 && !key.toLowerCase().endsWith('.pdf')) return false;
+    const hasKey = key !== null && key.length > 0;
     return hasKey || j.state === 'done' || j.state === 'failed';
   }) as InFlightDraftJob | undefined;
   async function openLetterPdf() {
@@ -242,8 +248,10 @@ export function CaseDetailPage() {
       const { data } = await getLetter(c.id);
       if (!data.rendered.pdfUrl) { window.alert('The letter PDF is not ready yet. If it persists, flag this case to Dr. Ryan.'); return; }
       window.open(data.rendered.pdfUrl, '_blank', 'noopener,noreferrer');
-    } catch {
-      window.alert('Could not open the letter PDF. If it keeps failing, flag this case to Dr. Ryan.');
+    } catch (e: unknown) {
+      // Surface the server's REAL reason (e.g. the structured 404 "Letter artifact missing from
+      // storage for v<N>…") — the bare generic here was one of the CLM-BBFCB3F8CE dead-ends.
+      window.alert(`Could not open the letter PDF — ${describeApiError(e)}. If it keeps failing, flag this case to Dr. Ryan.`);
     }
   }
 
@@ -488,6 +496,9 @@ export function CaseDetailPage() {
         {tab === 'notes' ? <ChartNotesPanel veteranId={c.veteranId} /> : null}
       </div>
     </div>
+
+    {/* Chunk D: Doctor Pack — the RN generates/curates the physician's chart abridgement here. */}
+    <DoctorPackPanel caseId={caseId} />
 
     {/* "Ask AI about this case" — read-only advisory Q&A (decision support only). */}
     <AdvisoryPanel caseId={caseId} />

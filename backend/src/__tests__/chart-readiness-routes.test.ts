@@ -39,8 +39,9 @@ function makeDb(c: CaseRecord = baseCase()) {
     case: { findFirst: vi.fn(async () => c), findUnique: vi.fn(async () => c), findMany: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn() },
     activityLog: { create: vi.fn(async () => ({})) },
     // Reconciliation (chart-readiness route): every readiness row has a live document, so nothing is
-    // filtered as orphaned — the existing block/ready assertions hold.
-    document: { findMany: vi.fn(async () => [...fileRows.values()].map((r) => ({ s3Key: r.filePath }))) },
+    // filtered as orphaned — the existing block/ready assertions hold. The id mirrors what Prisma
+    // returns for the route's { id, s3Key } select (documentId join, CLM-BBFCB3F8CE fix 5).
+    document: { findMany: vi.fn(async () => [...fileRows.values()].map((r) => ({ id: `DOC-${r.id}`, s3Key: r.filePath }))) },
     fileReadStatus: {
       findUnique: vi.fn(async (args: { where: { id: string } }) => fileRows.get(args.where.id) ?? null),
       findFirst: vi.fn(async (args: { where?: { caseId?: string; filePath?: string; id?: string } }) => {
@@ -177,6 +178,22 @@ describe('chart-readiness routes', () => {
     const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/chart-readiness');
     expect(res.body.data.ready).toBe(false);
     expect(res.body.data.blockingFiles).toHaveLength(1);
+  });
+
+  it('GET chart-readiness includes the matching documentId on each blocking file (clickable link join)', async () => {
+    // CLM-BBFCB3F8CE fix 5 (2026-06-11): the Document row exists for every blocking file, but the
+    // payload never carried its id — so the UI showed a dead filename instead of a clickable link.
+    const { db } = makeDb();
+    const post = await request(appFor(db)).post('/api/v1/cases/CASE-1/files/read-attempts').send({
+      filePath: 'records/scan.pdf', fileSha256: SHA, method: 'tesseract_ocr', extractedText: GARBLED,
+    });
+    const fileReadStatusId = post.body.data.id as string;
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/chart-readiness');
+    expect(res.status).toBe(200);
+    expect(res.body.data.blockingFiles).toHaveLength(1);
+    expect(res.body.data.blockingFiles[0].documentId).toBe(`DOC-${fileReadStatusId}`);
+    // The readiness row id remains alongside (unchanged contract).
+    expect(res.body.data.blockingFiles[0].fileReadStatusId).toBe(fileReadStatusId);
   });
 
   it('POST manual-summary rejects summaries shorter than 40 chars with 400', async () => {

@@ -132,12 +132,16 @@ export function createChartReadinessRouter(db: AppDb): Router {
       // Readiness and the chart's document list are separate tables with no FK — an orphaned readiness row
       // (a deleted/legacy file) would block drafting INVISIBLY (the chart can't even show it; Yorde 2026-06-07).
       // Reconcile: only block on a file the chart actually has, or a generated intake summary. Self-healing.
-      const liveKeys = new Set(
-        (await db.document.findMany({ where: { caseId }, select: { s3Key: true } })).map((d) => d.s3Key),
-      );
+      // Also select the Document id so each blocking file can carry its documentId — the UI renders
+      // the filename as a clickable link (presigned view) only when it has a document to open.
+      // (DocumentRecord in db-types is the minimal {s3Key} view; the id is selected + cast here.)
+      const docs = (await db.document.findMany({ where: { caseId }, select: { id: true, s3Key: true } })) as readonly { id?: string; s3Key: string }[];
+      const liveKeys = new Set(docs.map((d) => d.s3Key));
       const reconciled = rows.filter((r) => liveKeys.has(r.filePath) || isIntakeSummaryPath(r.filePath));
       const result = evaluateChartReadiness(reconciled);
-      res.json({ data: result });
+      const docIdByKey = new Map(docs.filter((d): d is { id: string; s3Key: string } => typeof d.id === 'string').map((d) => [d.s3Key, d.id]));
+      const blockingFiles = result.blockingFiles.map((b) => ({ ...b, documentId: docIdByKey.get(b.filePath) ?? null }));
+      res.json({ data: { ...result, blockingFiles } });
     }),
   );
 

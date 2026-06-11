@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { AxiosError, AxiosHeaders } from 'axios';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RnQueuePage } from '../routes/rn/RnQueuePage';
 import { ConflictError } from '../api/client';
@@ -118,6 +119,27 @@ describe('RnQueuePage', () => {
     await waitFor(() => {
       expect(postMock).toHaveBeenCalledWith('CASE-A', 'FRS-1', { summary: summaryText });
     });
+  });
+
+  it('routes non-409 errors through describeApiError (server message, not "Request failed with status code 400")', async () => {
+    const err = new AxiosError('Request failed with status code 400', 'ERR_BAD_REQUEST');
+    err.response = {
+      status: 400,
+      statusText: '',
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+      data: { error: { code: 'bad_request', message: 'summary must be at least 40 characters (FRN HARD RULE; manual interpretation must convey actual content)' } },
+    };
+    postMock.mockRejectedValueOnce(err);
+    renderQueue();
+    await screen.findByText('records/garbled_scan.pdf');
+    fireEvent.click(screen.getByText('records/garbled_scan.pdf'));
+    const textarea = await screen.findByPlaceholderText(/Read the file and summarize/);
+    fireEvent.change(textarea, { target: { value: 'A valid forty-character summary written by the RN reviewer.' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save summary/i }));
+    // The server's own reason, not the raw axios message.
+    expect(await screen.findByText(/server returned 400: summary must be at least 40 characters/)).toBeInTheDocument();
+    expect(screen.queryByText('Request failed with status code 400')).not.toBeInTheDocument();
   });
 
   it('on 409 ConflictError, shows "no longer awaiting" message', async () => {

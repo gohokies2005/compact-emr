@@ -84,6 +84,30 @@ describe('classifyReadAttempt', () => {
     expect(r.corruptedTokenRatio).toBeGreaterThan(READ_THRESHOLD_RATIO);
   });
 
+  // 2026-06-11: threshold lowered 40 → 20 ("thats a stupid fail"). Keyed to the constant, not a
+  // literal, so a future re-tune only touches the service.
+  it(`accepts clean text at exactly the threshold (${READ_THRESHOLD_WORDS} words)`, () => {
+    const text = Array.from({ length: READ_THRESHOLD_WORDS }, (_, i) => `word${i}`).join(' ');
+    const r = classifyReadAttempt({ method: 'textract', extractedText: text });
+    expect(r.succeeded).toBe(true);
+    expect(r.wordCount).toBe(READ_THRESHOLD_WORDS);
+    expect(r.reason).toBeNull();
+  });
+
+  it(`rejects clean text one word below the threshold (${READ_THRESHOLD_WORDS - 1} words)`, () => {
+    const text = Array.from({ length: READ_THRESHOLD_WORDS - 1 }, (_, i) => `word${i}`).join(' ');
+    const r = classifyReadAttempt({ method: 'textract', extractedText: text });
+    expect(r.succeeded).toBe(false);
+    expect(r.reason).toContain('too-few-words');
+  });
+
+  it('accepts a short-but-real 37-word document (the Thomas_OSA_Misc_3.png class, blocked under the old 40-word gate)', () => {
+    const text = Array.from({ length: 37 }, (_, i) => `word${i}`).join(' ');
+    const r = classifyReadAttempt({ method: 'textract', extractedText: text });
+    expect(r.succeeded).toBe(true);
+    expect(r.wordCount).toBeGreaterThanOrEqual(READ_THRESHOLD_WORDS);
+  });
+
   it('accepts clean text above thresholds', () => {
     const clean = 'The veteran is a fifty year old male with documented right knee pain. He served on active duty from two thousand one to two thousand eight in the United States Army with a primary military occupational specialty in infantry. He reports gradual onset of symptoms during service with progression after separation. Imaging confirms degenerative changes in the right knee compartment.';
     const r = classifyReadAttempt({ method: 'native_pdf_text', extractedText: clean });
@@ -154,6 +178,55 @@ describe('evaluateChartReadiness', () => {
     expect(r.ready).toBe(false);
     expect(r.blockingFiles).toHaveLength(1);
     expect(r.manualSummaryRequired).toBe(1);
+  });
+
+  // ── Retroactive threshold reconciliation (2026-06-11, 40 → 20) ──────────────────────────
+  // terminalStatus is written once at classification time, so rows stamped
+  // 'manual_summary_required' under the OLD threshold must self-heal at EVALUATION time when
+  // their stored last attempt passes the CURRENT thresholds.
+
+  it(`retro-heals a manual_summary_required row whose last attempt passes the current threshold (37 words >= ${READ_THRESHOLD_WORDS})`, () => {
+    const r = evaluateChartReadiness([
+      row({
+        terminalStatus: 'manual_summary_required',
+        filePath: 'cases/CASE-1/uuid-Thomas_OSA_Misc_3.png',
+        attemptsJson: [
+          { method: 'textract', wordCount: 37, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (37 < 40)' },
+        ],
+      }),
+    ]);
+    expect(r.ready).toBe(true);
+    expect(r.blockingFiles).toHaveLength(0);
+    expect(r.readFiles).toBe(1);
+    expect(r.manualSummaryRequired).toBe(0);
+  });
+
+  it('does NOT retro-heal a row whose last attempt is still below the current word threshold', () => {
+    const r = evaluateChartReadiness([
+      row({
+        terminalStatus: 'manual_summary_required',
+        filePath: 'records/empty_photo.jpg',
+        attemptsJson: [
+          { method: 'textract', wordCount: READ_THRESHOLD_WORDS - 1, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: `too-few-words (${READ_THRESHOLD_WORDS - 1} < ${READ_THRESHOLD_WORDS})` },
+        ],
+      }),
+    ]);
+    expect(r.ready).toBe(false);
+    expect(r.blockingFiles).toHaveLength(1);
+  });
+
+  it('does NOT retro-heal a garbled row (high word count but corrupted ratio above threshold)', () => {
+    const r = evaluateChartReadiness([
+      row({
+        terminalStatus: 'manual_summary_required',
+        filePath: 'records/garbled_scan.pdf',
+        attemptsJson: [
+          { method: 'tesseract_ocr', wordCount: 120, corruptedTokenRatio: 0.21, attemptedAt: '2026-06-10T00:00:00Z', note: 'garbled' },
+        ],
+      }),
+    ]);
+    expect(r.ready).toBe(false);
+    expect(r.blockingFiles).toHaveLength(1);
   });
 
   it('captures lastAttempt context for blocking rows when available', () => {

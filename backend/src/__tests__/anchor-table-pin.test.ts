@@ -14,11 +14,11 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const PINNED_TABLE_HASH = '58f9c315340214c27867995ddaf0bf0f9dcc9e08b48d8178ae111023e21b401f';
+const PINNED_TABLE_HASH = '7d7d355f631d2a60192205d993406161437564a3f9033f39a30c82f11e4869b2';
 // Rotated 2026-06-11 (P1a re-vendor at FRN HEAD ≥73095d9): the schema gained the optional
 // aggravation_only/causation_denied props (engine 5d04b62/0ebb73e emits them on best_anchor;
 // aggravation_only on alternatives). The TABLE hash did NOT rotate (58f9c315… unchanged).
-const PINNED_SCHEMA_SHA256 = '348177f2a8a4659beaf29772cd2165b7951313a4709d6e1a08e08a8cc60a47fb';
+const PINNED_SCHEMA_SHA256 = '731bd3e40e3c2903d440b9b75759bd1303973fe45db8140d8bda8079bdd92882';
 
 const vendorDir = path.dirname(fileURLToPath(new URL('../vendor/anchor_mechanism_pairs.json', import.meta.url)));
 const tableUrl = new URL('../vendor/anchor_mechanism_pairs.json', import.meta.url);

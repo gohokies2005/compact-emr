@@ -39,7 +39,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const PINNED_TABLE_HASH = '58f9c315340214c27867995ddaf0bf0f9dcc9e08b48d8178ae111023e21b401f';
+const PINNED_TABLE_HASH = '7d7d355f631d2a60192205d993406161437564a3f9033f39a30c82f11e4869b2';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fromIdx = process.argv.indexOf('--from');

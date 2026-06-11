@@ -2,7 +2,7 @@
   "schema_version": "anchor_mechanism_pairs.v1",
   "version": "2026-06-10.2",
   "authored_version": "2026-06-10.authored.2",
-  "content_hash": "58f9c315340214c27867995ddaf0bf0f9dcc9e08b48d8178ae111023e21b401f",
+  "content_hash": "7d7d355f631d2a60192205d993406161437564a3f9033f39a30c82f11e4869b2",
   "generator": "app/scripts/build-anchor-mechanism-pairs.js",
   "decision_doc": "docs/ANCHOR_SELECTION_DECISION_2026-06-10.md",
   "eligibility_vocabulary": [
@@ -15,17 +15,17 @@
   "plausible_is_default": true,
   "counts": {
     "excluded": 138,
-    "conditional": 260,
+    "conditional": 261,
     "chain": 61,
     "blessed": 47,
     "plausible": 7
   },
   "source_counts": {
     "authored": 487,
-    "curation": 11,
+    "curation": 12,
     "template": 15
   },
-  "row_count": 513,
+  "row_count": 514,
   "rows": [
     {
       "upstream_canonical": "PTSD",
@@ -17540,6 +17540,41 @@
       "tier": "conditional",
       "e": null,
       "mechanism": "Penetrating/moderate-severe TBI -> post-traumatic epilepsy (severity-gate; mild=M2).",
+      "library_folder": null,
+      "library_gap": false,
+      "chain": null,
+      "intermediate_node_type": null,
+      "authoring_incomplete": false
+    },
+    {
+      "upstream_canonical": "Biceps tear",
+      "claimed_canonical": "Shoulder",
+      "direction": "biceps_tear_to_shoulder",
+      "direction_label": "biceps_tear_to_shoulder",
+      "basis": "3.310a",
+      "eligibility": "conditional",
+      "mechanism_class": "same_joint_ptoa",
+      "requires": "Documented same-shoulder structural pathology following the biceps tear / tenodesis (LHB intra-articular role lost) AND radiographic or clinical glenohumeral OA in the SAME shoulder.",
+      "note": "Warren biceps->shoulder PTOA (NCBI-verified 2026-06-11). HONEST BAND = moderate-at-best: there is NO PMID isolating biceps-pathology->OA, so this is same-joint post-traumatic OA framed BY ANALOGY to instability-PTOA, conservatively tiered conditional (NOT blessed/strong). A1 PMID 37491135 (BMJ Mil Health 2024, military PTOA presents 3rd-4th decade); A2 PMID 42117061 (OJSM 2026, OA 40.7% after anterior-instability surgery); A3 PMID 15145428 (LHB intra-articular stabilizer mechanics). 3.310(a) same-joint PTOA.",
+      "template_id": null,
+      "routing_overlap": [],
+      "upstream_folders": [],
+      "claimed_folders": [
+        "osteoarthritis",
+        "msk_overuse",
+        "kinetic_chain"
+      ],
+      "source": "curation",
+      "owner": "warren-ncbi-verified-2026-06-11",
+      "last_reviewed": null,
+      "citation": "PMID 37491135 (BMJ Mil Health 2024); PMID 42117061 (OJSM 2026, OA 40.7%); PMID 15145428 (LHB mechanics)",
+      "signal_source": "lit_verified",
+      "physician_reviewed": false,
+      "reviewer": "warren-ncbi-verified-2026-06-11 (literature-verified, NOT physician-curated; awaits physician sign-off)",
+      "m_static": 2,
+      "tier": "conditional",
+      "e": null,
+      "mechanism": null,
       "library_folder": null,
       "library_gap": false,
       "chain": null,

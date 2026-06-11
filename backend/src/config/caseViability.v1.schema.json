@@ -30,8 +30,9 @@
         "mechanism_class": { "type": ["string", "null"] },
         "requires": { "type": ["string", "null"] },
         "mechanism_member": { "type": "string" },
-        "aggravation_only": { "type": "boolean", "const": true },
-        "causation_denied": { "type": "boolean", "const": true }
+        "inherited_from": { "type": "string" },
+        "aggravation_only": { "type": "boolean" },
+        "causation_denied": { "type": "boolean" }
       }
     },
     "alternatives": {
@@ -44,8 +45,7 @@
           "upstream_canonical": { "type": "string", "minLength": 1 },
           "M_eff": { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
           "tier": { "type": "string", "enum": ["blessed","conditional","chain","plausible","excluded"] },
-          "is_granted_sc": { "type": "boolean" },
-          "aggravation_only": { "type": "boolean", "const": true }
+          "is_granted_sc": { "type": "boolean" }
         }
       }
     },
@@ -87,7 +87,7 @@
     "confidence": { "type": "string", "enum": ["high", "low"] },
     "mode": { "type": "string", "enum": ["info_light", "chart_refined"] },
     "table_version": { "type": ["string", "null"] },
-    "table_content_hash": { "type": ["string", "null"], "const": "58f9c315340214c27867995ddaf0bf0f9dcc9e08b48d8178ae111023e21b401f" },
+    "table_content_hash": { "type": ["string", "null"], "const": "7d7d355f631d2a60192205d993406161437564a3f9033f39a30c82f11e4869b2" },
     "derivedAt": { "type": "string", "format": "date-time" }
   }
 }

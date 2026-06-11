@@ -133,8 +133,47 @@ function resolveAnchorEligibility(upstreamText, claimedText) {
       'one or both conditions did not canonicalize against the FRN condition map');
   }
 
-  const row = art.byKey.get(`${upC}>${clC}`);
+  let row = art.byKey.get(`${upC}>${clC}`);
+
+  // §b1 INHERIT-FROM (2026-06-11): no OWN row for this (upstream,claimed) pair, but
+  // the upstream shares a mechanism with a donor upstream (PTSD) that DOES carry
+  // table rows. Derive the eligibility from the donor's row demoted one tier, with
+  // the inherited_from provenance — WITHOUT aliasing the label (so PTSD-specific
+  // studies are never mis-cited on the non-PTSD dx).
   if (!row) {
+    const inh = _INHERIT_FROM[upC];
+    if (inh) {
+      const donorRow = art.byKey.get(`${inh.from}>${clC}`);
+      if (donorRow) {
+        const donorM = typeof donorRow.m_static === 'number' ? donorRow.m_static : null;
+        const derivedTier = _demoteTier(donorRow.eligibility, inh.tierShift);
+        const derivedM = donorM != null ? Math.max(1, donorM + inh.mShift) : null;
+        return {
+          upstream_canonical: upC,
+          claimed_canonical: clC,
+          eligibility: derivedTier,
+          in_table: false,
+          M_static: derivedM,
+          E: typeof donorRow.e === 'number' ? donorRow.e : null,
+          tier: derivedTier,
+          basis: donorRow.basis != null ? donorRow.basis : null,
+          requires: inh.requires,
+          mechanism_class: donorRow.mechanism_class != null ? donorRow.mechanism_class : null,
+          // Derived rows are never "blessed-confirmed" — always defer to physician.
+          mechanism_unconfirmed: derivedTier === 'plausible',
+          physician_review_anchor: true,
+          routing_overlap: Array.isArray(donorRow.routing_overlap) ? donorRow.routing_overlap : [],
+          // Do NOT carry the donor's PMID citation onto the non-PTSD dx (would
+          // mis-cite a PTSD-specific study). The drafter must source its own.
+          citation: null,
+          physician_reviewed: false,
+          inherited_from: inh.from,
+          note: `Derived (inherited) from ${inh.from} via shared ${inh.provenance.replace(/_/g, ' ')}; demoted one tier (${donorRow.eligibility}→${derivedTier}). Do NOT cite ${inh.from}-specific studies — source mechanism literature for the non-${inh.from} dx. Physician confirms the shared mechanism.`,
+          table_version: art.version,
+          source: 'inherited',
+        };
+      }
+    }
     return _plausibleDefault(upC, clC, art,
       'pair absent from anchor_mechanism_pairs.json — plausible default (long tail always drafts; physician confirms; promote to a permanent row once validated)');
   }
@@ -250,8 +289,16 @@ function tableContentHash() { return _artifact().content_hash; }
 // 4.130 General-Formula psych conditions that COLLAPSE to ONE anchor (§5.1).
 // The collapsed entity inherits the STRONGEST applicable member's M (never min/
 // mean) — so PTSD→OSA M4 is not lost when MDD co-exists.
+// 2026-06-11: 'Bipolar disorder' and 'Adjustment disorder' were DEAD members —
+// neither is a conditionCanon canonical label (isCanonicalLabel===false), so they
+// could never match a resolved upstream and silently did nothing. 'Adjustment
+// disorder' is now an ALIAS of the new canonical 'Trauma/stressor disorder
+// (non-PTSD)', so that label replaces it (and lets a vet with both PTSD and the
+// non-PTSD trauma dx collapse to the stronger member, PTSD). 'Bipolar disorder'
+// has NO canonical label in conditionCanon, so it is removed rather than left dead
+// (every _PSYCH_4130 member must be a real canonical label).
 const _PSYCH_4130 = new Set([
-  'PTSD', 'MDD / Depression', 'Anxiety / GAD', 'Bipolar disorder', 'Adjustment disorder',
+  'PTSD', 'MDD / Depression', 'Anxiety / GAD', 'Trauma/stressor disorder (non-PTSD)',
 ]);
 
 // §3.0 presumptive pre-emption — keyed on the DOWNSTREAM claimed condition.
@@ -307,6 +354,43 @@ function isAggravationOnly(claimedText, upstreamText) {
   const upC = _canon(upstreamText);
   if (!clC || !upC) return false;
   return Object.prototype.hasOwnProperty.call(_AGGRAVATION_ONLY, `${clC}|${upC}`);
+}
+
+// §b1 INHERIT-FROM transform (2026-06-11) — a derived-eligibility mechanism, NOT a
+// table change and NOT a canonical alias. Some upstream conditions share a
+// mechanism with a stronger, table-rich upstream (PTSD) but must NOT be aliased to
+// it: aliasing would mis-cite PTSD-SPECIFIC studies on a non-PTSD dx. Instead, when
+// the upstream is an _INHERIT_FROM key AND the (upstream,claimed) pair has NO own
+// row, we look up the `from` (PTSD) row for that claimed condition and return a
+// DERIVED eligibility = PTSD's row demoted one tier (via _ELIGIBILITY_STRENGTH) with
+// m_static reduced by `mShift` (floored at 1), a forced physician_review_anchor, and
+// an `inherited_from` provenance marker. If PTSD itself has no row for the claimed
+// condition, we fall through to the existing plausible default (never invent).
+//
+//   key = canonical upstream label
+//   from      = the donor upstream whose row is demoted (a canonical label)
+//   tierShift = tiers to demote (negative; -1 = one step weaker)
+//   mShift    = m_static delta (negative; -1)
+//   requires  = the chart-fact gate to attach to the derived row
+//   provenance= the provenance tag
+const _INHERIT_FROM = {
+  'Trauma/stressor disorder (non-PTSD)': {
+    from: 'PTSD',
+    tierShift: -1,
+    mShift: -1,
+    requires: 'shared stress-response mechanism (hyperarousal / HPA-axis / sleep fragmentation); physician confirms',
+    provenance: 'inherited_from_PTSD',
+  },
+};
+
+// Order of the eligibility tiers for the inherit demotion (strongest → weakest).
+// Demote by `tierShift` steps; clamp at the ends.
+const _TIER_ORDER = ['blessed', 'conditional', 'chain', 'plausible', 'excluded'];
+function _demoteTier(tier, shift) {
+  const i = _TIER_ORDER.indexOf(tier);
+  if (i < 0) return tier;
+  const j = Math.min(_TIER_ORDER.length - 1, Math.max(0, i - shift)); // shift is negative ⇒ i+1
+  return _TIER_ORDER[j];
 }
 
 // Umbrella claimed labels that REQUIRE phenotype resolution before ranking
@@ -474,6 +558,7 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
       in_table: r.in_table,
       physician_reviewed: r.physician_reviewed === true,
       aggravation_only: r.aggravation_only === true,
+      inherited_from: r.inherited_from || null,
     });
   }
 
@@ -568,6 +653,7 @@ function _publicAnchor(a) {
     is_granted_sc: a.is_granted_sc,
     mechanism_class: a.mechanism_class,
     requires: a.requires,
+    inherited_from: a.inherited_from || undefined,
   };
 }
 

@@ -20,6 +20,12 @@
 
 const CANONICAL_CONDITIONS = [
   ['PTSD',                              [/\bPTSD\b/i, /post.?traumatic stress/i]],
+  // Trauma/stressor disorder (non-PTSD) — declared immediately AFTER PTSD so PTSD
+  // still wins its own bare /\bPTSD\b/ match, but the F43.x adjustment/OSTSRD
+  // family routes to its OWN distinct label (it must NOT be swallowed by PTSD or
+  // by MDD/Depression — adjustment disorder is its own 4130 entity with an
+  // inherited-from-PTSD anchor, per the _INHERIT_FROM transform in anchorMechanism.js).
+  ['Trauma/stressor disorder (non-PTSD)', [/other specified trauma.?\s?and stressor.?related disorder/i, /\bOSTSRD\b/i, /unspecified trauma.?\s?and stressor.?related disorder/i, /adjustment disorder/i, /\bF43\.8\b/i, /\bF43\.9\b/i, /\bF43\.20\b/i, /\bF43\.21\b/i, /\bF43\.22\b/i, /\bF43\.23\b/i, /\bF43\.24\b/i, /\bF43\.25\b/i, /\bF43\.29\b/i]],
   ['MDD / Depression',                  [/\bMDD\b/i, /major depressive disorder/i, /\bmajor depression\b/i, /depressive disorder/i, /\bdepressive\b/i, /\bdepression\b/i, /\bdysthymia\b/i, /persistent depressive/i]],
   ['Anxiety / GAD',                     [/\bGAD\b/i, /generalized anxiety/i, /\banxiety disorder\b/i, /\banxiety\b/i, /panic disorder/i]],
   ['Acquired psychiatric (unspecified)',[/acquired psychiatric/i]],
@@ -78,6 +84,10 @@ const CANONICAL_CONDITIONS = [
   ['Lumbar / back',                     [/lumbar (?:spine|strain|disc|degenerative)/i, /\blow.?back\b/i, /\bback (?:pain|strain|disability|condition|injury)\b/i, /lumbosacral/i]],
   ['Cervical / neck',                   [/cervical (?:spine|strain|disc|degenerative)/i, /\bneck (?:pain|strain|disability|condition|injury)\b/i]],
   ['Knee',                              [/\bknee\b/i]],
+  // Biceps tear — distinct upstream for the same-joint PTOA anchor (biceps tear /
+  // s/p tenodesis → shoulder OA by analogy, 3.310(a)). Declared BEFORE Shoulder so
+  // "s/p biceps tenodesis" / "biceps repair" route here, not to the coarse Shoulder.
+  ['Biceps tear',                       [/biceps tear/i, /long head biceps tear/i, /\bLHB tear\b/i, /s\/p biceps tenodesis/i, /biceps tendon rupture/i, /biceps repair/i]],
   ['Shoulder',                          [/\bshoulder\b/i, /rotator cuff/i]],
   ['Hip',                               [/\bhip\b/i]],
   ['Ankle',                             [/\bankle\b/i]],

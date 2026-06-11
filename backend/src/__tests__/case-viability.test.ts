@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { deriveCaseViability, type CaseViability } from '../services/case-viability.js';
 
-const PINNED_TABLE_HASH = '58f9c315340214c27867995ddaf0bf0f9dcc9e08b48d8178ae111023e21b401f';
+const PINNED_TABLE_HASH = '7d7d355f631d2a60192205d993406161437564a3f9033f39a30c82f11e4869b2';
 
 const schemaUrl = new URL('../config/caseViability.v1.schema.json', import.meta.url);
 const schemaBytes = readFileSync(schemaUrl);

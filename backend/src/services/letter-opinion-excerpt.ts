@@ -21,6 +21,13 @@
 export interface OpinionExcerpt {
   /** The Section VII bolded opinion sentence, whitespace-collapsed. null if not found. */
   readonly opinion: string | null;
+  /**
+   * The FULL Section VII prose (bold sentence + its supporting paragraphs, ** stripped), or null.
+   * Chunk E1 (work-order 5a-bis): Ryan wants the email excerpt to carry the whole opinion section,
+   * not just the bolded line. The condition MAY appear inside this quoted letter text — that is
+   * acceptable (decision E-1); only the email's OWN framing prose must stay condition-free.
+   */
+  readonly opinionFull: string | null;
   /** Section VIII reference lines, in order. Empty if not found. */
   readonly references: readonly string[];
   /** A ready-to-embed text block (labeled), or null if NOTHING was extractable. */
@@ -52,6 +59,44 @@ export function extractOpinionSentence(letterText: string): string | null {
   return opinion.length >= 20 ? opinion : null;
 }
 
+/**
+ * Extract the FULL Section VII prose: the bolded opinion sentence PLUS the supporting paragraph(s)
+ * that follow it, stopping BEFORE the Section VIII header. `**` markers are stripped and each
+ * paragraph is whitespace-normalized (paragraph breaks preserved as one blank line). Honors the
+ * ANCHOR GOTCHA above: the slice anchors PAST the "VII. Opinion" header so the header itself never
+ * leaks into the excerpt. Returns null when no Section VII is found or the section is degenerate.
+ */
+export function extractOpinionFull(letterText: string): string | null {
+  if (typeof letterText !== 'string' || letterText.trim() === '') return null;
+  const m7 = SECTION_VII_RE.exec(letterText);
+  if (m7 === null) return null;
+  // Same anchor-past-the-header slice as extractOpinionSentence (lines above): slice at the VII
+  // header, bound at the VIII header, then strip the header + any trailing bold marker it carried.
+  let after = letterText.slice(m7.index);
+  const m8inAfter = SECTION_VIII_RE.exec(after);
+  if (m8inAfter !== null) {
+    after = after.slice(0, m8inAfter.index);
+  } else {
+    // No §VIII (non-canonical letter): bound at the signature/closing block instead, the same
+    // stop-guard extractReferences uses — otherwise the signer's name + NPI would be quoted into
+    // the veteran's invoice email as "opinion" prose.
+    const stop = /\n\s*(?:Respectfully submitted|Sincerely|\[SIGNATURE)/i.exec(after);
+    if (stop !== null) after = after.slice(0, stop.index);
+  }
+  after = after.replace(SECTION_VII_RE, '').replace(/^\s*\*{0,2}/, '');
+  // Strip bold markers, then normalize whitespace PER PARAGRAPH (blank-line-separated) so the
+  // prose reflows cleanly in a plain-text email while keeping its paragraph structure.
+  const paragraphs = after
+    .replace(/\*\*/g, '')
+    .split(/\n\s*\n/)
+    .map((p) => p.replace(/\s+/g, ' ').trim())
+    .filter((p) => p.length > 0);
+  if (paragraphs.length === 0) return null;
+  const full = paragraphs.join('\n\n');
+  // Same degenerate-match guard as the sentence extractor: a real opinion section is long.
+  return full.length >= 20 ? full : null;
+}
+
 /** Extract the Section VIII reference lines (numbered or bulleted), in order. */
 export function extractReferences(letterText: string): readonly string[] {
   if (typeof letterText !== 'string' || letterText.trim() === '') return [];
@@ -76,23 +121,27 @@ export function extractReferences(letterText: string): readonly string[] {
 
 /**
  * Build the labeled excerpt block for the delivery email. The label is fixed and never names the
- * condition. Returns null only when neither the opinion nor any reference could be extracted.
+ * condition (and carries no em dash — veteran-facing email prose hard rule). The Opinion block is
+ * the FULL Section VII (E1); the bolded sentence alone remains available via `opinion`.
+ * Returns null only when neither the opinion nor any reference could be extracted.
  */
 export function buildOpinionExcerpt(letterText: string): OpinionExcerpt {
   const opinion = extractOpinionSentence(letterText);
+  const opinionFull = extractOpinionFull(letterText);
   const references = extractReferences(letterText);
-  if (opinion === null && references.length === 0) {
-    return { opinion: null, references: [], block: null };
+  if (opinion === null && opinionFull === null && references.length === 0) {
+    return { opinion: null, opinionFull: null, references: [], block: null };
   }
   const parts: string[] = [
-    'The final opinion and sources from your full letter — an excerpt:',
+    'The final opinion and sources from your full letter, excerpted below:',
     '',
   ];
-  if (opinion !== null) {
-    parts.push('Opinion:', `"${opinion}"`, '');
+  const opinionText = opinionFull ?? opinion;
+  if (opinionText !== null) {
+    parts.push('Opinion:', `"${opinionText}"`, '');
   }
   if (references.length > 0) {
     parts.push('References:', ...references, '');
   }
-  return { opinion, references, block: parts.join('\n').trimEnd() };
+  return { opinion, opinionFull, references, block: parts.join('\n').trimEnd() };
 }

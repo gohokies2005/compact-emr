@@ -1,4 +1,4 @@
-import { apiGet, apiPost } from './client';
+import { apiClient, apiGet, apiPost } from './client';
 
 // Mirrors the backend delivery route (routes/delivery.ts). The delivery preview is composed
 // server-side from the finalized letter TXT (§VII+§VIII excerpt), the fixed delivery email, the
@@ -66,10 +66,17 @@ export interface DeliverySendResult {
   readonly status: string;
   readonly emailTransportConfigured: boolean;
   readonly stripeConfigured: boolean;
-  // false in this build (no transport code) — the email is composed/queued, not transmitted.
+  // true when SES actually transmitted (or the row was already sent — never re-transmitted).
   readonly emailSent: boolean;
-  // 'queued' = composed, not transmitted (the only state reachable in this build); 'sent' = real send.
+  // 'queued' = composed, not transmitted; 'sent' = a real SES transmit happened.
   readonly emailStatus: string;
+  // SES message id on a successful transmit.
+  readonly messageId?: string;
+  // Set when SES-sandbox forwarding fired: the email went to the staff inbox for manual
+  // forwarding to this (the real) recipient.
+  readonly redirectedFrom?: string;
+  // The REAL transport error, verbatim, when the send failed (row stays queued).
+  readonly error?: string;
   readonly message: string;
 }
 
@@ -86,4 +93,22 @@ export function sendDelivery(
   input: { emailBody: string },
 ): Promise<{ data: DeliverySendResult }> {
   return apiPost<{ data: DeliverySendResult }, typeof input>(deliveryPath(caseId, '/send'), input);
+}
+
+/**
+ * Open the cover memo as a PDF in a new tab (E4). The memo PDF route is an authenticated API GET,
+ * and a plain window.open can't carry the Bearer token — so fetch the bytes through apiClient
+ * (token rides the interceptor, same pattern as reports.ts fetchCostCsv) and open a Blob URL.
+ * Throws on failure so the caller can surface the REAL error.
+ */
+export async function openMemoPdf(caseId: string): Promise<void> {
+  const response = await apiClient.get(deliveryPath(caseId, '/memo.pdf'), { responseType: 'blob' });
+  const blob = response.data instanceof Blob
+    ? response.data
+    : new Blob([response.data as BlobPart], { type: 'application/pdf' });
+  const typed = blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
+  const url = URL.createObjectURL(typed);
+  window.open(url, '_blank', 'noopener,noreferrer');
+  // Give the new tab time to load the blob before revoking (revoke-immediately breaks Firefox).
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }

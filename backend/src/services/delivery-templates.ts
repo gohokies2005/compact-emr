@@ -64,7 +64,12 @@ export interface BuiltEmail {
 
 /**
  * The ONE fixed delivery email. Identical every time except (a) the greeting name, (b) the opinion
- * excerpt, (c) the Stripe link line. NEVER names the condition.
+ * excerpt, (c) the Stripe link line. NEVER names the condition in its OWN prose (the quoted §VII
+ * excerpt is letter text and may — decision E-1).
+ *
+ * Body order (Chunk E2, work-order 5a-bis2, Ryan): greeting → intro → payment instruction + link
+ * in the PARAGRAPH-2 zone → wording note → the full §VII excerpt LAST (with E1 the citations read
+ * as the natural end) → questions line → footer.
  */
 export function buildDeliveryEmail(input: BuildDeliveryEmailInput): BuiltEmail {
   const greetingName = (input.veteranFirstName ?? '').trim() || 'there';
@@ -85,12 +90,12 @@ export function buildDeliveryEmail(input: BuildDeliveryEmailInput): BuiltEmail {
       'corrections you see that need to be made. The signed PDF is released to you within a few ' +
       'minutes of payment; please reply to this email if you do not receive it.',
     '',
-    PROBABILITY_RATIONALE,
-    excerpt,
     'To receive your signed letter, please complete payment using the secure link below:',
     '',
     linkLine,
     '',
+    PROBABILITY_RATIONALE,
+    excerpt,
     'If you have any questions before then, reply to this email.',
     FRN_FOOTER,
   ].join('\n');

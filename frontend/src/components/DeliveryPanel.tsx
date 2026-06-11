@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
-import { getDelivery, sendDelivery, type DeliveryPreview } from '../api/delivery';
+import { describeApiError } from '../api/client';
+import { getDelivery, openMemoPdf, sendDelivery, type DeliveryPreview } from '../api/delivery';
 
 interface DeliveryPanelProps {
   readonly caseId: string;
@@ -13,10 +14,10 @@ interface DeliveryPanelProps {
 }
 
 // RN delivery panel — shown once the physician approves (status delivered/paid). The RN verifies
-// the letter + memo, ticks the confirm boxes, optionally edits the email, then sends from info@.
-// Both external sends (Stripe + email) are stubbed: the panel still lets the RN compose/save and
-// shows an amber "needs setup" note when a secret is missing. Mirrors PhysicianLetterReadyPanel
-// styling.
+// the letter + memo (both as PDFs), ticks the confirm boxes, optionally edits the email, then
+// sends the invoice email from info@ via SES (Chunk E3 — a real transmit; until SES production
+// access it lands in the staff inbox as [FWD to vet] via the sandbox forwarding mode). Stripe
+// remains config-gated. Mirrors PhysicianLetterReadyPanel styling.
 export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: DeliveryPanelProps) {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ['case', caseId, 'delivery'], queryFn: () => getDelivery(caseId) });
@@ -24,8 +25,25 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
   const [letterConfirmed, setLetterConfirmed] = useState(false);
   const [memoConfirmed, setMemoConfirmed] = useState(false);
   const [emailBody, setEmailBody] = useState('');
-  const [showMemo, setShowMemo] = useState(false);
-  const [sentMessage, setSentMessage] = useState<string | null>(null);
+  const [memoError, setMemoError] = useState<string | null>(null);
+  const [memoOpening, setMemoOpening] = useState(false);
+  // The send outcome: ok=true → green; ok=false → the route returned 200 but the transport
+  // failed (the message carries the REAL error verbatim) → red.
+  const [sentMessage, setSentMessage] = useState<{ text: string; ok: boolean } | null>(null);
+
+  // E4: "Verify the cover memo" opens a true PDF in a new tab (like the letter verify), rendered
+  // server-side by GET /delivery/memo.pdf. Failures surface the REAL reason (standing rule).
+  async function verifyMemoPdf() {
+    setMemoError(null);
+    setMemoOpening(true);
+    try {
+      await openMemoPdf(caseId);
+    } catch (e) {
+      setMemoError(`Could not open the cover memo PDF: ${describeApiError(e)}`);
+    } finally {
+      setMemoOpening(false);
+    }
+  }
 
   const data: DeliveryPreview | undefined = q.data?.data;
 
@@ -37,7 +55,7 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
   const send = useMutation({
     mutationFn: () => sendDelivery(caseId, { emailBody }),
     onSuccess: async (res) => {
-      setSentMessage(res.data.message);
+      setSentMessage({ text: res.data.message, ok: res.data.emailSent });
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['case', caseId, 'delivery'] }),
         qc.invalidateQueries({ queryKey: ['case', caseId] }),
@@ -75,17 +93,13 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
           Verify the final letter
         </Button>
         {memoApplies ? (
-          <Button type="button" variant="secondary" size="sm" onClick={() => setShowMemo((s) => !s)}>
-            {showMemo ? 'Hide cover memo' : 'Verify the cover memo'}
+          <Button type="button" variant="secondary" size="sm" loading={memoOpening} onClick={() => void verifyMemoPdf()}>
+            Verify the cover memo
           </Button>
         ) : null}
       </div>
 
-      {memoApplies && showMemo ? (
-        <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-800">
-          {data.memo.text ?? 'Cover memo text is unavailable.'}
-        </pre>
-      ) : null}
+      {memoError ? <p className="mt-2 text-sm text-rose-600">{memoError}</p> : null}
 
       {/* Confirm checkboxes */}
       <div className="mt-5 space-y-2">
@@ -131,24 +145,26 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
 
       {!emailTransportConfigured ? (
         <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-          Email sending is not configured. This will compose and save the email (ready to send). Add an email transport and it will send from info@.
+          Email sending is not configured (SES from-address missing). This will compose and save the email (ready to send). Add SES_FROM_ADDRESS and it will send from info@.
         </div>
       ) : null}
 
       {alreadyComposed ? (
         actuallySent ? (
           <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-            This delivery email has been sent and a $500 invoice is recorded for this case. Sending again is safe (it will not duplicate).
+            This delivery email has been sent and a $500 invoice is recorded for this case. Sending again is safe (it will not re-send or duplicate).
           </div>
         ) : (
           <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
-            A delivery email is composed and a $500 invoice is recorded for this case — <strong>pending send</strong> (not yet transmitted; transport is not wired in this build). Confirming again is safe (it will not duplicate).
+            A delivery email is composed and a $500 invoice is recorded for this case — <strong>pending send</strong> (not yet transmitted). Sending will transmit it; retrying is safe (it will not duplicate).
           </div>
         )
       ) : null}
 
-      {sentMessage ? <p className="mt-3 text-sm text-emerald-700">{sentMessage}</p> : null}
-      {send.isError ? <p className="mt-3 text-sm text-rose-600">Could not record the delivery. Please retry.</p> : null}
+      {sentMessage ? (
+        <p className={`mt-3 text-sm ${sentMessage.ok ? 'text-emerald-700' : 'text-rose-600'}`}>{sentMessage.text}</p>
+      ) : null}
+      {send.isError ? <p className="mt-3 text-sm text-rose-600">Send failed: {describeApiError(send.error)}</p> : null}
 
       <div className="mt-5 flex items-center justify-end gap-3 border-t border-slate-200 pt-4">
         {!confirmsMet ? (
@@ -161,7 +177,7 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
           loading={send.isPending}
           onClick={() => send.mutate()}
         >
-          {emailTransportConfigured ? 'Compose + queue (pending send)' : 'Compose + save (pending send — transport not configured)'}
+          {emailTransportConfigured ? 'Send the invoice email' : 'Compose + save (pending send — transport not configured)'}
         </Button>
       </div>
     </Card>

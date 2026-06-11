@@ -29,20 +29,15 @@ export function buildStripeLink(caseId: string, fee: StripeFee = 500): string | 
   return `${base.trim()}${sep}client_reference_id=CASE_${encodeURIComponent(caseId)}`;
 }
 
-// ── Email transport (config-gated stub) ─────────────────────────────────────────────────────────
-// "Configured" means an outbound transport secret is present. We accept any of the transports the
-// operator might wire later (SES region, Resend key, or a Gmail refresh token from info@). When
-// none is present, the route COMPOSES + PERSISTS the Email row marked ready-to-send and reports
-// stubbed. We never actually send a real veteran email in this build.
+// ── Email transport (config gate) ───────────────────────────────────────────────────────────────
+// Chunk E3 gate-truthfulness fix: this gate previously keyed on DELIVERY_EMAIL_TRANSPORT /
+// SES_REGION / RESEND_API_KEY / GMAIL_REFRESH_TOKEN, but the REAL transport (mailer.sendEmail, SES)
+// no-ops unless SES_FROM_ADDRESS is set — so the UI banner could say "configured" while sendEmail
+// refused, or vice-versa. The gate now keys on EXACTLY the precondition sendEmail checks
+// (mailer.ts: `if (!from) return { sent:false, ... }`), so the banner and the real send can never
+// disagree. delivery-config.test.ts binds this to the mailer's behavior.
 export function isEmailTransportConfigured(): boolean {
-  return Boolean(
-    (process.env.DELIVERY_EMAIL_TRANSPORT && process.env.DELIVERY_EMAIL_TRANSPORT.trim() !== '') ||
-      (process.env.SES_REGION && process.env.SES_REGION.trim() !== '') ||
-      (process.env.RESEND_API_KEY && process.env.RESEND_API_KEY.trim() !== '') ||
-      (process.env.GMAIL_REFRESH_TOKEN &&
-        process.env.GMAIL_REFRESH_TOKEN.trim() !== '' &&
-        process.env.GMAIL_REFRESH_TOKEN !== 'PLACEHOLDER'),
-  );
+  return typeof process.env.SES_FROM_ADDRESS === 'string' && process.env.SES_FROM_ADDRESS.trim() !== '';
 }
 
 // ── Cover-memo predicate (mirror of coverMemo.coverMemoRequirement) ──────────────────────────────

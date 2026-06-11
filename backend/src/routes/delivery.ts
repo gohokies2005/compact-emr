@@ -20,6 +20,8 @@ import {
   coverMemoRequirement,
 } from '../services/delivery-config.js';
 import { resolveCurrentTxtWithHash } from '../services/letter-current.js';
+import { sendEmail } from '../services/mailer.js';
+import { renderMemoPdf } from '../services/memo-render.js';
 import type { AppDb } from '../services/db-types.js';
 
 /**
@@ -77,6 +79,47 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
     return obj.Body.transformToString('utf-8');
   }
 
+  // Compose the cover memo (predicate + text) for a case row. Shared by composeDelivery and the
+  // memo.pdf route (E4) so the PDF can never diverge from the preview text — and so the PDF route
+  // does not need the letter TXT / S3 at all (the memo is built from the Case + physician rows).
+  async function composeMemo(c: {
+    claimType: string;
+    previouslyDenied: boolean | null;
+    priorDenialReason: string | null;
+    priorDecisionDate: Date | null;
+    claimedCondition: string;
+    assignedPhysicianId: string | null;
+  }, vFirst: string | null, vLast: string): Promise<{
+    required: boolean;
+    pathway: CoverMemoPathway | null;
+    reason: string;
+    text: string | null;
+  }> {
+    const req = coverMemoRequirement({
+      claimType: c.claimType,
+      previouslyDenied: c.previouslyDenied,
+      priorDenialReason: c.priorDenialReason,
+    });
+    let memoText: string | null = null;
+    if (req.required && req.pathway !== null) {
+      let signer = KASKY_CREDENTIALS;
+      if (c.assignedPhysicianId !== null) {
+        const phys = await db.physician.findFirst({ where: { id: c.assignedPhysicianId } });
+        const creds = phys ? parseCredentialBlock(phys.credentialBlockJson) : null;
+        if (creds !== null) signer = creds;
+      }
+      memoText = buildCoverMemoText({
+        pathway: req.pathway,
+        veteranFullName: `${vFirst ?? ''} ${vLast}`.trim(),
+        veteranLastName: vLast,
+        claimedCondition: c.claimedCondition,
+        priorDecisionDate: c.priorDecisionDate ? c.priorDecisionDate.toISOString().slice(0, 10) : null,
+        signer,
+      });
+    }
+    return { required: req.required, pathway: req.pathway, reason: req.reason, text: memoText };
+  }
+
   // Compose the full delivery preview for a case: excerpt + email body + memo (when applicable) +
   // configured flags + Stripe link + any already-saved delivery email/payment. Shared by GET and
   // POST so the two never diverge.
@@ -116,28 +159,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
     // Cover-memo predicate (mirror of local FRN single source). When it applies, build the TEXT
     // using the ASSIGNED physician's credential block (D2); fall back to Kasky only if no assigned
     // physician credential is on file (so a memo preview still renders rather than dead-ending).
-    const req = coverMemoRequirement({
-      claimType: c.claimType,
-      previouslyDenied: c.previouslyDenied,
-      priorDenialReason: c.priorDenialReason,
-    });
-    let memoText: string | null = null;
-    if (req.required && req.pathway !== null) {
-      let signer = KASKY_CREDENTIALS;
-      if (c.assignedPhysicianId !== null) {
-        const phys = await db.physician.findFirst({ where: { id: c.assignedPhysicianId } });
-        const creds = phys ? parseCredentialBlock(phys.credentialBlockJson) : null;
-        if (creds !== null) signer = creds;
-      }
-      memoText = buildCoverMemoText({
-        pathway: req.pathway,
-        veteranFullName: `${vFirst ?? ''} ${vLast}`.trim(),
-        veteranLastName: vLast,
-        claimedCondition: c.claimedCondition,
-        priorDecisionDate: c.priorDecisionDate ? c.priorDecisionDate.toISOString().slice(0, 10) : null,
-        signer,
-      });
-    }
+    const memo = await composeMemo(c, vFirst, vLast);
 
     // Existing saved delivery artifacts (idempotency surface). The delivery email is the outbound
     // email from info@ with our fixed subject; the payment is the letter_500 row.
@@ -154,7 +176,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       version: cur.version,
       excerpt,
       email,
-      memo: { applies: req.required, pathway: req.pathway, reason: req.reason, text: memoText },
+      memo: { applies: memo.required, pathway: memo.pathway, reason: memo.reason, text: memo.text },
       stripe: { configured: stripeConfigured, link: stripeLink },
       emailTransport: { configured: isEmailTransportConfigured() },
       savedEmail: savedEmailRow ? { id: savedEmailRow.id, subject: savedEmailRow.subject, body: savedEmailRow.body, sentAt: savedEmailRow.sentAt, status: savedEmailRow.status } : null,
@@ -231,6 +253,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       let emailId = out.savedEmail?.id ?? null;
       let paymentId = out.savedPayment?.id ?? null;
       let emailStatus = out.savedEmail?.status ?? null;
+      let emailSentAt = out.savedEmail?.sentAt ?? null;
 
       // Race-proof create-or-reuse. The pre-flight findFirst above is NOT atomic — two concurrent
       // POSTs both see null and both try to insert. The partial unique indexes (migration
@@ -243,9 +266,9 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
 
       if (emailId === null) {
         try {
-          // STUB: we never actually transmit in this build. We persist the composed email marked
-          // outbound from info@, status 'queued' with NO sentAt — it is NOT "sent", just ready to
-          // send the moment a real transport is wired (which will set sentAt + status 'sent').
+          // Persist the composed email FIRST, marked 'queued' with NO sentAt. The transmit below
+          // flips it to 'sent' on success; on any send failure the row stays 'queued' (truthful
+          // state — composed, not transmitted) and is re-sendable.
           const created = await db.email.create({
             data: {
               caseId,
@@ -254,8 +277,6 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
               body: emailBody,
               fromAddress: DELIVERY_FROM_ADDRESS,
               toAddress,
-              // No transmit happened: leave sentAt NULL and mark the row 'queued'. sentAt + 'sent'
-              // are set ONLY by the future real-send wire-up, never by this stub.
               sentAt: null,
               status: 'queued',
             },
@@ -271,6 +292,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
           if (existing === null) throw e; // index says it exists but we can't read it — surface the error
           emailId = existing.id;
           emailStatus = existing.status;
+          emailSentAt = existing.sentAt;
         }
       }
       if (paymentId === null) {
@@ -296,6 +318,56 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
         }
       }
 
+      // ── REAL TRANSMIT (Chunk E3, work-order 5a-pre2) ── Send via mailer.sendEmail (SES,
+      // forwarding-mode aware — the same transport the post-payment delivery email uses, see
+      // services/payment-delivery.ts). Rules:
+      //   - Idempotent: a row already 'sent' is NEVER re-transmitted (double-click / retry safe).
+      //   - Success: row flips to status 'sent' + sentAt (+ the body actually transmitted).
+      //   - sendEmail throw or sent:false: the row STAYS 'queued' and the REAL error/reason is
+      //     returned verbatim (standing rule: no silent errors) + one structured CloudWatch warn
+      //     (mirrors the server.ts http_error line shape; no PHI — ids + error only).
+      let emailSent = false;
+      let messageId: string | undefined;
+      let redirectedFrom: string | undefined;
+      let sendError: string | null = null;
+      const alreadySent = emailStatus === 'sent';
+      if (alreadySent) {
+        emailSent = true; // it HAS been sent; we just refuse to re-transmit
+      } else if (toAddress.trim() === '') {
+        // SES would reject an empty destination with an opaque validation error — say the real
+        // reason instead. The row stays 'queued' and is sendable once the veteran email is fixed.
+        sendError = 'The veteran has no email address on file.';
+      } else {
+        try {
+          const r = await sendEmail({ to: toAddress, subject: DELIVERY_EMAIL_SUBJECT, textBody: emailBody });
+          if (r.sent) {
+            const sentAt = new Date();
+            // Persist the flip + the exact body transmitted (the RN may have edited it since the
+            // row was first composed on an earlier failed attempt).
+            await db.email.update({ where: { id: emailId }, data: { status: 'sent', sentAt, body: emailBody } });
+            emailSent = true;
+            emailStatus = 'sent';
+            emailSentAt = sentAt;
+            messageId = r.messageId;
+            redirectedFrom = r.redirectedFrom;
+          } else {
+            // mailer's loud no-op (SES_FROM_ADDRESS unset). The config gate keys on the same
+            // precondition, so this branch means the env changed between gate-read and send.
+            sendError = r.reason ?? 'Email transport is not configured.';
+          }
+        } catch (e) {
+          sendError = e instanceof Error ? e.message : String(e);
+          console.warn(JSON.stringify({
+            msg: 'delivery_email_send_failed',
+            method: 'POST',
+            path: req.originalUrl,
+            caseId,
+            emailId,
+            error: sendError,
+          }));
+        }
+      }
+
       await db.activityLog.create({
         data: {
           actorUserId: user.sub,
@@ -307,16 +379,24 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
             paymentId,
             emailTransportConfigured,
             stripeConfigured,
-            // No real transmit in this build — record that this was a stub compose+queue.
-            stubbed: true,
             emailStatus,
+            emailSent,
+            alreadySent,
+            ...(messageId !== undefined ? { messageId } : {}),
+            ...(redirectedFrom !== undefined ? { redirectedFrom } : {}),
+            ...(sendError !== null ? { sendError } : {}),
           },
         },
       });
 
-      // In this build NO transport code exists, so an email is NEVER actually transmitted: report
-      // pending, never "sent". emailSent stays false until the real send wire-up sets sentAt.
-      const emailSent = false;
+      const message = alreadySent
+        ? `This delivery email was already sent${emailSentAt !== null ? ` on ${emailSentAt.toISOString()}` : ''}. It was not re-sent.`
+        : emailSent
+          ? redirectedFrom !== undefined
+            ? `Sent (SES sandbox forwarding): delivered to the staff inbox for manual forwarding to ${redirectedFrom}.`
+            : `Sent to ${toAddress}.`
+          : `Email send failed: ${sendError}. The email is saved (queued); it can be sent again once the issue is fixed.`;
+
       res.json({
         data: {
           emailId,
@@ -327,14 +407,43 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
           emailTransportConfigured,
           stripeConfigured,
           emailSent,
-          // Lifecycle of the delivery email: 'queued' = composed, not transmitted (the only state
-          // reachable in this build). The future real-send sets this to 'sent'.
+          // Lifecycle of the delivery email: 'queued' = composed, not transmitted; 'sent' = a real
+          // SES transmit happened (sentAt set).
           emailStatus: emailStatus ?? 'queued',
-          message: emailTransportConfigured
-            ? 'Pending send — composed and saved. Email transport configured, but live sending is not wired in this build.'
-            : 'Pending send — composed and saved. Transport not configured; add an email transport (and Stripe key) and this will send.',
+          ...(messageId !== undefined ? { messageId } : {}),
+          ...(redirectedFrom !== undefined ? { redirectedFrom } : {}),
+          ...(sendError !== null ? { error: sendError } : {}),
+          message,
         },
       });
+    }),
+  );
+
+  // ── GET — cover memo as a PDF (E4: "Verify the cover memo" opens a real document) ─────────────
+  // Same role guard as the other delivery reads. Self-contained render (services/memo-render.ts,
+  // pdf-lib) — deliberately NOT the FRN render Lambda, which only knows the nexus-letter shape
+  // (signature compositing + letter chrome) and would corrupt a plain memo (decision E-2 / E-4b).
+  router.get(
+    '/cases/:id/delivery/memo.pdf',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      if (!DELIVERY_STATUSES.has(c.status)) {
+        throw new HttpError(409, 'conflict', `Delivery is available only after the letter is finalized (status delivered/paid). Current status: '${c.status}'.`, { reason: 'not_deliverable', caseId, status: c.status });
+      }
+      const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
+      const vFirst = (veteran as { firstName?: string } | null)?.firstName ?? null;
+      const vLast = (veteran as { lastName?: string } | null)?.lastName ?? '';
+      const memo = await composeMemo(c, vFirst, vLast);
+      if (!memo.required || memo.text === null) {
+        throw new HttpError(404, 'not_found', 'No cover memo applies to this case (original claim, no prior denial).', { reason: 'no_memo', caseId });
+      }
+      const pdf = await renderMemoPdf(memo.text);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'inline; filename="cover-memo.pdf"');
+      res.send(Buffer.from(pdf));
     }),
   );
 

@@ -1,7 +1,8 @@
 import express from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDeliveryRouter } from '../routes/delivery.js';
+import { sendEmail } from '../services/mailer.js';
 import { isHttpError, sendError } from '../http/errors.js';
 import type { AppDb, Role, EmailRecord, PaymentRecord } from '../services/db-types.js';
 
@@ -19,6 +20,11 @@ vi.mock('../auth/roles', () => ({
       next();
     },
 }));
+
+// E3: the route transmits via mailer.sendEmail — stub it so no SES client is ever constructed.
+// Each test programs the stub (resolve sent / resolve redirected / reject) per its scenario.
+vi.mock('../services/mailer', () => ({ sendEmail: vi.fn() }));
+const sendEmailMock = vi.mocked(sendEmail);
 
 const FROM = 'info@flatratenexus.com';
 const SUBJECT = 'Your nexus letter is ready, invoice enclosed';
@@ -47,6 +53,7 @@ interface MakeDbOpts {
   caseExists?: boolean;
   claimType?: string;
   previouslyDenied?: boolean;
+  veteranEmail?: string;
   // Byte-binding gate (#9 Fix 3): sign-off rows the gate reads (latest by signedAt first).
   signOffs?: ReadonlyArray<{ signedVersion: number | null; signedContentSha256: string | null; signedAt: Date }>;
 }
@@ -91,6 +98,13 @@ function makeDb(opts: MakeDbOpts = {}) {
       emails.push(row);
       return row;
     }),
+    // E3: the real send flips the row to status 'sent' + sentAt via update().
+    update: vi.fn(async (a: { where: { id: string }; data: Partial<EmailRecord> }) => {
+      const row = emails.find((e) => e.id === a.where.id);
+      if (!row) throw new Error(`email ${a.where.id} not found`);
+      Object.assign(row, a.data);
+      return row;
+    }),
   };
 
   const paymentDelegate = {
@@ -112,7 +126,7 @@ function makeDb(opts: MakeDbOpts = {}) {
 
   const db = {
     case: { findFirst: vi.fn(async () => (opts.caseExists === false ? null : caseRow)) },
-    veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Jane', lastName: 'Doe', email: 'jane@example.com' })) },
+    veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Jane', lastName: 'Doe', email: opts.veteranEmail ?? 'jane@example.com' })) },
     letterRevision: { findFirst: vi.fn(async () => ({ version: 1, artifactTxtS3Key: 'letter-revisions/CASE-1/v1/letter.txt', artifactPdfS3Key: 'letter-revisions/CASE-1/v1/letter.pdf' })) },
     draftJob: { findFirst: vi.fn(async () => null) },
     physician: { findFirst: vi.fn(async () => null) },
@@ -147,10 +161,134 @@ function appFor(db: AppDb) {
   return app;
 }
 
-describe('POST /cases/:id/delivery/send — idempotency + no false "sent"', () => {
-  beforeEach(() => { mockUser = { sub: 'admin-sub', roles: ['admin'] }; });
+describe('POST /cases/:id/delivery/send — real SES send (E3) + idempotency', () => {
+  beforeEach(() => {
+    mockUser = { sub: 'admin-sub', roles: ['admin'] };
+    sendEmailMock.mockReset();
+    sendEmailMock.mockResolvedValue({ sent: true, messageId: 'ses-msg-1' });
+  });
+  afterEach(() => { delete process.env.SES_FROM_ADDRESS; });
 
-  it('(a) double POST /send creates exactly ONE Payment + ONE Email (idempotent)', async () => {
+  it('SUCCESS: transmits via sendEmail, flips the row to sent + sentAt, returns emailSent:true + messageId', async () => {
+    const { db, emails } = makeDb();
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
+    const sendArg = sendEmailMock.mock.calls[0][0];
+    expect(sendArg.to).toBe('jane@example.com');
+    expect(sendArg.subject).toBe(SUBJECT);
+    expect(sendArg.textBody).toContain('more likely than not');
+
+    expect(emails).toHaveLength(1);
+    expect(emails[0].status).toBe('sent');
+    expect(emails[0].sentAt).toBeInstanceOf(Date);
+
+    expect(res.body.data.emailSent).toBe(true);
+    expect(res.body.data.emailStatus).toBe('sent');
+    expect(res.body.data.messageId).toBe('ses-msg-1');
+    expect(res.body.data.message).toContain('Sent to jane@example.com');
+  });
+
+  it('FAILURE: sendEmail throws → row STAYS queued, the REAL error surfaces verbatim, structured warn logged', async () => {
+    const { db, emails } = makeDb();
+    sendEmailMock.mockRejectedValue(new Error('Email address is not verified: jane@example.com (SES sandbox)'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+      expect(res.status).toBe(200);
+
+      // Row persisted but NOT flipped — still re-sendable.
+      expect(emails).toHaveLength(1);
+      expect(emails[0].status).toBe('queued');
+      expect(emails[0].sentAt).toBeNull();
+
+      // The REAL transport error, verbatim (standing rule: no silent errors).
+      expect(res.body.data.emailSent).toBe(false);
+      expect(res.body.data.emailStatus).toBe('queued');
+      expect(res.body.data.error).toBe('Email address is not verified: jane@example.com (SES sandbox)');
+      expect(res.body.data.message).toContain('Email address is not verified');
+
+      // One structured CloudWatch warn (http_error-pattern sibling).
+      const warnLine = warnSpy.mock.calls.map((c) => String(c[0])).find((l) => l.includes('delivery_email_send_failed'));
+      expect(warnLine).toBeDefined();
+      const parsed = JSON.parse(warnLine!);
+      expect(parsed).toMatchObject({ msg: 'delivery_email_send_failed', caseId: 'CASE-1' });
+      expect(parsed.error).toContain('not verified');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('ALREADY SENT: a row with status sent is NEVER re-transmitted (sendEmail not called)', async () => {
+    const { db, emails } = makeDb();
+    const app = appFor(db);
+    // First send succeeds and flips the row.
+    await request(app).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(emails[0].status).toBe('sent');
+    sendEmailMock.mockClear();
+
+    const res = await request(app).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(res.body.data.emailSent).toBe(true);
+    expect(res.body.data.emailStatus).toBe('sent');
+    expect(res.body.data.message).toContain('already sent');
+    expect(res.body.data.message).toContain('not re-sent');
+    expect(emails).toHaveLength(1);
+  });
+
+  it('SES-sandbox forwarding: redirectedFrom surfaces in the response + message', async () => {
+    const { db } = makeDb();
+    sendEmailMock.mockResolvedValue({ sent: true, messageId: 'ses-msg-2', redirectedFrom: 'jane@example.com' });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.emailSent).toBe(true);
+    expect(res.body.data.redirectedFrom).toBe('jane@example.com');
+    expect(res.body.data.message).toContain('forwarding to jane@example.com');
+  });
+
+  it('mailer loud no-op (sent:false reason) → row stays queued + the reason surfaces', async () => {
+    const { db, emails } = makeDb();
+    sendEmailMock.mockResolvedValue({ sent: false, reason: 'SES_FROM_ADDRESS not configured' });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(emails[0].status).toBe('queued');
+    expect(res.body.data.emailSent).toBe(false);
+    expect(res.body.data.error).toBe('SES_FROM_ADDRESS not configured');
+  });
+
+  it('no veteran email on file → no transmit attempt, precise error, row stays queued', async () => {
+    const { db, emails } = makeDb({ veteranEmail: '' });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(emails[0].status).toBe('queued');
+    expect(res.body.data.emailSent).toBe(false);
+    expect(res.body.data.error).toContain('no email address on file');
+  });
+
+  it('RETRY AFTER FAILURE: a failed send leaves the row queued; the retry transmits and flips it', async () => {
+    const { db, emails } = makeDb();
+    const app = appFor(db);
+    sendEmailMock.mockRejectedValueOnce(new Error('SES throttled'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const first = await request(app).post('/api/v1/cases/CASE-1/delivery/send').send({});
+      expect(first.body.data.emailSent).toBe(false);
+      expect(emails[0].status).toBe('queued');
+
+      const second = await request(app).post('/api/v1/cases/CASE-1/delivery/send').send({});
+      expect(second.body.data.emailSent).toBe(true);
+      expect(emails).toHaveLength(1);
+      expect(emails[0].status).toBe('sent');
+      expect(second.body.data.emailId).toBe(first.body.data.emailId);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('(a) double POST /send creates exactly ONE Payment + ONE Email (idempotent rows)', async () => {
     const { db, emails, payments, emailDelegate, paymentDelegate } = makeDb();
     const app = appFor(db);
 
@@ -166,9 +304,10 @@ describe('POST /cases/:id/delivery/send — idempotency + no false "sent"', () =
     expect(second.body.data.emailId).toBe(first.body.data.emailId);
     expect(second.body.data.paymentId).toBe(first.body.data.paymentId);
     // Sequential re-send short-circuits via the pre-flight findFirst: the second request sees the
-    // existing row and never even attempts a second create.
+    // existing row and never even attempts a second create. The transmit also happened ONCE.
     expect(emailDelegate.create).toHaveBeenCalledTimes(1);
     expect(paymentDelegate.create).toHaveBeenCalledTimes(1);
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
   });
 
   it('(a2) CONCURRENT send (both pre-flight reads see nothing) still yields ONE row via the P2002 catch', async () => {
@@ -208,62 +347,75 @@ describe('POST /cases/:id/delivery/send — idempotency + no false "sent"', () =
     expect(r1.body.data.paymentId).toBe(r2.body.data.paymentId);
   });
 
-  it('(b) stub-mode send does NOT set sentAt and reports pending (not "sent")', async () => {
-    const { db, emails } = makeDb();
-    delete process.env.DELIVERY_EMAIL_TRANSPORT; delete process.env.SES_REGION;
-    delete process.env.RESEND_API_KEY; delete process.env.GMAIL_REFRESH_TOKEN;
-
-    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
-    expect(res.status).toBe(200);
-
-    // Persisted email is queued with NO sentAt.
-    expect(emails.length).toBe(1);
-    expect(emails[0].sentAt).toBeNull();
-    expect(emails[0].status).toBe('queued');
-
-    // API never reports "sent".
-    expect(res.body.data.emailSent).toBe(false);
-    expect(res.body.data.emailStatus).toBe('queued');
-    expect(String(res.body.data.message).toLowerCase()).toContain('pending send');
-  });
-
-  it('still reports pending (emailSent false) even if a transport env is set — no live send code exists', async () => {
-    const { db, emails } = makeDb();
-    process.env.RESEND_API_KEY = 're_test_key';
-    try {
-      const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
-      expect(res.status).toBe(200);
-      expect(res.body.data.emailTransportConfigured).toBe(true);
-      expect(res.body.data.emailSent).toBe(false);
-      expect(emails[0].sentAt).toBeNull();
-      expect(emails[0].status).toBe('queued');
-    } finally {
-      delete process.env.RESEND_API_KEY;
-    }
-  });
-
-  it('GET /delivery exposes a queued saved email with null sentAt after a stub send', async () => {
+  it('GET /delivery exposes the sent saved email (status sent, sentAt set) after a real send', async () => {
     const { db } = makeDb();
     const app = appFor(db);
     await request(app).post('/api/v1/cases/CASE-1/delivery/send').send({});
     const res = await request(app).get('/api/v1/cases/CASE-1/delivery');
     expect(res.status).toBe(200);
     expect(res.body.data.savedEmail).not.toBeNull();
-    expect(res.body.data.savedEmail.sentAt).toBeNull();
-    expect(res.body.data.savedEmail.status).toBe('queued');
+    expect(res.body.data.savedEmail.status).toBe('sent');
+    expect(res.body.data.savedEmail.sentAt).not.toBeNull();
     expect(res.body.data.savedPayment.kind).toBe('letter_500');
   });
 
-  it('non-deliverable status -> 409', async () => {
+  it('non-deliverable status -> 409 (and nothing transmits)', async () => {
     const { db } = makeDb({ status: 'records' });
     const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
     expect(res.status).toBe(409);
+    expect(sendEmailMock).not.toHaveBeenCalled();
   });
 
   it('physician role is forbidden from the delivery panel -> 403', async () => {
     const { db } = makeDb();
     mockUser = { sub: 'dr-sub', roles: ['physician'] };
     const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(403);
+    expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /cases/:id/delivery/memo.pdf — self-contained memo PDF (E4)', () => {
+  beforeEach(() => { mockUser = { sub: 'admin-sub', roles: ['admin'] }; });
+
+  // supertest does not buffer application/pdf by default — collect the raw bytes ourselves.
+  const binary = (res: request.Response, cb: (err: Error | null, body: Buffer) => void) => {
+    const chunks: Buffer[] = [];
+    res.on('data', (c: Buffer) => chunks.push(c));
+    res.on('end', () => cb(null, Buffer.concat(chunks)));
+  };
+
+  it('returns a real inline PDF for a memo-applicable case (supplemental claim)', async () => {
+    const { db } = makeDb({ claimType: 'supplemental' });
+    const res = await request(appFor(db))
+      .get('/api/v1/cases/CASE-1/delivery/memo.pdf')
+      .buffer(true)
+      .parse(binary);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('application/pdf');
+    expect(res.headers['content-disposition']).toContain('inline');
+    const body = res.body as Buffer;
+    expect(body.length).toBeGreaterThan(500);
+    expect(body.subarray(0, 5).toString('utf-8')).toBe('%PDF-');
+  });
+
+  it('404s with a precise reason when no memo applies (original claim, no denial)', async () => {
+    const { db } = makeDb({ claimType: 'initial' });
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/delivery/memo.pdf');
+    expect(res.status).toBe(404);
+    expect(res.body.error.details.reason).toBe('no_memo');
+  });
+
+  it('409s before the letter is finalized (same delivery gate as the panel)', async () => {
+    const { db } = makeDb({ claimType: 'supplemental', status: 'records' });
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/delivery/memo.pdf');
+    expect(res.status).toBe(409);
+  });
+
+  it('physician role is forbidden (same guard as the other delivery reads) -> 403', async () => {
+    const { db } = makeDb({ claimType: 'supplemental' });
+    mockUser = { sub: 'dr-sub', roles: ['physician'] };
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/delivery/memo.pdf');
     expect(res.status).toBe(403);
   });
 });

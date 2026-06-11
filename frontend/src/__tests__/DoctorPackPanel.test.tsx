@@ -129,12 +129,26 @@ describe('DoctorPackPanel', () => {
     expect(screen.queryByRole('button', { name: /Generate/ })).toBeNull();
   });
 
-  it('null + staff: shows the Generate button and kicks off generation', async () => {
+  // Package 7: the pack auto-generates on send-to-doctor, so the staff null-state explains the
+  // automation and offers only a small secondary "Generate now" escape hatch — the primary
+  // "Generate Doctor Pack" CTA is gone from the happy path.
+  it('null + staff: explains auto-generation on send-to-doctor; NO primary Generate CTA', async () => {
+    getLatestMock.mockResolvedValue({ data: null });
+    renderPanel();
+
+    expect(
+      await screen.findByText('No Doctor Pack yet — it will generate automatically when the case is sent to the doctor.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Generate Doctor Pack' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Generate now' })).toBeInTheDocument();
+  });
+
+  it('null + staff: the secondary "Generate now" affordance still kicks off generation (edge cases)', async () => {
     getLatestMock.mockResolvedValue({ data: null });
     generateMock.mockResolvedValue({ data: { ...READY_PACK, state: 'queued' } });
     renderPanel();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Generate Doctor Pack' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate now' }));
     await waitFor(() => expect(generateMock).toHaveBeenCalledWith('CASE-1'));
   });
 
@@ -144,10 +158,17 @@ describe('DoctorPackPanel', () => {
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
     renderPanel();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Generate Doctor Pack' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate now' }));
     await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
     expect(String(alertSpy.mock.calls[0]?.[0])).toContain('chart_not_ready: 2 files still unread');
     alertSpy.mockRestore();
+  });
+
+  it('failed state keeps Regenerate for staff (recovery path unchanged by Package 7)', async () => {
+    getLatestMock.mockResolvedValue({ data: { ...READY_PACK, state: 'failed', errorMessage: 'boom' } });
+    renderPanel();
+
+    expect(await screen.findByRole('button', { name: 'Regenerate' })).toBeInTheDocument();
   });
 
   it('renders the all-documents list: filename, human docType label, importance chip, pages selected', async () => {

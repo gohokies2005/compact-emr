@@ -6,6 +6,7 @@ import type {
   KeyDocRecord,
 } from './db-types.js';
 import { classifyFile, CLASSIFIER_VERSION, type ClassificationResult } from './key-docs-classifier.js';
+import { isEffectivelyRead } from './chart-readiness.js';
 
 /**
  * Phase 7B: Doctor Pack manifest assembly.
@@ -73,10 +74,17 @@ export interface SelectedKeyDoc {
  *   - classification === 'normal' AND importance >= 50 -> included, capped at 80 pages.
  *   - classification === 'bulk' -> excluded (future: include cited page ranges only).
  *
- * Read-status guard: only files in `read` or `manual_summary_provided` state can be included.
- * Files in `manual_summary_required` are blockers — the chart-readiness gate will refuse pack
- * generation upstream, but this is defense-in-depth: if a manual_summary_required row leaks
- * through, we still exclude it from the pack rather than silently fall back.
+ * Read-status guard (Package 7 H-tail, 2026-06-11): inclusion goes through the SHARED
+ * isEffectivelyRead predicate (chart-readiness.ts, Package 1) — the same evaluator every other
+ * consumer (drafter gate, sign-off, viability, RN queue) derives readiness from. Consequences:
+ *   - A retro-healed row (classified 'manual_summary_required' under the old 40-word threshold
+ *     but whose stored last attempt passes CURRENT thresholds) is INCLUDED — the prior raw
+ *     `terminalStatus === 'manual_summary_required'` check silently omitted it from packs.
+ *   - A 'manual_summary_provided' row with a missing/short (< 40 char) summary is EXCLUDED
+ *     (defense-in-depth, matching the gate) — the raw check used to let it through.
+ * Files with NO read-status row are still included (unchanged: the guard only ever excluded
+ * rows it could see). The chart-readiness gate refuses pack generation upstream; this is
+ * defense-in-depth if an unread row leaks through.
  */
 export function selectKeyDocs(input: SelectKeyDocsInput): readonly SelectedKeyDoc[] {
   const selected: SelectedKeyDoc[] = [];
@@ -87,7 +95,7 @@ export function selectKeyDocs(input: SelectKeyDocsInput): readonly SelectedKeyDo
     if (cls.classification === 'normal' && cls.importance < NORMAL_INCLUSION_THRESHOLD) continue;
 
     const readStatus = input.readStatusByPath.get(file.filePath);
-    if (readStatus && readStatus.terminalStatus === 'manual_summary_required') {
+    if (readStatus !== undefined && !isEffectivelyRead(readStatus)) {
       continue;
     }
 

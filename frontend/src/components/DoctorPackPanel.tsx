@@ -18,9 +18,16 @@ import { Spinner } from './ui/Spinner';
 // CaseDetailPage (next to Ask Aegis). Two parts:
 //   (a) the all-documents list (key-docs classification: what the selector kept per file)
 //   (b) the pack itself: ready -> open presigned PDF; queued/generating -> poll; failed ->
-//       the REAL errorMessage verbatim + Regenerate (NO-SILENT-ERRORS); none -> Generate for
-//       RN/admin, "ask your RN" for the physician (D-2: generation stays RN/admin; the POST
+//       the REAL errorMessage verbatim + Regenerate (NO-SILENT-ERRORS); none -> see below;
+//       physician always view-only ("ask your RN" — D-2: generation stays RN/admin; the POST
 //       role guard is authoritative — hiding the button just keeps the dead-end off-screen).
+//
+// Package 7 (2026-06-11): the pack AUTO-GENERATES when the RN sends the case to the doctor
+// (the rn_review -> physician_review status transition fires the same generate service). The
+// staff null-state therefore explains the automation instead of pushing a primary Generate CTA;
+// a small secondary "Generate now" stays as the edge-case escape hatch (early pack for a chart
+// still in review, recovery when the auto-fire was skipped/logged-warn). Regenerate remains on
+// the failed state (and on ready, for a changed chart).
 
 const DOC_TYPE_LABELS: Readonly<Record<string, string>> = {
   dd_214: 'DD-214',
@@ -162,9 +169,16 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
           <Spinner label="Loading Doctor Pack" />
         ) : pack === null ? (
           canGenerate ? (
-            <Button type="button" variant="primary" loading={generate.isPending} onClick={() => generate.mutate()}>
-              Generate Doctor Pack
-            </Button>
+            <div>
+              <p className="text-sm text-slate-500">
+                No Doctor Pack yet — it will generate automatically when the case is sent to the doctor.
+              </p>
+              <div className="mt-2">
+                <Button type="button" variant="secondary" size="sm" loading={generate.isPending} onClick={() => generate.mutate()}>
+                  Generate now
+                </Button>
+              </div>
+            </div>
           ) : (
             <p className="text-sm text-slate-500">No Doctor Pack yet — ask your RN to generate it.</p>
           )

@@ -19,6 +19,7 @@ import {
 import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor, type RequestActor } from '../services/request-actor.js';
 import { computeApproveBlockers, type ApproveBlocker, type ApproveBlockerDeps } from '../services/approve-blockers.js';
+import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
 
 const CASE_LITE_SELECT = {
   id: true,
@@ -364,6 +365,11 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         const row = await tx.case.create({
           data: {
             ...parsed,
+            // Provenance (keystone pkg 5): framing values typed into the create form are
+            // staff-set → 'manual' (immutable to the post-merge restamp hook).
+            ...(parsed.framingChoice !== undefined || parsed.upstreamScCondition !== undefined
+              ? { framingStampSource: 'manual' }
+              : {}),
             veteranId,
             status: 'intake',
           },
@@ -418,9 +424,19 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
             ? { claimedConditions: [newPrimary] }
             : {};
 
+        // Provenance (keystone pkg 5): a PATCH that touches the framing pair is an RN/staff edit →
+        // stamp 'manual' so the post-merge restamp hook never auto-overwrites it. (Clearing the
+        // fields to null is ALSO a deliberate staff action — still 'manual'.)
+        const touchesFraming = parsed.changedFields.includes('framingChoice') || parsed.changedFields.includes('upstreamScCondition');
+
         const row = await tx.case.update({
           where: { id },
-          data: { ...parsed.fields, ...syncConditions, version: { increment: 1 } },
+          data: {
+            ...parsed.fields,
+            ...(touchesFraming ? { framingStampSource: 'manual' } : {}),
+            ...syncConditions,
+            version: { increment: 1 },
+          },
           select: CASE_LITE_SELECT,
         });
 
@@ -593,6 +609,48 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
 
         return row;
       });
+
+      // Package 7 (2026-06-11): auto-generate the Doctor Pack whenever a case LANDS
+      // physician_review. Both landing edges flow through THIS route — rn_review ->
+      // physician_review (the RN's "Send to doctor", the canonical path) and drafting ->
+      // physician_review (legacy/manual back-compat); no other code path writes
+      // status='physician_review' (drafter /complete lands rn_review, /halt lands needs_*).
+      // Fired AFTER the transaction commits in a log-only try/catch (mirrors
+      // maybeEnqueueChartExtract's post-commit pattern, chart-extract-trigger.ts) so a pack
+      // failure can NEVER roll back or fail the status transition. Awaited (not fire-and-
+      // forget): this runs on Lambda, which freezes after the response — detached promises die.
+      // Idempotency lives in the service ('auto_send_to_doctor' mode): it skips when a
+      // queued/generating/ready pack exists at the post-transition version OR the
+      // pre-transition version (the bump between them IS this status flip, so a pack the RN
+      // generated just before clicking Send reflects the identical chart). On failure the send
+      // still succeeds; the Doctor Pack panel's null/failed state with its "Generate now" /
+      // Regenerate affordance is the recovery surface, and the stuck-pack watcher backstops.
+      if (parsed.to === 'physician_review') {
+        try {
+          const gen = await generateDoctorPackForCase(db, {
+            caseId: id,
+            actorSub: user.id,
+            trigger: 'auto_send_to_doctor',
+            priorCaseVersion: parsed.version,
+          });
+          console.log(JSON.stringify({
+            event: gen.outcome === 'queued' ? 'doctor_pack_autogen_queued' : 'doctor_pack_autogen_skipped',
+            caseId: id,
+            from: parsed.from,
+            ...(gen.outcome === 'queued'
+              ? { doctorPackId: gen.pack.id, caseVersion: gen.pack.caseVersion }
+              : { existingPackId: gen.existingPackId, existingState: gen.existingState, existingCaseVersion: gen.existingCaseVersion }),
+          }));
+        } catch (err) {
+          console.warn(JSON.stringify({
+            event: 'doctor_pack_autogen_failed',
+            caseId: id,
+            from: parsed.from,
+            to: parsed.to,
+            message: err instanceof Error ? err.message : String(err),
+          }));
+        }
+      }
 
       res.json({ data: withRecordsSignal(updated as unknown as Record<string, unknown>) });
     }),

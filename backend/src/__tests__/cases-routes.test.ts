@@ -21,6 +21,16 @@ vi.mock('../auth/roles', () => ({
     },
 }));
 
+// Package 7: the status route auto-fires Doctor Pack generation when a case lands
+// physician_review. Mock the service — its own behavior (idempotency modes, manifest assembly)
+// is unit-tested in doctor-pack-generate.test.ts; here we pin the ROUTE contract: fires on the
+// landing edges with the right args, and a failure NEVER blocks the transition.
+vi.mock('../services/doctor-pack-generate.js', () => ({
+  generateDoctorPackForCase: vi.fn(async () => ({ outcome: 'queued', pack: { id: 'DP-1', caseVersion: 2 } })),
+}));
+import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
+const doctorPackGenMock = vi.mocked(generateDoctorPackForCase);
+
 function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
   return {
     id: 'CASE-1',
@@ -264,6 +274,30 @@ describe('cases routes', () => {
     expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'case_updated' }) }));
   });
 
+  // pkg 5 provenance: a staff PATCH of the framing pair stamps 'manual' (immutable to the
+  // post-merge restamp hook); a PATCH that doesn't touch the pair must NOT touch the stamp.
+  it('PATCHing framingChoice stamps framingStampSource=manual', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, framingChoice: 'secondary' });
+    expect(res.status).toBe(200);
+    expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ framingChoice: 'secondary', framingStampSource: 'manual' }) }));
+  });
+
+  it('PATCHing upstreamScCondition (even clearing it to null) stamps manual', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, upstreamScCondition: null });
+    expect(res.status).toBe(200);
+    expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ upstreamScCondition: null, framingStampSource: 'manual' }) }));
+  });
+
+  it('a PATCH that does not touch the framing pair leaves the stamp alone', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, veteranStatement: 'updated' });
+    expect(res.status).toBe(200);
+    const data = (spies.caseUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
+    expect(data).not.toHaveProperty('framingStampSource');
+  });
+
   it('rejects PATCH stale version with 409', async () => {
     const { db } = makeDb(baseCase({ version: 2 }));
     const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, framingChoice: 'redacted framing' });
@@ -346,6 +380,94 @@ describe('cases routes', () => {
     const { db } = makeDb(baseCase({ status: 'intake', version: 1 }));
     const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/status').send({ from: 'intake', to: 'delivered', version: 1 });
     expect(res.status).toBe(400);
+  });
+
+  // ============ Package 7 (2026-06-11): Doctor Pack auto-gen on send-to-doctor ============
+  describe('Doctor Pack auto-gen on landing physician_review', () => {
+    beforeEach(() => {
+      doctorPackGenMock.mockReset();
+      doctorPackGenMock.mockResolvedValue({ outcome: 'queued', pack: { id: 'DP-1', caseVersion: 8 } } as never);
+    });
+
+    it('rn_review -> physician_review fires the auto-gen EXACTLY ONCE with the pre-transition version', async () => {
+      const { db } = makeDb(baseCase({ status: 'rn_review', version: 7, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'rn_review', to: 'physician_review', version: 7 });
+
+      expect(res.status).toBe(200);
+      expect(doctorPackGenMock).toHaveBeenCalledTimes(1);
+      expect(doctorPackGenMock).toHaveBeenCalledWith(db, {
+        caseId: 'CASE-1',
+        actorSub: 'USER-1',
+        trigger: 'auto_send_to_doctor',
+        priorCaseVersion: 7,
+      });
+    });
+
+    it('drafting -> physician_review (the legacy/manual landing edge) ALSO fires the auto-gen', async () => {
+      const { db } = makeDb(baseCase({ status: 'drafting', version: 3 }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'drafting', to: 'physician_review', version: 3 });
+
+      expect(res.status).toBe(200);
+      expect(doctorPackGenMock).toHaveBeenCalledTimes(1);
+      expect(doctorPackGenMock).toHaveBeenCalledWith(db, expect.objectContaining({ trigger: 'auto_send_to_doctor', priorCaseVersion: 3 }));
+    });
+
+    it('a re-fire where the service SKIPS (pack already current) still returns 200 — no duplicate, no error', async () => {
+      doctorPackGenMock.mockResolvedValue({
+        outcome: 'skipped', existingPackId: 'DP-1', existingState: 'ready', existingCaseVersion: 8,
+      } as never);
+      const { db, spies } = makeDb(baseCase({ status: 'rn_review', version: 7, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'rn_review', to: 'physician_review', version: 7 });
+
+      expect(res.status).toBe(200);
+      expect(doctorPackGenMock).toHaveBeenCalledTimes(1);
+      // The transition itself still committed.
+      expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'physician_review' }) }));
+    });
+
+    it('an auto-gen FAILURE does not block the send: status flips, 200 returned, structured warn logged', async () => {
+      doctorPackGenMock.mockRejectedValue(new Error('chart_not_ready: 2 files still unread'));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const { db, spies } = makeDb(baseCase({ status: 'rn_review', version: 7, assignedPhysicianId: 'PHYS-001' }));
+
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'rn_review', to: 'physician_review', version: 7 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.status).toBe('physician_review');
+      expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'physician_review' }) }));
+      const warnPayload = String(warnSpy.mock.calls.find((c) => String(c[0]).includes('doctor_pack_autogen_failed'))?.[0]);
+      expect(warnPayload).toContain('doctor_pack_autogen_failed');
+      expect(warnPayload).toContain('chart_not_ready: 2 files still unread');
+      warnSpy.mockRestore();
+    });
+
+    it('does NOT fire on transitions that do not land physician_review', async () => {
+      const { db } = makeDb(baseCase({ status: 'intake', version: 1 }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'intake', to: 'records', version: 1 });
+
+      expect(res.status).toBe(200);
+      expect(doctorPackGenMock).not.toHaveBeenCalled();
+    });
+
+    it('rn_review -> physician_review without an assigned physician still 409s BEFORE any auto-gen', async () => {
+      const { db } = makeDb(baseCase({ status: 'rn_review', version: 7, assignedPhysicianId: null }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'rn_review', to: 'physician_review', version: 7 });
+
+      expect(res.status).toBe(409);
+      expect(doctorPackGenMock).not.toHaveBeenCalled();
+    });
   });
 
   it('allows physician_review to delivered for assigned physician but not ops_staff', async () => {

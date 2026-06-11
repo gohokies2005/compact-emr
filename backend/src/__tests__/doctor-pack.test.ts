@@ -22,7 +22,9 @@ function readStatusRow(filePath: string, terminalStatus: FileReadStatusRecord['t
     fileSha256: 'a'.repeat(64),
     terminalStatus,
     attemptsJson: [],
-    manualSummary: terminalStatus === 'manual_summary_provided' ? 'RN reviewed and summarized this file' : null,
+    // >= 40 chars: MANUAL_SUMMARY_MIN_LENGTH — selectKeyDocs now applies the shared
+    // isEffectivelyRead predicate, which (correctly) rejects an under-length "summary".
+    manualSummary: terminalStatus === 'manual_summary_provided' ? 'RN reviewed and summarized this file in full detail.' : null,
     manualSummaryAt: terminalStatus === 'manual_summary_provided' ? now : null,
     manualSummaryBy: terminalStatus === 'manual_summary_provided' ? 'RN-SUB' : null,
     lastCheckedAt: now,
@@ -74,6 +76,42 @@ describe('selectKeyDocs', () => {
     const selected = selectKeyDocs({
       classifiedFiles: [{ filePath: 'DD-214.pdf', fileSha256: 'a'.repeat(64), pageCount: 3 }],
       readStatusByPath: new Map([['DD-214.pdf', readStatusRow('DD-214.pdf', 'manual_summary_required')]]),
+    });
+    expect(selected).toHaveLength(0);
+  });
+
+  // Package 7 (H-tail, 2026-06-11): pack inclusion goes through the SHARED isEffectivelyRead
+  // predicate (chart-readiness.ts, Package 1), not a raw terminalStatus read. A row classified
+  // 'manual_summary_required' under the OLD 40-word threshold whose stored last attempt passes
+  // the CURRENT thresholds (>= 20 words, clean) is retro-HEALED — the raw check silently
+  // omitted it from packs even though every other consumer treats it as read.
+  it('INCLUDES a retro-healed file: manual_summary_required but last attempt passes current thresholds', () => {
+    const healed: FileReadStatusRecord = {
+      ...readStatusRow('Thomas_OSA_Misc_3.png.pdf', 'manual_summary_required'),
+      attemptsJson: [
+        { method: 'tesseract_ocr', wordCount: 37, corruptedTokenRatio: 0.0, note: null },
+      ] as unknown as FileReadStatusRecord['attemptsJson'],
+    };
+    const selected = selectKeyDocs({
+      classifiedFiles: [{ filePath: 'Thomas_OSA_Misc_3.png.pdf', fileSha256: 'a'.repeat(64), pageCount: 1 }],
+      readStatusByPath: new Map([['Thomas_OSA_Misc_3.png.pdf', healed]]),
+    });
+    expect(selected).toHaveLength(1);
+    expect(selected[0]?.pageRanges).toEqual([{ from: 1, to: 1 }]);
+  });
+
+  // The heal requires the stored attempt to actually PASS: a genuinely unreadable file (last
+  // attempt under the word floor) stays excluded.
+  it('still excludes a manual_summary_required file whose last attempt fails current thresholds', () => {
+    const unreadable: FileReadStatusRecord = {
+      ...readStatusRow('fax_cover.pdf', 'manual_summary_required'),
+      attemptsJson: [
+        { method: 'tesseract_ocr', wordCount: 4, corruptedTokenRatio: 0.0, note: null },
+      ] as unknown as FileReadStatusRecord['attemptsJson'],
+    };
+    const selected = selectKeyDocs({
+      classifiedFiles: [{ filePath: 'fax_cover.pdf', fileSha256: 'a'.repeat(64), pageCount: 1 }],
+      readStatusByPath: new Map([['fax_cover.pdf', unreadable]]),
     });
     expect(selected).toHaveLength(0);
   });

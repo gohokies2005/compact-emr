@@ -6,15 +6,31 @@ import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
 import {
+  applyPackPageBudget,
   assembleDoctorPackManifest,
   DOCTOR_PACK_ENGINE_VERSION,
+  PACK_PAGE_BUDGET,
+  PACK_PAGE_TARGET,
+  type BudgetEntry,
 } from '../services/doctor-pack.js';
-import { classifyFile } from '../services/key-docs-classifier.js';
+import { classifyDocument } from '../services/key-docs-classifier.js';
 import { selectPages, type PageSelectorInputPage } from '../services/page-selector.js';
 import { aggregateChartSummary } from '../services/chart-summary-aggregator.js';
 import { publishDoctorPackQueued } from '../services/doctor-pack-queue.js';
 import { isDoctorPackS3Key } from '../services/s3-key-safety.js';
+import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { AppDb, DocumentPageRecord, KeyDocClassification, KeyDocType } from '../services/db-types.js';
+
+// Chunk D (2026-06-11): presigned GET for the assembled pack PDF (mirrors the drafter
+// artifact-pdf-url pattern). Client cached module-wide; injectable for tests.
+let cachedS3Client: S3Client | null = null;
+function getS3ForDoctorPacks(): S3Client {
+  if (cachedS3Client !== null) return cachedS3Client;
+  cachedS3Client = new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' });
+  return cachedS3Client;
+}
+const DOCTOR_PACK_PDF_TTL_SECONDS = 5 * 60;
 
 // Path-traversal guard. The Doctor Pack PDF lives at a deterministic S3 key derived from the
 // caseId + caseVersion + doctorPackId. We construct the key server-side and refuse to honor
@@ -74,8 +90,9 @@ async function fetchCaseRowForCover(db: AppDb, caseId: string, veteranId: string
   };
 }
 
-export function createDoctorPackRouter(db: AppDb): Router {
+export function createDoctorPackRouter(db: AppDb, opts?: { s3?: Pick<S3Client, 'send'> }): Router {
   const router = Router();
+  const s3ForPacks = (): Pick<S3Client, 'send'> => opts?.s3 ?? getS3ForDoctorPacks();
 
   /**
    * POST /api/v1/cases/:id/doctor-pack/generate
@@ -113,18 +130,23 @@ export function createDoctorPackRouter(db: AppDb): Router {
           id: true,
           veteranId: true,
           version: true,
+          // Chunk D: claimedCondition feeds the page-selector's progress-notes condition rule.
+          claimedCondition: true,
           documents: {
             // H1 (audit 2026-05-27): `id` MUST be selected. classifiedFiles maps
             // documentId: d.id, and the page-selector queries document_pages by that id.
             // Omitting it made documentId undefined => allDocumentIds empty => page text
             // never loaded => page selection inert.
-            select: { id: true, s3Key: true, pageCount: true },
+            // Chunk D: docTag is the uploader's explicit label - the human classification
+            // override when set (currently null/'Other' for all uploads).
+            select: { id: true, s3Key: true, pageCount: true, docTag: true },
             orderBy: { uploadedAt: 'asc' },
           },
         },
-      })) as unknown as { id: string; veteranId: string; version: number; documents: readonly { id: string; s3Key: string; pageCount: number | null }[] } | null;
+      })) as unknown as { id: string; veteranId: string; version: number; claimedCondition: string | null; documents: readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null }[] } | null;
       if (caseWithDocs === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
       const c = { id: caseWithDocs.id, veteranId: caseWithDocs.veteranId, version: caseWithDocs.version };
+      const claimedCondition = caseWithDocs.claimedCondition ?? undefined;
 
       // Architect REVIEW.md finding #2: preempt double-click-Generate with a 409 before the
        // partial-unique index would fire as a 500. Returns the in-flight row so the UI can
@@ -155,7 +177,7 @@ export function createDoctorPackRouter(db: AppDb): Router {
       // total. Until the worker is shipped, page_count stays null and the assembler treats
       // null as "include from page 1 onward; worker discovers exact bound at extraction".
       // We also pull existing KeyDoc rows to preserve per-doc physician overrides + notes.
-      const docList = caseWithDocs.documents as readonly { id: string; s3Key: string; pageCount: number | null }[];
+      const docList = caseWithDocs.documents as readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null }[];
       const existingKeyDocs = await db.keyDoc.findMany({ where: { caseId } });
       const existingByPath = new Map(existingKeyDocs.map((kd) => [kd.filePath, kd]));
 
@@ -167,6 +189,7 @@ export function createDoctorPackRouter(db: AppDb): Router {
             filePath: d.s3Key,
             fileSha256: readStatus?.fileSha256 ?? '',
             pageCount: d.pageCount ?? null,
+            docTag: d.docTag,
           };
         })
         .filter((f) => f.filePath.length > 0);
@@ -194,9 +217,19 @@ export function createDoctorPackRouter(db: AppDb): Router {
       }
 
       // Page-selector pass: for each classified file, decide which pages go in the pack.
+      // Chunk D (2026-06-11): classification is CONTENT-AWARE. Real uploads are named
+      // Misc_1.pdf...Misc_12.pdf, so the prior classifyFile(f.filePath) classified EVERYTHING
+      // 'unspecified' -> first-8-pages rule -> the entire VA-letter/statement/STR rule set in
+      // page-selector.ts never ran. classifyDocument composes: docTag (human override) >
+      // content text (first 2 OCR'd pages) > filename (legacy fallback).
+      const CONTENT_HINT_CHARS_PER_PAGE = 4000;
       const perFileSelection = classifiedFiles.map((f) => {
-        const cls = classifyFile(f.filePath);
         const pageRows = pagesByDocumentId.get(f.documentId) ?? [];
+        const contentText = pageRows
+          .filter((p) => p.pageNumber <= 2)
+          .map((p) => p.text.slice(0, CONTENT_HINT_CHARS_PER_PAGE))
+          .join('\n');
+        const cls = classifyDocument({ filePath: f.filePath, docTag: f.docTag, contentText });
         const pagesInput: readonly PageSelectorInputPage[] = pageRows.map((p) => ({
           pageNumber: p.pageNumber,
           text: p.text,
@@ -210,15 +243,21 @@ export function createDoctorPackRouter(db: AppDb): Router {
           pageCount: f.pageCount ?? pageRows.length ?? 0,
           pages: pagesInput,
           physicianIncludeAllPages: existing?.physicianIncludeAllPages ?? false,
+          ...(claimedCondition !== undefined ? { claimedCondition } : {}),
         });
         return { file: f, classification: cls, selection };
       });
+      const clsByPath = new Map(perFileSelection.map((s) => [s.file.filePath, s.classification]));
 
       // Assemble manifest: legacy whole-doc path for files with no per-page data; page-selected
       // for files with at least one DocumentPage row. The selection.pageRanges may be empty
       // (no_per_page_text_available) — the legacy assembler handles empty by including the
-      // whole file at extraction time.
-      const manifest = assembleDoctorPackManifest({ classifiedFiles, readStatuses });
+      // whole file at extraction time. The content-aware classification is passed through so
+      // the manifest's include/exclude tiers agree with the selector's docTypes.
+      const manifest = assembleDoctorPackManifest({
+        classifiedFiles: classifiedFiles.map((f) => ({ ...f, cls: clsByPath.get(f.filePath) })),
+        readStatuses,
+      });
       // Override the manifest entries' pageRanges with selector output when present.
       const refinedEntries = manifest.entries.map((entry) => {
         const sel = perFileSelection.find((s) => s.file.filePath === entry.filePath);
@@ -228,7 +267,45 @@ export function createDoctorPackRouter(db: AppDb): Router {
         const pageCount = ranges.reduce((sum, r) => sum + Math.max(0, r.to - r.from + 1), 0);
         return { ...entry, pageRanges: ranges, pageCount };
       });
-      const refinedTotalPageCount = refinedEntries.reduce((sum, e) => sum + e.pageCount, 0);
+
+      // Chunk D: APPEND selector-positive files the tier rules excluded from the manifest —
+      // concretely progress_notes (bulk tier, excluded by selectKeyDocs) whose new condition/
+      // recent-encounter rule selected actual pages. Only non-empty selections are appended:
+      // an empty-ranged entry would make the assembler ship the WHOLE doc (handler.py H2).
+      const manifestPaths = new Set(refinedEntries.map((e) => e.filePath));
+      const readStatusByPath = new Map(readStatuses.map((r) => [r.filePath, r]));
+      const appendedEntries = perFileSelection
+        .filter((s) => !manifestPaths.has(s.file.filePath))
+        .filter((s) => s.selection.pageRanges.length > 0)
+        .filter((s) => readStatusByPath.get(s.file.filePath)?.terminalStatus !== 'manual_summary_required')
+        .map((s) => ({
+          filePath: s.file.filePath,
+          docType: s.classification.docType,
+          classification: s.classification.classification,
+          pageRanges: s.selection.pageRanges,
+          pageCount: s.selection.pageRanges.reduce((sum, r) => sum + Math.max(0, r.to - r.from + 1), 0),
+        }));
+
+      // Re-sort the combined set with the manifest's own comparator (tier > importance > path)
+      // so appended bulk docs land last, then apply Ryan's pack page budget (10-15pp target,
+      // hard trim at PACK_PAGE_BUDGET=20) deterministically.
+      const tierOrder: Record<string, number> = { high_signal: 0, normal: 1, bulk: 2 };
+      const combinedEntries: BudgetEntry[] = [...refinedEntries, ...appendedEntries]
+        .map((e) => ({ ...e, importance: clsByPath.get(e.filePath)?.importance ?? 50 }))
+        .sort((a, b) => {
+          if (tierOrder[a.classification] !== tierOrder[b.classification]) {
+            return (tierOrder[a.classification] ?? 1) - (tierOrder[b.classification] ?? 1);
+          }
+          if (a.importance !== b.importance) return b.importance - a.importance;
+          return a.filePath.localeCompare(b.filePath);
+        });
+      const budget = applyPackPageBudget(combinedEntries, PACK_PAGE_BUDGET);
+      const trimmedPaths = new Set(budget.trimmedFilePaths);
+      // Strip the budget-only `importance` so manifestJson keeps the exact entry contract the
+      // assembler + RN review UI already consume.
+      const finalEntries = budget.entries.map(({ importance: _importance, ...entry }) => entry);
+      const finalRangesByPath = new Map(finalEntries.map((e) => [e.filePath, e.pageRanges]));
+      const refinedTotalPageCount = budget.postTrimPageCount;
 
       // Cover-page summary (architect plan: lives in DoctorPack.manifestJson.coverPage).
       const coverPage = await aggregateChartSummary({
@@ -249,20 +326,32 @@ export function createDoctorPackRouter(db: AppDb): Router {
         for (const sel of perFileSelection) {
           const f = sel.file;
           const cls = sel.classification;
-          const refinedEntry = refinedEntries.find((e) => e.filePath === f.filePath);
           const existing = existingByPath.get(f.filePath);
+
+          // Chunk D: the KeyDoc row reflects what's ACTUALLY in the pack post-budget. A file in
+          // the final manifest carries its budgeted ranges; a file the budget dropped (or that
+          // was never included) carries the selector's raw output so the RN review UI can still
+          // show what the selector found.
+          const wasTrimmed = trimmedPaths.has(f.filePath);
+          const rangesToWrite = finalRangesByPath.get(f.filePath)
+            ?? (wasTrimmed ? [] : sel.selection.pageRanges);
+          const rationaleToWrite = wasTrimmed
+            ? `${sel.selection.selectorRationale}; pack_page_budget(${PACK_PAGE_BUDGET}) trimmed this file`
+            : sel.selection.selectorRationale;
+          const freshNeedsRnReview = sel.selection.needsRnReview || wasTrimmed;
 
           // Architect QA finding #1 (REVIEW.md 0cd4df0): durable RN acknowledgement.
           // If an RN previously cleared `needsRnReview` for this file (selectorAcknowledgedAt
           // is set), preserve that decision across regeneration. Otherwise use the fresh
-          // selector verdict.
+          // selector verdict. (The budget trim is deterministic — same inputs re-trim the same
+          // way — so a prior ack stays meaningful across regenerations.)
           // Architect QA Build 2 finding #2 (REVIEW.md 8344668): clear the ack when the
           // doc_type changes — the RN cleared the file under different semantics. A re-
           // classified file needs a fresh review.
           const docTypeChanged = existing !== undefined && existing.docType !== cls.docType;
           const needsRnReviewToWrite = existing?.selectorAcknowledgedAt && !docTypeChanged
             ? false
-            : sel.selection.needsRnReview;
+            : freshNeedsRnReview;
 
           await tx.keyDoc.upsert({
             where: { caseId_filePath: { caseId, filePath: f.filePath } },
@@ -273,20 +362,20 @@ export function createDoctorPackRouter(db: AppDb): Router {
               classification: cls.classification,
               docType: cls.docType,
               importance: cls.importance,
-              pageRanges: refinedEntry?.pageRanges ?? sel.selection.pageRanges,
-              needsRnReview: sel.selection.needsRnReview,
+              pageRanges: rangesToWrite,
+              needsRnReview: freshNeedsRnReview,
               selectorVersion: sel.selection.selectorVersion,
-              selectorRationale: sel.selection.selectorRationale,
+              selectorRationale: rationaleToWrite,
             },
             update: {
               fileSha256: f.fileSha256,
               classification: cls.classification,
               docType: cls.docType,
               importance: cls.importance,
-              pageRanges: refinedEntry?.pageRanges ?? sel.selection.pageRanges,
+              pageRanges: rangesToWrite,
               needsRnReview: needsRnReviewToWrite,
               selectorVersion: sel.selection.selectorVersion,
-              selectorRationale: sel.selection.selectorRationale,
+              selectorRationale: rationaleToWrite,
               version: { increment: 1 },
               // When docType changes (classifier upgrade or content re-classification), wipe
               // the stale RN acknowledgement — the file means something different now.
@@ -311,16 +400,27 @@ export function createDoctorPackRouter(db: AppDb): Router {
             caseVersion: c.version,
             state: 'queued',
             pdfS3Key: s3Key,
-            keyDocCount: refinedEntries.length,
+            keyDocCount: finalEntries.length,
             pageCount: refinedTotalPageCount,
             // Phase 7B-revised Build 1: manifestJson carries entries (with refined page ranges)
             // + cover-page summary (the chart-state snapshot the assembler renders as PDF page 1).
             // The page-selector's per-file rationale lives on each KeyDoc row (selectorRationale)
             // for audit replay; the cover page surfaces top-line state only.
+            // Chunk D: budgetTrim records what the pack page budget removed (RN-visible audit).
             manifestJson: {
-              entries: refinedEntries,
+              entries: finalEntries,
               engineVersion: DOCTOR_PACK_ENGINE_VERSION,
               ...(coverPage ? { coverPage } : {}),
+              ...(budget.trimmed
+                ? {
+                    budgetTrim: {
+                      budget: PACK_PAGE_BUDGET,
+                      preTrimPageCount: budget.preTrimPageCount,
+                      postTrimPageCount: budget.postTrimPageCount,
+                      trimNotes: budget.trimNotes,
+                    },
+                  }
+                : {}),
             },
             generatedBy: actor.sub,
           },
@@ -337,9 +437,14 @@ export function createDoctorPackRouter(db: AppDb): Router {
             detailsJson: {
               caseId,
               doctorPackId: stamped.id,
-              keyDocCount: refinedEntries.length,
+              keyDocCount: finalEntries.length,
               pageCount: refinedTotalPageCount,
-              aboveTarget: refinedTotalPageCount > 250,
+              // Chunk D re-key: aboveTarget stays the HARD compression flag (PACK_PAGE_TARGET=250,
+              // worker may downsample); the curation budget is the separate budget* fields.
+              aboveTarget: refinedTotalPageCount > PACK_PAGE_TARGET,
+              budget: PACK_PAGE_BUDGET,
+              budgetTrimmed: budget.trimmed,
+              budgetPreTrimPageCount: budget.preTrimPageCount,
               engineVersion: DOCTOR_PACK_ENGINE_VERSION,
               preRefinementKeyDocCount: manifest.keyDocCount,
               preRefinementPageCount: manifest.totalPageCount,
@@ -390,10 +495,64 @@ export function createDoctorPackRouter(db: AppDb): Router {
   );
 
   /**
+   * GET /api/v1/cases/:id/doctor-pack/:packId/pdf-url
+   *
+   * Chunk D (2026-06-11): 5-min presigned GET URL for the assembled Doctor Pack PDF. Mirrors
+   * the letter-artifact presign (drafter.ts artifact-pdf-url). No prior route could serve the
+   * pack — it lives in the SEPARATE doctorPacksBucket (DOCTOR_PACKS_BUCKET_NAME env; the API
+   * Lambda already has the env + grantRead via api-stack.ts, unread until now).
+   *
+   * Access: same as the other doctor-pack GETs (admin / ops_staff / physician).
+   * Validates: pack exists, belongs to the URL case, is ready with a pdfS3Key, key passes the
+   * doctor-packs path validator; HeadObject confirms the object exists before signing.
+   */
+  router.get(
+    '/cases/:id/doctor-pack/:packId/pdf-url',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const packId = String(req.params.packId);
+
+      const bucket = process.env['DOCTOR_PACKS_BUCKET_NAME'];
+      if (typeof bucket !== 'string' || bucket.length === 0) {
+        throw new HttpError(503, 'internal_error', 'DOCTOR_PACKS_BUCKET_NAME not configured');
+      }
+
+      const pack = await db.doctorPack.findFirst({ where: { id: packId } });
+      if (pack === null || pack.caseId !== caseId) {
+        throw new HttpError(404, 'not_found', 'Doctor Pack not found for this case', { caseId, packId });
+      }
+      if (pack.state !== 'ready' || typeof pack.pdfS3Key !== 'string' || pack.pdfS3Key.length === 0) {
+        throw new HttpError(404, 'not_found', 'No Doctor Pack PDF exists yet (pack is not ready)', { caseId, packId, state: pack.state });
+      }
+      if (!isSafeS3Key(pack.pdfS3Key)) {
+        throw new HttpError(500, 'internal_error', 'Stored Doctor Pack S3 key fails safety check', { caseId, packId });
+      }
+
+      const s3 = s3ForPacks();
+      // Confirm the object exists before signing — a ready row whose PDF was lifecycle-deleted
+      // should 404 cleanly, not hand back a URL that resolves to S3 NoSuchKey XML.
+      try {
+        await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: pack.pdfS3Key }));
+      } catch {
+        throw new HttpError(404, 'not_found', 'The Doctor Pack PDF object is missing from storage', { caseId, packId });
+      }
+      const url = await getSignedUrl(s3 as S3Client, new GetObjectCommand({ Bucket: bucket, Key: pack.pdfS3Key }), {
+        expiresIn: DOCTOR_PACK_PDF_TTL_SECONDS,
+      });
+      const expiresAt = new Date(Date.now() + DOCTOR_PACK_PDF_TTL_SECONDS * 1000).toISOString();
+
+      res.json({ data: { url, expiresAt, ttlSeconds: DOCTOR_PACK_PDF_TTL_SECONDS } });
+    }),
+  );
+
+  /**
    * GET /api/v1/cases/:id/key-docs
    *
    * Returns the classified key-docs list for the case, importance descending. Used by the UI
    * to show "what's in the Doctor Pack" before / instead of opening the PDF.
+   * Chunk D: each row is enriched with `docPageCount` (the source Document's total pages,
+   * joined on s3Key) so the panel can render "3 of 25 pages".
    */
   router.get(
     '/cases/:id/key-docs',
@@ -404,7 +563,17 @@ export function createDoctorPackRouter(db: AppDb): Router {
         where: { caseId },
         orderBy: [{ importance: 'desc' }, { filePath: 'asc' }],
       });
-      res.json({ data: rows });
+      const docs = (await db.document.findMany({
+        where: { caseId },
+        select: { s3Key: true, pageCount: true, filename: true },
+      })) as unknown as readonly { s3Key: string; pageCount: number | null; filename: string }[];
+      const docByKey = new Map(docs.map((d) => [d.s3Key, d]));
+      const enriched = rows.map((r) => ({
+        ...r,
+        docPageCount: docByKey.get(r.filePath)?.pageCount ?? null,
+        filename: docByKey.get(r.filePath)?.filename ?? null,
+      }));
+      res.json({ data: enriched });
     }),
   );
 

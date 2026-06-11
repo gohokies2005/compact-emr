@@ -26,6 +26,12 @@ vi.mock('../layout/AppShell', () => ({
   AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
 
+// Chunk D: the Doctor Pack panel has its own test suite (DoctorPackPanel.test.tsx) and needs
+// an AuthProvider; stub it here so the page tests stay focused on the review/approve flow.
+vi.mock('../components/DoctorPackPanel', () => ({
+  DoctorPackPanel: () => <div data-testid="doctor-pack-panel" />,
+}));
+
 // Stub the attestation popup: when open, expose a single button that fires onSignedOff — the
 // page-level approve chain (the code under test) runs exactly as in production.
 vi.mock('../components/SignOffPopup', () => ({

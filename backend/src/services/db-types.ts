@@ -735,6 +735,11 @@ export type KeyDocType =
   | 'buddy_statement'
   | 'blue_button'
   | 'progress_notes'
+  // Chunk D (2026-06-11): imaging/radiology reports (MRI/CT/X-ray/ultrasound) — impression-page
+  // selection; intake_summary = our own generated intake form summary (small-doc-all). The
+  // `key_docs.doc_type` column is a plain VarChar(40), so new values are TS-only (no migration).
+  | 'imaging'
+  | 'intake_summary'
   | 'unspecified';
 
 export interface KeyDocPageRange {

@@ -12,6 +12,7 @@ import {
 } from '../../components/PhysicianLetterReadyPanel';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { AdvisoryPanel } from '../../components/AdvisoryPanel';
+import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { getCase } from '../../api/cases';
 import { formatNameLastFirst } from '../../lib/format';
 import { getArtifactPdfUrl } from '../../api/drafter';
@@ -143,6 +144,9 @@ export function PhysicianReviewPage() {
             message="This case is not ready for physician review."
           />
         )}
+
+        {/* Chunk D: Doctor Pack (curated chart abridgement) between the letter panel and Ask Aegis. */}
+        {caseId ? <DoctorPackPanel caseId={caseId} /> : null}
 
         {caseId ? <AdvisoryPanel caseId={caseId} /> : null}
 

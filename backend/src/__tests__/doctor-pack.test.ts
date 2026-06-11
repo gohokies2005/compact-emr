@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyPackPageBudget,
   assembleDoctorPackManifest,
   buildManifest,
   DOCTOR_PACK_ENGINE_VERSION,
+  PACK_PAGE_BUDGET,
   PACK_PAGE_TARGET,
   selectKeyDocs,
+  type BudgetEntry,
   type SelectedKeyDoc,
 } from '../services/doctor-pack.js';
 import type { FileReadStatusRecord } from '../services/db-types.js';
@@ -132,6 +135,162 @@ describe('buildManifest', () => {
     const m = buildManifest(docs);
     expect(m.aboveTarget).toBe(true);
     expect(m.totalPageCount).toBe(PACK_PAGE_TARGET + 50);
+  });
+});
+
+// ===================== Chunk D (2026-06-11): content-aware cls passthrough =====================
+
+describe('selectKeyDocs — pre-computed classification passthrough (Chunk D)', () => {
+  it('a Misc_N.pdf with a content-derived rating_decision cls is included high_signal in full', () => {
+    const selected = selectKeyDocs({
+      classifiedFiles: [{
+        filePath: 'cases/C1/abc-Misc_2.pdf',
+        fileSha256: 'a'.repeat(64),
+        pageCount: 9,
+        cls: { classification: 'high_signal', docType: 'rating_decision', importance: 100, matchedPattern: 'content_classification' },
+      }],
+      readStatusByPath: new Map(),
+    });
+    expect(selected).toHaveLength(1);
+    expect(selected[0]?.docType).toBe('rating_decision');
+    expect(selected[0]?.pageRanges).toEqual([{ from: 1, to: 9 }]);
+  });
+
+  it('a Misc_N.pdf with a content-derived blue_button cls is excluded (bulk)', () => {
+    const selected = selectKeyDocs({
+      classifiedFiles: [{
+        filePath: 'cases/C1/abc-Misc_9.pdf',
+        fileSha256: 'a'.repeat(64),
+        pageCount: 500,
+        cls: { classification: 'bulk', docType: 'blue_button', importance: 30, matchedPattern: 'content_classification' },
+      }],
+      readStatusByPath: new Map(),
+    });
+    expect(selected).toHaveLength(0);
+  });
+});
+
+// ===================== Chunk D (2026-06-11): pack page budget =====================
+
+function be(filePath: string, docType: BudgetEntry['docType'], classification: BudgetEntry['classification'], importance: number, pageCount: number): BudgetEntry {
+  return {
+    filePath,
+    docType,
+    classification,
+    importance,
+    pageRanges: pageCount > 0 ? [{ from: 1, to: pageCount }] : [],
+    pageCount,
+  };
+}
+
+describe('applyPackPageBudget', () => {
+  it('under budget: returns entries unchanged, trimmed=false', () => {
+    const entries = [be('a.pdf', 'rating_decision', 'high_signal', 100, 6), be('b.pdf', 'dd_214', 'high_signal', 95, 2)];
+    const r = applyPackPageBudget(entries);
+    expect(r.trimmed).toBe(false);
+    expect(r.entries).toEqual(entries);
+    expect(r.preTrimPageCount).toBe(8);
+    expect(r.postTrimPageCount).toBe(8);
+    expect(r.trimNotes).toEqual([]);
+  });
+
+  it('over budget: trims to <= PACK_PAGE_BUDGET, lowest tier/importance loses first', () => {
+    const entries = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 8),
+      be('dbq.pdf', 'dbq', 'high_signal', 90, 6),
+      be('audio.pdf', 'audiogram', 'high_signal', 80, 4),
+      be('notes.pdf', 'progress_notes', 'bulk', 35, 10),
+    ];
+    const r = applyPackPageBudget(entries);
+    expect(r.trimmed).toBe(true);
+    expect(r.postTrimPageCount).toBeLessThanOrEqual(PACK_PAGE_BUDGET);
+    // rating (protected) + dbq + audio = 18 pages keep everything; notes gets the 2 leftover.
+    expect(r.entries.find((e) => e.filePath === 'rating.pdf')?.pageCount).toBe(8);
+    expect(r.entries.find((e) => e.filePath === 'dbq.pdf')?.pageCount).toBe(6);
+    expect(r.entries.find((e) => e.filePath === 'audio.pdf')?.pageCount).toBe(4);
+    expect(r.entries.find((e) => e.filePath === 'notes.pdf')?.pageCount).toBe(2);
+    expect(r.trimmedFilePaths).toEqual(['notes.pdf']);
+    expect(r.trimNotes.join(' ')).toContain('notes.pdf: kept 2 of 10');
+  });
+
+  // Architect QA IMPORTANT-1 (2026-06-11): a legacy whole-doc entry (no per-page OCR + null
+  // Document.pageCount -> pageRanges []) has pageCount 0, so the take===0 branch used to DROP it
+  // from any over-budget pack - silently losing an entire document the assembler would otherwise
+  // ship whole. It must pass through untrimmed instead.
+  it('over budget: an incoming empty-ranges whole-doc entry survives untrimmed (passthrough)', () => {
+    const entries = [
+      be('legacy_va_letter.pdf', 'denial_letter', 'high_signal', 100, 0), // pageRanges [] via be()
+      be('dbq.pdf', 'dbq', 'high_signal', 90, 15),
+      be('notes.pdf', 'progress_notes', 'bulk', 35, 10),
+    ];
+    const r = applyPackPageBudget(entries);
+    expect(r.trimmed).toBe(true);
+    const survivor = r.entries.find((e) => e.filePath === 'legacy_va_letter.pdf');
+    expect(survivor).toBeDefined();
+    expect(survivor?.pageRanges).toEqual([]); // still the whole-doc shape for the assembler
+    expect(r.trimmedFilePaths).not.toContain('legacy_va_letter.pdf');
+    expect(r.trimNotes.join(' ')).toContain('legacy_va_letter.pdf: whole-doc passthrough');
+  });
+
+  it('NEVER trims the SC-decision docs first, even against higher-importance non-protected docs', () => {
+    const entries = [
+      be('rated_view.pdf', 'rated_disabilities_view', 'high_signal', 95, 12),
+      be('denial.pdf', 'denial_letter', 'high_signal', 100, 14),
+    ];
+    const r = applyPackPageBudget(entries);
+    // denial (protected) keeps all 14; rated_view (95, unprotected) gets the remaining 6.
+    expect(r.entries.find((e) => e.filePath === 'denial.pdf')?.pageCount).toBe(14);
+    expect(r.entries.find((e) => e.filePath === 'rated_view.pdf')?.pageCount).toBe(6);
+  });
+
+  it('drops zero-allocation docs ENTIRELY (empty ranges would make the assembler ship the whole doc)', () => {
+    const entries = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 20),
+      be('extra.pdf', 'personnel_record', 'high_signal', 75, 5),
+    ];
+    const r = applyPackPageBudget(entries);
+    expect(r.entries.map((e) => e.filePath)).toEqual(['rating.pdf']);
+    expect(r.entries.some((e) => e.pageRanges.length === 0)).toBe(false);
+    expect(r.trimNotes.join(' ')).toContain('extra.pdf: dropped (5');
+    expect(r.trimmedFilePaths).toContain('extra.pdf');
+  });
+
+  it('trims a partially-kept doc from the END of its selected ranges (prefix keep, page order preserved)', () => {
+    const entries = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 16),
+      {
+        ...be('cp.pdf', 'c_and_p_exam', 'high_signal', 90, 0),
+        pageRanges: [{ from: 2, to: 4 }, { from: 7, to: 9 }] as const,
+        pageCount: 6,
+      },
+    ];
+    const r = applyPackPageBudget(entries);
+    const cp = r.entries.find((e) => e.filePath === 'cp.pdf');
+    // 16 protected + 4 remaining: prefix of [2-4, 7-9] = [2-4, 7-7].
+    expect(cp?.pageRanges).toEqual([{ from: 2, to: 4 }, { from: 7, to: 7 }]);
+    expect(cp?.pageCount).toBe(4);
+  });
+
+  it('is deterministic: same input -> identical output (assembler idempotency contract)', () => {
+    const entries = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 9),
+      be('dbq.pdf', 'dbq', 'high_signal', 90, 9),
+      be('audio.pdf', 'audiogram', 'high_signal', 80, 9),
+      be('notes.pdf', 'progress_notes', 'bulk', 35, 9),
+    ];
+    const a = applyPackPageBudget(entries);
+    const b = applyPackPageBudget(entries.map((e) => ({ ...e })));
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  it('preserves the caller-supplied entry order for kept docs', () => {
+    const entries = [
+      be('z_rating.pdf', 'rating_decision', 'high_signal', 100, 5),
+      be('a_dbq.pdf', 'dbq', 'high_signal', 90, 5),
+      be('m_notes.pdf', 'progress_notes', 'bulk', 35, 30),
+    ];
+    const r = applyPackPageBudget(entries);
+    expect(r.entries.map((e) => e.filePath)).toEqual(['z_rating.pdf', 'a_dbq.pdf', 'm_notes.pdf']);
   });
 });
 

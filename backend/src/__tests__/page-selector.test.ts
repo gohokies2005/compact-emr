@@ -58,15 +58,109 @@ describe('selectPages — always-all doc types', () => {
 });
 
 describe('selectPages — default-exclude doc types', () => {
-  it('progress_notes: empty pages with explanatory rationale', () => {
-    const r = run('progress_notes', [p(1, 'visit note 2024-01-15')]);
-    expect(r.pageRanges).toEqual([]);
-    expect(r.selectorRationale).toContain('default_exclude');
-  });
-
   it('blue_button: empty pages', () => {
     const r = run('blue_button', [p(1, 'full health record dump')]);
     expect(r.pageRanges).toEqual([]);
+  });
+});
+
+// Chunk D (2026-06-11): progress notes are no longer blanket-excluded — Ryan's spec wants the
+// most recent/pertinent visit notes IN. Include = mentions the claimed condition OR belongs to
+// the most recent encounter (the doc's max parsed date).
+describe('selectPages — progress_notes condition / recent-encounter rules', () => {
+  function runNotes(pages: readonly PageSelectorInputPage[], claimedCondition?: string) {
+    return selectPages({
+      filePath: 'records/Misc_7.pdf',
+      docType: 'progress_notes',
+      classification: 'bulk',
+      pageCount: pages.length,
+      pages,
+      ...(claimedCondition !== undefined ? { claimedCondition } : {}),
+    });
+  }
+
+  it('includes pages mentioning the claimed condition, excludes unrelated notes', () => {
+    const r = runNotes(
+      [
+        p(1, 'Encounter 01/05/2020. Podiatry follow-up, ingrown toenail resolved without issue today.'),
+        p(2, 'Encounter 02/10/2021. Veteran reports worsening obstructive sleep apnea; CPAP compliance reviewed in detail.'),
+        p(3, 'Encounter 03/15/2022. Sleep clinic: apnea symptoms persist despite therapy adjustments this year.'),
+      ],
+      'obstructive sleep apnea',
+    );
+    const included = r.pageRanges.flatMap((rg) => Array.from({ length: rg.to - rg.from + 1 }, (_, i) => rg.from + i));
+    expect(included).toContain(2);
+    expect(included).toContain(3); // p3 also carries the doc's most recent date
+    expect(included).not.toContain(1);
+    expect(r.selectorRationale).toContain('mentions_claimed_condition');
+  });
+
+  it('includes the most recent encounter pages even without a condition mention', () => {
+    const r = runNotes(
+      [
+        p(1, 'Encounter 01/05/2020. Routine dermatology check, benign nevus monitored, no change.'),
+        p(2, 'Encounter 06/20/2024. Annual physical: blood pressure stable, labs reviewed with patient.'),
+      ],
+      'tinnitus',
+    );
+    const included = r.pageRanges.flatMap((rg) => Array.from({ length: rg.to - rg.from + 1 }, (_, i) => rg.from + i));
+    expect(included).toEqual([2]);
+    expect(r.selectorRationale).toContain('most_recent_encounter');
+  });
+
+  it('returns empty when nothing mentions the condition and no dates parse', () => {
+    const r = runNotes(
+      [p(1, 'General wellness counseling provided. Patient verbalized understanding of the plan.')],
+      'tinnitus',
+    );
+    expect(r.pageRanges).toEqual([]);
+    expect(r.selectorRationale).toContain('progress_notes_no_condition_or_recent_match');
+    expect(r.needsRnReview).toBe(false);
+  });
+
+  it('without claimedCondition, falls back to the recent-encounter rule alone', () => {
+    const r = runNotes([
+      p(1, 'Visit March 3, 2021: knee brace fitted, exercises reviewed and demonstrated correctly.'),
+      p(2, 'Visit March 3, 2023: knee pain worsening, MRI ordered for further evaluation today.'),
+    ]);
+    const included = r.pageRanges.flatMap((rg) => Array.from({ length: rg.to - rg.from + 1 }, (_, i) => rg.from + i));
+    expect(included).toEqual([2]);
+  });
+});
+
+describe('selectPages — imaging rules (Chunk D)', () => {
+  it('small imaging report (<=2 pages): all pages', () => {
+    const r = run('imaging', [p(1, 'MRI lumbar spine. Impression: L4-L5 disc herniation.')], { pageCount: 1 });
+    expect(r.pageRanges).toEqual([{ from: 1, to: 1 }]);
+    expect(r.selectorRationale).toContain('small_doc_shortcut');
+  });
+
+  it('large imaging doc: selects the impression/findings pages only', () => {
+    const r = run('imaging', [
+      p(1, 'Patient demographics and order information for the requested radiology study series.'),
+      p(2, 'Findings: Moderate degenerative disc disease at L4-L5 with posterior disc bulge noted.'),
+      p(3, 'Impression: 1. L4-L5 disc herniation with nerve root impingement. 2. Facet arthropathy.'),
+      p(4, 'Technical acquisition parameters and series listing for archival reference purposes only.'),
+    ]);
+    const included = r.pageRanges.flatMap((rg) => Array.from({ length: rg.to - rg.from + 1 }, (_, i) => rg.from + i));
+    expect(included).toContain(2);
+    expect(included).toContain(3);
+    expect(included).not.toContain(1);
+    expect(included).not.toContain(4);
+  });
+});
+
+describe('selectPages — rating_decision real-world VA phrasings (Chunk D)', () => {
+  it.each([
+    'We have made a decision on your claim for benefits received in March 2024.',
+    'Entitlement to service connection for obstructive sleep apnea is established effective June 1, 2023.',
+    'REASONS FOR DECISION\n\nThe examiner reviewed the record in connection with the issue on appeal.',
+    'Evaluation of post-traumatic stress disorder, currently 50 percent, is continued.',
+  ])('includes a page reading "%s"', (text) => {
+    // Two matching pages so the high-signal <2-match fallback doesn't mask the rule under test.
+    const r = run('rating_decision', [p(1, text), p(2, text)]);
+    expect(r.pageRanges).toEqual([{ from: 1, to: 2 }]);
+    expect(r.needsRnReview).toBe(false);
   });
 });
 

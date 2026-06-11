@@ -1,0 +1,187 @@
+import express from 'express';
+import request from 'supertest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDoctorPackRouter } from '../routes/doctor-pack.js';
+
+// Chunk D (2026-06-11) route tests:
+//   1. GET /cases/:id/doctor-pack/:packId/pdf-url — the new pack-PDF presign endpoint.
+//   2. POST /cases/:id/doctor-pack/generate — content-aware classification end-to-end:
+//      a Misc_N.pdf whose page text is a VA rating decision must produce a page-SELECTED
+//      manifest entry (not the whole-doc fallback), with the budget fields stamped.
+
+vi.mock('@aws-sdk/s3-request-presigner', () => ({
+  getSignedUrl: vi.fn(async () => 'https://signed.example/doctor-pack.pdf'),
+}));
+
+vi.mock('../services/chart-summary-aggregator.js', () => ({
+  aggregateChartSummary: vi.fn(async () => null),
+}));
+
+vi.mock('../services/doctor-pack-queue.js', () => ({
+  publishDoctorPackQueued: vi.fn(async () => ({})),
+}));
+
+const READY_PACK = {
+  id: 'pack-1',
+  caseId: 'CASE-1',
+  caseVersion: 3,
+  state: 'ready',
+  pdfS3Key: 'doctor-packs/CASE-1/v3/abc123-def.pdf',
+  pageCount: 12,
+  keyDocCount: 4,
+  manifestJson: { entries: [], engineVersion: 'doctor-pack-1.0.0' },
+  errorMessage: null,
+  generatedAt: new Date('2026-06-11T00:00:00.000Z'),
+  generatedBy: 'rn-1',
+  createdAt: new Date('2026-06-11T00:00:00.000Z'),
+  updatedAt: new Date('2026-06-11T00:00:00.000Z'),
+  version: 1,
+};
+
+function appFor(
+  prisma: unknown,
+  opts: { role?: 'admin' | 'ops_staff' | 'physician'; s3Send?: (cmd: unknown) => Promise<unknown> } = {},
+) {
+  process.env.DOCTOR_PACKS_BUCKET_NAME = 'test-doctor-packs-bucket';
+  const app = express();
+  app.use(express.json());
+  app.use(async (req, _res, next) => {
+    req.user = { sub: 'user-1', email: 'user@example.com', roles: [opts.role ?? 'ops_staff'] };
+    next();
+  });
+  app.use(
+    '/api/v1',
+    createDoctorPackRouter(prisma as never, { s3: { send: (opts.s3Send ?? vi.fn(async () => ({}))) as never } as never }),
+  );
+  // Mirror the server's error envelope enough for assertions ({ error: { code, message } }).
+  app.use((err: { status?: number; code?: string; message?: string }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    res.status(err.status ?? 500).json({ error: { code: err.code ?? 'internal_error', message: err.message ?? 'error' } });
+  });
+  return app;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  process.env.DOCTOR_PACKS_BUCKET_NAME = 'test-doctor-packs-bucket';
+});
+
+describe('GET /cases/:id/doctor-pack/:packId/pdf-url (Chunk D presign)', () => {
+  it('returns a presigned URL for a ready pack (physician role allowed)', async () => {
+    const prisma = { doctorPack: { findFirst: vi.fn(async () => READY_PACK) } };
+    const res = await request(appFor(prisma, { role: 'physician' }))
+      .get('/api/v1/cases/CASE-1/doctor-pack/pack-1/pdf-url')
+      .expect(200);
+    expect(res.body.data.url).toBe('https://signed.example/doctor-pack.pdf');
+    expect(res.body.data.ttlSeconds).toBe(300);
+    expect(prisma.doctorPack.findFirst).toHaveBeenCalledWith({ where: { id: 'pack-1' } });
+  });
+
+  it('404s for an unknown pack', async () => {
+    const prisma = { doctorPack: { findFirst: vi.fn(async () => null) } };
+    const res = await request(appFor(prisma)).get('/api/v1/cases/CASE-1/doctor-pack/nope/pdf-url').expect(404);
+    expect(res.body.error.message).toContain('not found');
+  });
+
+  it('404s when the pack belongs to a DIFFERENT case (cross-case guard)', async () => {
+    const prisma = { doctorPack: { findFirst: vi.fn(async () => ({ ...READY_PACK, caseId: 'CASE-OTHER' })) } };
+    await request(appFor(prisma)).get('/api/v1/cases/CASE-1/doctor-pack/pack-1/pdf-url').expect(404);
+  });
+
+  it('404s when the pack is not ready yet', async () => {
+    const prisma = { doctorPack: { findFirst: vi.fn(async () => ({ ...READY_PACK, state: 'generating', pdfS3Key: null })) } };
+    const res = await request(appFor(prisma)).get('/api/v1/cases/CASE-1/doctor-pack/pack-1/pdf-url').expect(404);
+    expect(res.body.error.message).toContain('not ready');
+  });
+
+  it('404s when the PDF object is missing from S3 (HeadObject throws)', async () => {
+    const prisma = { doctorPack: { findFirst: vi.fn(async () => READY_PACK) } };
+    const s3Send = vi.fn(async () => { throw new Error('NoSuchKey'); });
+    const res = await request(appFor(prisma, { s3Send })).get('/api/v1/cases/CASE-1/doctor-pack/pack-1/pdf-url').expect(404);
+    expect(res.body.error.message).toContain('missing from storage');
+  });
+
+  it('503s when DOCTOR_PACKS_BUCKET_NAME is not configured', async () => {
+    const prisma = { doctorPack: { findFirst: vi.fn(async () => READY_PACK) } };
+    const app = appFor(prisma);
+    delete process.env.DOCTOR_PACKS_BUCKET_NAME;
+    await request(app).get('/api/v1/cases/CASE-1/doctor-pack/pack-1/pdf-url').expect(503);
+  });
+});
+
+describe('POST /cases/:id/doctor-pack/generate — content-aware classification (Chunk D)', () => {
+  const RATING_PAGE_1 = 'Department of Veterans Affairs\n\nWe have made a decision on your claim for compensation received on March 12, 2024.';
+  const RATING_PAGE_2 = 'REASONS FOR DECISION\n\nEntitlement to service connection for obstructive sleep apnea is established with an evaluation of 50 percent.';
+  const BOILERPLATE_PAGE = 'How to appeal this decision. Your rights to appellate review are described here. You may file a Notice of Disagreement using VA Form 9.';
+
+  function generatePrisma() {
+    const created: { data?: Record<string, unknown> } = {};
+    const tx = {
+      keyDoc: {
+        deleteMany: vi.fn(async () => ({ count: 0 })),
+        upsert: vi.fn(async (args: { create: Record<string, unknown> }) => ({ id: 'kd-1', ...args.create })),
+      },
+      doctorPack: {
+        create: vi.fn(async (args: { data: Record<string, unknown> }) => {
+          created.data = args.data;
+          return { ...args.data };
+        }),
+      },
+      activityLog: { create: vi.fn(async () => ({})) },
+    };
+    const prisma = {
+      case: {
+        findFirst: vi.fn(async () => ({
+          id: 'CASE-1',
+          veteranId: 'VET-1',
+          version: 3,
+          claimedCondition: 'obstructive sleep apnea',
+          claimType: 'initial',
+          framingChoice: null,
+          upstreamScCondition: null,
+          status: 'records_review',
+          cdsVerdict: 'not_yet_run',
+          cdsOddsPct: null,
+          cdsRationale: null,
+          veteranStatement: null,
+          inServiceEvent: null,
+          documents: [{ id: 'doc-1', s3Key: 'cases/CASE-1/aaaa1111-Misc_1.pdf', pageCount: 3, docTag: 'Other' }],
+        })),
+      },
+      doctorPack: { findFirst: vi.fn(async () => null) },
+      fileReadStatus: { findMany: vi.fn(async () => []) },
+      keyDoc: { findMany: vi.fn(async () => []) },
+      documentPage: {
+        findMany: vi.fn(async () => [
+          { id: 'p1', documentId: 'doc-1', pageNumber: 1, text: RATING_PAGE_1, confidence: 0.99, extractedAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
+          { id: 'p2', documentId: 'doc-1', pageNumber: 2, text: RATING_PAGE_2, confidence: 0.99, extractedAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
+          { id: 'p3', documentId: 'doc-1', pageNumber: 3, text: BOILERPLATE_PAGE, confidence: 0.99, extractedAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
+        ]),
+      },
+      $transaction: vi.fn(async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx)),
+    };
+    return { prisma, tx, created };
+  }
+
+  it('classifies Misc_1.pdf as rating_decision from PAGE TEXT and page-selects (no whole-doc fallback)', async () => {
+    const { prisma, tx, created } = generatePrisma();
+    await request(appFor(prisma)).post('/api/v1/cases/CASE-1/doctor-pack/generate').send({}).expect(201);
+
+    // KeyDoc row: content classification won over the meaningless filename.
+    const upsert = tx.keyDoc.upsert.mock.calls[0]?.[0] as { create: Record<string, unknown> };
+    expect(upsert.create.docType).toBe('rating_decision');
+    expect(upsert.create.classification).toBe('high_signal');
+
+    // Manifest entry: decision pages 1-2 selected, appeal-boilerplate page 3 dropped — the
+    // entry is page-SELECTED, not the legacy whole-doc 1..3.
+    const manifest = created.data?.manifestJson as { entries: { filePath: string; docType: string; pageRanges: unknown }[] };
+    expect(manifest.entries).toHaveLength(1);
+    expect(manifest.entries[0]?.docType).toBe('rating_decision');
+    expect(manifest.entries[0]?.pageRanges).toEqual([{ from: 1, to: 2 }]);
+    expect(created.data?.pageCount).toBe(2);
+  });
+
+  it('physician role cannot generate (POST stays admin/ops_staff — D-2 decision)', async () => {
+    const { prisma } = generatePrisma();
+    await request(appFor(prisma, { role: 'physician' })).post('/api/v1/cases/CASE-1/doctor-pack/generate').send({}).expect(403);
+  });
+});

@@ -21,7 +21,9 @@ import type { KeyDocClassification, KeyDocPageRange, KeyDocType } from './db-typ
  * stamps the rationale as `physician_override`.
  */
 
-export const PAGE_SELECTOR_VERSION = 'page-selector-1.0.0';
+// 1.1.0 (Chunk D 2026-06-11): claimedCondition input + progress_notes condition/recent-encounter
+// inclusion (was default-exclude) + imaging rules + widened VA decision-letter phrasings.
+export const PAGE_SELECTOR_VERSION = 'page-selector-1.1.0';
 
 const SMALL_DOC_ALWAYS_ALL_TYPES: ReadonlySet<KeyDocType> = new Set<KeyDocType>([
   'audiogram',
@@ -36,10 +38,14 @@ const SMALL_DOC_ALWAYS_ALL_TYPES: ReadonlySet<KeyDocType> = new Set<KeyDocType>(
   'individual_exposure_summary',
   'entrance_exam',
   'separation_exam',
+  // Chunk D: our own generated intake summary - short, always pertinent.
+  'intake_summary',
 ]);
 
+// Chunk D: progress_notes left this set - Ryan WANTS recent/pertinent visit notes in the pack
+// (P2.4 spec rule 2). It now has its own condition/recent-encounter branch in selectPages.
+// blue_button stays hard-excluded (the "500 pages" guard).
 const DEFAULT_EXCLUDE_BY_DEFAULT: ReadonlySet<KeyDocType> = new Set<KeyDocType>([
-  'progress_notes',
   'blue_button',
 ]);
 
@@ -62,6 +68,11 @@ const RULES: Partial<Record<KeyDocType, RuleSet>> = {
     include: [
       /\bdecision\b/i,
       /reasons? and bases?/i,
+      // Chunk D: real-world VA decision-letter phrasings (D2 table row 1).
+      /reasons? for decision/i,
+      /we (have )?made a decision on your (claim|appeal)/i,
+      /entitlement to .{0,80}\bis (established|granted|denied)/i,
+      /evaluation of .{0,120}\bis (continued|increased|decreased|assigned)/i,
       /service[\s-]?connect(ion|ed)/i,
       /\b(is|has been|have been|are) (granted|denied|continued|established)/i,
       /we (have )?(granted|denied|continued)/i,
@@ -71,6 +82,7 @@ const RULES: Partial<Record<KeyDocType, RuleSet>> = {
       /\bdenied\b/i,
       /granted at \d/i,
       /with an evaluation of/i,
+      /\b\d{1,3}\s?(%|percent) (disabling|evaluation)/i,
     ],
     exclude: [
       /how to (appeal|file a notice)/i,
@@ -86,6 +98,10 @@ const RULES: Partial<Record<KeyDocType, RuleSet>> = {
     include: [
       /\bdecision\b/i,
       /reasons? and bases?/i,
+      // Chunk D: real-world VA decision-letter phrasings (D2 table row 1).
+      /reasons? for decision/i,
+      /we (have )?made a decision on your (claim|appeal)/i,
+      /entitlement to .{0,80}\bis (denied|not established)/i,
       /\b(is|are|have been|has been) (denied|not granted)/i,
       /we (have )?(denied|are denying)/i,
       /we cannot grant/i,
@@ -144,6 +160,16 @@ const RULES: Partial<Record<KeyDocType, RuleSet>> = {
       /claimant information/i,
       /claim(ant)? identification/i,
     ],
+    smallDocPageCutoff: 2,
+  },
+  // Chunk D: imaging/radiology - the impression/findings page is the payload; small-doc-all <=2pp.
+  imaging: {
+    include: [
+      /\bimpression\s*:/i,
+      /\bfindings\s*:/i,
+      /\bconclusion\s*:/i,
+    ],
+    exclude: [],
     smallDocPageCutoff: 2,
   },
   sleep_study: {
@@ -211,6 +237,10 @@ export interface PageSelectorInput {
   readonly pageCount: number;
   readonly pages: readonly PageSelectorInputPage[];
   readonly physicianIncludeAllPages?: boolean;
+  // Chunk D: the case's claimed condition - lets progress_notes (and any future condition-keyed
+  // rule) include pages that mention what the letter is actually about. Optional: absent keeps
+  // the recent-encounter rule alone.
+  readonly claimedCondition?: string;
 }
 
 export interface PageSelectorResult {
@@ -263,6 +293,48 @@ function pageIsBlank(text: string): boolean {
   return text.replace(/\s+/g, ' ').trim().length < 10;
 }
 
+// ---------- Chunk D: progress-notes condition + recent-encounter helpers ----------
+
+// Deterministic date extraction for "most recent encounter" detection. Returns comparable
+// yyyymmdd integers. Three formats cover VA/CPRS + private-practice note headers:
+// MM/DD/YYYY (and -), YYYY-MM-DD, and "Month DD, YYYY". Two-digit years are deliberately
+// ignored (ambiguous).
+const MONTH_INDEX: Readonly<Record<string, number>> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+function extractDateInts(text: string): number[] {
+  const out: number[] = [];
+  const push = (y: number, m: number, d: number) => {
+    if (y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) out.push(y * 10000 + m * 100 + d);
+  };
+  for (const m of text.matchAll(/\b(0?[1-9]|1[0-2])[/-](0?[1-9]|[12]\d|3[01])[/-]((?:19|20)\d{2})\b/g)) {
+    push(Number(m[3]), Number(m[1]), Number(m[2]));
+  }
+  for (const m of text.matchAll(/\b((?:19|20)\d{2})-(0?[1-9]|1[0-2])-(0?[1-9]|[12]\d|3[01])\b/g)) {
+    push(Number(m[1]), Number(m[2]), Number(m[3]));
+  }
+  for (const m of text.matchAll(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(0?[1-9]|[12]\d|3[01]),?\s+((?:19|20)\d{2})\b/gi)) {
+    const mon = MONTH_INDEX[(m[1] ?? '').toLowerCase()];
+    if (mon !== undefined) push(Number(m[3]), mon, Number(m[2]));
+  }
+  return out;
+}
+
+// Condition matcher: full-phrase match OR any distinctive token (length >= 5) from the claimed
+// condition. Short/common tokens ("back", "pain", "left") are dropped - the full phrase still
+// catches them; budget trim catches over-inclusion.
+function buildConditionMatcher(claimedCondition: string | undefined): ((text: string) => boolean) | null {
+  const phrase = (claimedCondition ?? '').trim().toLowerCase();
+  if (phrase.length < 3) return null;
+  const tokens = phrase.split(/[^a-z0-9]+/).filter((t) => t.length >= 5);
+  return (text: string) => {
+    const lower = text.toLowerCase();
+    if (lower.includes(phrase)) return true;
+    return tokens.some((t) => lower.includes(t));
+  };
+}
+
 function pageMatchesRule(text: string, rule: RuleSet): { include: boolean; reason: string } {
   for (const re of rule.exclude) {
     if (re.test(text)) return { include: false, reason: `excluded by ${re.source}` };
@@ -280,7 +352,9 @@ function pageMatchesRule(text: string, rule: RuleSet): { include: boolean; reaso
  *   1. Empty / no pages provided → empty result (worker hasn't extracted yet).
  *   2. Physician override → all pages, rationale='physician_override'.
  *   3. Always-all docTypes (DD-214, lay statements, audiograms, etc.) → all pages.
- *   4. Always-exclude docTypes (progress_notes, blue_button) → empty pages.
+ *   4. Always-exclude docTypes (blue_button) → empty pages.
+ *   4b. progress_notes (Chunk D) → pages mentioning the claimed condition OR in the most
+ *       recent encounter; nothing matches → empty.
  *   5. Small-doc shortcut (when configured): pageCount ≤ cutoff → all pages.
  *   6. benefit_summary → first 3 pages.
  *   7. Otherwise apply per-docType include/exclude rules per page.
@@ -322,6 +396,41 @@ export function selectPages(input: PageSelectorInput): PageSelectorResult {
     return {
       pageRanges: [],
       selectorRationale: `default_exclude (${input.docType}); drafter-cited pages add post-hoc`,
+      needsRnReview: false,
+      selectorVersion: PAGE_SELECTOR_VERSION,
+    };
+  }
+
+  // Chunk D: progress notes are no longer default-excluded. Ryan's spec (P2.4 rule 2) wants the
+  // "most recent/pertinent office visit notes" IN: include a page when it mentions the claimed
+  // condition OR belongs to the most recent encounter (= carries the doc's max parsed date).
+  // Nothing matches -> empty ranges (the old exclusion, now earned rather than blanket).
+  if (input.docType === 'progress_notes') {
+    const conditionMatches = buildConditionMatcher(input.claimedCondition);
+    const pageDates = new Map<number, number[]>();
+    let docMaxDate = 0;
+    for (const page of input.pages) {
+      if (pageIsBlank(page.text)) continue;
+      const dates = extractDateInts(page.text);
+      pageDates.set(page.pageNumber, dates);
+      for (const d of dates) docMaxDate = Math.max(docMaxDate, d);
+    }
+    const includedPages: number[] = [];
+    const reasons: string[] = [];
+    for (const page of input.pages) {
+      if (pageIsBlank(page.text)) continue;
+      const inRecentEncounter = docMaxDate > 0 && (pageDates.get(page.pageNumber) ?? []).includes(docMaxDate);
+      const mentionsCondition = conditionMatches !== null && conditionMatches(page.text);
+      if (mentionsCondition || inRecentEncounter) {
+        includedPages.push(page.pageNumber);
+        reasons.push(`p${page.pageNumber}: ${mentionsCondition ? 'mentions_claimed_condition' : `most_recent_encounter(${docMaxDate})`}`);
+      }
+    }
+    return {
+      pageRanges: rangesFromIncluded(includedPages),
+      selectorRationale: includedPages.length > 0
+        ? `progress_notes_condition_or_recent: ${reasons.join('; ')}`
+        : 'progress_notes_no_condition_or_recent_match (excluded)',
       needsRnReview: false,
       selectorVersion: PAGE_SELECTOR_VERSION,
     };

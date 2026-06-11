@@ -53,9 +53,10 @@ function makeDb(opts: { existingByEmail?: AppUserRecord | null; byId?: AppUserRe
     const role = a.where?.roles?.some?.role;
     return (role === undefined ? ALL : ALL.filter((x) => x.roles.some((r) => r.role === role)));
   });
-  const findUnique = vi.fn(async (a: { where?: { email?: string; id?: string } }) => {
+  const findUnique = vi.fn(async (a: { where?: { email?: string; id?: string; cognitoSub?: string } }) => {
     if (a.where?.email !== undefined) return opts.existingByEmail ?? null;
     if (a.where?.id !== undefined) return opts.byId ?? null;
+    if (a.where?.cognitoSub !== undefined) return ALL.find((x) => x.cognitoSub === a.where?.cognitoSub) ?? null;
     return null;
   });
   const appUser = {
@@ -104,6 +105,36 @@ describe('GET /users — directory', () => {
   it('rejects an invalid role with 400', async () => {
     const res = await request(appFor(makeDb().db, makeCognito())).get('/api/v1/users?role=superuser');
     expect(res.status).toBe(400);
+  });
+});
+
+describe('GET /users/me — caller identity (AppUser id, not the Cognito sub)', () => {
+  it('200 with { id, email, name, roles } when an AppUser row maps to the caller sub', async () => {
+    mockUser = { sub: 'rn-sub', roles: ['ops_staff'] };
+    const res = await request(appFor(makeDb().db, makeCognito())).get('/api/v1/users/me');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ id: 'U-RN', email: 'rn@x.test', name: 'RN', roles: ['ops_staff'] });
+    expect(res.body.data).not.toHaveProperty('cognitoSub');
+  });
+
+  it('is open to physicians too (any authenticated staff role)', async () => {
+    mockUser = { sub: 'd-sub', roles: ['physician'] };
+    const res = await request(appFor(makeDb().db, makeCognito())).get('/api/v1/users/me');
+    expect(res.status).toBe(200);
+    expect(res.body.data.id).toBe('U-DOC');
+  });
+
+  it('404 with a clear message when the login has no AppUser row (degrade signal, not a 500)', async () => {
+    mockUser = { sub: 'ghost-sub', roles: ['admin'] };
+    const res = await request(appFor(makeDb().db, makeCognito())).get('/api/v1/users/me');
+    expect(res.status).toBe(404);
+    expect(res.body.error.message).toMatch(/no AppUser row/i);
+  });
+
+  it('401 unauthenticated', async () => {
+    mockUser = undefined;
+    const res = await request(appFor(makeDb().db, makeCognito())).get('/api/v1/users/me');
+    expect(res.status).toBe(401);
   });
 });
 

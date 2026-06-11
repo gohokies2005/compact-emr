@@ -6,9 +6,11 @@ import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { formatRelativeTime } from '../../lib/date';
-import { listCases, deleteCase, restoreCase, updateQuickNote, type CaseLite } from '../../api/cases';
+import { listCases, deleteCase, restoreCase, updateQuickNote, assignCaseRn, type CaseLite } from '../../api/cases';
 import { describeApiError } from '../../api/client';
 import { listVeterans } from '../../api/veterans';
+import { getMe, listUsers, type StaffUser } from '../../api/users';
+import { useAuth } from '../../auth/useAuth';
 import type { CaseStatus, ClaimType } from '../../types/prisma';
 import { useColumnSort, type ColType } from '../../lib/useColumnSort';
 import { exportRowsToCsv } from '../../lib/csv';
@@ -21,10 +23,14 @@ function useDebounced<T>(value: T, ms: number): T {
   return debounced;
 }
 
+// KEPT for the Type COLUMN + CSV export — only the claim-type FILTER was removed (P3.2).
 const CLAIM_TYPE_LABELS: Record<ClaimType, string> = { initial: 'Initial', supplemental: 'Supplemental', hlr: 'Higher-level review', appeal_bva: 'Board appeal' };
 const STATUS_OPTIONS = Object.entries(CASE_STATUS_LABELS) as [CaseStatus, string][];
-const CLAIM_TYPE_OPTIONS = Object.entries(CLAIM_TYPE_LABELS) as [ClaimType, string][];
 const PAGE_SIZES = [25, 50, 100];
+// RN-filter tokens. '__me__' is CLIENT-ONLY (resolved to my AppUser id via /users/me before the
+// request); '__none__' is the backend's unassigned sentinel and goes over the wire as-is.
+const RN_ME = '__me__';
+const RN_UNASSIGNED = '__none__';
 const CASE_COLUMNS: readonly { readonly key: string; readonly label: string }[] = [
   { key: 'id', label: 'Case' }, { key: 'veteran', label: 'Veteran' }, { key: 'condition', label: 'Condition' },
   { key: 'type', label: 'Type' }, { key: 'status', label: 'Status' }, { key: 'records', label: 'Records' }, { key: 'note', label: 'Note' }, { key: 'physician', label: 'Physician' }, { key: 'rn', label: 'RN' }, { key: 'submitted', label: 'Submitted' }, { key: 'updated', label: 'Updated' }, { key: 'version', label: 'v' },
@@ -40,7 +46,7 @@ const caseSortValue = (key: string) => (c: CaseLite): unknown => {
     case 'records': return c.recordsUploaded ? 1 : 0; // sort: records-in (1) vs awaiting (0)
     case 'note': return c.quickNote ?? '';
     case 'physician': return c.assignedPhysician?.fullName ?? '';
-    case 'rn': return c.assignedRn?.email ?? '';
+    case 'rn': return c.assignedRn?.name ?? c.assignedRn?.email ?? '';
     case 'submitted': return c.createdAt;
     case 'updated': return c.updatedAt;
     case 'version': return c.version;
@@ -50,17 +56,42 @@ const caseSortValue = (key: string) => (c: CaseLite): unknown => {
 
 export function CasesPage() {
   const navigate = useNavigate();
+  const { role } = useAuth();
   const [status, setStatus] = useState<CaseStatus | ''>('');
-  const [claimType, setClaimType] = useState<ClaimType | ''>('');
   const [vetQuery, setVetQuery] = useState('');
   const [veteran, setVeteran] = useState<{ id: string; label: string } | null>(null);
   const [archived, setArchived] = useState(false); // show the Archive (soft-deleted claims)
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+  // RN filter (P3.3): [] = "All active" (param omitted). Default: admins see ALL active; everyone
+  // else lands on their own cases (B-2). Tokens: RN_ME | RN_UNASSIGNED | <AppUser id>.
+  const defaultRnSel: readonly string[] = role === 'admin' ? [] : [RN_ME];
+  const [rnSel, setRnSel] = useState<readonly string[]>(defaultRnSel);
+
+  // "Me" = my AppUser id (assignedRnId keys on it, NOT the Cognito sub) — resolved once via
+  // /users/me. A login without an AppUser row 404s: degrade by hiding [Me] and falling back to
+  // All active (no crash). staleTime Infinity: identity doesn't change mid-session.
+  const me = useQuery({ queryKey: ['users', 'me'], queryFn: getMe, retry: false, staleTime: Infinity });
+  const meId = me.data?.data.id ?? null;
+  const meResolved = me.isSuccess || me.isError;
+  // /users/me failed (e.g. 404: Cognito login without an AppUser row) → [Me] is meaningless. Prune
+  // it from the selection so the default degrades to All active and the summary never lies.
+  useEffect(() => {
+    if (me.isError) setRnSel((sel) => (sel.includes(RN_ME) ? sel.filter((t) => t !== RN_ME) : sel));
+  }, [me.isError]);
+  const effectiveRnTokens = rnSel
+    .filter((t) => t !== RN_ME || meId !== null)
+    .map((t) => (t === RN_ME ? (meId as string) : t));
+  const assignedRnParam = effectiveRnTokens.length > 0 ? effectiveRnTokens.join(',') : undefined;
+
+  // Roster for the filter checkboxes + the '+' assign popup (same source CaseAssignmentPanel uses).
+  const staffQuery = useQuery({ queryKey: ['users', 'ops_staff'], queryFn: () => listUsers({ role: 'ops_staff' }) });
+  const rnRoster = staffQuery.data?.data ?? [];
 
   const debouncedVet = useDebounced(vetQuery, 300);
   // Reset to page 1 whenever a filter changes.
-  useEffect(() => { setPage(1); }, [status, claimType, veteran?.id, pageSize, archived]);
+  const rnSelKey = rnSel.join(',');
+  useEffect(() => { setPage(1); }, [status, rnSelKey, veteran?.id, pageSize, archived]);
 
   const vetMatches = useQuery({
     queryKey: ['veteran-search', debouncedVet],
@@ -69,18 +100,20 @@ export function CasesPage() {
   });
 
   const cases = useQuery({
-    queryKey: ['cases', { status, claimType, veteranId: veteran?.id ?? '', archived, page, pageSize }],
+    queryKey: ['cases', { status, assignedRnId: assignedRnParam ?? '', veteranId: veteran?.id ?? '', archived, page, pageSize }],
     queryFn: () => listCases({
       ...(status && { status }),
-      ...(claimType && { claimType }),
+      ...(assignedRnParam && { assignedRnId: assignedRnParam }),
       ...(veteran && { veteranId: veteran.id }),
       ...(archived && { archived: true }),
       page,
       pageSize,
     }),
+    // Don't fire an UNFILTERED query while [Me] is still resolving — it would flash every case.
+    enabled: !rnSel.includes(RN_ME) || meResolved,
   });
 
-  function clearFilters() { setStatus(''); setClaimType(''); setVetQuery(''); setVeteran(null); setArchived(false); }
+  function clearFilters() { setStatus(''); setRnSel(defaultRnSel); setVetQuery(''); setVeteran(null); setArchived(false); }
   const total = cases.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -105,6 +138,15 @@ export function CasesPage() {
     onError: (e: unknown) => window.alert(`Could not save the note — ${describeApiError(e)}`),
   });
 
+  // RN-column '+' assign popup (P3.4): REAL assignment on the claim — same version-checked wiring
+  // as the chart's CaseAssignmentPanel. The 409 stale-version cause must surface verbatim.
+  const [assignCase, setAssignCase] = useState<CaseLite | null>(null);
+  const assignRnMut = useMutation({
+    mutationFn: ({ id, rnUserId, version }: { id: string; rnUserId: string; version: number }) => assignCaseRn(id, { rnUserId, version }),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['cases'] }); setAssignCase(null); },
+    onError: (e: unknown) => window.alert(`Could not assign the RN — ${describeApiError(e)}`),
+  });
+
   const { onHeaderClick, sortRows, ariaSort, indicator } = useColumnSort();
   const pageRows = cases.data?.data ?? [];
   const rows = sortRows(pageRows, caseSortValue, caseSortType);
@@ -115,7 +157,7 @@ export function CasesPage() {
     const headers = ['Case ID', 'Veteran', 'Condition', 'Type', 'Status', 'Records', 'Physician', 'RN', 'Submitted', 'Updated', 'Version'];
     const matrix = rows.map((c) => [
       c.id, c.veteran ? `${c.veteran.lastName}, ${c.veteran.firstName}` : c.veteranId, c.claimedCondition,
-      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.recordsUploaded ? 'Received' : 'Pending', c.assignedPhysician?.fullName ?? '', c.assignedRn?.email ?? '', c.createdAt, c.updatedAt, c.version,
+      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.recordsUploaded ? 'Received' : 'Pending', c.assignedPhysician?.fullName ?? '', c.assignedRn?.name ?? c.assignedRn?.email ?? '', c.createdAt, c.updatedAt, c.version,
     ]);
     exportRowsToCsv(`cases-export-${new Date().toISOString().slice(0, 10)}.csv`, headers, matrix);
   }
@@ -130,9 +172,7 @@ export function CasesPage() {
       <label className="block text-sm lg:w-56"><span className="mb-1 block font-medium text-slate-700">Status</span>
         <select className="input" value={status} onChange={(e) => setStatus(e.target.value as CaseStatus | '')}><option value="">All statuses</option>{STATUS_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
       </label>
-      <label className="block text-sm lg:w-56"><span className="mb-1 block font-medium text-slate-700">Claim type</span>
-        <select className="input" value={claimType} onChange={(e) => setClaimType(e.target.value as ClaimType | '')}><option value="">All claim types</option>{CLAIM_TYPE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
-      </label>
+      <RnFilterDropdown selection={rnSel} onChange={setRnSel} showMe={!me.isError} meId={meId} others={rnRoster.filter((u) => u.id !== meId)} />
       <div className="relative block text-sm lg:flex-1">
         <span className="mb-1 block font-medium text-slate-700">Veteran</span>
         {veteran
@@ -172,7 +212,11 @@ export function CasesPage() {
               )}
             </td>
             <td className="px-4 py-3 text-slate-600">{c.assignedPhysician?.fullName ?? '—'}</td>
-            <td className="px-4 py-3 text-slate-500">{c.assignedRn?.email ?? '—'}</td>
+            <td className="px-4 py-3 text-slate-500" onClick={(e) => e.stopPropagation()}>
+              {c.assignedRn ? (c.assignedRn.name ?? c.assignedRn.email) : (
+                <button type="button" aria-label="Assign RN" title="Assign an RN" className="text-base leading-none text-slate-300 hover:text-indigo-600" onClick={() => setAssignCase(c)}>+</button>
+              )}
+            </td>
             <td className="px-4 py-3 text-slate-500" title={new Date(c.createdAt).toLocaleString()}>{formatRelativeTime(c.createdAt)}</td>
             <td className="px-4 py-3 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
             <td className="px-4 py-3 text-slate-400">{c.version}</td>
@@ -210,7 +254,94 @@ export function CasesPage() {
         onSave={(note) => quickNoteMut.mutate({ id: noteCase.id, note })}
       />
     ) : null}
+
+    {assignCase ? (
+      <AssignRnPopup
+        c={assignCase}
+        rns={rnRoster}
+        assigning={assignRnMut.isPending}
+        onClose={() => setAssignCase(null)}
+        onAssign={(rnUserId) => assignRnMut.mutate({ id: assignCase.id, rnUserId, version: assignCase.version })}
+      />
+    ) : null}
   </div></AppShell>;
+}
+
+// "Assigned RN" dropdown-checkbox filter (P3.3). Selection semantics: [] = All active (param
+// omitted); otherwise any mix of [Me] / [Unassigned] / specific staff. "All active" is EXCLUSIVE —
+// checking it clears the others, and checking anything else un-checks it (length > 0).
+function RnFilterDropdown({ selection, onChange, showMe, meId, others }: {
+  readonly selection: readonly string[];
+  readonly onChange: (next: readonly string[]) => void;
+  readonly showMe: boolean; // false when /users/me 404'd (no AppUser row) — degrade, no [Me]
+  readonly meId: string | null;
+  readonly others: readonly StaffUser[];
+}) {
+  const [open, setOpen] = useState(false);
+  const isAll = selection.length === 0;
+  const toggle = (token: string) => onChange(selection.includes(token) ? selection.filter((t) => t !== token) : [...selection, token]);
+  const labelFor = (token: string): string => {
+    if (token === RN_ME) return 'Me';
+    if (token === RN_UNASSIGNED) return 'Unassigned';
+    if (token === meId) return 'Me';
+    const u = others.find((o) => o.id === token);
+    return u ? (u.name ?? u.email) : token;
+  };
+  const summary = isAll ? 'All active' : selection.map(labelFor).join(', ');
+  const itemCls = 'flex w-full cursor-pointer items-center gap-2 rounded px-2 py-1.5 hover:bg-slate-50';
+  return (
+    <div className="relative block text-sm lg:w-56">
+      <span className="mb-1 block font-medium text-slate-700">Assigned RN</span>
+      <button type="button" className="input flex w-full items-center justify-between gap-2 text-left" aria-haspopup="true" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <span className="truncate">{summary}</span><span aria-hidden="true" className="text-slate-400">▾</span>
+      </button>
+      {open ? <>
+        {/* invisible click-away layer (the row sits inside the filter flexbox, so a document listener is overkill) */}
+        <div className="fixed inset-0 z-10" aria-hidden="true" onClick={() => setOpen(false)} />
+        <div className="absolute z-20 mt-1 max-h-72 w-full overflow-auto rounded-lg border border-slate-200 bg-white p-1.5 shadow-lg">
+          {showMe ? (
+            <label className={itemCls}><input type="checkbox" checked={selection.includes(RN_ME)} onChange={() => toggle(RN_ME)} /> Me</label>
+          ) : null}
+          <label className={itemCls}><input type="checkbox" checked={selection.includes(RN_UNASSIGNED)} onChange={() => toggle(RN_UNASSIGNED)} /> Unassigned</label>
+          {others.map((u) => (
+            <label key={u.id} className={itemCls}><input type="checkbox" checked={selection.includes(u.id)} onChange={() => toggle(u.id)} /> <span className="truncate">{u.name ?? u.email}</span></label>
+          ))}
+          <div className="my-1 border-t border-slate-100" />
+          <label className={itemCls}><input type="checkbox" checked={isAll} onChange={() => { if (!isAll) onChange([]); }} /> All active</label>
+        </div>
+      </> : null}
+    </div>
+  );
+}
+
+// '+' assign popup (P3.4): pick an ops_staff user → REAL version-checked assignment (assignCaseRn),
+// mirroring the chart's Assignments panel. Backdrop/stopPropagation mirror QuickNotePopup.
+function AssignRnPopup({ c, rns, assigning, onClose, onAssign }: {
+  readonly c: CaseLite;
+  readonly rns: readonly StaffUser[];
+  readonly assigning: boolean;
+  readonly onClose: () => void;
+  readonly onAssign: (rnUserId: string) => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/40 p-6" onClick={onClose}>
+      <div className="mx-auto mt-32 max-w-sm rounded-lg bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-slate-900">Assign RN · {c.id}</h2>
+          <button type="button" className="text-slate-400 hover:text-slate-600" aria-label="Close" onClick={onClose}>✕</button>
+        </div>
+        <p className="mt-0.5 text-xs text-slate-500">Assigns the RN liaison on the claim — same as the chart’s Assignments panel.</p>
+        <ul className="mt-3 max-h-64 divide-y divide-slate-100 overflow-auto rounded-lg border border-slate-200">
+          {rns.map((u) => (
+            <li key={u.id}>
+              <button type="button" className="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 disabled:opacity-50" disabled={assigning} onClick={() => onAssign(u.id)}>{u.name ?? u.email}</button>
+            </li>
+          ))}
+          {rns.length === 0 ? <li className="px-3 py-2 text-sm text-slate-500">No active staff found.</li> : null}
+        </ul>
+      </div>
+    </div>
+  );
 }
 
 // RECORDS chip: binary "veteran-uploaded records present" signal. "Records in" once the case has

@@ -39,6 +39,16 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   needs_records: ['drafting', 'records', 'rejected'],
 };
 
+// Statuses where staff work is actively parked or moving — deactivating the assigned RN/physician
+// would strand the case. Shared by the users.ts + physicians.ts deactivation guards (each had a
+// hand-copied list that silently omitted rn_review + the two Gate-2 halt statuses). Derived from
+// CASE_STATUSES minus pre-flight (intake, records, viability) and terminal/post-work (delivered,
+// paid, rejected) so a future status is in-flight by default unless explicitly excluded here.
+const NOT_IN_FLIGHT: readonly CaseStatus[] = ['intake', 'records', 'viability', 'delivered', 'paid', 'rejected'];
+export const IN_FLIGHT_CASE_STATUSES: readonly CaseStatus[] = CASE_STATUSES.filter(
+  (s) => !NOT_IN_FLIGHT.includes(s),
+);
+
 export function isCaseStatus(value: unknown): value is CaseStatus {
   return typeof value === 'string' && CASE_STATUSES.includes(value as CaseStatus);
 }

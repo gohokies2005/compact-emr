@@ -9,11 +9,12 @@ import type { AppDb, PhysicianRecord } from '../services/db-types.js';
 import { parsePhysicianPatch, parseSignaturePresign } from '../services/physician-validation.js';
 import { buildPhysicianSignatureKey, isPhysicianSignatureS3Key } from '../services/s3-key-safety.js';
 import { composeCredentialBlock, parseCredentialBlock } from '../services/credential-block.js';
+// Setting a physician inactive while they hold a case in an in-flight state would lock them
+// out of their own assigned work (resolveCurrentPhysician returns null for inactive). Block it.
+// Shared const — the local hand-copied list silently omitted rn_review + the Gate-2 halt statuses.
+import { IN_FLIGHT_CASE_STATUSES } from '../services/case-status-transitions.js';
 
 const SIGNATURE_TTL_SECONDS = 5 * 60;
-// Setting a physician inactive while they hold a case in one of these states would lock them
-// out of their own assigned work (resolveCurrentPhysician returns null for inactive). Block it.
-const IN_FLIGHT_STATUSES = ['drafting', 'physician_review', 'correction_requested', 'correction_review'];
 
 interface PhysiciansRouterDeps { s3?: S3Client; bucketName?: string }
 
@@ -92,7 +93,7 @@ export function createPhysiciansRouter(db: AppDb, deps: PhysiciansRouterDeps = {
     }
     // Don't strand in-flight cases: refuse to deactivate a physician who still has assigned work.
     if (data.active === false && current.active === true) {
-      const inFlight = await db.case.count({ where: { assignedPhysicianId: id, status: { in: IN_FLIGHT_STATUSES } } });
+      const inFlight = await db.case.count({ where: { assignedPhysicianId: id, status: { in: [...IN_FLIGHT_CASE_STATUSES] } } });
       if (inFlight > 0) {
         throw new HttpError(409, 'conflict', `Cannot deactivate: physician has ${inFlight} in-flight case(s). Reassign them first.`, { physicianId: id, inFlightCount: inFlight });
       }

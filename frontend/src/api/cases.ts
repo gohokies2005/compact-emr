@@ -9,7 +9,7 @@ export interface CaseVeteranLite {
   readonly heightIn?: number | null; readonly weightLb?: number | null; readonly combatVeteran?: string | null;
 }
 export interface CasePhysicianLite { readonly id: string; readonly fullName: string; readonly email: string; }
-export interface AssignedRnLite { readonly id: string; readonly email: string; }
+export interface AssignedRnLite { readonly id: string; readonly email: string; readonly name?: string | null; }
 
 // Matches the backend CASE_LITE_SELECT shape returned by GET /cases and the list rows.
 export interface CaseLite {
@@ -59,6 +59,8 @@ export interface ListCasesParams {
   readonly claimType?: ClaimType;
   readonly veteranId?: string;
   readonly assignedPhysicianId?: string;
+  // Single AppUser id, '__none__' (unassigned), or a comma-separated mix — the RN multi-filter.
+  readonly assignedRnId?: string;
   readonly archived?: boolean; // true = show only archived (soft-deleted) claims
   readonly page?: number;
   readonly pageSize?: number;
@@ -70,6 +72,7 @@ export async function listCases(params: ListCasesParams = {}): Promise<CaseListR
   if (params.claimType) sp.set('claimType', params.claimType);
   if (params.veteranId) sp.set('veteranId', params.veteranId);
   if (params.assignedPhysicianId) sp.set('assignedPhysicianId', params.assignedPhysicianId);
+  if (params.assignedRnId) sp.set('assignedRnId', params.assignedRnId);
   if (params.archived) sp.set('archived', 'true');
   if (params.page) sp.set('page', String(params.page));
   if (params.pageSize) sp.set('pageSize', String(params.pageSize));

@@ -5,12 +5,14 @@ import { useAuth } from '../auth/useAuth';
 import { useHasQueryClient, useInboxUnreadCount } from '../api/messaging';
 import type { Role } from '../types/prisma';
 
+// STAFF nav only. Physicians never read this array — their ordered nav is physicianNavItems below,
+// so physician entries (Queue/Letters, or 'physician' in roles) here would be dead code.
 const navItems: readonly { label: string; href: string; roles: readonly Role[] }[] = [
   { label: 'Home', href: '/', roles: ['admin', 'ops_staff'] },
   { label: 'Intake', href: '/intake', roles: ['admin', 'ops_staff'] },
   { label: 'Veterans', href: '/veterans', roles: ['admin', 'ops_staff'] },
   { label: 'Cases', href: '/cases', roles: ['admin', 'ops_staff'] },
-  { label: 'Inbox', href: '/inbox', roles: ['admin', 'ops_staff', 'physician'] },
+  { label: 'Inbox', href: '/inbox', roles: ['admin', 'ops_staff'] },
   { label: 'Templates', href: '/templates', roles: ['admin'] },
   { label: 'Physicians', href: '/physicians', roles: ['admin'] },
   { label: 'Staff', href: '/staff', roles: ['admin'] },
@@ -19,9 +21,7 @@ const navItems: readonly { label: string; href: string; roles: readonly Role[] }
   { label: 'Refunds', href: '/refunds', roles: ['admin', 'ops_staff'] },
   { label: 'Compensation', href: '/compensation', roles: ['admin'] },
   { label: 'Costs', href: '/costs', roles: ['admin'] },
-  { label: 'Metrics', href: '/metrics', roles: ['admin'] },
-  { label: 'Queue', href: '/p/queue', roles: ['physician'] },
-  { label: 'Letters', href: '/p/letters', roles: ['physician'] }
+  { label: 'Metrics', href: '/metrics', roles: ['admin'] }
 ];
 
 // Physicians get a dedicated ordered nav: Queue (their landing) | Letters | Inbox (Ryan 2026-06-10

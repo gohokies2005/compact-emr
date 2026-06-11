@@ -55,6 +55,7 @@ const CASE_LITE_SELECT = {
     select: {
       id: true,
       email: true,
+      name: true, // friendly display name for the Cases RN column (falls back to email client-side)
     },
   },
   // RECORDS signal (binary): does the case have >=1 veteran-UPLOADED document, EXCLUDING the
@@ -136,8 +137,19 @@ function buildCaseListWhere(query: Request['query']): Record<string, unknown> {
   // must never silently vanish from every queue (RN-self-service: always reachable).
   if (assignedPhysicianId === '__none__') where.assignedPhysicianId = null;
   else if (assignedPhysicianId !== undefined) where.assignedPhysicianId = assignedPhysicianId;
-  if (assignedRnId === '__none__') where.assignedRnId = null;
-  else if (assignedRnId !== undefined) where.assignedRnId = assignedRnId;
+  // assignedRnId accepts a single AppUser id (legacy callers — unchanged equality), the '__none__'
+  // sentinel (unassigned), or a COMMA-SEPARATED mix of ids and/or '__none__' (the Cases-page RN
+  // multi-select). Combining stays inside this ONE where so the list query + count remain a single
+  // server-paginated pair — a client-side union would make `total`/page counts lie.
+  if (assignedRnId !== undefined) {
+    const tokens = assignedRnId.split(',').map((t) => t.trim()).filter((t) => t.length > 0);
+    const wantsUnassigned = tokens.includes('__none__');
+    const ids = tokens.filter((t) => t !== '__none__');
+    if (wantsUnassigned && ids.length > 0) where.OR = [{ assignedRnId: { in: ids } }, { assignedRnId: null }];
+    else if (wantsUnassigned) where.assignedRnId = null;
+    else if (ids.length === 1) where.assignedRnId = ids[0];
+    else if (ids.length > 1) where.assignedRnId = { in: ids };
+  }
 
   // Soft-archive: default views EXCLUDE archived cases; `?archived=true` shows only the archive.
   if (optionalStringQuery(query.archived) === 'true') where.archivedAt = { not: null };
@@ -276,7 +288,7 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         include: {
           veteran: { select: { id: true, firstName: true, lastName: true, email: true, dob: true, phone: true, address: true, branch: true, serviceStartYear: true, serviceEndYear: true, heightIn: true, weightLb: true, combatVeteran: true } },
           assignedPhysician: { select: { id: true, fullName: true, email: true } },
-          assignedRn: { select: { id: true, email: true } },
+          assignedRn: { select: { id: true, email: true, name: true } },
           documents: { orderBy: { uploadedAt: 'desc' }, take: 5 },
           draftJobs: { orderBy: { enqueuedAt: 'desc' }, take: 5 },
           corrections: { orderBy: { requestedAt: 'desc' }, take: 5 },

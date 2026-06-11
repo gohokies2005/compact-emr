@@ -443,4 +443,59 @@ describe('cases routes', () => {
     const res = await request(appFor(db)).get('/api/v1/cases?status=not_a_status');
     expect(res.status).toBe(400);
   });
+
+  // === assignedRnId filter: single id (legacy) / comma list / '__none__' sentinel combos ===
+  // The Cases-page RN multi-select sends a comma-joined value; it MUST stay one where-clause so the
+  // single findMany+count pair keeps server-side pagination totals truthful.
+
+  function listWhere(spies: ReturnType<typeof makeDb>['spies']): Record<string, unknown> {
+    const call = spies.caseFindMany.mock.calls[0] as unknown as Array<{ where?: Record<string, unknown> }>;
+    return call?.[0]?.where ?? {};
+  }
+
+  it('assignedRnId single id behaves exactly as before (plain equality, back-compat)', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?assignedRnId=U-RN-1');
+    expect(res.status).toBe(200);
+    expect(listWhere(spies).assignedRnId).toBe('U-RN-1');
+  });
+
+  it('assignedRnId=__none__ alone filters to unassigned (null)', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?assignedRnId=__none__');
+    expect(res.status).toBe(200);
+    expect(listWhere(spies).assignedRnId).toBeNull();
+  });
+
+  it('assignedRnId comma list of ids maps to { in: ids }', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?assignedRnId=U-RN-1,U-RN-2');
+    expect(res.status).toBe(200);
+    expect(listWhere(spies).assignedRnId).toEqual({ in: ['U-RN-1', 'U-RN-2'] });
+  });
+
+  it('assignedRnId ids + __none__ maps to the OR of { in: ids } and null', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?assignedRnId=U-RN-1,__none__,U-RN-2');
+    expect(res.status).toBe(200);
+    const where = listWhere(spies);
+    expect(where.assignedRnId).toBeUndefined();
+    expect(where.OR).toEqual([{ assignedRnId: { in: ['U-RN-1', 'U-RN-2'] } }, { assignedRnId: null }]);
+  });
+
+  it('count + findMany see the SAME multi-RN where (pagination totals stay truthful)', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?assignedRnId=U-RN-1,__none__');
+    expect(res.status).toBe(200);
+    const findManyWhere = listWhere(spies);
+    const countCall = spies.caseCount.mock.calls[0] as unknown as Array<{ where?: Record<string, unknown> }>;
+    expect(countCall?.[0]?.where).toEqual(findManyWhere);
+  });
+
+  it('list rows select assignedRn with the friendly name (B-3)', async () => {
+    const { db, spies } = makeDb();
+    await request(appFor(db)).get('/api/v1/cases');
+    const call = spies.caseFindMany.mock.calls[0] as unknown as Array<{ select?: { assignedRn?: { select?: Record<string, unknown> } } }>;
+    expect(call?.[0]?.select?.assignedRn?.select).toEqual({ id: true, email: true, name: true });
+  });
 });

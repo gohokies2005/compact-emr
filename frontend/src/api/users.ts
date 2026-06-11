@@ -52,6 +52,19 @@ export async function listUsers(params: { role?: StaffRole; includeInactive?: bo
   return apiGet<{ data: readonly StaffUser[] }>(`/api/v1/users${query ? `?${query}` : ''}`);
 }
 
+// The caller's own AppUser row (id is what assignedRnId etc. key on — NOT the Cognito sub).
+// 404s when the login has no AppUser mapping; callers must degrade gracefully (e.g. hide "Me").
+export interface MeUser {
+  readonly id: string;
+  readonly email: string;
+  readonly name: string | null;
+  readonly roles: readonly string[];
+}
+
+export async function getMe(): Promise<{ data: MeUser }> {
+  return apiGet<{ data: MeUser }>('/api/v1/users/me');
+}
+
 export async function createStaff(input: CreateStaffInput): Promise<{ data: CreatedStaff }> {
   return apiPost<{ data: CreatedStaff }, CreateStaffInput>('/api/v1/users', input);
 }

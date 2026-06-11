@@ -4,14 +4,13 @@ import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { currentActor } from '../services/request-actor.js';
+import { IN_FLIGHT_CASE_STATUSES } from '../services/case-status-transitions.js';
 import { composeCredentialBlock } from '../services/credential-block.js';
 import type { AppDb, Role } from '../services/db-types.js';
 import type { CognitoAdmin, StaffCredential } from '../services/cognito-admin.js';
 import { assertCognitoPasswordPolicy } from '../services/cognito-admin.js';
 
 const ASSIGNABLE_ROLES: readonly Role[] = ['admin', 'ops_staff', 'physician'];
-// Setting a user inactive while they hold in-flight work would strand it (mirrors physicians.ts).
-const IN_FLIGHT_STATUSES = ['drafting', 'physician_review', 'correction_requested', 'correction_review'];
 const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const NPI_PATTERN = /^\d{10}$/;
 
@@ -137,6 +136,23 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
     }),
   );
 
+  // Who am I? Resolves the CALLER's AppUser row from the JWT's cognito sub — the client needs its
+  // own AppUser.id (assignedRnId etc. key on it, NOT the Cognito sub) for "my cases" filters. Open
+  // to any authenticated staff role: it only ever returns the caller's own row. 404 (not 500) when
+  // the login has no AppUser mapping (e.g. a Cognito-only admin) so the UI can degrade gracefully.
+  router.get(
+    '/users/me',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const actor = currentActor(req);
+      const me = await db.appUser.findUnique({ where: { cognitoSub: actor.sub }, include: { roles: true } });
+      if (me === null) {
+        throw new HttpError(404, 'not_found', 'No staff profile maps to this login (the Cognito user has no AppUser row). Ask an admin to provision your staff account.', { cognitoSub: actor.sub });
+      }
+      res.json({ data: { id: me.id, email: me.email, name: me.name, roles: me.roles.map((r) => r.role) } });
+    }),
+  );
+
   router.post(
     '/users',
     requireRole(['admin']),
@@ -244,7 +260,7 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
 
       // Don't strand in-flight work: refuse to deactivate an RN assigned to an active case.
       if (body.active === false && current.active === true) {
-        const inFlight = await db.case.count({ where: { assignedRnId: id, status: { in: IN_FLIGHT_STATUSES } } });
+        const inFlight = await db.case.count({ where: { assignedRnId: id, status: { in: [...IN_FLIGHT_CASE_STATUSES] } } });
         if (inFlight > 0) {
           throw new HttpError(409, 'conflict', `Cannot deactivate: this user is the RN liaison on ${inFlight} in-flight case(s). Reassign them first.`, { userId: id, inFlightCount: inFlight });
         }

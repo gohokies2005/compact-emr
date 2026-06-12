@@ -214,6 +214,11 @@ const RULES: Partial<Record<KeyDocType, RuleSet>> = {
   },
 };
 
+// Item 3 (2026-06-11): unspecified docs at or under this page count are included in full
+// (and no longer RN-flagged — see the unspecified branch in selectPages); larger ones are
+// truncated to the first UNSPECIFIED_SMALL_PAGE_CUTOFF pages and DO get the RN flag.
+const UNSPECIFIED_SMALL_PAGE_CUTOFF = 8;
+
 const APPEAL_BOILERPLATE_THRESHOLD = 0.4;
 const APPEAL_BOILERPLATE_PATTERNS: readonly RegExp[] = [
   /how to (appeal|file)/i,
@@ -446,16 +451,20 @@ export function selectPages(input: PageSelectorInput): PageSelectorResult {
   }
 
   if (input.docType === 'unspecified') {
-    if (input.pageCount <= 8) {
+    if (input.pageCount <= UNSPECIFIED_SMALL_PAGE_CUTOFF) {
+      // Item 3 flag-volume cut (2026-06-11): small unspecified docs are included IN FULL, so
+      // there is nothing for an RN to verify — no pages can have been silently dropped. This
+      // branch was the bulk of the "Doc selection review" noise Ryan complained about. The
+      // large-doc branch below KEEPS the flag: its first-8 truncation can drop the payload.
       return {
         pageRanges: allPages(input.pageCount),
         selectorRationale: 'unspecified_small_doc_all_pages',
-        needsRnReview: true,
+        needsRnReview: false,
         selectorVersion: PAGE_SELECTOR_VERSION,
       };
     }
     return {
-      pageRanges: firstNPages(8, input.pageCount),
+      pageRanges: firstNPages(UNSPECIFIED_SMALL_PAGE_CUTOFF, input.pageCount),
       selectorRationale: 'unspecified_large_doc_first_8',
       needsRnReview: true,
       selectorVersion: PAGE_SELECTOR_VERSION,

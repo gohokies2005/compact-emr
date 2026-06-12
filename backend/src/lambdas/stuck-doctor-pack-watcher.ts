@@ -30,6 +30,13 @@ import { SERVICE_ACTORS } from '../services/service-actors.js';
  */
 
 const QUEUED_STALE_MS = 5 * 60 * 1000;
+// Republish CAP (2026-06-12 pypdf incident): a permanently-broken consumer used to grow the
+// queue unbounded — the watcher republished the same queued rows every 5 min for 14 hours
+// (101 messages + 23 DLQ from TWO packs) and no error ever reached a human. A queued row
+// older than this gives up loudly instead: state='failed' + RN-visible message.
+const QUEUED_GIVE_UP_MS = 60 * 60 * 1000;
+const QUEUED_GIVE_UP_MESSAGE =
+  'We could not put together this Doctor Pack after repeated attempts over an hour. Click Generate to try again. If it keeps failing, please flag this case to Dr. Ryan.';
 // 20 min instead of 15: the assembler Lambda timeout is exactly 15 min, so a strict 15-min
 // boundary would race with a legitimate long-running assembly. 5 min of cushion gives
 // borderline cases room to finish their final PATCH.
@@ -80,6 +87,31 @@ export async function handler(): Promise<StuckDoctorPackWatcherResult> {
 
   for (const row of staleQueued) {
     try {
+      // Give-up cap: createdAt (NOT updatedAt — republishes bump updatedAt) older than an
+      // hour means ~12 failed delivery attempts. Fail the row loudly; stop feeding the queue.
+      if (now.getTime() - row.createdAt.getTime() > QUEUED_GIVE_UP_MS) {
+        await prisma.$transaction([
+          prisma.doctorPack.update({
+            where: { id: row.id },
+            data: { state: 'failed', errorMessage: QUEUED_GIVE_UP_MESSAGE, version: { increment: 1 } },
+          }),
+          prisma.activityLog.create({
+            data: {
+              actorUserId: SERVICE_ACTORS.STUCK_JOB_WATCHER,
+              caseId: row.caseId,
+              action: 'doctor_pack_queued_gave_up',
+              detailsJson: { doctorPackId: row.id, caseId: row.caseId, createdAt: row.createdAt.toISOString(), giveUpAfterMin: 60 },
+            },
+          }),
+        ]);
+        generatingFailed += 1;
+        console.error(JSON.stringify({
+          msg: 'stuck-doctor-pack-watcher: queued row gave up after 1h of republishes',
+          doctorPackId: row.id,
+          caseId: row.caseId,
+        }));
+        continue;
+      }
       const pdfS3Key = row.pdfS3Key;
       if (pdfS3Key === null || pdfS3Key.length === 0) {
         console.error(JSON.stringify({

@@ -388,4 +388,31 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     const res = await request(appFor(makeDb().db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
     expect(res.status).toBe(403);
   });
+
+  // ── RN lock during physician review (Ryan 2026-06-11 — reverses the 2026-06-04 RN-can-edit
+  // decision). Physician + admin retain editing; ops_staff is locked on BOTH mutation routes.
+  it('locks ops_staff letter PUT while in physician_review (409 locked_physician_review)', async () => {
+    mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+    const { db } = makeDb(); // fixture default status is physician_review
+    const res = await request(appFor(db, deps())).put('/api/v1/cases/CASE-1/letter').send({ base_version: 1, txt: 'edited text' });
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('locked_physician_review');
+  });
+
+  it('locks ops_staff surgical-ai while in physician_review (409 locked_physician_review)', async () => {
+    mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+    const { db } = makeDb();
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/surgical-ai').send({ instruction: 'tighten section IV' });
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('locked_physician_review');
+  });
+
+  it('ops_staff letter PUT still allowed in correction_review (lock is physician_review ONLY)', async () => {
+    mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+    const { db } = makeDb(baseCase({ status: 'correction_review' }));
+    const res = await request(appFor(db, deps())).put('/api/v1/cases/CASE-1/letter').send({ base_version: 1, txt: 'edited text' });
+    // Any downstream shape (200 or a different 409 like stale_version) proves the gate let
+    // ops_staff through — it must just never be the lock.
+    expect(res.body?.error?.details?.reason).not.toBe('locked_physician_review');
+  });
 });

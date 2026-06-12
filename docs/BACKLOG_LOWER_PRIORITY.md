@@ -18,6 +18,15 @@ Items explicitly deferred to a future push. Add here instead of losing them in h
    case-context payload, labeled "FRN-drafted letter (our work product), version N". Live-pull only,
    never embedded. (chartSlice.ts — buildChartSlice needs s3+bucket deps threaded from routes/advisory.ts.)
 
+## Needs a Ryan policy call
+0. **Redraft during physician_review bypasses the RN edit-lock** (adversarial audit 2026-06-12 #1):
+   POST /cases/:id/draft has no status guard and `canRedraft` deliberately shows in
+   physician_review (Ryan 2026-06-04 "lost the ability to redraft"). A redraft replaces the letter
+   AND pulls the case back to rn_review — overt (case visibly leaves the doctor's queue), but it
+   contradicts the 2026-06-11 lock. Decide: exclude physician_review from Redraft too, or document
+   it as the sanctioned escape hatch. (Also: the drafter's completion write physician_review→
+   rn_review isn't in CASE_STATUS_TRANSITIONS — legalize or guard.)
+
 ## Whenever
 4. `IN_FLIGHT_STATUSES` hand-copied + drifted in routes/physicians.ts:16 + users.ts:14 (missing
    rn_review/needs_rn_decision/needs_records) — a provider with parked cases could be deactivated.
@@ -39,6 +48,15 @@ Items explicitly deferred to a future push. Add here instead of losing them in h
     primary regardless.
 13. Deploy workflow "Smoke test - Lambda cold start" step fails on EVERY run (pre-existing) — workflow
     always reads red; fix the smoke (payload/permissions) so green means green.
-14. Review follow-up automation candidate: surface a "send review follow-up" draft task N days after
+14. `window.open` after `await` in openSourceDocument/openPendingFile — popup blockers (Safari
+    always, Chrome on slow presigns) silently eat the open; pre-open about:blank or check the
+    return (audit 2026-06-12 #7; pre-existing pattern, now also physician-facing).
+15. Invoiced Payment rows never reconcile to a terminal state (Stripe settle creates a NEW paid
+    row) — fine for the chip, a footgun for future revenue reports summing by payment status.
+16. Watcher give-up increments the `generatingFailed` counter for queued rows (metric mislabel) +
+    each drained duplicate message logs a 'double-failure' line (noise, no PHI).
+17. Untrack `workers/ocr/__pycache__/*.pyc` (tracked compiled artifacts churn in every diff) +
+    add __pycache__ to .gitignore.
+18. Review follow-up automation candidate: surface a "send review follow-up" draft task N days after
     delivery (DRAFT-only discipline per feedback_never_send_veteran_email_autonomously.md). Playbook:
     flatratenexus-project/docs/REVIEW_ASK_PLAYBOOK.md.

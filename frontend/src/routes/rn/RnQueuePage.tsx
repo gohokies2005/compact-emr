@@ -41,6 +41,35 @@ async function openPendingFile(documentId: string) {
   }
 }
 
+// Item 3 (2026-06-11): display-only plain-language map for the page-selector rationale codes —
+// the raw codes ("unspecified_large_doc_first_8") meant nothing to the RN. Selector rationales
+// often carry suffixes (`no_rules_for_doctype (dbq); include_all + RN review`), so match on
+// PREFIX. All 12 codes page-selector.ts can emit are covered; anything unrecognized (e.g. the
+// per-page `p1: matched …` joins) renders as "Needs review".
+const SELECTOR_RATIONALE_LABELS: readonly (readonly [string, string])[] = [
+  ['unspecified_small_doc_all_pages', 'Document type unknown — small file, all pages included by default'],
+  ['unspecified_large_doc_first_8', 'Document type unknown — large file, only the first 8 pages included; confirm the right pages made it in'],
+  ['no_rules_for_doctype', 'No selection rules exist for this document type — selection needs a human eye'],
+  ['high_signal_fallback', 'Included as a best guess from content signals — confirm'],
+  ['physician_override', 'Included in full at physician request'],
+  ['no_per_page_text_available', 'No readable page text yet — page selection deferred'],
+  ['small_doc_always_all', 'Short document type — included in full'],
+  ['small_doc_shortcut', 'Small document — included in full'],
+  ['default_exclude', 'Bulk record dump — excluded by default'],
+  ['progress_notes_no_condition_or_recent_match', 'Progress notes — no mention of the claimed condition and no recent visit; excluded'],
+  ['progress_notes_condition_or_recent', 'Progress notes — pages mentioning the claimed condition or from the most recent visit included'],
+  ['benefit_summary_first_3_pages', 'Benefit summary — first 3 pages included'],
+];
+
+function selectorRationaleLabel(rationale: string | null): string {
+  if (rationale !== null) {
+    for (const [code, label] of SELECTOR_RATIONALE_LABELS) {
+      if (rationale.startsWith(code)) return label;
+    }
+  }
+  return 'Needs review';
+}
+
 function KeyDocReviewQueue() {
   const queryClient = useQueryClient();
   const reviewQuery = useQuery({
@@ -73,32 +102,45 @@ function KeyDocReviewQueue() {
   return (
     <div className="space-y-4">
       <p className="text-xs text-slate-400">{total} doc(s) flagged for RN selection review across all cases.</p>
-      {rows.map((row) => (
-        <Card key={row.id}>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">{row.docType}</span>
-                <span className="font-mono text-xs text-slate-500">case {row.caseId}</span>
-                <span className="text-xs text-slate-500">updated {formatRelativeTime(row.updatedAt)}</span>
+      {rows.map((row) => {
+        // Item 3: human filename (server-enriched; documentFileName fallback strips the uuid
+        // prefix off legacy raw-key payloads) + presigned Open + plain-language rationale.
+        const docId = row.documentId ?? null;
+        return (
+          <Card key={row.id}>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">{row.docType}</span>
+                  <span className="font-mono text-xs text-slate-500">case {row.caseId}</span>
+                  <span className="text-xs text-slate-500">updated {formatRelativeTime(row.updatedAt)}</span>
+                </div>
+                <p className="mt-2 break-words text-sm font-medium text-slate-800">{documentFileName(row.filename ?? row.filePath)}</p>
+                {/* The raw selector code rides along in the tooltip for debugging. */}
+                <p className="mt-2 text-xs italic text-slate-500" title={row.selectorRationale ?? undefined}>
+                  {selectorRationaleLabel(row.selectorRationale)}
+                </p>
               </div>
-              <p className="mt-2 break-words text-sm text-slate-800">{row.filePath}</p>
-              {row.selectorRationale ? (
-                <p className="mt-2 text-xs italic text-slate-500">Selector rationale: {row.selectorRationale}</p>
-              ) : null}
+              <div className="flex shrink-0 items-center gap-2">
+                {docId ? (
+                  <Button type="button" variant="secondary" onClick={() => void openPendingFile(docId)}>
+                    Open
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="primary"
+                  loading={ackMutation.isPending && ackMutation.variables === row.id}
+                  disabled={ackMutation.isPending}
+                  onClick={() => ackMutation.mutate(row.id)}
+                >
+                  Mark reviewed
+                </Button>
+              </div>
             </div>
-            <Button
-              type="button"
-              variant="primary"
-              loading={ackMutation.isPending && ackMutation.variables === row.id}
-              disabled={ackMutation.isPending}
-              onClick={() => ackMutation.mutate(row.id)}
-            >
-              Mark reviewed
-            </Button>
-          </div>
-        </Card>
-      ))}
+          </Card>
+        );
+      })}
     </div>
   );
 }

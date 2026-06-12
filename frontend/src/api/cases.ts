@@ -36,6 +36,9 @@ export interface CaseLite {
   // Lets the Cases list show "Records in" vs "Awaiting records" at a glance (Stage 2 done vs Stage-1-only).
   readonly recordsUploaded?: boolean;
   readonly recordCount?: number;
+  // INVOICED signal: a letter_500 Payment row sits at status='invoiced' (the RN sent the invoice
+  // email; the case status deliberately stays 'delivered' until payment reconciles to 'paid').
+  readonly invoiced?: boolean;
 }
 
 export interface QuickNote { readonly id: string; readonly quickNote: string | null; readonly quickNoteBy: string | null; readonly quickNoteAt: string | null; }
@@ -381,6 +384,10 @@ export interface KeyDocReviewRow {
   readonly notes: string | null;
   readonly updatedAt: string;
   readonly version: number;
+  // Item 3 (2026-06-11): server-side join on Document.s3Key — human filename for display +
+  // documentId for the presigned "Open" viewer. Null when the source Document is gone.
+  readonly filename?: string | null;
+  readonly documentId?: string | null;
 }
 
 export async function listKeyDocsNeedingReview(limit?: number): Promise<{ data: readonly KeyDocReviewRow[]; total: number }> {

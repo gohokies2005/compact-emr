@@ -28,6 +28,22 @@ function isSafeS3Key(s3Key: string): boolean {
   return isDoctorPackS3Key(s3Key);
 }
 
+// Items 3+4 (2026-06-11): shared KeyDoc enrichment. KeyDoc.filePath stores the raw S3 key;
+// Document.s3Key is @unique, so one IN-query maps each key to its human filename (display),
+// documentId (the presigned "Open" viewer), and pageCount ("N of M pages"). Used by BOTH the
+// per-case key-docs list and the cross-case RN review queue.
+async function keyDocEnrichmentByS3Key(
+  db: AppDb,
+  s3Keys: readonly string[],
+): Promise<Map<string, { documentId: string; filename: string; pageCount: number | null }>> {
+  if (s3Keys.length === 0) return new Map();
+  const docs = (await db.document.findMany({
+    where: { s3Key: { in: [...new Set(s3Keys)] } },
+    select: { id: true, s3Key: true, filename: true, pageCount: true },
+  })) as unknown as readonly { id: string; s3Key: string; filename: string; pageCount: number | null }[];
+  return new Map(docs.map((d) => [d.s3Key, { documentId: d.id, filename: d.filename, pageCount: d.pageCount }]));
+}
+
 export function createDoctorPackRouter(db: AppDb, opts?: { s3?: Pick<S3Client, 'send'> }): Router {
   const router = Router();
   const s3ForPacks = (): Pick<S3Client, 'send'> => opts?.s3 ?? getS3ForDoctorPacks();
@@ -165,15 +181,13 @@ export function createDoctorPackRouter(db: AppDb, opts?: { s3?: Pick<S3Client, '
         where: { caseId },
         orderBy: [{ importance: 'desc' }, { filePath: 'asc' }],
       });
-      const docs = (await db.document.findMany({
-        where: { caseId },
-        select: { s3Key: true, pageCount: true, filename: true },
-      })) as unknown as readonly { s3Key: string; pageCount: number | null; filename: string }[];
-      const docByKey = new Map(docs.map((d) => [d.s3Key, d]));
+      // Item 4: documentId added (shared helper) so the panel can open the source PDF inline.
+      const docByKey = await keyDocEnrichmentByS3Key(db, rows.map((r) => r.filePath));
       const enriched = rows.map((r) => ({
         ...r,
         docPageCount: docByKey.get(r.filePath)?.pageCount ?? null,
         filename: docByKey.get(r.filePath)?.filename ?? null,
+        documentId: docByKey.get(r.filePath)?.documentId ?? null,
       }));
       res.json({ data: enriched });
     }),
@@ -201,7 +215,17 @@ export function createDoctorPackRouter(db: AppDb, opts?: { s3?: Pick<S3Client, '
         where: { needsRnReview: true },
         orderBy: { updatedAt: 'asc' },
       });
-      res.json({ data: rows.slice(0, limit), total: rows.length });
+      // Item 3 (2026-06-11): the queue used to ship raw S3 keys with no way to open the file.
+      // Enrich the returned page (not the full set) with filename + documentId via the shared
+      // helper so the RN sees a human name and gets a presigned "Open" affordance.
+      const page = rows.slice(0, limit);
+      const docByKey = await keyDocEnrichmentByS3Key(db, page.map((r) => r.filePath));
+      const enriched = page.map((r) => ({
+        ...r,
+        filename: docByKey.get(r.filePath)?.filename ?? null,
+        documentId: docByKey.get(r.filePath)?.documentId ?? null,
+      }));
+      res.json({ data: enriched, total: rows.length });
     }),
   );
 

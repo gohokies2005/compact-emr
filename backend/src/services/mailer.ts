@@ -75,9 +75,14 @@ interface GmailSecret {
 
 // Cache is bound to the SECRET BYTES that minted it — a rotated/repopulated secret takes effect
 // within readSecretByName's 60s TTL instead of riding a stale access token to its expiry.
-let gmailAccessToken: { token: string; exp: number; secretRaw: string } | null = null;
+// Keyed BY SCOPE: gmail.send (outbound transport) and gmail.readonly (case Email tab live-pull)
+// mint separate tokens — one scope's token must never be served for the other's API calls.
+const gmailAccessTokens = new Map<string, { token: string; exp: number; secretRaw: string }>();
 
-async function gmailAccess(): Promise<{ token: string; user: string }> {
+/** Mint (or serve cached) a Gmail access token for the impersonated mailbox in the secret.
+ * Default scope preserves the original transport behavior byte-for-byte (gmail.send). Exported for
+ * gmail-readonly.ts — DO NOT widen the default; readers must ask for gmail.readonly explicitly. */
+export async function gmailAccess(scope: string = 'https://www.googleapis.com/auth/gmail.send'): Promise<{ token: string; user: string }> {
   const raw = await readSecretByName(process.env.GMAIL_OAUTH_SECRET_NAME);
   if (!raw) throw new Error('gmail transport: GMAIL_OAUTH_SECRET_NAME secret is empty or unreadable');
   let cfg: GmailSecret;
@@ -85,8 +90,9 @@ async function gmailAccess(): Promise<{ token: string; user: string }> {
     throw new Error('gmail transport: secret is not valid JSON — was it populated after deploy? (CDK seeds a random placeholder)');
   }
   if (!cfg.user) throw new Error('gmail transport: secret JSON missing "user" (the mailbox to send as)');
-  if (gmailAccessToken !== null && gmailAccessToken.exp > Date.now() && gmailAccessToken.secretRaw === raw) {
-    return { token: gmailAccessToken.token, user: cfg.user };
+  const cached = gmailAccessTokens.get(scope);
+  if (cached !== undefined && cached.exp > Date.now() && cached.secretRaw === raw) {
+    return { token: cached.token, user: cfg.user };
   }
 
   let body: URLSearchParams;
@@ -96,7 +102,7 @@ async function gmailAccess(): Promise<{ token: string; user: string }> {
     const b64 = (o: object): string => Buffer.from(JSON.stringify(o)).toString('base64url');
     const unsigned = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({
       iss: cfg.client_email,
-      scope: 'https://www.googleapis.com/auth/gmail.send',
+      scope,
       aud: 'https://oauth2.googleapis.com/token',
       sub: cfg.user,
       iat: now,
@@ -105,6 +111,9 @@ async function gmailAccess(): Promise<{ token: string; user: string }> {
     const sig = cryptoSign('RSA-SHA256', Buffer.from(unsigned), cfg.private_key).toString('base64url');
     body = new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: `${unsigned}.${sig}` });
   } else if (cfg.client_id && cfg.client_secret && cfg.refresh_token) {
+    // Legacy refresh-token grant: the token's scopes were fixed at consent time — the `scope`
+    // parameter cannot widen them. A readonly caller on this credential shape gets whatever the
+    // grant carries; the Gmail API call itself then 403s and the caller degrades gracefully.
     body = new URLSearchParams({
       client_id: cfg.client_id,
       client_secret: cfg.client_secret,
@@ -124,7 +133,7 @@ async function gmailAccess(): Promise<{ token: string; user: string }> {
   const j = (await r.json()) as { access_token?: string; expires_in?: number };
   if (!j.access_token) throw new Error('gmail transport: token response had no access_token');
   // Cache to ~80% of the granted lifetime (typ. 3600s) so a warm Lambda never sends with a stale token.
-  gmailAccessToken = { token: j.access_token, exp: Date.now() + Math.floor((j.expires_in ?? 3600) * 0.8) * 1000, secretRaw: raw };
+  gmailAccessTokens.set(scope, { token: j.access_token, exp: Date.now() + Math.floor((j.expires_in ?? 3600) * 0.8) * 1000, secretRaw: raw });
   return { token: j.access_token, user: cfg.user };
 }
 

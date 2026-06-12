@@ -241,12 +241,15 @@ describe('CaseDetailPage — physician-queue banner (Pryor 7a)', () => {
 
   const pryor = { id: 'PHY-1', fullName: 'John Pryor, MD', email: 'pryor@x.test' };
 
-  it("ops_staff on a physician_review case sees the queue banner with the doctor's name", async () => {
+  it("ops_staff on a physician_review case sees the LOCK banner with the doctor's name (Ryan 2026-06-11 reversal)", async () => {
     mockRole = 'ops_staff';
     mockCase({ assignedPhysician: pryor });
     renderPage();
     expect(await screen.findByText(/in Dr\. Pryor's queue/)).toBeInTheDocument();
-    expect(screen.getByText(/any letter save you make is what the doctor will review/i)).toBeInTheDocument();
+    // 2026-06-11: the banner copy flipped from "any save becomes what the doctor reviews" to a
+    // LOCK statement — RN edits are blocked in physician_review (backend 409s both edit routes).
+    expect(screen.getByText(/locked from edits until the doctor acts/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Open letter editor/)).toBeNull();
   });
 
   it('falls back to "the physician\'s queue" when no physician is assigned', async () => {

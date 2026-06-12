@@ -124,6 +124,13 @@ export function LetterEditorPage() {
     },
     onError: async (error: unknown) => {
       if (error instanceof ConflictError) {
+        // RN lock (2026-06-11): an RN who reached the editor via a direct URL on a
+        // physician_review case must get the HONEST reason — and their typed text must NOT be
+        // clobbered by the stale-version refetch (which resets the buffer via the letter effect).
+        if (error.serverMessage?.includes('locked while in physician review')) {
+          setMessage('This letter is locked while the doctor has the case — your changes were NOT saved. Copy your text if you need it; editing reopens when the case leaves physician review.');
+          return;
+        }
         setMessage('This letter was changed elsewhere. Reloaded the latest version.');
         await letterQuery.refetch();
         return;

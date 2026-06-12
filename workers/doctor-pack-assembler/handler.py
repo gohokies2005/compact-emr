@@ -33,7 +33,18 @@ import urllib.request
 from typing import Any
 
 import boto3
-from pypdf import PdfReader, PdfWriter
+
+# pypdf ships VENDORED in this asset dir (pip install pypdf -t .) — it is pure-Python, so the
+# vendor is platform-safe. Import failure must NOT init-crash the Lambda (2026-06-12 incident:
+# pypdf was never deployed, every invocation died at import, the watcher republished the queued
+# rows forever → 101-deep queue and NO error ever reached a human). A failed import is recorded
+# and surfaced per-record so the row flips to 'failed' loudly instead.
+try:
+    from pypdf import PdfReader, PdfWriter
+    _PYPDF_IMPORT_ERROR: str | None = None
+except Exception as _e:  # pragma: no cover — only fires on a broken deployment artifact
+    PdfReader = PdfWriter = None  # type: ignore[assignment]
+    _PYPDF_IMPORT_ERROR = f"pypdf unavailable in deployment artifact: {_e}"
 
 s3 = boto3.client("s3")
 
@@ -206,6 +217,14 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
 
         try:
             _patch_doctor_pack(doctor_pack_id, {"state": "generating"})
+
+            if _PYPDF_IMPORT_ERROR is not None:
+                # Fail the ROW loudly instead of init-crashing the whole Lambda — the RN sees a
+                # failed pack with the real reason, and the watcher stops republishing it. MUST
+                # come AFTER the 'generating' PATCH: the API's state machine only allows
+                # queued→generating→failed, so failing straight from 'queued' would 409 and leave
+                # the row stuck (adversarial-audit finding #14 — the fail-loud path was dead code).
+                raise RuntimeError(_PYPDF_IMPORT_ERROR)
 
             writer = PdfWriter()
 

@@ -439,26 +439,24 @@ export function CaseDetailPage() {
             />
           ) : null}
 
-          {/* Pryor 7(a) (UI sweep, 2026-06-11): an RN opening a physician_review case read the edit
-              panel below as "I must act" and saved over the letter the doctor was about to review.
-              State the situation plainly: the case is in the doctor's queue, and any save becomes
-              what the doctor reviews (currentVersion pointer — the doctor always gets the newest). */}
+          {/* RN LOCK during physician review (Ryan 2026-06-11 — REVERSES the 2026-06-04 RN-can-edit
+              decision after Perez: while the doctor has the case, the letter is locked from RN
+              edits, both hand-edit and surgical-AI; the backend enforces the same on both routes
+              (409 locked_physician_review). Physician + admin retain their tools. */}
           {role === 'ops_staff' && c.status === 'physician_review' ? (
             <div className="rounded-lg border border-sky-200 bg-sky-50 px-5 py-3 text-sm text-sky-900">
-              This case is in {c.assignedPhysician ? `Dr. ${formatPhysicianLastName(c.assignedPhysician.fullName)}'s` : "the physician's"} queue — no action is needed from you. Any letter save you make is what the doctor will review.
+              This case is in {c.assignedPhysician ? `Dr. ${formatPhysicianLastName(c.assignedPhysician.fullName)}'s` : "the physician's"} queue. The letter is locked from edits until the doctor acts — if something needs changing, message the doctor or wait for the case to come back.
             </div>
           ) : null}
 
           {/* RN letter-edit entry. The physician/admin reach the editor via the ready panel above;
-              an RN (ops_staff) otherwise has no entry to it. Ryan 2026-06-04: "RNs need the ability
-              to edit letters too ... by hand or AI surgically before sending to doc." Shown when a
-              letter exists, the run is not in flight, and the status is editable (drafting /
-              physician_review / correction_review — matches the backend EDITABLE_STATUSES). Editing
-              creates a NEW version; the version-safety in /draft + currentVersion pointer ensure the
-              doctor always reviews the newest version. Copy reads as AVAILABILITY, not instruction
-              (Pryor 7(a) — the old imperative phrasing read like a required step). */}
+              an RN (ops_staff) otherwise has no entry to it. Shown when a letter exists, the run is
+              not in flight, and the status is RN-editable: drafting / correction_review ONLY —
+              physician_review is LOCKED for ops_staff (Ryan 2026-06-11; backend mirrors this).
+              Editing creates a NEW version; the version-safety in /draft + currentVersion pointer
+              ensure the doctor always reviews the newest version. */}
           {!inFlightDraft && role === 'ops_staff' && viewableLetterJob &&
-            (c.status === 'drafting' || c.status === 'physician_review' || c.status === 'correction_review') ? (
+            (c.status === 'drafting' || c.status === 'correction_review') ? (
             <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
               <h2 className="text-base font-semibold text-slate-900">Edit {letterFilename(c.veteran?.lastName, c.veteran?.firstName, c.claimedCondition, c.currentVersion ?? c.version)}</h2>
               <p className="mt-1 text-sm text-slate-600">
@@ -496,7 +494,7 @@ export function CaseDetailPage() {
         ) : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} role={role} /> : null}
-        {tab === 'emails' ? <EmailLogPanel queryKey={['case', caseId, 'emails']} fetcher={() => listCaseEmails(caseId)} scope="claim" /> : null}
+        {tab === 'emails' ? <EmailLogPanel queryKey={['case', caseId, 'emails']} fetcher={() => listCaseEmails(caseId)} scope="claim" caseId={caseId} /> : null}
         {tab === 'messages' ? (
           <CaseMessagesPanel caseId={caseId} assignedRn={c.assignedRn ?? null} assignedPhysician={c.assignedPhysician ?? null} />
         ) : null}

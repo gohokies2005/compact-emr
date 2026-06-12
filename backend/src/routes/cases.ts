@@ -78,6 +78,11 @@ const CASE_LITE_SELECT = {
           ],
         },
       },
+      // "Invoiced" list signal (Ryan 2026-06-11): the RN sent the invoice email → a letter_500
+      // Payment row sits at status='invoiced' (delivery.ts POST /send). Derived chip ONLY — we
+      // deliberately do NOT invent a new case status (reconciliation to 'paid' stays the
+      // admin transition). >1 row possible (idempotent re-use guards); count>0 is the signal.
+      payments: { where: { kind: 'letter_500', status: 'invoiced' } },
     },
   },
 };
@@ -90,9 +95,10 @@ const CASE_LITE_SELECT = {
  */
 function withRecordsSignal(row: Record<string, unknown>): Record<string, unknown> {
   const { _count, ...rest } = row;
-  const count = (_count as { documents?: number } | undefined)?.documents;
-  const recordCount = typeof count === 'number' ? count : 0;
-  return { ...rest, recordCount, recordsUploaded: recordCount > 0 };
+  const counts = _count as { documents?: number; payments?: number } | undefined;
+  const recordCount = typeof counts?.documents === 'number' ? counts.documents : 0;
+  const invoicedCount = typeof counts?.payments === 'number' ? counts.payments : 0;
+  return { ...rest, recordCount, recordsUploaded: recordCount > 0, invoiced: invoicedCount > 0 };
 }
 
 /**

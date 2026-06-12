@@ -88,6 +88,21 @@ describe('CasesPage', () => {
     expect(screen.getAllByText('Drafting').some((el) => el.className.includes('text-slate-600') && !el.className.includes('bg-'))).toBe(true);
     // Records column renders the neutral one-word "Pending" label (mock rows have no recordsUploaded).
     expect(screen.getAllByText('Pending').length).toBeGreaterThan(0);
+    // No mock row carries invoiced:true → the Invoiced chip must be absent by default.
+    expect(screen.queryByText('Invoiced')).toBeNull();
+  });
+
+  it('shows the Invoiced chip next to the status when a letter_500 invoice is out (Ryan 2026-06-11)', async () => {
+    listCasesMock.mockResolvedValue({
+      ...CASES_RESULT,
+      data: [{ ...CASES_RESULT.data[0], status: 'delivered', invoiced: true }],
+      total: 1,
+    });
+    renderPage();
+    expect(await screen.findByText('CASE-001')).toBeInTheDocument();
+    const chip = screen.getByText('Invoiced');
+    expect(chip.className).toContain('text-emerald-700');
+    expect(chip).toHaveAttribute('title', expect.stringContaining('awaiting the veteran'));
   });
 
   it('sorts by a column header: default -> asc -> desc (3-state) with aria-sort + indicator', async () => {

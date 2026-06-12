@@ -5,6 +5,7 @@ import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { currentActor } from '../services/request-actor.js';
+import { listVeteranCorrespondence } from '../services/gmail-readonly.js';
 import type { AppDb } from '../services/db-types.js';
 
 // Feature B — Email Communications LOG (read-only) + unmatched-queue assignment (Ryan 2026-06-06).
@@ -52,6 +53,24 @@ export function createEmailsRouter(db: AppDb, deps: { bucketName?: string; s3?: 
     asyncHandler(async (req: Request, res: Response) => {
       const rows = await db.email.findMany({ where: { caseId: String(req.params.id) }, orderBy: EMAIL_LOG_ORDER, select: EMAIL_LOG_SELECT });
       res.json({ data: rows });
+    }),
+  );
+
+  // Claim tab — LIVE Gmail correspondence with the case's veteran (read-only, metadata+snippet only).
+  // Ships DARK: until the Workspace delegation grants gmail.readonly, the service degrades to
+  // {available:false, reason} and this stays 200 — the UI shows a quiet not-connected note instead
+  // of an error. Lights up with NO redeploy once Ryan grants the scope in admin.google.com.
+  router.get(
+    '/cases/:id/gmail-thread',
+    requireRole([...READ_ROLES]),
+    asyncHandler(async (req: Request, res: Response) => {
+      const id = String(req.params.id);
+      const c = (await db.case.findUnique({
+        where: { id },
+        select: { veteran: { select: { email: true } } },
+      })) as unknown as { veteran: { email: string } | null } | null;
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+      res.json({ data: await listVeteranCorrespondence(c.veteran?.email ?? '') });
     }),
   );
 

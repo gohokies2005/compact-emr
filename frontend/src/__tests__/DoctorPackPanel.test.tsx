@@ -11,6 +11,7 @@ import {
   type KeyDoc,
 } from '../api/doctorPack';
 import { useAuth } from '../auth/useAuth';
+import { viewDocument } from '../api/veterans';
 
 vi.mock('../api/doctorPack', async () => {
   const actual = await vi.importActual<typeof import('../api/doctorPack')>('../api/doctorPack');
@@ -27,11 +28,17 @@ vi.mock('../auth/useAuth', () => ({
   useAuth: vi.fn(),
 }));
 
+// Item 4 (2026-06-11): the Case-documents rows open the source PDF via the presigned viewer.
+vi.mock('../api/veterans', () => ({
+  viewDocument: vi.fn(),
+}));
+
 const getLatestMock = vi.mocked(getLatestDoctorPack);
 const listKeyDocsMock = vi.mocked(listKeyDocs);
 const generateMock = vi.mocked(generateDoctorPack);
 const pdfUrlMock = vi.mocked(getDoctorPackPdfUrl);
 const useAuthMock = vi.mocked(useAuth);
+const viewDocMock = vi.mocked(viewDocument);
 
 function setRole(role: 'admin' | 'ops_staff' | 'physician') {
   useAuthMock.mockReturnValue({ role } as unknown as ReturnType<typeof useAuth>);
@@ -64,6 +71,7 @@ const KEY_DOC: KeyDoc = {
   selectorRationale: 'p1: matched',
   docPageCount: 25,
   filename: 'Misc_3.pdf',
+  documentId: 'doc-77',
 };
 
 function renderPanel() {
@@ -171,7 +179,7 @@ describe('DoctorPackPanel', () => {
     expect(await screen.findByRole('button', { name: 'Regenerate' })).toBeInTheDocument();
   });
 
-  it('renders the all-documents list: filename, human docType label, importance chip, pages selected', async () => {
+  it('renders the all-documents list: filename, human docType label, classification chip, pages selected', async () => {
     getLatestMock.mockResolvedValue({ data: READY_PACK });
     listKeyDocsMock.mockResolvedValue({
       data: [
@@ -183,11 +191,41 @@ describe('DoctorPackPanel', () => {
 
     expect(await screen.findByText('Misc_3.pdf')).toBeInTheDocument();
     expect(screen.getByText('Rating decision')).toBeInTheDocument();
-    expect(screen.getByText('High signal · 100')).toBeInTheDocument();
+    // Item 4: the classification WORD stays; the raw importance integer ("· 100") is gone —
+    // an opaque internal sort score means nothing to a physician.
+    expect(screen.getByText('High signal')).toBeInTheDocument();
+    expect(screen.queryByText(/·\s*100/)).not.toBeInTheDocument();
+    expect(screen.queryByText('High signal · 100')).not.toBeInTheDocument();
     expect(screen.getByText('3 of 25 pages')).toBeInTheDocument();
     // The excluded bulk doc is listed but shows it contributes nothing.
     expect(screen.getByText('Blue_Button.pdf')).toBeInTheDocument();
     expect(screen.getByText('Blue Button dump')).toBeInTheDocument();
     expect(screen.getByText('not included')).toBeInTheDocument();
+  });
+
+  // ── Item 4 (2026-06-11): clickable Case-documents rows ───────────────────────────────────────
+
+  it('clicking a document filename opens it via viewDocument(documentId) in a new tab', async () => {
+    getLatestMock.mockResolvedValue({ data: READY_PACK });
+    listKeyDocsMock.mockResolvedValue({ data: [KEY_DOC] });
+    viewDocMock.mockResolvedValueOnce({ data: { downloadUrl: 'https://s3.example/keydoc-inline' } });
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Misc_3.pdf' }));
+    await waitFor(() => {
+      expect(viewDocMock).toHaveBeenCalledWith('doc-77');
+      expect(openSpy).toHaveBeenCalledWith('https://s3.example/keydoc-inline', '_blank', 'noopener,noreferrer');
+    });
+    openSpy.mockRestore();
+  });
+
+  it('a row without documentId renders the filename as plain text (no button)', async () => {
+    getLatestMock.mockResolvedValue({ data: READY_PACK });
+    listKeyDocsMock.mockResolvedValue({ data: [{ ...KEY_DOC, documentId: null }] });
+    renderPanel();
+
+    expect(await screen.findByText('Misc_3.pdf')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Misc_3.pdf' })).not.toBeInTheDocument();
   });
 });

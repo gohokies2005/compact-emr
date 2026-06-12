@@ -6,9 +6,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RnQueuePage } from '../routes/rn/RnQueuePage';
 import { ConflictError } from '../api/client';
 import {
+  acknowledgeKeyDoc,
   listFilesPendingManualGlobal,
+  listKeyDocsNeedingReview,
   postManualSummary,
   type FileReadStatus,
+  type KeyDocReviewRow,
 } from '../api/cases';
 import { viewDocument } from '../api/veterans';
 
@@ -18,6 +21,8 @@ vi.mock('../api/cases', async () => {
     ...actual,
     listFilesPendingManualGlobal: vi.fn(),
     postManualSummary: vi.fn(),
+    listKeyDocsNeedingReview: vi.fn(),
+    acknowledgeKeyDoc: vi.fn(),
   };
 });
 
@@ -37,6 +42,8 @@ vi.mock('../lib/date', () => ({
 const listMock = vi.mocked(listFilesPendingManualGlobal);
 const postMock = vi.mocked(postManualSummary);
 const viewDocMock = vi.mocked(viewDocument);
+const listReviewMock = vi.mocked(listKeyDocsNeedingReview);
+const ackMock = vi.mocked(acknowledgeKeyDoc);
 
 const row1: FileReadStatus = {
   id: 'FRS-1',
@@ -72,6 +79,7 @@ function renderQueue() {
 beforeEach(() => {
   vi.clearAllMocks();
   listMock.mockResolvedValue({ data: [row1, row2], total: 2 });
+  listReviewMock.mockResolvedValue({ data: [], total: 0 });
   postMock.mockResolvedValue({ data: { ...row1, terminalStatus: 'manual_summary_provided', manualSummary: 'Summary written by RN.', manualSummaryAt: '2026-05-25T12:00:00.000Z', manualSummaryBy: 'RN-SUB' } });
 });
 
@@ -208,6 +216,83 @@ describe('RnQueuePage', () => {
     renderQueue(); // default rows carry no documentId / no enrichment
     await screen.findByText('garbled_scan.pdf');
     expect(screen.queryByRole('button', { name: 'garbled_scan.pdf' })).not.toBeInTheDocument();
+  });
+
+  // ── Item 3 (2026-06-11): Doc-selection-review tab cleanup — human filename (not raw S3 key),
+  // presigned Open button, plain-language rationale instead of selector codes. ────────────────
+
+  const reviewRow: KeyDocReviewRow = {
+    id: 'KD-1',
+    caseId: 'CASE-D',
+    filePath: 'cases/CASE-D/123e4567-e89b-42d3-a456-426614174000-Mystery_Upload.pdf',
+    docType: 'unspecified',
+    classification: 'normal',
+    importance: 40,
+    needsRnReview: true,
+    selectorVersion: 'page-selector-1.1.0',
+    selectorRationale: 'unspecified_large_doc_first_8',
+    notes: null,
+    updatedAt: '2026-06-11T00:00:00.000Z',
+    version: 1,
+    filename: 'Mystery_Upload.pdf',
+    documentId: 'DOC-99',
+  };
+
+  async function openDocReviewTab() {
+    renderQueue();
+    fireEvent.click(await screen.findByRole('button', { name: 'Doc selection review' }));
+  }
+
+  it('doc-review row renders the human filename, never the raw S3 key', async () => {
+    listReviewMock.mockResolvedValue({ data: [reviewRow], total: 1 });
+    await openDocReviewTab();
+    expect(await screen.findByText('Mystery_Upload.pdf')).toBeInTheDocument();
+    expect(screen.queryByText(/123e4567/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/cases\/CASE-D/)).not.toBeInTheDocument();
+  });
+
+  it('doc-review row maps the selector code to plain language (raw code never shown)', async () => {
+    listReviewMock.mockResolvedValue({ data: [reviewRow], total: 1 });
+    await openDocReviewTab();
+    expect(
+      await screen.findByText('Document type unknown — large file, only the first 8 pages included; confirm the right pages made it in'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('unspecified_large_doc_first_8')).not.toBeInTheDocument();
+  });
+
+  it('unknown rationale codes render as "Needs review"', async () => {
+    listReviewMock.mockResolvedValue({ data: [{ ...reviewRow, selectorRationale: 'p1: matched decision; p2: matched granted' }], total: 1 });
+    await openDocReviewTab();
+    expect(await screen.findByText('Needs review')).toBeInTheDocument();
+  });
+
+  it('Open button opens the doc via viewDocument(documentId); absent when no documentId', async () => {
+    listReviewMock.mockResolvedValue({ data: [reviewRow], total: 1 });
+    viewDocMock.mockResolvedValueOnce({ data: { downloadUrl: 'https://s3.example/keydoc-presigned' } });
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    await openDocReviewTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Open' }));
+    await waitFor(() => {
+      expect(viewDocMock).toHaveBeenCalledWith('DOC-99');
+      expect(openSpy).toHaveBeenCalledWith('https://s3.example/keydoc-presigned', '_blank', 'noopener,noreferrer');
+    });
+    openSpy.mockRestore();
+  });
+
+  it('legacy row without enrichment: no Open button, filename falls back to the abbreviated key', async () => {
+    listReviewMock.mockResolvedValue({ data: [{ ...reviewRow, filename: null, documentId: null }], total: 1 });
+    await openDocReviewTab();
+    // documentFileName strips the uuid prefix off the raw key.
+    expect(await screen.findByText('Mystery_Upload.pdf')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open' })).not.toBeInTheDocument();
+  });
+
+  it('Mark reviewed still acknowledges the KeyDoc', async () => {
+    listReviewMock.mockResolvedValue({ data: [reviewRow], total: 1 });
+    ackMock.mockResolvedValue({ data: { id: 'KD-1', needsRnReview: false, selectorAcknowledgedAt: '2026-06-11T01:00:00.000Z' } });
+    await openDocReviewTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }));
+    await waitFor(() => expect(ackMock).toHaveBeenCalledWith('KD-1', {}));
   });
 
   it('detail header shows the enriched context and stays compatible with the inline ManualSummaryForm', async () => {

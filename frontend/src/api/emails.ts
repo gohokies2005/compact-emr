@@ -26,6 +26,25 @@ export async function listVeteranEmails(veteranId: string): Promise<{ data: read
 export async function listCaseEmails(caseId: string): Promise<{ data: readonly EmailLogRow[] }> {
   return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/emails`);
 }
+// Live Gmail (read-only) for the claim Email tab — metadata + snippet only, never bodies. Ships
+// DARK: the backend degrades to {available:false} until the Workspace gmail.readonly scope is
+// granted, and the endpoint stays 200 either way.
+export interface GmailThreadMessage {
+  readonly id: string;
+  readonly direction: 'inbound' | 'outbound';
+  readonly otherParty: string;
+  readonly subject: string;
+  readonly snippet: string;
+  readonly date: string;
+}
+export type GmailThreadResult =
+  | { readonly available: true; readonly messages: readonly GmailThreadMessage[] }
+  | { readonly available: false; readonly reason: 'workspace_scope_not_granted' | 'gmail_unreachable' };
+
+export async function getGmailThread(caseId: string): Promise<{ data: GmailThreadResult }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/gmail-thread`);
+}
+
 export async function listUnmatchedEmails(): Promise<{ data: readonly EmailLogRow[] }> {
   return apiGet(`/api/v1/emails/unmatched`);
 }

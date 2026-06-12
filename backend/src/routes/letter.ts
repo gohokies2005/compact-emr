@@ -185,6 +185,12 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
       await enforcePhysicianAssignment(caseId, user.role, user.sub, c.assignedPhysicianId);
       if (!EDITABLE_STATUSES.has(c.status)) throw new HttpError(409, 'conflict', `Letter is not editable in status '${c.status}'.`, { reason: 'not_editable', caseId, status: c.status });
+      // RN lock during physician review (Ryan 2026-06-11 — REVERSES the 2026-06-04 "RNs can
+      // edit before the doc reads it" decision): while the case sits in the doctor's queue,
+      // ops_staff cannot mutate the letter. Physician + admin retain their tools.
+      if (user.role === 'ops_staff' && c.status === 'physician_review') {
+        throw new HttpError(409, 'conflict', 'Letter is locked while in physician review.', { reason: 'locked_physician_review', caseId });
+      }
       // Optimistic concurrency: the editor must be saving against the version it loaded.
       if (baseVersion !== c.currentVersion) {
         throw new HttpError(409, 'conflict', `base_version ${baseVersion} is stale; current is v${c.currentVersion}. Reload and reapply your edits.`, { reason: 'stale_version', caseId, currentVersion: c.currentVersion });
@@ -284,6 +290,11 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
       await enforcePhysicianAssignment(caseId, user.role, user.sub, c.assignedPhysicianId);
       if (!EDITABLE_STATUSES.has(c.status)) throw new HttpError(409, 'conflict', `Letter is not editable in status '${c.status}'.`, { reason: 'not_editable', caseId, status: c.status });
+      // RN lock during physician review — the surgical-AI path must match the hand-edit PUT,
+      // or the lock leaks through the AI door (architect plan-gate, Ryan 2026-06-11).
+      if (user.role === 'ops_staff' && c.status === 'physician_review') {
+        throw new HttpError(409, 'conflict', 'Letter is locked while in physician review.', { reason: 'locked_physician_review', caseId });
+      }
 
       const bucketName = bucket();
       if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });

@@ -298,7 +298,16 @@ export function CasesPage() {
             <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`} onClick={(e) => e.stopPropagation()}>{formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}</Link></td>
             <td className="px-4 py-3 text-slate-700">{formatConditionLabel(c.claimedCondition)}</td>
             <td className="px-4 py-3 text-slate-600">{CLAIM_TYPE_LABELS[c.claimType]}</td>
-            <td className="px-4 py-3 text-center"><span className="text-xs font-medium text-slate-600">{CASE_STATUS_LABELS[c.status]}</span></td>
+            <td className="px-4 py-3 text-center">
+              <span className="text-xs font-medium text-slate-600">{CASE_STATUS_LABELS[c.status]}</span>
+              {/* Invoiced signal (Ryan 2026-06-11): the invoice email went out but the case status
+                  deliberately stays 'delivered' until payment reconciles — without this chip the
+                  list shows NOTHING changed after the RN clicks send. Derived from the letter_500
+                  invoiced Payment row; disappears once the case flips to paid. */}
+              {c.invoiced && c.status !== 'paid' ? (
+                <span className="ml-1.5 rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700" title="The invoice email has been sent — awaiting the veteran's payment.">Invoiced</span>
+              ) : null}
+            </td>
             <td className="px-4 py-3 text-center"><RecordsChip recordsUploaded={c.recordsUploaded} /></td>
             <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
               {c.quickNote ? (

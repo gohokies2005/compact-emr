@@ -289,10 +289,14 @@ describe('selectPages — benefit_summary special case', () => {
 });
 
 describe('selectPages — unspecified doc type', () => {
-  it('small unspecified (<=8 pages): include all + RN review flag', () => {
+  // Item 3 flag-volume cut (2026-06-11): DELIBERATE behavior flip. Small unspecified docs are
+  // included in full, so no pages can have been silently dropped — they no longer flood the RN
+  // "Doc selection review" queue. (Was needsRnReview=true.)
+  it('small unspecified (<=8 pages): include all, NO RN review flag (included-in-full = low risk)', () => {
     const r = run('unspecified', [p(1, 'mystery doc page 1'), p(2, 'mystery doc page 2')]);
     expect(r.pageRanges).toEqual([{ from: 1, to: 2 }]);
-    expect(r.needsRnReview).toBe(true);
+    expect(r.selectorRationale).toBe('unspecified_small_doc_all_pages');
+    expect(r.needsRnReview).toBe(false);
   });
 
   it('large unspecified (>8 pages): first 8 + RN review flag', () => {

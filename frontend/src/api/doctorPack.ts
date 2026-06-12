@@ -39,6 +39,9 @@ export interface KeyDoc {
   // so the panel can render `Misc_3.pdf · 3 of 25 pages`. Null when the join found no Document.
   readonly docPageCount: number | null;
   readonly filename: string | null;
+  // Item 4 (2026-06-11): the source Document's id (same s3Key join) so the row can open the
+  // underlying PDF via the presigned inline viewer. Null when the join found no Document.
+  readonly documentId?: string | null;
 }
 
 export async function getLatestDoctorPack(caseId: string): Promise<{ data: DoctorPack | null }> {

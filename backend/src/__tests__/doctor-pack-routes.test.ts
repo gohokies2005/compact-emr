@@ -185,3 +185,54 @@ describe('POST /cases/:id/doctor-pack/generate — content-aware classification 
     await request(appFor(prisma, { role: 'physician' })).post('/api/v1/cases/CASE-1/doctor-pack/generate').send({}).expect(403);
   });
 });
+
+// Items 3+4 (2026-06-11): both key-docs GET endpoints enrich rows via the shared
+// s3Key → { filename, documentId, pageCount } helper (Document.s3Key is @unique).
+describe('key-docs enrichment (shared helper)', () => {
+  const KEY_DOC_ROW = {
+    id: 'kd-1',
+    caseId: 'CASE-1',
+    filePath: 'cases/CASE-1/aaaa1111-Misc_1.pdf',
+    docType: 'unspecified',
+    classification: 'normal',
+    importance: 40,
+    pageRanges: [{ from: 1, to: 3 }],
+    needsRnReview: true,
+    selectorRationale: 'unspecified_large_doc_first_8',
+    updatedAt: new Date('2026-06-11T00:00:00.000Z'),
+    version: 1,
+  };
+  const DOCUMENT_ROW = { id: 'doc-1', s3Key: 'cases/CASE-1/aaaa1111-Misc_1.pdf', filename: 'Misc_1.pdf', pageCount: 25 };
+
+  it('GET /cases/:id/key-docs returns filename + documentId + docPageCount (Item 4)', async () => {
+    const prisma = {
+      keyDoc: { findMany: vi.fn(async () => [KEY_DOC_ROW]) },
+      document: { findMany: vi.fn(async () => [DOCUMENT_ROW]) },
+    };
+    const res = await request(appFor(prisma)).get('/api/v1/cases/CASE-1/key-docs').expect(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].filename).toBe('Misc_1.pdf');
+    expect(res.body.data[0].documentId).toBe('doc-1');
+    expect(res.body.data[0].docPageCount).toBe(25);
+    // The join queries by the rows' s3Keys (unique), not by caseId.
+    expect(prisma.document.findMany).toHaveBeenCalledWith({
+      where: { s3Key: { in: ['cases/CASE-1/aaaa1111-Misc_1.pdf'] } },
+      select: { id: true, s3Key: true, filename: true, pageCount: true },
+    });
+  });
+
+  it('GET /rn/key-docs-needing-review returns filename + documentId; unmatched keys yield nulls (Item 3)', async () => {
+    const orphanRow = { ...KEY_DOC_ROW, id: 'kd-2', caseId: 'CASE-2', filePath: 'cases/CASE-2/zzzz-deleted.pdf' };
+    const prisma = {
+      keyDoc: { findMany: vi.fn(async () => [KEY_DOC_ROW, orphanRow]) },
+      document: { findMany: vi.fn(async () => [DOCUMENT_ROW]) },
+    };
+    const res = await request(appFor(prisma)).get('/api/v1/rn/key-docs-needing-review').expect(200);
+    expect(res.body.total).toBe(2);
+    expect(res.body.data[0].filename).toBe('Misc_1.pdf');
+    expect(res.body.data[0].documentId).toBe('doc-1');
+    // A KeyDoc whose Document row is gone still renders — enrichment is null, never a throw.
+    expect(res.body.data[1].filename).toBeNull();
+    expect(res.body.data[1].documentId).toBeNull();
+  });
+});

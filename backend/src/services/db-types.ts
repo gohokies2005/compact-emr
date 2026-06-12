@@ -308,6 +308,7 @@ export interface DeliveryTokenDelegate {
   findFirst(args: unknown): Promise<DeliveryTokenRecord | null>;
   create(args: unknown): Promise<DeliveryTokenRecord>;
   update(args: unknown): Promise<DeliveryTokenRecord>;
+  updateMany(args: unknown): Promise<{ count: number }>;
 }
 
 export interface PaymentRecord {

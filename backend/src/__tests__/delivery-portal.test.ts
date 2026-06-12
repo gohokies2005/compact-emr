@@ -26,9 +26,12 @@ describe('delivery-token identity helpers', () => {
     expect(normalizeInputDob(undefined)).toBeNull();
   });
 
-  it('phoneLast4 strips formatting and needs >=4 digits', () => {
+  it('phoneLast4 is STRICT: clean 10/11-digit US numbers only — extensions/fragments are null', () => {
     expect(phoneLast4('(702) 555-1234')).toBe('1234');
     expect(phoneLast4('+1 702 555 1234')).toBe('1234');
+    // An extension would yield the WRONG last-4 ('2349') and brick the real veteran — must be null
+    // so the mint path falls to the needs-phone breadcrumb instead (adversarial-audit #4).
+    expect(phoneLast4('702-555-1234 ext 9')).toBeNull();
     expect(phoneLast4('123')).toBeNull();
     expect(phoneLast4(null)).toBeNull();
     expect(phoneLast4('')).toBeNull();
@@ -50,7 +53,16 @@ describe('delivery-token identity helpers', () => {
 const VET: { id: string; dob: Date; phone: string | null } = { id: 'V1', dob: new Date('1980-03-15T00:00:00.000Z'), phone: '(702) 555-1234' };
 
 function makeApp(token: Record<string, unknown> | null, over: { vet?: typeof VET | null } = {}) {
-  const tokenUpdate = vi.fn(async () => ({}));
+  // Mirrors Prisma update semantics for the ATOMIC increment: returns the post-update row, so the
+  // route's branch-on-returned-count logic is exercised for real.
+  const tokenUpdate = vi.fn(async (args: { data?: { failedAttempts?: { increment: number } | number } }) => {
+    const inc = args?.data?.failedAttempts;
+    const base = (token ?? {}) as { failedAttempts?: number };
+    const failedAttempts = typeof inc === 'object' && inc !== null
+      ? (base.failedAttempts ?? 0) + inc.increment
+      : typeof inc === 'number' ? inc : (base.failedAttempts ?? 0);
+    return { ...(token ?? {}), failedAttempts };
+  });
   const activity = vi.fn(async () => ({}));
   const db = {
     deliveryToken: {
@@ -101,19 +113,22 @@ describe('delivery portal — identity mode', () => {
     expect(tokenUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ failedAttempts: 0 }) }));
   });
 
-  it('wrong factor → 401 with a message that never reveals WHICH factor failed; attempts increment', async () => {
+  it('wrong factor → 401 with a message that never reveals WHICH factor failed; ATOMIC increment (never a stale absolute write)', async () => {
     const { app, tokenUpdate } = makeApp(identityToken);
     const r = await request(app).post('/api/v1/delivery/tok1/unlock').send({ dob: '1980-03-15', phoneLast4: '9999' });
     expect(r.status).toBe(401);
     expect(r.body.error).not.toMatch(/phone only|dob only|date of birth was wrong/i);
-    expect(tokenUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ failedAttempts: 1 }) }));
+    // The blocker-class assertion: the write must be {increment:1} (DB-serialized), NOT an absolute
+    // value computed from the pre-read — parallel guesses against an absolute write never lock.
+    expect(tokenUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: { failedAttempts: { increment: 1 } } }));
   });
 
-  it('5th failure locks the token (lockedAt set + 423 + alert breadcrumb)', async () => {
+  it('5th failure locks the token (lockedAt set on the RETURNED count + 423 + alert breadcrumb)', async () => {
     const { app, tokenUpdate, activity } = makeApp({ ...identityToken, failedAttempts: 4 });
     const r = await request(app).post('/api/v1/delivery/tok1/unlock').send({ dob: '1980-03-15', phoneLast4: '9999' });
     expect(r.status).toBe(423);
-    expect(tokenUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ failedAttempts: 5, lockedAt: expect.any(Date) }) }));
+    expect(tokenUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: { failedAttempts: { increment: 1 } } }));
+    expect(tokenUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: { lockedAt: expect.any(Date) } }));
     expect(activity).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'delivery_unlock_locked' }) }));
   });
 
@@ -138,11 +153,11 @@ describe('delivery portal — identity mode', () => {
     expect(r.body.data.url).toBe('https://s3.example/presigned');
   });
 
-  it('legacy password token rejects a wrong password (401) and increments attempts', async () => {
+  it('legacy password token rejects a wrong password (401) and increments attempts atomically', async () => {
     const { app, tokenUpdate } = makeApp(legacyToken);
     const r = await request(app).post('/api/v1/delivery/tok1/unlock').send({ password: 'nope' });
     expect(r.status).toBe(401);
-    expect(tokenUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ failedAttempts: 1 }) }));
+    expect(tokenUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: { failedAttempts: { increment: 1 } } }));
   });
 
   it('identity unlock fails closed when the veteran has no phone on file', async () => {
@@ -157,6 +172,21 @@ describe('delivery portal — identity mode', () => {
     for (let i = 0; i < 11; i += 1) {
       // Different token per request — the per-token lockout never trips; only the IP throttle can.
       const r = await request(app).post(`/api/v1/delivery/tok${i}/unlock`).send({ dob: '1990-01-01', phoneLast4: '0000' });
+      lastStatus = r.status;
+    }
+    expect(lastStatus).toBe(429);
+  });
+
+  it('spoofed left-most X-Forwarded-For does NOT mint fresh throttle buckets (right-most hop is keyed)', async () => {
+    const { app } = makeApp(identityToken);
+    let lastStatus = 0;
+    for (let i = 0; i < 11; i += 1) {
+      // Attacker varies the client-supplied left-most value every request; the right-most hop
+      // (appended by the gateway — here the same for every request) is what we key on.
+      const r = await request(app)
+        .post(`/api/v1/delivery/tok${i}/unlock`)
+        .set('x-forwarded-for', `${i}.${i}.${i}.${i}, 203.0.113.7`)
+        .send({ dob: '1990-01-01', phoneLast4: '0000' });
       lastStatus = r.status;
     }
     expect(lastStatus).toBe(429);

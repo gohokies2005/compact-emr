@@ -110,8 +110,60 @@ describe('mailer transport fork', () => {
 
   it('missing/empty gmail secret throws loudly (never a silent no-op)', async () => {
     process.env.EMAIL_TRANSPORT = 'gmail';
+    // Distinct name — the suite-wide name is already in readSecretByName's 60s cache, which would
+    // swallow this Once-mock and leak it into a later test.
+    process.env.GMAIL_OAUTH_SECRET_NAME = 'compact-emr-staging/gmail-oauth-empty-test';
     smSend.mockResolvedValueOnce({ SecretString: '' } as never);
     await expect(sendEmail({ to: 'vet@example.com', subject: 'S', textBody: 'B' })).rejects.toThrow(/gmail transport/);
+  });
+
+  it('SERVICE-ACCOUNT secret shape → JWT-bearer grant impersonating the user (the primary credential)', async () => {
+    process.env.EMAIL_TRANSPORT = 'gmail';
+    // Distinct secret NAME: readSecretByName caches by name for 60s, so reusing the suite-wide
+    // name would serve the refresh-token JSON cached by earlier tests and skip the SA branch.
+    process.env.GMAIL_OAUTH_SECRET_NAME = 'compact-emr-staging/gmail-oauth-sa-test';
+    const { generateKeyPairSync } = await import('node:crypto');
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+    smSend.mockResolvedValueOnce({
+      SecretString: JSON.stringify({ type: 'service_account', client_email: 'frn-gmail-delegate@flat-rate-nexus.iam.gserviceaccount.com', private_key: privateKey, user: 'info@flatratenexus.com' }),
+    } as never);
+    const f = mockFetchOk();
+    const r = await sendEmail({ to: 'vet@example.com', subject: 'S', textBody: 'B' });
+    expect(r.sent).toBe(true);
+    const tokenCall = f.mock.calls.find((c) => String(c[0]).includes('oauth2.googleapis.com'));
+    const body = String((tokenCall![1] as { body: URLSearchParams }).body);
+    expect(body).toContain('grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer');
+    expect(body).toContain('assertion=');
+    // Decode the JWT claims: must impersonate the user with gmail.send scope.
+    const assertion = new URLSearchParams(body).get('assertion')!;
+    const claims = JSON.parse(Buffer.from(assertion.split('.')[1]!, 'base64url').toString('utf8'));
+    expect(claims.sub).toBe('info@flatratenexus.com');
+    expect(claims.scope).toContain('gmail.send');
+    expect(claims.iss).toContain('frn-gmail-delegate@');
+  });
+
+  it('To/Bcc addresses are CRLF-sanitized and shape-validated (intake-supplied data cannot inject headers)', async () => {
+    process.env.EMAIL_TRANSPORT = 'gmail';
+    const f = mockFetchOk();
+    await expect(sendEmail({ to: 'vet@example.com\r\nBcc: evil@example.com', subject: 'S', textBody: 'B' })).rejects.toThrow(/to address is not a valid email/);
+    // A merely-whitespaced address is repaired, not rejected.
+    await sendEmail({ to: ' vet@example.com ', subject: 'S', textBody: 'B' });
+    const sendCall = f.mock.calls.find((c) => String(c[0]).includes('gmail.googleapis.com'));
+    const raw = JSON.parse((sendCall![1] as { body: string }).body).raw as string;
+    const rfc = Buffer.from(raw, 'base64url').toString('utf8');
+    expect(rfc).toContain('To: vet@example.com');
+  });
+
+  it('non-ASCII subject is RFC 2047 B-encoded (legacy encodeSubject parity)', async () => {
+    process.env.EMAIL_TRANSPORT = 'gmail';
+    const f = mockFetchOk();
+    await sendEmail({ to: 'vet@example.com', subject: 'Payment received — your letter', textBody: 'B' });
+    const sendCall = f.mock.calls.find((c) => String(c[0]).includes('gmail.googleapis.com'));
+    const raw = JSON.parse((sendCall![1] as { body: string }).body).raw as string;
+    const rfc = Buffer.from(raw, 'base64url').toString('utf8');
+    const subjectLine = rfc.split('\r\n').find((l) => l.startsWith('Subject:'))!;
+    expect(subjectLine).toMatch(/^Subject: =\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=$/);
+    expect(Buffer.from(subjectLine.replace('Subject: =?UTF-8?B?', '').replace('?=', ''), 'base64').toString('utf8')).toBe('Payment received — your letter');
   });
 
   it('subject header newlines are stripped (header-injection guard)', async () => {

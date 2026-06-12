@@ -58,7 +58,11 @@ export function createDeliveryPortalRouter(db: AppDb, deps: { bucketName?: strin
   }));
 
   router.post('/:token/unlock', asyncHandler(async (req: Request, res: Response) => {
-    const ip = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() || req.ip || 'unknown';
+    // RIGHT-most X-Forwarded-For hop = the source IP appended by API Gateway (trusted). The
+    // left-most value is CLIENT-SUPPLIED and trivially spoofable — keying the throttle on it
+    // would hand every request a fresh bucket (adversarial-audit blocker #2).
+    const xff = (req.headers['x-forwarded-for'] as string | undefined)?.split(',').map((s) => s.trim()).filter(Boolean);
+    const ip = (xff && xff.length > 0 ? xff[xff.length - 1] : undefined) || req.ip || 'unknown';
     if (ipThrottled(ip)) { res.status(429).json({ error: 'Too many attempts. Please wait a minute and try again.' }); return; }
 
     const token = String(req.params.token);
@@ -86,13 +90,19 @@ export function createDeliveryPortalRouter(db: AppDb, deps: { bucketName?: strin
     }
 
     if (!ok) {
-      const attempts = t.failedAttempts + 1;
-      const lock = attempts >= LOCKOUT_THRESHOLD;
-      await db.deliveryToken.update({
+      // ATOMIC increment — the DB is the serialization point (adversarial-audit blocker #1: a
+      // read-then-write counter lets N parallel guesses all write the same stale value, so the
+      // lockout never advances and phone-last-4 becomes brute-forceable). Branch on the row the
+      // UPDATE returns, never on the pre-read.
+      const updated = await db.deliveryToken.update({
         where: { token },
-        data: { failedAttempts: attempts, ...(lock ? { lockedAt: new Date() } : {}) },
+        data: { failedAttempts: { increment: 1 } },
       });
+      const attempts = updated.failedAttempts;
+      const lock = attempts >= LOCKOUT_THRESHOLD;
       if (lock) {
+        // Idempotent under the concurrent-lock race (two requests both reaching 5+ both set it).
+        await db.deliveryToken.update({ where: { token }, data: { lockedAt: new Date() } });
         // Loud breadcrumb: staff sees the lock and reaches out (the legitimate veteran may be the
         // one fat-fingering — or someone with the link is guessing). No PHI in the details.
         await db.activityLog.create({

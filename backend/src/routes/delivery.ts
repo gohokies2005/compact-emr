@@ -419,6 +419,30 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
     }),
   );
 
+  // ── POST — staff reset of a locked/failed delivery unlock (adversarial-audit #3) ──────────────
+  // Without this, a veteran who trips the 5-attempt lockout (fat-fingered DOB, corrected phone) is
+  // permanently bricked — fixing their Veteran record does NOT clear lockedAt. Staff verifies the
+  // veteran out-of-band, fixes the record if needed, then resets here; the SAME emailed link starts
+  // working again (no re-issue, no new email).
+  router.post(
+    '/cases/:id/delivery/unlock-reset',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      const r = await db.deliveryToken.updateMany({
+        where: { caseId },
+        data: { failedAttempts: 0, lockedAt: null },
+      });
+      await db.activityLog.create({
+        data: { actorUserId: user.sub, action: 'delivery_unlock_reset', caseId, veteranId: c.veteranId, detailsJson: { tokensReset: r.count } },
+      });
+      res.json({ data: { tokensReset: r.count } });
+    }),
+  );
+
   // ── GET — cover memo as a PDF (E4: "Verify the cover memo" opens a real document) ─────────────
   // Same role guard as the other delivery reads. Self-contained render (services/memo-render.ts,
   // pdf-lib) — deliberately NOT the FRN render Lambda, which only knows the nexus-letter shape

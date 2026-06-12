@@ -52,12 +52,17 @@ export function normalizeInputDob(s: unknown): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
 }
 
-/** Last 4 digits of a phone number, from EITHER side (stored E.164/freeform or user input).
- * Returns null when fewer than 4 digits exist (identity mode is then unusable for the case). */
+/** Last 4 digits of a STORED phone number — STRICT: the digit string must be a clean US number
+ * (exactly 10 digits, or 11 with a leading 1). Anything else — extensions ("…1234 ext 9" → last-4
+ * "2349", NOT the line number), double numbers, fragments — returns null so identity mode is
+ * never minted against a value the veteran could not possibly match (adversarial-audit #4: a
+ * corrupt-but-"usable" phone silently marches the real veteran into lockout). */
 export function phoneLast4(s: unknown): string | null {
   if (typeof s !== 'string') return null;
   const digits = s.replace(/\D/g, '');
-  return digits.length >= 4 ? digits.slice(-4) : null;
+  if (digits.length === 10) return digits.slice(-4);
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(-4);
+  return null;
 }
 
 function ctEqual(a: string, b: string): boolean {

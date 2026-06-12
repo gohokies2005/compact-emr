@@ -646,7 +646,7 @@ export function createDrafterClientRouter(db: AppDb): Router {
       // place in line IMMEDIATELY (cross-case only — a case can't queue behind itself; the in-flight
       // 409 above guarantees that). Computed from the DraftJob table only. Never block the enqueue on
       // this read — a concurrency-count hiccup must not fail a successfully-queued draft.
-      let concurrency: DraftConcurrency | null = null;
+      let concurrency: DraftConcurrency | null;
       try {
         concurrency = await getDraftConcurrency(db.draftJob, created.enqueuedAt);
       } catch {

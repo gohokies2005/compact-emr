@@ -66,13 +66,6 @@ function optionalNullableInt(input: Record<string, unknown>, key: string): numbe
   return value;
 }
 
-function requiredEnum(input: Record<string, unknown>, key: string): YesNoUnknown {
-  const value = input[key];
-  if (typeof value !== 'string' || !YES_NO_UNKNOWN.has(value)) {
-    throw new HttpError(400, 'bad_request', `${key} must be yes, no, or unknown.`);
-  }
-  return value as YesNoUnknown;
-}
 
 function optionalEnum(input: Record<string, unknown>, key: string): YesNoUnknown | undefined {
   const value = input[key];

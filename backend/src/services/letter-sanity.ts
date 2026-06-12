@@ -49,6 +49,7 @@ export function cleanProseForSave(text: string): string {
     .replace(/[“”„‟″]/g, '"')
     .replace(/[‘’‚‛′]/g, "'")
     .replace(/…/g, '...')
+    // eslint-disable-next-line no-irregular-whitespace -- literal NBSP/figure-space normalized to a plain space
     .replace(/[  ]/g, ' ');
 }
 

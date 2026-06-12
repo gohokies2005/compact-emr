@@ -56,7 +56,7 @@ export function createJotformWebhookRouter(db: AppDb): Router {
     // the exact load that previously rate-limit-locked the account. Stuck pending/failed rows DO
     // re-enqueue, so the sweep self-heals genuinely-dropped submissions.
     let intakeId = '';
-    let shouldEnqueue = false;
+    let shouldEnqueue: boolean;
     try {
       const created = await db.intake.create({
         data: { jotformFormId: formId, jotformSubmissionId: submissionId, status: 'pending' },

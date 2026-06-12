@@ -37,7 +37,9 @@ function stripHtml(s: string): string {
 function toWinAnsi(s: string): string {
   return s
     .replace(/[‘’‛]/g, "'").replace(/[“”]/g, '"')
+    // eslint-disable-next-line no-irregular-whitespace -- literal NBSP normalized to a plain space
     .replace(/[–—]/g, '-').replace(/…/g, '...').replace(/ /g, ' ')
+    // eslint-disable-next-line no-control-regex -- strips control chars the PDF font can't render
     .replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF]/g, '');
 }
 

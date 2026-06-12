@@ -85,7 +85,7 @@ const APPEAL_TYPES: ReadonlySet<ClaimType> = new Set<ClaimType>(['supplemental',
 // Filename/docTag heuristics. docTag classification isn't populating yet (all 'Other'), so the
 // filename is the workhorse; docTag is checked too for when classification lands.
 const DENIAL_DOC = /(denial|denied|decision|s00?c|statement of the case)/i;
-const RATING_DOC = /(rating\s*decision|code\s*sheet|rating\s*sheet)/i;
+const _RATING_DOC = /(rating\s*decision|code\s*sheet|rating\s*sheet)/i; // parked until docTag classification lands
 const SERVICE_DOC = /(dd[\s-]?214|service\s*treatment|^str\b|separation|enlist|entrance\s*exam|service\s*record)/i;
 
 function hasDoc(documents: { filename: string; docTag: string | null }[], re: RegExp): boolean {

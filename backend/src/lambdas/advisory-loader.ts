@@ -224,7 +224,6 @@ export async function handler(): Promise<LoadResult> {
     );
   }
 
-  // eslint-disable-next-line no-console
   console.log('[advisory-loader]', JSON.stringify({ ...result, failed: result.failed.length }));
   return result;
 }

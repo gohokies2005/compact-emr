@@ -4,7 +4,6 @@ import { HttpError } from '../http/errors.js';
 import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { isDoctorPackS3Key } from '../services/s3-key-safety.js';
 import { classifyReadAttempt } from '../services/chart-readiness.js';
-import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';

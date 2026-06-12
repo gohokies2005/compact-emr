@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 export function normalizeEmailAddress(raw: string): string {
   if (typeof raw !== 'string') return '';
   const angle = /<([^>]+)>/.exec(raw);
-  let addr = (angle ? angle[1]! : raw).trim().toLowerCase().replace(/^["'\s]+|["'\s]+$/g, '');
+  const addr = (angle ? angle[1]! : raw).trim().toLowerCase().replace(/^["'\s]+|["'\s]+$/g, '');
   const at = addr.lastIndexOf('@');
   if (at < 0) return '';
   let local = addr.slice(0, at);

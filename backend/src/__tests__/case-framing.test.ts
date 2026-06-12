@@ -23,7 +23,6 @@ import {
 const PINNED_SHA256 = '33629b053c17fb4ff7fcd3909b170f331d0ee737da6115a7198d49de88633401';
 const schemaUrl = new URL('../config/caseFraming.v1.schema.json', import.meta.url);
 const schemaBytes = readFileSync(schemaUrl);
-// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const schema = JSON.parse(schemaBytes.toString('utf8'));
 
 describe('vendored schema pin', () => {

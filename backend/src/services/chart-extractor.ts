@@ -274,7 +274,7 @@ const NAME_SYNONYMS: Record<string, string> = {
  * survives.
  */
 function stripTrailingAbbrevParen(s: string): string {
-  return s.replace(/\s*\([a-z0-9&.\/-]{2,12}\)$/, '').trim();
+  return s.replace(/\s*\([a-z0-9&./-]{2,12}\)$/, '').trim();
 }
 
 export function normalizeName(name: string): string {

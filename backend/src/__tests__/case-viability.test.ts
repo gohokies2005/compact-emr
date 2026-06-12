@@ -13,12 +13,10 @@ const PINNED_TABLE_HASH = '7d7d355f631d2a60192205d993406161437564a3f9033f39a30c8
 
 const schemaUrl = new URL('../config/caseViability.v1.schema.json', import.meta.url);
 const schemaBytes = readFileSync(schemaUrl);
-// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const schema = JSON.parse(schemaBytes.toString('utf8'));
 
 describe('vendored schema + table pins (cross-refs anchor-table-pin.test.ts)', () => {
   it('schema const pins the table content hash', () => {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     expect(schema.properties.table_content_hash.const).toBe(PINNED_TABLE_HASH);
   });
   it('schema bytes are non-empty and parse (byte-pin lives in anchor-table-pin.test.ts)', () => {

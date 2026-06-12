@@ -36,7 +36,6 @@ import type { AppDb } from '../services/db-types.js';
  * already-existing Email/Payment tables and never mutates the approve/sign/draft flows.
  */
 
-const PRESIGN_TTL_SECONDS = 300;
 const LETTER_500_CENTS = 50000;
 // The delivery panel only applies once the letter is finalized.
 const DELIVERY_STATUSES: ReadonlySet<string> = new Set(['delivered', 'paid']);

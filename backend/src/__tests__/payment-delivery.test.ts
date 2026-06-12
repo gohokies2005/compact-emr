@@ -7,15 +7,26 @@ vi.mock('../services/mailer.js', () => ({
   readSecretByName: vi.fn(async () => 'whsec'),
 }));
 
-function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boolean; phone?: string | null; approvedRevision?: boolean } = {}) {
+function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boolean; phone?: string | null; approvedRevision?: boolean; invoicedRow?: boolean } = {}) {
   const calls = {
     paymentCreate: vi.fn(async () => ({})),
+    paymentUpdate: vi.fn(async () => ({})),
     caseUpdate: vi.fn(async () => ({})),
     tokenCreate: vi.fn(async () => ({})),
     activity: vi.fn(async () => ({})),
   };
   const delegates = {
-    payment: { findFirst: vi.fn(async () => (over.existingPayment ? { id: 'P0' } : null)), create: calls.paymentCreate },
+    payment: {
+      // Two findFirst call sites: the chargeId fast-path dedup (where.stripeChargeId) and the
+      // invoice-reconciliation lookup (where.status='invoiced') — answer per-args like Prisma.
+      findFirst: vi.fn(async (a: { where?: { stripeChargeId?: string; status?: string } }) => {
+        if (a?.where?.stripeChargeId !== undefined) return over.existingPayment ? { id: 'P0' } : null;
+        if (a?.where?.status === 'invoiced') return over.invoicedRow ? { id: 'P-INV', status: 'invoiced' } : null;
+        return null;
+      }),
+      create: calls.paymentCreate,
+      update: calls.paymentUpdate,
+    },
     case: { findFirst: vi.fn(async () => (over.noCase ? null : { id: 'C1', veteranId: 'V1', currentVersion: 7 })), update: calls.caseUpdate },
     // Default: no LetterRevision at currentVersion → resolveSignedPdf falls back to the draftJob path.
     letterRevision: { findFirst: vi.fn(async () => (over.approvedRevision ? { version: 7, artifactPdfS3Key: 'letter-revisions/C1/v7/letter.pdf' } : null)) },
@@ -138,6 +149,19 @@ describe('payment-delivery', () => {
     expect(calls.tokenCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ letterVersion: 7, pdfS3Key: 'letter-revisions/C1/v7/letter.pdf' }),
     }));
+  });
+
+  it('RECONCILES the invoiced row to paid (never a second letter_500 row — the unique index made that P2002→silent rollback; Yorde 2026-06-12)', async () => {
+    const { db, calls } = makeDb({ invoicedRow: true });
+    const r = await processStripePayment(db, { caseId: 'C1', amountCents: 50000, chargeId: 'pi_yorde' }, cfg);
+    expect(r.status).toBe('delivered');
+    expect(calls.paymentUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'P-INV' },
+      data: expect.objectContaining({ status: 'paid', stripeChargeId: 'pi_yorde' }),
+    }));
+    expect(calls.paymentCreate).not.toHaveBeenCalled();
+    expect(calls.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'paid' } }));
+    expect(calls.tokenCreate).toHaveBeenCalled();
   });
 
   it('mints an IDENTITY-mode token (passwordHash null) when the veteran has a usable phone', async () => {

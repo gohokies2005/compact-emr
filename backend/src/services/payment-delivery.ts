@@ -89,7 +89,18 @@ export async function processStripePayment(
   // failure must not roll back a recorded payment).
   try {
     await db.$transaction(async (tx) => {
-      await tx.payment.create({ data: { caseId, kind, amountCents, status: 'paid', settledAt: new Date(), stripeChargeId: chargeId } });
+      // RECONCILE the invoiced row instead of inserting a second one (Yorde live incident
+      // 2026-06-12): the invoice-idempotency unique index (payments_case_id_letter_500_uq,
+      // ONE letter_500 row per case) made the webhook's paid-row INSERT throw P2002 — which the
+      // catch below read as 'charge already processed' → the WHOLE payment (case flip, token,
+      // email) silently rolled back while reporting 200/duplicate to Stripe. The invoice row
+      // becoming the paid row is also the correct ledger shape (no forever-'invoiced' orphans).
+      const invoicedRow = await tx.payment.findFirst({ where: { caseId, kind, status: 'invoiced' } });
+      if (invoicedRow !== null) {
+        await tx.payment.update({ where: { id: invoicedRow.id }, data: { status: 'paid', settledAt: new Date(), stripeChargeId: chargeId } });
+      } else {
+        await tx.payment.create({ data: { caseId, kind, amountCents, status: 'paid', settledAt: new Date(), stripeChargeId: chargeId } });
+      }
       if (!isLetter) {
         await tx.activityLog.create({ data: { actorUserId: STRIPE_ACTOR, action: 'payment_logged', caseId, veteranId: c.veteranId, detailsJson: { chargeId, amountCents, kind } } });
         return;

@@ -328,6 +328,8 @@ export interface PaymentDelegate {
   findFirst(args: unknown): Promise<PaymentRecord | null>;
   findMany(args: unknown): Promise<readonly PaymentRecord[]>;
   create(args: unknown): Promise<PaymentRecord>;
+  // Invoice→paid reconciliation (Yorde incident 2026-06-12): the webhook flips the invoiced row.
+  update(args: unknown): Promise<PaymentRecord>;
 }
 
 export interface AppDbTransaction {
@@ -760,6 +762,9 @@ export type KeyDocType =
   // `key_docs.doc_type` column is a plain VarChar(40), so new values are TS-only (no migration).
   | 'imaging'
   | 'intake_summary'
+  // Round 2 (backlog §Doctor-pack round 2 D, 2026-06-12): the generated one-page cover index —
+  // a MANIFEST-ONLY docType (it never lands on a KeyDoc row; the classifier never emits it).
+  | 'cover_index'
   | 'unspecified';
 
 export interface KeyDocPageRange {

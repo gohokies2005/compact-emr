@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
+import {
+  buildVeteranStatementHeader,
+  generateDoctorPackForCase,
+  NO_LAY_STATEMENT_NOTE,
+} from '../services/doctor-pack-generate.js';
+import { publishDoctorPackQueued } from '../services/doctor-pack-queue.js';
 import { HttpError } from '../http/errors.js';
 
 // Package 7 (2026-06-11): unit tests for the EXTRACTED Doctor Pack generate service — the
@@ -61,6 +66,41 @@ interface MockPageRow {
   readonly updatedAt: Date;
 }
 
+// Hoisted (ROUND 2): shared by every describe below.
+const pageRow = (documentId: string, pageNumber: number, text: string): MockPageRow => ({
+  id: `${documentId}-p${pageNumber}`,
+  documentId,
+  pageNumber,
+  text,
+  confidence: 0.99,
+  extractedAt: new Date('2026-06-01T00:00:00.000Z'),
+  createdAt: new Date('2026-06-01T00:00:00.000Z'),
+  updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+});
+
+type ManifestShape = {
+  entries: { filePath: string; docType: string; pageRanges: { from: number; to: number }[]; pageCount: number; displayLabel?: string }[];
+  warnings?: string[];
+  budgetTrim?: { trimNotes: string[] };
+};
+
+// ROUND 2 (F): the default chart carries a clinical note alongside the DD-214 so the canonical
+// happy path passes the hard no-dx gate — a DD-214-only chart is now the GATE fixture, not the
+// default. Tests asserting gate behavior pass their own documents.
+const DEFAULT_CLINICAL_DOC: MockDocument = {
+  id: 'doc-cl',
+  s3Key: 'cases/CASE-1/cccc0000-Progress_Notes.pdf',
+  pageCount: 1,
+  docTag: null,
+  filename: 'Progress_Notes.pdf',
+  contentType: 'application/pdf',
+};
+const DEFAULT_DD214_DOC: MockDocument = { id: 'doc-1', s3Key: 'cases/CASE-1/aaaa1111-DD-214.pdf', pageCount: 3, docTag: null };
+const DEFAULT_DOCS: readonly MockDocument[] = [DEFAULT_DD214_DOC, DEFAULT_CLINICAL_DOC];
+const DEFAULT_PAGE_ROWS: readonly MockPageRow[] = [
+  pageRow('doc-cl', 1, 'Assessment: obstructive sleep apnea, stable on current therapy.'),
+];
+
 function makeGenDb(
   opts: {
     existingPacks?: readonly ExistingPack[];
@@ -68,6 +108,9 @@ function makeGenDb(
     // WAVE 2: injectable document set + per-page OCR text rows.
     documents?: readonly MockDocument[];
     pageRows?: readonly MockPageRow[];
+    // ROUND 2 (C): the lay-statement source field + the intake date its header carries.
+    veteranStatement?: string | null;
+    caseCreatedAt?: Date;
   } = {},
 ) {
   const caseVersion = opts.caseVersion ?? 6;
@@ -101,15 +144,16 @@ function makeGenDb(
         cdsVerdict: 'not_yet_run',
         cdsOddsPct: null,
         cdsRationale: null,
-        veteranStatement: null,
+        veteranStatement: opts.veteranStatement ?? null,
         inServiceEvent: null,
-        documents: opts.documents ?? [{ id: 'doc-1', s3Key: 'cases/CASE-1/aaaa1111-DD-214.pdf', pageCount: 3, docTag: null }],
+        createdAt: opts.caseCreatedAt ?? new Date('2026-02-01T00:00:00.000Z'),
+        documents: opts.documents ?? DEFAULT_DOCS,
       })),
     },
     doctorPack: { findFirst: packFindFirstFor(opts.existingPacks ?? []) },
     fileReadStatus: { findMany: vi.fn(async () => []) },
     keyDoc: { findMany: vi.fn(async () => []) },
-    documentPage: { findMany: vi.fn(async () => opts.pageRows ?? []) },
+    documentPage: { findMany: vi.fn(async () => opts.pageRows ?? DEFAULT_PAGE_ROWS) },
     $transaction: vi.fn(async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx)),
   };
   return { db: db as never, tx, created, spies: { doctorPackCreate, activityLogCreate, packFindFirst: db.doctorPack.findFirst } };
@@ -237,17 +281,6 @@ describe('generateDoctorPackForCase — manual trigger (pre-extraction contract 
 // ============================================================================================
 
 describe('generateDoctorPackForCase — WAVE 2', () => {
-  const pageRow = (documentId: string, pageNumber: number, text: string): MockPageRow => ({
-    id: `${documentId}-p${pageNumber}`,
-    documentId,
-    pageNumber,
-    text,
-    confidence: 0.99,
-    extractedAt: new Date('2026-06-01T00:00:00.000Z'),
-    createdAt: new Date('2026-06-01T00:00:00.000Z'),
-    updatedAt: new Date('2026-06-01T00:00:00.000Z'),
-  });
-
   // A .txt psych note — THE Perez failure shape: the dx note the PCP refuses to sign without,
   // structurally unreachable by the PDF-only assembler until rendered.
   const TXT_DOC: MockDocument = {
@@ -264,12 +297,6 @@ describe('generateDoctorPackForCase — WAVE 2', () => {
     pageRow('doc-2', 2, 'Plan: continue current therapy and medication management. Return in 3 months.'),
   ];
 
-  type ManifestShape = {
-    entries: { filePath: string; docType: string; pageRanges: { from: number; to: number }[]; pageCount: number; displayLabel?: string }[];
-    warnings?: string[];
-    budgetTrim?: { trimNotes: string[] };
-  };
-
   it('renders a non-PDF source to the derived records-bucket key and rewrites the manifest entry (1b)', async () => {
     const { db, tx, created } = makeGenDb({ caseVersion: 6, documents: [TXT_DOC], pageRows: TXT_PAGES });
     const s3Send = vi.fn(async (_cmd: unknown) => ({}));
@@ -281,20 +308,23 @@ describe('generateDoctorPackForCase — WAVE 2', () => {
     expect(result.outcome).toBe('queued');
 
     // Manifest entry points at the RENDERED key (zero handler.py contract change) with
-    // pageRanges adjusted to the rendered page count.
+    // pageRanges adjusted to the rendered page count. (The cover index — entry #1 since
+    // ROUND 2 D, ungated since Ryan's 2026-06-12 no-hard-gate call — precedes it.)
     const manifest = created.data?.manifestJson as ManifestShape;
-    expect(manifest.entries).toHaveLength(1);
-    expect(manifest.entries[0]?.filePath).toBe('cases/CASE-1/_rendered/doc-2-v6.pdf');
-    expect(manifest.entries[0]?.pageRanges).toEqual([{ from: 1, to: 2 }]);
-    expect(manifest.entries[0]?.pageCount).toBe(2);
+    expect(manifest.entries).toHaveLength(2);
+    expect(manifest.entries[0]?.docType).toBe('cover_index');
+    expect(manifest.entries[1]?.filePath).toBe('cases/CASE-1/_rendered/doc-2-v6.pdf');
+    expect(manifest.entries[1]?.pageRanges).toEqual([{ from: 1, to: 2 }]);
+    expect(manifest.entries[1]?.pageCount).toBe(2);
     // §3: unspecified docType → displayLabel is just the original filename.
-    expect(manifest.entries[0]?.displayLabel).toBe('PsychNote.txt');
-    expect(created.data?.pageCount).toBe(2);
+    expect(manifest.entries[1]?.displayLabel).toBe('PsychNote.txt');
+    expect(created.data?.pageCount).toBe(2 + (manifest.entries[0]?.pageCount ?? 0));
     // No render-failure notes.
     expect(manifest.budgetTrim?.trimNotes ?? []).not.toContainEqual(expect.stringContaining('could not render'));
 
-    // The upload went to the records bucket under the derived key as a real PDF.
-    expect(s3Send).toHaveBeenCalledTimes(1);
+    // The upload went to the records bucket under the derived key as a real PDF (the second
+    // upload is the cover index).
+    expect(s3Send).toHaveBeenCalledTimes(2);
     const putCmd = s3Send.mock.calls[0]?.[0] as unknown as { input: { Bucket: string; Key: string; ContentType: string; Body: Uint8Array } };
     expect(putCmd.input.Bucket).toBe('phi-test-bucket');
     expect(putCmd.input.Key).toBe('cases/CASE-1/_rendered/doc-2-v6.pdf');
@@ -323,19 +353,45 @@ describe('generateDoctorPackForCase — WAVE 2', () => {
     expect(manifest.budgetTrim?.trimNotes).toContain('could not render PsychNote.txt');
   });
 
-  it('a pack with ZERO clinical pages gets the NO_CLINICAL_DX_DOCUMENTATION warning + audit row (§1 soft gate)', async () => {
-    // Default fixture: a lone DD-214 — service category, zero clinical (progress/C&P/DBQ) pages.
-    const { db, created, spies } = makeGenDb({ caseVersion: 6 });
-    await generateDoctorPackForCase(db, { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' });
+  it('a pack with ZERO clinical pages STILL queues + assembles (Ryan 2026-06-12: NO hard gate) — warning + audit row drive the calm panel notice', async () => {
+    // The fixture: a lone DD-214 — service category, zero clinical (progress/C&P/DBQ) pages.
+    const { db, created, spies } = makeGenDb({
+      caseVersion: 6,
+      documents: [DEFAULT_DD214_DOC],
+      pageRows: [],
+      veteranStatement: 'My back has hurt since 2009.', // renders normally — nothing is held back
+    });
+    const s3Send = vi.fn(async () => ({}));
+    const result = await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: s3Send }, recordsBucketName: 'phi-test-bucket' },
+    );
 
+    // The pack generates and enqueues exactly like any other — never 'failed', never held.
+    expect(result.outcome).toBe('queued');
+    expect(created.data?.state).toBe('queued');
+    expect(created.data?.errorMessage).toBeUndefined();
+    expect(vi.mocked(publishDoctorPackQueued)).toHaveBeenCalledTimes(1);
+    // Statement + cover render as usual (uploads happened).
+    expect(s3Send).toHaveBeenCalled();
+
+    // The §1 warning + audit-row trail is the ONLY signal — the panel keys its calm notice on it.
     const manifest = created.data?.manifestJson as ManifestShape;
     expect(manifest.warnings).toEqual(['NO_CLINICAL_DX_DOCUMENTATION']);
-    expect(spies.activityLogCreate).toHaveBeenCalledTimes(2);
     const second = spies.activityLogCreate.mock.calls[1]?.[0];
     expect(second?.data.action).toBe('doctor_pack_missing_clinical');
     expect(second?.data.detailsJson.warning).toBe('NO_CLINICAL_DX_DOCUMENTATION');
     // The queued log stays FIRST (existing assertions key on calls[0]).
     expect(spies.activityLogCreate.mock.calls[0]?.[0]?.data.action).toBe('doctor_pack_queued');
+  });
+
+  it('ROUND 2 (F positive control): a clinical-bearing pack still queues AND publishes to SQS', async () => {
+    const { db, created } = makeGenDb({ caseVersion: 6 }); // default fixture carries the clinical note
+    await generateDoctorPackForCase(db, { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' });
+    expect(created.data?.state).toBe('queued');
+    expect(created.data?.errorMessage).toBeUndefined();
+    expect(vi.mocked(publishDoctorPackQueued)).toHaveBeenCalledTimes(1);
   });
 
   it('clinical pages present → NO warning, no extra audit row, and a human displayLabel on the entry (§1/§3)', async () => {
@@ -365,5 +421,131 @@ describe('generateDoctorPackForCase — WAVE 2', () => {
     expect(manifest.entries[0]?.docType).toBe('progress_notes');
     expect(manifest.entries[0]?.pageRanges).toEqual([{ from: 1, to: 1 }]);
     expect(manifest.entries[0]?.displayLabel).toBe('Clinical notes — Progress_Notes.pdf');
+  });
+});
+
+// ============================================================================================
+// ROUND 2 (backlog §"Doctor-pack round 2" A/C/D/E — PCP re-review 2026-06-12). F lives above
+// with the gate it replaced.
+// ============================================================================================
+
+describe('generateDoctorPackForCase — ROUND 2', () => {
+  it('A: the same content uploaded under two filenames ships ONCE, keeps the earliest upload, and records the omission', async () => {
+    const text = 'Assessment: obstructive sleep apnea. Plan: continue CPAP therapy nightly.';
+    const { db, created, tx } = makeGenDb({
+      caseVersion: 6,
+      documents: [
+        { id: 'doc-a', s3Key: 'cases/CASE-1/aaaa0000-Progress_Notes.pdf', pageCount: 1, docTag: null, filename: 'Progress_Notes.pdf', contentType: 'application/pdf' },
+        { id: 'doc-b', s3Key: 'cases/CASE-1/bbbb0000-Progress_Notes_copy.pdf', pageCount: 1, docTag: null, filename: 'Progress_Notes_copy.pdf', contentType: 'application/pdf' },
+      ],
+      pageRows: [pageRow('doc-a', 1, text), pageRow('doc-b', 1, text)],
+    });
+    await generateDoctorPackForCase(db, { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' });
+
+    const manifest = created.data?.manifestJson as ManifestShape;
+    const notesEntries = manifest.entries.filter((e) => e.docType === 'progress_notes');
+    expect(notesEntries).toHaveLength(1);
+    expect(notesEntries[0]?.filePath).toBe('cases/CASE-1/aaaa0000-Progress_Notes.pdf');
+    expect(manifest.budgetTrim?.trimNotes).toContain(
+      'Progress_Notes_copy.pdf: duplicate of Progress_Notes.pdf (identical content) — omitted',
+    );
+
+    // The duplicate KEEPS its KeyDoc row (the RN doc list stays complete) with the why.
+    const dupUpsert = tx.keyDoc.upsert.mock.calls
+      .map((call) => (call[0] as { create: Record<string, unknown> }).create)
+      .find((c) => String(c.filePath).endsWith('Progress_Notes_copy.pdf'));
+    expect(dupUpsert).toBeDefined();
+    expect(String(dupUpsert?.selectorRationale)).toContain('duplicate of Progress_Notes.pdf');
+  });
+
+  it('C: veteranStatement renders into a one-page LAY entry at the derived key with the intake provenance header', async () => {
+    const { db, created } = makeGenDb({
+      caseVersion: 6,
+      veteranStatement: 'My sleep problems began after my PTSD worsened in 2015.',
+      caseCreatedAt: new Date('2026-03-15T12:00:00.000Z'),
+    });
+    const s3Send = vi.fn(async (_cmd: unknown) => ({}));
+    await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: s3Send }, recordsBucketName: 'phi-test-bucket' },
+    );
+
+    const manifest = created.data?.manifestJson as ManifestShape;
+    const statement = manifest.entries.find((e) => e.docType === 'lay_statement');
+    expect(statement).toBeDefined();
+    expect(statement?.filePath).toBe('cases/CASE-1/_rendered/veteran-statement-v6.pdf');
+    expect(statement?.displayLabel).toBe('Veteran statement (from intake)');
+    expect(statement?.pageRanges).toEqual([{ from: 1, to: 1 }]);
+    // No "missing statement" note on a case that HAS one.
+    expect(manifest.budgetTrim?.trimNotes ?? []).not.toContain(NO_LAY_STATEMENT_NOTE);
+
+    // Uploaded as a real PDF to the records bucket at the derived key.
+    const keys = s3Send.mock.calls.map((call) => (call[0] as { input: { Key: string } }).input.Key);
+    expect(keys).toContain('cases/CASE-1/_rendered/veteran-statement-v6.pdf');
+  });
+
+  it('C: the provenance header carries the intake date verbatim (exact wording pinned)', () => {
+    expect(buildVeteranStatementHeader(new Date('2026-03-15T12:00:00.000Z'))).toBe(
+      "Veteran's statement as submitted at intake on 2026-03-15",
+    );
+    expect(buildVeteranStatementHeader(null)).toBe(
+      "Veteran's statement as submitted at intake on an unknown date",
+    );
+  });
+
+  it('C: an EMPTY veteranStatement becomes the "No lay statement on file" Not-included note', async () => {
+    const { db, created } = makeGenDb({ caseVersion: 6, veteranStatement: '   ' });
+    await generateDoctorPackForCase(db, { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' });
+    const manifest = created.data?.manifestJson as ManifestShape;
+    expect(manifest.entries.some((e) => e.docType === 'lay_statement')).toBe(false);
+    expect(manifest.budgetTrim?.trimNotes).toContain(NO_LAY_STATEMENT_NOTE);
+  });
+
+  it('D/E: the cover index is manifest entry #1 and the rest are medicine-first ordered (clinical → lay → denial → service)', async () => {
+    const { db, created } = makeGenDb({
+      caseVersion: 6,
+      veteranStatement: 'My sleep problems began after my PTSD worsened in 2015.',
+      documents: [
+        { id: 'doc-dd', s3Key: 'cases/CASE-1/eeee0000-DD-214.pdf', pageCount: 1, docTag: null, filename: 'DD-214.pdf', contentType: 'application/pdf' },
+        // A denial for a DIFFERENT condition (the PCP's non-obvious-inclusion case).
+        { id: 'doc-dn', s3Key: 'cases/CASE-1/dddd0000-Hip_Denial.pdf', pageCount: 2, docTag: null, filename: 'Hip_Denial.pdf', contentType: 'application/pdf' },
+        DEFAULT_CLINICAL_DOC,
+      ],
+      pageRows: [
+        pageRow('doc-dd', 1, 'Certificate of Release or Discharge from Active Duty. DD Form 214.'),
+        // Denial-only phrasing: the classifier checks rating-decision openers ("we have made a
+        // decision on your claim" / "reasons for decision") FIRST, so this page must carry the
+        // denial patterns alone to classify denial_letter.
+        pageRow('doc-dn', 1, 'Entitlement to service connection for right hip strain is denied. We have denied your claim for the right hip.'),
+        pageRow('doc-dn', 2, 'The evidence considered does not show the right hip strain began in service. Service connection for the right hip is denied.'),
+        ...DEFAULT_PAGE_ROWS,
+      ],
+    });
+    const s3Send = vi.fn(async (_cmd: unknown) => ({}));
+    await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: s3Send }, recordsBucketName: 'phi-test-bucket' },
+    );
+
+    const manifest = created.data?.manifestJson as ManifestShape;
+    expect(manifest.entries[0]?.docType).toBe('cover_index');
+    expect(manifest.entries[0]?.displayLabel).toBe('Cover index');
+    expect(manifest.entries[0]?.filePath).toBe('cases/CASE-1/_rendered/cover-index-v6.pdf');
+    expect(manifest.entries.map((e) => e.docType)).toEqual([
+      'cover_index',
+      'progress_notes', // clinical first (the dx note)
+      'lay_statement', // veteran statement
+      'denial_letter', // denial narrative
+      'dd_214', // service
+    ]);
+
+    // Cover + statement both uploaded; the row's pageCount includes them.
+    const keys = s3Send.mock.calls.map((call) => (call[0] as { input: { Key: string } }).input.Key);
+    expect(keys).toContain('cases/CASE-1/_rendered/cover-index-v6.pdf');
+    expect(keys).toContain('cases/CASE-1/_rendered/veteran-statement-v6.pdf');
+    const totalPages = manifest.entries.reduce((sum, e) => sum + e.pageCount, 0);
+    expect(created.data?.pageCount).toBe(totalPages);
   });
 });

@@ -45,7 +45,9 @@ export const PACK_PAGE_BUDGET = 20;
 // Assessment 2026-06-12 §1c (category budget): docType -> pack category. Soft caps + floors
 // replace the old flat "protected docTypes fill first" rule, which let a rating decision eat
 // all 20 pages before any clinical note was reached (the live failure).
-type PackCategory = 'sc_proof' | 'denial' | 'clinical' | 'tests' | 'service' | 'lay' | 'other';
+// Exported (Round 2 item E, 2026-06-12): doctor-pack-generate's medicine-first manifest
+// ordering keys off the SAME category map the budget allocator uses — one source of truth.
+export type PackCategory = 'sc_proof' | 'denial' | 'clinical' | 'tests' | 'service' | 'lay' | 'other';
 
 const CATEGORY_BY_DOC_TYPE: Partial<Record<KeyDocRecord['docType'], PackCategory>> = {
   rating_decision: 'sc_proof',
@@ -70,7 +72,7 @@ const CATEGORY_BY_DOC_TYPE: Partial<Record<KeyDocRecord['docType'], PackCategory
   statement_in_support: 'lay',
 };
 
-function packCategoryOf(docType: KeyDocRecord['docType']): PackCategory {
+export function packCategoryOf(docType: KeyDocRecord['docType']): PackCategory {
   return CATEGORY_BY_DOC_TYPE[docType] ?? 'other';
 }
 

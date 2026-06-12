@@ -29,7 +29,11 @@ import type { KeyDocClassification, KeyDocPageRange, KeyDocType } from './db-typ
 // >=2-distinct-hits density); rating/denial/supplemental includes TIERED into strong anchors
 // (include alone) vs weak tokens (count only when a strong anchor fired somewhere in the doc);
 // high-signal fallback now returns all NON-boilerplate pages instead of all pages.
-export const PAGE_SELECTOR_VERSION = 'page-selector-1.2.0';
+// 1.3.0 (Round 2 backlog item B, 2026-06-12): kill-list gains the notification-letter species
+// that survived the first live pack — VALife, VSignals survey, VA Form 20-0998 QR appeal page,
+// monthly-entitlement table, commissary/travel/state-benefits enclosure. Patterns only; no
+// rule-flow change.
+export const PAGE_SELECTOR_VERSION = 'page-selector-1.3.0';
 
 const SMALL_DOC_ALWAYS_ALL_TYPES: ReadonlySet<KeyDocType> = new Set<KeyDocType>([
   'audiogram',
@@ -281,6 +285,26 @@ const BENEFITS_ENCLOSURE_PATTERNS: readonly RegExp[] = [
   // Combined-rating math table pages — explicitly on the PCP NEVER list (assessment §1).
   /combined ratings? table|how va combines ratings/i,
   /enclosure\s*\d?\b/i,
+  // ── Round 2 (backlog §Doctor-pack round 2 B, PCP re-review 2026-06-12): the notification-
+  // letter species that SURVIVED the first kill-list (5pp in the live pack). Each species is
+  // split into separate concept patterns so a real enclosure page trips the >=2-distinct-hits
+  // density floor on its own content — never on a single passing mention. ──
+  // VALife insurance enclosure.
+  /\bVALife\b/i,
+  /veterans affairs life insurance|guaranteed acceptance whole life/i,
+  // VSignals customer-survey page.
+  /\bVSignals\b/i,
+  /(customer|veteran) (experience|satisfaction) survey|tell us about your experience/i,
+  // VA Form 20-0998 / "how do I disagree" QR appeal page (the per-spec pattern + the page's
+  // companion phrasings as a second concept).
+  /VA Form 20-?0998|decision review request|opt.?in.{0,20}appeals modernization/i,
+  /how do I disagree|decision review options|scan (the|this) QR code/i,
+  // Monthly-entitlement payment table (two concepts: a real table page carries both).
+  /monthly entitlement amount/i,
+  /payment start date/i,
+  // Commissary / beneficiary-travel / state-benefits enclosure (commissary|exchange privileges
+  // already exists above; these are the page's companion concepts).
+  /beneficiary travel|state veterans benefits/i,
 ];
 
 const PAGE_BOILERPLATE_PATTERNS: readonly RegExp[] = [

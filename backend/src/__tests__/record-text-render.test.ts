@@ -121,3 +121,36 @@ describe('previewRecordTextLayout (the exact plan the renderer draws)', () => {
     expect(new Set(plan.map((p) => p.sourcePageNumber))).toEqual(new Set([5]));
   });
 });
+
+// ROUND 2 (backlog §Doctor-pack round 2 C/D): non-document pages — the veteran's intake
+// statement and the cover index — carry their OWN header line and no 'page N of source' footer.
+describe('provenanceHeader override + omitSourceFooters (Round 2)', () => {
+  const STATEMENT_INPUT = {
+    originalFilename: 'Veteran statement (from intake)',
+    pages: [{ sourcePageNumber: 1, text: 'My back pain started after the 2009 convoy accident.' }],
+    provenanceHeader: "Veteran's statement as submitted at intake on 2026-03-15",
+    omitSourceFooters: true,
+  } as const;
+
+  it('the override REPLACES the document-conversion header verbatim', async () => {
+    const plan = await previewRecordTextLayout(STATEMENT_INPUT);
+    const rejoined = (plan[0]?.items ?? []).filter((i): i is string => i !== null).join(' ');
+    expect(rejoined).toContain("Veteran's statement as submitted at intake on 2026-03-15");
+    expect(rejoined).not.toContain('Rendered verbatim from');
+    expect(rejoined).toContain('My back pain started after the 2009 convoy accident.');
+  });
+
+  it('renders + stays deterministic with footers omitted', async () => {
+    const a = await renderRecordTextPdf(STATEMENT_INPUT);
+    const b = await renderRecordTextPdf(STATEMENT_INPUT);
+    expect(new TextDecoder().decode(a.bytes.slice(0, 5))).toBe('%PDF-');
+    expect(a.pageCount).toBe(1);
+    expect(Buffer.from(a.bytes).equals(Buffer.from(b.bytes))).toBe(true);
+  });
+
+  it('omitting footers changes the bytes vs the footered render (the flag is live)', async () => {
+    const withFooter = await renderRecordTextPdf({ ...STATEMENT_INPUT, omitSourceFooters: false });
+    const withoutFooter = await renderRecordTextPdf(STATEMENT_INPUT);
+    expect(Buffer.from(withFooter.bytes).equals(Buffer.from(withoutFooter.bytes))).toBe(false);
+  });
+});

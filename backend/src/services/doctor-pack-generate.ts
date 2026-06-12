@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { HttpError } from '../http/errors.js';
 import { evaluateChartReadiness, isEffectivelyRead } from './chart-readiness.js';
@@ -9,14 +9,16 @@ import {
   DOCTOR_PACK_ENGINE_VERSION,
   PACK_PAGE_BUDGET,
   PACK_PAGE_TARGET,
+  packCategoryOf,
   type BudgetEntry,
+  type PackCategory,
 } from './doctor-pack.js';
 import { classifyDocument, CLASSIFIER_VERSION_NUM } from './key-docs-classifier.js';
 import { selectPages, type PageSelectorInputPage } from './page-selector.js';
 import { aggregateChartSummary } from './chart-summary-aggregator.js';
 import { publishDoctorPackQueued } from './doctor-pack-queue.js';
 import { isDoctorPackS3Key } from './s3-key-safety.js';
-import type { AppDb, DoctorPackRecord, DocumentPageRecord } from './db-types.js';
+import type { AppDb, DoctorPackManifestEntry, DoctorPackRecord, DocumentPageRecord, KeyDocPageRange } from './db-types.js';
 
 /**
  * Package 7 (2026-06-11): the Doctor Pack generate body, EXTRACTED from
@@ -189,6 +191,252 @@ export function isNonPdfSource(
 export const CLINICAL_DX_DOC_TYPES: ReadonlySet<string> = new Set(['progress_notes', 'c_and_p_exam', 'dbq', 'blue_button']);
 export const NO_CLINICAL_DX_WARNING = 'NO_CLINICAL_DX_DOCUMENTATION';
 
+// ================= ROUND 2 (backlog §"Doctor-pack round 2" A–E,
+// PCP re-review 2026-06-12 — verdict USABLE-WITH-CHART-CHECKS; these reach SIGNABLE) =================
+// NOTE (Ryan 2026-06-12): NO hard no-dx gate. A pack with zero clinical pages still generates
+// and delivers; the panel shows a calm notice keyed on NO_CLINICAL_DX_WARNING instead.
+
+// C. The Not-included note when the case has no veteranStatement.
+export const NO_LAY_STATEMENT_NOTE = 'No lay statement on file';
+
+/** C. Provenance header for the rendered intake-statement page (exact wording per spec). */
+export function buildVeteranStatementHeader(caseCreatedAt: Date | null | undefined): string {
+  const date =
+    caseCreatedAt instanceof Date && !Number.isNaN(caseCreatedAt.getTime())
+      ? caseCreatedAt.toISOString().slice(0, 10)
+      : 'an unknown date';
+  return `Veteran's statement as submitted at intake on ${date}`;
+}
+
+// A. Content-hash dedup. The live failure: the same MHV export uploaded under two filenames
+// produced 16 duplicate pages (Misc_6=Misc_8, Misc_9=Misc_10). Two content signals, either of
+// which establishes identity:
+//   - the file-byte sha256 the OCR pipeline stamped on FileReadStatus (same bytes ⇒ same sha);
+//   - a text fingerprint over the OCR'd page text (catches re-exports whose bytes differ but
+//     whose content is identical). Normalized (whitespace-collapsed, lowercased) so trivial
+//     extraction jitter doesn't defeat it.
+export function computeTextFingerprint(
+  pageRows: readonly { readonly pageNumber: number; readonly text: string }[],
+): string | null {
+  const normalized = pageRows
+    .map((p) => p.text.replace(/\s+/g, ' ').trim().toLowerCase())
+    .filter((t) => t.length > 0)
+    .join('\n');
+  if (normalized.length === 0) return null;
+  return createHash('sha256').update(normalized, 'utf8').digest('hex');
+}
+
+export interface DedupCandidate {
+  readonly filePath: string;
+  readonly displayName: string;
+  // Byte sha from FileReadStatus ('' when no read-status row carries one).
+  readonly fileSha256: string;
+  readonly textFingerprint: string | null;
+  readonly docType: string;
+  readonly importance: number;
+  // Position in the upload-ordered document list — the earliest-upload tiebreak.
+  readonly uploadIndex: number;
+}
+
+export interface DedupResult {
+  // Dropped path -> kept path.
+  readonly duplicateOf: ReadonlyMap<string, string>;
+  // One Not-included note per dropped doc ('X: duplicate of Y …').
+  readonly notes: readonly string[];
+}
+
+/**
+ * Group candidate documents that share a content identity (byte sha OR text fingerprint) and
+ * keep exactly ONE per group: prefer the better-classified docType (anything beats
+ * 'unspecified'), then higher classifier importance, then earliest upload. Deterministic.
+ */
+export function dedupPackDocuments(candidates: readonly DedupCandidate[]): DedupResult {
+  // Union-find over candidate indexes, keyed by shared content keys.
+  const parent = candidates.map((_, i) => i);
+  const find = (i: number): number => {
+    let root = i;
+    while (parent[root] !== root) root = parent[root]!;
+    let cur = i;
+    while (parent[cur] !== root) {
+      const next = parent[cur]!;
+      parent[cur] = root;
+      cur = next;
+    }
+    return root;
+  };
+  const union = (a: number, b: number): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  };
+  const byKey = new Map<string, number>();
+  candidates.forEach((c, i) => {
+    const keys: string[] = [];
+    if (c.fileSha256.length > 0) keys.push(`sha:${c.fileSha256}`);
+    if (c.textFingerprint !== null) keys.push(`text:${c.textFingerprint}`);
+    for (const key of keys) {
+      const seen = byKey.get(key);
+      if (seen === undefined) byKey.set(key, i);
+      else union(i, seen);
+    }
+  });
+  const groups = new Map<number, DedupCandidate[]>();
+  candidates.forEach((c, i) => {
+    const root = find(i);
+    const list = groups.get(root) ?? [];
+    list.push(c);
+    groups.set(root, list);
+  });
+  const duplicateOf = new Map<string, string>();
+  const notes: string[] = [];
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const ranked = [...group].sort((a, b) => {
+      const aUnspec = a.docType === 'unspecified' ? 1 : 0;
+      const bUnspec = b.docType === 'unspecified' ? 1 : 0;
+      if (aUnspec !== bUnspec) return aUnspec - bUnspec;
+      if (a.importance !== b.importance) return b.importance - a.importance;
+      if (a.uploadIndex !== b.uploadIndex) return a.uploadIndex - b.uploadIndex;
+      return a.filePath.localeCompare(b.filePath);
+    });
+    const kept = ranked[0]!;
+    for (const dup of ranked.slice(1)) {
+      duplicateOf.set(dup.filePath, kept.filePath);
+      notes.push(`${dup.displayName}: duplicate of ${kept.displayName} (identical content) — omitted`);
+    }
+  }
+  return { duplicateOf, notes };
+}
+
+// D/E. Medicine-first manifest order (Ryan/PCP: the doctor reads dx note FIRST). The cover
+// index is prepended separately; everything else sorts by this category rank, then classifier
+// importance desc, then path — fully deterministic.
+export const PACK_CATEGORY_ORDER: Readonly<Record<PackCategory, number>> = {
+  clinical: 0,
+  lay: 1,
+  denial: 2,
+  sc_proof: 3,
+  tests: 4,
+  service: 5,
+  other: 6,
+};
+
+export function orderPackEntriesMedicineFirst<T>(
+  entries: readonly T[],
+  key: (e: T) => { docType: DoctorPackManifestEntry['docType']; importance: number; filePath: string },
+): T[] {
+  return [...entries].sort((a, b) => {
+    const ka = key(a);
+    const kb = key(b);
+    const ca = PACK_CATEGORY_ORDER[packCategoryOf(ka.docType)];
+    const cb = PACK_CATEGORY_ORDER[packCategoryOf(kb.docType)];
+    if (ca !== cb) return ca - cb;
+    if (ka.importance !== kb.importance) return kb.importance - ka.importance;
+    return ka.filePath.localeCompare(kb.filePath);
+  });
+}
+
+// D. Cover-index WHY lines — plain English per category. The PCP's named non-obvious case: a
+// denial-category doc whose condition is NOT the claimed condition is in the pack to show what
+// the nexus must NOT lean on.
+export function coverWhyLine(category: PackCategory, mentionsClaimedCondition: boolean): string {
+  switch (category) {
+    case 'clinical':
+      return 'Clinical documentation of the claimed condition — read first.';
+    case 'lay':
+      return "The veteran's own account and timeline.";
+    case 'denial':
+      return mentionsClaimedCondition
+        ? "The VA's stated reasons for denying the claimed condition — the letter must answer these."
+        : 'Denial of a DIFFERENT condition — shows it is NOT service-connected; the nexus must not lean on it.';
+    case 'sc_proof':
+      return 'Proof of the service-connected condition(s) the theory builds on.';
+    case 'tests':
+      return 'Objective test results supporting current severity.';
+    case 'service':
+      return 'Service verification.';
+    case 'other':
+      return 'Supporting record.';
+  }
+}
+
+// Same condition matcher shape the page-selector uses (full phrase OR any distinctive token
+// >= 5 chars) — local copy because page-selector edits are kill-list-only this round.
+export function textMentionsCondition(text: string, claimedCondition: string | undefined): boolean {
+  const phrase = (claimedCondition ?? '').trim().toLowerCase();
+  if (phrase.length < 3) return false;
+  const lower = text.toLowerCase();
+  if (lower.includes(phrase)) return true;
+  return phrase
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 5)
+    .some((t) => lower.includes(t));
+}
+
+// D. Backend-side humanization for the cover page's Not-included list: swap a leading
+// '<filePath>: …' for the document's display name; drop whole-doc-passthrough bookkeeping
+// notes (they are not omissions). The PANEL keeps its own humanizer for the manifest's raw
+// trimNotes — this one only feeds the rendered cover page.
+export function humanizeTrimNotes(
+  notes: readonly string[],
+  displayNameByPath: ReadonlyMap<string, string>,
+): string[] {
+  const out: string[] = [];
+  for (const note of notes) {
+    if (note.includes('whole-doc passthrough')) continue;
+    const idx = note.indexOf(': ');
+    if (idx > 0) {
+      const display = displayNameByPath.get(note.slice(0, idx));
+      if (display !== undefined) {
+        out.push(`${display}: ${note.slice(idx + 2)}`);
+        continue;
+      }
+    }
+    out.push(note);
+  }
+  return out;
+}
+
+export interface CoverIndexEntryInput {
+  readonly displayLabel: string;
+  readonly category: PackCategory;
+  readonly pageRanges: readonly KeyDocPageRange[];
+  readonly mentionsClaimedCondition: boolean;
+}
+
+/** D. The cover-index page body (line-per-line; rendered via record-text-render). Pure. */
+export function buildCoverIndexLines(input: {
+  readonly caseId: string;
+  readonly claimedCondition?: string;
+  readonly claimType?: string | null;
+  readonly framingChoice?: string | null;
+  readonly upstreamScCondition?: string | null;
+  readonly entries: readonly CoverIndexEntryInput[];
+  readonly notIncluded: readonly string[];
+}): string[] {
+  const lines: string[] = [];
+  lines.push(`Case ${input.caseId} — claimed condition: ${input.claimedCondition ?? 'not recorded'}`);
+  const framing = input.framingChoice ?? input.claimType ?? 'not set';
+  const upstream = input.upstreamScCondition
+    ? ` — upstream service-connected condition: ${input.upstreamScCondition}`
+    : '';
+  lines.push(`Theory: ${framing}${upstream}`);
+  lines.push('');
+  lines.push('Included documents:');
+  input.entries.forEach((e, i) => {
+    const pages =
+      e.pageRanges.length === 0
+        ? 'all pages'
+        : e.pageRanges.map((r) => (r.from === r.to ? `p${r.from}` : `p${r.from}-${r.to}`)).join(', ');
+    lines.push(`${i + 1}. ${e.displayLabel} — ${pages} — ${coverWhyLine(e.category, e.mentionsClaimedCondition)}`);
+  });
+  lines.push('');
+  lines.push('Not included:');
+  if (input.notIncluded.length === 0) lines.push('(nothing was omitted)');
+  else for (const note of input.notIncluded) lines.push(`- ${note}`);
+  return lines;
+}
+
 // Rendered-artifact uploads go to the RECORDS bucket (PHI_BUCKET_NAME — the same bucket the
 // assembler's _records_bucket() reads manifest entries from) under a key DERIVED from the
 // source layout: cases/<caseId>/_rendered/<documentId>-v<caseVersion>.pdf. Chosen over a
@@ -245,6 +493,13 @@ export async function generateDoctorPackForCase(
       version: true,
       // Chunk D: claimedCondition feeds the page-selector's progress-notes condition rule.
       claimedCondition: true,
+      // ROUND 2: veteranStatement + createdAt feed the rendered lay-statement page (C);
+      // claimType/framingChoice/upstreamScCondition feed the cover index's theory line (D).
+      veteranStatement: true,
+      createdAt: true,
+      claimType: true,
+      framingChoice: true,
+      upstreamScCondition: true,
       documents: {
         // H1 (audit 2026-05-27): `id` MUST be selected. classifiedFiles maps
         // documentId: d.id, and the page-selector queries document_pages by that id.
@@ -258,7 +513,7 @@ export async function generateDoctorPackForCase(
         orderBy: { uploadedAt: 'asc' },
       },
     },
-  })) as unknown as { id: string; veteranId: string; version: number; claimedCondition: string | null; documents: readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null; filename?: string | null; contentType?: string | null; uploadedAt?: Date | string | null }[] } | null;
+  })) as unknown as { id: string; veteranId: string; version: number; claimedCondition: string | null; veteranStatement?: string | null; createdAt?: Date | string | null; claimType?: string | null; framingChoice?: string | null; upstreamScCondition?: string | null; documents: readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null; filename?: string | null; contentType?: string | null; uploadedAt?: Date | string | null }[] } | null;
   if (caseWithDocs === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
   const c = { id: caseWithDocs.id, veteranId: caseWithDocs.veteranId, version: caseWithDocs.version };
   const claimedCondition = caseWithDocs.claimedCondition ?? undefined;
@@ -383,13 +638,34 @@ export async function generateDoctorPackForCase(
   });
   const clsByPath = new Map(perFileSelection.map((s) => [s.file.filePath, s.classification]));
 
+  // ROUND 2 (A): content-hash dedup BEFORE selection-results enter the manifest/budget. The
+  // KeyDoc upsert loop still writes a row for EVERY file (the RN doc list stays complete; the
+  // duplicate's rationale says why it's not in the pack), but duplicates never consume budget.
+  const docMetaByPath = new Map(docList.map((d) => [d.s3Key, d]));
+  const displayNameByPath = new Map(docList.map((d) => [d.s3Key, displayFileName(d.s3Key, d.filename ?? null)]));
+  const uploadIndexByPath = new Map(docList.map((d, i) => [d.s3Key, i]));
+  const dedup = dedupPackDocuments(
+    perFileSelection.map((s) => ({
+      filePath: s.file.filePath,
+      displayName: displayNameByPath.get(s.file.filePath) ?? s.file.filePath,
+      fileSha256: s.file.fileSha256,
+      textFingerprint: computeTextFingerprint(pagesByDocumentId.get(docMetaByPath.get(s.file.filePath)?.id ?? '') ?? []),
+      docType: s.classification.docType,
+      importance: s.classification.importance,
+      uploadIndex: uploadIndexByPath.get(s.file.filePath) ?? Number.MAX_SAFE_INTEGER,
+    })),
+  );
+  const duplicatePaths = new Set(dedup.duplicateOf.keys());
+
   // Assemble manifest: legacy whole-doc path for files with no per-page data; page-selected
   // for files with at least one DocumentPage row. The selection.pageRanges may be empty
   // (no_per_page_text_available) — the legacy assembler handles empty by including the
   // whole file at extraction time. The content-aware classification is passed through so
   // the manifest's include/exclude tiers agree with the selector's docTypes.
   const manifest = assembleDoctorPackManifest({
-    classifiedFiles: classifiedFiles.map((f) => ({ ...f, cls: clsByPath.get(f.filePath) })),
+    classifiedFiles: classifiedFiles
+      .filter((f) => !duplicatePaths.has(f.filePath))
+      .map((f) => ({ ...f, cls: clsByPath.get(f.filePath) })),
     readStatuses,
   });
   // Override the manifest entries' pageRanges with selector output when present.
@@ -413,6 +689,8 @@ export async function generateDoctorPackForCase(
   const readStatusByPath = new Map(readStatuses.map((r) => [r.filePath, r]));
   const appendedEntries = perFileSelection
     .filter((s) => !manifestPaths.has(s.file.filePath))
+    // ROUND 2 (A): duplicates never enter the pack via the append path either.
+    .filter((s) => !duplicatePaths.has(s.file.filePath))
     .filter((s) => s.selection.pageRanges.length > 0)
     .filter((s) => {
       const rs = readStatusByPath.get(s.file.filePath);
@@ -446,8 +724,7 @@ export async function generateDoctorPackForCase(
   const finalEntries = budget.entries.map(({ importance: _importance, ...entry }) => entry);
   const finalRangesByPath = new Map(finalEntries.map((e) => [e.filePath, e.pageRanges]));
 
-  // ===== WAVE 2 (assessment 2026-06-12 §1b/1d/§3): label, render non-PDF sources, no-dx gate =====
-  const docMetaByPath = new Map(docList.map((d) => [d.s3Key, d]));
+  // ===== WAVE 2 (assessment 2026-06-12 §1b/1d/§3) + ROUND 2 (C/D/E/F): label, render, gate =====
 
   // §3: stamp displayLabel BEFORE the render swap so the label always carries the ORIGINAL
   // filename (the rendered artifact's provenance header declares the conversion separately).
@@ -457,17 +734,41 @@ export async function generateDoctorPackForCase(
     return { ...entry, displayLabel: keyDocDisplayLabel(entry.docType, displayFileName(entry.filePath, meta?.filename ?? null)) };
   });
 
+  // Shared rendered-artifact upload (non-PDF sources, the lay-statement page, the cover index).
+  // Derived RECORDS-bucket keys — zero handler.py contract change (it fetches every entry from
+  // _records_bucket()). Deterministic bytes + deterministic key = idempotent, overwrite-safe.
+  const uploadRenderedPdf = async (key: string, bytes: Uint8Array): Promise<void> => {
+    const bucket = deps?.recordsBucketName ?? process.env['PHI_BUCKET_NAME'];
+    if (typeof bucket !== 'string' || bucket.length === 0) {
+      throw new Error('PHI_BUCKET_NAME (records bucket) not configured for rendered-record upload');
+    }
+    const s3 = deps?.s3 ?? defaultRecordsS3();
+    await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: bytes, ContentType: 'application/pdf' }));
+  };
+
   // §1b: render each non-PDF source's SELECTED pages to a real PDF in the records bucket and
   // point the manifest entry at the rendered key. Fail-OPEN per entry: a render/upload error
   // logs, drops THAT entry into trimNotes ('could not render <filename>'), and the pack keeps
   // assembling — never the whole pack. (KeyDoc rows are untouched: they keep the ORIGINAL
   // filePath + selector ranges so the RN review UI and the Document join keep working.)
+  // ROUND 2: each surviving entry carries side-channel meta (importance for the medicine-first
+  // sort, mentionsClaimedCondition for the cover index's WHY line) keyed to the entry itself so
+  // the rendered-key swap can't orphan it.
+  type LabeledEntry = DoctorPackManifestEntry & { readonly displayLabel: string };
+  interface PackEntryMeta {
+    readonly entry: LabeledEntry;
+    readonly importance: number;
+    readonly mentionsClaimedCondition: boolean;
+  }
   const renderNotes: string[] = [];
-  const packEntries: Array<(typeof labeledEntries)[number]> = [];
+  const packEntryMetas: PackEntryMeta[] = [];
   for (const entry of labeledEntries) {
     const meta = docMetaByPath.get(entry.filePath);
+    const importance = clsByPath.get(entry.filePath)?.importance ?? 50;
+    const docText = (pagesByDocumentId.get(meta?.id ?? '') ?? []).map((p) => p.text).join('\n');
+    const mentionsClaimedCondition = textMentionsCondition(docText, claimedCondition);
     if (meta === undefined || !isNonPdfSource(entry.filePath, meta.filename ?? null, meta.contentType ?? null)) {
-      packEntries.push(entry);
+      packEntryMetas.push({ entry, importance, mentionsClaimedCondition });
       continue;
     }
     const displayName = displayFileName(entry.filePath, meta.filename ?? null);
@@ -485,36 +786,125 @@ export async function generateDoctorPackForCase(
         sourceUploadedAt: uploadedAtRaw !== null ? new Date(uploadedAtRaw) : null,
         pages: selectedRows.map((p) => ({ sourcePageNumber: p.pageNumber, text: p.text })),
       });
-      // Derived RECORDS-bucket key — zero handler.py contract change (it fetches every entry
-      // from _records_bucket()). Deterministic + overwrite-safe: same text → same bytes.
       const renderedKey = `cases/${caseId}/_rendered/${meta.id}-v${c.version}.pdf`;
-      const bucket = deps?.recordsBucketName ?? process.env['PHI_BUCKET_NAME'];
-      if (typeof bucket !== 'string' || bucket.length === 0) {
-        throw new Error('PHI_BUCKET_NAME (records bucket) not configured for rendered-record upload');
-      }
-      const s3 = deps?.s3 ?? defaultRecordsS3();
-      await s3.send(new PutObjectCommand({ Bucket: bucket, Key: renderedKey, Body: rendered.bytes, ContentType: 'application/pdf' }));
-      packEntries.push({
-        ...entry,
-        filePath: renderedKey,
-        pageRanges: [{ from: 1, to: rendered.pageCount }],
-        pageCount: rendered.pageCount,
+      await uploadRenderedPdf(renderedKey, rendered.bytes);
+      packEntryMetas.push({
+        entry: {
+          ...entry,
+          filePath: renderedKey,
+          pageRanges: [{ from: 1, to: rendered.pageCount }],
+          pageCount: rendered.pageCount,
+        },
+        importance,
+        mentionsClaimedCondition,
       });
     } catch (renderErr) {
       console.warn(`doctor-pack: could not render non-PDF source ${displayName} (entry dropped, pack continues):`, renderErr);
       renderNotes.push(`could not render ${displayName}`);
     }
   }
-  const packTrimNotes = [...budget.trimNotes, ...renderNotes];
-  const refinedTotalPageCount = packEntries.reduce((sum, e) => sum + e.pageCount, 0);
 
-  // §1 soft no-dx gate: did the clinical category (progress_notes / c_and_p_exam / dbq)
-  // contribute ZERO pages to the final manifest? Whole-doc passthrough clinical entries
-  // (pageCount 0, empty ranges) count as contributing — the assembler ships the whole file.
-  const clinicalPageContribution = packEntries
+  // §1 no-dx gate input: did the clinical category (progress_notes / c_and_p_exam / dbq /
+  // condition-matched blue_button) contribute ZERO pages to the final manifest? Whole-doc
+  // passthrough clinical entries (pageCount 0, empty ranges) count as contributing — the
+  // assembler ships the whole file. Ryan 2026-06-12: this stays a SOFT signal — the pack
+  // generates and delivers either way; the panel renders a calm notice off the manifest warning.
+  const clinicalPageContribution = packEntryMetas
+    .map((m) => m.entry)
     .filter((e) => CLINICAL_DX_DOC_TYPES.has(e.docType))
     .reduce((sum, e) => sum + (e.pageRanges.length === 0 ? Math.max(1, e.pageCount) : e.pageCount), 0);
   const missingClinical = clinicalPageContribution === 0;
+
+  // ROUND 2 (C): the veteran's lay/timeline statement (Case.veteranStatement) renders into a
+  // one-page LAY-category entry; an empty statement becomes a Not-included note the panel
+  // surfaces.
+  {
+    const statementText = (caseWithDocs.veteranStatement ?? '').trim();
+    if (statementText.length === 0) {
+      renderNotes.push(NO_LAY_STATEMENT_NOTE);
+    } else {
+      try {
+        const createdAtRaw = caseWithDocs.createdAt ?? null;
+        const rendered = await renderRecordTextPdf({
+          originalFilename: 'Veteran statement (from intake)',
+          pages: [{ sourcePageNumber: 1, text: statementText }],
+          provenanceHeader: buildVeteranStatementHeader(createdAtRaw !== null ? new Date(createdAtRaw) : null),
+          omitSourceFooters: true,
+        });
+        const statementKey = `cases/${caseId}/_rendered/veteran-statement-v${c.version}.pdf`;
+        await uploadRenderedPdf(statementKey, rendered.bytes);
+        packEntryMetas.push({
+          entry: {
+            filePath: statementKey,
+            docType: 'lay_statement',
+            classification: 'high_signal',
+            pageRanges: [{ from: 1, to: rendered.pageCount }],
+            pageCount: rendered.pageCount,
+            displayLabel: 'Veteran statement (from intake)',
+          },
+          importance: 70,
+          mentionsClaimedCondition: textMentionsCondition(statementText, claimedCondition),
+        });
+      } catch (statementErr) {
+        console.warn('doctor-pack: could not render the veteran statement (pack continues):', statementErr);
+        renderNotes.push('could not render the veteran statement');
+      }
+    }
+  }
+
+  // ROUND 2 (E): medicine-first order — clinical (dx note first) → lay → denial → sc_proof →
+  // tests → service → other; deterministic within category (importance desc, then path).
+  const orderedMetas = orderPackEntriesMedicineFirst(packEntryMetas, (m) => ({
+    docType: m.entry.docType,
+    importance: m.importance,
+    filePath: m.entry.filePath,
+  }));
+
+  // ROUND 2 (D): one-page cover index, rendered + prepended as manifest entry #1. Fail-open:
+  // a cover render failure drops only the cover (note in trimNotes), never the pack.
+  const dedupAndBudgetNotes = [...dedup.notes, ...budget.trimNotes];
+  let coverEntry: LabeledEntry | null = null;
+  {
+    try {
+      const coverLines = buildCoverIndexLines({
+        caseId,
+        ...(claimedCondition !== undefined ? { claimedCondition } : {}),
+        claimType: caseWithDocs.claimType ?? null,
+        framingChoice: caseWithDocs.framingChoice ?? null,
+        upstreamScCondition: caseWithDocs.upstreamScCondition ?? null,
+        entries: orderedMetas.map((m) => ({
+          displayLabel: m.entry.displayLabel,
+          category: packCategoryOf(m.entry.docType),
+          pageRanges: m.entry.pageRanges,
+          mentionsClaimedCondition: m.mentionsClaimedCondition,
+        })),
+        notIncluded: humanizeTrimNotes([...dedupAndBudgetNotes, ...renderNotes], displayNameByPath),
+      });
+      const rendered = await renderRecordTextPdf({
+        originalFilename: 'Doctor pack cover index',
+        pages: [{ sourcePageNumber: 1, text: coverLines.join('\n') }],
+        provenanceHeader: 'DOCTOR PACK — COVER INDEX',
+        omitSourceFooters: true,
+      });
+      const coverKey = `cases/${caseId}/_rendered/cover-index-v${c.version}.pdf`;
+      await uploadRenderedPdf(coverKey, rendered.bytes);
+      coverEntry = {
+        filePath: coverKey,
+        docType: 'cover_index',
+        classification: 'high_signal',
+        pageRanges: [{ from: 1, to: rendered.pageCount }],
+        pageCount: rendered.pageCount,
+        displayLabel: 'Cover index',
+      };
+    } catch (coverErr) {
+      console.warn('doctor-pack: could not render the cover index (pack continues):', coverErr);
+      renderNotes.push('could not render the cover index');
+    }
+  }
+
+  const packEntries: LabeledEntry[] = [...(coverEntry !== null ? [coverEntry] : []), ...orderedMetas.map((m) => m.entry)];
+  const packTrimNotes = [...dedupAndBudgetNotes, ...renderNotes];
+  const refinedTotalPageCount = packEntries.reduce((sum, e) => sum + e.pageCount, 0);
 
   // Cover-page summary (architect plan: lives in DoctorPack.manifestJson.coverPage).
   const coverPage = await aggregateChartSummary({
@@ -544,9 +934,15 @@ export async function generateDoctorPackForCase(
       const wasTrimmed = trimmedPaths.has(f.filePath);
       const rangesToWrite = finalRangesByPath.get(f.filePath)
         ?? (wasTrimmed ? [] : sel.selection.pageRanges);
-      const rationaleToWrite = wasTrimmed
+      // ROUND 2 (A): a content-duplicate keeps its KeyDoc row (the RN doc list stays complete)
+      // but its rationale says exactly why it is not in the pack.
+      const dupKeptPath = dedup.duplicateOf.get(f.filePath);
+      const dupSuffix = dupKeptPath !== undefined
+        ? `; duplicate of ${displayNameByPath.get(dupKeptPath) ?? dupKeptPath} (identical content) — omitted from the pack`
+        : '';
+      const rationaleToWrite = (wasTrimmed
         ? `${sel.selection.selectorRationale}; pack_page_budget(${PACK_PAGE_BUDGET}) trimmed this file`
-        : sel.selection.selectorRationale;
+        : sel.selection.selectorRationale) + dupSuffix;
       const freshNeedsRnReview = sel.selection.needsRnReview || wasTrimmed;
 
       // Architect QA finding #1 (REVIEW.md 0cd4df0): durable RN acknowledgement.
@@ -609,6 +1005,9 @@ export async function generateDoctorPackForCase(
     // prior create + update double-write.
     const doctorPackId = randomUUID();
     const s3Key = buildDoctorPackS3Key(caseId, c.version, doctorPackId);
+    // Ryan 2026-06-12 (reversing the round-2 hard gate): a pack with ZERO clinical-category
+    // pages STILL generates and enqueues normally — the manifest warning below drives a calm
+    // panel notice; nothing is held back.
     const stamped = await tx.doctorPack.create({
       data: {
         id: doctorPackId,
@@ -631,7 +1030,9 @@ export async function generateDoctorPackForCase(
           engineVersion: DOCTOR_PACK_ENGINE_VERSION,
           ...(coverPage ? { coverPage } : {}),
           ...(missingClinical ? { warnings: [NO_CLINICAL_DX_WARNING] } : {}),
-          ...(budget.trimmed || renderNotes.length > 0
+          // ROUND 2: the budgetTrim block appears whenever ANY Not-included note exists —
+          // budget trims, dedup omissions (A), render failures, or the no-lay-statement note (C).
+          ...(budget.trimmed || packTrimNotes.length > 0
             ? {
                 budgetTrim: {
                   budget: PACK_PAGE_BUDGET,
@@ -674,9 +1075,8 @@ export async function generateDoctorPackForCase(
       },
     });
 
-    // WAVE 2 (§1 soft gate): a pack with ZERO clinical-dx pages is loudly flagged — manifest
-    // warning (panel banner) + its own audit row. The hard no-dx-no-ship park comes after the
-    // PCP re-review proves selection quality.
+    // §1 audit row: a pack with ZERO clinical-dx pages writes the manifest warning + its own
+    // audit row (soft signal only — the pack still assembles and delivers).
     if (missingClinical) {
       await tx.activityLog.create({
         data: {

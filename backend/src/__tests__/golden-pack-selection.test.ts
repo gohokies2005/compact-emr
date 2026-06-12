@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { selectPages, type PageSelectorResult } from '../services/page-selector.js';
 import { applyPackPageBudget, PACK_PAGE_BUDGET, type BudgetEntry } from '../services/doctor-pack.js';
+import {
+  buildCoverIndexLines,
+  computeTextFingerprint,
+  dedupPackDocuments,
+  orderPackEntriesMedicineFirst,
+  type DedupCandidate,
+} from '../services/doctor-pack-generate.js';
 import type { KeyDocClassification, KeyDocPageRange, KeyDocType } from '../services/db-types.js';
 import { RATING_DECISION_PAGES } from './fixtures/golden-pack/rating-decision-11pp.js';
 import { DENIAL_LETTER_PAGES } from './fixtures/golden-pack/denial-letter-3pp.js';
@@ -90,12 +97,24 @@ describe('GOLDEN PACK — live-failure replication (anxiety case)', () => {
   );
   const pagesOf = (filePath: string): number[] => keptPages.get(filePath) ?? [];
 
-  it('includes ZERO VA enclosure/appeal boilerplate pages (rating pages 3-11 are all boilerplate)', () => {
-    // Every one of rating pages 3-11 says "service-connected" and "granted" — exactly like the
+  it('includes ZERO VA enclosure/appeal boilerplate pages (rating pages 3-16 are all boilerplate)', () => {
+    // Every one of rating pages 3-16 says "service-connected" and "granted" — exactly like the
     // real enclosures. None of them may ship.
     expect(pagesOf('records/Rating_Decision_2025.pdf').filter((p) => p >= 3)).toEqual([]);
     // Denial page 3 is appeal boilerplate.
     expect(pagesOf('records/Denial_Letter_Anxiety.pdf')).not.toContain(3);
+  });
+
+  it('ROUND 2 (B): the notification-letter species that survived the live pack are excluded — VALife (p12), VSignals (p13), VA Form 20-0998 QR (p14), monthly-entitlement table (p15), commissary/travel/state benefits (p16)', () => {
+    const kept = pagesOf('records/Rating_Decision_2025.pdf');
+    for (const boilerplatePage of [12, 13, 14, 15, 16]) {
+      expect(kept).not.toContain(boilerplatePage);
+    }
+    // And the selector's own rationale shows them dying as boilerplate, not as weak-include misses.
+    const selection = selections.get('records/Rating_Decision_2025.pdf');
+    for (const boilerplatePage of [12, 13, 14, 15, 16]) {
+      expect(selection?.selectorRationale).toContain(`p${boilerplatePage}: boilerplate`);
+    }
   });
 
   it('rating decision contributes ONLY its decision-table + reasons pages, within the 6pp sc_proof cap', () => {
@@ -224,5 +243,160 @@ describe('GOLDEN PACK — small blue-button export carries the dx (Perez live fi
     const bb = r.entries.find((e) => e.filePath === 'bb_export.txt');
     expect(bb).toBeDefined();
     expect(bb!.pageCount).toBeGreaterThan(0);
+  });
+});
+
+// ============================================================================================
+// ROUND 2 (backlog §"Doctor-pack round 2", PCP re-review 2026-06-12)
+// ============================================================================================
+
+describe('ROUND 2 (A) — content-hash dedup (Misc_6=Misc_8 live failure shape)', () => {
+  const PAGES = [
+    { pageNumber: 1, text: 'My HealtheVet export. PCMHI consult: Unspecified Anxiety Disorder.' },
+    { pageNumber: 2, text: 'Plan: continue escitalopram. Follow up in 3 months.' },
+  ];
+  const candidate = (over: Partial<DedupCandidate>): DedupCandidate => ({
+    filePath: 'cases/C1/aaaa-Misc_6.pdf',
+    displayName: 'Misc_6.pdf',
+    fileSha256: '',
+    textFingerprint: computeTextFingerprint(PAGES),
+    docType: 'blue_button',
+    importance: 40,
+    uploadIndex: 0,
+    ...over,
+  });
+
+  it('two identical-content docs under different filenames → ONE survives + a duplicate note naming the kept file', () => {
+    const r = dedupPackDocuments([
+      candidate({}),
+      candidate({ filePath: 'cases/C1/bbbb-Misc_8.pdf', displayName: 'Misc_8.pdf', uploadIndex: 1 }),
+    ]);
+    expect(r.duplicateOf.size).toBe(1);
+    expect(r.duplicateOf.get('cases/C1/bbbb-Misc_8.pdf')).toBe('cases/C1/aaaa-Misc_6.pdf'); // earliest upload kept
+    expect(r.notes).toEqual(['Misc_8.pdf: duplicate of Misc_6.pdf (identical content) — omitted']);
+  });
+
+  it('matching file-byte sha256 alone (no OCR text yet) also establishes identity', () => {
+    const r = dedupPackDocuments([
+      candidate({ fileSha256: 'f'.repeat(64), textFingerprint: null }),
+      candidate({ filePath: 'cases/C1/bbbb-Copy.pdf', displayName: 'Copy.pdf', fileSha256: 'f'.repeat(64), textFingerprint: null, uploadIndex: 1 }),
+    ]);
+    expect(r.duplicateOf.get('cases/C1/bbbb-Copy.pdf')).toBe('cases/C1/aaaa-Misc_6.pdf');
+  });
+
+  it('the better-classified copy is kept even when uploaded LATER (unspecified loses to a real docType)', () => {
+    const r = dedupPackDocuments([
+      candidate({ docType: 'unspecified', importance: 40, uploadIndex: 0 }),
+      candidate({ filePath: 'cases/C1/bbbb-BlueButton.pdf', displayName: 'BlueButton.pdf', docType: 'blue_button', importance: 40, uploadIndex: 1 }),
+    ]);
+    expect(r.duplicateOf.get('cases/C1/aaaa-Misc_6.pdf')).toBe('cases/C1/bbbb-BlueButton.pdf');
+  });
+
+  it('different content never groups; docs with no sha AND no text never group', () => {
+    const r = dedupPackDocuments([
+      candidate({}),
+      candidate({ filePath: 'cases/C1/cccc-Other.pdf', displayName: 'Other.pdf', textFingerprint: computeTextFingerprint([{ pageNumber: 1, text: 'A completely different rating decision document.' }]), uploadIndex: 1 }),
+      candidate({ filePath: 'cases/C1/dddd-Empty1.pdf', displayName: 'Empty1.pdf', textFingerprint: null, uploadIndex: 2 }),
+      candidate({ filePath: 'cases/C1/eeee-Empty2.pdf', displayName: 'Empty2.pdf', textFingerprint: null, uploadIndex: 3 }),
+    ]);
+    expect(r.duplicateOf.size).toBe(0);
+    expect(r.notes).toEqual([]);
+  });
+
+  it('the text fingerprint normalizes whitespace/case jitter and ignores blank pages', () => {
+    const a = computeTextFingerprint(PAGES);
+    const b = computeTextFingerprint([
+      { pageNumber: 1, text: '  My   HealtheVet export.\nPCMHI consult: unspecified anxiety disorder.  ' },
+      { pageNumber: 2, text: 'Plan: continue escitalopram.   Follow up in 3 months.' },
+      { pageNumber: 3, text: '   ' },
+    ]);
+    expect(a).toBe(b);
+    expect(computeTextFingerprint([])).toBeNull();
+    expect(computeTextFingerprint([{ pageNumber: 1, text: '  ' }])).toBeNull();
+  });
+});
+
+describe('ROUND 2 (E) — medicine-first manifest order', () => {
+  interface E { docType: KeyDocType; importance: number; filePath: string }
+  const e = (docType: KeyDocType, importance: number, filePath: string): E => ({ docType, importance, filePath });
+
+  it('orders clinical → lay → denial → sc_proof → tests → service → other; importance then path within category', () => {
+    const shuffled: E[] = [
+      e('dd_214', 95, 'dd214.pdf'),
+      e('rating_decision', 100, 'rating.pdf'),
+      e('imaging', 80, 'mri.pdf'),
+      e('lay_statement', 70, 'statement.pdf'),
+      e('denial_letter', 100, 'denial.pdf'),
+      e('progress_notes', 60, 'notes_b.pdf'),
+      e('c_and_p_exam', 100, 'cnp.pdf'),
+      e('progress_notes', 60, 'notes_a.pdf'),
+      e('nexus_letter_prior', 90, 'old_nexus.pdf'),
+    ];
+    const ordered = orderPackEntriesMedicineFirst(shuffled, (x) => x);
+    expect(ordered.map((x) => x.filePath)).toEqual([
+      'cnp.pdf', // clinical, importance 100
+      'notes_a.pdf', // clinical, 60, path tiebreak
+      'notes_b.pdf',
+      'statement.pdf', // lay
+      'denial.pdf', // denial
+      'rating.pdf', // sc_proof
+      'mri.pdf', // tests
+      'dd214.pdf', // service
+      'old_nexus.pdf', // other
+    ]);
+  });
+
+  it('is deterministic (same input → same order, input untouched)', () => {
+    const input: E[] = [e('dd_214', 95, 'a.pdf'), e('progress_notes', 60, 'b.pdf')];
+    const snapshot = JSON.stringify(input);
+    const once = orderPackEntriesMedicineFirst(input, (x) => x);
+    const twice = orderPackEntriesMedicineFirst(input, (x) => x);
+    expect(JSON.stringify(once)).toBe(JSON.stringify(twice));
+    expect(JSON.stringify(input)).toBe(snapshot);
+  });
+});
+
+describe('ROUND 2 (D) — cover-index page body', () => {
+  const lines = buildCoverIndexLines({
+    caseId: 'CASE-77',
+    claimedCondition: 'obstructive sleep apnea',
+    claimType: 'secondary',
+    framingChoice: 'secondary to service-connected condition',
+    upstreamScCondition: 'PTSD',
+    entries: [
+      { displayLabel: 'Clinical notes — SleepClinic.pdf', category: 'clinical', pageRanges: [{ from: 2, to: 3 }], mentionsClaimedCondition: true },
+      { displayLabel: 'Veteran statement (from intake)', category: 'lay', pageRanges: [{ from: 1, to: 1 }], mentionsClaimedCondition: true },
+      { displayLabel: 'Denial letter — Hip_Denial.pdf', category: 'denial', pageRanges: [{ from: 1, to: 2 }], mentionsClaimedCondition: false },
+      { displayLabel: 'Rating decision — Misc_1.pdf', category: 'sc_proof', pageRanges: [], mentionsClaimedCondition: true },
+    ],
+    notIncluded: ['Misc_8.pdf: duplicate of Misc_6.pdf (identical content) — omitted', 'No lay statement on file'],
+  });
+  const body = lines.join('\n');
+
+  it('leads with case id, claimed condition, and the theory line (framing + upstream SC)', () => {
+    expect(lines[0]).toBe('Case CASE-77 — claimed condition: obstructive sleep apnea');
+    expect(lines[1]).toBe('Theory: secondary to service-connected condition — upstream service-connected condition: PTSD');
+  });
+
+  it('each included doc gets displayLabel — pages kept — plain-English WHY', () => {
+    expect(body).toContain('1. Clinical notes — SleepClinic.pdf — p2-3 — Clinical documentation of the claimed condition — read first.');
+    expect(body).toContain("2. Veteran statement (from intake) — p1 — The veteran's own account and timeline.");
+    expect(body).toContain('4. Rating decision — Misc_1.pdf — all pages — Proof of the service-connected condition(s) the theory builds on.');
+  });
+
+  it("the PCP's non-obvious case: a denial of a DIFFERENT condition explains itself (the nexus must not lean on it)", () => {
+    expect(body).toContain('3. Denial letter — Hip_Denial.pdf — p1-2 — Denial of a DIFFERENT condition — shows it is NOT service-connected; the nexus must not lean on it.');
+  });
+
+  it('carries the Not-included list verbatim', () => {
+    expect(body).toContain('Not included:');
+    expect(body).toContain('- Misc_8.pdf: duplicate of Misc_6.pdf (identical content) — omitted');
+    expect(body).toContain('- No lay statement on file');
+  });
+
+  it('falls back to claimType for the theory line and notes when nothing was omitted', () => {
+    const minimal = buildCoverIndexLines({ caseId: 'C2', claimedCondition: 'tinnitus', claimType: 'initial', framingChoice: null, upstreamScCondition: null, entries: [], notIncluded: [] });
+    expect(minimal[1]).toBe('Theory: initial');
+    expect(minimal.join('\n')).toContain('(nothing was omitted)');
   });
 });

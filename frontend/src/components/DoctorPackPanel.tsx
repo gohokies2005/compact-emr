@@ -291,11 +291,13 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
           </p>
         ) : null}
 
-        {/* WAVE 2 §1 soft gate: prominent amber banner — the PCP refuses to sign without the
-            dx note, so a pack with zero clinical pages must announce itself loudly. */}
+        {/* Calm no-dx notice (Ryan 2026-06-12: never hold the pack/delivery for this — just say
+            it plainly). Informational tone, not an alarm; the chart itself is one click away. */}
         {missingClinicalDx ? (
-          <div role="alert" className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
-            This pack contains NO clinical documentation of the claimed condition — review the chart before relying on it.
+          <div role="status" className="mt-3 rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
+            Clinical documentation supporting the diagnosis could not be auto-extracted for this
+            pack. The pack was still generated — please check the chart documents for the
+            diagnosis note.
           </div>
         ) : null}
 

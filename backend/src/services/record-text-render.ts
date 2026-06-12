@@ -89,6 +89,13 @@ export interface RenderRecordTextInput {
   // The SELECTED source pages, in order. Verbatim text — the caller has already applied page
   // selection; this module never drops or trims content.
   readonly pages: readonly RecordTextPage[];
+  // Round 2 (backlog §Doctor-pack round 2 C/D, 2026-06-12): pages that are not document
+  // conversions (the veteran's intake statement, the cover index) carry their OWN provenance/
+  // title line instead of the 'Rendered verbatim from: …' sentence. When set, this string IS
+  // the header block, verbatim.
+  readonly provenanceHeader?: string;
+  // Same callers: 'page N of source' footers are meaningless when there is no source document.
+  readonly omitSourceFooters?: boolean;
 }
 
 export interface RenderRecordTextResult {
@@ -141,7 +148,10 @@ function planRecordTextLayout(input: RenderRecordTextInput, font: PDFFont): Plan
   newPage(firstSource);
 
   // Mandatory provenance header block, then a paragraph gap before the verbatim text.
-  for (const headerLine of wrapLine(toWinAnsi(buildRecordRenderHeader(input.originalFilename, input.sourceUploadedAt)), font)) {
+  // provenanceHeader (Round 2): non-document pages (intake statement, cover index) supply
+  // their own header sentence verbatim instead of the document-conversion one.
+  const headerText = input.provenanceHeader ?? buildRecordRenderHeader(input.originalFilename, input.sourceUploadedAt);
+  for (const headerLine of wrapLine(toWinAnsi(headerText), font)) {
     pushLine(headerLine, firstSource);
   }
   pushGap();
@@ -203,13 +213,15 @@ export async function renderRecordTextPdf(input: RenderRecordTextInput): Promise
   }
 
   // 'page N of source' footers — N is the SOURCE page number, repeated when a source page
-  // wraps across multiple rendered pages.
+  // wraps across multiple rendered pages. Suppressed for non-document pages (Round 2).
   const pages = doc.getPages();
-  pages.forEach((p, i) => {
-    const label = `page ${plan[i]!.sourcePageNumber} of source`;
-    const w = font.widthOfTextAtSize(label, 10);
-    p.drawText(label, { x: (PAGE_WIDTH - w) / 2, y: FOOTER_Y, size: 10, font, color: rgb(0.35, 0.35, 0.35) });
-  });
+  if (input.omitSourceFooters !== true) {
+    pages.forEach((p, i) => {
+      const label = `page ${plan[i]!.sourcePageNumber} of source`;
+      const w = font.widthOfTextAtSize(label, 10);
+      p.drawText(label, { x: (PAGE_WIDTH - w) / 2, y: FOOTER_Y, size: 10, font, color: rgb(0.35, 0.35, 0.35) });
+    });
+  }
 
   const bytes = await doc.save();
   return { bytes, pageCount: pages.length };

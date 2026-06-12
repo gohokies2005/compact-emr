@@ -231,7 +231,7 @@ describe('DoctorPackPanel', () => {
 
   // ── WAVE 2 (assessment 2026-06-12 §1 gate / §1d / §3) ───────────────────────────────────────
 
-  it('renders the prominent amber banner when the manifest carries NO_CLINICAL_DX_DOCUMENTATION', async () => {
+  it('renders the CALM no-dx notice when the manifest carries NO_CLINICAL_DX_DOCUMENTATION (Ryan 2026-06-12: informational, never blocking)', async () => {
     getLatestMock.mockResolvedValue({
       data: { ...READY_PACK, manifestJson: { warnings: ['NO_CLINICAL_DX_DOCUMENTATION'] } },
     });
@@ -239,7 +239,7 @@ describe('DoctorPackPanel', () => {
 
     expect(
       await screen.findByText(
-        'This pack contains NO clinical documentation of the claimed condition — review the chart before relying on it.',
+        /Clinical documentation supporting the diagnosis could not be auto-extracted/,
       ),
     ).toBeInTheDocument();
   });
@@ -249,7 +249,7 @@ describe('DoctorPackPanel', () => {
     renderPanel();
 
     await screen.findByRole('button', { name: 'Open Doctor Pack (12pp)' });
-    expect(screen.queryByText(/NO clinical documentation/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be auto-extracted/)).not.toBeInTheDocument();
     expect(screen.queryByText('Not included')).not.toBeInTheDocument();
   });
 

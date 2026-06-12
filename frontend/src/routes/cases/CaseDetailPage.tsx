@@ -154,9 +154,14 @@ export function CaseDetailPage() {
     },
   });
 
-  // Redraft (re-run the drafter). Available to admin/ops_staff post-draft so a physician_review
-  // letter can be re-run (the OpsHeldPanel 'Re-run' only shows for held/revise). Guarded by a
-  // confirm + the backend's in-flight 409. (Ryan 2026-06-04: "lost the ability to redraft".)
+  // Redraft (re-run the drafter). RATIFIED LIFECYCLE (Ryan 2026-06-12): redraft LOCKS when the
+  // RN sends the case to the doctor — ops_staff can redraft post-draft (rn_review,
+  // correction_review, a held 'drafting') but NOT in physician_review; the doctor's "Send back
+  // to RN" reopens it. Admin keeps the affordance everywhere. This REVERSES the 2026-06-04
+  // "lost the ability to redraft" decision that deliberately allowed re-running a
+  // physician_review letter. The backend enforces the same rule on POST /draft with
+  // 409 {reason:'locked_physician_review'} (same envelope as the letter editor's RN lock), so a
+  // stale tab can't slip past canRedraft below.
   const redraft = useMutation({
     mutationFn: (guidance?: string) => postDraft(caseId, guidance ? { strategyOverride: guidance } : {}),
     onSuccess: async (res) => {
@@ -168,14 +173,20 @@ export function CaseDetailPage() {
     },
     // Surface the REAL reason (status + server message), never a canned guess — the redraft
     // endpoint's HttpErrors aren't logged server-side, so this alert is the only place the reason
-    // appears. A 409 honestly covers both "already in flight" and "chart not ready yet" (we don't
-    // claim a specific one). Everything else shows the server's own message. (Ryan: error-proof.)
-    onError: (e: unknown) =>
+    // appears. The G1 redraft lock (locked_physician_review) gets its own precise message — it
+    // can reach here on a stale tab where canRedraft still showed the button. A generic 409
+    // honestly covers both "already in flight" and "chart not ready yet" (we don't claim a
+    // specific one). Everything else shows the server's own message. (Ryan: error-proof.)
+    onError: (e: unknown) => {
+      const reason = e instanceof ConflictError ? (e.current as { reason?: string } | undefined)?.reason : undefined;
       window.alert(
-        e instanceof ConflictError
-          ? 'Cannot redraft right now — a drafter run may already be in flight, or the chart is not ready yet. Reload the case and check its status.'
-          : `Could not start a redraft — ${describeApiError(e)}. Please retry or flag to Dr. Ryan.`,
-      ),
+        reason === 'locked_physician_review'
+          ? 'Redraft is locked while the case is with the doctor. It reopens if the doctor sends the case back to the RN.'
+          : e instanceof ConflictError
+            ? 'Cannot redraft right now — a drafter run may already be in flight, or the chart is not ready yet. Reload the case and check its status.'
+            : `Could not start a redraft — ${describeApiError(e)}. Please retry or flag to Dr. Ryan.`,
+      );
+    },
   });
 
   // Cancel an in-flight draft (stops the ~$15 spend). (Ryan 2026-06-05.)
@@ -216,7 +227,10 @@ export function CaseDetailPage() {
     c.status === 'physician_review' && (role === 'admin' || role === 'physician');
   const draftInFlight = (c.draftJobs?.[0] as InFlightDraftJob | undefined)?.state === 'queued'
     || (c.draftJobs?.[0] as InFlightDraftJob | undefined)?.state === 'running';
-  const canRedraft = (role === 'admin' || role === 'ops_staff') && (c.draftJobs ?? []).length > 0 && !draftInFlight;
+  // G1 redraft lock: ops_staff loses the Redraft affordance while the case sits in the doctor's
+  // queue (physician_review). Admin keeps it everywhere. See the redraft mutation comment above.
+  const canRedraft = (role === 'admin' || (role === 'ops_staff' && c.status !== 'physician_review'))
+    && (c.draftJobs ?? []).length > 0 && !draftInFlight;
 
   // The newest draft-job that produced (or should have produced) a letter PDF. draftJobs is
   // version-desc, so the first terminal-or-keyed job is the latest letter. Terminal (done OR a

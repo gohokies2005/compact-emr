@@ -23,18 +23,39 @@ describe('case status transitions', () => {
     expect(CASE_STATUS_TRANSITIONS.rn_review).toEqual(['physician_review', 'drafting', 'rejected']);
     expect(CASE_STATUS_TRANSITIONS.needs_rn_decision).toEqual(['drafting', 'records', 'rejected']);
     expect(CASE_STATUS_TRANSITIONS.needs_records).toEqual(['drafting', 'records', 'rejected']);
+    // physician_review -> rn_review legalizes the drafter's live /complete flip after a redraft
+    // started in physician_review (assessment 2026-06-12 flagged the hop as absent from the map).
     expect(CASE_STATUS_TRANSITIONS.physician_review).toEqual([
       'correction_requested',
       'delivered',
+      'rn_review',
       'rejected',
     ]);
     expect(CASE_STATUS_TRANSITIONS.correction_requested).toEqual(['correction_review']);
     expect(CASE_STATUS_TRANSITIONS.correction_review).toEqual(['delivered', 'rejected']);
-    expect(CASE_STATUS_TRANSITIONS.delivered).toEqual(['paid']);
+    // delivered -> physician_review is the G4 stale-signature return (ratified sign/edit
+    // lifecycle, Ryan 2026-06-12): an edit over the signed version sends the case back to the
+    // doctor's queue for re-signature instead of sitting delivered with changed bytes.
+    expect(CASE_STATUS_TRANSITIONS.delivered).toEqual(['paid', 'physician_review']);
   });
 
   it('rejects ops_staff attempting physician_review to delivered', () => {
     expect(canRolePerformCaseStatusTransition('ops_staff', 'physician_review', 'delivered')).toBe(false);
+  });
+
+  // ── Ratified sign/edit lifecycle role gates (2026-06-12) ──────────────────
+  it('ops_staff can NOT self-unlock the G1 redraft lock by moving physician_review back to rn_review', () => {
+    expect(canRolePerformCaseStatusTransition('ops_staff', 'physician_review', 'rn_review')).toBe(false);
+    // The physician's reopen path is decline (-> correction_requested), not this hop, so the
+    // legalized drafter-completion transition stays admin-only for humans too.
+    expect(canRolePerformCaseStatusTransition('physician', 'physician_review', 'rn_review')).toBe(false);
+    expect(canRolePerformCaseStatusTransition('admin', 'physician_review', 'rn_review')).toBe(true);
+  });
+
+  it('ops_staff can NOT manually pull a delivered (signed) case back to physician_review — the G4 return is system/admin-only', () => {
+    expect(canRolePerformCaseStatusTransition('ops_staff', 'delivered', 'physician_review')).toBe(false);
+    expect(canRolePerformCaseStatusTransition('physician', 'delivered', 'physician_review')).toBe(false);
+    expect(canRolePerformCaseStatusTransition('admin', 'delivered', 'physician_review')).toBe(true);
   });
 
   it('lets the RN (ops_staff) send rn_review to the doctor (physician_review)', () => {

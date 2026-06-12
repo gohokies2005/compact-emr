@@ -275,3 +275,46 @@ describe('CaseDetailPage — physician-queue banner (Pryor 7a)', () => {
     expect(screen.queryByText(/queue — no action is needed/i)).not.toBeInTheDocument();
   });
 });
+
+// ── G1 redraft lock (ratified sign/edit lifecycle, Ryan 2026-06-12): "lock redraft after sent
+// to doctor. if doc sends back to RN that reopens." canRedraft drops the Redraft affordance for
+// ops_staff in physician_review; the backend mirrors it with 409 locked_physician_review. ──
+describe('CaseDetailPage — Redraft lock (G1, ratified 2026-06-12)', () => {
+  afterEach(() => { mockRole = 'admin'; vi.restoreAllMocks(); });
+
+  // A terminal done job with a sane PDF key — the pre-lock canRedraft preconditions
+  // (a draft exists + nothing in flight) hold, so only the new status×role rule decides.
+  const doneJob = { id: 'JOB-1', state: 'done', version: 1, artifactPdfS3Key: 'letter-revisions/CASE-1/v1/letter.pdf' };
+
+  it('ops_staff does NOT see Redraft while the case is in physician_review (locked)', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ status: 'physician_review', draftJobs: [doneJob] });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.queryByRole('button', { name: 'Redraft' })).not.toBeInTheDocument();
+  });
+
+  it('ops_staff sees Redraft in rn_review (pre-send: still the RN\'s case)', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ status: 'rn_review', draftJobs: [doneJob] });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.getByRole('button', { name: 'Redraft' })).toBeInTheDocument();
+  });
+
+  it('ops_staff sees Redraft in correction_review (the doctor sent it back — reopened)', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ status: 'correction_review', draftJobs: [doneJob] });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.getByRole('button', { name: 'Redraft' })).toBeInTheDocument();
+  });
+
+  it('admin keeps Redraft in physician_review (the lock is ops_staff-only)', async () => {
+    mockRole = 'admin';
+    mockCase({ status: 'physician_review', draftJobs: [doneJob] });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.getByRole('button', { name: 'Redraft' })).toBeInTheDocument();
+  });
+});

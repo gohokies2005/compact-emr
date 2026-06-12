@@ -1,7 +1,7 @@
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createLetterRouter, type LetterRouterDeps } from '../routes/letter.js';
+import { createLetterRouter, staleSignOffOutcome, type LetterRouterDeps } from '../routes/letter.js';
 import { isHttpError, sendError } from '../http/errors.js';
 import { KASKY_CREDENTIALS, type SignerCredentials } from '../services/credential-block.js';
 import type { AppDb, CaseRecord, LetterRevisionRecord, PhysicianRecord, Role } from '../services/db-types.js';
@@ -414,5 +414,107 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     // Any downstream shape (200 or a different 409 like stale_version) proves the gate let
     // ops_staff through — it must just never be the lock.
     expect(res.body?.error?.details?.reason).not.toBe('locked_physician_review');
+  });
+
+  // ── Ratified sign/edit lifecycle (Ryan 2026-06-12) — G2 door-level signed guard + G4 ────────
+  // "only the signed copy can ship · the signed PDF itself is send-only forever · a post-sign
+  // edit goes back to the doctor to re-sign." The byte-hash delivery gate (delivery.ts
+  // signed_bytes_changed, pinned in delivery-routes.test.ts) stays the ultimate enforcement;
+  // these pin the DOOR-level behavior.
+  describe('signed-letter lifecycle (G2/G4)', () => {
+    // G2(b): a delivered (approved/signed) case is immutable through EVERY letter mutation route,
+    // for every role — the editor set excluding 'delivered' is the invariant, not an accident.
+    it('ops_staff can NOT hand-PUT a delivered case (409 not_editable)', async () => {
+      mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+      const { db } = makeDb(baseCase({ status: 'delivered' }));
+      const res = await request(appFor(db, deps())).put('/api/v1/cases/CASE-1/letter').send({ base_version: 1, txt: 'edited text' });
+      expect(res.status).toBe(409);
+      expect(res.body.error.details.reason).toBe('not_editable');
+    });
+
+    it('ops_staff can NOT surgical-ai a delivered case (409 not_editable — the AI door matches the hand door)', async () => {
+      mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+      const { db } = makeDb(baseCase({ status: 'delivered' }));
+      const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/surgical-ai').send({ instruction: 'tighten section IV' });
+      expect(res.status).toBe(409);
+      expect(res.body.error.details.reason).toBe('not_editable');
+    });
+
+    it('even admin can NOT edit a delivered case — the signed letter is send-only for everyone', async () => {
+      mockUser = { sub: 'ADMIN', roles: ['admin'] };
+      const { db } = makeDb(baseCase({ status: 'delivered' }));
+      const res = await request(appFor(db, deps())).put('/api/v1/cases/CASE-1/letter').send({ base_version: 1, txt: 'edited text' });
+      expect(res.status).toBe(409);
+      expect(res.body.error.details.reason).toBe('not_editable');
+    });
+
+    // G4 outcome helper — the delivered branch is intentionally unreachable through the routes
+    // today (the not_editable tests above prove it), so the branch selection is pinned directly.
+    it('staleSignOffOutcome: delivered → RETURN to physician_review with the ratified notice', () => {
+      const out = staleSignOffOutcome('delivered');
+      expect(out.returnToPhysicianReview).toBe(true);
+      expect(out.logAction).toBe('letter_edited_after_signoff_returned_to_physician');
+      expect(out.notice).toBe("This letter was already signed — it has returned to the doctor's queue for re-signature.");
+    });
+
+    it('staleSignOffOutcome: physician_review (and other editable statuses) → stay but flag', () => {
+      for (const status of ['physician_review', 'correction_review', 'rn_review']) {
+        const out = staleSignOffOutcome(status);
+        expect(out.returnToPhysicianReview).toBe(false);
+        expect(out.logAction).toBe('letter_edited_after_signoff');
+        expect(out.notice).toContain('re-sign');
+      }
+    });
+
+    // Binds tx.signOff.findFirst to "a SignOff exists on signedVersion 1" (the version the
+    // edit goes over). Legacy sign-offs carry signedVersion null and never match.
+    function bindSignOffToV1(tx: ReturnType<typeof makeDb>['tx']) {
+      (tx.signOff.findFirst as ReturnType<typeof vi.fn>).mockImplementation(
+        async (a: { where?: { signedVersion?: number } }) =>
+          (a?.where?.signedVersion === 1 ? { id: 'SO-1', caseId: 'CASE-1', signedVersion: 1, signedContentSha256: 'a'.repeat(64) } : null),
+      );
+    }
+
+    // G4 reachable path: the physician's own edit in physician_review AFTER signing but before
+    // approving. The case stays in the doctor's queue (no status change) but the edit is flagged
+    // and the response notice tells the editor the doctor must re-sign.
+    it('PUT over a signed version: 200, stays in physician_review, flags the activity log, response carries the notice', async () => {
+      const { db, tx } = makeDb(); // physician_review, currentVersion 1; default user = physician
+      bindSignOffToV1(tx);
+      const res = await request(appFor(db, deps())).put('/api/v1/cases/CASE-1/letter').send({ base_version: 1, txt: 'edited after signing' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.notice).toBe('This letter was signed before this edit — the doctor must re-sign before it can be delivered.');
+      // The case stays put — the doctor re-signs at approve; no status field in the update.
+      const caseUpdate = (tx.case.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(caseUpdate.data.status).toBeUndefined();
+      // Flag row written in the SAME transaction, naming the stale signed version.
+      const flagLogs = (tx.activityLog.create as ReturnType<typeof vi.fn>).mock.calls
+        .filter((c) => (c[0] as { data: { action: string } }).data.action === 'letter_edited_after_signoff');
+      expect(flagLogs).toHaveLength(1);
+      expect((flagLogs[0][0] as { data: { detailsJson: Record<string, unknown> } }).data.detailsJson).toMatchObject({ staleSignedVersion: 1, newVersion: 2, fromStatus: 'physician_review', source: 'editor_save' });
+    });
+
+    it('surgical-ai APPLY over a signed version: same flag + notice (the AI door can not dodge the re-sign rule)', async () => {
+      const { db, tx } = makeDb();
+      bindSignOffToV1(tx);
+      const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ apply: true, proposal: { operation: 'replace', anchor_text: 'lumbosacral strain', new_text: 'lumbosacral strain (DC 5237)' } });
+      expect(res.status).toBe(200);
+      expect(res.body.data.notice).toBe('This letter was signed before this edit — the doctor must re-sign before it can be delivered.');
+      const flagLogs = (tx.activityLog.create as ReturnType<typeof vi.fn>).mock.calls
+        .filter((c) => (c[0] as { data: { action: string } }).data.action === 'letter_edited_after_signoff');
+      expect(flagLogs).toHaveLength(1);
+      expect((flagLogs[0][0] as { data: { detailsJson: Record<string, unknown> } }).data.detailsJson).toMatchObject({ source: 'surgical_ai' });
+    });
+
+    it('PUT with NO sign-off bound to the edited version: notice null, no flag log (nothing went stale)', async () => {
+      const { db, tx } = makeDb(); // default signOff.findFirst resolves undefined → treated as none
+      const res = await request(appFor(db, deps())).put('/api/v1/cases/CASE-1/letter').send({ base_version: 1, txt: 'plain edit' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.notice).toBeNull();
+      const flagLogs = (tx.activityLog.create as ReturnType<typeof vi.fn>).mock.calls
+        .filter((c) => String((c[0] as { data: { action: string } }).data.action).startsWith('letter_edited_after_signoff'));
+      expect(flagLogs).toHaveLength(0);
+    });
   });
 });

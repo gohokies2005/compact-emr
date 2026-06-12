@@ -34,8 +34,48 @@ import type { AppDb } from '../services/db-types.js';
 
 const PRESIGN_TTL_SECONDS = 300;
 // Statuses in which the letter may be edited. Outside these (e.g. delivered/paid/rejected)
-// the editor is read-only.
+// the editor is read-only. 'delivered' staying OUT of this set is load-bearing for the ratified
+// sign/edit lifecycle (Ryan 2026-06-12): the approved/signed letter is send-only forever — no
+// editor path may mutate a delivered case (pinned by the G2 tests in letter-routes.test.ts).
 const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'rn_review', 'physician_review', 'correction_review']);
+
+/**
+ * G4 — ratified sign/edit lifecycle (Ryan 2026-06-12): "nurse cannot edit the version the doctor
+ * signed … they can go in and do a surgical edit, but then if changed that has to go back to
+ * doctor to resign before sending."
+ *
+ * Computed when a save / surgical-apply creates version N+1 over a version N that carries a
+ * SignOff (SignOff.signedVersion === N): the prior signature is now STALE — the signed bytes no
+ * longer match the current letter. The byte-hash delivery gate (delivery.ts signed_bytes_changed)
+ * remains the ULTIMATE enforcement; this makes the re-sign demand proactive at edit time instead
+ * of a delivery-time surprise:
+ *   - delivered: the case RETURNS to physician_review (legal map transition added for exactly
+ *     this) in the same transaction. Defensive today — 'delivered' is NOT in EDITABLE_STATUSES,
+ *     so no editor path can currently reach it — but enforced so a future widening of the
+ *     editable set can never leave a delivered case sitting on changed bytes.
+ *   - every other (editable) status, physician_review above all: the case STAYS put — the doctor
+ *     re-signs at approve anyway — but the edit is flagged in the activity log and the response
+ *     carries a notice the UI can surface.
+ */
+export interface StaleSignOffOutcome {
+  returnToPhysicianReview: boolean;
+  logAction: 'letter_edited_after_signoff' | 'letter_edited_after_signoff_returned_to_physician';
+  notice: string;
+}
+export function staleSignOffOutcome(status: string): StaleSignOffOutcome {
+  if (status === 'delivered') {
+    return {
+      returnToPhysicianReview: true,
+      logAction: 'letter_edited_after_signoff_returned_to_physician',
+      notice: "This letter was already signed — it has returned to the doctor's queue for re-signature.",
+    };
+  }
+  return {
+    returnToPhysicianReview: false,
+    logAction: 'letter_edited_after_signoff',
+    notice: 'This letter was signed before this edit — the doctor must re-sign before it can be delivered.',
+  };
+}
 
 export interface RenderInvokeInput {
   caseData: {
@@ -208,6 +248,11 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
       if (veteran === null) throw new HttpError(409, 'conflict', 'Veteran not found for case.', { caseId });
 
+      // G4: does a SignOff bind to the version we are about to edit over? (signedVersion is null
+      // on legacy sign-offs predating byte-binding — those carry no hash, nothing goes stale.)
+      const staleSignOff = (await db.signOff.findFirst({ where: { caseId, signedVersion: c.currentVersion } })) ?? null;
+      const stale = staleSignOff !== null ? staleSignOffOutcome(c.status) : null;
+
       const newVersion = c.currentVersion + 1;
       const keys = {
         txtKey: buildLetterRevisionKey(caseId, newVersion, 'txt'),
@@ -244,7 +289,9 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
               sanityJson: warnings,
             },
           });
-          await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, version: { increment: 1 } } });
+          // G4: a stale-signature edit on a delivered case returns it to the doctor's queue in
+          // the SAME transaction (delivered → physician_review is legal in CASE_STATUS_TRANSITIONS).
+          await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, version: { increment: 1 }, ...(stale?.returnToPhysicianReview ? { status: 'physician_review' } : {}) } });
           await tx.activityLog.create({
             data: {
               actorUserId: user.sub,
@@ -254,6 +301,17 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
               detailsJson: { version: newVersion, source: 'editor_save', warnings: warnings.map((w) => w.rule) },
             },
           });
+          if (stale !== null) {
+            await tx.activityLog.create({
+              data: {
+                actorUserId: user.sub,
+                action: stale.logAction,
+                caseId,
+                veteranId: c.veteranId,
+                detailsJson: { staleSignedVersion: c.currentVersion, newVersion, fromStatus: c.status, source: 'editor_save' },
+              },
+            });
+          }
         });
       } catch (e: unknown) {
         // P2002 on letter_revisions_case_version_uq → a concurrent save advanced the version.
@@ -265,7 +323,9 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
 
       // Return the canonical saved text — cleanProseForSave may have altered it (em dashes →
       // commas, smart quotes, etc.), so the editor must re-sync to what was actually stored.
-      res.json({ data: { version: newVersion, txt: cleaned, rendered: { pdf: rendered.ok, docx: rendered.ok }, warnings } });
+      // notice (G4): non-null when this save went over a signed version — the UI surfaces it so
+      // the editor learns at save time (not delivery time) that the doctor must re-sign.
+      res.json({ data: { version: newVersion, txt: cleaned, rendered: { pdf: rendered.ok, docx: rendered.ok }, warnings, notice: stale?.notice ?? null } });
     }),
   );
 
@@ -310,6 +370,10 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         const warnings: SanityFinding[] = sanityCheckLetterText(oldText, applied.newText);
         const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
         if (veteran === null) throw new HttpError(409, 'conflict', 'Veteran not found for case.', { caseId });
+        // G4: same stale-signature detection as the PUT save — the surgical-AI door must not be
+        // a way around the re-sign rule (the edit still creates version N+1 over signed version N).
+        const staleSignOff = (await db.signOff.findFirst({ where: { caseId, signedVersion: c.currentVersion } })) ?? null;
+        const stale = staleSignOff !== null ? staleSignOffOutcome(c.status) : null;
         const newVersion = c.currentVersion + 1;
         const keys = {
           txtKey: buildLetterRevisionKey(caseId, newVersion, 'txt'),
@@ -324,14 +388,18 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         try {
           await db.$transaction(async (tx) => {
             await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: c.currentVersion, source: 'surgical_ai', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: warnings } });
-            await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, version: { increment: 1 } } });
+            // G4: stale-signature edit on a delivered case returns it to physician_review in-transaction.
+            await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, version: { increment: 1 }, ...(stale?.returnToPhysicianReview ? { status: 'physician_review' } : {}) } });
             await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_surgical_ai_applied', caseId, veteranId: c.veteranId, detailsJson: { version: newVersion, anchor_fallback: applied.anchor_fallback, warnings: warnings.map((w) => w.rule) } } });
+            if (stale !== null) {
+              await tx.activityLog.create({ data: { actorUserId: user.sub, action: stale.logAction, caseId, veteranId: c.veteranId, detailsJson: { staleSignedVersion: c.currentVersion, newVersion, fromStatus: c.status, source: 'surgical_ai' } } });
+            }
           });
         } catch (e: unknown) {
           if ((e as { code?: string }).code === 'P2002') throw new HttpError(409, 'conflict', 'Another save advanced the version; reload and re-propose.', { reason: 'concurrent_save', caseId });
           throw e;
         }
-        res.json({ data: { version: newVersion, txt: applied.newText, warnings } });
+        res.json({ data: { version: newVersion, txt: applied.newText, warnings, notice: stale?.notice ?? null } });
         return;
       }
 

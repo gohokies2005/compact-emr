@@ -27,10 +27,21 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   // RN review: "Send to doctor for review" -> physician_review; a redraft drops back to drafting;
   // or reject. (Ryan 2026-06-04: no auto-route to the doctor.)
   rn_review: ['physician_review', 'drafting', 'rejected'],
-  physician_review: ['correction_requested', 'delivered', 'rejected'],
+  // physician_review -> rn_review legalizes what the drafter already does LIVE: an admin redraft
+  // started in physician_review parks the case in 'drafting' and the worker's /complete lands it
+  // in rn_review (the assessment 2026-06-12 flagged the hop as absent from this map). It is NOT
+  // an RN affordance — role-gated admin-only below so ops_staff cannot self-unlock the G1 redraft
+  // lock by bouncing the case out of the doctor's queue. The doctor's reopen path stays
+  // correction_requested (decline / "Send back to RN").
+  physician_review: ['correction_requested', 'delivered', 'rn_review', 'rejected'],
   correction_requested: ['correction_review'],
   correction_review: ['delivered', 'rejected'],
-  delivered: ['paid'],
+  // delivered -> physician_review is the G4 stale-signature return (ratified sign/edit lifecycle,
+  // Ryan 2026-06-12): if a new letter version is ever created over the signed one post-approve,
+  // the case returns to the doctor's queue for re-signature instead of sitting 'delivered' with
+  // changed bytes until the delivery-time signed_bytes_changed 409. Performed by the letter
+  // routes in-transaction; role-gated admin-only below as a manual move.
+  delivered: ['paid', 'physician_review'],
   paid: [],
   rejected: [],
   // Gate-2 parked states: the RN resumes (drafting via the rnDecision draft) or rejects. needs_records
@@ -59,6 +70,14 @@ export function isValidCaseStatusTransition(from: CaseStatus, to: CaseStatus): b
 
 export function requiredRolesForCaseStatusTransition(from: CaseStatus, to: CaseStatus): readonly Role[] {
   if (from === 'delivered' && to === 'paid') return ['admin'];
+  // G4 stale-signature return — system-performed by the letter routes (in-transaction, no role
+  // check there); as a HUMAN move it is admin-only so ops_staff can never manually pull a
+  // delivered (signed/approved) case back into a mutable status.
+  if (from === 'delivered' && to === 'physician_review') return ['admin'];
+  // Drafter-completion legalization (see map comment) — live performer is the drafter service
+  // principal via the internal /complete route (which bypasses role checks); admin-only as a
+  // human move so the RN cannot self-unlock the G1 redraft lock (physician reopen = decline).
+  if (from === 'physician_review' && to === 'rn_review') return ['admin'];
 
   if (
     from === 'physician_review' &&

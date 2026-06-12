@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import express from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -364,6 +365,34 @@ describe('POST /cases/:id/delivery/send — real SES send (E3) + idempotency', (
     const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
     expect(res.status).toBe(409);
     expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  // ── G2(a) — byte-binding gate PINNED (ratified sign/edit lifecycle 2026-06-12) ──────────────
+  // "only the signed copy can ship": a sign-off whose bound hash no longer matches the current
+  // TXT must block delivery until re-sign. This is the ULTIMATE enforcement behind the G1/G4
+  // door-level guards in drafter.ts/letter.ts — pinned so a refactor can't soften it.
+  it('G2a: sign-off hash mismatch (post-sign edit) blocks /delivery/send with 409 signed_bytes_changed and nothing transmits', async () => {
+    const { db } = makeDb({ signOffs: [{ signedVersion: 1, signedContentSha256: 'f'.repeat(64), signedAt: new Date() }] });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('signed_bytes_changed');
+    expect(res.body.error.details.reason).toBe('signed_bytes_changed');
+    expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  it('G2a: a re-signed letter (hash matches the current TXT) delivers normally', async () => {
+    const sha = createHash('sha256').update(LETTER_TXT, 'utf-8').digest('hex');
+    const { db } = makeDb({ signOffs: [{ signedVersion: 1, signedContentSha256: sha, signedAt: new Date() }] });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.emailSent).toBe(true);
+  });
+
+  it('G2a back-compat: a legacy sign-off with NO bound hash skips the byte check (delivers)', async () => {
+    const { db } = makeDb({ signOffs: [{ signedVersion: null, signedContentSha256: null, signedAt: new Date() }] });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.emailSent).toBe(true);
   });
 
   it('physician role is forbidden from the delivery panel -> 403', async () => {

@@ -418,6 +418,18 @@ export function createDrafterClientRouter(db: AppDb): Router {
       const c = await db.case.findFirst({ where: { id: caseId } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
 
+      // ── G1 REDRAFT LOCK (ratified sign/edit lifecycle, Ryan 2026-06-12: "lock redraft after
+      // sent to doctor. if doc sends back to RN that reopens.") ── Once the RN sends the case to
+      // the doctor (physician_review), ops_staff can no longer redraft. Same 409 envelope shape
+      // as the letter editor's RN lock (PUT /letter + surgical-ai) so the UI handles both
+      // identically. The doctor's "Send back to RN" (correction_requested → correction_review)
+      // reopens; correction_review / drafting / rn_review stay redraftable. Admin is unaffected.
+      // REVERSES the deliberate 2026-06-04 "re-run a physician_review letter" affordance — see
+      // CaseDetailPage canRedraft, updated in the same change.
+      if (actor.role === 'ops_staff' && c.status === 'physician_review') {
+        throw new HttpError(409, 'conflict', 'Redraft is locked while the case is in physician review. It reopens if the doctor sends the case back to the RN.', { reason: 'locked_physician_review', caseId, status: c.status });
+      }
+
       // Require BOTH reviewers assigned before a draft can run (Ryan 2026-06-09): a draft shouldn't spend
       // cloud $ until a physician AND an RN liaison own the case.
       if (!c.assignedPhysicianId || !c.assignedRnId) {

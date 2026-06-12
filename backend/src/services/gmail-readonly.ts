@@ -122,3 +122,65 @@ export async function listVeteranCorrespondence(vetEmail: string): Promise<Veter
   cache.set(key, { val: result, exp: Date.now() + CACHE_TTL_MS });
   return result;
 }
+
+// ── FULL MESSAGE BODY (Ryan 2026-06-12) — authenticated, role-gated read of ONE message's full body
+// for the case Email tab bubble view. This DOES fetch the body (the metadata-only discipline above is
+// for the cheap thread LIST). It stays PHI-safe: the caller is an authorized EMR user, the body is
+// NEVER persisted and NEVER logged (counts only), and we verify the veteran is a party to the message
+// before returning it — a staffer can't read an arbitrary mailbox message by guessing an id (audit #9).
+interface GmailPart { mimeType?: string; body?: { data?: string }; parts?: GmailPart[] }
+
+function decodeB64Url(data: string): string {
+  return Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+}
+function stripHtml(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0?39;/gi, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+// Walk the MIME tree for the first body of the wanted type. text/plain is preferred across the WHOLE
+// tree before falling back to (stripped) text/html.
+function collectByMime(part: GmailPart | undefined, wanted: string): string {
+  if (!part) return '';
+  if ((part.mimeType ?? '').startsWith(wanted) && part.body?.data) return decodeB64Url(part.body.data);
+  for (const p of part.parts ?? []) { const t = collectByMime(p, wanted); if (t) return t; }
+  return '';
+}
+
+export type GmailMessageBody =
+  | { available: true; body: string }
+  | { available: false; reason: 'workspace_scope_not_granted' | 'gmail_unreachable' | 'not_party' };
+
+const MAX_BODY_CHARS = 50_000;
+
+/** Full body of ONE Gmail message, gated on the veteran being a party. Never throws; never logs the body. */
+export async function fetchMessageBody(messageId: string, vetEmail: string): Promise<GmailMessageBody> {
+  const key = vetEmail.trim().toLowerCase();
+  if (!key || !SAFE_EMAIL.test(key)) return { available: false, reason: 'not_party' };
+  try {
+    const { token } = await gmailAccess(READONLY_SCOPE);
+    const r = await fetch(`${GMAIL_API}/messages/${encodeURIComponent(messageId)}?format=full`, { headers: { authorization: `Bearer ${token}` } });
+    if (r.status === 403) return { available: false, reason: 'workspace_scope_not_granted' };
+    if (!r.ok) return { available: false, reason: 'gmail_unreachable' };
+    const msg = (await r.json()) as { payload?: GmailPart & { headers?: GmailHeader[] } };
+    // Cross-veteran guard (audit #9): the veteran must be From or To on this message.
+    const headers = msg.payload?.headers ?? [];
+    const from = (headers.find((h) => (h.name ?? '').toLowerCase() === 'from')?.value ?? '').toLowerCase();
+    const to = (headers.find((h) => (h.name ?? '').toLowerCase() === 'to')?.value ?? '').toLowerCase();
+    if (!from.includes(key) && !to.includes(key)) return { available: false, reason: 'not_party' };
+    const plain = collectByMime(msg.payload, 'text/plain');
+    const body = (plain || stripHtml(collectByMime(msg.payload, 'text/html'))).slice(0, MAX_BODY_CHARS);
+    console.log(JSON.stringify({ msg: 'gmail_readonly_body_fetched', chars: body.length })); // count ONLY — never the body
+    return { available: true, body };
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e);
+    return { available: false, reason: /token grant failed|unauthorized/i.test(m) ? 'workspace_scope_not_granted' : 'gmail_unreachable' };
+  }
+}

@@ -45,6 +45,15 @@ export async function getGmailThread(caseId: string): Promise<{ data: GmailThrea
   return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/gmail-thread`);
 }
 
+// Full body of ONE live-Gmail message (bubble expand). Authenticated; the backend verifies the
+// veteran is a party and never persists/logs the body. Degrades to {available:false} like the thread.
+export type GmailMessageBodyResult =
+  | { readonly available: true; readonly body: string }
+  | { readonly available: false; readonly reason: string };
+export async function getGmailMessageBody(caseId: string, messageId: string): Promise<{ data: GmailMessageBodyResult }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/gmail-thread/${encodeURIComponent(messageId)}/body`);
+}
+
 export async function listUnmatchedEmails(): Promise<{ data: readonly EmailLogRow[] }> {
   return apiGet(`/api/v1/emails/unmatched`);
 }

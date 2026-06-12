@@ -52,10 +52,24 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
     if (data) setEmailBody(data.savedEmail?.body ?? data.email.body);
   }, [data]);
 
+  // Resend cooldown (Ryan 2026-06-12): once the email has been sent, the Send button is replaced
+  // with "Resend to veteran", disabled for 30s after the last send click so a worried staffer
+  // can't machine-gun the veteran's inbox.
+  const COOLDOWN_MS = 30_000;
+  const [lastSentAt, setLastSentAt] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    if (lastSentAt === null) return;
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [lastSentAt]);
+
   const send = useMutation({
-    mutationFn: () => sendDelivery(caseId, { emailBody }),
+    mutationFn: (opts: { resend?: boolean }) =>
+      sendDelivery(caseId, { emailBody, ...(opts.resend === true ? { resend: true } : {}) }),
     onSuccess: async (res) => {
       setSentMessage({ text: res.data.message, ok: res.data.emailSent });
+      if (res.data.emailSent) setLastSentAt(Date.now());
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['case', caseId, 'delivery'] }),
         qc.invalidateQueries({ queryKey: ['case', caseId] }),
@@ -76,6 +90,12 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
   // Send is allowed once both applicable confirms are checked. The memo confirm only gates when a
   // memo applies. Stripe/email NOT being configured does NOT block compose+save (stub-friendly).
   const confirmsMet = letterConfirmed && (!memoApplies || memoConfirmed);
+  // Once sent (this session or a prior one), the Send button becomes Resend. Cooldown applies only
+  // to a send done in THIS session (lastSentAt) — a reload of an already-sent case can resend
+  // immediately, and the 30s lock kicks in after that click.
+  const hasBeenSent = actuallySent || lastSentAt !== null;
+  const cooldownRemainingMs = lastSentAt !== null ? Math.max(0, COOLDOWN_MS - (nowMs - lastSentAt)) : 0;
+  const cooldownSecs = Math.ceil(cooldownRemainingMs / 1000);
 
   return (
     <Card className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
@@ -152,7 +172,7 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
       {alreadyComposed ? (
         actuallySent ? (
           <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-            This delivery email has been sent and a $500 invoice is recorded for this case. Sending again is safe (it will not re-send or duplicate).
+            This delivery email has been sent and a $500 invoice is recorded for this case. If the veteran didn’t receive it, use <strong>Resend to veteran</strong> below — it re-sends the same secure link and does NOT create a second invoice.
           </div>
         ) : (
           <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
@@ -167,18 +187,34 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
       {send.isError ? <p className="mt-3 text-sm text-rose-600">Send failed: {describeApiError(send.error)}</p> : null}
 
       <div className="mt-5 flex items-center justify-end gap-3 border-t border-slate-200 pt-4">
-        {!confirmsMet ? (
-          <span className="text-xs text-slate-500">Check the confirmation{memoApplies ? 's' : ''} to enable sending.</span>
-        ) : null}
-        <Button
-          type="button"
-          variant="primary"
-          disabled={!confirmsMet}
-          loading={send.isPending}
-          onClick={() => send.mutate()}
-        >
-          {emailTransportConfigured ? 'Send the invoice email' : 'Compose + save (pending send — transport not configured)'}
-        </Button>
+        {hasBeenSent ? (
+          // Sent already → Resend, with a 30s cooldown after the last send. No confirm gate: the
+          // letter was verified on the first send and the byte-binding gate re-checks it server-side.
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={cooldownRemainingMs > 0}
+            loading={send.isPending}
+            onClick={() => send.mutate({ resend: true })}
+          >
+            {cooldownRemainingMs > 0 ? `Resend to veteran (wait ${cooldownSecs}s)` : 'Resend to veteran'}
+          </Button>
+        ) : (
+          <>
+            {!confirmsMet ? (
+              <span className="text-xs text-slate-500">Check the confirmation{memoApplies ? 's' : ''} to enable sending.</span>
+            ) : null}
+            <Button
+              type="button"
+              variant="primary"
+              disabled={!confirmsMet}
+              loading={send.isPending}
+              onClick={() => send.mutate({})}
+            >
+              {emailTransportConfigured ? 'Send the invoice email' : 'Compose + save (pending send — transport not configured)'}
+            </Button>
+          </>
+        )}
       </div>
     </Card>
   );

@@ -5,7 +5,7 @@ import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { currentActor } from '../services/request-actor.js';
-import { listVeteranCorrespondence } from '../services/gmail-readonly.js';
+import { listVeteranCorrespondence, fetchMessageBody } from '../services/gmail-readonly.js';
 import type { AppDb } from '../services/db-types.js';
 
 // Feature B — Email Communications LOG (read-only) + unmatched-queue assignment (Ryan 2026-06-06).
@@ -71,6 +71,24 @@ export function createEmailsRouter(db: AppDb, deps: { bucketName?: string; s3?: 
       })) as unknown as { veteran: { email: string } | null } | null;
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
       res.json({ data: await listVeteranCorrespondence(c.veteran?.email ?? '') });
+    }),
+  );
+
+  // Full body of ONE live-Gmail message — for the case Email tab bubble expand (Ryan 2026-06-12).
+  // Authenticated + role-gated; the service verifies the veteran is a party + never persists/logs the
+  // body. Degrades to {available:false} when the readonly scope isn't granted (same dark-launch shape).
+  router.get(
+    '/cases/:id/gmail-thread/:messageId/body',
+    requireRole([...READ_ROLES]),
+    asyncHandler(async (req: Request, res: Response) => {
+      const id = String(req.params.id);
+      const messageId = String(req.params.messageId);
+      const c = (await db.case.findUnique({
+        where: { id },
+        select: { veteran: { select: { email: true } } },
+      })) as unknown as { veteran: { email: string } | null } | null;
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+      res.json({ data: await fetchMessageBody(messageId, c.veteran?.email ?? '') });
     }),
   );
 

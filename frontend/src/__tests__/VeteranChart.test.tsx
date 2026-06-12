@@ -23,7 +23,7 @@ describe('VeteranChart', () => {
     // Vet-file tab ORDER lock (UI sweep P2b, Ryan item 12): Claims, Staff Notes, then the shared
     // tail (Documents, SC Conditions, Active Problems, Medications) — only tabs a VETERAN owns.
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
-      'Claims', 'Staff Notes', 'Documents', 'Service Connected Conditions', 'Active Problems', 'Medications',
+      'Claims', 'Staff Notes', 'Documents', 'SC Conditions', 'Active Problems', 'Medications',
     ]);
     // The claim-scoped Email tab is dropped from the veteran chart (it belongs to a claim).
     expect(screen.queryByRole('tab', { name: 'Email' })).not.toBeInTheDocument();

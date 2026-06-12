@@ -86,8 +86,8 @@ describe('CaseDetailPage', () => {
     await screen.findByText('Hypertension');
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
       'Overview', 'Ask Aegis', 'Draft jobs', 'Staff Notes', 'Email', 'Messages',
-      'Documents', 'Service Connected Conditions', 'Active Problems', 'Medications',
-      'Decisions & overrides',
+      'Documents', 'SC Conditions', 'Active Problems', 'Medications',
+      'Decisions',
     ]);
     expect(screen.queryByRole('tab', { name: /clarifications/i })).not.toBeInTheDocument();
     // Sticky = class assertion (P2a): pinned to the scroll parent, opaque, above panel content.
@@ -102,12 +102,12 @@ describe('CaseDetailPage', () => {
     renderPage();
     await screen.findByText('Hypertension');
     // The four clinical tabs mirror the veteran chart page.
-    expect(screen.getByRole('tab', { name: 'Service Connected Conditions' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'SC Conditions' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Active Problems' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Medications' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Staff Notes' })).toBeInTheDocument();
     // Clicking the SC Conditions tab mounts the shared ConditionsPanel and shows the veteran's data.
-    await userEvent.click(screen.getByRole('tab', { name: 'Service Connected Conditions' }));
+    await userEvent.click(screen.getByRole('tab', { name: 'SC Conditions' }));
     expect(await screen.findByText('PTSD')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add' })).toBeInTheDocument();
   });

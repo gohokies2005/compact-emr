@@ -1,11 +1,12 @@
 import { useState } from 'react';
+import { clsx } from 'clsx';
 import { useQuery } from '@tanstack/react-query';
 import { EmptyState } from './ui/EmptyState';
 import { TabSection } from './ui/TabSection';
 import { DataRow } from './ui/DataRow';
 import { StatusChip } from './ui/StatusChip';
 import { formatRelativeTime } from '../lib/date';
-import { emailEffectiveAt, getEmailAttachment, getGmailThread, type EmailLogRow, type GmailThreadMessage } from '../api/emails';
+import { emailEffectiveAt, getEmailAttachment, getGmailThread, getGmailMessageBody, type EmailLogRow, type GmailThreadMessage } from '../api/emails';
 
 // Feature B — read-only Email Communications log. Single chronological list of expandable rows (RN
 // panel: not chat bubbles). Collapsed row = date · in/out · correspondent · subject · snippet · 📎count;
@@ -61,17 +62,60 @@ function EmailRow({ e }: { readonly e: EmailLogRow }) {
   );
 }
 
-// Live Gmail (read-only) — second section below the EMR log rows on the claim tab. Metadata +
-// snippet only (no bodies), so deliberately NO attachment/assign/expand affordances. Degrades to a
-// quiet note while the Workspace gmail.readonly scope is ungranted (the endpoint stays 200).
-function GmailRow({ m }: { readonly m: GmailThreadMessage }) {
+// Live Gmail (read-only) — bubble-chat conversation below the EMR log on the claim tab (Ryan
+// 2026-06-12: "i like bubble chats ... something thats obvious based on who is emailing"). Inbound
+// (the veteran / correspondent) sits LEFT in a mist bubble; outbound (us) sits RIGHT in a navy-tint
+// bubble. The collapsed bubble shows the Gmail snippet; clicking lazily fetches the FULL body
+// (authenticated, never persisted). Degrades to a quiet note while the readonly scope is ungranted.
+function GmailBubble({ caseId, m }: { readonly caseId: string; readonly m: GmailThreadMessage }) {
+  const [open, setOpen] = useState(false);
+  const bodyQuery = useQuery({
+    queryKey: ['case', caseId, 'gmail-body', m.id],
+    queryFn: () => getGmailMessageBody(caseId, m.id),
+    enabled: open,
+  });
+  const inbound = m.direction === 'inbound';
   const when = formatRelativeTime(m.date) || m.date;
   return (
-    <DataRow
-      lead={<><span aria-hidden="true">{m.direction === 'inbound' ? '←' : '→'}</span> <span className="font-medium text-slateInk">{m.subject || '(no subject)'}</span>{m.snippet ? <span className="text-steel"> — {m.snippet}</span> : null}</>}
-      meta={`${m.otherParty} · ${when}`}
-    />
+    <div className={clsx('flex', inbound ? 'justify-start' : 'justify-end')}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={clsx(
+          'max-w-[82%] rounded-2xl px-4 py-2.5 text-left text-sm shadow-sm transition-colors',
+          inbound ? 'rounded-tl-sm bg-mist hover:bg-mistSoft' : 'rounded-tr-sm bg-navy/10 hover:bg-navy/15',
+        )}
+      >
+        <div className="mb-0.5 flex items-baseline justify-between gap-3">
+          <span className="text-xs font-semibold text-navyDeep">{inbound ? m.otherParty : 'Flat Rate Nexus'}</span>
+          <span className="shrink-0 text-[11px] text-steel">{when}</span>
+        </div>
+        {m.subject ? <div className="text-xs font-medium text-steel">{m.subject}</div> : null}
+        {open ? (
+          bodyQuery.isLoading ? (
+            <div className="mt-1 text-xs text-steel">Loading full email…</div>
+          ) : bodyQuery.data?.data.available ? (
+            <div className="mt-1 whitespace-pre-wrap break-words text-slateInk">{bodyQuery.data.data.body || <span className="text-steel">(no body captured)</span>}</div>
+          ) : (
+            <div className="mt-1 text-slateInk"><span className="break-words">{m.snippet}</span><div className="mt-1 text-[11px] text-steel">Couldn’t load the full email — showing the preview.</div></div>
+          )
+        ) : (
+          <div className="mt-0.5 break-words text-slateInk">{m.snippet}</div>
+        )}
+        <div className="mt-1 text-[11px] text-navy">{open ? 'Click to collapse' : 'Click to read the full email'}</div>
+      </button>
+    </div>
   );
+}
+
+// Sort newest-last so the bubbles read like a chat (oldest at top). Date is an RFC-2822 header
+// string; unparseable dates fall back to original order via a 0 delta.
+function chronological(messages: readonly GmailThreadMessage[]): GmailThreadMessage[] {
+  return [...messages].sort((a, b) => {
+    const ta = Date.parse(a.date); const tb = Date.parse(b.date);
+    if (Number.isNaN(ta) || Number.isNaN(tb)) return 0;
+    return ta - tb;
+  });
 }
 
 function GmailThreadSection({ caseId }: { readonly caseId: string }) {
@@ -86,7 +130,7 @@ function GmailThreadSection({ caseId }: { readonly caseId: string }) {
   } else if (q.data.data.messages.length === 0) {
     body = <div className="px-5 py-3 text-sm text-steel">No Gmail correspondence found for this veteran’s address.</div>;
   } else {
-    body = <>{q.data.data.messages.map((m) => <GmailRow key={m.id} m={m} />)}</>;
+    body = <div className="space-y-3 px-3 py-3">{chronological(q.data.data.messages).map((m) => <GmailBubble key={m.id} caseId={caseId} m={m} />)}</div>;
   }
   return <TabSection title="Live Gmail (read-only)" className="mt-4">{body}</TabSection>;
 }

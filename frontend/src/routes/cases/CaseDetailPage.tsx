@@ -82,7 +82,7 @@ const TABS: readonly TabItem<TabId>[] = [
   { id: 'emails', label: 'Email' },
   { id: 'messages', label: 'Messages' },
   ...SHARED_TABS,
-  { id: 'decisions', label: 'Decisions & overrides' },
+  { id: 'decisions', label: 'Decisions' },
 ];
 
 function serverErrorMessage(err: unknown): string | undefined {
@@ -509,7 +509,7 @@ export function CaseDetailPage() {
     ) : null}
 
     <div className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
-      <TabBar tabs={TABS} active={tab} onChange={setTab} className="flex-wrap" />
+      <TabBar tabs={TABS} active={tab} onChange={setTab} />
       <div className="p-4">
         {tab === 'overview' ? (
           <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />

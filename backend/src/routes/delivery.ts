@@ -204,7 +204,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
     asyncHandler(async (req: Request, res: Response) => {
       const user = currentActor(req);
       const caseId = String(req.params.id);
-      const body = (req.body ?? {}) as { emailBody?: unknown };
+      const body = (req.body ?? {}) as { emailBody?: unknown; resend?: unknown };
 
       // ── BYTE-BINDING DELIVERY GATE (#9 Fix 3) ── The real patient egress. Before composing or
       // sending, verify the letter has not changed since the physician signed it. We re-hash the
@@ -330,8 +330,14 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       let redirectedFrom: string | undefined;
       let sendError: string | null = null;
       const alreadySent = emailStatus === 'sent';
-      if (alreadySent) {
-        emailSent = true; // it HAS been sent; we just refuse to re-transmit
+      // Resend (Ryan 2026-06-12): an explicit resend RE-transmits an already-sent delivery email
+      // (lost / spam-foldered) WITHOUT creating a second invoice — the email + invoiced payment rows
+      // were reused (found above), never re-created. Without resend, an already-sent row is never
+      // re-transmitted (double-click / retry safe).
+      const wantResend = body.resend === true;
+      const isResend = alreadySent && wantResend;
+      if (alreadySent && !wantResend) {
+        emailSent = true; // already sent, no resend requested — refuse to re-transmit
       } else if (toAddress.trim() === '') {
         // SES would reject an empty destination with an opaque validation error — say the real
         // reason instead. The row stays 'queued' and is sendable once the veteran email is fixed.
@@ -381,6 +387,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
             emailStatus,
             emailSent,
             alreadySent,
+            resend: wantResend,
             ...(messageId !== undefined ? { messageId } : {}),
             ...(redirectedFrom !== undefined ? { redirectedFrom } : {}),
             ...(sendError !== null ? { sendError } : {}),
@@ -388,12 +395,14 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
         },
       });
 
-      const message = alreadySent
+      const message = (alreadySent && !wantResend)
         ? `This delivery email was already sent${emailSentAt !== null ? ` on ${emailSentAt.toISOString()}` : ''}. It was not re-sent.`
         : emailSent
-          ? redirectedFrom !== undefined
-            ? `Sent (SES sandbox forwarding): delivered to the staff inbox for manual forwarding to ${redirectedFrom}.`
-            : `Sent to ${toAddress}.`
+          ? isResend
+            ? `Resent to ${toAddress}.`
+            : redirectedFrom !== undefined
+              ? `Sent (SES sandbox forwarding): delivered to the staff inbox for manual forwarding to ${redirectedFrom}.`
+              : `Sent to ${toAddress}.`
           : `Email send failed: ${sendError}. The email is saved (queued); it can be sent again once the issue is fixed.`;
 
       res.json({

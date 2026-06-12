@@ -10,7 +10,7 @@ describe('caseTabs shared list', () => {
   it('locks the shared tail order (Documents, SC Conditions, Active Problems, Medications)', () => {
     expect(SHARED_TABS.map((t) => t.id)).toEqual(['documents', 'conditions', 'problems', 'medications']);
     expect(SHARED_TABS.map((t) => t.label)).toEqual([
-      'Documents', 'Service Connected Conditions', 'Active Problems', 'Medications',
+      'Documents', 'SC Conditions', 'Active Problems', 'Medications',
     ]);
   });
 

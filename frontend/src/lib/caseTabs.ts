@@ -13,7 +13,7 @@ export type SharedTabId = 'documents' | 'conditions' | 'problems' | 'medications
 
 export const SHARED_TABS: readonly TabItem<SharedTabId>[] = [
   { id: 'documents', label: 'Documents' },
-  { id: 'conditions', label: 'Service Connected Conditions' },
+  { id: 'conditions', label: 'SC Conditions' },
   { id: 'problems', label: 'Active Problems' },
   { id: 'medications', label: 'Medications' },
 ];

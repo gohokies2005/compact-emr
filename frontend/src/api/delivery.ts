@@ -90,7 +90,9 @@ export function getDelivery(caseId: string): Promise<{ data: DeliveryPreview }> 
 
 export function sendDelivery(
   caseId: string,
-  input: { emailBody: string },
+  // resend (Ryan 2026-06-12): re-transmit an already-sent delivery email (lost / spam-foldered)
+  // without creating a second $500 invoice. Omitted/false on the first send.
+  input: { emailBody: string; resend?: boolean },
 ): Promise<{ data: DeliverySendResult }> {
   return apiPost<{ data: DeliverySendResult }, typeof input>(deliveryPath(caseId, '/send'), input);
 }

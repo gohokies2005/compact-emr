@@ -1,0 +1,17 @@
+-- KeyDoc classifier-version stamp (assessment 2026-06-12 §2 — stale-row backfill).
+-- ROOT CAUSE this fixes: classifier upgrades never retrofit stored key_docs rows, so the
+-- "Doc selection review" RN queue kept showing yesterday's misclassifications (our own
+-- Intake_Summary.pdf as "unspecified", Jr_AAD_Nexus.pdf as "Service treatment records")
+-- even after the classifier learned them. There was no way to TELL which rows were written
+-- by old code.
+--
+-- classifier_version  INTEGER, the CLASSIFIER_VERSION_NUM (key-docs-classifier.ts) of the
+--                     code that last wrote this row's doc_type/classification. DEFAULT 0 =
+--                     legacy: every pre-existing row backfills to 0 ("classified by code older
+--                     than stamping"), which is exactly what makes them selectable by the
+--                     admin backfill route POST /rn/key-docs/reclassify-stale
+--                     (WHERE classifier_version < current).
+--
+-- Additive, metadata-only (constant default — no table rewrite, no backfill UPDATE needed);
+-- IF NOT EXISTS for idempotent re-runs (codebuild-prisma-migrate psql flow).
+ALTER TABLE "key_docs" ADD COLUMN IF NOT EXISTS "classifier_version" INTEGER NOT NULL DEFAULT 0;

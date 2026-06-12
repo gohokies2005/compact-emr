@@ -3,7 +3,8 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
-import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
+import { buildContentHintText, displayFileName, generateDoctorPackForCase, keyDocDisplayLabel } from '../services/doctor-pack-generate.js';
+import { classifyDocument, CLASSIFIER_VERSION_NUM } from '../services/key-docs-classifier.js';
 import { isDoctorPackS3Key } from '../services/s3-key-safety.js';
 import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -32,16 +33,29 @@ function isSafeS3Key(s3Key: string): boolean {
 // Document.s3Key is @unique, so one IN-query maps each key to its human filename (display),
 // documentId (the presigned "Open" viewer), and pageCount ("N of M pages"). Used by BOTH the
 // per-case key-docs list and the cross-case RN review queue.
+// WAVE 2 (assessment 2026-06-12 §3): also emits displayLabel ('<DocType human name> —
+// <original filename>'; unspecified → just the filename) — which needs the row's docType, so
+// the helper now takes the rows (filePath + docType), not bare keys. Date extraction is
+// deliberately deferred (medium confidence per the assessment).
 async function keyDocEnrichmentByS3Key(
   db: AppDb,
-  s3Keys: readonly string[],
-): Promise<Map<string, { documentId: string; filename: string; pageCount: number | null }>> {
-  if (s3Keys.length === 0) return new Map();
+  rows: readonly { readonly filePath: string; readonly docType: string }[],
+): Promise<Map<string, { documentId: string | null; filename: string | null; pageCount: number | null; displayLabel: string }>> {
+  if (rows.length === 0) return new Map();
   const docs = (await db.document.findMany({
-    where: { s3Key: { in: [...new Set(s3Keys)] } },
+    where: { s3Key: { in: [...new Set(rows.map((r) => r.filePath))] } },
     select: { id: true, s3Key: true, filename: true, pageCount: true },
   })) as unknown as readonly { id: string; s3Key: string; filename: string; pageCount: number | null }[];
-  return new Map(docs.map((d) => [d.s3Key, { documentId: d.id, filename: d.filename, pageCount: d.pageCount }]));
+  const docByKey = new Map(docs.map((d) => [d.s3Key, d]));
+  return new Map(rows.map((r) => {
+    const d = docByKey.get(r.filePath);
+    return [r.filePath, {
+      documentId: d?.id ?? null,
+      filename: d?.filename ?? null,
+      pageCount: d?.pageCount ?? null,
+      displayLabel: keyDocDisplayLabel(r.docType, displayFileName(r.filePath, d?.filename ?? null)),
+    }];
+  }));
 }
 
 export function createDoctorPackRouter(db: AppDb, opts?: { s3?: Pick<S3Client, 'send'> }): Router {
@@ -182,12 +196,14 @@ export function createDoctorPackRouter(db: AppDb, opts?: { s3?: Pick<S3Client, '
         orderBy: [{ importance: 'desc' }, { filePath: 'asc' }],
       });
       // Item 4: documentId added (shared helper) so the panel can open the source PDF inline.
-      const docByKey = await keyDocEnrichmentByS3Key(db, rows.map((r) => r.filePath));
+      // WAVE 2 §3: displayLabel rides along (panel renders it; falls back when absent).
+      const docByKey = await keyDocEnrichmentByS3Key(db, rows);
       const enriched = rows.map((r) => ({
         ...r,
         docPageCount: docByKey.get(r.filePath)?.pageCount ?? null,
         filename: docByKey.get(r.filePath)?.filename ?? null,
         documentId: docByKey.get(r.filePath)?.documentId ?? null,
+        displayLabel: docByKey.get(r.filePath)?.displayLabel ?? null,
       }));
       res.json({ data: enriched });
     }),
@@ -219,11 +235,13 @@ export function createDoctorPackRouter(db: AppDb, opts?: { s3?: Pick<S3Client, '
       // Enrich the returned page (not the full set) with filename + documentId via the shared
       // helper so the RN sees a human name and gets a presigned "Open" affordance.
       const page = rows.slice(0, limit);
-      const docByKey = await keyDocEnrichmentByS3Key(db, page.map((r) => r.filePath));
+      const docByKey = await keyDocEnrichmentByS3Key(db, page);
       const enriched = page.map((r) => ({
         ...r,
         filename: docByKey.get(r.filePath)?.filename ?? null,
         documentId: docByKey.get(r.filePath)?.documentId ?? null,
+        // WAVE 2 §3: '<DocType human name> — <original filename>' for the RN queue card copy.
+        displayLabel: docByKey.get(r.filePath)?.displayLabel ?? null,
       }));
       res.json({ data: enriched, total: rows.length });
     }),
@@ -273,6 +291,160 @@ export function createDoctorPackRouter(db: AppDb, opts?: { s3?: Pick<S3Client, '
       });
 
       res.json({ data: updated });
+    }),
+  );
+
+  // ============================================================================================
+  // STALE-ROW BACKFILL (assessment 2026-06-12 §2 — appended as a SEPARATE block; the routes
+  // above are owned by the doctor-pack/budget work stream).
+  // ============================================================================================
+
+  /**
+   * POST /api/v1/rn/key-docs/reclassify-stale  (admin only)
+   *
+   * ROOT CAUSE: classifier upgrades never retrofit stored KeyDoc rows — Hatfield's
+   * Intake_Summary.pdf sat in the RN queue as "unspecified" a day after the classifier learned
+   * the pattern, because nothing re-classifies the installed base. (Rejected alternative per
+   * the assessment: re-classify on queue READ — a surprising read-path mutation; an explicit
+   * admin backfill is auditable.)
+   *
+   * Contract:
+   *   - Loads every KeyDoc row with classifierVersion < CLASSIFIER_VERSION_NUM (0 = legacy).
+   *   - Re-runs classifyDocument against the SAME inputs generation uses: the Document's
+   *     docTag (human override) + the stored document_pages text fed through the shared
+   *     buildContentHintText slice (first 2 pages x 4000 chars) + the filename. A row whose
+   *     Document/pages are gone re-classifies on filename alone — same fallback as generation.
+   *   - docType UNCHANGED: refreshes classification/importance, stamps classifierVersion.
+   *     needsRnReview and any RN acknowledgement are left alone — the RN's decision was made
+   *     under semantics that still hold.
+   *   - docType CHANGED: writes the new docType/classification/importance and REPLICATES the
+   *     generate-path docTypeChanged semantics (doctor-pack-generate.ts): the stale RN
+   *     acknowledgement is wiped (selectorAcknowledgedAt/By = null) because the RN cleared a
+   *     file that meant something different. needsRnReview clears when the row is now a KNOWN
+   *     type (the reason it was queued — unknown identity — is resolved); a row that flips TO
+   *     'unspecified' keeps its flag.
+   *   - All updates + one summary activity-log row commit in a single transaction; returns
+   *     counts: { classifierVersion, scanned, reclassified, stampedOnly, rnReviewCleared,
+   *     acksCleared }.
+   *
+   * NOTE: page RANGES are deliberately NOT recomputed here — that is the page-selector's job
+   * and runs on the next pack generation (the cleared ack ensures the fresh selector verdict
+   * is honored there). This route only fixes what the row SAYS the document is.
+   */
+  router.post(
+    '/rn/key-docs/reclassify-stale',
+    requireRole(['admin']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const actor = currentActor(req);
+      const staleRows = await db.keyDoc.findMany({
+        where: { classifierVersion: { lt: CLASSIFIER_VERSION_NUM } },
+        orderBy: { updatedAt: 'asc' },
+      });
+
+      // Batch-load the classification inputs: Document (docTag) by unique s3Key, then the
+      // first 2 OCR pages per document — the exact feed generation gives the classifier.
+      const s3Keys = [...new Set(staleRows.map((r) => r.filePath))];
+      const docs = s3Keys.length > 0
+        ? ((await db.document.findMany({
+            where: { s3Key: { in: s3Keys } },
+            select: { id: true, s3Key: true, docTag: true },
+          })) as unknown as readonly { id: string; s3Key: string; docTag: string | null }[])
+        : [];
+      const docByKey = new Map(docs.map((d) => [d.s3Key, d]));
+      const pagesByDocId = new Map<string, { pageNumber: number; text: string }[]>();
+      if (docs.length > 0) {
+        const pageRows = await db.documentPage.findMany({
+          where: { documentId: { in: docs.map((d) => d.id) }, pageNumber: { lte: 2 } },
+          orderBy: [{ documentId: 'asc' }, { pageNumber: 'asc' }],
+        });
+        for (const p of pageRows) {
+          const arr = pagesByDocId.get(p.documentId) ?? [];
+          arr.push({ pageNumber: p.pageNumber, text: p.text });
+          pagesByDocId.set(p.documentId, arr);
+        }
+      }
+
+      let reclassified = 0;
+      let stampedOnly = 0;
+      let rnReviewCleared = 0;
+      let acksCleared = 0;
+
+      await db.$transaction(async (tx) => {
+        for (const row of staleRows) {
+          const doc = docByKey.get(row.filePath);
+          const contentText = doc ? buildContentHintText(pagesByDocId.get(doc.id) ?? []) : '';
+          const cls = classifyDocument({
+            filePath: row.filePath,
+            docTag: doc?.docTag ?? null,
+            contentText,
+          });
+          const docTypeChanged = cls.docType !== row.docType;
+
+          if (!docTypeChanged) {
+            stampedOnly += 1;
+            await tx.keyDoc.update({
+              where: { id: row.id },
+              data: {
+                classification: cls.classification,
+                importance: cls.importance,
+                classifierVersion: CLASSIFIER_VERSION_NUM,
+                version: { increment: 1 },
+              },
+            });
+            continue;
+          }
+
+          reclassified += 1;
+          const newNeedsRnReview = cls.docType === 'unspecified' ? row.needsRnReview : false;
+          if (row.needsRnReview && !newNeedsRnReview) rnReviewCleared += 1;
+          if (row.selectorAcknowledgedAt !== null) acksCleared += 1;
+          await tx.keyDoc.update({
+            where: { id: row.id },
+            data: {
+              docType: cls.docType,
+              classification: cls.classification,
+              importance: cls.importance,
+              needsRnReview: newNeedsRnReview,
+              classifierVersion: CLASSIFIER_VERSION_NUM,
+              // Replicates the generate-path docTypeChanged ack-clear (doctor-pack-generate.ts):
+              // the RN acknowledged a row that claimed to be a different kind of document.
+              selectorAcknowledgedAt: null,
+              selectorAcknowledgedBy: null,
+              version: { increment: 1 },
+            },
+          });
+        }
+
+        await tx.activityLog.create({
+          data: {
+            actorUserId: actor.sub,
+            action: 'key_docs_reclassified_stale',
+            detailsJson: {
+              classifierVersion: CLASSIFIER_VERSION_NUM,
+              scanned: staleRows.length,
+              reclassified,
+              stampedOnly,
+              rnReviewCleared,
+              acksCleared,
+            },
+          },
+        });
+        // 120s timeout (architect post-QA 2026-06-12): the first run sweeps the WHOLE legacy
+        // installed base (every row < CLASSIFIER_VERSION_NUM) in this one transaction — Prisma's
+        // default 5s would P2028-rollback on a large table with zero progress. Chunking is the
+        // long-term shape if key_docs ever grows past ~10k rows.
+      }, { timeout: 120_000 });
+
+      res.json({
+        data: {
+          classifierVersion: CLASSIFIER_VERSION_NUM,
+          scanned: staleRows.length,
+          reclassified,
+          stampedOnly,
+          rnReviewCleared,
+          acksCleared,
+        },
+      });
     }),
   );
 

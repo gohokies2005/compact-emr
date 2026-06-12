@@ -332,6 +332,96 @@ describe('applyPackPageBudget', () => {
   });
 });
 
+// ============ Assessment 2026-06-12 §1c: CATEGORY budget (caps + clinical floor) ============
+// The flat prefix-fill let "protected" rating decisions fill all 20 pages before any clinical
+// note was reached. Categories now have soft caps + a clinical floor that fills FIRST.
+
+describe('applyPackPageBudget — category budget (assessment §1c)', () => {
+  it('clinical floor: progress notes keep >= 4 pages even when a giant rating decision wants the whole budget', () => {
+    const entries = [
+      be('rating_18pp.pdf', 'rating_decision', 'high_signal', 100, 18),
+      be('notes.pdf', 'progress_notes', 'normal', 60, 6),
+    ];
+    const r = applyPackPageBudget(entries);
+    // Floor 4 fills first; sc_proof cap 6 next; leftover flows back to the rating by rank.
+    expect(r.entries.find((e) => e.filePath === 'notes.pdf')?.pageCount).toBe(4);
+    expect(r.entries.find((e) => e.filePath === 'rating_18pp.pdf')?.pageCount).toBe(16);
+    expect(r.postTrimPageCount).toBeLessThanOrEqual(PACK_PAGE_BUDGET);
+  });
+
+  it('denial is PROTECTED: never evicted below its actual selected pages up to 4', () => {
+    const entries = [
+      be('cp_exam_30pp.pdf', 'c_and_p_exam', 'high_signal', 90, 30),
+      be('denial.pdf', 'denial_letter', 'high_signal', 100, 4),
+    ];
+    const r = applyPackPageBudget(entries);
+    // clinical floor 4 -> denial cap 4 (all 4 selected pages, protected) -> leftover 12 to the
+    // C&P exam by global rank.
+    expect(r.entries.find((e) => e.filePath === 'denial.pdf')?.pageCount).toBe(4);
+    expect(r.entries.find((e) => e.filePath === 'cp_exam_30pp.pdf')?.pageCount).toBe(16);
+  });
+
+  it('soft caps under full contention: every category gets its allowance (4+4+6+3+1+2 = 20)', () => {
+    const entries = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 10),  // sc_proof cap 6
+      be('denial.pdf', 'denial_letter', 'high_signal', 100, 10),    // denial cap 4
+      be('dbq.pdf', 'dbq', 'high_signal', 90, 10),                  // clinical floor/cap 4
+      be('sleep.pdf', 'sleep_study', 'high_signal', 85, 10),        // tests cap 3
+      be('dd214.pdf', 'dd_214', 'high_signal', 95, 2),              // service cap 1
+      be('lay.pdf', 'lay_statement', 'high_signal', 70, 5),         // lay cap 2
+    ];
+    const r = applyPackPageBudget(entries);
+    const count = (p: string) => r.entries.find((e) => e.filePath === p)?.pageCount ?? 0;
+    expect(count('dbq.pdf')).toBe(4);
+    expect(count('denial.pdf')).toBe(4);
+    expect(count('rating.pdf')).toBe(6);
+    expect(count('sleep.pdf')).toBe(3);
+    expect(count('dd214.pdf')).toBe(1);
+    expect(count('lay.pdf')).toBe(2);
+    expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET);
+  });
+
+  it('caps are SOFT: leftover budget flows back by global rank past the category cap', () => {
+    const entries = [
+      be('sleep_10pp.pdf', 'sleep_study', 'high_signal', 85, 10), // tests cap 3, but no contention
+      be('notes.pdf', 'progress_notes', 'normal', 60, 14),
+    ];
+    const r = applyPackPageBudget(entries);
+    // floor: notes 4; caps: tests 3; leftover 13 by rank: sleep (high_signal) +7 = 10 full,
+    // then notes +6 = 10.
+    expect(r.entries.find((e) => e.filePath === 'sleep_10pp.pdf')?.pageCount).toBe(10);
+    expect(r.entries.find((e) => e.filePath === 'notes.pdf')?.pageCount).toBe(10);
+    expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET);
+  });
+
+  it('records category evictions in trimNotes', () => {
+    const entries = [
+      be('rating_18pp.pdf', 'rating_decision', 'high_signal', 100, 18),
+      be('notes.pdf', 'progress_notes', 'normal', 60, 6),
+    ];
+    const r = applyPackPageBudget(entries);
+    const joined = r.trimNotes.join(' | ');
+    expect(joined).toContain('rating_18pp.pdf: kept 16 of 18');
+    expect(joined).toContain('notes.pdf: kept 4 of 6');
+    expect(joined).toContain('category sc_proof: kept 16 of 18');
+    expect(joined).toContain('category clinical: kept 4 of 6');
+  });
+
+  it('"other" docTypes only allocate from leftover global rank', () => {
+    const entries = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 10), // sc_proof
+      be('notes.pdf', 'progress_notes', 'normal', 60, 4),          // clinical
+      be('personnel.pdf', 'personnel_record', 'high_signal', 75, 20), // other
+    ];
+    const r = applyPackPageBudget(entries);
+    // floor: notes 4; caps: rating 6; leftover 10 by rank: rating +4 = 10 full, personnel +6.
+    expect(r.entries.find((e) => e.filePath === 'notes.pdf')?.pageCount).toBe(4);
+    expect(r.entries.find((e) => e.filePath === 'rating.pdf')?.pageCount).toBe(10);
+    expect(r.entries.find((e) => e.filePath === 'personnel.pdf')?.pageCount).toBe(6);
+    expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET);
+  });
+});
+
 describe('assembleDoctorPackManifest (composite)', () => {
   it('produces a complete manifest from a realistic OSA-secondary case', () => {
     // Simulated PTSD -> OSA secondary case with realistic record set.

@@ -42,12 +42,61 @@ export const PACK_PAGE_TARGET = 250;
 // page selection, applyPackPageBudget() deterministically rank-trims the manifest down to this.
 export const PACK_PAGE_BUDGET = 20;
 
-// Never trim the SC-decision documents first - they are the core of the pack (Ryan's rule 1).
-const BUDGET_PROTECTED_DOC_TYPES: ReadonlySet<KeyDocRecord['docType']> = new Set([
-  'rating_decision',
-  'denial_letter',
-  'supplemental_decision',
-]);
+// Assessment 2026-06-12 §1c (category budget): docType -> pack category. Soft caps + floors
+// replace the old flat "protected docTypes fill first" rule, which let a rating decision eat
+// all 20 pages before any clinical note was reached (the live failure).
+type PackCategory = 'sc_proof' | 'denial' | 'clinical' | 'tests' | 'service' | 'lay' | 'other';
+
+const CATEGORY_BY_DOC_TYPE: Partial<Record<KeyDocRecord['docType'], PackCategory>> = {
+  rating_decision: 'sc_proof',
+  supplemental_decision: 'sc_proof',
+  rated_disabilities_view: 'sc_proof',
+  denial_letter: 'denial',
+  progress_notes: 'clinical',
+  c_and_p_exam: 'clinical',
+  dbq: 'clinical',
+  imaging: 'tests',
+  sleep_study: 'tests',
+  pulmonary_function_test: 'tests',
+  audiogram: 'tests',
+  dd_214: 'service',
+  lay_statement: 'lay',
+  buddy_statement: 'lay',
+  statement_in_support: 'lay',
+};
+
+function packCategoryOf(docType: KeyDocRecord['docType']): PackCategory {
+  return CATEGORY_BY_DOC_TYPE[docType] ?? 'other';
+}
+
+// Soft caps for the priority allocation phase. clinical's "cap" equals its floor — its
+// guaranteed pages come from the floor phase; anything more comes from leftover global rank.
+// 4 + 4 + 6 + 3 + 1 + 2 = 20 = PACK_PAGE_BUDGET: under full contention every category gets
+// exactly its allowance.
+const CATEGORY_SOFT_CAPS: Record<Exclude<PackCategory, 'other'>, number> = {
+  clinical: 4,
+  denial: 4,
+  sc_proof: 6,
+  tests: 3,
+  service: 1,
+  lay: 2,
+};
+
+// Clinical dx pages have a guaranteed FLOOR that fills FIRST (PCP: "a pack without the
+// diagnosing note is never acceptable. Not ever.").
+const CLINICAL_PAGE_FLOOR = 4;
+
+// Cap-phase priority order. denial sits ahead of sc_proof: it is PROTECTED — never evicted
+// below its actual selected pages up to its cap (Ryan: "not just SC conditions but denials
+// with explanations").
+const CATEGORY_CAP_PRIORITY: readonly Exclude<PackCategory, 'other'>[] = [
+  'clinical',
+  'denial',
+  'sc_proof',
+  'tests',
+  'service',
+  'lay',
+];
 
 export interface SelectKeyDocsInput {
   // `cls` (Chunk D): pre-computed content-aware classification from the route (docTag override >
@@ -211,14 +260,20 @@ function takeFirstPages(ranges: readonly KeyDocPageRange[], quota: number): read
 /**
  * Deterministic pack-level page-budget trim (Ryan: pack targets 10-15pp, max ~20).
  *
- * Trim PRIORITY (who keeps pages first) - strictly ordered, no randomness:
- *   1. SC-decision docs (rating_decision / denial_letter / supplemental_decision) - NEVER
- *      trimmed first; they're the core of the pack.
- *   2. classification tier: high_signal > normal > bulk.
- *   3. importance descending.
- *   4. filePath ascending (stable tie-break).
- * Within a doc, pages are kept in page order (prefix of the selected ranges - the selector
- * orders decision/impression pages first in practice because they ARE the early pages).
+ * Assessment 2026-06-12 §1c — CATEGORY BUDGET. The old flat prefix-fill let the "protected"
+ * rating decision fill all 20 pages before any clinical note was reached. Allocation is now
+ * three deterministic phases:
+ *   1. FLOORS fill first: clinical (progress_notes / c_and_p_exam / dbq) is guaranteed
+ *      CLINICAL_PAGE_FLOOR (4) pages — the dx note is the page the PCP refuses to sign without.
+ *   2. CATEGORY SOFT CAPS in priority order (clinical, denial, sc_proof, tests, service, lay):
+ *      each category takes up to its cap. denial is PROTECTED — it is never evicted below its
+ *      actual selected pages up to its cap, because it allocates before sc_proof and the
+ *      floor+denial allowance always fits the budget.
+ *   3. Remaining budget by GLOBAL RANK (classification tier > importance desc > filePath asc)
+ *      across all docs including 'other' — the caps are soft: spare pages flow back.
+ * Within a category, docs allocate in global-rank order; within a doc, pages are kept in page
+ * order (prefix of the selected ranges - the selector orders decision/impression pages first
+ * in practice because they ARE the early pages).
  *
  * Docs allocated ZERO pages are REMOVED from the manifest entirely: the assembler contract
  * (workers/doctor-pack-assembler/handler.py H2) treats empty pageRanges as "include the WHOLE
@@ -246,22 +301,59 @@ export function applyPackPageBudget(
   // Whole-doc passthroughs (incoming empty ranges) never enter the allocation loop - see doc
   // comment above. They are re-emitted as-is in the kept loop below.
   const trimmable = entries.filter((e) => e.pageRanges.length > 0);
+  // Global rank: classification tier > importance desc > filePath asc. (The old
+  // protected-docTypes-first key is superseded by the category phases.)
   const ranked = [...trimmable].sort((a, b) => {
-    const aProtected = BUDGET_PROTECTED_DOC_TYPES.has(a.docType) ? 0 : 1;
-    const bProtected = BUDGET_PROTECTED_DOC_TYPES.has(b.docType) ? 0 : 1;
-    if (aProtected !== bProtected) return aProtected - bProtected;
     if (tierOrder[a.classification] !== tierOrder[b.classification]) return tierOrder[a.classification] - tierOrder[b.classification];
     if (a.importance !== b.importance) return b.importance - a.importance;
     return a.filePath.localeCompare(b.filePath);
   });
 
+  // ---- Three-phase allocation (deterministic; per-doc page counts, prefix-take later) ----
+  const takenByPath = new Map<string, number>();
+  let remaining = budget;
+  const takeFor = (entry: BudgetEntry, want: number): number => {
+    const already = takenByPath.get(entry.filePath) ?? 0;
+    const take = Math.max(0, Math.min(want, entry.pageCount - already, remaining));
+    if (take > 0) {
+      takenByPath.set(entry.filePath, already + take);
+      remaining -= take;
+    }
+    return take;
+  };
+  const categoryTaken = (cat: PackCategory): number =>
+    ranked.reduce((sum, e) => sum + (packCategoryOf(e.docType) === cat ? (takenByPath.get(e.filePath) ?? 0) : 0), 0);
+
+  // Phase 1 — clinical floor fills first.
+  let clinicalTaken = 0;
+  for (const entry of ranked) {
+    if (clinicalTaken >= CLINICAL_PAGE_FLOOR || remaining <= 0) break;
+    if (packCategoryOf(entry.docType) !== 'clinical') continue;
+    clinicalTaken += takeFor(entry, CLINICAL_PAGE_FLOOR - clinicalTaken);
+  }
+
+  // Phase 2 — category soft caps in priority order.
+  for (const cat of CATEGORY_CAP_PRIORITY) {
+    const cap = CATEGORY_SOFT_CAPS[cat];
+    let catTaken = categoryTaken(cat);
+    for (const entry of ranked) {
+      if (catTaken >= cap || remaining <= 0) break;
+      if (packCategoryOf(entry.docType) !== cat) continue;
+      catTaken += takeFor(entry, cap - catTaken);
+    }
+  }
+
+  // Phase 3 — leftover budget by global rank, caps are soft ('other' docs allocate here).
+  for (const entry of ranked) {
+    if (remaining <= 0) break;
+    takeFor(entry, entry.pageCount);
+  }
+
   const keptRangesByPath = new Map<string, readonly KeyDocPageRange[]>();
   const trimNotes: string[] = [];
   const trimmedFilePaths: string[] = [];
-  let remaining = budget;
   for (const entry of ranked) {
-    const take = Math.min(entry.pageCount, remaining);
-    remaining -= take;
+    const take = takenByPath.get(entry.filePath) ?? 0;
     if (take === entry.pageCount) {
       keptRangesByPath.set(entry.filePath, entry.pageRanges);
     } else if (take > 0) {
@@ -271,6 +363,21 @@ export function applyPackPageBudget(
     } else {
       trimNotes.push(`${entry.filePath}: dropped (${entry.pageCount} selected pages over budget)`);
       trimmedFilePaths.push(entry.filePath);
+    }
+  }
+
+  // Category-eviction notes (assessment §1 fix 5: the cover sheet lists what the doctor is
+  // NOT seeing and why).
+  const noted = new Set<PackCategory>();
+  for (const entry of ranked) {
+    const cat = packCategoryOf(entry.docType);
+    if (noted.has(cat)) continue;
+    noted.add(cat);
+    const selected = ranked.reduce((sum, e) => sum + (packCategoryOf(e.docType) === cat ? e.pageCount : 0), 0);
+    const kept = categoryTaken(cat);
+    if (kept < selected) {
+      const capNote = cat === 'other' ? 'global rank only' : `soft cap ${CATEGORY_SOFT_CAPS[cat]}${cat === 'clinical' ? `, floor ${CLINICAL_PAGE_FLOOR}` : ''}`;
+      trimNotes.push(`category ${cat}: kept ${kept} of ${selected} selected pages (${capNote})`);
     }
   }
 

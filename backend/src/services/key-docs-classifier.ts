@@ -1,4 +1,5 @@
 import type { KeyDocClassification, KeyDocType } from './db-types.js';
+import { isIntakeSummaryPath } from './chart-readiness.js';
 
 /**
  * Phase 7B: classify a record filename into a Doctor Pack signal tier + a specific doc_type.
@@ -52,8 +53,12 @@ const PATTERNS: readonly PatternMatcher[] = [
   { pattern: /(?:^|[\W_])ies(?:[\W_]|$)/i,                  docType: 'individual_exposure_summary', classification: 'high_signal', importance: 90 },
 
   // ===== HIGH-SIGNAL: prior nexus / IMOs =====
-  { pattern: /nexus.?letter/i,              docType: 'nexus_letter_prior',       classification: 'high_signal', importance: 80 },
-  { pattern: /nexus.?opinion/i,             docType: 'nexus_letter_prior',       classification: 'high_signal', importance: 80 },
+  // Assessment 2026-06-12 §2: the bare /nexus/i subsumes the old nexus.?letter / nexus.?opinion
+  // forms — real uploads arrive as "Jr_AAD_Nexus.pdf" and the stricter forms missed them.
+  // Importance is MODEST (~70): a PRIOR nexus letter is context for the physician, not primary
+  // evidence; the include-policy is small-doc-all via the page-selector's SMALL_DOC_ALWAYS_ALL
+  // set (these run 1-3pp), so modest importance never costs us the document itself.
+  { pattern: /nexus/i,                      docType: 'nexus_letter_prior',       classification: 'high_signal', importance: 70 },
   { pattern: /medical.?opinion/i,           docType: 'medical_opinion',          classification: 'high_signal', importance: 75 },
   { pattern: /imo[._-]/i,                   docType: 'medical_opinion',          classification: 'high_signal', importance: 75 },
 
@@ -219,6 +224,16 @@ const reTest = (r: RegExp) => (text: string) => r.test(text);
 const allOf = (...rs: RegExp[]) => (text: string) => rs.every((r) => r.test(text));
 const anyOf = (...rs: RegExp[]) => (text: string) => rs.some((r) => r.test(text));
 
+// nexus_letter_prior content markers (assessment 2026-06-12 §2). The title/citation phrases
+// ("nexus letter", "independent medical opinion") plus the signature sentence every private
+// IMO carries ("it is my [independent] medical opinion"). C_AND_P_EXAM_MARKERS is the negative
+// guard: those phrases appear on VA C&P exams/DBQs — which also say "medical opinion" — and
+// essentially never on a private nexus letter, so their presence routes the doc to the C&P/DBQ
+// matchers instead.
+const NEXUS_LETTER_PHRASES = /\b(nexus|independent medical) (letter|opinion)\b/i;
+const NEXUS_OPINION_SENTENCE = /it is my (independent )?medical opinion/i;
+const C_AND_P_EXAM_MARKERS = /compensation\s*(and|&)\s*pension|c\s*&\s*p\s*examination|disability benefits questionnaire/i;
+
 const CONTENT_PATTERNS: readonly ContentPatternMatcher[] = [
   // DD-214 - the certificate line is unique to the form.
   { test: reTest(/certificate of release or discharge from active duty/i), docType: 'dd_214', classification: 'high_signal', confidence: 0.9 },
@@ -242,6 +257,22 @@ const CONTENT_PATTERNS: readonly ContentPatternMatcher[] = [
   { test: anyOf(/buddy statement/i, /lay statement/i, /lay witness statement/i), docType: 'lay_statement', classification: 'high_signal', confidence: 0.7 },
   // CO / command letter -> statement (small-doc-all in the selector).
   { test: anyOf(/commanding officer/i, /\bcompany commander\b/i, /letter from .{0,40}\bcommand/i), docType: 'buddy_statement', classification: 'high_signal', confidence: 0.7 },
+
+  // Prior nexus / IMO letter (assessment 2026-06-12 §2). MUST be evaluated BEFORE the C&P and
+  // STR matchers below — both directions of the trap are real:
+  //   - a nexus letter's body cites STRs ("review of his service treatment records shows...")
+  //     so the STR marker would otherwise win (the Jr_AAD_Nexus.pdf -> "Service treatment
+  //     records" misfire that started this fix);
+  //   - C&P exams ALSO say "medical opinion", so an explicit C&P-marker guard (compensation
+  //     and pension / C&P examination / disability benefits questionnaire — phrases a C&P or
+  //     DBQ carries and a private nexus letter does not) sends those to the C&P/DBQ matchers.
+  // Both directions are pinned in key-docs-classifier.test.ts.
+  {
+    test: (text) =>
+      !C_AND_P_EXAM_MARKERS.test(text)
+      && (NEXUS_LETTER_PHRASES.test(text) || NEXUS_OPINION_SENTENCE.test(text)),
+    docType: 'nexus_letter_prior', classification: 'high_signal', confidence: 0.7,
+  },
 
   // DBQ / C&P exam.
   { test: reTest(/disability benefits questionnaire/i), docType: 'dbq', classification: 'high_signal', confidence: 0.9 },
@@ -302,6 +333,27 @@ export function classifyDocument(input: {
   readonly docTag?: string | null;
   readonly contentText?: string | null;
 }): ClassificationResult {
+  // NEVER-CLASSIFY-OWN-ARTIFACTS (assessment 2026-06-12 §2.3 — "a system asking a human to
+  // review its own output is the purest waste in the building"). System-minted documents have
+  // a KNOWN identity at creation, so heuristics must never run on them — the generated intake
+  // summary's Q&A text echoes decision-letter phrasing ("...service connection...denied...")
+  // and can misclassify as a denial letter, then queue an RN to confirm our own PDF.
+  // Smallest correct mechanism per artifact:
+  //   - Intake_Summary.pdf: minted ONLY as `cases/<id>/<uuid>-Intake_Summary.pdf`
+  //     (routes/intakes.ts assign step). Recognize the reserved key suffix FIRST — the same
+  //     isIntakeSummaryPath predicate the chart-readiness gate already trusts — and return the
+  //     stamped type deterministically. docTag/content/filename heuristics are never consulted.
+  //   - The Doctor Pack PDF itself: structurally excluded — it uploads to the SEPARATE
+  //     doctor-packs bucket (`doctor-packs/<case>/v<N>/<id>.pdf`) and never becomes a case
+  //     Document row, so it can never reach classification. No guard needed; documented here.
+  if (isIntakeSummaryPath(input.filePath)) {
+    return {
+      classification: 'high_signal',
+      docType: 'intake_summary',
+      importance: DOCTYPE_BASE_IMPORTANCE.get('intake_summary') ?? 65,
+      matchedPattern: 'system_artifact',
+    };
+  }
   const tagged = mapDocTagToDocType(input.docTag);
   if (tagged !== null) {
     const canonical = DOCTYPE_BASE_IMPORTANCE.get(tagged) ?? 50;
@@ -339,4 +391,19 @@ export function sortByDoctorPackPriority(filePaths: readonly string[]): readonly
 
 // 1.1.0 (Chunk D 2026-06-11): content-text classification + docTag override + imaging/intake_summary
 // docTypes + CO-letter patterns + canonical content-hint importance.
-export const CLASSIFIER_VERSION = 'key-docs-classifier-1.1.0';
+// 1.2.0 (assessment 2026-06-12 §2): nexus_letter_prior content pattern evaluated BEFORE C&P/STR
+// (with C&P-marker guard) + bare /nexus/i filename pattern at modest importance 70 + the
+// system-artifact guard (generated Intake_Summary.pdf is stamped intake_summary at the top of
+// classifyDocument, never heuristically classified).
+export const CLASSIFIER_VERSION = 'key-docs-classifier-1.2.0';
+
+// Monotonic INTEGER mirror of CLASSIFIER_VERSION, stamped onto key_docs.classifier_version by
+// the doctor-pack-generate KeyDoc upsert. Exists so stored rows can be compared against the
+// running classifier: rows with classifier_version < CLASSIFIER_VERSION_NUM were classified by
+// older code and are candidates for POST /rn/key-docs/reclassify-stale (the assessment-§2
+// backfill — classifier upgrades must retrofit the installed base, not just future uploads).
+// History: 0 = legacy/pre-stamping rows (the DB column default — anything written before this
+// column existed); 1 is reserved-unused so "0 vs nonzero" cleanly separates legacy from
+// stamped; 2 = 1.2.0, the first stamped version. BUMP THIS whenever a pattern/order change
+// could alter an existing row's docType.
+export const CLASSIFIER_VERSION_NUM = 2;

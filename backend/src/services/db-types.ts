@@ -815,6 +815,9 @@ export interface DoctorPackManifestEntry {
   readonly classification: KeyDocClassification;
   readonly pageRanges: readonly KeyDocPageRange[];
   readonly pageCount: number;
+  // WAVE 2 (assessment 2026-06-12 §3): '<DocType human name> — <original filename>', stamped at
+  // generate time. ADDITIVE — the assembler's TOC falls back to filePath when absent.
+  readonly displayLabel?: string;
 }
 
 export interface DoctorPackRecord {
@@ -826,8 +829,15 @@ export interface DoctorPackRecord {
   pageCount: number | null;
   keyDocCount: number | null;
   // manifestJson optionally carries a coverPage block (chart-summary snapshot the assembler
-  // renders as PDF page 1) — Phase 7B-revised Build 1.
-  manifestJson: { entries: readonly DoctorPackManifestEntry[]; engineVersion: string; coverPage?: unknown } | null;
+  // renders as PDF page 1) — Phase 7B-revised Build 1. WAVE 2 (2026-06-12): optional warnings
+  // (NO_CLINICAL_DX_DOCUMENTATION) + budgetTrim (budget trims and/or non-PDF render failures).
+  manifestJson: {
+    entries: readonly DoctorPackManifestEntry[];
+    engineVersion: string;
+    coverPage?: unknown;
+    warnings?: readonly string[];
+    budgetTrim?: { budget: number; preTrimPageCount: number; postTrimPageCount: number; trimNotes: readonly string[] };
+  } | null;
   errorMessage: string | null;
   generatedAt: Date | null;
   generatedBy: string | null;

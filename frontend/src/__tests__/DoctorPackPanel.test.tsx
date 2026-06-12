@@ -228,4 +228,69 @@ describe('DoctorPackPanel', () => {
     expect(await screen.findByText('Misc_3.pdf')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Misc_3.pdf' })).not.toBeInTheDocument();
   });
+
+  // ── WAVE 2 (assessment 2026-06-12 §1 gate / §1d / §3) ───────────────────────────────────────
+
+  it('renders the prominent amber banner when the manifest carries NO_CLINICAL_DX_DOCUMENTATION', async () => {
+    getLatestMock.mockResolvedValue({
+      data: { ...READY_PACK, manifestJson: { warnings: ['NO_CLINICAL_DX_DOCUMENTATION'] } },
+    });
+    renderPanel();
+
+    expect(
+      await screen.findByText(
+        'This pack contains NO clinical documentation of the claimed condition — review the chart before relying on it.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('no banner and no "Not included" section when the manifest carries neither', async () => {
+    getLatestMock.mockResolvedValue({ data: { ...READY_PACK, manifestJson: {} } });
+    renderPanel();
+
+    await screen.findByRole('button', { name: 'Open Doctor Pack (12pp)' });
+    expect(screen.queryByText(/NO clinical documentation/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Not included')).not.toBeInTheDocument();
+  });
+
+  it('renders trimNotes as plain-English "Not included" items — raw S3 keys and internal codes never reach the screen', async () => {
+    getLatestMock.mockResolvedValue({
+      data: {
+        ...READY_PACK,
+        manifestJson: {
+          budgetTrim: {
+            trimNotes: [
+              'cases/CASE-1/aaaa1111-bbbb-cccc-dddd-eeee22223333-Blue_Button.pdf: dropped (12 selected pages over budget)',
+              'cases/CASE-1/aaaa1111-bbbb-cccc-dddd-eeee22223333-Rating.pdf: kept 4 of 12 selected pages (budget trim)',
+              'category sc_proof: kept 6 of 9 selected pages (soft cap 6)',
+              'could not render PsychNote.txt',
+              'cases/CASE-1/aaaa1111-bbbb-cccc-dddd-eeee22223333-Whole.pdf: whole-doc passthrough (no per-page selection) - not counted against the budget',
+            ],
+          },
+        },
+      },
+    });
+    renderPanel();
+
+    expect(await screen.findByText('Not included')).toBeInTheDocument();
+    expect(screen.getByText('Blue_Button.pdf — left out (12 pages, over the page limit)')).toBeInTheDocument();
+    expect(screen.getByText('Rating.pdf — only 4 of 12 selected pages fit the page limit')).toBeInTheDocument();
+    expect(screen.getByText('service-connection proof — 6 of 9 selected pages included overall')).toBeInTheDocument();
+    expect(screen.getByText('PsychNote.txt — could not be converted for the pack; open it from the chart instead')).toBeInTheDocument();
+    // Plain English only: no raw keys, no category codes; the passthrough note (not an
+    // omission) is filtered out entirely.
+    expect(document.body.textContent).not.toContain('cases/CASE-1');
+    expect(document.body.textContent).not.toContain('sc_proof');
+    expect(document.body.textContent).not.toContain('passthrough');
+  });
+
+  it('renders the server displayLabel when present and suppresses the now-duplicate docType subline', async () => {
+    getLatestMock.mockResolvedValue({ data: READY_PACK });
+    listKeyDocsMock.mockResolvedValue({ data: [{ ...KEY_DOC, displayLabel: 'Rating decision — Misc_3.pdf' }] });
+    renderPanel();
+
+    expect(await screen.findByText('Rating decision — Misc_3.pdf')).toBeInTheDocument();
+    // Exact-match query: the standalone subline 'Rating decision' is gone (the label carries it).
+    expect(screen.queryByText('Rating decision')).not.toBeInTheDocument();
+  });
 });

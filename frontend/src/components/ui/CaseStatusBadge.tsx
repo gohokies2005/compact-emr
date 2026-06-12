@@ -1,5 +1,5 @@
 import type { CaseStatus } from '../../types/prisma';
-import { CASE_STATUS_LABELS } from '../../lib/caseStatus';
+import { caseDisplayLabel } from '../../lib/caseStatus';
 import { StatusChip, type ChipTone } from './StatusChip';
 
 // The ~13 ad-hoc color pairs collapse onto the 6 shared Aegis chip tones. Prop API is unchanged
@@ -21,6 +21,9 @@ const STATUS_TONES: Record<CaseStatus, ChipTone> = {
   needs_records: 'warn',
 };
 
-export function CaseStatusBadge({ status, className }: { readonly status: CaseStatus; readonly className?: string }) {
-  return <StatusChip tone={STATUS_TONES[status]} {...(className ? { className } : {})}>{CASE_STATUS_LABELS[status]}</StatusChip>;
+export function CaseStatusBadge({ status, invoiced, className }: { readonly status: CaseStatus; readonly invoiced?: boolean | undefined; readonly className?: string }) {
+  // Invoiced overlay (Ryan 2026-06-12): a delivered case with the invoice email out reads
+  // "Invoiced" — SAME format, neutral tone (not the green 'good'), label change only.
+  const isInvoiced = status === 'delivered' && invoiced === true;
+  return <StatusChip tone={isInvoiced ? 'neutral' : STATUS_TONES[status]} {...(className ? { className } : {})}>{caseDisplayLabel(status, { invoiced })}</StatusChip>;
 }

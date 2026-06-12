@@ -972,6 +972,12 @@ model KeyDoc {
   selectorRationale        String?  @map("selector_rationale")
   selectorAcknowledgedAt   DateTime? @map("selector_acknowledged_at") @db.Timestamptz(6)
   selectorAcknowledgedBy   String?  @map("selector_acknowledged_by")
+  // Assessment 2026-06-12 §2: the INTEGER classifier-code version that last wrote this row's
+  // docType/classification (CLASSIFIER_VERSION_NUM in key-docs-classifier.ts). 0 = legacy row
+  // classified before stamping existed. POST /rn/key-docs/reclassify-stale re-runs the (cheap,
+  // regex) classifier over rows where this < current — so classifier upgrades retrofit the
+  // installed base instead of leaving yesterday's misclassifications in the RN queue forever.
+  classifierVersion        Int      @default(0) @map("classifier_version")
   createdAt                DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version                  Int      @default(1)

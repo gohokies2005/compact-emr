@@ -174,8 +174,12 @@ def _render_toc_page(entries: list[dict[str, Any]]) -> bytes:
     """Render a table-of-contents page listing every included doc + its page range."""
     from weasyprint import HTML
 
+    # WAVE 2 (assessment 2026-06-12 §1 fix 6 / §3): the TOC used to print raw S3 keys. The
+    # generate path now stamps each entry with displayLabel ('<DocType human name> — <original
+    # filename>'); render that, falling back to the raw key for legacy manifests (additive
+    # field — absence tolerated).
     rows_html = "\n".join(
-        f"<tr><td>{i + 1}</td><td>{e['filePath']}</td><td>{e['docType']}</td><td>"
+        f"<tr><td>{i + 1}</td><td>{e.get('displayLabel') or e['filePath']}</td><td>{e['docType']}</td><td>"
         + ", ".join(f"{r['from']}–{r['to']}" for r in (e.get('pageRanges') or []))
         + f"</td><td style=\"text-align:right\">{e.get('pageCount', '')}</td></tr>"
         for i, e in enumerate(entries)

@@ -388,6 +388,9 @@ export interface KeyDocReviewRow {
   // documentId for the presigned "Open" viewer. Null when the source Document is gone.
   readonly filename?: string | null;
   readonly documentId?: string | null;
+  // WAVE 2 (assessment 2026-06-12 §3): server-computed '<DocType human name> — <original
+  // filename>' ('unspecified' → just the filename). Card copy renders it when present.
+  readonly displayLabel?: string | null;
 }
 
 export async function listKeyDocsNeedingReview(limit?: number): Promise<{ data: readonly KeyDocReviewRow[]; total: number }> {

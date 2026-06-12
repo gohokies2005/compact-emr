@@ -74,6 +74,38 @@ function baseName(filePath: string): string {
   return base.replace(/^[a-f0-9-]{36}-/, '');
 }
 
+// WAVE 2 (assessment 2026-06-12 §1d): plain-English rendering of manifestJson.budgetTrim
+// trimNotes — the doctor must know what he is NOT seeing, but raw S3 keys and internal
+// category codes never reach the screen. Known generator shapes are rewritten; the whole-doc
+// passthrough note is filtered out (it is not an omission); anything unrecognized falls back
+// to the note with any path prefix stripped.
+const TRIM_CATEGORY_LABELS: Readonly<Record<string, string>> = {
+  sc_proof: 'service-connection proof',
+  denial: 'denial rationale',
+  clinical: 'clinical notes',
+  tests: 'test results',
+  service: 'service records',
+  lay: 'lay statements',
+  other: 'other documents',
+};
+
+export function humanizeTrimNote(note: string): string | null {
+  let m = note.match(/^(.+): kept (\d+) of (\d+) selected pages \(budget trim\)$/);
+  if (m) return `${baseName(m[1] ?? '')} — only ${m[2]} of ${m[3]} selected pages fit the page limit`;
+  m = note.match(/^(.+): dropped \((\d+) selected pages over budget\)$/);
+  if (m) return `${baseName(m[1] ?? '')} — left out (${m[2]} pages, over the page limit)`;
+  m = note.match(/^category (\w+): kept (\d+) of (\d+) selected pages/);
+  if (m) return `${TRIM_CATEGORY_LABELS[m[1] ?? ''] ?? (m[1] ?? '').replace(/_/g, ' ')} — ${m[2]} of ${m[3]} selected pages included overall`;
+  m = note.match(/^could not render (.+)$/);
+  if (m) return `${m[1]} — could not be converted for the pack; open it from the chart instead`;
+  if (note.includes('whole-doc passthrough')) return null;
+  return note.replace(/^[\w./-]*\//, '');
+}
+
+// §1 soft gate: the warning code the generate path writes when the clinical category
+// (progress notes / C&P exam / DBQ) contributed zero pages.
+const NO_CLINICAL_DX_WARNING = 'NO_CLINICAL_DX_DOCUMENTATION';
+
 function ImportanceChip({ doc }: { readonly doc: KeyDoc }) {
   const tier = doc.classification;
   const cls =
@@ -108,7 +140,9 @@ function KeyDocRow({ doc }: { readonly doc: KeyDoc }) {
   const selected = selectedPageCount(doc);
   const total = doc.docPageCount;
   const pagesText = total !== null && total > 0 ? `${selected} of ${total} pages` : `${selected} page${selected === 1 ? '' : 's'}`;
-  const name = doc.filename ?? baseName(doc.filePath);
+  // WAVE 2 §3: prefer the server-computed displayLabel ('Rating decision — Misc_5.pdf');
+  // legacy payloads without it fall back to filename + the docType subline (current behavior).
+  const name = doc.displayLabel ?? doc.filename ?? baseName(doc.filePath);
   const docId = doc.documentId ?? null;
   return (
     <div className="flex items-center justify-between gap-3 py-2 text-sm">
@@ -125,7 +159,7 @@ function KeyDocRow({ doc }: { readonly doc: KeyDoc }) {
         ) : (
           <div className="truncate font-medium text-slate-800">{name}</div>
         )}
-        <div className="text-xs text-slate-500">{docTypeLabel(doc.docType)}</div>
+        {doc.displayLabel ? null : <div className="text-xs text-slate-500">{docTypeLabel(doc.docType)}</div>}
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <ImportanceChip doc={doc} />
@@ -183,6 +217,13 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
 
   const pack = packQuery.data?.data ?? null;
   const keyDocs = keyDocsQuery.data?.data ?? [];
+
+  // WAVE 2: amber no-clinical-dx banner (§1 soft gate) + plain-English omissions (§1d).
+  const packWarnings = pack?.manifestJson?.warnings ?? [];
+  const missingClinicalDx = packWarnings.includes(NO_CLINICAL_DX_WARNING);
+  const omissionNotes = (pack?.manifestJson?.budgetTrim?.trimNotes ?? [])
+    .map(humanizeTrimNote)
+    .filter((n): n is string => n !== null);
 
   return (
     <Card>
@@ -248,6 +289,27 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
           <p role="alert" className="mt-2 text-sm text-rose-700">
             Could not load the Doctor Pack — {describeApiError(packQuery.error)}
           </p>
+        ) : null}
+
+        {/* WAVE 2 §1 soft gate: prominent amber banner — the PCP refuses to sign without the
+            dx note, so a pack with zero clinical pages must announce itself loudly. */}
+        {missingClinicalDx ? (
+          <div role="alert" className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+            This pack contains NO clinical documentation of the claimed condition — review the chart before relying on it.
+          </div>
+        ) : null}
+
+        {/* WAVE 2 §1d: quiet plain-English list of what the pack does NOT contain (budget
+            trims + non-PDF render failures) — no raw S3 keys, no internal codes. */}
+        {omissionNotes.length > 0 ? (
+          <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Not included</h3>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs text-slate-600">
+              {omissionNotes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          </div>
         ) : null}
       </div>
 

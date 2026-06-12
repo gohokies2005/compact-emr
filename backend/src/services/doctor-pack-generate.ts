@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { HttpError } from '../http/errors.js';
 import { evaluateChartReadiness, isEffectivelyRead } from './chart-readiness.js';
+import { renderRecordTextPdf } from './record-text-render.js';
 import {
   applyPackPageBudget,
   assembleDoctorPackManifest,
@@ -9,7 +11,7 @@ import {
   PACK_PAGE_TARGET,
   type BudgetEntry,
 } from './doctor-pack.js';
-import { classifyDocument } from './key-docs-classifier.js';
+import { classifyDocument, CLASSIFIER_VERSION_NUM } from './key-docs-classifier.js';
 import { selectPages, type PageSelectorInputPage } from './page-selector.js';
 import { aggregateChartSummary } from './chart-summary-aggregator.js';
 import { publishDoctorPackQueued } from './doctor-pack-queue.js';
@@ -93,6 +95,114 @@ async function fetchCaseRowForCover(db: AppDb, caseId: string, veteranId: string
   };
 }
 
+// Content-classifier feed contract (Chunk D, hoisted + exported for the reclassify-stale
+// backfill route 2026-06-12): the classifier sees the first 2 OCR'd pages, each capped at
+// 4000 chars. The backfill MUST feed stored rows the exact same way — a different slice could
+// classify the same document differently than generation did and make the backfill lie.
+export const CONTENT_HINT_CHARS_PER_PAGE = 4000;
+export function buildContentHintText(
+  pageRows: readonly { readonly pageNumber: number; readonly text: string }[],
+): string {
+  return pageRows
+    .filter((p) => p.pageNumber <= 2)
+    .map((p) => p.text.slice(0, CONTENT_HINT_CHARS_PER_PAGE))
+    .join('\n');
+}
+
+// ====================== WAVE 2 (assessment 2026-06-12 §1b/1d/§3) helpers ======================
+
+// §3 display labels: '<DocType human name> — <original filename>'. The human map mirrors the
+// docType vocabulary in db-types.ts KeyDocType; 'unspecified' (and any unknown value) renders
+// as just the filename — a made-up type name would be worse than none. Date extraction is
+// deliberately NOT attempted (assessment: medium confidence; VA letters carry multiple dates).
+export const DOC_TYPE_HUMAN_LABELS: Readonly<Record<string, string>> = {
+  dd_214: 'DD-214',
+  rating_decision: 'Rating decision',
+  denial_letter: 'Denial letter',
+  supplemental_decision: 'Supplemental decision',
+  rated_disabilities_view: 'Rated disabilities',
+  benefit_summary: 'Benefit summary',
+  dbq: 'DBQ',
+  c_and_p_exam: 'C&P exam',
+  tera_memo: 'TERA memo',
+  individual_exposure_summary: 'Exposure summary',
+  nexus_letter_prior: 'Prior nexus letter',
+  medical_opinion: 'Medical opinion',
+  audiogram: 'Audiogram',
+  sleep_study: 'Sleep study',
+  pulmonary_function_test: 'Pulmonary function test',
+  service_treatment_record_summary: 'Service treatment records',
+  separation_exam: 'Separation exam',
+  entrance_exam: 'Entrance exam',
+  personnel_record: 'Personnel record',
+  statement_in_support: 'Statement in support',
+  lay_statement: 'Lay statement',
+  buddy_statement: 'Buddy statement',
+  blue_button: 'Blue Button dump',
+  progress_notes: 'Clinical notes',
+  imaging: 'Imaging / radiology',
+  intake_summary: 'Intake summary',
+};
+
+// Human filename for display: prefer the Document's original filename; otherwise the S3 key's
+// basename with the upload-time uuid prefix stripped (keys are `cases/<caseId>/<uuid>-<name>`).
+export function displayFileName(filePath: string, filename?: string | null): string {
+  if (typeof filename === 'string' && filename.length > 0) return filename;
+  const base = filePath.split('/').pop() ?? filePath;
+  return base.replace(/^[a-f0-9-]{36}-/, '');
+}
+
+export function keyDocDisplayLabel(docType: string, displayName: string): string {
+  const human = DOC_TYPE_HUMAN_LABELS[docType];
+  if (docType === 'unspecified' || human === undefined) return displayName;
+  return `${human} — ${displayName}`;
+}
+
+// §1b non-PDF detection: filename extension OR the stored Document.contentType (mime). Either
+// signal marks the source as needing text→PDF rendering — the Python assembler is PDF-only and
+// silently skips anything else (the Perez psych-note failure).
+const NON_PDF_EXTENSIONS = /\.(txt|rtf|doc|docx)$/i;
+const NON_PDF_MIME_TYPES: ReadonlySet<string> = new Set([
+  'text/plain',
+  'text/rtf',
+  'application/rtf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]);
+export function isNonPdfSource(
+  filePath: string,
+  filename: string | null | undefined,
+  contentType: string | null | undefined,
+): boolean {
+  if (NON_PDF_EXTENSIONS.test(filePath)) return true;
+  if (typeof filename === 'string' && NON_PDF_EXTENSIONS.test(filename)) return true;
+  const mime = typeof contentType === 'string' ? contentType.split(';')[0]?.trim().toLowerCase() : undefined;
+  return mime !== undefined && mime.length > 0 && NON_PDF_MIME_TYPES.has(mime);
+}
+
+// §1 soft no-dx gate: the clinical category — the pages the PCP "refuses to sign without".
+// Mirrors CATEGORY_BY_DOC_TYPE's 'clinical' bucket in services/doctor-pack.ts (progress_notes /
+// c_and_p_exam / dbq). The HARD ship-block comes after the PCP re-review proves selection
+// quality; for now the pack still ships, loudly flagged.
+export const CLINICAL_DX_DOC_TYPES: ReadonlySet<string> = new Set(['progress_notes', 'c_and_p_exam', 'dbq']);
+export const NO_CLINICAL_DX_WARNING = 'NO_CLINICAL_DX_DOCUMENTATION';
+
+// Rendered-artifact uploads go to the RECORDS bucket (PHI_BUCKET_NAME — the same bucket the
+// assembler's _records_bucket() reads manifest entries from) under a key DERIVED from the
+// source layout: cases/<caseId>/_rendered/<documentId>-v<caseVersion>.pdf. Chosen over a
+// per-entry bucket field precisely so handler.py needs ZERO contract change. Deterministic
+// bytes (record-text-render) + deterministic key = idempotent, overwrite-safe.
+export interface DoctorPackGenerateDeps {
+  readonly s3?: { send(command: unknown): Promise<unknown> };
+  readonly recordsBucketName?: string;
+}
+let cachedRecordsS3: S3Client | null = null;
+function defaultRecordsS3(): S3Client {
+  if (cachedRecordsS3 !== null) return cachedRecordsS3;
+  cachedRecordsS3 = new S3Client({ forcePathStyle: process.env['AWS_S3_FORCE_PATH_STYLE'] === 'true' });
+  return cachedRecordsS3;
+}
+
 export interface GenerateDoctorPackParams {
   readonly caseId: string;
   // Stamped as DoctorPack.generatedBy + the activity-log actor. For the auto trigger this is
@@ -115,6 +225,9 @@ export type GenerateDoctorPackResult =
 export async function generateDoctorPackForCase(
   db: AppDb,
   params: GenerateDoctorPackParams,
+  // WAVE 2: injectable S3 for the non-PDF → rendered-PDF uploads. Callers that never hit a
+  // non-PDF source never touch S3 (the client is created lazily, per render).
+  deps?: DoctorPackGenerateDeps,
 ): Promise<GenerateDoctorPackResult> {
   const { caseId, actorSub } = params;
   const trigger = params.trigger ?? 'manual';
@@ -137,11 +250,13 @@ export async function generateDoctorPackForCase(
         // never loaded => page selection inert.
         // Chunk D: docTag is the uploader's explicit label - the human classification
         // override when set (currently null/'Other' for all uploads).
-        select: { id: true, s3Key: true, pageCount: true, docTag: true },
+        // WAVE 2 (§1b/§3): filename + contentType feed non-PDF detection + display labels;
+        // uploadedAt feeds the rendered-PDF provenance header ('source uploaded <date>').
+        select: { id: true, s3Key: true, pageCount: true, docTag: true, filename: true, contentType: true, uploadedAt: true },
         orderBy: { uploadedAt: 'asc' },
       },
     },
-  })) as unknown as { id: string; veteranId: string; version: number; claimedCondition: string | null; documents: readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null }[] } | null;
+  })) as unknown as { id: string; veteranId: string; version: number; claimedCondition: string | null; documents: readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null; filename?: string | null; contentType?: string | null; uploadedAt?: Date | string | null }[] } | null;
   if (caseWithDocs === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
   const c = { id: caseWithDocs.id, veteranId: caseWithDocs.veteranId, version: caseWithDocs.version };
   const claimedCondition = caseWithDocs.claimedCondition ?? undefined;
@@ -198,7 +313,7 @@ export async function generateDoctorPackForCase(
   // total. Until the worker is shipped, page_count stays null and the assembler treats
   // null as "include from page 1 onward; worker discovers exact bound at extraction".
   // We also pull existing KeyDoc rows to preserve per-doc physician overrides + notes.
-  const docList = caseWithDocs.documents as readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null }[];
+  const docList = caseWithDocs.documents as readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null; filename?: string | null; contentType?: string | null; uploadedAt?: Date | string | null }[];
   const existingKeyDocs = await db.keyDoc.findMany({ where: { caseId } });
   const existingByPath = new Map(existingKeyDocs.map((kd) => [kd.filePath, kd]));
 
@@ -243,13 +358,9 @@ export async function generateDoctorPackForCase(
   // 'unspecified' -> first-8-pages rule -> the entire VA-letter/statement/STR rule set in
   // page-selector.ts never ran. classifyDocument composes: docTag (human override) >
   // content text (first 2 OCR'd pages) > filename (legacy fallback).
-  const CONTENT_HINT_CHARS_PER_PAGE = 4000;
   const perFileSelection = classifiedFiles.map((f) => {
     const pageRows = pagesByDocumentId.get(f.documentId) ?? [];
-    const contentText = pageRows
-      .filter((p) => p.pageNumber <= 2)
-      .map((p) => p.text.slice(0, CONTENT_HINT_CHARS_PER_PAGE))
-      .join('\n');
+    const contentText = buildContentHintText(pageRows);
     const cls = classifyDocument({ filePath: f.filePath, docTag: f.docTag, contentText });
     const pagesInput: readonly PageSelectorInputPage[] = pageRows.map((p) => ({
       pageNumber: p.pageNumber,
@@ -332,7 +443,76 @@ export async function generateDoctorPackForCase(
   // assembler + RN review UI already consume.
   const finalEntries = budget.entries.map(({ importance: _importance, ...entry }) => entry);
   const finalRangesByPath = new Map(finalEntries.map((e) => [e.filePath, e.pageRanges]));
-  const refinedTotalPageCount = budget.postTrimPageCount;
+
+  // ===== WAVE 2 (assessment 2026-06-12 §1b/1d/§3): label, render non-PDF sources, no-dx gate =====
+  const docMetaByPath = new Map(docList.map((d) => [d.s3Key, d]));
+
+  // §3: stamp displayLabel BEFORE the render swap so the label always carries the ORIGINAL
+  // filename (the rendered artifact's provenance header declares the conversion separately).
+  // Additive manifest field — the assembler tolerates absence on legacy rows.
+  const labeledEntries = finalEntries.map((entry) => {
+    const meta = docMetaByPath.get(entry.filePath);
+    return { ...entry, displayLabel: keyDocDisplayLabel(entry.docType, displayFileName(entry.filePath, meta?.filename ?? null)) };
+  });
+
+  // §1b: render each non-PDF source's SELECTED pages to a real PDF in the records bucket and
+  // point the manifest entry at the rendered key. Fail-OPEN per entry: a render/upload error
+  // logs, drops THAT entry into trimNotes ('could not render <filename>'), and the pack keeps
+  // assembling — never the whole pack. (KeyDoc rows are untouched: they keep the ORIGINAL
+  // filePath + selector ranges so the RN review UI and the Document join keep working.)
+  const renderNotes: string[] = [];
+  const packEntries: Array<(typeof labeledEntries)[number]> = [];
+  for (const entry of labeledEntries) {
+    const meta = docMetaByPath.get(entry.filePath);
+    if (meta === undefined || !isNonPdfSource(entry.filePath, meta.filename ?? null, meta.contentType ?? null)) {
+      packEntries.push(entry);
+      continue;
+    }
+    const displayName = displayFileName(entry.filePath, meta.filename ?? null);
+    try {
+      const pageRows = pagesByDocumentId.get(meta.id) ?? [];
+      // Whole-doc passthrough entries (empty pageRanges) render ALL available page text —
+      // mirroring the assembler's "empty ranges = whole document" contract (handler.py H2).
+      const selectedRows = entry.pageRanges.length === 0
+        ? pageRows
+        : pageRows.filter((p) => entry.pageRanges.some((r) => p.pageNumber >= r.from && p.pageNumber <= r.to));
+      if (selectedRows.length === 0) throw new Error('no extracted page text available to render');
+      const uploadedAtRaw = meta.uploadedAt ?? null;
+      const rendered = await renderRecordTextPdf({
+        originalFilename: displayName,
+        sourceUploadedAt: uploadedAtRaw !== null ? new Date(uploadedAtRaw) : null,
+        pages: selectedRows.map((p) => ({ sourcePageNumber: p.pageNumber, text: p.text })),
+      });
+      // Derived RECORDS-bucket key — zero handler.py contract change (it fetches every entry
+      // from _records_bucket()). Deterministic + overwrite-safe: same text → same bytes.
+      const renderedKey = `cases/${caseId}/_rendered/${meta.id}-v${c.version}.pdf`;
+      const bucket = deps?.recordsBucketName ?? process.env['PHI_BUCKET_NAME'];
+      if (typeof bucket !== 'string' || bucket.length === 0) {
+        throw new Error('PHI_BUCKET_NAME (records bucket) not configured for rendered-record upload');
+      }
+      const s3 = deps?.s3 ?? defaultRecordsS3();
+      await s3.send(new PutObjectCommand({ Bucket: bucket, Key: renderedKey, Body: rendered.bytes, ContentType: 'application/pdf' }));
+      packEntries.push({
+        ...entry,
+        filePath: renderedKey,
+        pageRanges: [{ from: 1, to: rendered.pageCount }],
+        pageCount: rendered.pageCount,
+      });
+    } catch (renderErr) {
+      console.warn(`doctor-pack: could not render non-PDF source ${displayName} (entry dropped, pack continues):`, renderErr);
+      renderNotes.push(`could not render ${displayName}`);
+    }
+  }
+  const packTrimNotes = [...budget.trimNotes, ...renderNotes];
+  const refinedTotalPageCount = packEntries.reduce((sum, e) => sum + e.pageCount, 0);
+
+  // §1 soft no-dx gate: did the clinical category (progress_notes / c_and_p_exam / dbq)
+  // contribute ZERO pages to the final manifest? Whole-doc passthrough clinical entries
+  // (pageCount 0, empty ranges) count as contributing — the assembler ships the whole file.
+  const clinicalPageContribution = packEntries
+    .filter((e) => CLINICAL_DX_DOC_TYPES.has(e.docType))
+    .reduce((sum, e) => sum + (e.pageRanges.length === 0 ? Math.max(1, e.pageCount) : e.pageCount), 0);
+  const missingClinical = clinicalPageContribution === 0;
 
   // Cover-page summary (architect plan: lives in DoctorPack.manifestJson.coverPage).
   const coverPage = await aggregateChartSummary({
@@ -380,6 +560,11 @@ export async function generateDoctorPackForCase(
         ? false
         : freshNeedsRnReview;
 
+      // Assessment 2026-06-12 §2: stamp the classifier-code version that produced this row's
+      // docType/classification. Rows stamped below CLASSIFIER_VERSION_NUM (or at the column
+      // default 0 = legacy) are what POST /rn/key-docs/reclassify-stale backfills after a
+      // classifier upgrade — without the stamp, stale misclassifications are indistinguishable
+      // from fresh ones and sit in the RN queue forever.
       await tx.keyDoc.upsert({
         where: { caseId_filePath: { caseId, filePath: f.filePath } },
         create: {
@@ -393,6 +578,7 @@ export async function generateDoctorPackForCase(
           needsRnReview: freshNeedsRnReview,
           selectorVersion: sel.selection.selectorVersion,
           selectorRationale: rationaleToWrite,
+          classifierVersion: CLASSIFIER_VERSION_NUM,
         },
         update: {
           fileSha256: f.fileSha256,
@@ -403,6 +589,7 @@ export async function generateDoctorPackForCase(
           needsRnReview: needsRnReviewToWrite,
           selectorVersion: sel.selection.selectorVersion,
           selectorRationale: rationaleToWrite,
+          classifierVersion: CLASSIFIER_VERSION_NUM,
           version: { increment: 1 },
           // When docType changes (classifier upgrade or content re-classification), wipe
           // the stale RN acknowledgement — the file means something different now.
@@ -427,24 +614,28 @@ export async function generateDoctorPackForCase(
         caseVersion: c.version,
         state: 'queued',
         pdfS3Key: s3Key,
-        keyDocCount: finalEntries.length,
+        keyDocCount: packEntries.length,
         pageCount: refinedTotalPageCount,
         // Phase 7B-revised Build 1: manifestJson carries entries (with refined page ranges)
         // + cover-page summary (the chart-state snapshot the assembler renders as PDF page 1).
         // The page-selector's per-file rationale lives on each KeyDoc row (selectorRationale)
         // for audit replay; the cover page surfaces top-line state only.
         // Chunk D: budgetTrim records what the pack page budget removed (RN-visible audit).
+        // WAVE 2: entries carry displayLabel; render failures append to trimNotes (the
+        // budgetTrim block now also appears when only render notes exist); warnings carries
+        // the §1 no-clinical-dx flag the panel surfaces as the amber banner.
         manifestJson: {
-          entries: finalEntries,
+          entries: packEntries,
           engineVersion: DOCTOR_PACK_ENGINE_VERSION,
           ...(coverPage ? { coverPage } : {}),
-          ...(budget.trimmed
+          ...(missingClinical ? { warnings: [NO_CLINICAL_DX_WARNING] } : {}),
+          ...(budget.trimmed || renderNotes.length > 0
             ? {
                 budgetTrim: {
                   budget: PACK_PAGE_BUDGET,
                   preTrimPageCount: budget.preTrimPageCount,
                   postTrimPageCount: budget.postTrimPageCount,
-                  trimNotes: budget.trimNotes,
+                  trimNotes: packTrimNotes,
                 },
               }
             : {}),
@@ -464,7 +655,7 @@ export async function generateDoctorPackForCase(
         detailsJson: {
           caseId,
           doctorPackId: stamped.id,
-          keyDocCount: finalEntries.length,
+          keyDocCount: packEntries.length,
           pageCount: refinedTotalPageCount,
           // Chunk D re-key: aboveTarget stays the HARD compression flag (PACK_PAGE_TARGET=250,
           // worker may downsample); the curation budget is the separate budget* fields.
@@ -480,6 +671,28 @@ export async function generateDoctorPackForCase(
         },
       },
     });
+
+    // WAVE 2 (§1 soft gate): a pack with ZERO clinical-dx pages is loudly flagged — manifest
+    // warning (panel banner) + its own audit row. The hard no-dx-no-ship park comes after the
+    // PCP re-review proves selection quality.
+    if (missingClinical) {
+      await tx.activityLog.create({
+        data: {
+          actorUserId: actorSub,
+          action: 'doctor_pack_missing_clinical',
+          caseId,
+          ...(c.veteranId ? { veteranId: c.veteranId } : {}),
+          detailsJson: {
+            caseId,
+            doctorPackId: stamped.id,
+            warning: NO_CLINICAL_DX_WARNING,
+            claimedCondition: claimedCondition ?? null,
+            keyDocCount: packEntries.length,
+            pageCount: refinedTotalPageCount,
+          },
+        },
+      });
+    }
 
     return stamped;
   });

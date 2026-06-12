@@ -181,14 +181,17 @@ describe('selectPages — rating_decision rules', () => {
     expect(r.needsRnReview).toBe(false);
   });
 
-  it('high-signal fallback: if <2 page matches, includes all + flags RN', () => {
+  // Assessment 2026-06-12 §1a (page-selector 1.2.0) — DELIBERATE flip: the fallback now
+  // returns all NON-boilerplate pages (was: ALL pages). p4 is appeal boilerplate and may
+  // never ship, even under the "decision is in here somewhere" fallback.
+  it('high-signal fallback: if <2 page matches, includes all NON-boilerplate pages + flags RN', () => {
     const r = run('rating_decision', [
       p(1, 'cover sheet'),
       p(2, 'letterhead only'),
       p(3, 'we have granted PTSD service connection'), // 1 match
       p(4, 'how to appeal — your rights — notice of disagreement'),
     ]);
-    expect(r.pageRanges).toEqual([{ from: 1, to: 4 }]);
+    expect(r.pageRanges).toEqual([{ from: 1, to: 3 }]);
     expect(r.needsRnReview).toBe(true);
     expect(r.selectorRationale).toContain('high_signal_fallback');
   });
@@ -317,6 +320,74 @@ describe('selectPages — range merging', () => {
       p(5, 'service connection is established'),
     ]);
     expect(r.pageRanges).toEqual([{ from: 1, to: 3 }, { from: 5, to: 5 }]);
+  });
+});
+
+// Assessment 2026-06-12 §1a (page-selector 1.2.0): benefits-enclosure kill-list + tiered
+// includes. The live failure: VA "Additional Benefits" enclosures say "service-connected"
+// and "granted" on every page and sailed into the pack.
+describe('selectPages — benefits-enclosure boilerplate kill-list (1.2.0)', () => {
+  it('excludes a benefits enclosure page even though it says "service-connected" and "granted"', () => {
+    const r = run('rating_decision', [
+      p(1, 'REASONS FOR DECISION\n\nEntitlement to service connection for lumbar strain is granted.'),
+      p(2, 'Evaluation of lumbar strain is assigned at 40 percent based on limitation of motion.'),
+      p(3, 'What You Should Know About Additional Benefits — Enclosure 2\n\nBecause you are a service-connected veteran whose claim has been granted, you may be eligible for vocational rehabilitation.'),
+      p(4, 'Veterans Crisis Line\n\nIf you are a veteran in crisis — even if not service-connected or granted benefits — Dial 988 then Press 1.'),
+    ]);
+    const included = r.pageRanges.flatMap((rg) => Array.from({ length: rg.to - rg.from + 1 }, (_, i) => rg.from + i));
+    expect(included).toEqual([1, 2]);
+    expect(r.needsRnReview).toBe(false);
+  });
+
+  it('density rule: a REAL decision page mentioning one boilerplate phrase in passing survives', () => {
+    const r = run('rating_decision', [
+      p(1, 'REASONS FOR DECISION\n\nWe have granted service connection. See the enclosure for more information.'),
+      p(2, 'An evaluation of 40 percent is assigned because flexion is limited to 25 degrees.'),
+    ]);
+    const included = r.pageRanges.flatMap((rg) => Array.from({ length: rg.to - rg.from + 1 }, (_, i) => rg.from + i));
+    expect(included).toContain(1); // one 'enclosure' hit is NOT boilerplate (needs >= 2 distinct)
+    expect(included).toContain(2);
+  });
+
+  it('weak tokens (bare granted/service-connect) count only when a strong anchor fired in the doc', () => {
+    // Doc A: strong anchor on p1 -> the weak-only p2 rides in.
+    const withStrong = run('rating_decision', [
+      p(1, 'REASONS FOR DECISION\n\nEntitlement to service connection for tinnitus is granted.'),
+      p(2, 'The veteran is service-connected for tinnitus and the granted evaluation is unchanged in this narrative continuation.'),
+    ]);
+    const includedA = withStrong.pageRanges.flatMap((rg) => Array.from({ length: rg.to - rg.from + 1 }, (_, i) => rg.from + i));
+    expect(includedA).toEqual([1, 2]);
+    expect(withStrong.needsRnReview).toBe(false);
+
+    // Doc B: NO strong anchor anywhere -> weak tokens alone select nothing; the high-signal
+    // fallback takes over (all non-boilerplate pages + RN review).
+    const weakOnly = run('rating_decision', [
+      p(1, 'Your service-connected benefits summary is enclosed for reference purposes granted to you.'),
+      p(2, 'Thank you for your service. This page mentions granted benefits only in passing.'),
+      p(3, 'General correspondence text without any decision language at all beyond being granted.'),
+    ]);
+    expect(weakOnly.needsRnReview).toBe(true);
+    expect(weakOnly.selectorRationale).toContain('high_signal_fallback');
+  });
+
+  it('combined-rating math table page is excluded (PCP NEVER list)', () => {
+    const r = run('rating_decision', [
+      p(1, 'REASONS FOR DECISION\n\nEntitlement to service connection for lumbar strain is granted.'),
+      p(2, 'Evaluation of lumbar strain is assigned at 40 percent under diagnostic code 5237.'),
+      p(3, 'How VA Combines Ratings — Combined Ratings Table — Enclosure 3\n\nFor service-connected granted disabilities, 40 combined with 10 is 46 percent.'),
+    ]);
+    const included = r.pageRanges.flatMap((rg) => Array.from({ length: rg.to - rg.from + 1 }, (_, i) => rg.from + i));
+    expect(included).not.toContain(3);
+  });
+
+  it('denial letter: narrative continuation page with only weak "is denied" rides in on page-1 strong anchors', () => {
+    const r = run('denial_letter', [
+      p(1, 'We made a decision on your claim.\n\nREASONS FOR DECISION\n\nService connection for anxiety is denied because the evidence does not show a link to service.'),
+      p(2, 'The examiner opined the condition was less likely than not related. The claimed condition of generalized anxiety disorder is denied.'),
+      p(3, 'Your Rights to Appeal Our Decision\n\nYou may file a Notice of Disagreement or complete VA Form 9 for appellate review.'),
+    ]);
+    const included = r.pageRanges.flatMap((rg) => Array.from({ length: rg.to - rg.from + 1 }, (_, i) => rg.from + i));
+    expect(included).toEqual([1, 2]);
   });
 });
 

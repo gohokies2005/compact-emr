@@ -115,7 +115,9 @@ function KeyDocReviewQueue() {
                   <span className="font-mono text-xs text-slate-500">case {row.caseId}</span>
                   <span className="text-xs text-slate-500">updated {formatRelativeTime(row.updatedAt)}</span>
                 </div>
-                <p className="mt-2 break-words text-sm font-medium text-slate-800">{documentFileName(row.filename ?? row.filePath)}</p>
+                {/* WAVE 2 §3: server-computed displayLabel ('Rating decision — Misc_5.pdf')
+                    when present; legacy fallback = human filename (uuid prefix stripped). */}
+                <p className="mt-2 break-words text-sm font-medium text-slate-800">{row.displayLabel ?? documentFileName(row.filename ?? row.filePath)}</p>
                 {/* The raw selector code rides along in the tooltip for debugging. */}
                 <p className="mt-2 text-xs italic text-slate-500" title={row.selectorRationale ?? undefined}>
                   {selectorRationaleLabel(row.selectorRationale)}
@@ -207,7 +209,7 @@ function DeliveryReleaseQueue() {
                   <td className="px-4 py-2 font-medium text-slate-900">{c.id}</td>
                   <td className="px-4 py-2 text-slate-700">{c.veteran ? `${c.veteran.lastName}, ${c.veteran.firstName}` : c.veteranId}</td>
                   <td className="px-4 py-2 text-slate-700">{c.claimedCondition}</td>
-                  <td className="px-4 py-2"><CaseStatusBadge status={c.status} /></td>
+                  <td className="px-4 py-2"><CaseStatusBadge status={c.status} invoiced={c.invoiced} /></td>
                   <td className="px-4 py-2 text-slate-500">{formatRelativeTime(c.updatedAt)}</td>
                   <td className="px-4 py-2 text-right">
                     <Link className="text-indigo-600 hover:underline" to={caseHref} onClick={(e) => e.stopPropagation()}>Invoice + release</Link>
@@ -264,14 +266,15 @@ export function RnQueuePage() {
             onClick={() => setTab('manual_summary')}
             className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === 'manual_summary' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
-            Manual summary{tab === 'manual_summary' && total > 0 ? ` (${total})` : ''}
+            {/* Tab names describe the NURSE'S verb, not the system's state (RN panel 2026-06-12). */}
+            Can't read — type it{tab === 'manual_summary' && total > 0 ? ` (${total})` : ''}
           </button>
           <button
             type="button"
             onClick={() => setTab('doc_review')}
             className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === 'doc_review' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
-            Doc selection review
+            Confirm pack pages
           </button>
           <button
             type="button"

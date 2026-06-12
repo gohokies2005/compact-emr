@@ -92,7 +92,7 @@ describe('CasesPage', () => {
     expect(screen.queryByText('Invoiced')).toBeNull();
   });
 
-  it('shows the Invoiced chip next to the status when a letter_500 invoice is out (Ryan 2026-06-11)', async () => {
+  it('invoiced delivered case: the STATUS LABEL ITSELF reads "Invoiced", same neutral format, no chip (Ryan 2026-06-12)', async () => {
     listCasesMock.mockResolvedValue({
       ...CASES_RESULT,
       data: [{ ...CASES_RESULT.data[0], status: 'delivered', invoiced: true }],
@@ -100,9 +100,13 @@ describe('CasesPage', () => {
     });
     renderPage();
     expect(await screen.findByText('CASE-001')).toBeInTheDocument();
-    const chip = screen.getByText('Invoiced');
-    expect(chip.className).toContain('text-emerald-700');
-    expect(chip).toHaveAttribute('title', expect.stringContaining('awaiting the veteran'));
+    const label = screen.getByText('Invoiced');
+    // Same neutral slate row format as every other status — never the green decoration.
+    expect(label.className).toContain('text-slate-600');
+    expect(label.className).not.toContain('emerald');
+    // The ROW must not say "Ready for delivery" (the filter dropdown option legitimately still does).
+    const rowMentions = screen.getAllByText('Ready for delivery').filter((el) => el.tagName !== 'OPTION');
+    expect(rowMentions).toHaveLength(0);
   });
 
   it('sorts by a column header: default -> asc -> desc (3-state) with aria-sort + indicator', async () => {

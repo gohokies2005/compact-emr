@@ -235,4 +235,38 @@ describe('key-docs enrichment (shared helper)', () => {
     expect(res.body.data[1].filename).toBeNull();
     expect(res.body.data[1].documentId).toBeNull();
   });
+
+  // ── WAVE 2 (assessment 2026-06-12 §3): displayLabel = '<DocType human name> — <original
+  // filename>'; 'unspecified' → just the filename. Emitted by BOTH key-docs GET endpoints. ──
+
+  it('GET /cases/:id/key-docs emits displayLabel "<Human type> — <filename>" for known docTypes', async () => {
+    const prisma = {
+      keyDoc: { findMany: vi.fn(async () => [{ ...KEY_DOC_ROW, docType: 'rating_decision' }]) },
+      document: { findMany: vi.fn(async () => [DOCUMENT_ROW]) },
+    };
+    const res = await request(appFor(prisma)).get('/api/v1/cases/CASE-1/key-docs').expect(200);
+    expect(res.body.data[0].displayLabel).toBe('Rating decision — Misc_1.pdf');
+  });
+
+  it('GET /cases/:id/key-docs: unspecified docType displayLabel is JUST the filename (no made-up type)', async () => {
+    const prisma = {
+      keyDoc: { findMany: vi.fn(async () => [KEY_DOC_ROW]) }, // docType 'unspecified'
+      document: { findMany: vi.fn(async () => [DOCUMENT_ROW]) },
+    };
+    const res = await request(appFor(prisma)).get('/api/v1/cases/CASE-1/key-docs').expect(200);
+    expect(res.body.data[0].displayLabel).toBe('Misc_1.pdf');
+  });
+
+  it('GET /rn/key-docs-needing-review emits displayLabel; a gone Document falls back to the key basename', async () => {
+    const orphanRow = { ...KEY_DOC_ROW, id: 'kd-2', caseId: 'CASE-2', docType: 'denial_letter', filePath: 'cases/CASE-2/zzzz-deleted.pdf' };
+    const prisma = {
+      keyDoc: { findMany: vi.fn(async () => [{ ...KEY_DOC_ROW, docType: 'nexus_letter_prior' }, orphanRow]) },
+      document: { findMany: vi.fn(async () => [DOCUMENT_ROW]) },
+    };
+    const res = await request(appFor(prisma)).get('/api/v1/rn/key-docs-needing-review').expect(200);
+    expect(res.body.data[0].displayLabel).toBe('Prior nexus letter — Misc_1.pdf');
+    // Document row gone → filename falls back to the S3 key basename (uuid prefix stripped
+    // when present); the human docType still leads.
+    expect(res.body.data[1].displayLabel).toBe('Denial letter — zzzz-deleted.pdf');
+  });
 });

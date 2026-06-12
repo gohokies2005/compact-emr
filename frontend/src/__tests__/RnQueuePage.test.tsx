@@ -240,7 +240,7 @@ describe('RnQueuePage', () => {
 
   async function openDocReviewTab() {
     renderQueue();
-    fireEvent.click(await screen.findByRole('button', { name: 'Doc selection review' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm pack pages' }));
   }
 
   it('doc-review row renders the human filename, never the raw S3 key', async () => {
@@ -285,6 +285,19 @@ describe('RnQueuePage', () => {
     // documentFileName strips the uuid prefix off the raw key.
     expect(await screen.findByText('Mystery_Upload.pdf')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Open' })).not.toBeInTheDocument();
+  });
+
+  // WAVE 2 (assessment 2026-06-12 §3): the card's title line renders the server displayLabel
+  // ('<DocType human name> — <original filename>') when present; legacy rows fall back.
+  it('doc-review card renders the server displayLabel when present', async () => {
+    listReviewMock.mockResolvedValue({
+      data: [{ ...reviewRow, docType: 'nexus_letter_prior', displayLabel: 'Prior nexus letter — Jr_AAD_Nexus.pdf' }],
+      total: 1,
+    });
+    await openDocReviewTab();
+    expect(await screen.findByText('Prior nexus letter — Jr_AAD_Nexus.pdf')).toBeInTheDocument();
+    // The fallback filename line is replaced, not duplicated.
+    expect(screen.queryByText('Mystery_Upload.pdf')).not.toBeInTheDocument();
   });
 
   it('Mark reviewed still acknowledges the KeyDoc', async () => {

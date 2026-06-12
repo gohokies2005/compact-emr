@@ -36,6 +36,17 @@ export const CASE_STATUS_LABELS: Record<CaseStatus, string> = {
   needs_records: 'Needs records',
 };
 
+/**
+ * Display label with the INVOICED overlay (Ryan 2026-06-12): once the RN sends the invoice email
+ * (a letter_500 Payment row at status='invoiced'), a 'delivered' case READS "Invoiced" — same
+ * neutral format, the label itself changes, no extra chip ("just change ready for delivery to
+ * invoiced, keeping the same format"). The enum value stays 'delivered'; this is display-only.
+ */
+export function caseDisplayLabel(status: CaseStatus, opts?: { invoiced?: boolean | undefined }): string {
+  if (status === 'delivered' && opts?.invoiced) return 'Invoiced';
+  return CASE_STATUS_LABELS[status];
+}
+
 export function validNextStatuses(from: CaseStatus): readonly CaseStatus[] {
   return CASE_STATUS_TRANSITIONS[from];
 }

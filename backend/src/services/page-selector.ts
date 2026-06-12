@@ -10,7 +10,8 @@ import type { KeyDocClassification, KeyDocPageRange, KeyDocType } from './db-typ
  * Two HARD-RULE-derived behaviors are baked in here:
  *   - Confidence fallback: high-signal docs (rating_decision, denial_letter, supplemental_
  *     decision, dbq, c_and_p_exam) with fewer than 2 page matches across their entire body
- *     fall back to "include all pages + needsRnReview=true". The selector cannot be wrong
+ *     fall back to "include all NON-boilerplate pages + needsRnReview=true". The selector
+ *     cannot be wrong
  *     about "the decision is in here somewhere" for a doc the classifier marked high-signal;
  *     over-inclusion + RN review beats shipping a pack missing the actual decision.
  *   - Deterministic: regex-only, no LLM. Replayability is non-negotiable (the assembler
@@ -23,7 +24,12 @@ import type { KeyDocClassification, KeyDocPageRange, KeyDocType } from './db-typ
 
 // 1.1.0 (Chunk D 2026-06-11): claimedCondition input + progress_notes condition/recent-encounter
 // inclusion (was default-exclude) + imaging rules + widened VA decision-letter phrasings.
-export const PAGE_SELECTOR_VERSION = 'page-selector-1.1.0';
+// 1.2.0 (Assessment 2026-06-12 §1, golden-pack red->green): BENEFITS_ENCLOSURE_PATTERNS folded
+// with the appeal patterns into pageIsBoilerplate() (runs BEFORE includes, outranks them,
+// >=2-distinct-hits density); rating/denial/supplemental includes TIERED into strong anchors
+// (include alone) vs weak tokens (count only when a strong anchor fired somewhere in the doc);
+// high-signal fallback now returns all NON-boilerplate pages instead of all pages.
+export const PAGE_SELECTOR_VERSION = 'page-selector-1.2.0';
 
 const SMALL_DOC_ALWAYS_ALL_TYPES: ReadonlySet<KeyDocType> = new Set<KeyDocType>([
   'audiogram',
@@ -58,31 +64,44 @@ const HIGH_SIGNAL_FALLBACK_TYPES: ReadonlySet<KeyDocType> = new Set<KeyDocType>(
 ]);
 
 interface RuleSet {
+  // STRONG anchors: a match on a page includes it on its own. For the VA decision-letter
+  // types these are the phrasings ONLY a real decision page carries (reasons-for-decision,
+  // entitlement-to-X-is, evaluation-of-X, decision-table rows) — never the enclosures.
   readonly include: readonly RegExp[];
+  // WEAK tokens (assessment 2026-06-12 §1a): bare granted / denied / service-connect(ed).
+  // The VA "Additional Benefits" enclosures say these words on every page, so a weak match
+  // counts ONLY on a page in a doc where >= 1 strong anchor also fired somewhere.
+  readonly weakInclude?: readonly RegExp[];
   readonly exclude: readonly RegExp[];
   readonly smallDocPageCutoff?: number; // include-all if pageCount <= cutoff
 }
 
 const RULES: Partial<Record<KeyDocType, RuleSet>> = {
+  // Assessment 2026-06-12 §1a: the rating/denial/supplemental includes are TIERED. Strong
+  // anchors = real-decision-page phrasings, include alone. Weak tokens = words the benefits
+  // enclosures also say on every page; they count only when a strong anchor fired somewhere
+  // in the same doc (and pageIsBoilerplate has already vetoed the enclosure pages outright).
   rating_decision: {
     include: [
-      /\bdecision\b/i,
       /reasons? and bases?/i,
       // Chunk D: real-world VA decision-letter phrasings (D2 table row 1).
       /reasons? for decision/i,
       /we (have )?made a decision on your (claim|appeal)/i,
       /entitlement to .{0,80}\bis (established|granted|denied)/i,
       /evaluation of .{0,120}\bis (continued|increased|decreased|assigned)/i,
-      /service[\s-]?connect(ion|ed)/i,
-      /\b(is|has been|have been|are) (granted|denied|continued|established)/i,
       /we (have )?(granted|denied|continued)/i,
       /we (cannot |are )?(granting|denying)/i,
       /evidence considered/i,
-      /\bgranted\b/i,
-      /\bdenied\b/i,
       /granted at \d/i,
       /with an evaluation of/i,
       /\b\d{1,3}\s?(%|percent) (disabling|evaluation)/i,
+    ],
+    weakInclude: [
+      /\bdecision\b/i,
+      /service[\s-]?connect(ion|ed)/i,
+      /\b(is|has been|have been|are) (granted|denied|continued|established)/i,
+      /\bgranted\b/i,
+      /\bdenied\b/i,
     ],
     exclude: [
       /how to (appeal|file a notice)/i,
@@ -96,17 +115,19 @@ const RULES: Partial<Record<KeyDocType, RuleSet>> = {
   },
   denial_letter: {
     include: [
-      /\bdecision\b/i,
       /reasons? and bases?/i,
       // Chunk D: real-world VA decision-letter phrasings (D2 table row 1).
       /reasons? for decision/i,
       /we (have )?made a decision on your (claim|appeal)/i,
       /entitlement to .{0,80}\bis (denied|not established)/i,
-      /\b(is|are|have been|has been) (denied|not granted)/i,
       /we (have )?(denied|are denying)/i,
       /we cannot grant/i,
-      /service[\s-]?connect(ion|ed) (is )?(not )?(granted|denied|established)/i,
       /evidence considered/i,
+    ],
+    weakInclude: [
+      /\bdecision\b/i,
+      /\b(is|are|have been|has been) (denied|not granted)/i,
+      /service[\s-]?connect(ion|ed) (is )?(not )?(granted|denied|established)/i,
     ],
     exclude: [
       /how to (appeal|file)/i,
@@ -118,12 +139,14 @@ const RULES: Partial<Record<KeyDocType, RuleSet>> = {
   },
   supplemental_decision: {
     include: [
-      /\bdecision\b/i,
       /reasons? and bases?/i,
       /supplemental claim/i,
-      /\b(is|are|has been|have been) (granted|denied|continued)/i,
       /we (have )?(granted|denied|continued)/i,
       /evidence considered/i,
+    ],
+    weakInclude: [
+      /\bdecision\b/i,
+      /\b(is|are|has been|have been) (granted|denied|continued)/i,
     ],
     exclude: [
       /how to (appeal|file)/i,
@@ -219,7 +242,6 @@ const RULES: Partial<Record<KeyDocType, RuleSet>> = {
 // truncated to the first UNSPECIFIED_SMALL_PAGE_CUTOFF pages and DO get the RN flag.
 const UNSPECIFIED_SMALL_PAGE_CUTOFF = 8;
 
-const APPEAL_BOILERPLATE_THRESHOLD = 0.4;
 const APPEAL_BOILERPLATE_PATTERNS: readonly RegExp[] = [
   /how to (appeal|file)/i,
   /your (appeal )?rights/i,
@@ -228,6 +250,45 @@ const APPEAL_BOILERPLATE_PATTERNS: readonly RegExp[] = [
   /appellate review/i,
   /right to (appeal|representation)/i,
 ];
+
+// Assessment 2026-06-12 §1a (golden-pack): the VA decision-letter ENCLOSURES — "Additional
+// Benefits", mental-health counseling, home loan, life insurance, crisis line, fraud box,
+// combined-rating math — say "service-connected" and "granted" on every page, which is how
+// they sailed into the first live pack. The PCP's NEVER list. These fold with the appeal
+// patterns into one pageIsBoilerplate() that runs BEFORE the include rules and outranks them.
+const BENEFITS_ENCLOSURE_PATTERNS: readonly RegExp[] = [
+  /additional benefits/i,
+  /mental health (counsel|care)/i,
+  /vocational rehabilitation/i,
+  /home loan guaranty/i,
+  /government life insurance/i,
+  /\bS-?DVI\b/i,
+  // "priority group" split into its own concept: a dedicated VA-medical-care enrollment page
+  // always pairs the two, while a decision page mentioning "VA medical care" in passing only
+  // trips one — the >=2-distinct-hits density rule then keeps the decision page.
+  /VA medical care|health care enrollment/i,
+  /priority group/i,
+  /veterans crisis line|dial 988|1-800-273/i,
+  // Second crisis-page concept (same rationale as priority group): the dedicated crisis-line
+  // enclosure always carries the "in crisis" / text-line language alongside the hotline number.
+  /\bin crisis\b|text 838255/i,
+  /commissary|exchange privileges/i,
+  /how to contact|where to send|toll-free/i,
+  /what you should know|your rights and responsibilities/i,
+  // Combined-rating math table pages — explicitly on the PCP NEVER list (assessment §1).
+  /combined ratings? table|how va combines ratings/i,
+  /enclosure\s*\d?\b/i,
+];
+
+const PAGE_BOILERPLATE_PATTERNS: readonly RegExp[] = [
+  ...APPEAL_BOILERPLATE_PATTERNS,
+  ...BENEFITS_ENCLOSURE_PATTERNS,
+];
+
+// >=2 DISTINCT pattern hits = boilerplate. The density floor keeps a REAL decision page that
+// mentions one phrase in passing ("See the enclosure for more information.") in the pack,
+// while every actual enclosure/appeal page — header + body phrasing — trips 2+.
+const BOILERPLATE_MIN_DISTINCT_HITS = 2;
 
 export interface PageSelectorInputPage {
   readonly pageNumber: number;
@@ -285,13 +346,18 @@ function rangesFromIncluded(includedPageNumbers: readonly number[]): readonly Ke
   return ranges;
 }
 
-function pageHasAppealBoilerplate(text: string): boolean {
+// One folded boilerplate gate (appeal + benefits-enclosure patterns). Runs BEFORE the include
+// rules and OUTRANKS them: a boilerplate page is excluded no matter how many include patterns
+// it matches. Replaces the old pageHasAppealBoilerplate (appeal-only, effectively >=3 hits).
+function pageIsBoilerplate(text: string): boolean {
   let hits = 0;
-  for (const re of APPEAL_BOILERPLATE_PATTERNS) {
-    if (re.test(text)) hits++;
+  for (const re of PAGE_BOILERPLATE_PATTERNS) {
+    if (re.test(text)) {
+      hits++;
+      if (hits >= BOILERPLATE_MIN_DISTINCT_HITS) return true;
+    }
   }
-  // Heuristic: a page dominated by appeal boilerplate matches 3+ of the canonical phrases.
-  return hits >= 3 || (hits >= 1 && text.length > 0 && text.length < 2000 && hits / APPEAL_BOILERPLATE_PATTERNS.length >= APPEAL_BOILERPLATE_THRESHOLD);
+  return false;
 }
 
 function pageIsBlank(text: string): boolean {
@@ -340,12 +406,19 @@ function buildConditionMatcher(claimedCondition: string | undefined): ((text: st
   };
 }
 
-function pageMatchesRule(text: string, rule: RuleSet): { include: boolean; reason: string } {
+// `docHasStrongAnchor`: did any STRONG include fire on a usable page anywhere in this doc?
+// Weak tokens only count when it did (assessment 2026-06-12 §1a tiering).
+function pageMatchesRule(text: string, rule: RuleSet, docHasStrongAnchor: boolean): { include: boolean; reason: string } {
   for (const re of rule.exclude) {
     if (re.test(text)) return { include: false, reason: `excluded by ${re.source}` };
   }
   for (const re of rule.include) {
     if (re.test(text)) return { include: true, reason: `matched ${re.source}` };
+  }
+  if (docHasStrongAnchor) {
+    for (const re of rule.weakInclude ?? []) {
+      if (re.test(text)) return { include: true, reason: `weak ${re.source} (doc has strong anchor)` };
+    }
   }
   return { include: false, reason: 'no include match' };
 }
@@ -363,7 +436,8 @@ function pageMatchesRule(text: string, rule: RuleSet): { include: boolean; reaso
  *   5. Small-doc shortcut (when configured): pageCount ≤ cutoff → all pages.
  *   6. benefit_summary → first 3 pages.
  *   7. Otherwise apply per-docType include/exclude rules per page.
- *   8. High-signal confidence fallback: if rules selected < 2 pages, include all + flag for RN.
+ *   8. High-signal confidence fallback: if rules selected < 2 pages, include all
+ *      NON-boilerplate pages + flag for RN (1.2.0: was all pages).
  */
 export function selectPages(input: PageSelectorInput): PageSelectorResult {
   if (input.physicianIncludeAllPages === true) {
@@ -491,30 +565,48 @@ export function selectPages(input: PageSelectorInput): PageSelectorResult {
     };
   }
 
-  // Per-page evaluation.
+  // Per-page evaluation. Boilerplate runs FIRST and outranks every include (assessment §1a).
+  // Pre-pass: find whether any strong anchor fires on a usable (non-blank, non-boilerplate)
+  // page — weak tokens only count in a doc where one did.
+  let docHasStrongAnchor = false;
+  for (const page of input.pages) {
+    if (pageIsBlank(page.text) || pageIsBoilerplate(page.text)) continue;
+    if (rule.include.some((re) => re.test(page.text))) {
+      docHasStrongAnchor = true;
+      break;
+    }
+  }
+
   const includedPages: number[] = [];
   const perPageRationales: string[] = [];
+  const boilerplatePageNumbers = new Set<number>();
   for (const page of input.pages) {
     if (pageIsBlank(page.text)) {
       perPageRationales.push(`p${page.pageNumber}: blank_or_image_only`);
       continue;
     }
-    if (pageHasAppealBoilerplate(page.text)) {
-      perPageRationales.push(`p${page.pageNumber}: appeal_boilerplate (excluded)`);
+    if (pageIsBoilerplate(page.text)) {
+      boilerplatePageNumbers.add(page.pageNumber);
+      perPageRationales.push(`p${page.pageNumber}: boilerplate (appeal/benefits-enclosure, excluded)`);
       continue;
     }
-    const decision = pageMatchesRule(page.text, rule);
+    const decision = pageMatchesRule(page.text, rule, docHasStrongAnchor);
     if (decision.include) {
       includedPages.push(page.pageNumber);
       perPageRationales.push(`p${page.pageNumber}: ${decision.reason}`);
     }
   }
 
-  // High-signal confidence fallback.
+  // High-signal confidence fallback. Assessment §1a: the fallback is now all NON-boilerplate
+  // pages — "the decision is in here somewhere" never justified shipping the VA's benefits
+  // enclosures or appeal instructions.
   if (HIGH_SIGNAL_FALLBACK_TYPES.has(input.docType) && includedPages.length < 2) {
+    const nonBoilerplate = input.pages
+      .filter((page) => !boilerplatePageNumbers.has(page.pageNumber))
+      .map((page) => page.pageNumber);
     return {
-      pageRanges: allPages(input.pageCount),
-      selectorRationale: `high_signal_fallback (only ${includedPages.length} match(es); included all pages + RN review). Pages: ${perPageRationales.join('; ')}`,
+      pageRanges: rangesFromIncluded(nonBoilerplate),
+      selectorRationale: `high_signal_fallback (only ${includedPages.length} match(es); included all non-boilerplate pages + RN review). Pages: ${perPageRationales.join('; ')}`,
       needsRnReview: true,
       selectorVersion: PAGE_SELECTOR_VERSION,
     };

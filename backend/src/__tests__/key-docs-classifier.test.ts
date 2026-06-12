@@ -5,6 +5,7 @@ import {
   classifyFile,
   classifyFileWithContentHint,
   CLASSIFIER_VERSION,
+  CLASSIFIER_VERSION_NUM,
   isHighSignal,
   mapDocTagToDocType,
   sortByDoctorPackPriority,
@@ -198,6 +199,124 @@ describe('classifyDocument — docTag > content > filename precedence', () => {
   it('falls back to filename when content is absent or unrecognized', () => {
     expect(classifyDocument({ filePath: 'DD-214.pdf' }).docType).toBe('dd_214');
     expect(classifyDocument({ filePath: 'Misc_9.pdf', contentText: 'nothing recognizable here at all today' }).docType).toBe('unspecified');
+  });
+});
+
+// ============== Assessment 2026-06-12 §2: nexus_letter_prior patterns + ordering ==============
+// The Jr_AAD_Nexus.pdf misfire: no nexus content pattern existed and a nexus letter's body cites
+// STRs, so the STR marker won. These pin the fix in BOTH directions (nexus-vs-STR, nexus-vs-C&P).
+
+describe('nexus_letter_prior — filename (assessment §2)', () => {
+  it('bare /nexus/i catches real-world names like Jr_AAD_Nexus.pdf at modest importance 70', () => {
+    const r = classifyFile('Jr_AAD_Nexus.pdf');
+    expect(r.docType).toBe('nexus_letter_prior');
+    expect(r.classification).toBe('high_signal');
+    expect(r.importance).toBe(70);
+  });
+
+  it('the legacy nexus.?letter form still classifies (subsumed by /nexus/i)', () => {
+    expect(classifyFile('Nexus_Letter_2023.pdf').docType).toBe('nexus_letter_prior');
+    expect(classifyFile('nexus-opinion-draft.pdf').docType).toBe('nexus_letter_prior');
+  });
+});
+
+describe('nexus_letter_prior — content ordering vs STR and C&P (assessment §2)', () => {
+  it('a nexus letter that cites STRs classifies nexus, NOT service_treatment_record_summary (STR marker appears FIRST in the text)', () => {
+    const hint = classifyContentText(
+      'I have reviewed the veteran\'s service treatment records in their entirety, including the chronological record of medical care, '
+      + 'as well as his post-service history. It is my independent medical opinion that his anxiety disorder is at least as likely as not related to his period of active duty.',
+    );
+    expect(hint?.docType).toBe('nexus_letter_prior');
+    expect(hint?.classification).toBe('high_signal');
+    expect(hint?.confidence).toBeGreaterThanOrEqual(0.6);
+  });
+
+  it('a nexus letter classifies nexus when the nexus phrasing appears BEFORE the STR citation (other text order)', () => {
+    const hint = classifyContentText(
+      'INDEPENDENT MEDICAL OPINION — NEXUS LETTER. Re: Mr. Perez. '
+      + 'In forming this opinion I reviewed his service treatment records and VA claims file.',
+    );
+    expect(hint?.docType).toBe('nexus_letter_prior');
+  });
+
+  it('a pure STR bundle (no nexus/IMO phrasing) STILL classifies service_treatment_record_summary', () => {
+    const hint = classifyContentText(
+      'CHRONOLOGICAL RECORD OF MEDICAL CARE (SF 600). Sick call 1998-03-12: patient reports low back pain after lifting.',
+    );
+    expect(hint?.docType).toBe('service_treatment_record_summary');
+  });
+
+  it('a C&P exam that says "it is my medical opinion" classifies c_and_p_exam, NOT nexus (the C&P-marker guard)', () => {
+    const hint = classifyContentText(
+      'COMPENSATION AND PENSION EXAMINATION. Veteran examined this date. '
+      + 'It is my medical opinion that the claimed condition is less likely than not related to service.',
+    );
+    expect(hint?.docType).toBe('c_and_p_exam');
+  });
+
+  it('a DBQ that says "it is my medical opinion" classifies dbq, NOT nexus (guard covers the DBQ marker too)', () => {
+    const hint = classifyContentText(
+      'MENTAL DISORDERS DISABILITY BENEFITS QUESTIONNAIRE. Section IV — it is my medical opinion that the diagnosis is confirmed.',
+    );
+    expect(hint?.docType).toBe('dbq');
+  });
+
+  it('the bare phrase "medical opinion" alone (no nexus/IMO phrasing) does NOT classify nexus', () => {
+    const hint = classifyContentText(
+      'The medical opinion of record was considered along with routine wellness counseling and diet notes from the clinic visit.',
+    );
+    expect(hint?.docType).not.toBe('nexus_letter_prior');
+  });
+});
+
+describe('DD-214 content pattern (assessment §2 — present + pinned)', () => {
+  it('classifies the certificate line regardless of surrounding OCR noise', () => {
+    const hint = classifyContentText('DD FORM 214 — Certificate of Release or Discharge from Active Duty. 1. NAME 2. DEPARTMENT');
+    expect(hint?.docType).toBe('dd_214');
+    expect(hint?.classification).toBe('high_signal');
+  });
+});
+
+// ============== Assessment 2026-06-12 §2.3: never-classify-own-artifacts ==============
+
+describe('classifyDocument — system-artifact guard (never classify our own output)', () => {
+  // The generated intake summary's Q&A text ECHOES decision-letter phrasing — without the
+  // guard this content would classify denial_letter and queue an RN to review our own PDF.
+  const INTAKE_SUMMARY_ECHO_TEXT =
+    'Flat Rate Nexus Intake. Q: Have you previously been denied? A: Yes — the letter said entitlement to service connection for anxiety is denied.';
+
+  it('the generated Intake_Summary.pdf key classifies intake_summary via the reserved name, never via content', () => {
+    const r = classifyDocument({
+      filePath: 'cases/CASE-1/3f2a9c1e-Intake_Summary.pdf',
+      contentText: INTAKE_SUMMARY_ECHO_TEXT,
+    });
+    expect(r.docType).toBe('intake_summary');
+    expect(r.classification).toBe('high_signal');
+    expect(r.matchedPattern).toBe('system_artifact');
+  });
+
+  it('the system-artifact guard outranks even a human docTag (system identity is not overridable)', () => {
+    const r = classifyDocument({
+      filePath: 'cases/CASE-1/3f2a9c1e-Intake_Summary.pdf',
+      docTag: 'DBQ',
+      contentText: INTAKE_SUMMARY_ECHO_TEXT,
+    });
+    expect(r.docType).toBe('intake_summary');
+    expect(r.matchedPattern).toBe('system_artifact');
+  });
+
+  it('control: the SAME echo text on a normal upload content-classifies (proving the guard is what saves the summary)', () => {
+    const r = classifyDocument({ filePath: 'cases/CASE-1/Misc_7.pdf', contentText: INTAKE_SUMMARY_ECHO_TEXT });
+    expect(r.docType).not.toBe('intake_summary');
+    expect(r.matchedPattern).toBe('content_classification');
+  });
+});
+
+describe('CLASSIFIER_VERSION_NUM (stale-row backfill stamp)', () => {
+  it('is an integer >= 2 (0 = legacy DB default, 1 reserved) and tracks the string version', () => {
+    expect(Number.isInteger(CLASSIFIER_VERSION_NUM)).toBe(true);
+    expect(CLASSIFIER_VERSION_NUM).toBeGreaterThanOrEqual(2);
+    expect(CLASSIFIER_VERSION).toBe('key-docs-classifier-1.2.0');
   });
 });
 

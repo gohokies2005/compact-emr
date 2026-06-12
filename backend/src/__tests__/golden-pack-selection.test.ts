@@ -173,3 +173,56 @@ describe('GOLDEN PACK — budget contention (category floors beat flat prefix-fi
     expect(r.trimNotes.join(' ')).toContain('rating_big.pdf');
   });
 });
+
+describe('GOLDEN PACK — small blue-button export carries the dx (Perez live finding 2026-06-12)', () => {
+  // A 6-page My-HealtheVet TEXT export whose page 2 IS the diagnosing note. Under the old
+  // blanket blue_button hard-exclude this never entered the pack and the regenerated live pack
+  // shipped NO_CLINICAL_DX_DOCUMENTATION. Small exports now ride the condition-keyed branch.
+  const BLUE_BUTTON_PAGES: readonly string[] = [
+    'My HealtheVet Blue Button report. Personal information report generated for veteran.',
+    'PCMHI Functional Assessment Consult. DIAGNOSES (DSM-5): Unspecified Anxiety Disorder. Assessment: anxiety, chronic, related to pain. Plan: continue escitalopram.',
+    'Allergies: NKDA. Immunizations list. Influenza 2024.',
+    'Vitals history. BP readings table.',
+    'Appointment history. Past appointments list.',
+    'End of report. My HealtheVet download footer.',
+  ];
+
+  const selection = selectPages({
+    filePath: 'records/bb_export.txt',
+    docType: 'blue_button',
+    classification: 'bulk',
+    pageCount: BLUE_BUTTON_PAGES.length,
+    pages: BLUE_BUTTON_PAGES.map((text, i) => ({ pageNumber: i + 1, text, confidence: 0.99 })),
+    claimedCondition: 'anxiety',
+  });
+
+  it('selects the dx page via the condition-keyed branch instead of default-excluding', () => {
+    expect(selection.selectorRationale).toContain('blue_button_condition_or_recent');
+    const pages = selection.pageRanges.flatMap((r) => Array.from({ length: r.to - r.from + 1 }, (_, k) => r.from + k));
+    expect(pages).toContain(2); // the PCMHI dx page
+  });
+
+  it('a LARGE blue-button dump (40pp) stays default-excluded', () => {
+    const big = selectPages({
+      filePath: 'records/bb_big_dump.txt',
+      docType: 'blue_button',
+      classification: 'bulk',
+      pageCount: 40,
+      pages: Array.from({ length: 40 }, (_, i) => ({ pageNumber: i + 1, text: i === 1 ? 'anxiety mentioned here' : `filler page ${i}`, confidence: 0.99 })),
+      claimedCondition: 'anxiety',
+    });
+    expect(big.pageRanges).toEqual([]);
+    expect(big.selectorRationale).toContain('default_exclude (blue_button)');
+  });
+
+  it('the kept blue-button pages count as CLINICAL in the budget (floor-protected, not other)', () => {
+    const entries: BudgetEntry[] = [
+      { filePath: 'rating.pdf', docType: 'rating_decision', classification: 'high_signal', importance: 100, pageRanges: Array.from({ length: 18 }, (_, i) => ({ from: i + 1, to: i + 1 })) as KeyDocPageRange[], pageCount: 18 },
+      { filePath: 'bb_export.txt', docType: 'blue_button', classification: 'bulk', importance: 40, pageRanges: selection.pageRanges, pageCount: selection.pageRanges.reduce((n, r) => n + (r.to - r.from + 1), 0) },
+    ];
+    const r = applyPackPageBudget(entries, PACK_PAGE_BUDGET);
+    const bb = r.entries.find((e) => e.filePath === 'bb_export.txt');
+    expect(bb).toBeDefined();
+    expect(bb!.pageCount).toBeGreaterThan(0);
+  });
+});

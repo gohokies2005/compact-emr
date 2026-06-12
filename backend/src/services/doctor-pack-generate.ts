@@ -184,7 +184,9 @@ export function isNonPdfSource(
 // Mirrors CATEGORY_BY_DOC_TYPE's 'clinical' bucket in services/doctor-pack.ts (progress_notes /
 // c_and_p_exam / dbq). The HARD ship-block comes after the PCP re-review proves selection
 // quality; for now the pack still ships, loudly flagged.
-export const CLINICAL_DX_DOC_TYPES: ReadonlySet<string> = new Set(['progress_notes', 'c_and_p_exam', 'dbq']);
+// blue_button: small exports contribute pages ONLY via the condition-keyed branch (Perez
+// 2026-06-12 — the dx note was a 6pp My-HealtheVet text export), so their kept pages count.
+export const CLINICAL_DX_DOC_TYPES: ReadonlySet<string> = new Set(['progress_notes', 'c_and_p_exam', 'dbq', 'blue_button']);
 export const NO_CLINICAL_DX_WARNING = 'NO_CLINICAL_DX_DOCUMENTATION';
 
 // Rendered-artifact uploads go to the RECORDS bucket (PHI_BUCKET_NAME — the same bucket the

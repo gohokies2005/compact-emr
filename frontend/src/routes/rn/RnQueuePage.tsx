@@ -58,6 +58,9 @@ const SELECTOR_RATIONALE_LABELS: readonly (readonly [string, string])[] = [
   ['default_exclude', 'Bulk record dump — excluded by default'],
   ['progress_notes_no_condition_or_recent_match', 'Progress notes — no mention of the claimed condition and no recent visit; excluded'],
   ['progress_notes_condition_or_recent', 'Progress notes — pages mentioning the claimed condition or from the most recent visit included'],
+  // Small blue-button exports ride the same condition-keyed selection (Perez dx-note fix 2026-06-12).
+  ['blue_button_no_condition_or_recent_match', 'Health-record export — no mention of the claimed condition; excluded'],
+  ['blue_button_condition_or_recent', 'Health-record export — pages mentioning the claimed condition included'],
   ['benefit_summary_first_3_pages', 'Benefit summary — first 3 pages included'],
 ];
 

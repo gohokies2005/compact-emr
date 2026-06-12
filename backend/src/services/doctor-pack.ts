@@ -55,6 +55,11 @@ const CATEGORY_BY_DOC_TYPE: Partial<Record<KeyDocRecord['docType'], PackCategory
   progress_notes: 'clinical',
   c_and_p_exam: 'clinical',
   dbq: 'clinical',
+  // Small blue-button exports only contribute pages when the selector's condition-keyed branch
+  // matched them (large dumps select zero pages) — those matched pages ARE clinical evidence
+  // (the Perez PCMHI dx note, 2026-06-12) and must count toward / be protected by the clinical
+  // floor, not ride the unprotected 'other' bucket.
+  blue_button: 'clinical',
   imaging: 'tests',
   sleep_study: 'tests',
   pulmonary_function_test: 'tests',

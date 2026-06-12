@@ -241,6 +241,9 @@ const RULES: Partial<Record<KeyDocType, RuleSet>> = {
 // (and no longer RN-flagged — see the unspecified branch in selectPages); larger ones are
 // truncated to the first UNSPECIFIED_SMALL_PAGE_CUTOFF pages and DO get the RN flag.
 const UNSPECIFIED_SMALL_PAGE_CUTOFF = 8;
+// Small My-HealtheVet/blue-button exports (≤15pp) get condition-keyed selection instead of the
+// bulk-dump hard-exclude — a 6-page text export can BE the diagnosing note (Perez 2026-06-12).
+const SMALL_BLUE_BUTTON_MAX_PAGES = 15;
 
 const APPEAL_BOILERPLATE_PATTERNS: readonly RegExp[] = [
   /how to (appeal|file)/i,
@@ -472,19 +475,30 @@ export function selectPages(input: PageSelectorInput): PageSelectorResult {
   }
 
   if (DEFAULT_EXCLUDE_BY_DEFAULT.has(input.docType)) {
-    return {
-      pageRanges: [],
-      selectorRationale: `default_exclude (${input.docType}); drafter-cited pages add post-hoc`,
-      needsRnReview: false,
-      selectorVersion: PAGE_SELECTOR_VERSION,
-    };
+    // SMALL blue-button exception (live Perez finding 2026-06-12): veterans upload My HealtheVet
+    // TEXT exports a few pages long whose content IS the clinical evidence (the PCMHI consult
+    // carrying the anxiety dx classified blue_button → hard-excluded → the regenerated pack
+    // shipped with NO clinical documentation). The 500-page-dump guard must not nuke a 6-page
+    // export. Small blue-button docs fall through to the SAME condition/recent-encounter
+    // selection progress notes use (next branch); genuinely-bulk dumps stay default-excluded.
+    // Format/source must never silently decide clinical inclusion (PCP panel spec line 3).
+    const isSmallBlueButton = input.docType === 'blue_button' && input.pageCount <= SMALL_BLUE_BUTTON_MAX_PAGES;
+    if (!isSmallBlueButton) {
+      return {
+        pageRanges: [],
+        selectorRationale: `default_exclude (${input.docType}); drafter-cited pages add post-hoc`,
+        needsRnReview: false,
+        selectorVersion: PAGE_SELECTOR_VERSION,
+      };
+    }
   }
 
   // Chunk D: progress notes are no longer default-excluded. Ryan's spec (P2.4 rule 2) wants the
   // "most recent/pertinent office visit notes" IN: include a page when it mentions the claimed
   // condition OR belongs to the most recent encounter (= carries the doc's max parsed date).
   // Nothing matches -> empty ranges (the old exclusion, now earned rather than blanket).
-  if (input.docType === 'progress_notes') {
+  // Small blue_button exports ride the same branch (see the exception above).
+  if (input.docType === 'progress_notes' || input.docType === 'blue_button') {
     const conditionMatches = buildConditionMatcher(input.claimedCondition);
     const pageDates = new Map<number, number[]>();
     let docMaxDate = 0;
@@ -505,11 +519,13 @@ export function selectPages(input: PageSelectorInput): PageSelectorResult {
         reasons.push(`p${page.pageNumber}: ${mentionsCondition ? 'mentions_claimed_condition' : `most_recent_encounter(${docMaxDate})`}`);
       }
     }
+    // Rationale prefix carries the REAL docType so blue-button exports don't masquerade as
+    // progress notes in the RN tooltip (both prefixes mapped in the frontend label table).
     return {
       pageRanges: rangesFromIncluded(includedPages),
       selectorRationale: includedPages.length > 0
-        ? `progress_notes_condition_or_recent: ${reasons.join('; ')}`
-        : 'progress_notes_no_condition_or_recent_match (excluded)',
+        ? `${input.docType}_condition_or_recent: ${reasons.join('; ')}`
+        : `${input.docType}_no_condition_or_recent_match (excluded)`,
       needsRnReview: false,
       selectorVersion: PAGE_SELECTOR_VERSION,
     };

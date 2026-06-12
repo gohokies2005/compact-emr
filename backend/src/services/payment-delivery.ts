@@ -67,7 +67,10 @@ export async function processStripePayment(
   if (c === null) {
     // A real PAID charge whose client_reference_id matched no EMR case leaves NO other trace (Stripe
     // gets 200 and never retries) — record a breadcrumb so an admin can reconcile it manually.
-    await db.activityLog.create({ data: { actorUserId: STRIPE_ACTOR, action: 'payment_received_no_case', caseId, detailsJson: { chargeId, amountCents, clientReferenceId: caseId } } }).catch(() => undefined);
+    // NO caseId on the row: activity_log.case_id is an FK, and by definition this caseId matches no
+    // case — setting it made the breadcrumb ITSELF throw (FK violation) and the .catch ate the only
+    // evidence (Yorde incident 2026-06-12). The unmatched reference lives in detailsJson instead.
+    await db.activityLog.create({ data: { actorUserId: STRIPE_ACTOR, action: 'payment_received_no_case', detailsJson: { chargeId, amountCents, clientReferenceId: caseId } } }).catch((e) => { console.warn('[payment] no_case breadcrumb failed:', e); });
     return { status: 'no_case', reason: `case ${caseId} not found` };
   }
 

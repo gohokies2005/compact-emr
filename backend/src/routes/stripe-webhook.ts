@@ -46,12 +46,21 @@ export function createStripeWebhookRouter(db: AppDb): Router {
     const caseId = parseCaseRef(session['client_reference_id'] as string | undefined);
     const amountCents = typeof session['amount_total'] === 'number' ? (session['amount_total'] as number) : 0;
     const chargeId = String(session['payment_intent'] ?? session['id'] ?? '');
+    // OBSERVABILITY (Yorde incident 2026-06-12): every verified event logs WHAT arrived — without
+    // this, a no_case/ignored outcome left zero trace of which reference/amount Stripe sent (the
+    // no-case breadcrumb also used to crash on its own FK, erasing the only other evidence).
+    // client_reference_id / amounts / payment_intent ids are not PHI.
+    console.log(
+      `[stripe-webhook] checkout.session.completed ref=${String(session['client_reference_id'] ?? '(none)')} ` +
+      `parsedCaseId=${caseId ?? '(none)'} amount=${amountCents} chargeId=${chargeId || '(none)'}`,
+    );
     if (!caseId || !chargeId) { res.json({ received: true, reason: 'missing case ref or charge id' }); return; }
 
     const result = await processStripePayment(db, { caseId, amountCents, chargeId }, {
       portalBaseUrl: process.env.DELIVERY_PORTAL_BASE_URL ?? 'https://emr.flatratenexus.com',
       ...(process.env.DELIVERY_ADMIN_BCC ? { adminBcc: process.env.DELIVERY_ADMIN_BCC } : {}),
     });
+    console.log(`[stripe-webhook] result=${result.status}${result.reason ? ` reason=${result.reason}` : ''} caseId=${caseId}`);
     res.json({ received: true, result: result.status });
   }));
   return router;

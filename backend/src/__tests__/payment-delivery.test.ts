@@ -123,6 +123,13 @@ describe('payment-delivery', () => {
     const r = await processStripePayment(db, { caseId: 'NOPE', amountCents: 50000, chargeId: 'x' }, cfg);
     expect(r.status).toBe('no_case');
     expect(calls.activity).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'payment_received_no_case' }) }));
+    // The breadcrumb must NOT set the FK column — activity_log.case_id references cases, and this
+    // caseId by definition matches none; setting it made the breadcrumb itself throw and the catch
+    // swallowed the only evidence (Yorde 2026-06-12). The reference rides detailsJson only.
+    const crumbCalls = calls.activity.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>;
+    const crumb = crumbCalls.find((call) => call[0].data['action'] === 'payment_received_no_case')?.[0];
+    expect(crumb?.data['caseId']).toBeUndefined();
+    expect((crumb?.data['detailsJson'] as Record<string, unknown>)['clientReferenceId']).toBe('NOPE');
   });
 
   // ── Identity-unlock (HIPAA audit APP-1 fix, 2026-06-11) ──────────────────────────────────────

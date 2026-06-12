@@ -338,7 +338,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
         sendError = 'The veteran has no email address on file.';
       } else {
         try {
-          const r = await sendEmail({ to: toAddress, subject: DELIVERY_EMAIL_SUBJECT, textBody: emailBody });
+          const r = await sendEmail({ to: toAddress, subject: DELIVERY_EMAIL_SUBJECT, textBody: emailBody, ...(process.env.DELIVERY_ADMIN_BCC ? { bcc: process.env.DELIVERY_ADMIN_BCC } : {}) });
           if (r.sent) {
             const sentAt = new Date();
             // Persist the flip + the exact body transmitted (the RN may have edited it since the

@@ -157,6 +157,18 @@ Server (see P0-1 + P1-4): resolve/create veteran → resolve/create case (both v
 
 ---
 
+## 6b. Design decisions locked with Ryan (2026-06-04) — build to these
+
+- **Capture EVERYTHING, not just files.** Worker stores all answers (rawAnswersJson) + parsed fields.
+- **Intake Summary PDF.** The worker RENDERS the Q&A answers into a clean "Intake Summary.pdf" (we generate it — consistent format) and includes it as the FIRST file in the manifest, so on assign it becomes a chart Document the drafter reads (state/name/wt/ht/service/in-service event = structured source for the AI).
+- **Profile creation = confirm, not type.** New-veteran form is PRE-FILLED from the parsed fields (name/DOB/email/state); RN eyeballs the Stage-1 PDF for DOB and 1-clicks. No re-entry.
+- **Form-type-aware assign defaults (use jotformFormId):**
+  - Stage-1 main intake (260898029223159) → create veteran (prefilled) + initial claim (condition prefilled).
+  - Stage-2 condition forms (28 of them) → MATCH veteran + NEW claim, condition prefilled, **RN confirms with 1 click (NOT silent auto-create)** — wrong-name auto-attach is the one mistake we won't allow.
+  - Additional-documents form (260804641700146) → MATCH veteran + EXISTING claim + prompt **"re-run the draft with the new records?"** (redraft).
+- **File renaming (DONE backend, chart-filename.ts):** Lastname_Condition_DocType.ext; combined/unclassifiable → "Misc"; collisions numbered. Applied on assign.
+- **Keep Jotform's email notifications** as the redundant heads-up; the pool is the system of record.
+
 ## 7. UI (compact-EMR frontend)
 
 - **New nav: "Intake" (pool)** for admin/ops_staff. Default landing for the RN's day.

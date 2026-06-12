@@ -3,8 +3,6 @@ import {
   evaluateGate,
   validateSchema,
   gradeRank,
-  computeFilesetHash,
-  computePerFileHashes,
   GATED_FILESET,
   ENFORCER_GATE_MAJOR,
   STALENESS_BACKSTOP_MS,

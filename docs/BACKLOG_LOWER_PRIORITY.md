@@ -60,3 +60,15 @@ Items explicitly deferred to a future push. Add here instead of losing them in h
 18. Review follow-up automation candidate: surface a "send review follow-up" draft task N days after
     delivery (DRAFT-only discipline per feedback_never_send_veteran_email_autonomously.md). Playbook:
     flatratenexus-project/docs/REVIEW_ASK_PLAYBOOK.md.
+
+## Doctor-pack round 2 (PCP re-review 2026-06-12 — verdict USABLE-WITH-CHART-CHECKS; these reach SIGNABLE)
+A. CONTENT-HASH dedup in pack assembly (pipeline-blocking per PCP): the same MHV export uploaded under
+   two filenames produced 16 duplicate pages (Misc_6=Misc_8, Misc_9=Misc_10); dedup manifest entries on
+   document content sha, not filename.
+B. Residual notification-letter boilerplate (5pp survived): add kill-list patterns for VALife /
+   VSignals survey / VA Form 20-0998 QR appeal page / monthly-entitlement table / commissary-travel
+   enclosure; the dup QR page also dies with A.
+C. Include the veteran lay/timeline statement (the case veteranStatement field) as a rendered pack
+   page — or cover-sheet flag when absent.
+D. One-page cover index: each doc, date, why included (esp. non-obvious pages like a non-SC hip denial).
+E. Order medicine-first: dx note -> PCP note -> rating decision -> radiology -> DD-214.

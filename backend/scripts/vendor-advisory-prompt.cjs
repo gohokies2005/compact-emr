@@ -57,6 +57,8 @@ const VENDOR_FILES = [
   'app/services/advisory/bvaConditionMatch.js',
   'app/services/advisory/bvaPairLookup.js',
   'app/services/advisory/advisoryLiteratureLookup.js',
+  // per-source-type retrieval quotas (VA-authority enrichment 2026-06-12) — retrieve.js requires it
+  'app/services/advisory/sourceQuota.js',
   // viability grounding (task f) — retrieve.js top-level-requires it; the engine trio below
   // completes its lazy require-graph (../anchorMechanism → ./conditionCanon → references table).
   // DARK in the EMR tab unless AEGIS_VIABILITY_GROUNDING=true is set on the API env.

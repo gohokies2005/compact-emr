@@ -244,20 +244,33 @@ function buildViabilityFacts(text) {
   return { block: lines.join('\n'), raw: v, available: true };
 }
 
-// The abstain message is itself a HARD directive — the old "Reason normally"
-// wording invited the model to fall back on its own knowledge and confidently
-// assert a pathway the table does not back (live smoke 2026-06-11). It now tells
-// the model to STOP and say so in plain language.
+// The engine-empty message is a HARD directive, but a CONDITIONAL one (Phase 3b,
+// 2026-06-11): "abstain on absence of GROUND, not absence of a table row." It must
+// NEVER let the model assert a band the engine did not give — that invariant is
+// absolute and unchanged. But it no longer hard-stops unconditionally: if the
+// retrieved corpus or the live PubMed pull genuinely covers the pairing, the model
+// may give a clearly-labeled grounded read (cite the source, NO band, "grounded
+// reasoning, not a validated pathway — physician confirm", escalate). Only when
+// nothing in front of it covers the pairing does it fall to the plain-language stop.
+// The reason-vs-stop choice is made by the PIPELINE from the retrieval signal
+// (retrieve.js: semantic-covered / pubmed_live) and enforced mechanically by the
+// answer-path backstop (sanitizeAnswer) — this text just keeps the FACTS block from
+// contradicting the system prompt's conditional rule.
 function _notAvailable(reason) {
   return [
     '=== DETERMINISTIC VIABILITY FACTS ===',
-    `OUR REFERENCE TABLE HAS NO TABLE-BACKED ANSWER FOR THIS PAIRING (reason: ${reason}).`,
-    'STOP. Do NOT supply a mechanism, a pathway, a viability band, an anchor, a percentage, or any medical',
-    'opinion from your own knowledge — a confident answer the table does not back is the worst failure mode.',
-    'Your entire reply must be a short, plain-language alert: tell the user, in ordinary words, that this',
-    'specific pairing is not in our reference table so you cannot give a backed viability answer, and that',
-    "they should run it by Dr. Ryan / the Team Lead. No jargon, no field names. (If the question was merely",
-    'vague about WHICH condition or anchor, ask them to name it instead — but still never improvise a pathway.)',
+    `THE VIABILITY ENGINE PLACED NO BAND FOR THIS PAIRING (reason: ${reason}).`,
+    'ABSOLUTE: do NOT assert or imply a viability band, a percentage, or a table-style verdict — the engine',
+    'gave none, so you have none. Never free-reason a band from your own training.',
+    'THEN, based ONLY on what is actually in front of you:',
+    '- If the RETRIEVED CONTEXT below (or a live PubMed pull) genuinely covers these conditions, you MAY give',
+    '  a grounded read FROM THAT MATERIAL: cite the exact PMID(s)/source(s), give NO band, and label it',
+    '  "grounded reasoning, not a validated/blessed pathway — have Dr. Ryan confirm." Treat as needs-more-info',
+    '  and escalate. Quote only what is provided; never reconstruct a study/PMID/stat from memory.',
+    '- If nothing on-topic was retrieved and no PubMed papers came back, STOP: a short plain-language alert',
+    '  that this pairing is not in our references so you cannot give a backed answer, run it by Dr. Ryan /',
+    '  the Team Lead. No jargon, no field names.',
+    '(If the question was merely vague about WHICH condition or anchor, ask them to name it instead.)',
   ].join('\n');
 }
 

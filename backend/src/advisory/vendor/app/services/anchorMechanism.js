@@ -570,6 +570,20 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
     });
   }
 
+  // Collapse DUPLICATE granted anchors (same canonical upstream) to one. A veteran
+  // cannot anchor twice on the same SC condition, and a duplicate poisons the §5.1
+  // psych collapse below — which keys its drop-set on upstream_canonical, so a
+  // duplicated psych anchor (e.g. PTSD listed in both primary_sc and other_sc) puts
+  // the kept anchor's own label in the drop-set and splices out EVERY copy → empty
+  // resolved → "weak/none" for the #1 pair PTSD→OSA (live bug, real-case data 2026-06-11).
+  {
+    const _seenUp = new Set();
+    for (let i = 0; i < resolved.length; i++) {
+      if (_seenUp.has(resolved[i].upstream_canonical)) { resolved.splice(i, 1); i--; continue; }
+      _seenUp.add(resolved[i].upstream_canonical);
+    }
+  }
+
   // §5.1 collapse co-class 4.130 psych anchors to the STRONGEST applicable member.
   // Tiebreak mirrors the main ranker incl. causation-first (so a causation-capable
   // psych member is kept over an equal-M aggravation-only one — architect QA 2026-06-11).
@@ -737,9 +751,45 @@ function aggravationOnlyUpstreamsFor(claimedText) {
   return out;
 }
 
+// ── public: recommendedAction(viabilityResult) ───────────────────────────────
+// SSOT band→action policy (2026-06-11). The RN viability card AND Ask Aegis both
+// consume THIS — neither re-derives the mapping — so "auto-run vs escalate" is
+// consistent everywhere. Pure/deterministic. Returns {action, route, band, reason}.
+//   strong               -> auto_run                  (dominant pathway; RN proceeds)
+//   moderate             -> proceed_with_guidance      (well-established; proceed w/ framing)
+//   conditional          -> proceed_with_guidance      (solid once the named record is present)
+//   weak | abstain       -> escalate route 'aegis'     (off the validated table — Aegis grounded
+//                                                        reasoning, then physician confirm)
+//   redirect             -> escalate route 'physician' (presumptive pre-emption — physician path)
+//   (unknown band)       -> escalate route 'physician' (fail safe to a human)
+function recommendedAction(viabilityResult) {
+  const band = viabilityResult && viabilityResult.viability;
+  switch (band) {
+    case 'strong':
+      return { action: 'auto_run', route: null, band, reason: 'Dominant recognized pathway — proceed.' };
+    case 'moderate':
+      return { action: 'proceed_with_guidance', route: null, band, reason: 'Well-established pathway — proceed with the documented framing.' };
+    case 'conditional':
+      return {
+        action: 'proceed_with_guidance', route: null, band,
+        reason: (viabilityResult && viabilityResult.missing_fact)
+          ? `Solid pathway once the record shows: ${viabilityResult.missing_fact}.`
+          : 'Solid pathway — confirm the required record, then proceed.',
+      };
+    case 'redirect':
+      return { action: 'escalate', route: 'physician', band, reason: 'Presumptive pre-emption — physician decides the path.' };
+    case 'weak':
+    case 'abstain':
+      return { action: 'escalate', route: 'aegis', band, reason: 'Off the validated table — grounded reasoning, then physician confirm.' };
+    default:
+      return { action: 'escalate', route: 'physician', band: band || null, reason: 'Unrecognized viability state — escalate.' };
+  }
+}
+
 module.exports = {
   resolveAnchorEligibility,
   assessClaimViability,
+  recommendedAction,
   preferenceRankFor,
   eligibleUpstreamsFor,
   isAggravationOnly,

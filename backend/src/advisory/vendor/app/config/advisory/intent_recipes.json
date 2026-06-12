@@ -8,6 +8,7 @@
     "viability": {
       "label": "Is this case viable / should we take it?",
       "sources": ["chart_slice", "reject_list", "viability_engine", "library", "cfr", "pubmed_live_fallback"],
+      "quotas": { "medical": 6, "m21": 2, "regulation": 2, "dbq": 1, "guidance": 0 },
       "classifier_cues": ["viable", "viability", "should we take", "is this a case", "worth it", "can we help", "case-check", "is this strong enough for us", "decline or accept", "connect", "link to", "related to", "caused by", "aggravated by", "pathway", "framing", "anchor"],
       "retrieval_recipe": [
         "chart slice (read-only): current diagnosis present? in-service event/exposure? if secondary, is the primary service-connected?",
@@ -32,6 +33,7 @@
     "email_response": {
       "label": "How do I respond to this email / message?",
       "sources": ["email_text", "email_playbook", "canonical_facts"],
+      "quotas": { "medical": 0, "m21": 0, "regulation": 0, "dbq": 0, "guidance": 0 },
       "classifier_cues": ["respond", "reply", "email", "how do I answer", "what do I say", "they wrote", "veteran asked", "[pasted email block]"],
       "retrieval_recipe": [
         "the email text itself",
@@ -52,6 +54,7 @@
     "stats_lookup": {
       "label": "What's the win rate for X->Y / does an IMO help?",
       "sources": ["pair_atlas", "condition_atlas", "live_sql"],
+      "quotas": { "medical": 2, "m21": 3, "regulation": 1, "dbq": 1, "guidance": 0 },
       "classifier_cues": ["win rate", "grant rate", "how often", "odds at BVA", "does an IMO help", "secondary to", "what % granted", "data on", "how does X do at the board", "strong pair", "numbers for", "bva data", "in the bva", "the numbers", "granted at the board"],
       "retrieval_recipe": [
         "bvaPairLookup(upstream, claimed) over bva_secondary_pairs.json (decided-only; remands excluded)",
@@ -71,6 +74,7 @@
     "general": {
       "label": "Fallback for anything not matching the 3 intents",
       "sources": ["library", "cfr", "case_law", "canonical_facts"],
+      "quotas": { "medical": 6, "m21": 2, "regulation": 2, "dbq": 1, "guidance": 1 },
       "classifier_cues": ["*"],
       "retrieval_recipe": [
         "routing.json semantic hop over the medical library + CFR + case_law for the topic",

@@ -28,6 +28,7 @@ const { resolveCondition } = require('./bvaConditionMatch');
 const { pairLookup, psychRollup } = require('./bvaPairLookup');
 const { livePubmedLookup } = require('./advisoryLiteratureLookup');
 const { isViabilityQuery, buildViabilityFacts } = require('./viabilityGrounding');
+const { selectByQuota } = require('./sourceQuota');
 
 // Task (f): when AEGIS_VIABILITY_GROUNDING is on AND the question is viability-shaped,
 // inject the DETERMINISTIC viability engine's FACTS block ABOVE the corpus context.
@@ -35,7 +36,9 @@ const { isViabilityQuery, buildViabilityFacts } = require('./viabilityGrounding'
 // note; the engine never crashes the ask-path and never fabricates a band.
 const VIABILITY_GROUNDING_ON = process.env.AEGIS_VIABILITY_GROUNDING === 'true';
 
-const SEM_K = 8;             // semantic top-k
+const SEM_K = 8;             // legacy semantic top-k (superseded by SEM_CANDIDATES/SEM_CAP below)
+const SEM_CANDIDATES = 24;   // WIDE candidate pull so per-source-type quotas have material to draw from
+const SEM_CAP = 11;          // final chunk cap after quota selection (cost guard: ~5-10c/call at this width)
 const RELEVANCE_FLOOR = 0.40; // cosine; below this AND no folder match = no coverage (calibrated 2026-06-07)
 const PSYCH_RE = /\b(psych|psychiatric|mental health|mental-health|any psych)\b/i;
 
@@ -110,7 +113,7 @@ async function semanticSearch(pgClient, qvec) {
   // kNN is fast + accurate; coverage is judged by cosine, not by the chart.
   const sql = `SELECT id, text, source, citation, condition, library_path, letter_citable, `
     + `1 - (embedding <=> $1::vector) AS score FROM advisory.ref_chunk `
-    + `ORDER BY embedding <=> $1::vector LIMIT ${SEM_K}`;
+    + `ORDER BY embedding <=> $1::vector LIMIT ${SEM_CANDIDATES}`;
   const res = await pgClient.query(sql, [qstr]);
   const chunks = (res.rows || []).map((row) => ({
     text: row.text, source: row.source || 'semantic', citation: row.citation,
@@ -178,9 +181,20 @@ async function retrieve(input, clients = {}) {
         const qvec = await embedQuery(bedrockClient, question);
         const sem = await semanticSearch(pgClient, qvec);
         semanticRan = true;
-        covered = sem.topScore >= RELEVANCE_FLOOR;
-        if (covered) { chunks.push(...sem.chunks); notes.push(`semantic: ${sem.chunks.length} chunks, top=${sem.topScore.toFixed(3)}`); }
-        else notes.push(`semantic: weak (top=${sem.topScore.toFixed(3)} < ${RELEVANCE_FLOOR}) — treating as no coverage`);
+        covered = sem.topScore >= RELEVANCE_FLOOR;   // UNCHANGED: judged on the FULL candidate set (top chunk always present)
+        if (covered) {
+          // Per-source-type quota selection so VA-authority chunks (M21-1/CFR/DBQ) get a guaranteed slot
+          // when above floor and are never padded in when below. quotas come from the resolved intent
+          // recipe; absent -> degrades to top-cap-above-floor (≈ legacy). Bucketing is by id-prefix
+          // (no citation_type column dependency). topScore/coverage already computed above, so the
+          // PubMed-fallback + coverage_gap logic below is untouched.
+          const quotas = (routed.recipe && routed.recipe.quotas) || null;
+          const picked = selectByQuota(sem.chunks, { quotas, floor: RELEVANCE_FLOOR, cap: SEM_CAP });
+          chunks.push(...picked);
+          notes.push(`semantic: ${picked.length}/${sem.chunks.length} chunks (quota), top=${sem.topScore.toFixed(3)}`);
+        } else {
+          notes.push(`semantic: weak (top=${sem.topScore.toFixed(3)} < ${RELEVANCE_FLOOR}) — treating as no coverage`);
+        }
       } catch (e) { errors.push(`semantic failed: ${e.message}`); } // errored, NOT confirmed no-coverage
     }
 

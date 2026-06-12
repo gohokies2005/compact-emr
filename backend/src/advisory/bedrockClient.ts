@@ -53,10 +53,14 @@ export function buildAdvisoryBody(
   systemPrompt: string,
   userContent: string,
   maxTokens: number = ADVISORY_MAX_TOKENS,
+  temperature?: number,
 ): Record<string, unknown> {
   return {
     anthropic_version: 'bedrock-2023-05-31',
     max_tokens: maxTokens,
+    // Optional determinism knob (doctor-pack page picker uses temperature 0 so the same chart
+    // selects the same pages across regenerations). Omitted → Bedrock/Claude default.
+    ...(temperature !== undefined ? { temperature } : {}),
     system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: userContent }],
   };
@@ -80,9 +84,9 @@ function client(): BedrockRuntimeClient {
 export async function invokeAdvisory(
   systemPrompt: string,
   userContent: string,
-  opts: { maxTokens?: number } = {},
+  opts: { maxTokens?: number; temperature?: number } = {},
 ): Promise<AdvisoryResult> {
-  const body = buildAdvisoryBody(systemPrompt, userContent, opts.maxTokens ?? ADVISORY_MAX_TOKENS);
+  const body = buildAdvisoryBody(systemPrompt, userContent, opts.maxTokens ?? ADVISORY_MAX_TOKENS, opts.temperature);
   const res = await client().send(
     new InvokeModelCommand({
       modelId: ADVISORY_MODEL_ID,

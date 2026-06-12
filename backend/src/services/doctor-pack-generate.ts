@@ -14,7 +14,8 @@ import {
   type PackCategory,
 } from './doctor-pack.js';
 import { classifyDocument, CLASSIFIER_VERSION_NUM } from './key-docs-classifier.js';
-import { selectPages, type PageSelectorInputPage } from './page-selector.js';
+import { selectPages, type PageSelectorInputPage, type PageSelectorResult } from './page-selector.js';
+import { selectPagesLlm, shouldUseLlmPicker, PAGE_LLM_VERSION } from './doctor-pack-page-llm.js';
 import { aggregateChartSummary } from './chart-summary-aggregator.js';
 import { publishDoctorPackQueued } from './doctor-pack-queue.js';
 import { isDoctorPackS3Key } from './s3-key-safety.js';
@@ -615,7 +616,17 @@ export async function generateDoctorPackForCase(
   // 'unspecified' -> first-8-pages rule -> the entire VA-letter/statement/STR rule set in
   // page-selector.ts never ran. classifyDocument composes: docTag (human override) >
   // content text (first 2 OCR'd pages) > filename (legacy fallback).
-  const perFileSelection = classifiedFiles.map((f) => {
+  // AI picker scope (Ryan 2026-06-12): the multi-page record types where VA benefit boilerplate
+  // hides and per-page selection matters. Always-include small docs (DD-214, intake summary, lay
+  // statements) and bulk blue_button exports are NOT in this set — they keep their deterministic
+  // shortcuts (no LLM cost, no boilerplate risk).
+  const LLM_PICKER_DOCTYPES = new Set<string>([
+    'rating_decision', 'denial_letter', 'supplemental_decision', 'c_and_p_exam', 'dbq',
+    'imaging', 'sleep_study', 'personnel_record', 'service_treatment_record_summary',
+    'benefit_summary', 'unspecified', 'progress_notes',
+  ]);
+  let packPickerCostUsd = 0;
+  const perFileSelection = await Promise.all(classifiedFiles.map(async (f) => {
     const pageRows = pagesByDocumentId.get(f.documentId) ?? [];
     const contentText = buildContentHintText(pageRows);
     const cls = classifyDocument({ filePath: f.filePath, docTag: f.docTag, contentText });
@@ -625,17 +636,40 @@ export async function generateDoctorPackForCase(
       confidence: p.confidence,
     }));
     const existing = existingByPath.get(f.filePath);
-    const selection = selectPages({
+    const physicianOverride = existing?.physicianIncludeAllPages ?? false;
+    // Deterministic regex selector — the fail-safe. Used directly for non-LLM docTypes, and as the
+    // fallback whenever the LLM picker is unavailable / errors / returns nothing usable.
+    const runRegex = (): PageSelectorResult => selectPages({
       filePath: f.filePath,
       docType: cls.docType,
       classification: cls.classification,
       pageCount: f.pageCount ?? pageRows.length ?? 0,
       pages: pagesInput,
-      physicianIncludeAllPages: existing?.physicianIncludeAllPages ?? false,
+      physicianIncludeAllPages: physicianOverride,
       ...(claimedCondition !== undefined ? { claimedCondition } : {}),
     });
+    let selection: PageSelectorResult;
+    const textPageCount = pagesInput.filter((p) => (p.text ?? '').trim().length > 0).length;
+    if (!physicianOverride && LLM_PICKER_DOCTYPES.has(cls.docType) && shouldUseLlmPicker(textPageCount)) {
+      const llm = await selectPagesLlm({
+        docType: cls.docType,
+        pages: pagesInput,
+        ...(claimedCondition !== undefined ? { claimedCondition } : {}),
+      });
+      if (llm !== null) {
+        packPickerCostUsd += llm.costUsd;
+        selection = { pageRanges: llm.pageRanges, selectorRationale: llm.rationale, needsRnReview: false, selectorVersion: PAGE_LLM_VERSION };
+      } else {
+        selection = runRegex();
+      }
+    } else {
+      selection = runRegex();
+    }
     return { file: f, classification: cls, selection };
-  });
+  }));
+  if (packPickerCostUsd > 0) {
+    console.log(JSON.stringify({ msg: 'doctor_pack_page_picker_cost', costUsd: Math.round(packPickerCostUsd * 10000) / 10000 }));
+  }
   const clsByPath = new Map(perFileSelection.map((s) => [s.file.filePath, s.classification]));
 
   // ROUND 2 (A): content-hash dedup BEFORE selection-results enter the manifest/budget. The

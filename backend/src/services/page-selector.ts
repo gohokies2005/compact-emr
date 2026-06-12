@@ -353,7 +353,7 @@ function firstNPages(n: number, pageCount: number): readonly KeyDocPageRange[] {
   return [{ from: 1, to: Math.min(n, pageCount) }];
 }
 
-function rangesFromIncluded(includedPageNumbers: readonly number[]): readonly KeyDocPageRange[] {
+export function rangesFromIncluded(includedPageNumbers: readonly number[]): readonly KeyDocPageRange[] {
   if (includedPageNumbers.length === 0) return [];
   const sorted = [...new Set(includedPageNumbers)].sort((a, b) => a - b);
   const ranges: KeyDocPageRange[] = [];

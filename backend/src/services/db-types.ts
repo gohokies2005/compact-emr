@@ -292,7 +292,10 @@ export interface DeliveryTokenRecord {
   id: string;
   caseId: string;
   token: string;
-  passwordHash: string;
+  // null = identity-mode token (DOB + phone last-4 unlock); non-null = legacy password token.
+  passwordHash: string | null;
+  failedAttempts: number;
+  lockedAt: Date | null;
   letterVersion: number;
   pdfS3Key: string;
   expiresAt: Date;

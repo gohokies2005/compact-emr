@@ -105,6 +105,16 @@ export class ApiStack extends Stack {
       secretName: `compact-emr-${props.config.envName}/stripe-webhook-secret`,
     });
 
+    // Gmail OAuth grant for the outbound-email transport (EMAIL_TRANSPORT=gmail — SES production
+    // access denied 2026-06-11, case 178094063100860; Gmail is BAA-covered under Google Workspace).
+    // Operator-populated AFTER deploy (same lifecycle as the Anthropic/Stripe secrets — CDK never
+    // owns the value, so it persists across deploys). JSON value shape:
+    //   {"client_id":"…","client_secret":"…","refresh_token":"…","user":"info@flatratenexus.com"}
+    // Read at RUNTIME by friendly name (mailer.readSecretByName) — never env-injected (audit INF-2).
+    const gmailOauthSecret = new secretsmanager.Secret(this, 'GmailOauthSecret', {
+      secretName: `compact-emr-${props.config.envName}/gmail-oauth`,
+    });
+
     const handler = new nodejs.NodejsFunction(this, 'PlaceholderApiLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: path.resolve(__dirname, '../../backend/src/placeholder-lambda.ts'),
@@ -179,7 +189,11 @@ export class ApiStack extends Stack {
         STRIPE_WEBHOOK_SECRET_NAME: `compact-emr-${props.config.envName}/stripe-webhook-secret`,
         STRIPE_LINK_500: 'https://buy.stripe.com/3cI9ALcMG5LH05Y3Xm0Ba03', // public payment link (not a secret)
         STRIPE_LINK_350: 'https://buy.stripe.com/aFa5kvaEygql5qi9hG0Ba01', // $350 letter fee payment link (not a secret)
-        SES_FROM_ADDRESS: 'info@flatratenexus.com',                          // must be a VERIFIED SES identity
+        SES_FROM_ADDRESS: 'info@flatratenexus.com',                          // From address (verified SES identity AND the Gmail OAuth user)
+        // Outbound transport: 'gmail' (default — BAA-covered Workspace send as info@) or anything
+        // else for SES (sandbox until the production-access appeal lands). Flip via cdk.json context.
+        EMAIL_TRANSPORT: (this.node.tryGetContext('email_transport') as string | undefined) ?? 'gmail',
+        GMAIL_OAUTH_SECRET_NAME: `compact-emr-${props.config.envName}/gmail-oauth`,
         DELIVERY_PORTAL_BASE_URL: `https://${props.config.domainName}`,      // /d/<token> lives on the SPA
         DELIVERY_ADMIN_BCC: 'admin@flatratenexus.com',
         // SES-SANDBOX forwarding mode (Ryan 2026-06-10): all veteran emails delivered to this inbox
@@ -243,6 +257,9 @@ export class ApiStack extends Stack {
 
     // Stripe + delivery: read the webhook signing secret at runtime; send the portal email via SES.
     stripeWebhookSecret.grantRead(handler);
+    // Gmail transport: read the OAuth grant at runtime (friendly name; CDK-created so the full ARN
+    // grant resolves — not the fromSecretNameV2 partial-ARN footgun).
+    gmailOauthSecret.grantRead(handler);
     handler.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['ses:SendEmail', 'ses:SendRawEmail'],

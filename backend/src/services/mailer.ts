@@ -1,40 +1,107 @@
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 
-// Outbound email via SES (Ryan chose SES over Resend — AWS-native, in the BAA). Plain-text only; the
-// delivery email carries a portal link + password, never a PHI attachment. From = the verified SES
-// identity (info@flatratenexus.com). No-ops loudly if SES_FROM_ADDRESS is unset (not yet configured).
+// Outbound email. TWO transports behind ONE function (Ryan 2026-06-11, SES production access
+// DENIED — case 178094063100860):
+//   EMAIL_TRANSPORT=gmail → Gmail API as info@flatratenexus.com (BAA-covered under the Google
+//                           Workspace agreement; the SAME OAuth grant the legacy FRN system sends
+//                           all templates with). Creds read at RUNTIME from Secrets Manager
+//                           (GMAIL_OAUTH_SECRET_NAME) — never env-injected (audit INF-2).
+//   anything else        → SES (sandbox; kept as the fallback + the path if the appeal succeeds).
+// Plain-text only; the delivery email carries a portal link ONLY — no password, no PHI attachment.
 const ses = new SESClient({});
 
 /**
- * SES-SANDBOX FORWARDING MODE (Ryan 2026-06-10, until SES production access is granted — support
- * case 178094063100860): when EMAIL_REDIRECT_ALL_TO is set, EVERY outbound email is delivered to
- * that address instead of the real recipient (sandbox can deliver to any @flatratenexus.com because
- * the DOMAIN identity is verified). The subject is prefixed [FWD to <real recipient>] and a banner
- * is prepended to the body so staff forwards it manually (target: within a few hours). The original
- * body is untouched below the banner — strip the banner lines, forward, done.
- * To turn OFF after production access: clear `email_redirect_all_to` in infra/cdk.json and deploy.
+ * FORWARDING MODE (Ryan 2026-06-10): when EMAIL_REDIRECT_ALL_TO is set, EVERY outbound email is
+ * delivered to that address instead of the real recipient, with a [FWD to <real recipient>]
+ * subject prefix + staff banner. TRANSPORT-AGNOSTIC BY CONSTRUCTION: the redirect is computed
+ * BEFORE the transport fork below, so the gmail branch can never leak a real send while the
+ * guard is on (architect plan-gate item D3 — the highest-consequence wiring detail).
+ * To turn OFF: clear `email_redirect_all_to` in infra/cdk.json and deploy.
  */
 export async function sendEmail(input: { to: string; subject: string; textBody: string; bcc?: string }): Promise<{ sent: boolean; messageId?: string; reason?: string; redirectedFrom?: string }> {
   const from = process.env.SES_FROM_ADDRESS;
   if (!from) return { sent: false, reason: 'SES_FROM_ADDRESS not configured' };
+  // ── 1. Redirect guard (before ANY transport decision) ──
   const redirect = (process.env.EMAIL_REDIRECT_ALL_TO ?? '').trim();
   const redirected = redirect.length > 0 && redirect.toLowerCase() !== input.to.trim().toLowerCase();
   const to = redirected ? redirect : input.to;
   const subject = redirected ? `[FWD to ${input.to}] ${input.subject}` : input.subject;
   const textBody = redirected
-    ? `=== STAFF ACTION (SES sandbox) ===\nForward this email to: ${input.to}\nDelete these banner lines first. Target: within a few hours of receipt.\n===\n\n${input.textBody}`
+    ? `=== STAFF ACTION (forwarding mode) ===\nForward this email to: ${input.to}\nDelete these banner lines first. Target: within a few hours of receipt.\n===\n\n${input.textBody}`
     : input.textBody;
+  // BCC dropped in redirect mode — the admin copy would just duplicate the same inbox family.
+  const bcc = !redirected ? input.bcc : undefined;
+
+  // ── 2. Transport fork ──
+  if ((process.env.EMAIL_TRANSPORT ?? '').trim().toLowerCase() === 'gmail') {
+    const messageId = await gmailSend({ from, to, subject, textBody, bcc });
+    return { sent: true, messageId, ...(redirected ? { redirectedFrom: input.to } : {}) };
+  }
   const res = await ses.send(new SendEmailCommand({
     Source: from,
-    // BCC dropped in redirect mode — the admin copy would just duplicate the same inbox family.
-    Destination: { ToAddresses: [to], ...(!redirected && input.bcc ? { BccAddresses: [input.bcc] } : {}) },
+    Destination: { ToAddresses: [to], ...(bcc ? { BccAddresses: [bcc] } : {}) },
     Message: {
       Subject: { Data: subject, Charset: 'UTF-8' },
       Body: { Text: { Data: textBody, Charset: 'UTF-8' } },
     },
   }));
   return { sent: true, messageId: res.MessageId, ...(redirected ? { redirectedFrom: input.to } : {}) };
+}
+
+// ── Gmail transport ───────────────────────────────────────────────────────────────────────────
+// Secret JSON shape: {"client_id":"…","client_secret":"…","refresh_token":"…","user":"info@flatratenexus.com"}
+// The From header MUST be the OAuth user's mailbox (or a verified send-as alias) — Gmail silently
+// rewrites or rejects anything else. SES_FROM_ADDRESS and the OAuth user are both info@ by config.
+let gmailAccessToken: { token: string; exp: number } | null = null;
+
+async function gmailAccess(): Promise<{ token: string; user: string }> {
+  const raw = await readSecretByName(process.env.GMAIL_OAUTH_SECRET_NAME);
+  if (!raw) throw new Error('gmail transport: GMAIL_OAUTH_SECRET_NAME secret is empty or unreadable');
+  const cfg = JSON.parse(raw) as { client_id?: string; client_secret?: string; refresh_token?: string; user?: string };
+  if (!cfg.client_id || !cfg.client_secret || !cfg.refresh_token || !cfg.user) {
+    throw new Error('gmail transport: secret JSON missing client_id/client_secret/refresh_token/user');
+  }
+  if (gmailAccessToken !== null && gmailAccessToken.exp > Date.now()) return { token: gmailAccessToken.token, user: cfg.user };
+  const r = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: cfg.client_id,
+      client_secret: cfg.client_secret,
+      refresh_token: cfg.refresh_token,
+      grant_type: 'refresh_token',
+    }),
+  });
+  if (!r.ok) throw new Error(`gmail transport: token refresh failed (${r.status} ${await r.text().then((t) => t.slice(0, 200)).catch(() => '')})`);
+  const j = (await r.json()) as { access_token?: string; expires_in?: number };
+  if (!j.access_token) throw new Error('gmail transport: token response had no access_token');
+  // Cache to ~80% of the granted lifetime (typ. 3600s) so a warm Lambda never sends with a stale token.
+  gmailAccessToken = { token: j.access_token, exp: Date.now() + Math.floor((j.expires_in ?? 3600) * 0.8) * 1000 };
+  return { token: j.access_token, user: cfg.user };
+}
+
+async function gmailSend(input: { from: string; to: string; subject: string; textBody: string; bcc?: string }): Promise<string | undefined> {
+  const { token } = await gmailAccess();
+  const rfc822 = [
+    `From: Flat Rate Nexus <${input.from}>`,
+    `To: ${input.to}`,
+    ...(input.bcc ? [`Bcc: ${input.bcc}`] : []),
+    `Subject: ${input.subject.replace(/[\r\n]+/g, ' ')}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    input.textBody,
+  ].join('\r\n');
+  const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ raw: Buffer.from(rfc822, 'utf8').toString('base64url') }),
+  });
+  if (!r.ok) throw new Error(`gmail transport: send failed (${r.status} ${await r.text().then((t) => t.slice(0, 200)).catch(() => '')})`);
+  const j = (await r.json()) as { id?: string };
+  return j.id;
 }
 
 // Runtime read of a Secrets Manager secret BY FRIENDLY NAME (never partial ARN — the AccessDenied

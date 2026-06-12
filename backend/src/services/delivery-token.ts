@@ -31,3 +31,55 @@ export function verifyPassword(pw: string, storedHashHex: string): boolean {
   try { b = Buffer.from(storedHashHex, 'hex'); } catch { return false; }
   return a.length === b.length && timingSafeEqual(a, b);
 }
+
+// ── Identity-mode unlock (HIPAA audit APP-1 fix, Ryan 2026-06-11) ─────────────────────────────
+// The unlock secret is data the veteran already knows — DOB + phone last-4 — so NOTHING secret
+// ever rides the delivery email (link only). Factors chosen for zero ambiguity: digits only,
+// never name-derived (multi-part surnames parse inconsistently across forms).
+
+/** Stored Veteran.dob is @db.Date → a JS Date at UTC MIDNIGHT. Read the UTC calendar date —
+ * NEVER getFullYear()/getMonth()/getDate(), which read local time and go off-by-one-day in any
+ * negative-offset zone (architect plan-gate item A). */
+export function dobToIso(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/** Accept only strict YYYY-MM-DD (the portal sends a date-picker value). No Date() parsing —
+ * `new Date('3/15/80')` is locale quicksand. */
+export function normalizeInputDob(s: unknown): string | null {
+  if (typeof s !== 'string') return null;
+  const v = s.trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+}
+
+/** Last 4 digits of a phone number, from EITHER side (stored E.164/freeform or user input).
+ * Returns null when fewer than 4 digits exist (identity mode is then unusable for the case). */
+export function phoneLast4(s: unknown): string | null {
+  if (typeof s !== 'string') return null;
+  const digits = s.replace(/\D/g, '');
+  return digits.length >= 4 ? digits.slice(-4) : null;
+}
+
+function ctEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
+
+/** Constant-time identity check: BOTH factors must match. Fails closed on any missing/garbled
+ * stored value (null phone, <4 digits) — callers should not have minted an identity token then. */
+export function verifyIdentity(
+  input: { dob: unknown; phoneLast4: unknown },
+  stored: { dob: Date; phone: string | null },
+): boolean {
+  const inDob = normalizeInputDob(input.dob);
+  const inP4 = typeof input.phoneLast4 === 'string' && /^\d{4}$/.test(input.phoneLast4.trim())
+    ? input.phoneLast4.trim()
+    : null;
+  const storedP4 = phoneLast4(stored.phone);
+  if (inDob === null || inP4 === null || storedP4 === null) return false;
+  // Evaluate both comparisons unconditionally (no short-circuit timing signal on which factor failed).
+  const dobOk = ctEqual(inDob, dobToIso(stored.dob));
+  const p4Ok = ctEqual(inP4, storedP4);
+  return dobOk && p4Ok;
+}

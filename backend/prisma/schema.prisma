@@ -819,7 +819,11 @@ model DeliveryToken {
   id             String    @id @default(uuid())
   caseId         String    @map("case_id")
   token          String    @unique          // long random URL secret
-  passwordHash   String    @map("password_hash")
+  // NULL = identity-mode token (unlock = DOB + phone last-4, HIPAA APP-1 fix 2026-06-11);
+  // non-null = legacy password-mode token (still honored — old links keep working).
+  passwordHash   String?   @map("password_hash")
+  failedAttempts Int       @default(0) @map("failed_attempts")
+  lockedAt       DateTime? @map("locked_at") @db.Timestamptz(6)
   letterVersion  Int       @map("letter_version")
   pdfS3Key       String    @map("pdf_s3_key") // drafter-artifacts/<caseId>/v<N>/*.pdf (validated)
   expiresAt      DateTime  @map("expires_at") @db.Timestamptz(6)

@@ -7,7 +7,7 @@ vi.mock('../services/mailer.js', () => ({
   readSecretByName: vi.fn(async () => 'whsec'),
 }));
 
-function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boolean } = {}) {
+function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boolean; phone?: string | null } = {}) {
   const calls = {
     paymentCreate: vi.fn(async () => ({})),
     caseUpdate: vi.fn(async () => ({})),
@@ -18,7 +18,7 @@ function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boo
     payment: { findFirst: vi.fn(async () => (over.existingPayment ? { id: 'P0' } : null)), create: calls.paymentCreate },
     case: { findFirst: vi.fn(async () => (over.noCase ? null : { id: 'C1', veteranId: 'V1' })), update: calls.caseUpdate },
     draftJob: { findMany: vi.fn(async () => (over.noPdf ? [] : [{ version: 5, artifactPdfS3Key: 'drafter-artifacts/C1/v5/letter.pdf' }])) },
-    veteran: { findUnique: vi.fn(async () => ({ email: 'vet@example.com', firstName: 'Sam' })) },
+    veteran: { findUnique: vi.fn(async () => ({ email: 'vet@example.com', firstName: 'Sam', phone: over.phone !== undefined ? over.phone : '(702) 555-1234' })) },
     deliveryToken: { create: calls.tokenCreate },
     activityLog: { create: calls.activity },
   };
@@ -112,10 +112,32 @@ describe('payment-delivery', () => {
     expect(calls.activity).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'payment_received_no_case' }) }));
   });
 
-  it('delivery email carries the link + password + expiry', () => {
-    const t = buildDeliveryEmailText({ firstName: 'Sam', link: 'https://emr.flatratenexus.com/d/tok', password: 'Abc234xyz', expiresDays: 90 });
+  // ── Identity-unlock (HIPAA audit APP-1 fix, 2026-06-11) ──────────────────────────────────────
+
+  it('delivery email is LINK-ONLY: carries link + expiry + the DOB/phone explanation, and NO password of any kind', () => {
+    const t = buildDeliveryEmailText({ firstName: 'Sam', link: 'https://emr.flatratenexus.com/d/tok', expiresDays: 90 });
     expect(t).toContain('https://emr.flatratenexus.com/d/tok');
-    expect(t).toContain('Abc234xyz');
     expect(t).toContain('90 days');
+    expect(t).toContain('date of birth');
+    expect(t).toContain('last 4 digits');
+    // The APP-1 regression guard: no password line, no password word implying one exists to enter.
+    expect(t).not.toMatch(/Password:/i);
+  });
+
+  it('mints an IDENTITY-mode token (passwordHash null) when the veteran has a usable phone', async () => {
+    const { db, calls } = makeDb();
+    const r = await processStripePayment(db, { caseId: 'C1', amountCents: 50000, chargeId: 'pi_idmode' }, cfg);
+    expect(r.status).toBe('delivered');
+    expect(calls.tokenCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ passwordHash: null }) }));
+    // No needs-phone breadcrumb when the phone is usable.
+    expect(calls.activity).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'delivery_identity_unlock_needs_phone' }) }));
+  });
+
+  it('no usable phone on file → token still mints (identity-mode) + loud needs-phone breadcrumb', async () => {
+    const { db, calls } = makeDb({ phone: null });
+    const r = await processStripePayment(db, { caseId: 'C1', amountCents: 50000, chargeId: 'pi_nophone' }, cfg);
+    expect(r.status).toBe('delivered');
+    expect(calls.tokenCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ passwordHash: null }) }));
+    expect(calls.activity).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'delivery_identity_unlock_needs_phone' }) }));
   });
 });

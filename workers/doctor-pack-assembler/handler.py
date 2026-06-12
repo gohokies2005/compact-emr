@@ -263,6 +263,7 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
                         print(f"TOC render failed (continuing without): {toc_err}")
 
             # Source-doc page extraction
+            skipped_non_pdf = 0
             for entry in entries:
                 file_path = entry.get("filePath")
                 page_ranges = entry.get("pageRanges") or []
@@ -273,6 +274,15 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
                 # filePath is the source S3 key (relative to records bucket)
                 obj = s3.get_object(Bucket=_records_bucket(), Key=file_path)
                 pdf_bytes = obj["Body"].read()
+                # NON-PDF sources (live finding 2026-06-12, Perez): the key-docs selector can
+                # include .txt/.docx records (natively readable since the OCR keystone fix), but
+                # this assembler merges PDFs only — pypdf dies on 'invalid pdf header' and the
+                # WHOLE pack used to fail. Skip the non-PDF entry (logged, count only) and keep
+                # assembling; a pack missing one text file beats no pack at all.
+                if not pdf_bytes.lstrip()[:5].startswith(b"%PDF-"):
+                    skipped_non_pdf += 1
+                    print(f"skipping non-PDF manifest entry ({len(pdf_bytes)} bytes)")
+                    continue
                 if page_ranges:
                     pages = _select_pages(pdf_bytes, page_ranges)
                 else:
@@ -283,6 +293,15 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
                     pages = list(reader.pages)
                 for page in pages:
                     writer.add_page(page)
+
+            if skipped_non_pdf:
+                print(f"assembled with {skipped_non_pdf} non-PDF manifest entr(ies) skipped")
+            if len(writer.pages) == 0:
+                # EVERY source was unreadable/non-PDF — an empty pack would be a silent lie.
+                raise RuntimeError(
+                    f"no PDF pages could be assembled ({skipped_non_pdf} non-PDF source(s) skipped); "
+                    "the case's key documents may all be text files"
+                )
 
             # Upload to the server-computed S3 key
             output = io.BytesIO()

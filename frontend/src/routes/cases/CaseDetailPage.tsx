@@ -19,7 +19,6 @@ import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
 import { DecisionsOverridesPanel } from '../../components/DecisionsOverridesPanel';
 import { AdvisoryPanel } from '../../components/AdvisoryPanel';
-import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { DocumentUploadPanel } from '../../components/DocumentUploadPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
@@ -69,14 +68,21 @@ export function decidePollIntervalMs(status: CaseStatus | undefined): number | f
 // the veteran chart can't drift; the claim page prepends Overview + its claim-scoped tabs.
 // Order is Ryan-specified (item 12): Overview, Draft jobs, Staff Notes, Email, Messages, then the
 // shared tail (Documents, SC Conditions, Active Problems, Medications).
-type TabId = 'overview' | 'drafts' | 'notes' | 'emails' | 'messages' | SharedTabId;
+// Ask Aegis (advisory Q&A) and Decisions & overrides used to render as ALWAYS-ON page sections
+// below the tab card, so they appeared on every tab (Ryan 2026-06-12: "everywhere, in every tab").
+// They are now their OWN tabs inside the switch: Ask Aegis right after Overview; Decisions & overrides
+// pinned LAST (lowest-yield, after Medications). Doctor Pack was removed from this page entirely — it
+// auto-generates when the case is sent to the physician and lives on the physician review page.
+type TabId = 'overview' | 'advisory' | 'drafts' | 'notes' | 'emails' | 'messages' | SharedTabId | 'decisions';
 const TABS: readonly TabItem<TabId>[] = [
   { id: 'overview', label: 'Overview' },
+  { id: 'advisory', label: 'Ask Aegis' },
   { id: 'drafts', label: 'Draft jobs' },
   NOTES_TAB,
   { id: 'emails', label: 'Email' },
   { id: 'messages', label: 'Messages' },
   ...SHARED_TABS,
+  { id: 'decisions', label: 'Decisions & overrides' },
 ];
 
 function serverErrorMessage(err: unknown): string | undefined {
@@ -488,16 +494,18 @@ export function CaseDetailPage() {
       );
     })()}
 
-    {/* Assignments — moved out of the buried Overview tab to right under the editor panels so it's
-        apparent (Ryan 2026-06-04: "move assignments just under the letter editor ... needs to be
-        apparent"). Admin/ops_staff only. */}
-    {role === 'admin' || role === 'ops_staff' ? (
-      <CaseAssignmentPanel caseId={c.id} version={c.version} assignedPhysician={c.assignedPhysician ?? null} assignedRn={c.assignedRn ?? null} />
-    ) : null}
-
-    {/* Post-approval RN delivery panel — invoice email + cover memo + Stripe link. Stubbed sends. */}
+    {/* Post-approval RN delivery panel — invoice email + cover memo + Stripe link. Pinned directly
+        under the case summary and ABOVE assignments (Ryan 2026-06-12) so when a letter is ready to
+        deliver it's the first thing in view. Shows only at delivered/paid, by which point the
+        drafting/review panels above have cleared — so in practice it sits right under the summary. */}
     {(c.status === 'delivered' || c.status === 'paid') && (role === 'admin' || role === 'ops_staff') ? (
       <DeliveryPanel caseId={caseId} onVerifyLetter={openLetterPdf} hasLetterPdf={!!viewableLetterJob} />
+    ) : null}
+
+    {/* Assignments — under the delivery panel / editor panels so it's apparent (Ryan 2026-06-04:
+        "move assignments just under the letter editor ... needs to be apparent"). Admin/ops_staff only. */}
+    {role === 'admin' || role === 'ops_staff' ? (
+      <CaseAssignmentPanel caseId={c.id} version={c.version} assignedPhysician={c.assignedPhysician ?? null} assignedRn={c.assignedRn ?? null} />
     ) : null}
 
     <div className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
@@ -506,6 +514,7 @@ export function CaseDetailPage() {
         {tab === 'overview' ? (
           <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
         ) : null}
+        {tab === 'advisory' ? <AdvisoryPanel caseId={caseId} /> : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} role={role} /> : null}
         {tab === 'emails' ? <EmailLogPanel queryKey={['case', caseId, 'emails']} fetcher={() => listCaseEmails(caseId)} scope="claim" caseId={caseId} /> : null}
@@ -519,18 +528,9 @@ export function CaseDetailPage() {
         {tab === 'problems' ? <VeteranClinicalTab veteranId={c.veteranId} section="problems" /> : null}
         {tab === 'medications' ? <VeteranClinicalTab veteranId={c.veteranId} section="medications" /> : null}
         {tab === 'notes' ? <ChartNotesPanel veteranId={c.veteranId} /> : null}
+        {tab === 'decisions' ? <DecisionsOverridesPanel caseId={caseId} caseVersion={c.version} /> : null}
       </div>
     </div>
-
-    {/* Chunk D: Doctor Pack — the RN generates/curates the physician's chart abridgement here. */}
-    <DoctorPackPanel caseId={caseId} />
-
-    {/* "Ask AI about this case" — read-only advisory Q&A (decision support only). */}
-    <AdvisoryPanel caseId={caseId} />
-
-    {/* In-chart decisions/overrides audit — plain-language, pinned to the very bottom of the case
-        screen (Ryan 2026-06-06). Self-hides when empty. */}
-    <DecisionsOverridesPanel caseId={caseId} caseVersion={c.version} />
 
     {pendingTo ? <TransitionModal caseId={caseId} from={c.status} to={pendingTo} version={c.version} onClose={() => setPendingTo(null)} onDone={async () => { setPendingTo(null); await refetch(); }} /> : null}
     <SignOffPopup caseId={caseId} open={signOffOpen} onClose={() => setSignOffOpen(false)} onSignedOff={refetch} />

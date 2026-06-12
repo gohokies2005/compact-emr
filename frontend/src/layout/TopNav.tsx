@@ -7,12 +7,15 @@ import type { Role } from '../types/prisma';
 
 // STAFF nav only. Physicians never read this array — their ordered nav is physicianNavItems below,
 // so physician entries (Queue/Letters, or 'physician' in roles) here would be dead code.
+// Owner-specified order (Ryan 2026-06-12): Home, Intake, Cases, Veterans on the LEFT; Inbox is pulled
+// OUT of this left list and renders RIGHT-aligned next to the identity cluster (staffRightNavItems
+// below) — the same treatment the physician nav already got on 2026-06-11. (The earlier ask only
+// landed on the physician nav; the staff nav kept Inbox inline + Veterans-before-Cases until now.)
 const navItems: readonly { label: string; href: string; roles: readonly Role[] }[] = [
   { label: 'Home', href: '/', roles: ['admin', 'ops_staff'] },
   { label: 'Intake', href: '/intake', roles: ['admin', 'ops_staff'] },
-  { label: 'Veterans', href: '/veterans', roles: ['admin', 'ops_staff'] },
   { label: 'Cases', href: '/cases', roles: ['admin', 'ops_staff'] },
-  { label: 'Inbox', href: '/inbox', roles: ['admin', 'ops_staff'] },
+  { label: 'Veterans', href: '/veterans', roles: ['admin', 'ops_staff'] },
   { label: 'Templates', href: '/templates', roles: ['admin'] },
   { label: 'Physicians', href: '/physicians', roles: ['admin'] },
   { label: 'Staff', href: '/staff', roles: ['admin'] },
@@ -37,6 +40,11 @@ const physicianNavItems: readonly { label: string; href: string }[] = [
 const physicianRightNavItems: readonly { label: string; href: string }[] = [
   { label: 'Inbox', href: '/inbox' }
 ];
+// STAFF (admin/ops_staff) also render Inbox RIGHT-aligned next to the identity cluster (Ryan
+// 2026-06-12) — mirrors the physician treatment so Inbox sits over by the user/Ops-Staff menu.
+const staffRightNavItems: readonly { label: string; href: string; roles: readonly Role[] }[] = [
+  { label: 'Inbox', href: '/inbox', roles: ['admin', 'ops_staff'] }
+];
 // Badge renders the inbox unread count. Split into its own component (only mounted when a QueryClient
 // is present) so the nav — which renders on every page — never crashes a provider-less unit test.
 function InboxBadge() {
@@ -52,7 +60,11 @@ export function TopNav() {
   const { role } = useAuth();
   const hasClient = useHasQueryClient();
   const visibleItems = role === 'physician' ? physicianNavItems : role ? navItems.filter((item) => item.roles.includes(role)) : [];
-  const rightItems = role === 'physician' ? physicianRightNavItems : [];
+  const rightItems = role === 'physician'
+    ? physicianRightNavItems
+    : role
+      ? staffRightNavItems.filter((item) => item.roles.includes(role))
+      : [];
   const renderItem = (item: { label: string; href: string }) => (
     <NavLink key={item.href} to={item.href} className={navLinkClass}>
       <span className="inline-flex items-center gap-1.5">{item.label}{item.href === '/inbox' && hasClient ? <InboxBadge /> : null}</span>

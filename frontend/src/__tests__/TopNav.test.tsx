@@ -54,12 +54,22 @@ describe('TopNav ordering', () => {
     expect(headerLabels).toEqual(['Letters in Queue', 'Completed Letters', 'Track pay', 'Inbox']);
   });
 
-  it('staff nav order is unchanged (Home first, Inbox in its shared slot)', () => {
+  it('staff left nav is Home | Intake | Cases | Veterans; Inbox right-aligned outside it', () => {
+    // Ryan 2026-06-12: staff left order is Home, Intake, Cases, Veterans (Cases BEFORE Veterans), and
+    // Inbox is pulled out of the left list to the right cluster next to the identity menu — the same
+    // treatment the physician nav already had.
     renderNav('ops_staff');
     const labels = navLabels();
-    expect(labels[0]).toBe('Home');
-    expect(labels).toContain('Inbox');
-    expect(labels).toContain('Cases');
+    expect(labels).toEqual(['Home', 'Intake', 'Cases', 'Veterans']);
+    // Inbox is no longer in the left nav — it's right-aligned outside it.
+    const nav = screen.getByRole('navigation');
+    expect(within(nav).queryByRole('link', { name: 'Inbox' })).toBeNull();
+    const inbox = screen.getByRole('link', { name: 'Inbox' });
+    expect(nav.contains(inbox)).toBe(false);
+    // Inbox follows the left tabs in DOM order (right cluster).
+    const leftLinks = within(nav).getAllByRole('link');
+    const lastLeft = leftLinks[leftLinks.length - 1]!;
+    expect(lastLeft.compareDocumentPosition(inbox) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Physician-only tabs never leak into the staff nav.
     expect(labels).not.toContain('Letters in Queue');
     expect(labels).not.toContain('Completed Letters');

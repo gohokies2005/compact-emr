@@ -85,8 +85,9 @@ describe('CaseDetailPage', () => {
     renderPage();
     await screen.findByText('Hypertension');
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
-      'Overview', 'Draft jobs', 'Staff Notes', 'Email', 'Messages',
+      'Overview', 'Ask Aegis', 'Draft jobs', 'Staff Notes', 'Email', 'Messages',
       'Documents', 'Service Connected Conditions', 'Active Problems', 'Medications',
+      'Decisions & overrides',
     ]);
     expect(screen.queryByRole('tab', { name: /clarifications/i })).not.toBeInTheDocument();
     // Sticky = class assertion (P2a): pinned to the scroll parent, opaque, above panel content.

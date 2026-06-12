@@ -8,3 +8,7 @@ backend/src/config/caseFraming.v1.schema.json -text
 # backend/src/__tests__/anchor-table-pin.test.ts. A CRLF normalization trips the pin.
 backend/src/config/caseViability.v1.schema.json -text
 backend/src/vendor/** -text
+
+# Credential-block round-trip fixture (backend/src/__tests__/credential-block.test.ts reads it).
+# Pin LF so the byte-for-byte Section-I/signature compare is identical on every OS checkout.
+backend/prisma/demo-letter.txt text eol=lf

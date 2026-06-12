@@ -1,0 +1,52 @@
+May 30, 2026
+
+Department of Veterans Affairs
+Evidence Intake Center
+P.O. Box 4444
+Janesville, WI 53547-4444
+
+Re: Independent Medical Opinion regarding James Adams
+Condition: Obstructive Sleep Apnea (secondary to service-connected PTSD)
+
+To Whom It May Concern,
+
+I. Physician Qualifications
+
+I, Ryan J. Kasky, DO, am board-certified in Family Medicine through the American Board of Osteopathic Family Physicians (ABOFP). I hold an active medical license in Nevada (License #DO2996) with NPI 1073018958. I have no treatment relationship with this veteran. This letter is an independent medical opinion prepared for the purpose of his VA disability claim.
+
+II. Methodology
+
+An in-person or telehealth examination is not required for an independent medical opinion. The VA accepts medical opinions based on thorough record review, and this methodology is consistent with standard medical practice for rendering expert opinions. See Nieves-Rodriguez v. Peake, 22 Vet. App. 295 (2008), which held that the probative value of a medical opinion is determined by whether the opinion is factually accurate, fully articulated, and supported by sound reasoning. This independent medical opinion is based solely on a review of the records identified herein. It does not establish a physician-patient relationship. The scope of this service is limited to rendering an independent medical opinion for the veteran's VA disability claim. No treatment, examination, or ongoing care is provided or implied.
+
+III. Records Reviewed
+
+I reviewed the veteran's DD-214, service treatment records, VA rating decision establishing service connection for post-traumatic stress disorder at 70 percent, a VA mental health treatment note documenting ongoing PTSD symptoms, and a diagnostic polysomnography report confirming obstructive sleep apnea with an apnea-hypopnea index of 22.
+
+IV. Relevant History
+
+The veteran served on active duty in the United States Army from 2002 to 2010, with a combat deployment to Iraq. He is service-connected for post-traumatic stress disorder, currently evaluated at 70 percent. Following separation, he reported progressive sleep disturbance, including frequent nocturnal awakenings, witnessed apneas reported by his spouse, loud snoring, and disabling daytime somnolence. A sleep study performed in the post-service period confirmed moderate obstructive sleep apnea, with an apnea-hypopnea index of 22 events per hour. His PTSD symptoms, including hyperarousal, nightmares, and fragmented sleep, were well documented prior to and concurrent with the onset of his sleep-disordered breathing.
+
+V. Current Diagnosis
+
+The veteran carries a current, active diagnosis of obstructive sleep apnea, confirmed by attended polysomnography (apnea-hypopnea index 22). The condition is symptomatic and is being managed with positive airway pressure therapy.
+
+VI. Medical Reasoning and Rationale
+
+The medical literature establishes a robust association between post-traumatic stress disorder and obstructive sleep apnea. Gupta and Simpson (2015), in a systematic review published in the Journal of Clinical Sleep Medicine, found a markedly elevated prevalence of obstructive sleep apnea among patients with PTSD relative to the general population, and described plausible mechanisms by which chronic sympathetic hyperarousal, sleep fragmentation, and PTSD-related neuroendocrine dysregulation promote upper-airway instability and the development or worsening of sleep-disordered breathing. This veteran's clinical course mirrors that pattern: his service-connected PTSD was established and symptomatic, and his sleep-disordered breathing developed in that setting, with an objectively confirmed apnea-hypopnea index of 22. Alternative etiologies were considered. While weight is a recognized contributor to obstructive sleep apnea, it does not exclude a PTSD-mediated contribution, and the temporal relationship between his documented PTSD symptomatology and the onset of his sleep complaints supports a causal nexus that is at least as strong as any independent factor.
+
+VII. Opinion
+
+It is my independent medical opinion that James Adams's obstructive sleep apnea is more likely than not (greater than 50% probability) proximately due to and aggravated by his service-connected post-traumatic stress disorder. This opinion rests on the peer-reviewed literature linking PTSD to obstructive sleep apnea, the objectively confirmed diagnosis, and the documented temporal relationship between his service-connected PTSD and the onset of his sleep-disordered breathing.
+
+VIII. References
+
+1. Gupta MA, Simpson FC. Obstructive sleep apnea and psychiatric disorders: a systematic review. J Clin Sleep Med. 2015;11(2):165-175.
+2. Krakow B, et al. Sleep-disordered breathing in trauma survivors with posttraumatic stress disorder. J Trauma Stress. 2001;14(4):647-665.
+3. Colvonen PJ, et al. Obstructive sleep apnea and posttraumatic stress disorder among veterans. J Clin Sleep Med. 2018;14(9):1601-1607.
+
+Respectfully submitted,
+
+Ryan J. Kasky, DO
+Board-Certified in Family Medicine, ABOFP
+Nevada Medical License #DO2996
+NPI: 1073018958

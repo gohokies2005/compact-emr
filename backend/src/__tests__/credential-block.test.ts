@@ -27,7 +27,10 @@ const JANE: SignerCredentials = {
 
 // Resolve the reference letter relative to this test file: src/__tests__ -> ../../prisma.
 const here = dirname(fileURLToPath(import.meta.url));
-const demoLetter = readFileSync(join(here, '..', '..', 'prisma', 'demo-letter.txt'), 'utf8');
+// Normalize CRLF → LF: the fixture is checked out with the platform's line endings (CRLF on a
+// Windows checkout); the builders emit LF, so a raw split left a trailing \r on every line and the
+// byte-for-byte compare failed on Windows. Normalizing makes the round-trip OS-independent.
+const demoLetter = readFileSync(join(here, '..', '..', 'prisma', 'demo-letter.txt'), 'utf8').replace(/\r\n/g, '\n');
 const lines = demoLetter.split('\n');
 
 describe('credential-block — round-trip against the Kasky reference letter', () => {

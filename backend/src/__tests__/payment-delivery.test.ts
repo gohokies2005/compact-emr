@@ -7,7 +7,7 @@ vi.mock('../services/mailer.js', () => ({
   readSecretByName: vi.fn(async () => 'whsec'),
 }));
 
-function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boolean; phone?: string | null } = {}) {
+function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boolean; phone?: string | null; approvedRevision?: boolean } = {}) {
   const calls = {
     paymentCreate: vi.fn(async () => ({})),
     caseUpdate: vi.fn(async () => ({})),
@@ -16,7 +16,9 @@ function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boo
   };
   const delegates = {
     payment: { findFirst: vi.fn(async () => (over.existingPayment ? { id: 'P0' } : null)), create: calls.paymentCreate },
-    case: { findFirst: vi.fn(async () => (over.noCase ? null : { id: 'C1', veteranId: 'V1' })), update: calls.caseUpdate },
+    case: { findFirst: vi.fn(async () => (over.noCase ? null : { id: 'C1', veteranId: 'V1', currentVersion: 7 })), update: calls.caseUpdate },
+    // Default: no LetterRevision at currentVersion → resolveSignedPdf falls back to the draftJob path.
+    letterRevision: { findFirst: vi.fn(async () => (over.approvedRevision ? { version: 7, artifactPdfS3Key: 'letter-revisions/C1/v7/letter.pdf' } : null)) },
     draftJob: { findMany: vi.fn(async () => (over.noPdf ? [] : [{ version: 5, artifactPdfS3Key: 'drafter-artifacts/C1/v5/letter.pdf' }])) },
     veteran: { findUnique: vi.fn(async () => ({ email: 'vet@example.com', firstName: 'Sam', phone: over.phone !== undefined ? over.phone : '(702) 555-1234' })) },
     deliveryToken: { create: calls.tokenCreate },
@@ -122,6 +124,16 @@ describe('payment-delivery', () => {
     expect(t).toContain('last 4 digits');
     // The APP-1 regression guard: no password line, no password word implying one exists to enter.
     expect(t).not.toMatch(/Password:/i);
+  });
+
+  it('token PDF prefers the CURRENT approved LetterRevision over an older draftJob render', async () => {
+    const { db, calls } = makeDb({ approvedRevision: true });
+    const r = await processStripePayment(db, { caseId: 'C1', amountCents: 50000, chargeId: 'pi_rev' }, cfg);
+    expect(r.status).toBe('delivered');
+    // The veteran must receive what the physician approved (v7), never the stale drafter v5 render.
+    expect(calls.tokenCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ letterVersion: 7, pdfS3Key: 'letter-revisions/C1/v7/letter.pdf' }),
+    }));
   });
 
   it('mints an IDENTITY-mode token (passwordHash null) when the veteran has a usable phone', async () => {

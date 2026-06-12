@@ -24,7 +24,15 @@ function paymentKindForAmount(cents: number): 'letter_500' | 'letter_350' | 'rev
   return null;
 }
 
-async function resolveSignedPdf(db: AppDb, caseId: string): Promise<{ version: number; pdfS3Key: string } | null> {
+async function resolveSignedPdf(db: AppDb, caseId: string, currentVersion: number): Promise<{ version: number; pdfS3Key: string } | null> {
+  // PREFER the case's CURRENT letter (Case.currentVersion → LetterRevision) — the artifact the
+  // physician actually approved/signed. The draftJob fallback alone shipped an OLDER render for any
+  // case whose letter advanced via editor saves/approve after drafting (the Seam-B remediated cases
+  // are exactly this shape: the approved v<N> is a LetterRevision; draft jobs stop at the drafter run).
+  if (Number.isInteger(currentVersion) && currentVersion >= 1) {
+    const rev = await db.letterRevision.findFirst({ where: { caseId, version: currentVersion } }) as { version: number; artifactPdfS3Key: string | null } | null;
+    if (rev && rev.artifactPdfS3Key) return { version: rev.version, pdfS3Key: rev.artifactPdfS3Key };
+  }
   const jobs = await db.draftJob.findMany({ where: { caseId, artifactPdfS3Key: { not: null } }, orderBy: { version: 'desc' }, take: 1 }) as readonly { version: number; artifactPdfS3Key: string | null }[];
   const j = jobs[0];
   return j && j.artifactPdfS3Key ? { version: j.version, pdfS3Key: j.artifactPdfS3Key } : null;
@@ -55,7 +63,7 @@ export async function processStripePayment(
   // RACE-SAFE backstop (concurrent retries → payment.create throws P2002, caught below).
   if (await db.payment.findFirst({ where: { stripeChargeId: chargeId } })) return { status: 'duplicate', reason: 'charge already processed' };
 
-  const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true } });
+  const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true, currentVersion: true } }) as { id: string; veteranId: string; currentVersion: number } | null;
   if (c === null) {
     // A real PAID charge whose client_reference_id matched no EMR case leaves NO other trace (Stripe
     // gets 200 and never retries) — record a breadcrumb so an admin can reconcile it manually.
@@ -65,7 +73,7 @@ export async function processStripePayment(
 
   const isLetter = kind === 'letter_500' || kind === 'letter_350';
   // Reads + pure generation happen BEFORE the transaction (no side effects to roll back).
-  const pdf = isLetter ? await resolveSignedPdf(db, caseId) : null;
+  const pdf = isLetter ? await resolveSignedPdf(db, caseId, c.currentVersion) : null;
   const vet = isLetter && pdf !== null ? ((await db.veteran.findUnique({ where: { id: c.veteranId } })) as { email?: string; firstName?: string; phone?: string | null } | null) : null;
   const token = generateToken();
   // Unlock mode (HIPAA audit APP-1 fix, Ryan 2026-06-11): when the veteran has a usable phone on

@@ -87,7 +87,7 @@
     "confidence": { "type": "string", "enum": ["high", "low"] },
     "mode": { "type": "string", "enum": ["info_light", "chart_refined"] },
     "table_version": { "type": ["string", "null"] },
-    "table_content_hash": { "type": ["string", "null"], "const": "7d7d355f631d2a60192205d993406161437564a3f9033f39a30c82f11e4869b2" },
+    "table_content_hash": { "type": ["string", "null"], "const": "1f095fb66e851ec10f9babe6e7fa0a5956c4b6eb11dadc3733bc8fcf25a868e3" },
     "derivedAt": { "type": "string", "format": "date-time" }
   }
 }

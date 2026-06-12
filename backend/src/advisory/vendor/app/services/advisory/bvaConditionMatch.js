@@ -17,6 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { canonicalizeCondition, isCanonicalLabel } = require('../conditionCanon');
 
 const MAP_PATH = path.join(__dirname, '..', '..', 'config', 'advisory', 'bva_condition_map.json');
 
@@ -56,18 +57,39 @@ function resolveCondition(phrase) {
   if (!phrase || typeof phrase !== 'string') return null;
   const text = phrase.toLowerCase().trim();
   if (!text) return null;
-  // Already a canonical key? (cheap exact-key pass so callers can pass canonical names.)
+
+  // Compute the advisory map's own answer (exact-key pass, then specificity-ordered synonym scan).
   const map = loadMap();
+  let advisory = null;
   for (const entry of map.conditions) {
-    if (entry.canonical.toLowerCase() === text) return entry.canonical;
+    if (entry.canonical.toLowerCase() === text) { advisory = entry.canonical; break; }
   }
-  // Synonym scan, specificity order (first match wins — mirrors the generator).
-  for (const entry of map.conditions) {
-    for (const syn of entry.synonyms) {
-      if (termHits(text, syn.toLowerCase())) return entry.canonical;
+  if (advisory === null) {
+    for (const entry of map.conditions) {
+      for (const syn of entry.synonyms) {
+        if (termHits(text, syn.toLowerCase())) { advisory = entry.canonical; break; }
+      }
+      if (advisory !== null) break;
     }
   }
-  return null;
+
+  // DEFECT 2 fix (2026-06-12): the advisory map above is a coarse, substring-matched subset (the
+  // original 43 atlas keys) with NO entry for the distinct phenotypes conditionCanon (the SSOT)
+  // split out — Allergic rhinitis, Central sleep apnea, Pulmonary hypertension, Chronic
+  // rhinosinusitis, Psoriasis, Trauma/stressor disorder (non-PTSD), etc. So e.g. "central sleep
+  // apnea" hit the loose "sleep apnea" synonym and COLLAPSED into "Obstructive sleep apnea",
+  // making Aegis look up the WRONG anchor row. When the advisory scan produced a hit but
+  // conditionCanon assigns a DIFFERENT distinct label, conditionCanon wins (it is the
+  // canonicalization SSOT and the downstream viability engine re-canonicalizes through it anyway).
+  // We deliberately do NOT override the advisory map's null: if the advisory BVA atlas has no
+  // coverage for a term, returning null preserves the coverage-honesty contract (caller surfaces
+  // "no BVA data for X, verify") rather than fabricating a match for a condition conditionCanon
+  // happens to know but the BVA atlas does not (e.g. "glaucoma").
+  if (advisory !== null) {
+    const cc = canonicalizeCondition(phrase);
+    if (cc && cc !== advisory && isCanonicalLabel(cc)) return cc;
+  }
+  return advisory;
 }
 
 /** All canonical keys (for tests / coverage checks). */

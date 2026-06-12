@@ -318,6 +318,42 @@ const _PRESUMPTIVE = {
   'IBS': { path: 'GW_3317', service_flag: 'gulf_war_theater', note: 'Gulf War chronic multi-symptom illness presumptive (38 CFR 3.317). File presumptive; secondary held as fallback.' },
   'Fibromyalgia': { path: 'GW_3317', service_flag: 'gulf_war_theater', note: 'Gulf War presumptive (38 CFR 3.317). File presumptive; secondary held as fallback.' },
   'Chronic fatigue syndrome': { path: 'GW_3317', service_flag: 'gulf_war_theater', note: 'Gulf War presumptive (38 CFR 3.317). File presumptive; secondary held as fallback.' },
+  // ── 2026-06-12: VA-VERIFIED presumptives (sourced from official va.gov pages, NOT memory).
+  // Keyed on OUR canonical claimed labels. Info-light = ADVISORY flag only (does NOT change the band);
+  // a HARD redirect fires only when the chart's service_profile confirms the matching exposure. ──
+  // Agent Orange (herbicide) — va.gov/.../agent-orange
+  'Diabetes type 2': { path: 'AGENT_ORANGE', service_flag: 'herbicide_exposure', note: 'Agent Orange presumptive (herbicide exposure). If herbicide-exposed, file the presumptive direct path first; secondary anchor work is the fallback.' },
+  'Hypertension': { path: 'AGENT_ORANGE', service_flag: 'herbicide_exposure', note: 'Agent Orange presumptive (2022 expansion). If herbicide-exposed, file presumptive; secondary = fallback.' },
+  'Ischemic heart disease': { path: 'AGENT_ORANGE', service_flag: 'herbicide_exposure', note: 'Agent Orange presumptive. If herbicide-exposed, file presumptive; secondary = fallback.' },
+  'Hypothyroidism': { path: 'AGENT_ORANGE', service_flag: 'herbicide_exposure', note: 'Agent Orange presumptive. If herbicide-exposed, file presumptive; secondary = fallback.' },
+  'Peripheral neuropathy': { path: 'AGENT_ORANGE', service_flag: 'herbicide_exposure', note: 'Agent Orange presumptive (early-onset). If herbicide-exposed, check presumptive; secondary = fallback.' },
+  'Parkinson disease': { path: 'AGENT_ORANGE_OR_CAMP_LEJEUNE', service_flag: 'herbicide_or_lejeune', note: 'Presumptive under BOTH Agent Orange (herbicide) AND Camp Lejeune water. If either exposure applies, file presumptive direct; secondary = fallback.' },
+  'Prostate cancer': { path: 'AGENT_ORANGE', service_flag: 'herbicide_exposure', note: 'Agent Orange presumptive (also PACT reproductive cancer). If exposed, file presumptive.' },
+  'Lung cancer': { path: 'AGENT_ORANGE_OR_PACT', service_flag: 'herbicide_or_burnpit', note: 'Presumptive under Agent Orange (respiratory cancer) AND PACT burn pits. If exposed, file presumptive.' },
+  'Lymphoma': { path: 'MULTIPLE', service_flag: 'toxic_exposure', note: 'Presumptive under Agent Orange (NHL/Hodgkin), Camp Lejeune (NHL), and PACT burn pits (lymphoma, any type). If any exposure, file presumptive.' },
+  // Camp Lejeune water (1953-1987) — va.gov/.../camp-lejeune-water-contamination
+  'Bladder cancer': { path: 'AGENT_ORANGE_OR_CAMP_LEJEUNE', service_flag: 'herbicide_or_lejeune', note: 'Presumptive under Agent Orange AND Camp Lejeune. If exposed, file presumptive.' },
+  'Kidney cancer': { path: 'CAMP_LEJEUNE_OR_PACT', service_flag: 'lejeune_or_burnpit', note: 'Presumptive under Camp Lejeune water AND PACT burn pits. If exposed, file presumptive.' },
+  'Hepatocellular carcinoma': { path: 'CAMP_LEJEUNE', service_flag: 'camp_lejeune_water', note: 'Camp Lejeune presumptive (liver cancer). If stationed Camp Lejeune Aug 1953-Dec 1987, file presumptive.' },
+  'Myelodysplastic syndrome': { path: 'CAMP_LEJEUNE', service_flag: 'camp_lejeune_water', note: 'Camp Lejeune presumptive (aplastic anemia / MDS). If Camp Lejeune exposure, file presumptive.' },
+  // PACT Act burn pits / airborne hazards — va.gov PACT hub
+  'Asthma': { path: 'PACT_BURN_PIT', service_flag: 'burn_pit_exposure', note: 'PACT Act burn-pit presumptive (asthma diagnosed after service). If burn-pit/airborne-hazard exposed, file presumptive; secondary = fallback.' },
+  'COPD': { path: 'PACT_BURN_PIT', service_flag: 'burn_pit_exposure', note: 'PACT Act burn-pit presumptive (COPD / emphysema / chronic bronchitis). If exposed, file presumptive.' },
+  'Chronic rhinosinusitis': { path: 'PACT_BURN_PIT', service_flag: 'burn_pit_exposure', note: 'PACT Act presumptive (chronic sinusitis / rhinitis). If burn-pit exposed, file presumptive.' },
+  'Interstitial lung disease': { path: 'PACT_BURN_PIT', service_flag: 'burn_pit_exposure', note: 'PACT Act presumptive (ILD / pulmonary fibrosis). If exposed, file presumptive.' },
+  'Sarcoidosis': { path: 'PACT_BURN_PIT', service_flag: 'burn_pit_exposure', note: 'PACT Act burn-pit presumptive (also a known anchor). If burn-pit exposed, file presumptive.' },
+  'Melanoma': { path: 'PACT_BURN_PIT', service_flag: 'burn_pit_exposure', note: 'PACT Act burn-pit presumptive (melanoma). If exposed, file presumptive.' },
+  // Gulf War (38 CFR 3.317) — va.gov Gulf War page (IBS/Fibromyalgia/CFS above)
+  'Tuberculosis': { path: 'GW_INFECTIOUS', service_flag: 'gulf_war_theater', note: 'Gulf War presumptive infectious disease (M. tuberculosis). If SW-Asia/Afghanistan service, file presumptive.' },
+};
+
+// §3.6 INTERMEDIATE-ONLY claimed conditions (Doximity QA 2026-06-12). Obesity is NOT a
+// standalone directly-service-connectable disability (VAOPGCPREC 1-2017). It functions as an
+// INTERMEDIATE step in a chain (SC condition -> obesity -> secondary), NEVER a standalone claim.
+// Flagged advisory on the claimed side so a consumer never presents obesity-as-an-endpoint as a
+// clean claim; obesity-as-an-ANCHOR (the intermediate link) is unaffected.
+const _INTERMEDIATE_ONLY = {
+  'Obesity': { note: 'Obesity is NOT a standalone service-connectable disability (VAOPGCPREC 1-2017). It is only an INTERMEDIATE step in a chain (service-connected condition -> obesity -> the actual claimed condition). Do not frame obesity itself as the claim; use it as the link.' },
 };
 
 // §3.2 graveyard / redirect — claimed|upstream pairings where the anchor is
@@ -532,6 +568,10 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
       return shell;   // hard pre-empt: secondary held as fallback, not ranked
     }
   }
+
+  // §3.6 intermediate-only advisory (obesity): flag that the claimed condition is not a
+  // standalone direct claim — does not change the band, just warns the consumer.
+  if (_INTERMEDIATE_ONLY[clC]) shell.intermediate_only = _INTERMEDIATE_ONLY[clC];
 
   // Resolve every granted SC as a candidate upstream for this claimed condition.
   const resolved = [];
@@ -786,10 +826,28 @@ function recommendedAction(viabilityResult) {
   }
 }
 
+// public: presumptiveFor(claimedText) — returns the VA-verified presumptive rule for a claimed
+// condition (or null). Lets intake + the quick-ref + the RN card flag "this may be a direct
+// presumptive grant — check that path first; our secondary letter is the fallback." Pure.
+function presumptiveFor(claimedText) {
+  const clC = _canon(claimedText);
+  if (!clC || !_PRESUMPTIVE[clC]) return null;
+  return Object.assign({ claimed: clC }, _PRESUMPTIVE[clC]);
+}
+
+// public: intermediateOnlyFor(claimedText) — non-null when the claimed condition is not a
+// standalone direct claim (obesity, VAOPGCPREC 1-2017). For intake/quick-ref/RN-card guidance.
+function intermediateOnlyFor(claimedText) {
+  const clC = _canon(claimedText);
+  return (clC && _INTERMEDIATE_ONLY[clC]) ? Object.assign({ claimed: clC }, _INTERMEDIATE_ONLY[clC]) : null;
+}
+
 module.exports = {
   resolveAnchorEligibility,
   assessClaimViability,
   recommendedAction,
+  presumptiveFor,
+  intermediateOnlyFor,
   preferenceRankFor,
   eligibleUpstreamsFor,
   isAggravationOnly,

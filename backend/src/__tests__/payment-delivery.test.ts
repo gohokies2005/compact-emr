@@ -124,6 +124,10 @@ describe('payment-delivery', () => {
     expect(t).toContain('last 4 digits');
     // The APP-1 regression guard: no password line, no password word implying one exists to enter.
     expect(t).not.toMatch(/Password:/i);
+    // The review touch rides the delivery email (post-payment) — and the unlock instructions
+    // must come BEFORE it (the email's job first, the favor after).
+    expect(t).toContain('https://g.page/r/CaYDGwvikxZEEAE/review');
+    expect(t.indexOf('date of birth')).toBeLessThan(t.indexOf('g.page'));
   });
 
   it('token PDF prefers the CURRENT approved LetterRevision over an older draftJob render', async () => {

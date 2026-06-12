@@ -155,6 +155,10 @@ export function buildDeliveryEmailText(input: { firstName?: string; link: string
     'of your phone number. That is all you need — there is no password to keep track of.', '',
     `This link is valid for ${input.expiresDays} days. Open it, verify, and download your letter (PDF).`, '',
     'Thank you,', 'Flat Rate Nexus', 'flatratenexus.com', '',
-    'All correspondence should be directed to info@flatratenexus.com.',
+    'All correspondence should be directed to info@flatratenexus.com.', '',
+    // Passive review touch — AFTER payment + delivery, never on the invoice (Ryan 2026-06-11:
+    // the invoice has one job; the review ask rides the moment the value lands).
+    'P.S. If our work helped you, a quick Google review helps other veterans find us:',
+    'https://g.page/r/CaYDGwvikxZEEAE/review',
   ].join('\n');
 }

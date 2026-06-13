@@ -124,7 +124,11 @@ export function createVeteransRouter(db: AppDb): Router {
 
   router.get(
     '/veterans',
-    requireRole([...OPS_ROLES]),
+    // Physicians included (Ryan 2026-06-13): the staff-message "Link a case" picker lets a doctor
+    // type a veteran name to attach a case — that 403'd on OPS_ROLES, so doctors couldn't link a
+    // case at all. Physicians already see full charts on cases they sign; this is the same data
+    // surface scoped to a name search. The veteran LIST page nav stays ops-only via the frontend.
+    requireRole(['admin', 'ops_staff', 'physician']),
     asyncHandler(async (req, res) => {
       const limit = toPositiveInt(req.query.limit, 25, 100);
       const page = toPositiveInt(req.query.page, 1, 10_000);

@@ -108,6 +108,25 @@ describe('GET /users — directory', () => {
   });
 });
 
+describe('GET /users/directory — messaging recipient picker (physician-readable, keyed by cognito sub)', () => {
+  it('open to physicians; returns staff + physicians as { sub, name, role } with minimal PII', async () => {
+    const { db, physician } = makeDb();
+    physician.findMany.mockResolvedValue([{ cognitoSub: 'ph-sub', fullName: 'House, Gregory MD', active: true }]);
+    mockUser = { sub: 'd-sub', roles: ['physician'] }; // physician was 403 on /users — must NOT be here
+    const res = await request(appFor(db, makeCognito())).get('/api/v1/users/directory');
+    expect(res.status).toBe(200);
+    // Minimal PII: sub + name + role only — never email/version (those are on the admin /users list).
+    expect(res.body.data.every((r: Record<string, unknown>) => 'sub' in r && 'name' in r && 'role' in r && !('email' in r) && !('version' in r))).toBe(true);
+    // Each staff row is keyed by the COGNITO SUB (the id recipient rows match on), not the AppUser id.
+    const rn = res.body.data.find((r: { sub: string }) => r.sub === 'rn-sub');
+    expect(rn).toMatchObject({ name: 'RN', role: 'ops_staff' });
+    // The physician from the Physician table is present and labeled physician.
+    expect(res.body.data.find((r: { sub: string }) => r.sub === 'ph-sub')).toMatchObject({ name: 'House, Gregory MD', role: 'physician' });
+    // A physician-ROLE AppUser (DOC, cognito d-sub) is NOT emitted as ops_staff (no mislabel).
+    expect(res.body.data.find((r: { sub: string }) => r.sub === 'd-sub')).toBeUndefined();
+  });
+});
+
 describe('GET /users/me — caller identity (AppUser id, not the Cognito sub)', () => {
   it('200 with { id, email, name, roles } when an AppUser row maps to the caller sub', async () => {
     mockUser = { sub: 'rn-sub', roles: ['ops_staff'] };

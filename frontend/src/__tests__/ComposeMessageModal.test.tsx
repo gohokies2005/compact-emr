@@ -3,8 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ComposeMessageModal } from '../components/messaging/ComposeMessageModal';
 import { sendMessage } from '../api/messaging';
-import { listUsers } from '../api/users';
-import { listPhysicians } from '../api/physicians';
+import { listDirectory } from '../api/users';
 import { listCases } from '../api/cases';
 import { listVeterans } from '../api/veterans';
 
@@ -12,14 +11,12 @@ vi.mock('../api/messaging', async () => {
   const actual = await vi.importActual<typeof import('../api/messaging')>('../api/messaging');
   return { ...actual, sendMessage: vi.fn() };
 });
-vi.mock('../api/users', () => ({ listUsers: vi.fn() }));
-vi.mock('../api/physicians', () => ({ listPhysicians: vi.fn() }));
+vi.mock('../api/users', () => ({ listDirectory: vi.fn() }));
 vi.mock('../api/cases', () => ({ listCases: vi.fn() }));
 vi.mock('../api/veterans', () => ({ listVeterans: vi.fn() }));
 
 const sendMock = vi.mocked(sendMessage);
-const listUsersMock = vi.mocked(listUsers);
-const listPhysiciansMock = vi.mocked(listPhysicians);
+const listDirectoryMock = vi.mocked(listDirectory);
 const listCasesMock = vi.mocked(listCases);
 const listVeteransMock = vi.mocked(listVeterans);
 
@@ -47,10 +44,9 @@ function renderModal() {
 describe('ComposeMessageModal', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    listUsersMock.mockResolvedValue({
-      data: [{ id: 'rn-sub-1', email: 'rn@example.com', name: 'Nurse Joy', active: true, roles: ['ops_staff'], version: 1 }],
+    listDirectoryMock.mockResolvedValue({
+      data: [{ sub: 'rn-sub-1', name: 'Nurse Joy', role: 'ops_staff' }],
     });
-    listPhysiciansMock.mockResolvedValue({ data: [] });
     listCasesMock.mockResolvedValue({ data: [], total: 0, page: 1, pageSize: 5 });
     listVeteransMock.mockResolvedValue({ data: [] });
     sendMock.mockResolvedValue({ threadId: 'thread-1', messageId: 'msg-1' });

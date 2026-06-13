@@ -283,12 +283,15 @@ describe('Phase 3A-1 veteran routes', () => {
     expect(res.body.error.code).toBe('unauthorized');
   });
 
-  it('GET /api/v1/veterans rejects physician role with 403', async () => {
+  it('GET /api/v1/veterans now allows physician (staff-message "Link a case" picker, Ryan 2026-06-13)', async () => {
+    // Was 403 (OPS_ROLES). Physicians must be able to type a veteran name to attach a case to a
+    // staff message; they already see full charts on cases they sign, so the name search is the
+    // same data surface. The veteran LIST nav stays ops-only on the frontend.
     const db = new MockDb();
     const token = await makeJwt(['physician']);
     const res = await request(createApp({ db: db as unknown as AppDb })).get('/api/v1/veterans').set('Authorization', `Bearer ${token}`);
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe('forbidden');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.data)).toBe(true);
   });
 
   it('PATCH /api/v1/veterans/:id increments version and writes fields-only activity details', async () => {

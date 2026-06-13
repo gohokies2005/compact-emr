@@ -197,6 +197,41 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
     }),
   );
 
+  // Messaging directory — the type-ahead source for the staff-message recipient picker. Readable by
+  // EVERY staff role (physicians included): a physician could previously only pick the role aliases
+  // because GET /users is admin/ops_staff-only, so they 403'd and saw no individuals (Ryan 2026-06-13).
+  // Returns ONLY { sub, name, role } — minimal PII (no email/version) — and crucially keys each row by
+  // the COGNITO SUB, which is the id the staff-message recipient rows match on (recipientSub). The old
+  // picker addressed staff by AppUser.id, which never matched a JWT sub → individual messages were
+  // misrouted for everyone. Rows without a cognitoSub are omitted (they can't receive a message).
+  router.get(
+    '/users/directory',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (_req: Request, res: Response) => {
+      const staff = await db.appUser.findMany({ where: { active: true }, include: { roles: true } });
+      const physicians = await db.physician.findMany({ where: { active: true } });
+      const out: { sub: string; name: string; role: Role }[] = [];
+      const seen = new Set<string>();
+      for (const u of staff) {
+        if (!u.cognitoSub) continue;
+        const roles = u.roles.map((r) => r.role);
+        // Classify by the ops/admin roles only. A physician-role AppUser (if one exists) is sourced
+        // from the Physician table below — skip it here so it isn't mislabeled or duplicated.
+        const role: Role | null = roles.includes('admin') ? 'admin' : roles.includes('ops_staff') ? 'ops_staff' : null;
+        if (role === null) continue;
+        out.push({ sub: u.cognitoSub, name: u.name ?? u.email, role });
+        seen.add(u.cognitoSub);
+      }
+      for (const p of physicians) {
+        if (!p.cognitoSub || seen.has(p.cognitoSub)) continue;
+        out.push({ sub: p.cognitoSub, name: p.fullName, role: 'physician' });
+        seen.add(p.cognitoSub);
+      }
+      out.sort((a, b) => a.name.localeCompare(b.name));
+      res.json({ data: out });
+    }),
+  );
+
   // Who am I? Resolves the CALLER's AppUser row from the JWT's cognito sub — the client needs its
   // own AppUser.id (assignedRnId etc. key on it, NOT the Cognito sub) for "my cases" filters. Open
   // to any authenticated staff role: it only ever returns the caller's own row. 404 (not 500) when

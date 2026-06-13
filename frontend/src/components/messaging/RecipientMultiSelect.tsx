@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { listUsers } from '../../api/users';
-import { listPhysicians } from '../../api/physicians';
+import { listDirectory } from '../../api/users';
 import type { RecipientAlias, RecipientKind, SendRecipient } from '../../api/messaging';
 
-// Chip-input type-ahead over the UNION of staff users (listUsers) + physicians (listPhysicians). The
-// cross-role key is `sub`. Role aliases ("All RNs"/"All Physicians"/"Admins") are selectable options
-// that send as { alias, kind } rather than a concrete sub. Mirrors the Cases veteran-search autocomplete
-// (debounced filter -> dropdown of buttons -> selected pills).
+// Chip-input type-ahead over the messaging directory (GET /users/directory — staff + physicians in
+// ONE physician-readable list, each keyed by its COGNITO SUB, the id recipient rows match on). The
+// old picker unioned listUsers()+listPhysicians(): physicians 403'd on listUsers so they saw no
+// individuals, and staff were addressed by AppUser.id (never a JWT sub) so individual messages
+// misrouted. Role aliases ("All RNs"/"All Physicians"/"Admins") remain selectable as { alias, kind }.
+// Mirrors the Cases veteran-search autocomplete (debounced filter -> dropdown of buttons -> pills).
 export interface SelectedRecipient {
   readonly key: string; // sub or `alias:<alias>` — local de-dup key
   readonly label: string;
@@ -47,8 +48,7 @@ export function RecipientMultiSelect({
   const [query, setQuery] = useState('');
   const debounced = useDebounced(query, 250);
 
-  const usersQuery = useQuery({ queryKey: ['users', 'all'], queryFn: () => listUsers() });
-  const physiciansQuery = useQuery({ queryKey: ['physicians', 'all'], queryFn: () => listPhysicians() });
+  const directoryQuery = useQuery({ queryKey: ['users', 'directory'], queryFn: () => listDirectory() });
 
   const options = useMemo<Option[]>(() => {
     const opts: Option[] = ALIAS_OPTIONS.map((a) => ({
@@ -57,28 +57,18 @@ export function RecipientMultiSelect({
       sublabel: 'Group',
       toSend: (kind) => ({ alias: a.alias, kind }),
     }));
-    for (const u of usersQuery.data?.data ?? []) {
-      // Staff users carry `id` (the app-user id); the cross-role key the backend wants is the Cognito
-      // sub. Staff list exposes it as the row id in this contract's picker union — guard against missing.
-      const sub = u.id;
+    for (const d of directoryQuery.data?.data ?? []) {
+      // Each directory row is already keyed by the Cognito sub — the id staff-message recipient rows
+      // match on — so individual recipients route correctly for every role.
       opts.push({
-        key: sub,
-        label: u.name ?? u.email,
-        sublabel: u.roles.includes('ops_staff') ? 'RN' : u.roles.includes('admin') ? 'Admin' : u.roles.join(', '),
-        toSend: (kind) => ({ sub, kind }),
-      });
-    }
-    for (const p of physiciansQuery.data?.data ?? []) {
-      if (!p.cognitoSub) continue; // a physician without a Cognito identity can't be a recipient
-      opts.push({
-        key: p.cognitoSub,
-        label: p.fullName,
-        sublabel: 'Physician',
-        toSend: (kind) => ({ sub: p.cognitoSub as string, kind }),
+        key: d.sub,
+        label: d.name,
+        sublabel: d.role === 'ops_staff' ? 'RN' : d.role === 'admin' ? 'Admin' : 'Physician',
+        toSend: (kind) => ({ sub: d.sub, kind }),
       });
     }
     return opts;
-  }, [usersQuery.data, physiciansQuery.data]);
+  }, [directoryQuery.data]);
 
   const selectedKeys = useMemo(() => new Set(selected.map((s) => s.key)), [selected]);
 

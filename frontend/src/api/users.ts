@@ -53,6 +53,18 @@ export async function listUsers(params: { role?: StaffRole; includeInactive?: bo
   return apiGet<{ data: readonly StaffUser[] }>(`/api/v1/users${query ? `?${query}` : ''}`);
 }
 
+// Messaging directory entry — keyed by the COGNITO SUB (the id staff-message recipients match on),
+// readable by every staff role (physicians included). Minimal PII: name + role only.
+export interface DirectoryEntry {
+  readonly sub: string;
+  readonly name: string;
+  readonly role: 'admin' | 'ops_staff' | 'physician';
+}
+
+export async function listDirectory(): Promise<{ data: readonly DirectoryEntry[] }> {
+  return apiGet<{ data: readonly DirectoryEntry[] }>('/api/v1/users/directory');
+}
+
 // The caller's own AppUser row (id is what assignedRnId etc. key on — NOT the Cognito sub).
 // 404s when the login has no AppUser mapping; callers must degrade gracefully (e.g. hide "Me").
 export interface MeUser {

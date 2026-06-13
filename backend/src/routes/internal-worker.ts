@@ -8,6 +8,8 @@ import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
 import { writeScreeningSummary } from '../services/screening-summary-write.js';
+import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
+import { randomUUID } from 'node:crypto';
 import type { ScreeningResult } from '../services/chart-extract-llm.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { refreshDerivedStamps } from '../services/case-stamp-refresh.js';
@@ -729,6 +731,25 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       const screenings = coerceScreeningPayload(rawScreenings);
       const result = await writeScreeningSummary(db, caseId, screenings, runId);
       res.json({ data: result });
+    }),
+  );
+
+  /**
+   * POST /api/v1/internal/cases/:caseId/force-extract
+   *
+   * Force a fresh chart extraction for an already-OCR'd case (salted trigger hash → a new run,
+   * bypassing the doc-set-unchanged dedup). Worker-token-gated ops/validation tool: lets the
+   * cohort be re-extracted through the REAL pipeline (so the run populates the chart + screening
+   * file) without the staff-auth reprocess UI. Returns { enqueued, reason, requestId }. No-op
+   * (enqueued:false) when docs aren't all OCR-terminal yet.
+   */
+  router.post(
+    '/internal/cases/:caseId/force-extract',
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.caseId);
+      const requestId = randomUUID();
+      const result = await maybeEnqueueChartExtract(db, caseId, { forceSalt: `manual:${requestId}` });
+      res.json({ data: { ...result, requestId } });
     }),
   );
 

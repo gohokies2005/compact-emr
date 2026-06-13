@@ -16,17 +16,19 @@ interface RawDoc {
 }
 
 export async function loadBundleDocuments(db: AppDb, caseId: string): Promise<BundleDocument[]> {
-  // Exclude the auto-generated screening-summary file (docTag 'screening_summary') — it is an OUTPUT
-  // of extraction, not an input. Feeding it back in would let the extractor re-read its own summary
-  // (circular). No-op until that feature writes such a doc. (Ryan 2026-06-13.)
   const rows = (await (db as unknown as {
     document: {
-      findMany: (a: { where: { caseId: string; docTag?: { not: string } }; include: { pages: { orderBy: { pageNumber: 'asc' } } } }) => Promise<RawDoc[]>;
+      findMany: (a: { where: { caseId: string }; include: { pages: { orderBy: { pageNumber: 'asc' } } } }) => Promise<RawDoc[]>;
     };
   }).document.findMany({
-    where: { caseId, docTag: { not: 'screening_summary' } },
+    where: { caseId },
     include: { pages: { orderBy: { pageNumber: 'asc' } } },
-  }));
+  }))
+    // Exclude the auto-generated screening-summary file (an OUTPUT of extraction, not an input —
+    // feeding it back would let the extractor re-read its own summary). Filtered in JS, NOT via a
+    // Prisma `{ not }` where-clause: Prisma's `not` drops NULL-docTag rows, which would silently
+    // exclude every untagged document. No-op until that feature writes such a doc. (Ryan 2026-06-13.)
+    .filter((d) => d.docTag !== 'screening_summary');
 
   return rows.map((d) => ({
     id: d.id,

@@ -1,6 +1,7 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { evaluateChartReadiness } from './chart-readiness.js';
+import { deriveChartBuildState, type ChartBuildState } from './chart-build-state.js';
 import type { AppDb } from './db-types.js';
 import type { CaseFraming } from './case-framing.js';
 import type { CaseViability } from './case-viability.js';
@@ -61,6 +62,10 @@ export interface DrafterBundle {
   readonly chartReadiness: {
     readonly ready: boolean;
     readonly manualSummaryRequired: number;
+    // Real extraction phase for THIS case (deriveChartBuildState). `ready` is OCR-only; this lets the
+    // Fargate drafter REFUSE on a failed/reaped/incomplete extraction (Bonnewitz) instead of trusting
+    // the worker's fabricated stage2_semantic:'done'. Only 'chart_ready' is safe to draft on.
+    readonly extractionState: ChartBuildState;
   };
   readonly doctorPack: unknown;
   readonly activeJob: unknown;
@@ -115,6 +120,7 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
     documents,
     latestDoctorPack,
     activeJob,
+    latestExtractionRun,
   ] = await Promise.all([
     (db as unknown as { scCondition: { findMany: (args: { where: { veteranId: string } }) => Promise<unknown[]> } })
       .scCondition.findMany({ where: { veteranId: cw.veteranId } }),
@@ -148,12 +154,28 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
       where: { caseId, state: { in: ['queued', 'running'] as const } },
       orderBy: { enqueuedAt: 'desc' },
     }),
+    // THIS case's latest extraction run, for the real build-state (extractionState below). Scoped to
+    // caseId (not the veteran) — a prior case's failed run must not taint this draft.
+    (db as unknown as {
+      chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { triggerHash: true; status: true } }) => Promise<{ triggerHash: string; status: string } | null> };
+    }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true, status: true } }),
   ]);
 
   // Gate on THIS case's own files only (empty set = ready). The bundle payload still carries the
   // veteran-wide fileReadStatuses above so the drafter can use inherited manual summaries; a prior
   // case's unresolved file must not block this case's draft. (Ryan 2026-06-04 returning-customer.)
-  const chartReadiness = evaluateChartReadiness(fileReadStatuses.filter((r) => r.caseId === caseId));
+  const thisCaseReadStatuses = fileReadStatuses.filter((r) => r.caseId === caseId);
+  const chartReadiness = evaluateChartReadiness(thisCaseReadStatuses);
+  // Real extraction phase for this case (no_documents | ocr_in_progress | extracting | chart_ready |
+  // extract_failed). The drafter must refuse on anything but chart_ready (Bonnewitz failed-extract).
+  const buildStateDocs = (documents as ReadonlyArray<{ id: string; s3Key: string; caseId: string }>)
+    .filter((d) => d.caseId === caseId)
+    .map((d) => ({ id: d.id, s3Key: d.s3Key }));
+  const extractionState = deriveChartBuildState(
+    buildStateDocs,
+    thisCaseReadStatuses.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })),
+    latestExtractionRun,
+  ).state;
 
   return {
     case: {
@@ -188,6 +210,7 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
     chartReadiness: {
       ready: chartReadiness.ready,
       manualSummaryRequired: chartReadiness.manualSummaryRequired,
+      extractionState,
     },
     doctorPack: latestDoctorPack,
     activeJob,

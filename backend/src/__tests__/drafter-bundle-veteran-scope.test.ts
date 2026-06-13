@@ -38,6 +38,8 @@ function makeDb(opts: { captureDocWhere: (w: unknown) => void; captureFrsWhere: 
     },
     doctorPack: { findFirst: async () => null },
     draftJob: { findFirst: async () => null },
+    // extractionState derivation (Ryan 2026-06-13): latest run for this case; null = no run yet.
+    chartExtractionRun: { findFirst: async () => null },
   };
 }
 

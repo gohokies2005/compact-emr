@@ -623,7 +623,11 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       if (typeof runId !== 'string' || runId.length === 0) { badRequest('runId is required', { field: 'runId' }); return; }
       const rawItems = body['items'];
       if (!Array.isArray(rawItems)) { badRequest('items is required (array)', { field: 'items' }); return; }
-      if (rawItems.length > 500) { badRequest('items exceeds maximum of 500', { field: 'items', max: 500 }); return; }
+      // Cap is a payload-abuse backstop, not a clinical limit. 500 truncated large extractions — a
+      // 1,000+ page Blue Button report legitimately yields hundreds of problems/meds/SC rows across
+      // three categories. Raised to 2000 so a complete extraction is never silently rejected at the
+      // door (the dedup/merge downstream collapses duplicates). (Ryan 2026-06-13, $500-stakes.)
+      if (rawItems.length > 2000) { badRequest('items exceeds maximum of 2000', { field: 'items', max: 2000 }); return; }
       const costUsd = typeof body['costUsd'] === 'number' ? (body['costUsd'] as number) : undefined;
 
       const c = await (db as unknown as {

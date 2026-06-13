@@ -4,7 +4,6 @@ import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { TabSection } from './ui/TabSection';
 import { DataRow } from './ui/DataRow';
-import { StatusChip, type ChipTone } from './ui/StatusChip';
 import { RowAction } from './ui/RowAction';
 import { ConditionSelect } from './ConditionSelect';
 import { ConflictError } from '../api/client';
@@ -50,19 +49,12 @@ const SC_STATUS_OPTIONS: readonly { readonly value: ScConditionStatus; readonly 
   { value: 'pending', label: 'Pending' },
   { value: 'denied', label: 'Denied' },
 ];
+// The editable claim-status <select> is color-coded in place (good/warn/bad) — the redundant
+// read-only StatusChip that used to sit next to it was removed (Ryan 2026-06-13, declutter).
 function scStatusClass(status: ScConditionStatus): string {
   if (status === 'pending') return 'text-amber-700';
   if (status === 'denied') return 'text-rose-700';
   return 'text-emerald-700';
-}
-// Chip tone mirroring the claim status: established SC = good, denied = bad, pending = warn.
-function scStatusTone(status: ScConditionStatus): ChipTone {
-  if (status === 'pending') return 'warn';
-  if (status === 'denied') return 'bad';
-  return 'good';
-}
-function scStatusLabel(status: ScConditionStatus): string {
-  return SC_STATUS_OPTIONS.find((o) => o.value === status)?.label ?? status;
 }
 
 export function ConditionsPanel({ veteranId, rows, onChange }: { readonly veteranId: string; readonly rows: readonly ScCondition[]; readonly onChange: () => Promise<void> }) {
@@ -95,7 +87,6 @@ function ScConditionRow({ row, onChange, onDelete }: { readonly row: ScCondition
     lead={row.condition}
     {...(meta ? { meta } : {})}
     trailing={<>
-      <StatusChip tone={scStatusTone(row.status)}>{scStatusLabel(row.status)}</StatusChip>
       <select className={`input w-48 text-xs font-medium ${scStatusClass(row.status)}`} value={row.status} disabled={update.isPending} onChange={(e) => update.mutate(e.target.value as ScConditionStatus)} aria-label={`Claim status for ${row.condition}`}>{SC_STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
       <RowAction kind="danger" onClick={onDelete}>Delete</RowAction>
     </>}

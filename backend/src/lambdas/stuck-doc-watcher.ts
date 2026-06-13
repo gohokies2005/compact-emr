@@ -2,6 +2,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { TERMINAL_READ_STATUSES, isScreeningSummaryKey } from '../services/chart-build-state.js';
+import { classifyReadAttempt } from '../services/chart-readiness.js';
 
 /**
  * Stuck-DOCUMENT watcher (Ryan 2026-06-13: "no errors, no babysitting, no silent failures").
@@ -55,6 +56,7 @@ export interface StuckDocWatcherResult {
   refired: number;
   sweptToManual: number;
   waiting: number;
+  stamped: number;
   errors: number;
 }
 
@@ -105,6 +107,7 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
   let refired = 0;
   let sweptToManual = 0;
   let waiting = 0;
+  let stamped = 0;
   let errors = 0;
 
   // Candidates: Documents with NO DocumentPage rows (no successful read), old enough to be stuck. Most
@@ -196,7 +199,51 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
     }
   }
 
-  const summary: StuckDocWatcherResult = { ranAt: now.toISOString(), refired, sweptToManual, waiting, errors };
+  // ===== Phase 2: text-but-no-status docs (post-intake / import landed pages without a read-status) =====
+  // A doc with extracted pages but NO terminal file_read_status keeps the case in ocr_in_progress, and the
+  // no-pages candidate query above CANNOT see it (it HAS pages). The text is already there — don't re-OCR;
+  // CLASSIFY the existing pages and write the missing status. Reaches a case via a post-intake upload or a
+  // bulk import/migration that wrote pages without going through document-pages-writer. (Ryan 2026-06-13:
+  // post-intake docs are real and must work — Woodley's GERD .docx case.) No FK between Document and
+  // FileReadStatus, so a parameterized raw NOT-EXISTS SELECT is the bounded way to find "pages, no status".
+  const orphanPaged = await prisma.$queryRaw<Array<{ id: string; case_id: string; s3_key: string }>>`
+    SELECT d.id, d.case_id, d.s3_key
+    FROM documents d
+    WHERE d.uploaded_at < ${boundary}
+      AND EXISTS (SELECT 1 FROM document_pages p WHERE p.document_id = d.id)
+      AND NOT EXISTS (SELECT 1 FROM file_read_status f WHERE f.case_id = d.case_id AND f.file_path = d.s3_key)
+    LIMIT ${BATCH_LIMIT}
+  `;
+  for (const d of orphanPaged) {
+    try {
+      if (isScreeningSummaryKey(d.s3_key) || d.s3_key.includes(RENDERED_MARKER)) continue; // not an OCR input
+      const pageRows = await prisma.documentPage.findMany({ where: { documentId: d.id }, orderBy: { pageNumber: 'asc' }, select: { text: true } });
+      const text = pageRows.map((p) => p.text ?? '').join('\n');
+      const outcome = classifyReadAttempt({ method: 'textract', extractedText: text, pageCount: pageRows.length });
+      const terminalStatus = outcome.succeeded ? 'read' : 'manual_summary_required';
+      const attempt = {
+        method: 'textract' as const,
+        wordCount: outcome.wordCount,
+        corruptedTokenRatio: outcome.corruptedTokenRatio,
+        pageCount: pageRows.length,
+        attemptedAt: now.toISOString(),
+        note: `watcher classified existing pages — ${outcome.succeeded ? 'read OK' : outcome.reason}`,
+      };
+      await prisma.fileReadStatus.create({
+        data: { caseId: d.case_id, filePath: d.s3_key, fileSha256: '', terminalStatus, attemptsJson: [attempt] as unknown as Prisma.InputJsonValue, lastCheckedAt: now },
+      });
+      await prisma.activityLog.create({
+        data: { actorUserId: SERVICE_ACTORS.STUCK_JOB_WATCHER, caseId: d.case_id, action: 'ocr_classified_orphan_pages', detailsJson: { documentId: d.id, s3Key: d.s3_key, terminalStatus, wordCount: outcome.wordCount } },
+      });
+      stamped += 1;
+      console.log(JSON.stringify({ msg: 'stuck-doc-watcher: stamped orphan-paged doc', documentId: d.id, caseId: d.case_id, terminalStatus }));
+    } catch (err) {
+      errors += 1;
+      console.error(JSON.stringify({ msg: 'stuck-doc-watcher: stamp orphan-paged doc failed', documentId: d.id, caseId: d.case_id, error: err instanceof Error ? err.message : String(err) }));
+    }
+  }
+
+  const summary: StuckDocWatcherResult = { ranAt: now.toISOString(), refired, sweptToManual, waiting, stamped, errors };
   console.log(JSON.stringify({ msg: 'stuck-doc-watcher: summary', ...summary }));
   return summary;
 }

@@ -19,22 +19,27 @@ function makeDeps(opts: {
   candidates: Candidate[];
   frsByKey?: Record<string, { id: string; terminalStatus: string; attemptsJson: unknown } | null>;
   refiresByCase?: Record<string, RefireLog[]>;
+  orphanPaged?: Array<{ id: string; case_id: string; s3_key: string }>;
+  pagesByDoc?: Record<string, Array<{ text: string }>>;
 }) {
   const logsCreated: Array<{ action: string; detailsJson: unknown }> = [];
   const frsUpdated: Array<Record<string, unknown>> = [];
-  const frsCreated: Array<Record<string, unknown>> = [];
+  const frsCreated: Array<{ data: Record<string, unknown> }> = [];
   const invokeOcr = vi.fn(async () => {});
   const prisma = {
     document: { findMany: vi.fn(async () => opts.candidates) },
+    documentPage: { findMany: vi.fn(async (a: { where: { documentId: string } }) => opts.pagesByDoc?.[a.where.documentId] ?? []) },
     fileReadStatus: {
       findFirst: vi.fn(async (a: { where: { filePath: string } }) => opts.frsByKey?.[a.where.filePath] ?? null),
       update: vi.fn(async (a: Record<string, unknown>) => { frsUpdated.push(a); }),
-      create: vi.fn(async (a: Record<string, unknown>) => { frsCreated.push(a); }),
+      create: vi.fn(async (a: { data: Record<string, unknown> }) => { frsCreated.push(a); }),
     },
     activityLog: {
       findMany: vi.fn(async (a: { where: { caseId: string } }) => opts.refiresByCase?.[a.where.caseId] ?? []),
       create: vi.fn(async (a: { data: { action: string; detailsJson: unknown } }) => { logsCreated.push(a.data); }),
     },
+    // tagged-template raw query for the Phase-2 "pages but no status" anti-join
+    $queryRaw: vi.fn(async () => opts.orphanPaged ?? []),
   } as unknown as PrismaClient;
   return { deps: { prisma, invokeOcr }, invokeOcr, logsCreated, frsUpdated, frsCreated };
 }
@@ -115,5 +120,33 @@ describe('stuck-doc watcher — one-re-fire-then-flag, anti-join, clobber-guard'
     expect(invokeOcr).not.toHaveBeenCalled();
     expect(r.refired).toBe(0);
     expect(r.sweptToManual).toBe(0);
+  });
+
+  it('Phase 2: STAMPS a text-but-no-status doc as read (classifies existing pages — NO re-OCR)', async () => {
+    const cleanText = Array.from({ length: 40 }, (_, i) => `clinical${i}`).join(' ');
+    const { deps, invokeOcr, frsCreated, logsCreated } = makeDeps({
+      candidates: [], // no no-pages candidates this run
+      orphanPaged: [{ id: 'DOC-PG', case_id: 'CASE-2', s3_key: 'cases/CASE-2/xyz-Buddy-Statement.pdf' }],
+      pagesByDoc: { 'DOC-PG': [{ text: cleanText }] },
+    });
+    const r = await handler(deps);
+    expect(invokeOcr).not.toHaveBeenCalled(); // it already HAS text → never re-OCR
+    expect(r.stamped).toBe(1);
+    const created = frsCreated.find((f) => f.data['filePath'] === 'cases/CASE-2/xyz-Buddy-Statement.pdf');
+    expect(created?.data['terminalStatus']).toBe('read');
+    expect(logsCreated.some((l) => l.action === 'ocr_classified_orphan_pages')).toBe(true);
+  });
+
+  it('Phase 2: STAMPS a GARBLED text-but-no-status doc as manual_summary_required (never a false read)', async () => {
+    const garbled = 'Pati$nt 4@ ol# p#esent!ng r!ght kn$e p$in lim%ted m0t!on n0 ev!d#nce im+pro!vement phys-ic@l'.repeat(3);
+    const { deps, frsCreated } = makeDeps({
+      candidates: [],
+      orphanPaged: [{ id: 'DOC-G', case_id: 'CASE-3', s3_key: 'cases/CASE-3/xyz-BadScan.pdf' }],
+      pagesByDoc: { 'DOC-G': [{ text: garbled }, { text: garbled }, { text: garbled }] },
+    });
+    const r = await handler(deps);
+    expect(r.stamped).toBe(1);
+    const created = frsCreated.find((f) => f.data['filePath'] === 'cases/CASE-3/xyz-BadScan.pdf');
+    expect(created?.data['terminalStatus']).toBe('manual_summary_required');
   });
 });

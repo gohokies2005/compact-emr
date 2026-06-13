@@ -19,6 +19,7 @@ import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
 import { DecisionsOverridesPanel } from '../../components/DecisionsOverridesPanel';
 import { AdvisoryPanel } from '../../components/AdvisoryPanel';
+import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { DocumentUploadPanel } from '../../components/DocumentUploadPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
@@ -348,6 +349,12 @@ export function CaseDetailPage() {
         {role === 'admin' ? <> <Link to="/refunds" className="font-medium underline underline-offset-2 hover:text-amber-950">Open refunds</Link></> : null}
       </div>
     ) : null}
+
+    {/* Abridged notes and records — the curated chart abridgement, near the TOP of the claim page
+        for EVERYONE (Ryan 2026-06-12, renamed from "Doctor Pack"; was removed from the tabs, now a
+        single top-level card). Auto-generates when the records finish parsing; the Regenerate button
+        inside is RN/admin-only (physician sees view-only). */}
+    <DoctorPackPanel caseId={caseId} />
 
     {/* CDS panel retired from the workflow (Ryan 2026-06-03). Backend route is flag-guarded off
         (CDS_ENABLED); the engine code is kept. Re-add this panel if CDS is re-enabled. */}

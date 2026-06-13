@@ -98,7 +98,7 @@ describe('DoctorPackPanel', () => {
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
     renderPanel();
 
-    const openBtn = await screen.findByRole('button', { name: 'Open Doctor Pack (12pp)' });
+    const openBtn = await screen.findByRole('button', { name: 'Open abridged notes (12pp)' });
     fireEvent.click(openBtn);
 
     await waitFor(() => expect(pdfUrlMock).toHaveBeenCalledWith('CASE-1', 'pack-1'));
@@ -110,8 +110,8 @@ describe('DoctorPackPanel', () => {
     getLatestMock.mockResolvedValue({ data: { ...READY_PACK, state: 'generating', pageCount: null } });
     renderPanel();
 
-    expect(await screen.findByText('Doctor Pack generating…')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Open Doctor Pack/ })).toBeNull();
+    expect(await screen.findByText('Abridged notes generating…')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Open abridged notes/ })).toBeNull();
   });
 
   it('failed: surfaces the worker errorMessage VERBATIM and offers Regenerate to staff', async () => {
@@ -121,7 +121,7 @@ describe('DoctorPackPanel', () => {
     renderPanel();
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('Doctor Pack generation failed');
+    expect(alert).toHaveTextContent('Abridged notes generation failed');
     expect(alert).toHaveTextContent(realError); // verbatim — NO-SILENT-ERRORS
 
     fireEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
@@ -133,7 +133,7 @@ describe('DoctorPackPanel', () => {
     getLatestMock.mockResolvedValue({ data: null });
     renderPanel();
 
-    expect(await screen.findByText('No Doctor Pack yet — ask your RN to generate it.')).toBeInTheDocument();
+    expect(await screen.findByText('No abridged notes yet — ask your RN to generate them.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Generate/ })).toBeNull();
   });
 
@@ -145,7 +145,7 @@ describe('DoctorPackPanel', () => {
     renderPanel();
 
     expect(
-      await screen.findByText('No Doctor Pack yet — it will generate automatically when the case is sent to the doctor.'),
+      await screen.findByText('No abridged notes yet — they generate automatically once the records finish parsing.'),
     ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Generate Doctor Pack' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Generate now' })).toBeInTheDocument();
@@ -248,7 +248,7 @@ describe('DoctorPackPanel', () => {
     getLatestMock.mockResolvedValue({ data: { ...READY_PACK, manifestJson: {} } });
     renderPanel();
 
-    await screen.findByRole('button', { name: 'Open Doctor Pack (12pp)' });
+    await screen.findByRole('button', { name: 'Open abridged notes (12pp)' });
     expect(screen.queryByText(/could not be auto-extracted/)).not.toBeInTheDocument();
     expect(screen.queryByText('Not included')).not.toBeInTheDocument();
   });

@@ -459,7 +459,7 @@ export interface GenerateDoctorPackParams {
   // Stamped as DoctorPack.generatedBy + the activity-log actor. For the auto trigger this is
   // the RN who clicked "Send to doctor" (the status route's authenticated user).
   readonly actorSub: string;
-  readonly trigger?: 'manual' | 'auto_send_to_doctor';
+  readonly trigger?: 'manual' | 'auto_send_to_doctor' | 'auto_chart_parsed';
   // Auto trigger only: the case version immediately BEFORE the status transition bumped it.
   readonly priorCaseVersion?: number;
 }
@@ -519,9 +519,10 @@ export async function generateDoctorPackForCase(
   const c = { id: caseWithDocs.id, veteranId: caseWithDocs.veteranId, version: caseWithDocs.version };
   const claimedCondition = caseWithDocs.claimedCondition ?? undefined;
 
-  if (trigger === 'auto_send_to_doctor') {
-    // Auto-gen idempotency (Package 7): skip when a pack for the CURRENT chart state already
-    // exists — queued/generating (in flight) or ready — keyed on the post-transition case
+  if (trigger === 'auto_send_to_doctor' || trigger === 'auto_chart_parsed') {
+    // Auto-gen idempotency (Package 7 send-to-doctor + Ryan 2026-06-12 chart-parsed): skip when a
+    // pack for the CURRENT chart state already exists — queued/generating (in flight) or ready —
+    // keyed on the post-transition case
     // version AND the pre-transition version (see module doc comment). Skip, never 409: the
     // status transition already committed and must not be made to look failed.
     const currentVersions =

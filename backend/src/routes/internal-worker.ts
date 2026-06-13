@@ -6,6 +6,7 @@ import { isDoctorPackS3Key } from '../services/s3-key-safety.js';
 import { classifyReadAttempt } from '../services/chart-readiness.js';
 import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
+import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { refreshDerivedStamps } from '../services/case-stamp-refresh.js';
 import { deriveIntakeFields } from '../services/intake-derive.js';
@@ -650,6 +651,23 @@ export function createInternalWorkerRouter(db: AppDb): Router {
             error: err instanceof Error ? err.message : String(err),
           }));
         }
+      }
+
+      // Auto-generate the abridged notes ("Doctor Pack") the moment the records finish parsing
+      // (Ryan 2026-06-12: available to EVERYONE from the start, not only on send-to-physician).
+      // Post-commit + log-only — a pack failure can NEVER fail this worker callback. The service is
+      // idempotent + readiness-gated: it queues only when the chart is fully read AND no
+      // queued/generating/ready pack already exists for this case version (so a re-extraction with a
+      // pack already present is a no-op; the RN's Regenerate button handles "new notes came in").
+      try {
+        const gen = await generateDoctorPackForCase(db, { caseId, actorSub: SERVICE_ACTORS.WORKER, trigger: 'auto_chart_parsed' });
+        console.log(JSON.stringify({
+          event: gen.outcome === 'queued' ? 'doctor_pack_autogen_queued' : 'doctor_pack_autogen_skipped',
+          caseId, source: 'chart_parsed', runId,
+          ...(gen.outcome === 'queued' ? { doctorPackId: gen.pack.id } : { existingPackId: gen.existingPackId, existingState: gen.existingState }),
+        }));
+      } catch (err) {
+        console.warn(JSON.stringify({ event: 'doctor_pack_autogen_failed', caseId, source: 'chart_parsed', message: err instanceof Error ? err.message : String(err) }));
       }
 
       res.json({ data: result });

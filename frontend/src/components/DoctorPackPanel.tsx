@@ -227,10 +227,10 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
 
   return (
     <Card>
-      <h2 className="text-base font-semibold text-slate-900">Doctor Pack</h2>
+      <h2 className="text-base font-semibold text-slate-900">Abridged notes and records</h2>
       <p className="text-sm text-slate-500">
-        Curated chart abridgement for the reviewing physician — SC decisions, recent pertinent
-        notes and imaging, statements, in-service records.
+        Curated chart abridgement — SC decisions, recent pertinent notes and imaging, statements,
+        in-service records.
       </p>
 
       <div className="mt-4">
@@ -240,7 +240,7 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
           canGenerate ? (
             <div>
               <p className="text-sm text-slate-500">
-                No Doctor Pack yet — it will generate automatically when the case is sent to the doctor.
+                No abridged notes yet — they generate automatically once the records finish parsing.
               </p>
               <div className="mt-2">
                 <Button type="button" variant="secondary" size="sm" loading={generate.isPending} onClick={() => generate.mutate()}>
@@ -249,13 +249,13 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
               </div>
             </div>
           ) : (
-            <p className="text-sm text-slate-500">No Doctor Pack yet — ask your RN to generate it.</p>
+            <p className="text-sm text-slate-500">No abridged notes yet — ask your RN to generate them.</p>
           )
         ) : IN_FLIGHT_STATES.has(pack.state) ? (
-          <Spinner label={`Doctor Pack ${pack.state === 'queued' ? 'queued' : 'generating'}…`} />
+          <Spinner label={`Abridged notes ${pack.state === 'queued' ? 'queued' : 'generating'}…`} />
         ) : pack.state === 'failed' ? (
           <div role="alert" className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
-            <p className="font-semibold">Doctor Pack generation failed</p>
+            <p className="font-semibold">Abridged notes generation failed</p>
             {/* NO-SILENT-ERRORS: the worker's real cause, verbatim. */}
             <p className="mt-1 whitespace-pre-wrap">{pack.errorMessage ?? 'No error message was recorded.'}</p>
             {canGenerate ? (
@@ -271,7 +271,7 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
         ) : (
           <div className="flex flex-wrap items-center gap-3">
             <Button type="button" variant="primary" onClick={() => void openPdf(pack)}>
-              Open Doctor Pack ({pack.pageCount ?? '?'}pp)
+              Open abridged notes ({pack.pageCount ?? '?'}pp)
             </Button>
             {canGenerate ? (
               <Button type="button" variant="secondary" loading={generate.isPending} onClick={() => generate.mutate()}>

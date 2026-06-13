@@ -36,28 +36,27 @@ const MAX_OUTPUT_TOKENS = 700;
 // fine"). KEEP = medical/claim substance a nexus-letter physician needs. DROP = administrative /
 // benefit boilerplate. The system prompt is the CACHED prefix (cache_control in bedrockClient) so
 // repeated docs/cases pay almost nothing for it.
-const SYSTEM_PROMPT = `You curate a U.S. veteran's VA disability records into a tight pack for a physician who will write a nexus (medical opinion) letter. For ONE document at a time, you receive its pages (text, truncated). Decide which pages to KEEP and which to DROP.
+const SYSTEM_PROMPT = `You curate a U.S. veteran's VA disability records into a TIGHT pack for a physician who will write a nexus (medical opinion) letter. For ONE document at a time, you receive its pages (text, truncated). Decide which pages to KEEP and which to DROP. Bias hard toward a SMALL pack — a few pages per document. The physician wants signal, not the whole chart.
 
-KEEP a page when it carries medical or claim substance the physician needs:
+KEEP a page when it carries the substance the physician actually needs:
 - The VA's service-connection decision and its stated REASONS/evidence (what condition was granted, denied, continued, or evaluated, and WHY).
-- Diagnoses, problem lists, physical-exam findings.
-- Test and imaging results: sleep studies (AHI), audiograms, labs, radiology impressions/findings.
-- In-service events, injuries, or exposures; service/personnel facts (MOS, deployments, combat).
-- Treatment/progress notes pertinent to the claimed condition.
+- The page that NAMES the current DIAGNOSIS of the claimed (or a directly related) condition.
+- For treatment / progress / clinical notes: keep ONLY (a) the note that establishes the diagnosis, and (b) the SINGLE most recent encounter that shows the current treatment plan. Around TWO clinical pages is the target — NOT every visit.
+- Test / imaging results: the impression/findings page ONLY (one page) — not raw data tables, trends, or repeated panels.
+- In-service events, injuries, or exposures; concise service/personnel facts (MOS, deployments, combat).
 - Prior medical opinions, DBQs, and C&P exam findings + rationale.
-- Lay/buddy statements describing symptoms or events.
+- Lay / buddy statements describing symptoms or events.
 
-DROP a page when it is administrative or benefit boilerplate a physician does NOT need:
-- Monthly payment / entitlement amounts and payment schedules.
-- Commissary or exchange privileges, beneficiary/beneficial travel, state veterans benefits.
-- Life insurance enclosures (VALife, S-DVI), home loan guaranty, vocational rehabilitation.
-- Appeal rights, "What you should do if you disagree", decision-review-request / VA Form instructions, notice of disagreement.
-- Veterans Crisis Line, customer-satisfaction surveys (VSignals), generic "Additional Benefits" enclosures, combined-rating math tables.
-- Blank pages, cover/transmittal/address pages.
+DROP a page when it is low-yield or administrative — be AGGRESSIVE:
+- Monthly payment / entitlement amounts; commissary/exchange, beneficiary/beneficial travel, state veterans benefits; life insurance (VALife, S-DVI), home loan, vocational rehabilitation enclosures.
+- Appeal rights, "What you should do if you disagree", decision-review-request / VA Form instructions, notice of disagreement; Veterans Crisis Line; satisfaction surveys (VSignals); generic "Additional Benefits"; combined-rating math tables.
+- REPETITIVE or routine clinical pages that add neither the diagnosis nor the current plan: old or duplicate visit notes, vitals-only pages, medication refill lists, lab/result tables, normal or unremarkable encounters, telephone/care-coordination notes, administrative clinic pages.
+- Blank, cover, transmittal, or address pages.
 
 RULES:
-- Judge by what the page actually says, not by where it sits. The FIRST pages of a VA letter are often payment and benefit boilerplate — DROP those; the decision and its reasons come later.
-- When a substantive page also mentions a benefit in passing, KEEP it. When in doubt about a clinically/legally substantive page, KEEP it. Never keep a page that is purely boilerplate.
+- Judge by what the page SAYS, not where it sits. VA letters often open with payment/benefit boilerplate — DROP it; the decision and its reasons come later.
+- When a document has many similar clinical pages, pick the 1-2 MOST informative (the diagnosis + the most recent plan) and drop the rest. Err toward FEWER pages.
+- Keep a substantive page even if it also mentions a benefit in passing. NEVER keep a page that is purely boilerplate or a routine/repetitive clinical note.
 - Prefer pages relevant to the claimed condition when one is given.
 
 Return ONLY a JSON object, no prose, no markdown fences:

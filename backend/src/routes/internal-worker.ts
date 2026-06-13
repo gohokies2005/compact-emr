@@ -7,6 +7,8 @@ import { classifyReadAttempt } from '../services/chart-readiness.js';
 import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
+import { writeScreeningSummary } from '../services/screening-summary-write.js';
+import type { ScreeningResult } from '../services/chart-extract-llm.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { refreshDerivedStamps } from '../services/case-stamp-refresh.js';
 import { deriveIntakeFields } from '../services/intake-derive.js';
@@ -52,6 +54,26 @@ function coerceExtractedItems(raw: readonly unknown[]): FinalExtractedItem[] {
       confidence: Math.max(0, Math.min(1, r['confidence'] as number)),
       disposition,
       needsReview: disposition === 'needs_review',
+    });
+  }
+  return out;
+}
+
+/** Coerce the worker's POSTed screenings defensively (token-trusted, but validate shape). */
+function coerceScreeningPayload(raw: readonly unknown[]): ScreeningResult[] {
+  const out: ScreeningResult[] = [];
+  for (const r of raw) {
+    if (!isRecord(r)) continue;
+    if (typeof r['instrument'] !== 'string' || (r['instrument'] as string).trim().length === 0) continue;
+    if (typeof r['sourcePage'] !== 'number' || typeof r['sourceQuote'] !== 'string') continue;
+    out.push({
+      instrument: (r['instrument'] as string).trim(),
+      score: typeof r['score'] === 'string' ? r['score'] : typeof r['score'] === 'number' ? String(r['score']) : '',
+      date: typeof r['date'] === 'string' && (r['date'] as string).trim().length > 0 ? (r['date'] as string).trim() : null,
+      sourceDocumentId: typeof r['sourceDocumentId'] === 'string' ? (r['sourceDocumentId'] as string) : '',
+      sourcePage: Math.trunc(r['sourcePage'] as number),
+      sourceQuote: r['sourceQuote'] as string,
+      confidence: typeof r['confidence'] === 'number' ? Math.max(0, Math.min(1, r['confidence'] as number)) : 1,
     });
   }
   return out;
@@ -680,6 +702,32 @@ export function createInternalWorkerRouter(db: AppDb): Router {
         console.warn(JSON.stringify({ event: 'doctor_pack_autogen_failed', caseId, source: 'chart_parsed', message: err instanceof Error ? err.message : String(err) }));
       }
 
+      res.json({ data: result });
+    }),
+  );
+
+  /**
+   * POST /api/v1/internal/cases/:caseId/screening-summary
+   *
+   * The chart-extract worker POSTs the screenings it captured; this renders the consolidated
+   * Screening Summary text file + upserts its Document row (idempotent on the stable s3Key). Body:
+   *   { runId: string, screenings: ScreeningResult[] }
+   * No-op when screenings is empty. Best-effort from the worker's side (a failure here must never
+   * fail the chart-extract callback — the chart rows already committed).
+   */
+  router.post(
+    '/internal/cases/:caseId/screening-summary',
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.caseId);
+      const body = req.body;
+      if (!isRecord(body)) { badRequest('Request body must be an object'); return; }
+      const runId = body['runId'];
+      if (typeof runId !== 'string' || runId.length === 0) { badRequest('runId is required', { field: 'runId' }); return; }
+      const rawScreenings = body['screenings'];
+      if (!Array.isArray(rawScreenings)) { badRequest('screenings is required (array)', { field: 'screenings' }); return; }
+      if (rawScreenings.length > 2000) { badRequest('screenings exceeds maximum of 2000', { field: 'screenings', max: 2000 }); return; }
+      const screenings = coerceScreeningPayload(rawScreenings);
+      const result = await writeScreeningSummary(db, caseId, screenings, runId);
       res.json({ data: result });
     }),
   );

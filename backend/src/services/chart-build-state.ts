@@ -33,6 +33,16 @@ export interface DocRef {
   id: string;
   s3Key: string;
 }
+
+// The auto-generated screening-summary file is an extraction OUTPUT, not an input. It has a stable
+// s3Key marker (cases/<id>/00000000-screening-summary.txt) recognized here so the build-state +
+// trigger-hash IGNORE it everywhere in ONE place (every caller already passes s3Key): it carries no
+// OCR file_read_status (would stall allTerminal) and must not change the trigger hash (would
+// re-trigger extraction in a loop). Keep this marker in sync with the screening-summary writer.
+export const SCREENING_SUMMARY_KEY_MARKER = '00000000-screening-summary.txt';
+export function isScreeningSummaryKey(s3Key: string): boolean {
+  return s3Key.endsWith(SCREENING_SUMMARY_KEY_MARKER);
+}
 export interface ReadStatusRef {
   filePath: string;
   terminalStatus: string;
@@ -57,8 +67,9 @@ export interface ExtractionRunRef {
  * always creates a fresh run.
  */
 export function computeTriggerHash(documents: readonly DocRef[], readStatuses: readonly ReadStatusRef[], salt?: string): string {
+  const inputs = documents.filter((d) => !isScreeningSummaryKey(d.s3Key)); // exclude the extraction OUTPUT file
   const statusByKey = new Map(readStatuses.map((r) => [r.filePath, r.terminalStatus]));
-  const pairs = documents.map((d) => `${d.id}:${statusByKey.get(d.s3Key) ?? 'none'}`).sort();
+  const pairs = inputs.map((d) => `${d.id}:${statusByKey.get(d.s3Key) ?? 'none'}`).sort();
   const base = createHash('sha256').update(pairs.join('|')).digest('hex');
   return salt !== undefined && salt.length > 0 ? `${base}:${salt}` : base;
 }
@@ -95,12 +106,15 @@ export function deriveChartBuildState(
   readStatuses: readonly ReadStatusRef[],
   latestRun: ExtractionRunRef | null,
 ): ChartBuildStatus {
-  if (documents.length === 0) return { state: 'no_documents', currentHash: '' };
+  // Exclude the extraction OUTPUT (screening-summary file): it has no OCR status and would both stall
+  // allTerminal and (via computeTriggerHash) churn the hash. computeTriggerHash filters it too.
+  const inputs = documents.filter((d) => !isScreeningSummaryKey(d.s3Key));
+  if (inputs.length === 0) return { state: 'no_documents', currentHash: '' };
 
   const terminalKeys = new Set(
     readStatuses.filter((r) => TERMINAL_READ_STATUSES.has(r.terminalStatus)).map((r) => r.filePath),
   );
-  const allTerminal = documents.every((d) => terminalKeys.has(d.s3Key));
+  const allTerminal = inputs.every((d) => terminalKeys.has(d.s3Key));
   const currentHash = computeTriggerHash(documents, readStatuses);
 
   if (!allTerminal) return { state: 'ocr_in_progress', currentHash };

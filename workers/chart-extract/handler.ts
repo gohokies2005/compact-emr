@@ -69,6 +69,15 @@ async function postMerge(caseId: string, runId: string, items: unknown[], costUs
   if (!res.ok) throw new Error(`extracted-chart-items POST failed: ${res.status}`);
 }
 
+async function postScreeningSummary(caseId: string, runId: string, screenings: unknown[]): Promise<void> {
+  const res = await fetch(`${apiBase()}/api/v1/internal/cases/${caseId}/screening-summary`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Internal-Worker-Token': workerToken() },
+    body: JSON.stringify({ runId, screenings }),
+  });
+  if (!res.ok) throw new Error(`screening-summary POST failed: ${res.status}`);
+}
+
 async function postFailed(caseId: string, runId: string, error: string): Promise<void> {
   await fetch(`${apiBase()}/api/v1/internal/cases/${caseId}/chart-extract-failed`, {
     method: 'POST',
@@ -92,6 +101,16 @@ export async function handler(event: SqsEvent): Promise<void> {
       // not mistaken for a clean parse (the full-read chunker, PR-1, eliminates the cause).
       if (result.truncatedWindows > 0) {
         console.warn(JSON.stringify({ msg: 'chart_extract_INCOMPLETE_truncation', caseId: msg.caseId, runId: msg.runId, truncatedWindows: result.truncatedWindows }));
+      }
+      // Consolidated screening-summary Documents file (best-effort, log-only — the chart rows already
+      // committed above, so a summary failure must never fail this callback).
+      if (result.screenings && result.screenings.length > 0) {
+        try {
+          await postScreeningSummary(msg.caseId, msg.runId, result.screenings);
+          console.log(JSON.stringify({ msg: 'screening_summary_written', caseId: msg.caseId, runId: msg.runId, screenings: result.screenings.length }));
+        } catch (err) {
+          console.warn(JSON.stringify({ msg: 'screening_summary_failed', caseId: msg.caseId, runId: msg.runId, error: err instanceof Error ? err.message : String(err) }));
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

@@ -11,6 +11,28 @@ describe('EXTRACTED_SOURCE', () => {
   it('is the single non-manual provenance value', () => expect(EXTRACTED_SOURCE).toBe('extracted'));
 });
 
+// The auto-generated screening-summary file (Ryan 2026-06-13) is an extraction OUTPUT, not an input.
+// It has no OCR read-status and must be IGNORED by build-state + trigger-hash, or it would stall
+// chart_ready and churn the hash (re-trigger loop).
+describe('screening-summary file is excluded from build-state', () => {
+  const summaryDoc = { id: 'd-screen', s3Key: 'cases/c/00000000-screening-summary.txt' };
+
+  it('does NOT change the trigger hash', () => {
+    expect(computeTriggerHash([...docs, summaryDoc], bothRead)).toBe(computeTriggerHash(docs, bothRead));
+  });
+
+  it('does NOT stall chart_ready (no read-status on the summary doc)', () => {
+    const hash = computeTriggerHash(docs, bothRead);
+    const run = { triggerHash: hash, status: 'complete' };
+    expect(deriveChartBuildState(docs, bothRead, run).state).toBe('chart_ready');
+    expect(deriveChartBuildState([...docs, summaryDoc], bothRead, run).state).toBe('chart_ready');
+  });
+
+  it('a case with ONLY a summary doc reads as no_documents (it is not a real input)', () => {
+    expect(deriveChartBuildState([summaryDoc], [], null).state).toBe('no_documents');
+  });
+});
+
 describe('computeTriggerHash', () => {
   it('is stable for the same doc set + read outcomes (order-independent)', () => {
     const a = computeTriggerHash(docs, bothRead);

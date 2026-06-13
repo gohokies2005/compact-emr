@@ -302,7 +302,27 @@ export function CaseDetailPage() {
               v?.phone ? formatPhone(v.phone) : null,
               v?.address || null,
             ].filter(Boolean);
-            return bits.length ? <p className="mt-2 text-sm text-steel">{bits.join('  ·  ')}</p> : null;
+            // Email leads the line, hyperlinked to a Gmail compose window (Ryan 2026-06-13, David
+            // Porter: "put his email at the top, hyperlinked so Gmail opens"). Staff are on Workspace
+            // Gmail, so the compose-URL is the right target (mailto would open a random local client).
+            const emailLink = v?.email ? (
+              <a
+                href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(v.email)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-navy hover:underline"
+                title="Compose an email to this veteran in Gmail"
+              >
+                {v.email}
+              </a>
+            ) : null;
+            return emailLink || bits.length ? (
+              <p className="mt-2 text-sm text-steel">
+                {emailLink}
+                {emailLink && bits.length ? '  ·  ' : ''}
+                {bits.join('  ·  ')}
+              </p>
+            ) : null;
           })()}
           <p className="mt-1 text-xs text-harbor">Case {c.id} · {c.claimType} · <Link className="text-navy" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>chart</Link> · updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
           {/* Sticky scratch-note — the team's free-text tracker (e.g. "Awaiting records — C-file requested

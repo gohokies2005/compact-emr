@@ -76,4 +76,23 @@ describe('extracted-chart-items → post-merge restamp hook', () => {
     const res = await post(appFor()).expect(200);
     expect(res.body.data.written).toBe(1); // the worker callback is unharmed
   });
+
+  // Architect pre-flip BLOCKER: the route's coerceExtractedItems rebuilds each item field-by-field
+  // and previously DROPPED medStatus/startDate/lastSeenDate, so every full-read med would write as
+  // 'active' and the timeline would collapse at dedup. Guard the boundary passthrough.
+  it('passes medication temporality through to the merge (no HTTP-boundary drop)', async () => {
+    mergeMock.mockResolvedValueOnce({ autofill: false, written: 0, skippedManual: 0, skippedPriorExtracted: 0, skippedDuplicate: 0 });
+    const med = {
+      category: 'active_medication', name: 'escitalopram', medStatus: 'historical',
+      startDate: '03/12/2015', lastSeenDate: '06/14/2022',
+      sourceDocumentId: 'd1', sourcePage: 5, sourceQuote: 'escitalopram', confidence: 0.9,
+    };
+    await request(appFor())
+      .post('/api/v1/internal/cases/CASE-1/extracted-chart-items')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ runId: 'RUN-1', items: [med] })
+      .expect(200);
+    const passedItem = mergeMock.mock.calls[0]![1].items[0]!;
+    expect(passedItem).toMatchObject({ medStatus: 'historical', startDate: '03/12/2015', lastSeenDate: '06/14/2022' });
+  });
 });

@@ -40,6 +40,12 @@ function coerceExtractedItems(raw: readonly unknown[]): FinalExtractedItem[] {
       ...(typeof r['dose'] === 'string' ? { dose: r['dose'] as string } : {}),
       ...(typeof r['frequency'] === 'string' ? { frequency: r['frequency'] as string } : {}),
       ...(typeof r['indication'] === 'string' ? { indication: r['indication'] as string } : {}),
+      // Medication temporality (Ryan 2026-06-13). MUST pass through here — the writer + the
+      // (drug,status,year) dedup key depend on these. Dropping them writes every med as 'active'
+      // and collapses the treatment timeline at merge (architect pre-flip BLOCKER).
+      ...(typeof r['medStatus'] === 'string' ? { medStatus: r['medStatus'] as FinalExtractedItem['medStatus'] } : {}),
+      ...(typeof r['startDate'] === 'string' ? { startDate: r['startDate'] as string } : {}),
+      ...(typeof r['lastSeenDate'] === 'string' ? { lastSeenDate: r['lastSeenDate'] as string } : {}),
       sourceDocumentId: r['sourceDocumentId'] as string,
       sourcePage: Math.trunc(r['sourcePage'] as number),
       sourceQuote: r['sourceQuote'] as string,

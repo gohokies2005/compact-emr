@@ -246,7 +246,7 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
               enum: ['sc_condition', 'active_problem', 'active_medication', 'screening'],
               description: 'sc_condition = a VA service-connected/rated disability (granted/pending/denied); active_problem = a Problem List entry; active_medication = an Active Medications entry; screening = a screening-instrument result (PHQ-9/GAD-7/PC-PTSD-5/AUDIT-C) — a DATA POINT, never a diagnosis.',
             },
-            name: { type: 'string', description: 'The condition/problem/medication name as written; for a screening, the instrument name (e.g. "PHQ-9").' },
+            name: { type: 'string', description: 'For a condition/problem: the name as written. For a medication: the DRUG NAME ONLY (generic or brand, e.g. "fluoxetine", "Lexapro") — do NOT include dose, strength, or form in the name; those go in dose. For a screening: the instrument name (e.g. "PHQ-9").' },
             status: { type: 'string', enum: ['service_connected', 'pending', 'denied'], description: 'sc_condition only: service_connected if granted, denied if THIS condition is denied, pending if awaiting decision.' },
             ratingPct: { type: 'integer', description: 'sc_condition only: rating percentage if explicitly stated.' },
             dcCode: { type: 'string', description: 'sc_condition only: diagnostic code if explicitly stated.' },
@@ -309,8 +309,9 @@ function combinedSystemPrompt(): string {
     '  - DATES: copy a date into startDate ONLY if a field labeled Start Date/Issued/Issue Date appears for that drug. Copy lastSeenDate from a labeled Last Filled/Last Release date OR (for a note mention) the note\'s date. If a date is not written next to the drug, omit it — never compute, estimate, or carry a date from another drug or page.',
     '  - Any date you put in startDate or lastSeenDate MUST appear inside the sourceQuote you copy. Quote the line containing the date. If you cannot quote the date, omit that date field.',
     '  - The SAME drug may legitimately appear many times across years. Emit each dated occurrence with its own page, quote, and date — do NOT merge them or decide which is "current." Capturing every dated occurrence is the goal.',
+    '  - NAME = the drug only. Put the strength/dose ("20 mg", "0.65% soln") in dose and the form in dose if needed — NEVER repeat the dose in the name, and never write the dose twice. Do NOT prefix source qualifiers like "Non-VA" into the name. "Non-VA FLUOXETINE 20MG CAP" → name="fluoxetine", dose="20 mg". This keeps the same drug from splitting into many rows.',
     'EXAMPLES (medication dating):',
-    '  "[p.412] ACTIVE OUTPATIENT MEDICATIONS  FLUOXETINE 20MG CAP  Take one daily  Start Date: 03/12/2015  Last Filled: 11/02/2025" → {category:active_medication, name:"FLUOXETINE 20MG", medStatus:"active", startDate:"03/12/2015", lastSeenDate:"11/02/2025", sourceQuote:"FLUOXETINE 20MG CAP ... Start Date: 03/12/2015 Last Filled: 11/02/2025"}',
+    '  "[p.412] ACTIVE OUTPATIENT MEDICATIONS  FLUOXETINE 20MG CAP  Take one daily  Start Date: 03/12/2015  Last Filled: 11/02/2025" → {category:active_medication, name:"fluoxetine", dose:"20 mg", medStatus:"active", startDate:"03/12/2015", lastSeenDate:"11/02/2025", sourceQuote:"FLUOXETINE 20MG CAP ... Start Date: 03/12/2015 Last Filled: 11/02/2025"}',
     '  "[p.88] 06/14/2022 Progress Note ... Patient reports starting sertraline last month, tolerating well." → {category:active_medication, name:"sertraline", medStatus:"historical", lastSeenDate:"06/14/2022", sourceQuote:"06/14/2022 Progress Note ... starting sertraline"} (startDate omitted — "last month" is not a written date).',
     // PRECISION GUARD (Ryan standing rule: a screen is NOT a diagnosis): keep screening instruments
     // out of the problem/condition rows so a positive score never becomes a fabricated dx.

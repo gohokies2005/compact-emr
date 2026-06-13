@@ -33,6 +33,12 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
     queryKey: ['case', caseId, 'chart-readiness'],
     queryFn: () => getChartReadiness(caseId),
     enabled: caseId.length > 0,
+    // While the chart is still building (OCR or the full-read extraction), poll so the draft button
+    // unlocks ITSELF the moment it finishes — no manual refresh. Stops polling once it settles.
+    refetchInterval: (q) => {
+      const st = q.state.data?.data?.extractionState;
+      return st === 'extracting' || st === 'ocr_in_progress' ? 8000 : false;
+    },
   });
 
   const draftMutation = useMutation({
@@ -85,6 +91,10 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
 
   const readiness = readinessQuery.data?.data;
   const ready = readiness?.ready === true;
+  // The chart is still building: OCR running, or the full-read extraction (minutes) hasn't finished.
+  // Drafting must wait — the pre-draft gates (Gate-2 dx / framing / viability) read the EXTRACTED
+  // chart, so a draft started mid-extraction sees a half-populated chart. (Ryan 2026-06-13.)
+  const stillBuilding = readiness?.extractionState === 'extracting' || readiness?.extractionState === 'ocr_in_progress';
   const blockingFiles = readiness?.blockingFiles ?? readiness?.blockers ?? [];
   const blockingFileCount = blockingFiles.length;
   // The original filename (basename of the S3 key) so the RN knows EXACTLY which file to re-upload or
@@ -149,7 +159,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
         <Button
           type="button"
           variant="primary"
-          disabled={!ready || needsAssignment}
+          disabled={!ready || needsAssignment || stillBuilding}
           loading={draftMutation.isPending}
           onClick={startDraft}
         >
@@ -166,6 +176,22 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
         ) : readinessQuery.isError ? (
           <div className="rounded-lg border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-4 text-sm text-amber-800">
             Could not check chart readiness. Please retry.
+          </div>
+        ) : stillBuilding ? (
+          // OCR-done-but-still-extracting (or OCR-in-progress) — wait, don't draft on a half-built
+          // chart. Auto-clears: the readiness query polls and the button enables when it finishes.
+          <div className="flex items-start gap-3 rounded-lg border border-sky-300 border-l-4 border-l-sky-500 bg-sky-50 p-4">
+            <Spinner />
+            <div>
+              <h3 className="text-sm font-semibold text-sky-900">
+                {readiness?.extractionState === 'extracting' ? 'Reading & extracting the full chart…' : 'Reading the documents…'}
+              </h3>
+              <p className="mt-1 text-sm text-sky-800">
+                Wait to draft until the chart finishes building (usually ~1–3 minutes). The drafter reads the
+                whole record and the pre-draft checks rely on the extracted chart, so the button unlocks
+                automatically the moment it&rsquo;s done — no need to refresh.
+              </p>
+            </div>
           </div>
         ) : ready ? (
           <div className="rounded-lg border border-emerald-300 border-l-4 border-l-emerald-500 bg-emerald-50 p-4 text-sm text-emerald-800">

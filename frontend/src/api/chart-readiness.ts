@@ -25,11 +25,17 @@ export interface ChartReadinessBlockingFile {
   } | null;
 }
 
+export type ChartExtractionState = 'no_documents' | 'ocr_in_progress' | 'extracting' | 'chart_ready' | 'extract_failed';
+
 export interface ChartReadinessResult {
   readonly ready: boolean;
   readonly blockingFiles?: readonly ChartReadinessBlockingFile[];
   readonly blockers?: readonly ChartReadinessBlockingFile[];
   readonly reason?: string | null;
+  // Where the chart-build pipeline is. `ready` reflects OCR/file-read only; this reflects the
+  // EXTRACTION phase (the full-read chunker, minutes long). Draft must wait for 'chart_ready'.
+  // Optional: an older backend omits it → the UI treats absence as "not blocking" (fail-open).
+  readonly extractionState?: ChartExtractionState;
 }
 
 export async function getChartReadiness(caseId: string): Promise<{ data: ChartReadinessResult }> {

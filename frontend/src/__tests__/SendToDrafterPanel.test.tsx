@@ -89,6 +89,19 @@ describe('SendToDrafterPanel', () => {
     await waitFor(() => expect(postDraftMock).toHaveBeenCalledWith('CASE-1', {}));
   });
 
+  it('blocks drafting while the chart is still EXTRACTING (OCR done, chunker running) with a clear wait message', async () => {
+    // ready (file-read) is TRUE, but the full-read extraction has not finished — the button must
+    // still be disabled, because the pre-draft gates read the extracted chart. (Ryan 2026-06-13.)
+    readinessMock.mockResolvedValue({ data: { ready: true, extractionState: 'extracting' } });
+    renderPanel();
+
+    expect(await screen.findByText('Reading & extracting the full chart…')).toBeInTheDocument();
+    expect(screen.getByText(/Wait to draft until the chart finishes building/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to Drafter' })).toBeDisabled();
+    // It is NOT shown as "ready" while extracting.
+    expect(screen.queryByText('Chart is ready for drafting.')).not.toBeInTheDocument();
+  });
+
   it('explains the blocker AND offers an override (never a dead-end) when the chart is not ready', async () => {
     readinessMock.mockResolvedValue({
       data: {

@@ -14,6 +14,7 @@ import {
   parseManualSummary,
   parseReadAttempt,
 } from '../services/file-read-validation.js';
+import { deriveChartBuildState } from '../services/chart-build-state.js';
 import type { AppDb, FileReadAttempt, FileReadStatusRecord } from '../services/db-types.js';
 
 // The s3Key is minted `cases/<caseId>/<uuid>-<OriginalName.ext>` (documents presign). Recover the
@@ -156,7 +157,21 @@ export function createChartReadinessRouter(db: AppDb): Router {
       const result = evaluateChartReadiness(reconciled);
       const docIdByKey = new Map(docs.filter((d): d is { id: string; s3Key: string } => typeof d.id === 'string').map((d) => [d.s3Key, d.id]));
       const blockingFiles = result.blockingFiles.map((b) => ({ ...b, documentId: docIdByKey.get(b.filePath) ?? null }));
-      res.json({ data: { ...result, blockingFiles } });
+
+      // Extraction phase (full-read chunker takes minutes). File-read `ready` flips true the moment
+      // OCR finishes — but the chart's sc_conditions/meds aren't populated until EXTRACTION completes,
+      // and the pre-draft gates (Gate-2 dx / framing / viability) read that extracted chart. So the
+      // draft button must wait for extractionState==='chart_ready', not just OCR. (Ryan 2026-06-13.)
+      const latestRun = await (db as unknown as {
+        chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { triggerHash: true; status: true } }) => Promise<{ triggerHash: string; status: string } | null> };
+      }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true, status: true } });
+      const build = deriveChartBuildState(
+        docs.map((d) => ({ id: d.id ?? '', s3Key: d.s3Key })),
+        rows.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })),
+        latestRun,
+      );
+
+      res.json({ data: { ...result, blockingFiles, extractionState: build.state } });
     }),
   );
 

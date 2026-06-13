@@ -81,7 +81,7 @@ export function createJotformWebhookRouter(db: AppDb): Router {
       await publishJotformIngest({ intakeId, formId, submissionId }).catch(async (err: unknown) => {
         const reason = err instanceof Error ? err.message : String(err);
         console.error(JSON.stringify({ msg: 'jotform-webhook: enqueue failed', intakeId, submissionId, error: reason }));
-        await db.intake.update({ where: { id: intakeId }, data: { errorMessage: `enqueue failed: ${reason}`.slice(0, 2000) } }).catch(() => { /* best-effort */ });
+        await db.intake.update({ where: { id: intakeId }, data: { status: 'failed', errorMessage: `enqueue failed: ${reason}`.slice(0, 2000) } }).catch(() => { /* best-effort */ }); // status=failed (audit 2026-06-13): surface as actionable in the pool, not as normal in-progress; the hourly sweep re-enqueues pending||failed so it still self-heals.
       });
     }
 

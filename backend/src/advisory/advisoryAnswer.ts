@@ -125,7 +125,12 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
   }
 
   const res = await deps.invoke(deps.systemPrompt, userContent);
-  const clean = deps.sanitize ? deps.sanitize(res.text) : res.text;
+  const sanitized = deps.sanitize ? deps.sanitize(res.text) : res.text;
+  // Audit 2026-06-13: surface a hard truncation (ADVISORY_MAX_TOKENS cap) instead of returning a
+  // half-answer that silently drops the trailing advisory-note / escalation line the prompt requires.
+  const clean = res.stopReason === 'max_tokens'
+    ? `${sanitized}\n\n(This answer was cut off at the length limit — ask me to continue for the rest.)`
+    : sanitized;
   return {
     ok: true,
     answer: clean,

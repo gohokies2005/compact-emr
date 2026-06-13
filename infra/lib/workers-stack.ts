@@ -5,6 +5,7 @@ import { Duration, Stack, type StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import {
   aws_cloudwatch as cloudwatch,
+  aws_cloudwatch_actions as cloudwatchActions,
   aws_ec2 as ec2,
   aws_events as events,
   aws_events_targets as targets,
@@ -430,6 +431,36 @@ export class WorkersStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+
+    // ===== Ops alerting: SNS topic + DLQ-depth alarms on the four previously-SILENT queues =====
+    // Whole-pipeline audit 2026-06-13 (3-agent finding): the chart-extract / jotform-ingest / draft-job /
+    // doctor-pack DLQs had NO depth alarm, and NO alarm in the account had an SNS action (the ocr-start DLQ
+    // sat RED ~36h unseen). One ops topic + a depth alarm on each silent DLQ so a poisoned intake, a failed
+    // extract, a failed draft, or a failed doctor-pack is LOUD + PAGED — never silent. (Subscribe/confirm the
+    // ops email; existing OCR alarms should also get .addAlarmAction(opsTopic) as a trivial follow-up.)
+    const opsTopic = new sns.Topic(this, 'OpsAlertsTopic', {
+      topicName: `compact-emr-${config.envName}-ops-alerts`,
+      displayName: 'Compact EMR ops alerts (DLQ depth + Lambda errors)',
+    });
+    // Default ops destination = the FRN inbox. AWS emails a confirmation link to info@ that must be clicked
+    // before alarms deliver. Change/add destinations (SMS, a dedicated ops address) as desired.
+    opsTopic.addSubscription(new subs.EmailSubscription('info@flatratenexus.com'));
+    const dlqDepthAlarm = (id: string, alarmName: string, queue: sqs.IQueue, what: string): void => {
+      const a = new cloudwatch.Alarm(this, id, {
+        alarmName,
+        alarmDescription: `${what} landed in its DLQ after exhausting retries — investigate the source logs + redrive. (whole-pipeline audit 2026-06-13)`,
+        metric: queue.metricApproximateNumberOfMessagesVisible({ statistic: 'Maximum', period: Duration.minutes(5) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+      a.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+    };
+    dlqDepthAlarm('ChartExtractDlqDepthAlarm', `compact-emr-${config.envName}-chart-extract-dlq-depth`, chartExtractDlq, 'A chart-extraction message');
+    dlqDepthAlarm('JotformIngestDlqDepthAlarm', `compact-emr-${config.envName}-jotform-ingest-dlq-depth`, jotformIngestDlq, 'A Jotform intake-ingest message');
+    dlqDepthAlarm('DraftJobDlqDepthAlarm', `compact-emr-${config.envName}-draft-job-dlq-depth`, draftJobDlq, 'A drafter job');
+    dlqDepthAlarm('DoctorPackAssemblerDlqDepthAlarm', `compact-emr-${config.envName}-doctor-pack-assembler-dlq-depth`, dpDlq, 'A doctor-pack assembly message');
 
     // ===== Doctor Pack assembler Lambda =====
     // The WeasyPrint dependencies (cairo, pango, gobject) require a custom layer.
@@ -868,7 +899,7 @@ export class WorkersStack extends Stack {
         // is the resolved full ARN, which the `*` grant below covers.
         JOTFORM_API_KEY_SECRET_ARN: jotformApiKeySecret.secretName,
         JOTFORM_WEBHOOK_SECRET_ARN: jotformWebhookSecretForSweep.secretName,
-        LOOKBACK_MINUTES: '360',
+        LOOKBACK_MINUTES: '1440', // 24h (audit 2026-06-13): 360min left a silent gap if BOTH the webhook missed a submit AND the sweep was down >6h; idempotent, steady-state cost unchanged.
       },
     });
     // IAM FIX (2026-06-05 incident, defense-in-depth). The ACTUAL blocker was the partial-ARN

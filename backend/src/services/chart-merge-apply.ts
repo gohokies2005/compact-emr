@@ -87,7 +87,12 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
           extractionRunId: input.runId,
         };
         if (it.category === 'sc_condition') {
-          await txAny.scCondition.create({ data: { veteranId: input.veteranId, condition: it.name, status: it.status ?? 'service_connected', ...(it.ratingPct != null ? { ratingPct: it.ratingPct } : {}), ...(it.dcCode ? { dcCode: it.dcCode } : {}), ...prov } });
+          // Default an UNMAPPED/absent SC status to `pending`, NOT `service_connected` (audit 2026-06-13,
+          // 2-agent consensus). `service_connected` is the privileged value — defaulting to it can write a
+          // GRANTED SC the records don't support, which then becomes a framing anchor (case-framing builds
+          // grantedScAnchors from status==='service_connected'). `pending` can't anchor a theory and surfaces
+          // for RN confirmation. Matches the existing "deferred/claimed → pending, never SC" sanitizer intent.
+          await txAny.scCondition.create({ data: { veteranId: input.veteranId, condition: it.name, status: it.status ?? 'pending', ...(it.ratingPct != null ? { ratingPct: it.ratingPct } : {}), ...(it.dcCode ? { dcCode: it.dcCode } : {}), ...prov } });
         } else if (it.category === 'active_problem') {
           await txAny.activeProblem.create({ data: { veteranId: input.veteranId, problem: it.name, ...(it.icd10 ? { icd10: it.icd10 } : {}), ...prov } });
         } else {

@@ -20,7 +20,7 @@ import {
   uncoveredPages,
   splitChunkText,
   groundExtractedItem,
-  normalizeName,
+  chartDedupKey,
   dispositionForConfidence,
   type BundleDocument,
   type ExtractCategory,
@@ -401,25 +401,6 @@ export function groundScreenings(documents: BundleDocument[], raw: ScreeningResu
   return out;
 }
 
-/** First 4-digit year found across the given dates, '' if none. Year-granularity: OCR'd VA dates
- *  are unreliable at day precision, and a day-level key would shatter true duplicates. */
-function yearOf(...dates: (string | undefined)[]): string {
-  for (const d of dates) { const m = d?.match(/\b(?:19|20)\d{2}\b/); if (m) return m[0]; }
-  return '';
-}
-
-/**
- * Dedup key. Conditions/problems keep the original (category, normalizedName) — unchanged. MEDS get
- * a temporality-aware key so 8 chunk-overlap copies of one drug collapse, but a treatment TIMELINE
- * survives: "Prozac active 2015" vs "Prozac historical 2021" vs "Lexapro active 2022" stay distinct
- * (medStatus + start/last-seen year). normalizeName is NOT touched (it is test-locked + shared).
- */
-function dedupKey(it: RawExtractedItem): string {
-  const base = `${it.category}::${normalizeName(it.name)}`;
-  if (it.category !== 'active_medication') return base;
-  return `${base}::${it.medStatus ?? 'unknown'}::${yearOf(it.startDate, it.lastSeenDate)}`;
-}
-
 /**
  * Date anti-fabrication: the grounding gate proves the QUOTE is on the page, but a med date lives in
  * a separate field the gate never inspects — a model could quote a real drug line and invent a date.
@@ -466,7 +447,7 @@ export function groundAndDispose(
     const it = scrubUnquotedDates(it0); // null out any med date not present in the grounded quote
     const disp = dispositionForConfidence(it.confidence);
     if (disp === 'drop') { droppedLowConfidence++; continue; }
-    const key = dedupKey(it);
+    const key = chartDedupKey(it);
     const existingIdx = indexByKey.get(key);
     if (existingIdx !== undefined) {
       droppedDuplicate++;

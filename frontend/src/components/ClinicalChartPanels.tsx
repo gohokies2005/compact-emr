@@ -98,9 +98,26 @@ export function ProblemsPanel({ veteranId, rows, onChange }: { readonly veteranI
   return <div className="space-y-4"><div className="flex flex-col gap-2 sm:flex-row sm:items-start"><div className="sm:flex-1"><ConditionSelect label="Problem" value={problem} onChange={setProblem} placeholder="Select a problem…" /></div><Button size="sm" onClick={() => add.mutate()} disabled={!problem}>Add</Button></div><Rows rows={dedupByCondition(rows, (r) => r.problem).map((r) => ({ id: r.id, cols: [r.problem, r.notes ?? ''], onDelete: () => { if (window.confirm('Remove this problem?')) del.mutate(r.id); } }))} /></div>;
 }
 
+// Full-read chart extraction (Ryan 2026-06-13) populates a treatment HISTORY, not just a current
+// list. Split the CURRENT active meds (prominent) from a collapsed history/discontinued section so
+// the active list stays clean while the timeline (with dates) is one click away — never cluttering.
 export function MedicationsPanel({ veteranId, rows, onChange }: { readonly veteranId: string; readonly rows: readonly ActiveMedication[]; readonly onChange: () => Promise<void> }) {
-  const [drugName, setDrugName] = useState(''); const add = useMutation({ mutationFn: () => addMedication(veteranId, { drugName }), onSuccess: async () => { setDrugName(''); await onChange(); } }); const del = useMutation({ mutationFn: deleteMedication, onSuccess: onChange });
-  return <div className="space-y-4"><div className="flex gap-2"><input className="input" placeholder="Medication" value={drugName} onChange={(e) => setDrugName(e.target.value)} /><Button size="sm" onClick={() => add.mutate()} disabled={!drugName}>Add</Button></div><Rows rows={rows.map((r) => ({ id: r.id, cols: [r.drugName, r.dose ?? '', r.frequency ?? ''], onDelete: () => { if (window.confirm('Remove this medication?')) del.mutate(r.id); } }))} /></div>;
+  const [drugName, setDrugName] = useState(''); const [showHistory, setShowHistory] = useState(false);
+  const add = useMutation({ mutationFn: () => addMedication(veteranId, { drugName }), onSuccess: async () => { setDrugName(''); await onChange(); } });
+  const del = useMutation({ mutationFn: deleteMedication, onSuccess: onChange });
+  const onDelete = (id: string) => () => { if (window.confirm('Remove this medication?')) del.mutate(id); };
+  const isActive = (r: ActiveMedication) => (r.medStatus ?? 'active') === 'active'; // legacy/manual rows = active
+  const dates = (r: ActiveMedication) => [r.startDate, r.lastSeenDate].filter(Boolean).join('–');
+  const active = rows.filter(isActive);
+  const history = rows.filter((r) => !isActive(r));
+  return <div className="space-y-4">
+    <div className="flex gap-2"><input className="input" placeholder="Medication" value={drugName} onChange={(e) => setDrugName(e.target.value)} /><Button size="sm" onClick={() => add.mutate()} disabled={!drugName}>Add</Button></div>
+    <Rows rows={active.map((r) => ({ id: r.id, cols: [r.drugName, r.dose ?? '', r.frequency ?? ''], onDelete: onDelete(r.id) }))} />
+    {history.length > 0 ? <div>
+      <button type="button" onClick={() => setShowHistory((v) => !v)} className="text-xs font-medium text-steel hover:text-navy">{showHistory ? '▾' : '▸'} Medication history ({history.length})</button>
+      {showHistory ? <div className="mt-2"><Rows rows={history.map((r) => ({ id: r.id, cols: [r.drugName, r.dose ?? '', dates(r)], onDelete: onDelete(r.id) }))} /></div> : null}
+    </div> : null}
+  </div>;
 }
 
 function Rows({ rows }: { readonly rows: readonly { readonly id: string; readonly cols: readonly string[]; readonly onDelete: () => void }[] }) {

@@ -264,6 +264,12 @@ model ActiveMedication {
   dose       String?
   frequency  String?
   indication String?
+  // Temporality (full-read chunker, Ryan 2026-06-13). medStatus splits the current active list from
+  // the treatment history; start/lastSeen are STRING (VA OCR dates are often partial — "2015",
+  // "03/2015" — a Date column would force a fabricating parse). Existing + manual rows default active.
+  medStatus    String    @default("active") @map("med_status")
+  startDate    String?   @map("start_date")
+  lastSeenDate String?   @map("last_seen_date")
   // Provenance (chart auto-extract) — see ScCondition. source defaults to 'manual'.
   source           String    @default("manual")
   sourceDocumentId String?   @map("source_document_id")
@@ -279,6 +285,7 @@ model ActiveMedication {
   veteran    Veteran  @relation(fields: [veteranId], references: [id], onDelete: Cascade)
 
   @@index([veteranId])
+  @@index([veteranId, medStatus])
   @@index([drugName])
   @@index([indication])
   @@map("active_medications")

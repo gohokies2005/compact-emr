@@ -44,7 +44,7 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
   }).scCondition;
   const medDelegate = (db as unknown as {
     activeMedication: {
-      findMany: (a: { where: { veteranId: string }; select: { drugName: true; source: true } }) => Promise<{ drugName: string; source: string }[]>;
+      findMany: (a: { where: { veteranId: string }; select: { drugName: true; source: true; medStatus: true; startDate: true; lastSeenDate: true } }) => Promise<{ drugName: string; source: string; medStatus: string | null; startDate: string | null; lastSeenDate: string | null }[]>;
       create: (a: { data: Record<string, unknown> }) => Promise<unknown>;
     };
   }).activeMedication;
@@ -57,12 +57,13 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
     scDelegate.findMany({ where: { veteranId: input.veteranId }, select: { condition: true, source: true } }) as Promise<{ condition: string; source: string }[]>,
     (db as unknown as { activeProblem: { findMany: (a: { where: { veteranId: string }; select: { problem: true; source: true } }) => Promise<{ problem: string; source: string }[]> } })
       .activeProblem.findMany({ where: { veteranId: input.veteranId }, select: { problem: true, source: true } }),
-    medDelegate.findMany({ where: { veteranId: input.veteranId }, select: { drugName: true, source: true } }),
+    medDelegate.findMany({ where: { veteranId: input.veteranId }, select: { drugName: true, source: true, medStatus: true, startDate: true, lastSeenDate: true } }),
   ]);
   const existing: ExistingChartRow[] = [
     ...scRows.map((r) => ({ category: 'sc_condition' as const, name: r.condition, source: r.source })),
     ...problemRows.map((r) => ({ category: 'active_problem' as const, name: r.problem, source: r.source })),
-    ...medRows.map((r) => ({ category: 'active_medication' as const, name: r.drugName, source: r.source })),
+    // Carry med temporality so the merge key matches the extracted key (active vs historical/year).
+    ...medRows.map((r) => ({ category: 'active_medication' as const, name: r.drugName, source: r.source, medStatus: r.medStatus, startDate: r.startDate, lastSeenDate: r.lastSeenDate })),
   ];
 
   const plan = planMerge(existing, input.items);
@@ -90,7 +91,7 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
         } else if (it.category === 'active_problem') {
           await txAny.activeProblem.create({ data: { veteranId: input.veteranId, problem: it.name, ...(it.icd10 ? { icd10: it.icd10 } : {}), ...prov } });
         } else {
-          await txAny.activeMedication.create({ data: { veteranId: input.veteranId, drugName: it.name, ...(it.dose ? { dose: it.dose } : {}), ...(it.frequency ? { frequency: it.frequency } : {}), ...(it.indication ? { indication: it.indication } : {}), ...prov } });
+          await txAny.activeMedication.create({ data: { veteranId: input.veteranId, drugName: it.name, ...(it.dose ? { dose: it.dose } : {}), ...(it.frequency ? { frequency: it.frequency } : {}), ...(it.indication ? { indication: it.indication } : {}), ...(it.medStatus ? { medStatus: it.medStatus } : {}), ...(it.startDate ? { startDate: it.startDate } : {}), ...(it.lastSeenDate ? { lastSeenDate: it.lastSeenDate } : {}), ...prov } });
         }
       }
     }

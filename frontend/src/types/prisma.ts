@@ -18,7 +18,7 @@ export interface Veteran extends VersionedRecord { readonly id: string; readonly
 export type ScConditionStatus = 'service_connected' | 'pending' | 'denied';
 export interface ScCondition extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly condition: string; readonly dcCode?: string; readonly ratingPct?: number; readonly status: ScConditionStatus; readonly grantedDate?: string; readonly createdAt: string; }
 export interface ActiveProblem extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly problem: string; readonly notes?: string; readonly createdAt: string; }
-export interface ActiveMedication extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly drugName: string; readonly dose?: string; readonly frequency?: string; readonly indication?: string; readonly createdAt: string; }
+export interface ActiveMedication extends VersionedRecord { readonly id: string; readonly veteranId: string; readonly drugName: string; readonly dose?: string; readonly frequency?: string; readonly indication?: string; readonly medStatus?: string; readonly startDate?: string | null; readonly lastSeenDate?: string | null; readonly createdAt: string; }
 // 'blocked' added for the condition-not-in-library feature (task #155). 'hold' added on
 // ShipRecommendation as a third option distinct from ship/revise.
 export type OperatorState = 'ready' | 'ready_with_notes' | 'needs_one_thing' | 'paused' | 'blocked';

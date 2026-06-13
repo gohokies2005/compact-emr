@@ -84,4 +84,32 @@ describe('planMerge (non-destructive)', () => {
     expect(p.toInsert).toHaveLength(0);
     expect(p.skippedPriorExtracted).toBe(1);
   });
+
+  // ── Medication temporality (Ryan 2026-06-13) — the architect's load-bearing 🔴 case ──
+  const med = (over: Partial<FinalExtractedItem>): FinalExtractedItem =>
+    item({ category: 'active_medication', name: 'escitalopram', sourceQuote: 'escitalopram', ...over });
+
+  it('a manual ACTIVE med does NOT block an extracted HISTORICAL occurrence (history is additive)', () => {
+    const existing: ExistingChartRow[] = [{ category: 'active_medication', name: 'escitalopram', source: 'manual', medStatus: 'active' }];
+    const p = planMerge(existing, [med({ medStatus: 'historical', lastSeenDate: '06/14/2015' })]);
+    expect(p.toInsert).toHaveLength(1); // different status/year key → the 2015 history row inserts
+    expect(p.skippedManual).toBe(0);
+  });
+
+  it('a manual ACTIVE med DOES block an extracted ACTIVE same-drug (manual wins, no dup)', () => {
+    const existing: ExistingChartRow[] = [{ category: 'active_medication', name: 'escitalopram', source: 'manual', medStatus: 'active' }];
+    const p = planMerge(existing, [med({ medStatus: 'active' })]);
+    expect(p.toInsert).toHaveLength(0);
+    expect(p.skippedManual).toBe(1);
+  });
+
+  it('collapses chunk-overlap copies (same drug+status+year) but keeps different years', () => {
+    const p = planMerge([], [
+      med({ medStatus: 'historical', lastSeenDate: '03/12/2015' }),
+      med({ medStatus: 'historical', lastSeenDate: '2015' }),           // same year → dup
+      med({ medStatus: 'historical', lastSeenDate: '06/14/2022' }),     // different year → distinct
+    ]);
+    expect(p.toInsert).toHaveLength(2);
+    expect(p.skippedDuplicate).toBe(1);
+  });
 });

@@ -11,7 +11,7 @@
  *     documents lands once.
  */
 
-import { normalizeName, type ExtractCategory } from './chart-extractor.js';
+import { chartDedupKey, type ExtractCategory } from './chart-extractor.js';
 import type { FinalExtractedItem } from './chart-extract-llm.js';
 
 export interface ExistingChartRow {
@@ -20,6 +20,12 @@ export interface ExistingChartRow {
   name: string;
   /** 'manual' | 'extracted' */
   source: string;
+  // Medication temporality (full-read). Carried so the dedup key matches the EXTRACTED key: a manual
+  // "active escitalopram" blocks an extracted active escitalopram, but NOT an extracted historical
+  // 2015 occurrence (different key) — so the treatment history is additive, never clobbering.
+  medStatus?: string | null;
+  startDate?: string | null;
+  lastSeenDate?: string | null;
 }
 
 export interface MergePlan {
@@ -31,17 +37,15 @@ export interface MergePlan {
 
 // TEST-LOCK (keystone pkg 6): the dedup correctness of this merge lives in normalizeName
 // (chart-extractor.ts) — qualifier stripping, parenthetical-abbrev stripping, and the synonym
-// fold all happen THERE. planMerge only keys on it. Extend canonicalization in normalizeName,
-// never by adding a second normalization here (chart-extractor.test.ts + chart-merge.test.ts
-// lock the contract: manual rows always win; no insert whose canonical key matches an existing
-// row of the same category; within-run duplicates collapse).
-function key(category: ExtractCategory, name: string): string {
-  return `${category}::${normalizeName(name)}`;
-}
+// fold all happen THERE, surfaced via the shared chartDedupKey. planMerge only keys on it. Extend
+// canonicalization in normalizeName, never by adding a second normalization here
+// (chart-extractor.test.ts + chart-merge.test.ts lock the contract: manual rows always win; no
+// insert whose canonical key matches an existing row of the same category; within-run duplicates
+// collapse). Meds additionally key on medStatus + start/last-seen year (chartDedupKey).
 
 export function planMerge(existing: readonly ExistingChartRow[], extracted: readonly FinalExtractedItem[]): MergePlan {
   const existingSourceByKey = new Map<string, string>();
-  for (const e of existing) existingSourceByKey.set(key(e.category, e.name), e.source);
+  for (const e of existing) existingSourceByKey.set(chartDedupKey(e), e.source);
 
   const toInsert: FinalExtractedItem[] = [];
   const seen = new Set<string>();
@@ -50,7 +54,7 @@ export function planMerge(existing: readonly ExistingChartRow[], extracted: read
   let skippedDuplicate = 0;
 
   for (const it of extracted) {
-    const k = key(it.category, it.name);
+    const k = chartDedupKey(it);
     if (seen.has(k)) { skippedDuplicate++; continue; }
     seen.add(k);
 

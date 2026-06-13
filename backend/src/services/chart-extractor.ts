@@ -402,3 +402,32 @@ export function dispositionForConfidence(confidence: number): ConfidenceDisposit
   if (confidence >= CONFIDENCE_FLOOR) return 'needs_review';
   return 'drop';
 }
+
+/** First 4-digit year found across the given dates, '' if none (year-granularity: OCR'd VA dates
+ *  are unreliable at day precision and a day-level key would shatter true duplicates). */
+export function yearOf(...dates: (string | undefined)[]): string {
+  for (const d of dates) { const m = d?.match(/\b(?:19|20)\d{2}\b/); if (m) return m[0]; }
+  return '';
+}
+
+/**
+ * Shared dedup key for both the extract-time dedup (groundAndDispose) and the write-time merge
+ * (planMerge), so they can never drift. Conditions/problems key on (category, normalizedName) —
+ * UNCHANGED. MEDS additionally key on medStatus + start/last-seen year, so chunk-overlap copies of
+ * one drug collapse but a treatment TIMELINE survives (active vs historical, 2015 vs 2022). The
+ * medStatus default is 'active' to MATCH the active_medications.med_status column default, so an
+ * extracted med with no status keys the same as the row it will be stored as. normalizeName is NOT
+ * touched (test-locked + shared with conditions/problems).
+ */
+export interface DedupKeyInput {
+  category: ExtractCategory;
+  name: string;
+  medStatus?: string | null;
+  startDate?: string | null;
+  lastSeenDate?: string | null;
+}
+export function chartDedupKey(it: DedupKeyInput): string {
+  const base = `${it.category}::${normalizeName(it.name)}`;
+  if (it.category !== 'active_medication') return base;
+  return `${base}::${it.medStatus ?? 'active'}::${yearOf(it.startDate ?? undefined, it.lastSeenDate ?? undefined)}`;
+}

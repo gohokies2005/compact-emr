@@ -699,6 +699,10 @@ export interface FileReadAttempt {
   readonly method: FileReadMethod;
   readonly wordCount: number;
   readonly corruptedTokenRatio: number;
+  // Document page count at read time (Ryan 2026-06-13). Powers the SIZE-AWARE word floor — a <=1-page
+  // file with little text is a valid small file, not "incomplete". Optional: pre-2026-06-13 attempts
+  // omit it → the reconciliation treats them as substantial (full 20-word floor; no regression).
+  readonly pageCount?: number | null;
   readonly attemptedAt: string;
   readonly note: string | null;
 }

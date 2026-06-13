@@ -56,7 +56,8 @@ _secrets = boto3.client("secretsmanager")
 
 ANTHROPIC_MODEL = "claude-sonnet-4-6"  # matches local claude.js OCR model
 MAX_OCR_BYTES = 25 * 1024 * 1024  # Claude document/image request cap headroom; larger → flag for RN
-LOW_TEXT_CHARS = 200  # Textract output below this ≈ a barely-read scan → try Claude (≈ the 40-word read gate)
+LOW_TEXT_CHARS = 200  # Textract output below this ≈ a barely-read scan → try Claude (≈ the 20-word read gate)
+CLAUDE_REREAD_PER_PAGE_FLOOR = 50  # chars/page below which a MULTI-page doc is a choked scan (not a thin-but-fine form) → Claude re-read
 _MEDIA_BY_EXT = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}
 _cached_anthropic_key: str | None = None
 
@@ -130,6 +131,15 @@ def start_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     if key.endswith("00000000-screening-summary.txt"):
         print(f"skipping screening-summary output file (not an OCR input): {key}")
         return {"started": [], "skipped": "screening_summary"}
+
+    # Rendered-letter outputs live at cases/<id>/_rendered/<doc>-v<n>.pdf — an EXTRA path segment, so
+    # isCaseDocumentS3Key rejects them and no Document is ever recorded. The cases/ EventBridge rule still
+    # fires on their write; without this skip _resolve_document 404s and (because key startswith cases/)
+    # start_handler RAISES → exhausts retries → floods the ocr-start DLQ with output PDFs, crying wolf over
+    # the real-failure alarm. Skip them like the screening-summary output. (QA 2026-06-13.)
+    if "/_rendered/" in key:
+        print(f"skipping rendered-letter output (not an OCR input): {key}")
+        return {"started": [], "skipped": "rendered_output"}
 
     doc = _resolve_document(key)
     if not doc:
@@ -239,7 +249,7 @@ def _complete_intake(job_id: str, status: str, job_tag: str) -> dict[str, Any]:
     if status != "SUCCEEDED":
         print(json.dumps({"msg": "ocr: intake textract not SUCCEEDED; assign will live-OCR", "jobTag": job_tag, "status": status}))
         return {"status": status, "posted": False}
-    blocks = _fetch_all_pages(job_id)
+    blocks, _ = _fetch_all_pages(job_id)
     pages, page_count = _build_page_payload(blocks)
     if not pages:
         print(json.dumps({"msg": "ocr: intake textract read no text; assign will live-OCR", "jobTag": job_tag}))
@@ -250,20 +260,27 @@ def _complete_intake(job_id: str, status: str, job_tag: str) -> dict[str, Any]:
     return {"status": "POSTED" if posted else "DROPPED", "pages": len(pages), "posted": posted}
 
 
-def _fetch_all_pages(job_id: str) -> list[dict[str, Any]]:
-    """Page through GetDocumentTextDetection until all blocks are retrieved."""
+def _fetch_all_pages(job_id: str) -> tuple[list[dict[str, Any]], int]:
+    """Page through GetDocumentTextDetection until all blocks are retrieved. Returns (blocks,
+    total_pages) where total_pages = Textract's DocumentMetadata.Pages — the REAL page count of the
+    PDF, NOT max-page-with-text. A 50-page scan Textract choked on (text on page 1 only) reports
+    total_pages=50 even though only page 1 carries blocks; the caller needs the real count so the
+    size-relative Claude re-read fires AND the readiness gate treats it as substantial. (QA 2026-06-13.)"""
     blocks: list[dict[str, Any]] = []
+    total_pages = 0
     next_token: str | None = None
     while True:
         kwargs: dict[str, Any] = {"JobId": job_id}
         if next_token:
             kwargs["NextToken"] = next_token
         response = textract.get_document_text_detection(**kwargs)
+        if not total_pages:
+            total_pages = int(response.get("DocumentMetadata", {}).get("Pages", 0) or 0)
         blocks.extend(response.get("Blocks", []))
         next_token = response.get("NextToken")
         if not next_token:
             break
-    return blocks
+    return blocks, total_pages
 
 
 def _build_page_payload(blocks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
@@ -563,7 +580,13 @@ def _claude_ocr(document_id: str) -> str:
         "max_tokens": 16000,
         "messages": [{"role": "user", "content": [
             block,
-            {"type": "text", "text": "Extract ALL text from this medical record document verbatim. Include every date, diagnosis, lab value, provider name, medication, and clinical finding. Preserve the document structure. Output the raw text only, no commentary."},
+            {"type": "text", "text": (
+                "Extract ALL text from this medical record document verbatim. Include every date, "
+                "diagnosis, lab value, provider name, medication, and clinical finding. Preserve the "
+                "document structure. If the document has multiple pages, prefix each page's text with a "
+                "line '=== Page N ==='. If a page contains no legible text, output nothing for that page "
+                "— do NOT describe the image or guess. Output the raw text only, no commentary."
+            )},
         ]}],
     }).encode("utf-8")
     req = urllib.request.Request(
@@ -573,7 +596,15 @@ def _claude_ocr(document_id: str) -> str:
     with urllib.request.urlopen(req, timeout=300) as response:
         payload = json.loads(response.read().decode("utf-8"))
     parts = payload.get("content") or []
-    return "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+    text = "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+    # Truncation guard (QA 2026-06-13): if Claude hit max_tokens the extraction is PARTIAL. Posting it
+    # would clear the readiness gate looking complete while silently dropping the back half of the record
+    # — a correctness hazard for the letter. Return '' so the caller falls through to the thin Textract
+    # text → readiness gate flags for the RN. Fail to a FLAG, never to a silent partial.
+    if payload.get("stop_reason") == "max_tokens":
+        print(json.dumps({"msg": "ocr: claude OCR truncated at max_tokens; flagging instead of posting partial", "documentId": document_id, "chars": len(text)}))
+        return ""
+    return text
 
 
 def _handle_unreadable(document_id: str, textract_status: str, job_id: str) -> bool:
@@ -626,22 +657,35 @@ def completion_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             processed.append({"jobId": job_id, "documentId": document_id, "status": status, "posted": read, "claudeOcr": read, "flaggedForRn": not read})
             continue
 
-        blocks = _fetch_all_pages(job_id)
-        pages, document_page_count = _build_page_payload(blocks)
+        blocks, total_pages = _fetch_all_pages(job_id)
+        pages, max_text_page = _build_page_payload(blocks)
+        # REAL PDF page count (DocumentMetadata.Pages), falling back to max-page-with-text. A 50-page scan
+        # Textract choked on has total_pages=50 but max_text_page=1 — the real count makes the size-relative
+        # re-read fire AND the readiness gate treat it as substantial (flag thin text), instead of silently
+        # accepting a 1-page read of a 50-page record. (QA 2026-06-13.)
+        document_page_count = total_pages or max_text_page
         if pages:
             # Textract read SOMETHING but very little (a scan it choked on → a few words). Try Claude
             # OCR and keep whichever extraction has more text — so a partially-read scanned record
             # gets a real read instead of tripping the <40-word readiness threshold. (Our generated
             # Intake_Summary is skipped inside _claude_ocr.)
             total_chars = sum(len(p.get("text", "")) for p in pages)
-            if total_chars < LOW_TEXT_CHARS:
+            # Size-relative low-text trigger (Ryan 2026-06-13: "if in doubt, send it to Anthropic").
+            # Fire the Claude deep-read when text is sparse in ABSOLUTE terms (a small choked scan) OR
+            # sparse RELATIVE to the page count (a 10-page doc with 800 chars is a big scan Textract
+            # choked on — re-read it before it ever reaches the readiness gate). Cost stays bounded by
+            # the 25MB cap inside _claude_ocr; a legitimately short small file stays Textract-only.
+            low_text = total_chars < LOW_TEXT_CHARS or (document_page_count >= 2 and total_chars < CLAUDE_REREAD_PER_PAGE_FLOOR * document_page_count)
+            if low_text:
                 claude_text = ""
                 try:
                     claude_text = _claude_ocr(document_id)
                 except Exception as exc:  # noqa: BLE001
                     print(json.dumps({"msg": "ocr: claude low-text fallback error", "documentId": document_id, "error": f"{type(exc).__name__}: {exc}"}))
                 if len(claude_text) > total_chars:
-                    _post_pages_to_api(document_id, [{"pageNumber": 1, "text": claude_text, "confidence": None}], 1)
+                    # Post the REAL page count (not 1): if Claude itself read a big scan poorly, the doc
+                    # still trips the multi-page word floor downstream rather than passing as a 1-pager.
+                    _post_pages_to_api(document_id, [{"pageNumber": 1, "text": claude_text, "confidence": None}], document_page_count)
                     print(json.dumps({"msg": "ocr: claude low-text fallback won", "documentId": document_id, "textractChars": total_chars, "claudeChars": len(claude_text)}))
                     processed.append({"jobId": job_id, "documentId": document_id, "status": "POSTED", "pages": 1, "claudeOcr": True})
                     continue

@@ -383,7 +383,53 @@ export class WorkersStack extends Stack {
       actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
       resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:compact-emr-${config.envName}/drafter-anthropic-api-key*`],
     }));
-    textractCompletionTopic.addSubscription(new subs.LambdaSubscription(ocrCompletion));
+    // ===== OCR completion SNS subscription DLQ + depth alarm =====
+    // Without a DLQ, an SNS→Lambda delivery that keeps failing (e.g. the completion's /pages POST 500s)
+    // is retried by SNS then SILENTLY DROPPED — exactly how a successfully-OCR'd doc (Lozano's 6MB PDF,
+    // 2026-06) was lost and its case stranded in ocr_in_progress with no trace. Capture the undeliverable
+    // message so it's loud + recoverable, never silent. (QA 2026-06-13.)
+    const ocrCompletionDlq = new sqs.Queue(this, 'OcrCompletionDlq', {
+      queueName: `compact-emr-${config.envName}-ocr-completion-dlq`,
+      retentionPeriod: Duration.days(14),
+    });
+    textractCompletionTopic.addSubscription(new subs.LambdaSubscription(ocrCompletion, {
+      deadLetterQueue: ocrCompletionDlq,
+    }));
+    new cloudwatch.Alarm(this, 'OcrCompletionDlqDepthAlarm', {
+      alarmName: `compact-emr-${config.envName}-ocr-completion-dlq-depth`,
+      alarmDescription: 'An ocr-completion SNS delivery exhausted retries and landed in the DLQ — a Textract completion (page text or the read-attempt-failed flag) was NOT recorded, so a doc may be stranded non-terminal. The stuck-doc watcher auto-recovers this; inspect compact-emr-' + config.envName + '-ocr-completion-dlq for the raw message.',
+      metric: ocrCompletionDlq.metricApproximateNumberOfMessagesVisible({
+        statistic: 'Maximum',
+        period: Duration.minutes(5),
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // ===== Errors alarms on BOTH OCR Lambdas (the only Errors alarm in the account was jotform-sweep) =====
+    // ocr-start RAISES intentionally on the recordDocument orphan race (self-heals on retry), so require a
+    // SUSTAINED error (3 periods) before breaching — a single transient raise must not page. ocr-completion
+    // has no such intended-raise, so a tighter 2-period alarm is correct there.
+    new cloudwatch.Alarm(this, 'OcrStartErrorsAlarm', {
+      alarmName: `compact-emr-${config.envName}-ocr-start-errors`,
+      alarmDescription: 'ocr-start is erroring on a SUSTAINED basis (beyond the benign recordDocument-race retry) — record uploads may not be starting OCR.',
+      metric: ocrStart.metricErrors({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    new cloudwatch.Alarm(this, 'OcrCompletionErrorsAlarm', {
+      alarmName: `compact-emr-${config.envName}-ocr-completion-errors`,
+      alarmDescription: 'ocr-completion is erroring — Textract completions may not be recording page text or the read-attempt-failed flag (the SNS DLQ above captures the dropped messages).',
+      metric: ocrCompletion.metricErrors({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 2,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     // ===== Doctor Pack assembler Lambda =====
     // The WeasyPrint dependencies (cairo, pango, gobject) require a custom layer.
@@ -512,6 +558,80 @@ export class WorkersStack extends Stack {
       description: 'Every 5 min, sweep DraftJob rows with stale heartbeats to state=failed.',
       schedule: events.Schedule.rate(Duration.minutes(5)),
       targets: [new targets.LambdaFunction(stuckJobWatcher, { retryAttempts: 2 })],
+    });
+
+    // ===== Stuck-DOCUMENT watcher Lambda (Ryan 2026-06-13: never stuck, never silent, never babysit) =====
+    // Every 5 min: find a Document with NO pages + NO terminal file_read_status, uploaded > 20 min ago —
+    // the inert-stuck class that pinned Woodley/Lozano in ocr_in_progress INVISIBLY (no RN-queue entry,
+    // no error, no alarm). Re-fire OCR once by invoking ocr-start with a synthetic ObjectCreated event;
+    // if a prior re-fire still didn't land a terminal row, flag manual (loud + RN-visible). Reuses the
+    // stuck-job watcher's SG + DB-URL construction (same DB, same VPC).
+    const stuckDocLogGroup = new logs.LogGroup(this, 'StuckDocWatcherLogGroup', {
+      logGroupName: `/aws/lambda/compact-emr-${config.envName}-stuck-doc-watcher`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: config.envName === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+    const stuckDocWatcher = new nodejs.NodejsFunction(this, 'StuckDocWatcher', {
+      functionName: `compact-emr-${config.envName}-stuck-doc-watcher`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.resolve(__dirname, '..', '..', 'backend', 'src', 'lambdas', 'stuck-doc-watcher.ts'),
+      handler: 'handler',
+      timeout: Duration.minutes(2),
+      memorySize: 512,
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [watcherSg],
+      logGroup: stuckDocLogGroup,
+      environment: {
+        ENV_NAME: config.envName,
+        DATABASE_URL: watcherDatabaseUrl,
+        DATABASE_URL_SECRET_ARN: props.databaseSecret.secretArn,
+        RECORDS_BUCKET: phiBucket.bucketName,
+        OCR_START_FUNCTION_NAME: ocrStart.functionName,
+      },
+      bundling: {
+        externalModules: ['@prisma/client', '@prisma/engines'],
+        commandHooks: {
+          beforeBundling: () => [],
+          beforeInstall: () => [],
+          afterBundling: (inputDir: string, outputDir: string) => {
+            const helper = path.join(__dirname, '..', 'scripts', 'bundle-copy.cjs');
+            const q = (s: string) => `"${s}"`;
+            return [
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/@prisma')} ${q(outputDir + '/node_modules/@prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/.prisma')} ${q(outputDir + '/node_modules/.prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/prisma')} ${q(outputDir + '/prisma')}`,
+            ];
+          },
+        },
+      },
+    });
+    props.databaseSecret.grantRead(stuckDocWatcher);
+    ocrStart.grantInvoke(stuckDocWatcher); // re-fire OCR via a synthetic ObjectCreated invoke
+
+    new events.Rule(this, 'StuckDocWatcherSchedule', {
+      ruleName: `compact-emr-${config.envName}-stuck-doc-watcher-schedule`,
+      description: 'Every 5 min, re-fire (once) or flag-manual any Document stuck with no terminal read status.',
+      schedule: events.Schedule.rate(Duration.minutes(5)),
+      targets: [new targets.LambdaFunction(stuckDocWatcher, { retryAttempts: 2 })],
+    });
+
+    // Loud when the watcher GIVES UP on a file (re-fire didn't heal → flagged manual): a sustained stream
+    // means an OCR class we can't auto-read. Metric-filter on the structured give-up log line.
+    const sweptToManualMetric = stuckDocLogGroup.addMetricFilter('StuckDocSweptToManualMetric', {
+      filterPattern: logs.FilterPattern.literal('{ $.msg = "stuck-doc-watcher: swept to manual after re-fire timed out" }'),
+      metricNamespace: `compact-emr-${config.envName}/ocr`,
+      metricName: 'StuckDocSweptToManual',
+      metricValue: '1',
+    });
+    new cloudwatch.Alarm(this, 'StuckDocSweptToManualAlarm', {
+      alarmName: `compact-emr-${config.envName}-stuck-doc-swept-to-manual`,
+      alarmDescription: 'The stuck-doc watcher gave up on one+ files (auto-OCR + a re-fire both failed) and flagged them for manual summary — investigate the file type / OCR path if this is sustained.',
+      metric: sweptToManualMetric.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
     // ===== F7: RN Advisory cabinet loader Lambda (Approach A) =====

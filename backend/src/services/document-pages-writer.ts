@@ -62,13 +62,19 @@ export async function writeDocumentPages(
     let readStatus: { terminalStatus: string; wordCount: number; corruptedTokenRatio: number } | null = null;
     if (doc !== null) {
       const concatenatedText = pages.map((p) => p.text).join('\n');
-      const outcome = classifyReadAttempt({ method: 'textract', extractedText: concatenatedText });
+      // Size signal for the SIZE-AWARE word floor (classifyReadAttempt): prefer the reported page count,
+      // fall back to the number of pages we actually wrote text for. A <=1-page file with any text is a
+      // valid small file ("CPAP" note) and must not block. Persisted into the attempt so the retroactive
+      // reconciliation can self-heal a previously-flagged small file. (Ryan 2026-06-13.)
+      const docPages = documentPageCount ?? pages.length;
+      const outcome = classifyReadAttempt({ method: 'textract', extractedText: concatenatedText, pageCount: docPages });
 
       const existing = await tx.fileReadStatus.findFirst({ where: { caseId: doc.caseId, filePath: doc.s3Key } });
       const newAttempt = {
         method: 'textract' as const,
         wordCount: outcome.wordCount,
         corruptedTokenRatio: outcome.corruptedTokenRatio,
+        pageCount: docPages,
         attemptedAt: now.toISOString(),
         note: outcome.succeeded ? `Textract read OK (${outcome.wordCount} words)` : `Textract read insufficient: ${outcome.reason}`,
       };

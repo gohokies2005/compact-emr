@@ -76,6 +76,12 @@ export function wordCount(text: string): number {
 export interface ReadAttemptInput {
   readonly method: 'native_pdf_text' | 'tesseract_ocr' | 'textract' | 'bedrock_data_automation' | 'claude_vision';
   readonly extractedText: string;
+  // Document page count (when known). The word-count floor is SIZE-AWARE: a legitimately small file
+  // (a 1-page note that just says "CPAP") is VALID and must NOT block the case as "incomplete". Only a
+  // SUBSTANTIAL file (>=2 pages) that yields almost no text is the real "OCR choked on a big scan"
+  // signal. null/unknown → treat as substantial (require the full word floor — conservative, no
+  // regression). (Ryan 2026-06-13: "some files are small … that little detail would hold us all up.")
+  readonly pageCount?: number | null;
 }
 
 export interface ReadAttemptOutcome {
@@ -96,12 +102,27 @@ export interface ReadAttemptOutcome {
 export function classifyReadAttempt(input: ReadAttemptInput): ReadAttemptOutcome {
   const wc = wordCount(input.extractedText);
   const ratio = corruptedTokenRatio(input.extractedText);
+  const pageCount = input.pageCount ?? null;
 
-  if (wc < MIN_WORDS_FOR_READ) {
-    return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: `too-few-words (${wc} < ${MIN_WORDS_FOR_READ})` };
-  }
+  // Garbled text is OCR corruption, not brevity — never acceptable at any size (the worker re-reads it
+  // via Claude vision upstream).
   if (ratio > GARBLED_RATIO_THRESHOLD) {
     return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: `garbled (corrupted-token-ratio=${ratio.toFixed(3)} > ${GARBLED_RATIO_THRESHOLD})` };
+  }
+  // An EMPTY read (0 words) is NEVER a "valid small file" — it's a failed read (e.g. a scanned 1-page
+  // DD-214 OCR couldn't see). Flag it so Claude/RN handle it; never silently accept a blank.
+  if (wc === 0) {
+    return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: 'empty (0 words)' };
+  }
+  // SIZE-AWARE word floor (Ryan 2026-06-13): a legitimately small file — a 1-page note that just says
+  // "CPAP" — is VALID and must NOT block the case as "incomplete". Only a SUBSTANTIAL file (>=2 pages,
+  // or unknown size) that STILL has <20 words after the upstream Claude re-read is the genuine
+  // "unreadable big scan" → flag for the RN. A <=1-page file with any non-garbled text → accept.
+  if (pageCount !== null && pageCount <= 1) {
+    return { succeeded: true, wordCount: wc, corruptedTokenRatio: ratio, reason: null };
+  }
+  if (wc < MIN_WORDS_FOR_READ) {
+    return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: `too-few-words (${wc} < ${MIN_WORDS_FOR_READ}) for a ${pageCount ?? 'multi'}-page file` };
   }
   return { succeeded: true, wordCount: wc, corruptedTokenRatio: ratio, reason: null };
 }
@@ -123,7 +144,7 @@ export interface ChartReadinessBlocker {
   readonly fileReadStatusId: string;
   readonly filePath: string;
   readonly terminalStatus: FileTerminalStatus;
-  readonly lastAttempt: { method: string; wordCount: number; corruptedTokenRatio: number; note: string | null } | null;
+  readonly lastAttempt: { method: string; wordCount: number; corruptedTokenRatio: number; note: string | null; pageCount?: number | null } | null;
   // The chart Document row matching this file (joined on s3Key by the route) — lets the UI render the
   // blocking file as a clickable link (presigned view), not a dead name. Optional: the pure evaluator
   // has no DB access; the GET /chart-readiness route enriches it. (CLM-BBFCB3F8CE fix 5, 2026-06-11.)
@@ -175,12 +196,15 @@ export function isIntakeSummaryPath(filePath: unknown): boolean {
 function lastAttemptPassesCurrentThresholds(row: FileReadStatusRecord): boolean {
   const last = lastAttemptOf(row);
   if (last === null) return false;
-  return (
-    typeof last.wordCount === 'number' &&
-    typeof last.corruptedTokenRatio === 'number' &&
-    last.wordCount >= MIN_WORDS_FOR_READ &&
-    last.corruptedTokenRatio <= GARBLED_RATIO_THRESHOLD
-  );
+  if (typeof last.wordCount !== 'number' || typeof last.corruptedTokenRatio !== 'number') return false;
+  if (last.corruptedTokenRatio > GARBLED_RATIO_THRESHOLD) return false;
+  if (last.wordCount === 0) return false;
+  // Mirror classifyReadAttempt's SIZE-AWARE floor so an already-stored small-file attempt self-heals (a
+  // 1-page "CPAP" note classified manual_summary_required under the bare 20-word floor). pageCount absent
+  // on pre-2026-06-13 attempts → treated as substantial (require the 20-word floor; no regression).
+  const pageCount = typeof last.pageCount === 'number' ? last.pageCount : null;
+  if (pageCount !== null && pageCount <= 1) return true;
+  return last.wordCount >= MIN_WORDS_FOR_READ;
 }
 
 /**
@@ -265,6 +289,7 @@ function lastAttemptOf(row: FileReadStatusRecord): ChartReadinessBlocker['lastAt
     wordCount: last.wordCount,
     corruptedTokenRatio: last.corruptedTokenRatio,
     note: last.note,
+    pageCount: typeof last.pageCount === 'number' ? last.pageCount : null,
   };
 }
 

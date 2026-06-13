@@ -367,7 +367,9 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       }
       const intakeS3Key = placeholder.intakeS3Key;
       const concatenatedText = parsed.pages.map((p) => p.text).join('\n');
-      const outcome = classifyReadAttempt({ method: 'textract', extractedText: concatenatedText });
+      // Forward the page count so a legitimately small single-page intake file isn't transiently flagged
+      // "needs manual" (size-aware gate). (QA 2026-06-13.)
+      const outcome = classifyReadAttempt({ method: 'textract', extractedText: concatenatedText, pageCount: parsed.documentPageCount ?? parsed.pages.length });
       const readStatus = outcome.succeeded ? 'read' : 'manual_summary_required';
       const txDb = db as unknown as { $transaction: (fn: (tx: typeof intakePageDb) => Promise<unknown>) => Promise<unknown> };
       await txDb.$transaction(async (tx) => {
@@ -583,6 +585,7 @@ export function createInternalWorkerRouter(db: AppDb): Router {
           method: 'textract' as const,
           wordCount: 0,
           corruptedTokenRatio: 0,
+          pageCount: null, // a total read failure has no page count; wordCount 0 keeps it manual_summary_required
           attemptedAt: now.toISOString(),
           note: noteText,
         };

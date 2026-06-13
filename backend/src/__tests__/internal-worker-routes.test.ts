@@ -251,17 +251,29 @@ describe('POST /internal/documents/:id/pages', () => {
     expect(rows[0]?.terminalStatus).toBe('read');
   });
 
-  it('lands manual_summary_required when OCR success returns too few words', async () => {
+  it('lands manual_summary_required when a MULTI-PAGE OCR success returns too few words (choked big scan)', async () => {
     const { db, fileReadStatuses } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-short.pdf' });
     const res = await request(appFor(db))
       .post('/api/v1/internal/documents/DOC-1/pages')
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
-      .send({ pages: [{ pageNumber: 1, text: 'only a handful of words here total', confidence: 0.6 }], documentPageCount: 1 });
+      .send({ pages: [{ pageNumber: 1, text: 'only a handful of words here total', confidence: 0.6 }], documentPageCount: 5 });
     expect(res.status).toBe(201);
     expect(res.body.data.readTerminalStatus).toBe('manual_summary_required');
     const rows = [...fileReadStatuses.values()];
     expect(rows).toHaveLength(1);
     expect(rows[0]?.terminalStatus).toBe('manual_summary_required');
+  });
+
+  it('ACCEPTS a 1-page file with few words as read (the size-aware "CPAP note" fix — Ryan 2026-06-13)', async () => {
+    const { db, fileReadStatuses } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-cpap.pdf' });
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/documents/DOC-1/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ pages: [{ pageNumber: 1, text: 'CPAP', confidence: 0.9 }], documentPageCount: 1 });
+    expect(res.status).toBe(201);
+    expect(res.body.data.readTerminalStatus).toBe('read');
+    const rows = [...fileReadStatuses.values()];
+    expect(rows[0]?.terminalStatus).toBe('read');
   });
 
   it('lands manual_summary_required when OCR success returns garbled text', async () => {

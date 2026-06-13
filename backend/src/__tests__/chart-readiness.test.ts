@@ -115,6 +115,41 @@ describe('classifyReadAttempt', () => {
     expect(r.succeeded).toBe(true);
     expect(r.reason).toBeNull();
   });
+
+  // SIZE-AWARE word floor (Ryan 2026-06-13): a legit 1-page note ("CPAP") must NOT block the case; an
+  // empty/garbled read still flags; a substantial sparse file still flags (the "OCR choked" signal).
+  it('accepts a 1-page file with little text (the "CPAP" note) — the false-positive fix', () => {
+    const r = classifyReadAttempt({ method: 'textract', extractedText: 'CPAP', pageCount: 1 });
+    expect(r.succeeded).toBe(true);
+    expect(r.reason).toBeNull();
+  });
+
+  it('rejects a 0-word read even on a 1-page file (empty/failed read, never silently accepted)', () => {
+    const r = classifyReadAttempt({ method: 'textract', extractedText: '   ', pageCount: 1 });
+    expect(r.succeeded).toBe(false);
+    expect(r.reason).toContain('empty');
+  });
+
+  it('rejects a garbled 1-page read (garble beats the small-file pass)', () => {
+    const garbled = 'Pati$nt 4@ ol# p#esent!ng r!ght kn$e p$in lim%ted m0t!on n0 ev!d#nce im+pro!vement phys-ic@l'.repeat(3);
+    const r = classifyReadAttempt({ method: 'textract', extractedText: garbled, pageCount: 1 });
+    expect(r.succeeded).toBe(false);
+    expect(r.reason).toContain('garbled');
+  });
+
+  it('rejects a SUBSTANTIAL (>=2 page) file with little text — the "OCR choked on a big scan" signal', () => {
+    const text = Array.from({ length: 15 }, (_, i) => `word${i}`).join(' ');
+    const r = classifyReadAttempt({ method: 'textract', extractedText: text, pageCount: 8 });
+    expect(r.succeeded).toBe(false);
+    expect(r.reason).toContain('too-few-words');
+  });
+
+  it('treats UNKNOWN page count as substantial (requires the full word floor — no regression)', () => {
+    const short = Array.from({ length: 15 }, (_, i) => `word${i}`).join(' ');
+    expect(classifyReadAttempt({ method: 'textract', extractedText: short }).succeeded).toBe(false);
+    const ok = Array.from({ length: 25 }, (_, i) => `word${i}`).join(' ');
+    expect(classifyReadAttempt({ method: 'textract', extractedText: ok }).succeeded).toBe(true);
+  });
 });
 
 describe('isValidManualSummary', () => {
@@ -214,6 +249,20 @@ describe('evaluateChartReadiness', () => {
     ]);
     expect(r.ready).toBe(false);
     expect(r.blockingFiles).toHaveLength(1);
+  });
+
+  it('retro-heals a stored 1-page low-word attempt (size-aware: a "CPAP" note self-heals at eval time)', () => {
+    const r = evaluateChartReadiness([
+      row({
+        terminalStatus: 'manual_summary_required',
+        filePath: 'cases/CASE-1/uuid-cpap-note.pdf',
+        attemptsJson: [
+          { method: 'textract', wordCount: 3, corruptedTokenRatio: 0.0, pageCount: 1, attemptedAt: '2026-06-13T00:00:00Z', note: 'short' },
+        ],
+      }),
+    ]);
+    expect(r.ready).toBe(true);
+    expect(r.blockingFiles).toHaveLength(0);
   });
 
   it('does NOT retro-heal a garbled row (high word count but corrupted ratio above threshold)', () => {

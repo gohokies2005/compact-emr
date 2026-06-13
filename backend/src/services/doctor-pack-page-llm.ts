@@ -41,7 +41,8 @@ const SYSTEM_PROMPT = `You curate a U.S. veteran's VA disability records into a 
 KEEP a page when it carries the substance the physician actually needs:
 - The VA's service-connection decision and its stated REASONS/evidence (what condition was granted, denied, continued, or evaluated, and WHY).
 - The page that NAMES the current DIAGNOSIS of the claimed (or a directly related) condition.
-- For treatment / progress / clinical notes: keep ONLY the page that names the diagnosis, PLUS the LAST 2 (most recent) treatment/progress notes pertinent to the claimed condition. Drop every older or routine note. If the diagnosis is already named within those last 2 notes, that is all you need — aim for ~2 clinical pages, never the whole record.
+- For treatment / progress / clinical notes the goal is the DIAGNOSIS. Keep the page(s) where a provider EXPLICITLY names the claimed or a closely-related condition (for an anxiety claim, e.g. "generalized anxiety disorder", "GAD", "anxiety", "adjustment disorder"). A charted symptom or a vague word like "mood" is NOT a diagnosis — never treat it as one. From the most recent note that carries such a diagnosis, keep ONLY the key Subjective page and the Assessment & Plan (A&P) page; DROP pages about UNRELATED comorbidities (e.g. hypertension, amlodipine, medication refills) even inside the same note. Aim for ~2 pages, never a whole multi-page SOAP note.
+- Validated SCREENING tools (PHQ-9, GAD-7, PC-PTSD-5, AUDIT-C, etc.) ARE good supporting evidence — KEEP the screening page; it supports SEVERITY. But a positive screen is NOT a diagnosis on its own and never substitutes for the diagnosis page above.
 - Test / imaging results: the impression/findings page ONLY (one page) — not raw data tables, trends, or repeated panels.
 - In-service events, injuries, or exposures; concise service/personnel facts (MOS, deployments, combat).
 - Prior medical opinions, DBQs, and C&P exam findings + rationale.

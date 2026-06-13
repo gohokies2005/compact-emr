@@ -122,6 +122,15 @@ def start_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     if key.startswith("intake/"):
         return _start_intake_ocr(bucket, key)
 
+    # The auto-generated screening-summary file (cases/<id>/00000000-screening-summary.txt) is an
+    # EXTRACTION OUTPUT, not a record to OCR. The cases/ EventBridge rule fires on its write, but it
+    # has no clinical content to read, and re-OCRing it writes spurious document_pages/file_read_status
+    # rows + a benign re-trigger (already no-op'd by the trigger-hash exclusion). Skip it. Keep this
+    # marker in sync with chart-build-state.ts isScreeningSummaryKey + the writer. (Ryan 2026-06-13.)
+    if key.endswith("00000000-screening-summary.txt"):
+        print(f"skipping screening-summary output file (not an OCR input): {key}")
+        return {"started": [], "skipped": "screening_summary"}
+
     doc = _resolve_document(key)
     if not doc:
         # Package 4a orphan-race fix (raise-for-retry): a cases/ upload fires this Lambda the

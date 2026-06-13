@@ -60,7 +60,7 @@ describe('TopNav ordering', () => {
     // treatment the physician nav already had.
     renderNav('ops_staff');
     const labels = navLabels();
-    expect(labels).toEqual(['Home', 'Intake', 'Cases', 'Veterans']);
+    expect(labels).toEqual(['Home', 'Intake', 'Cases', 'Veterans', 'RN Queue']);
     // Inbox is no longer in the left nav — it's right-aligned outside it.
     const nav = screen.getByRole('navigation');
     expect(within(nav).queryByRole('link', { name: 'Inbox' })).toBeNull();

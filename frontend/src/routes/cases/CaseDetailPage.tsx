@@ -521,7 +521,7 @@ export function CaseDetailPage() {
         {tab === 'overview' ? (
           <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
         ) : null}
-        {tab === 'advisory' ? <AdvisoryPanel caseId={caseId} /> : null}
+        {tab === 'advisory' ? <AdvisoryPanel caseId={caseId} alwaysOpen /> : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} role={role} /> : null}
         {tab === 'emails' ? <EmailLogPanel queryKey={['case', caseId, 'emails']} fetcher={() => listCaseEmails(caseId)} scope="claim" caseId={caseId} /> : null}
@@ -671,7 +671,7 @@ function DraftJobsTab({ caseId }: { readonly caseId: string }) {
           <DataRow
             key={d.id}
             {...(viewable ? { onClick: () => viewVersion(d.id) } : {})}
-            lead={<><span className="font-medium text-slateInk">Draft #{total - i}</span> <span className="ml-1 text-xs text-steel" title={`Internal letter version ${d.version}`}>v{d.version}</span></>}
+            lead={<span className="font-medium text-slateInk">Draft #{total - i}</span>}
             meta={meta}
             trailing={
               <>

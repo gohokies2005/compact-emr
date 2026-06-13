@@ -49,7 +49,7 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
   if (pack === null) {
     return canGenerate ? (
       <Button type="button" variant="secondary" size="sm" loading={generate.isPending} onClick={() => generate.mutate()}>
-        Generate now
+        Generate abridged notes
       </Button>
     ) : (
       <p className="text-sm text-slate-500">No abridged notes yet — ask your RN to generate them.</p>

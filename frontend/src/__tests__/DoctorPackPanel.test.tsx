@@ -136,7 +136,7 @@ describe('DoctorPackPanel — just the buttons', () => {
     getLatestMock.mockResolvedValue({ data: null });
     generateMock.mockResolvedValue({ data: { ...READY_PACK, state: 'queued' } });
     renderPanel();
-    fireEvent.click(await screen.findByRole('button', { name: 'Generate now' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate abridged notes' }));
     await waitFor(() => expect(generateMock).toHaveBeenCalledWith('CASE-1'));
   });
 
@@ -146,7 +146,7 @@ describe('DoctorPackPanel — just the buttons', () => {
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
     renderPanel();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Generate now' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate abridged notes' }));
     await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
     expect(String(alertSpy.mock.calls[0]?.[0])).toContain('chart_not_ready: 2 files still unread');
     alertSpy.mockRestore();

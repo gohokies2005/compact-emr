@@ -16,6 +16,7 @@ const navItems: readonly { label: string; href: string; roles: readonly Role[] }
   { label: 'Intake', href: '/intake', roles: ['admin', 'ops_staff'] },
   { label: 'Cases', href: '/cases', roles: ['admin', 'ops_staff'] },
   { label: 'Veterans', href: '/veterans', roles: ['admin', 'ops_staff'] },
+  { label: 'RN Queue', href: '/rn', roles: ['admin', 'ops_staff'] },
   { label: 'Templates', href: '/templates', roles: ['admin'] },
   { label: 'Physicians', href: '/physicians', roles: ['admin'] },
   { label: 'Staff', href: '/staff', roles: ['admin'] },

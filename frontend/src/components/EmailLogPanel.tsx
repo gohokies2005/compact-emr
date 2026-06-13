@@ -29,26 +29,35 @@ function decodeEntities(s: string): string {
 // are already their own bubbles above (Ryan 2026-06-12: "just have the response and follow
 // sequentially"). Cuts at the earliest of: an "On <date> … wrote:" attribution, an Original-Message
 // divider, a From:/Sent: header block, the first quoted ">" line, or a known mobile-client footer.
-const QUOTE_MARKERS: readonly RegExp[] = [
+// STRONG = unambiguous start of a QUOTED chain (the prior email) — always safe to cut here.
+const STRONG_QUOTE_MARKERS: readonly RegExp[] = [
   /\r?\n?On\s[\s\S]{0,300}?\bwrote:/i,
   /\r?\n-{2,}\s*Original Message\s*-{2,}/i,
   /\r?\nFrom:\s.*\r?\n(Sent|Date|To):\s/i,
+];
+// AGGRESSIVE = footers / bare quote lines. Good for trimming a short PREVIEW, but they can clip
+// legitimate body text, so they apply to the collapsed snippet ONLY — never the expanded full body
+// (Ryan 2026-06-13: expanded bubble was cutting mid-sentence).
+const AGGRESSIVE_MARKERS: readonly RegExp[] = [
   /\r?\n>/,
   /Yahoo Mail: Search, Organize, Conquer/i,
   /Sent from my (iPhone|iPad|Android|mobile|Galaxy)/i,
   /Get Outlook for (iOS|Android)/i,
 ];
-function stripQuotedReply(text: string): string {
+function stripQuotedReply(text: string, mode: 'preview' | 'full'): string {
+  const markers = mode === 'full' ? STRONG_QUOTE_MARKERS : [...STRONG_QUOTE_MARKERS, ...AGGRESSIVE_MARKERS];
   let cut = text.length;
-  for (const re of QUOTE_MARKERS) {
+  for (const re of markers) {
     const m = text.match(re);
     if (m && m.index !== undefined && m.index < cut) cut = m.index;
   }
   return text.slice(0, cut).trim();
 }
-export function cleanEmailText(text: string): string {
+// 'full' (expanded bubble) = decode + remove only the quoted chain → the COMPLETE new message.
+// 'preview' (collapsed snippet) = also trim footers for brevity.
+export function cleanEmailText(text: string, mode: 'preview' | 'full' = 'preview'): string {
   const decoded = decodeEntities(text ?? '');
-  const stripped = stripQuotedReply(decoded).trim();
+  const stripped = stripQuotedReply(decoded, mode).trim();
   // If stripping ate everything (a pure quote/forward), fall back to the decoded original.
   return stripped.length > 0 ? stripped : decoded.trim();
 }
@@ -132,7 +141,7 @@ function GmailBubble({ caseId, m }: { readonly caseId: string; readonly m: Gmail
           bodyQuery.isLoading ? (
             <div className="mt-1 text-xs text-steel">Loading full email…</div>
           ) : bodyQuery.data?.data.available ? (
-            <div className="mt-1 whitespace-pre-wrap break-words text-slateInk">{cleanEmailText(bodyQuery.data.data.body) || <span className="text-steel">(no body captured)</span>}</div>
+            <div className="mt-1 whitespace-pre-wrap break-words text-slateInk">{cleanEmailText(bodyQuery.data.data.body, 'full') || <span className="text-steel">(no body captured)</span>}</div>
           ) : (
             <div className="mt-1 text-slateInk"><span className="break-words">{cleanEmailText(m.snippet)}</span><div className="mt-1 text-[11px] text-steel">Couldn’t load the full email — showing the preview.</div></div>
           )

@@ -71,6 +71,13 @@ export interface RawExtractedItem {
   dose?: string;
   frequency?: string;
   indication?: string;
+  // active_medication temporality (full-read combined pass). medStatus is the active-vs-history
+  // discriminator; startDate = an explicitly-labeled Start/Issue date only; lastSeenDate = last-fill
+  // date (active list) OR the progress-note date a past mention came from (the "Prozac 2015" signal).
+  // All transcription-only — never inferred — and scrubbed to require the date appear in sourceQuote.
+  medStatus?: 'active' | 'discontinued' | 'historical' | 'unknown';
+  startDate?: string;
+  lastSeenDate?: string;
   sourceDocumentId: string;
   sourcePage: number;
   sourceQuote: string;
@@ -247,6 +254,9 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
             dose: { type: 'string', description: 'active_medication only: dose/strength as written (e.g. "10 mg").' },
             frequency: { type: 'string', description: 'active_medication only: frequency/sig as written.' },
             indication: { type: 'string', description: 'active_medication only: what the medication is for, if explicitly stated.' },
+            medStatus: { type: 'string', enum: ['active', 'discontinued', 'historical', 'unknown'], description: 'active_medication only: "active" if under an Active Medications list or status=ACTIVE; "discontinued" if marked discontinued/D/C/expired; "historical" if named only in a dated progress note (a past mention); "unknown" if no signal. NEVER infer from absence elsewhere.' },
+            startDate: { type: 'string', description: 'active_medication only: the START/ISSUE date, verbatim, ONLY if a field labeled Start Date/Issued/Issue Date appears for THIS drug. NOT the note date, NOT the fill date. Else omit.' },
+            lastSeenDate: { type: 'string', description: 'active_medication only: the Last Filled/Last Release date if labeled, OR — for a drug named inside a dated progress note — that note\'s date (when the drug was REFERENCED, not when it started/stopped). Else omit.' },
             score: { type: 'string', description: 'screening only: the score as written (e.g. "18", "2/5", "moderate").' },
             screenDate: { type: 'string', description: 'screening only: the date the screen was administered, if stated.' },
             sourcePage: { type: 'integer', description: 'The [p.N] page number this item appears on.' },
@@ -280,6 +290,7 @@ function combinedSystemPrompt(): string {
     '  DEFERRED/PENDING: "Service connection for X is deferred" · "X is deferred pending ...".',
     '  Capture EACH itemized condition separately with its own status + ratingPct + dcCode when the decision lists them — even if many appear on one page.',
     'If a benefit-summary letter states only a COMBINED percentage (e.g. "your combined evaluation is 70 percent") WITHOUT itemizing the individual conditions, do NOT invent the individual conditions — emit nothing for those rather than guess.',
+    'A COMBINED / OVERALL rating statement is NOT a condition. NEVER emit a row whose name is "Combined service-connected disabilities", "Service connected (combined rating N%)", "Service-connected rating", "Service Connected Rating", or any overall/summary percentage. An sc_condition row must name a SPECIFIC disability (e.g. "lumbar strain", "PTSD") — the combined total is a summary, not a disability.',
     '',
     // BLUE BUTTON STRUCTURE (Ryan 2026-06-13): VA Blue Button / CAPRI reports are templated — the
     // problem and medication lists sit under stable headers. Naming them lifts recall on the
@@ -287,9 +298,23 @@ function combinedSystemPrompt(): string {
     'BLUE BUTTON SECTION HEADERS — extract every row beneath these when present:',
     '  active_problem: "Problem List" / "VA Problem List" / "Computerized Problem List" — one row per listed problem (with its ICD-10 if shown).',
     '  active_medication: "Active Medications" / "Active Outpatient Medications" / "Medications" — one row per drug (with dose/frequency/sig as written).',
+    '',
+    // MEDICATION TEMPORALITY (Ryan 2026-06-13): a flat "active" list is wrong — the owner wants the
+    // treatment HISTORY with dates + an active-vs-old split. Set from EXPLICIT page signals ONLY.
+    'MEDICATION STATUS AND DATES (active_medication) — set from EXPLICIT page signals only, never inference:',
+    '  - A medication under "Active Medications"/"Active Outpatient Medications", or whose row status reads ACTIVE, is medStatus="active".',
+    '  - A medication marked DISCONTINUED / "D/C" / discontinued / EXPIRED, or under a Discontinued/Expired list, is medStatus="discontinued".',
+    '  - A medication named only inside a dated progress note (not a medications list) is medStatus="historical": put that note\'s date in lastSeenDate. A past mention does NOT mean it is currently active or has stopped.',
+    '  - If no status word and no list context tell you, set medStatus="unknown". Do not guess.',
+    '  - DATES: copy a date into startDate ONLY if a field labeled Start Date/Issued/Issue Date appears for that drug. Copy lastSeenDate from a labeled Last Filled/Last Release date OR (for a note mention) the note\'s date. If a date is not written next to the drug, omit it — never compute, estimate, or carry a date from another drug or page.',
+    '  - Any date you put in startDate or lastSeenDate MUST appear inside the sourceQuote you copy. Quote the line containing the date. If you cannot quote the date, omit that date field.',
+    '  - The SAME drug may legitimately appear many times across years. Emit each dated occurrence with its own page, quote, and date — do NOT merge them or decide which is "current." Capturing every dated occurrence is the goal.',
+    'EXAMPLES (medication dating):',
+    '  "[p.412] ACTIVE OUTPATIENT MEDICATIONS  FLUOXETINE 20MG CAP  Take one daily  Start Date: 03/12/2015  Last Filled: 11/02/2025" → {category:active_medication, name:"FLUOXETINE 20MG", medStatus:"active", startDate:"03/12/2015", lastSeenDate:"11/02/2025", sourceQuote:"FLUOXETINE 20MG CAP ... Start Date: 03/12/2015 Last Filled: 11/02/2025"}',
+    '  "[p.88] 06/14/2022 Progress Note ... Patient reports starting sertraline last month, tolerating well." → {category:active_medication, name:"sertraline", medStatus:"historical", lastSeenDate:"06/14/2022", sourceQuote:"06/14/2022 Progress Note ... starting sertraline"} (startDate omitted — "last month" is not a written date).',
     // PRECISION GUARD (Ryan standing rule: a screen is NOT a diagnosis): keep screening instruments
     // out of the problem/condition rows so a positive score never becomes a fabricated dx.
-    'SCREENS ARE NOT DIAGNOSES: PHQ-9, GAD-7, PC-PTSD-5, AUDIT-C and similar screening scores are DATA POINTS, not conditions. Capture each as category "screening" with name=instrument, score, and screenDate if stated. NEVER emit a screen as an active_problem or sc_condition, and never turn a positive screen into a diagnosis — only an actual charted diagnosis or a VA service-connection determination is a condition.',
+    'SCREENS ARE NOT DIAGNOSES: PHQ-9, GAD-7, PC-PTSD-5, AUDIT-C and similar screening scores are DATA POINTS, not conditions. Capture each as category "screening" with name=instrument, score, and screenDate if stated (the screenDate MUST appear inside the sourceQuote — quote the line containing it — or omit it). NEVER emit a screen as an active_problem or sc_condition, and never turn a positive screen into a diagnosis — only an actual charted diagnosis or a VA service-connection determination is a condition.',
     'This chunk may contain none, some, or all three categories. Return every item you find; return an empty items array if there are none.',
   ].join('\n');
 }
@@ -321,6 +346,9 @@ export function coerceRawItemsCombined(toolInput: unknown, documentId: string): 
       dose: typeof r.dose === 'string' ? r.dose : undefined,
       frequency: typeof r.frequency === 'string' ? r.frequency : undefined,
       indication: typeof r.indication === 'string' ? r.indication : undefined,
+      medStatus: ['active', 'discontinued', 'historical', 'unknown'].includes(r.medStatus as string) ? (r.medStatus as RawExtractedItem['medStatus']) : undefined,
+      startDate: typeof r.startDate === 'string' && r.startDate.trim() ? r.startDate.trim() : undefined,
+      lastSeenDate: typeof r.lastSeenDate === 'string' && r.lastSeenDate.trim() ? r.lastSeenDate.trim() : undefined,
       sourceDocumentId: documentId, // injected — unambiguous, the model never sees it
       sourcePage: Math.trunc(r.sourcePage),
       sourceQuote: r.sourceQuote,
@@ -359,8 +387,11 @@ export function coerceScreenings(toolInput: unknown, documentId: string): Screen
 export function groundScreenings(documents: BundleDocument[], raw: ScreeningResult[]): ScreeningResult[] {
   const seen = new Set<string>();
   const out: ScreeningResult[] = [];
-  for (const s of raw) {
-    if (!groundExtractedItem(documents, s)) continue;
+  for (const s0 of raw) {
+    if (!groundExtractedItem(documents, s0)) continue;
+    // Same date anti-fabrication as meds: the gate proves the quote is on-page; require the date to
+    // be IN the quote or null it, so a screening date can't be off-page-invented and still pass.
+    const s: ScreeningResult = s0.date && !s0.sourceQuote.includes(s0.date) ? { ...s0, date: null } : s0;
     const key = `${s.instrument.toLowerCase()}::${s.date ?? ''}::${s.score.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -369,20 +400,53 @@ export function groundScreenings(documents: BundleDocument[], raw: ScreeningResu
   return out;
 }
 
+/** First 4-digit year found across the given dates, '' if none. Year-granularity: OCR'd VA dates
+ *  are unreliable at day precision, and a day-level key would shatter true duplicates. */
+function yearOf(...dates: (string | undefined)[]): string {
+  for (const d of dates) { const m = d?.match(/\b(?:19|20)\d{2}\b/); if (m) return m[0]; }
+  return '';
+}
+
 /**
- * Pure: ground every raw item (verbatim quote on the cited page), drop low-confidence, dedup on
- * (category, normalizedName). Returns the final writable set + drop counts for the audit row.
+ * Dedup key. Conditions/problems keep the original (category, normalizedName) — unchanged. MEDS get
+ * a temporality-aware key so 8 chunk-overlap copies of one drug collapse, but a treatment TIMELINE
+ * survives: "Prozac active 2015" vs "Prozac historical 2021" vs "Lexapro active 2022" stay distinct
+ * (medStatus + start/last-seen year). normalizeName is NOT touched (it is test-locked + shared).
  */
+function dedupKey(it: RawExtractedItem): string {
+  const base = `${it.category}::${normalizeName(it.name)}`;
+  if (it.category !== 'active_medication') return base;
+  return `${base}::${it.medStatus ?? 'unknown'}::${yearOf(it.startDate, it.lastSeenDate)}`;
+}
+
 /**
- * Completeness score for picking the survivor among duplicate rows: a row carrying SC status +
- * rating + DC code beats a bare mention; confidence is the sub-unit tiebreak. Used only when
- * preferMoreComplete is set (the full-read path), where the 1-page overlap means a boundary SC
- * grant legitimately arrives twice and the copies can disagree on ratingPct/status (architect
- * SHOULD-FIX). The windowed path keeps its original first-wins behavior.
+ * Date anti-fabrication: the grounding gate proves the QUOTE is on the page, but a med date lives in
+ * a separate field the gate never inspects — a model could quote a real drug line and invent a date.
+ * After grounding, null out any med date that is not a substring of the (already on-page) sourceQuote.
+ * This makes the grounding gate transitively cover the date (quote on page + date in quote = date on
+ * page). Substring, not date-parsing — never interpret/normalize a date (that's where fabrication and
+ * the Jotform-TZ class of bug creep in). Meds only; other categories pass through untouched.
+ */
+function scrubUnquotedDates(it: RawExtractedItem): RawExtractedItem {
+  if (it.category !== 'active_medication') return it;
+  const q = it.sourceQuote;
+  const keep = (d?: string): string | undefined => (d && q.includes(d) ? d : undefined);
+  return { ...it, startDate: keep(it.startDate), lastSeenDate: keep(it.lastSeenDate) };
+}
+
+/**
+ * Completeness score for picking the survivor among duplicate rows (full-read preferMoreComplete
+ * only; windowed keeps first-wins). A row carrying more concrete fields beats a bare mention;
+ * confidence ∈ [0,1] is only the sub-unit tiebreak. Category-aware: SC scores status/rating/DC,
+ * meds score status/dates/dose — so among 8 overlap copies the most complete one wins.
  */
 function completenessScore(it: RawExtractedItem): number {
+  if (it.category === 'active_medication') {
+    const f = (it.medStatus && it.medStatus !== 'unknown' ? 1 : 0) + (it.startDate ? 1 : 0) + (it.lastSeenDate ? 1 : 0) + (it.dose ? 1 : 0);
+    return f * 10 + it.confidence;
+  }
   const fields = (it.status ? 1 : 0) + (it.ratingPct != null ? 1 : 0) + (it.dcCode ? 1 : 0);
-  return fields * 10 + it.confidence; // confidence ∈ [0,1] never outranks an extra concrete field
+  return fields * 10 + it.confidence;
 }
 
 export function groundAndDispose(
@@ -396,11 +460,12 @@ export function groundAndDispose(
   const indexByKey = new Map<string, number>();
   const items: FinalExtractedItem[] = [];
 
-  for (const it of raw) {
-    if (!groundExtractedItem(documents, it)) { droppedUngrounded++; continue; }
+  for (const it0 of raw) {
+    if (!groundExtractedItem(documents, it0)) { droppedUngrounded++; continue; }
+    const it = scrubUnquotedDates(it0); // null out any med date not present in the grounded quote
     const disp = dispositionForConfidence(it.confidence);
     if (disp === 'drop') { droppedLowConfidence++; continue; }
-    const key = `${it.category}::${normalizeName(it.name)}`;
+    const key = dedupKey(it);
     const existingIdx = indexByKey.get(key);
     if (existingIdx !== undefined) {
       droppedDuplicate++;

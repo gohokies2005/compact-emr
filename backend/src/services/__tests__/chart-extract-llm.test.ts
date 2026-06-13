@@ -74,6 +74,61 @@ describe('coerceRawItemsCombined — full-read chunk (category comes from the it
   });
 });
 
+describe('medication temporality — dedup key + date scrub (Ryan 2026-06-13)', () => {
+  const page = 'ACTIVE OUTPATIENT MEDICATIONS FLUOXETINE 20MG Start Date: 03/12/2015 Last Filled: 11/02/2025 | 06/14/2022 note: FLUOXETINE referenced | LEXAPRO 10MG Start Date: 01/05/2022';
+  const mdocs: BundleDocument[] = [{ id: 'd', filename: 'bb.pdf', pages: [{ pageNumber: 5, text: page }] }];
+  const med = (over: Partial<RawExtractedItem>): RawExtractedItem => ({
+    category: 'active_medication', name: 'Fluoxetine', sourceDocumentId: 'd', sourcePage: 5, sourceQuote: 'FLUOXETINE 20MG', confidence: 0.9, ...over,
+  });
+
+  it('collapses chunk-overlap copies of the SAME drug+status+year to one', () => {
+    const m = med({ medStatus: 'active', startDate: '03/12/2015', sourceQuote: 'FLUOXETINE 20MG Start Date: 03/12/2015' });
+    const r = groundAndDispose(mdocs, [m, { ...m }], { preferMoreComplete: true });
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0]!.startDate).toBe('03/12/2015');
+  });
+
+  it('keeps active vs historical of the same drug as DISTINCT timeline rows', () => {
+    const active = med({ medStatus: 'active', startDate: '03/12/2015', sourceQuote: 'FLUOXETINE 20MG Start Date: 03/12/2015' });
+    const hist = med({ medStatus: 'historical', lastSeenDate: '06/14/2022', sourceQuote: '06/14/2022 note: FLUOXETINE referenced' });
+    const r = groundAndDispose(mdocs, [active, hist], { preferMoreComplete: true });
+    expect(r.items).toHaveLength(2);
+  });
+
+  it('keeps the same drug+status in DIFFERENT years as distinct (treatment timeline)', () => {
+    const y2015 = med({ medStatus: 'historical', lastSeenDate: '03/12/2015', sourceQuote: 'FLUOXETINE 20MG Start Date: 03/12/2015' });
+    const y2022 = med({ medStatus: 'historical', lastSeenDate: '06/14/2022', sourceQuote: '06/14/2022 note: FLUOXETINE referenced' });
+    expect(groundAndDispose(mdocs, [y2015, y2022], { preferMoreComplete: true }).items).toHaveLength(2);
+  });
+
+  it('SCRUBS a med date that is NOT in the grounded quote (anti-fabrication)', () => {
+    const fabricated = med({ medStatus: 'active', startDate: '01/01/2099', sourceQuote: 'FLUOXETINE 20MG' }); // 2099 not on page/quote
+    const r = groundAndDispose(mdocs, [fabricated], { preferMoreComplete: true });
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0]!.startDate).toBeUndefined(); // nulled — date wasn't in the quote
+  });
+
+  it('does NOT change the dedup key for conditions/problems (regression)', () => {
+    const cdocs: BundleDocument[] = [{ id: 'c', filename: 'x.pdf', pages: [{ pageNumber: 1, text: 'PTSD and tinnitus' }] }];
+    const c = (name: string): RawExtractedItem => ({ category: 'sc_condition', name, sourceDocumentId: 'c', sourcePage: 1, sourceQuote: name, confidence: 0.9 });
+    // Two PTSD rows still collapse to one (name-only key for conditions, unchanged).
+    expect(groundAndDispose(cdocs, [c('PTSD'), c('PTSD')], { preferMoreComplete: true }).items).toHaveLength(1);
+  });
+});
+
+describe('coerceRawItemsCombined — medication temporality fields', () => {
+  it('coerces medStatus/startDate/lastSeenDate; drops an invalid medStatus to undefined', () => {
+    const [ok] = coerceRawItemsCombined({ items: [
+      { category: 'active_medication', name: 'Lexapro', medStatus: 'historical', startDate: '01/05/2022', lastSeenDate: '06/2024', sourcePage: 5, sourceQuote: 'Lexapro', confidence: 0.9 },
+    ] }, 'd');
+    expect(ok).toMatchObject({ medStatus: 'historical', startDate: '01/05/2022', lastSeenDate: '06/2024' });
+    const [bad] = coerceRawItemsCombined({ items: [
+      { category: 'active_medication', name: 'Lexapro', medStatus: 'bogus', sourcePage: 5, sourceQuote: 'Lexapro', confidence: 0.9 },
+    ] }, 'd');
+    expect(bad!.medStatus).toBeUndefined();
+  });
+});
+
 describe('groundScreenings — grounded + deduped screening data points', () => {
   const sdocs: BundleDocument[] = [{ id: 'd', filename: 'bb.pdf', pages: [{ pageNumber: 7, text: 'mental health: PHQ-9 score 18 administered 2024-03-01' }] }];
   const base: ScreeningResult = { instrument: 'PHQ-9', score: '18', date: '2024-03-01', sourceDocumentId: 'd', sourcePage: 7, sourceQuote: 'PHQ-9 score 18', confidence: 0.9 };
@@ -84,6 +139,12 @@ describe('groundScreenings — grounded + deduped screening data points', () => 
   });
   it('dedups identical (instrument, date, score) repeats from chunk overlap', () => {
     expect(groundScreenings(sdocs, [base, { ...base }])).toHaveLength(1);
+  });
+  it('keeps a screening date only when it is in the quote; nulls an unquoted date (anti-fabrication)', () => {
+    const dated = { ...base, score: '18', sourceQuote: 'PHQ-9 score 18 administered 2024-03-01' }; // date IS in quote
+    expect(groundScreenings(sdocs, [dated])[0]!.date).toBe('2024-03-01');
+    const unquoted = { ...base, score: '9', date: '01/01/2099', sourceQuote: 'PHQ-9 score 18' }; // 2099 not in quote
+    expect(groundScreenings(sdocs, [unquoted])[0]!.date).toBeNull();
   });
 });
 

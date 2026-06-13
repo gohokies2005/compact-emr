@@ -102,6 +102,20 @@ async function main(): Promise<void> {
     console.log(name.slice(0, 45).padEnd(46), cells.join(''));
   }
 
+  // Medications with temporality (full-read variants) — active list vs historical timeline.
+  for (const v of variants) {
+    const meds = v.result.items.filter((i) => i.category === 'active_medication');
+    if (!meds.length || !v.result.fullRead) continue;
+    const active = meds.filter((m) => (m.medStatus ?? 'active') === 'active');
+    const hist = meds.filter((m) => m.medStatus === 'historical' || m.medStatus === 'discontinued');
+    const unk = meds.filter((m) => m.medStatus === 'unknown');
+    const fmt = (m: typeof meds[number]) => `  ${m.name}${m.dose ? ` ${m.dose}` : ''}${m.startDate ? ` · start ${m.startDate}` : ''}${m.lastSeenDate ? ` · seen ${m.lastSeenDate}` : ''} [p.${m.sourcePage}]`;
+    console.log(`\n=== MEDICATIONS — ${v.label} (active ${active.length} · history ${hist.length} · unknown ${unk.length}) ===`);
+    console.log(' ACTIVE:'); active.forEach((m) => console.log(fmt(m)));
+    if (hist.length) { console.log(' HISTORY / DISCONTINUED:'); hist.forEach((m) => console.log(fmt(m))); }
+    if (unk.length) { console.log(' UNKNOWN STATUS:'); unk.forEach((m) => console.log(fmt(m))); }
+  }
+
   // Screenings captured (full-read variants only).
   for (const v of variants) {
     if (!v.result.screenings?.length) continue;

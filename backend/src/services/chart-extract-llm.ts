@@ -21,6 +21,7 @@ import {
   splitChunkText,
   groundExtractedItem,
   chartDedupKey,
+  normalizeName,
   dispositionForConfidence,
   type BundleDocument,
   type ExtractCategory,
@@ -66,7 +67,11 @@ const MAX_SPLIT_DEPTH = 2;
 // medico-legal chart; the problem/condition row still lands with its name). This also stops a long
 // icd10 from overflowing VarChar(16) and aborting the whole extraction write (Ryan 2026-06-13, 2
 // agents confirmed: icd10 overflow DLQ'd a 130-item Woodley run).
-const ICD10_SHAPE = /^[A-Z][0-9]{2}(?:\.[A-Z0-9]{1,4})?[A-Z0-9]?$/i;
+// Shape: letter + digit + (digit OR letter) category, then an optional dotted 1-4 subclassification.
+// The 3rd char admits a LETTER so the M1A / C7A / O9A categories (chronic gout, neuroendocrine, etc.)
+// are NOT silently dropped (QA 2026-06-13). Max 7 chars total = the correct ICD-10-CM ceiling. Rejects
+// "G47.33 Obstructive sleep apnea" (the VARCHAR(16) crash — has a space) and dot-less blobs.
+const ICD10_SHAPE = /^[A-Z][0-9][0-9A-Z](?:\.[A-Z0-9]{1,4})?$/i;
 export function sanitizeIcd10(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined;
   const t = v.trim();
@@ -76,6 +81,44 @@ export function sanitizeCode16(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined;
   const t = v.trim();
   return t.length > 0 && t.length <= 16 ? t : undefined; // DC code: drop if over the manual-entry limit
+}
+
+// `status` is written into the Postgres ScConditionStatus ENUM (service_connected | pending | denied).
+// The tool-schema enum constrains the MODEL, but the coercers are the DEFENSIVE layer — an un-mapped
+// free-text status (the prompt itself discusses "deferred → pending", so "deferred" is a plausible
+// emission) would be rejected by the enum and ABORT the whole merge transaction, exactly like the
+// icd10 overflow did (2 agents, 2026-06-13). Map known synonyms to the three legal values; anything
+// unrecognized → undefined (the merge then applies its default). NOTE: deferred/claimed map to
+// `pending`, never to service_connected — a deferred/claimed condition must not be mismarked as a
+// granted SC on a medico-legal chart.
+const SC_STATUS_SYNONYMS: Record<string, 'service_connected' | 'pending' | 'denied'> = {
+  service_connected: 'service_connected',
+  'service-connected': 'service_connected',
+  'service connected': 'service_connected',
+  serviceconnected: 'service_connected',
+  sc: 'service_connected',
+  granted: 'service_connected',
+  grant: 'service_connected',
+  rated: 'service_connected',
+  pending: 'pending',
+  claimed: 'pending',
+  deferred: 'pending',
+  'under review': 'pending',
+  denied: 'denied',
+  denial: 'denied',
+  'not service-connected': 'denied',
+  'not service connected': 'denied',
+};
+export function sanitizeScStatus(v: unknown): 'service_connected' | 'pending' | 'denied' | undefined {
+  if (typeof v !== 'string') return undefined;
+  return SC_STATUS_SYNONYMS[v.trim().toLowerCase()];
+}
+
+// ratingPct is written into a Postgres `Int`. A non-integer (e.g. 70.5) or out-of-range value would be
+// accepted by a bare `typeof === 'number'` check but REJECTED by the integer column → transaction abort.
+// Gate to a 0..100 integer; drop anything else (the row still writes without a rating). (QA 2026-06-13.)
+export function sanitizeRatingPct(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 100 ? v : undefined;
 }
 
 /** Raw item as returned by the model for a single window, before grounding. */
@@ -226,9 +269,9 @@ export function coerceRawItems(toolInput: unknown, window: SectionWindow): RawEx
     out.push({
       category: window.category,
       name: r.name.trim(),
-      status: typeof r.status === 'string' ? (r.status as RawExtractedItem['status']) : undefined,
+      status: sanitizeScStatus(r.status),
       dcCode: sanitizeCode16(r.dcCode),
-      ratingPct: typeof r.ratingPct === 'number' ? r.ratingPct : undefined,
+      ratingPct: sanitizeRatingPct(r.ratingPct),
       icd10: sanitizeIcd10(r.icd10),
       dose: typeof r.dose === 'string' ? r.dose : undefined,
       frequency: typeof r.frequency === 'string' ? r.frequency : undefined,
@@ -370,9 +413,9 @@ export function coerceRawItemsCombined(toolInput: unknown, documentId: string): 
     out.push({
       category: r.category as ExtractCategory,
       name: r.name.trim(),
-      status: typeof r.status === 'string' ? (r.status as RawExtractedItem['status']) : undefined,
+      status: sanitizeScStatus(r.status),
       dcCode: sanitizeCode16(r.dcCode),
-      ratingPct: typeof r.ratingPct === 'number' ? r.ratingPct : undefined,
+      ratingPct: sanitizeRatingPct(r.ratingPct),
       icd10: sanitizeIcd10(r.icd10),
       dose: typeof r.dose === 'string' ? r.dose : undefined,
       frequency: typeof r.frequency === 'string' ? r.frequency : undefined,
@@ -491,7 +534,25 @@ export function groundAndDispose(
     indexByKey.set(key, items.length);
     items.push({ ...it, disposition: disp, needsReview: disp === 'needs_review' });
   }
-  return { items, droppedUngrounded, droppedLowConfidence, droppedDuplicate };
+
+  // Cross-category collapse (QA 2026-06-13): chartDedupKey is category-scoped, so a condition that is
+  // SERVICE-CONNECTED on a rating decision AND charted as a bare dx in a progress note survives as BOTH
+  // `sc_condition::X` and `active_problem::X` (different keys) — on a full read of a large chart that's
+  // near-certain, and it reads as two findings, undercutting the SC determination's authority. Chunks are
+  // read independently so neither tag is wrong locally; this can only be resolved AFTER accumulation.
+  // The SC row is authoritative + more complete (carries status/rating/DC), so DROP the duplicate
+  // active_problem (its dx is preserved by the surviving SC row).
+  const scNames = new Set(
+    items.filter((i) => i.category === 'sc_condition').map((i) => normalizeName(i.name)),
+  );
+  const collapsed = items.filter((i) => {
+    if (i.category === 'active_problem' && scNames.has(normalizeName(i.name))) {
+      droppedDuplicate++;
+      return false;
+    }
+    return true;
+  });
+  return { items: collapsed, droppedUngrounded, droppedLowConfidence, droppedDuplicate };
 }
 
 export interface ChartExtractor {

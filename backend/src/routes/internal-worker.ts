@@ -8,7 +8,7 @@ import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
 import { writeScreeningSummary } from '../services/screening-summary-write.js';
-import { sanitizeIcd10, sanitizeCode16 } from '../services/chart-extract-llm.js';
+import { sanitizeIcd10, sanitizeCode16, sanitizeScStatus, sanitizeRatingPct } from '../services/chart-extract-llm.js';
 import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { randomUUID } from 'node:crypto';
 import type { ScreeningResult } from '../services/chart-extract-llm.js';
@@ -38,12 +38,12 @@ function coerceExtractedItems(raw: readonly unknown[]): FinalExtractedItem[] {
     out.push({
       category: r['category'] as ExtractCategory,
       name: (r['name'] as string).trim(),
-      ...(typeof r['status'] === 'string' ? { status: r['status'] as FinalExtractedItem['status'] } : {}),
-      // Last gate before the DB write: a code that's over-length / not code-shaped is dropped, NOT
-      // truncated (a truncated code is a WRONG code). icd10 is VarChar(16) — an unsanitized value
-      // here overflows the column and DLQs the whole merge (Ryan 2026-06-13, the Woodley 500).
+      // Last gate before the DB write. icd10 (VarChar 16) overflow, an out-of-enum `status`, or a
+      // non-integer `ratingPct` each REJECT at Postgres and DLQ the whole merge (the Woodley 500 class,
+      // 2 agents 2026-06-13). Map/drop here so a bad value nulls its field, never aborts the transaction.
+      ...((): { status?: FinalExtractedItem['status'] } => { const s = sanitizeScStatus(r['status']); return s ? { status: s } : {}; })(),
       ...((): { dcCode?: string } => { const c = sanitizeCode16(r['dcCode']); return c ? { dcCode: c } : {}; })(),
-      ...(typeof r['ratingPct'] === 'number' ? { ratingPct: r['ratingPct'] as number } : {}),
+      ...((): { ratingPct?: number } => { const p = sanitizeRatingPct(r['ratingPct']); return p != null ? { ratingPct: p } : {}; })(),
       ...((): { icd10?: string } => { const c = sanitizeIcd10(r['icd10']); return c ? { icd10: c } : {}; })(),
       ...(typeof r['dose'] === 'string' ? { dose: r['dose'] as string } : {}),
       ...(typeof r['frequency'] === 'string' ? { frequency: r['frequency'] as string } : {}),

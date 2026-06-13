@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { coerceRawItems, coerceRawItemsCombined, coerceScreenings, groundScreenings, groundAndDispose, sanitizeIcd10, sanitizeCode16, type RawExtractedItem, type ScreeningResult } from '../chart-extract-llm.js';
+import { coerceRawItems, coerceRawItemsCombined, coerceScreenings, groundScreenings, groundAndDispose, sanitizeIcd10, sanitizeCode16, sanitizeScStatus, sanitizeRatingPct, type RawExtractedItem, type ScreeningResult } from '../chart-extract-llm.js';
 import type { BundleDocument, SectionWindow } from '../chart-extractor.js';
 
 const win: SectionWindow = {
@@ -120,6 +120,9 @@ describe('sanitizeIcd10 / sanitizeCode16 — drop bad codes, never truncate (Woo
   it('keeps a valid ICD-10 (uppercased), drops an over-length phrase or non-code', () => {
     expect(sanitizeIcd10('g47.33')).toBe('G47.33');
     expect(sanitizeIcd10('M54.5')).toBe('M54.5');
+    expect(sanitizeIcd10('M1A.3110')).toBe('M1A.3110'); // letter-in-3rd-pos category (chronic gout) — must NOT be dropped
+    expect(sanitizeIcd10('C7A.098')).toBe('C7A.098'); // neuroendocrine category — same class
+    expect(sanitizeIcd10('S06.0X0A')).toBe('S06.0X0A'); // 7-char code at the ICD-10-CM ceiling
     expect(sanitizeIcd10('G47.33 Obstructive sleep apnea')).toBeUndefined(); // the actual Woodley overflow
     expect(sanitizeIcd10('see chart')).toBeUndefined();
     expect(sanitizeIcd10('this is a very long description well over sixteen chars')).toBeUndefined();
@@ -136,6 +139,53 @@ describe('sanitizeIcd10 / sanitizeCode16 — drop bad codes, never truncate (Woo
     ] }, 'd');
     expect(it!.name).toBe('Obstructive sleep apnea');
     expect(it!.icd10).toBeUndefined(); // dropped — the row still lands
+  });
+});
+
+describe('sanitizeScStatus / sanitizeRatingPct — keep the enum + int writes from aborting the merge tx', () => {
+  it('maps known synonyms to the 3 legal enum values; deferred/claimed → pending (never SC)', () => {
+    expect(sanitizeScStatus('service_connected')).toBe('service_connected');
+    expect(sanitizeScStatus('Service Connected')).toBe('service_connected');
+    expect(sanitizeScStatus('granted')).toBe('service_connected');
+    expect(sanitizeScStatus('SC')).toBe('service_connected');
+    expect(sanitizeScStatus('deferred')).toBe('pending'); // must NOT become service_connected
+    expect(sanitizeScStatus('claimed')).toBe('pending');
+    expect(sanitizeScStatus('denied')).toBe('denied');
+  });
+  it('drops an unrecognized / non-string status to undefined (the merge default applies, no enum abort)', () => {
+    expect(sanitizeScStatus('approved-ish')).toBeUndefined();
+    expect(sanitizeScStatus('')).toBeUndefined();
+    expect(sanitizeScStatus(42)).toBeUndefined();
+    expect(sanitizeScStatus(undefined)).toBeUndefined();
+  });
+  it('keeps a 0..100 integer ratingPct; drops a non-integer / out-of-range (would reject at the Int column)', () => {
+    expect(sanitizeRatingPct(70)).toBe(70);
+    expect(sanitizeRatingPct(0)).toBe(0);
+    expect(sanitizeRatingPct(100)).toBe(100);
+    expect(sanitizeRatingPct(70.5)).toBeUndefined();
+    expect(sanitizeRatingPct(150)).toBeUndefined();
+    expect(sanitizeRatingPct('70')).toBeUndefined();
+  });
+  it('coerceRawItemsCombined maps a free-text status + drops a float ratingPct (no value reaches the enum/int)', () => {
+    const [it] = coerceRawItemsCombined({ items: [
+      { category: 'sc_condition', name: 'PTSD', status: 'deferred', ratingPct: 70.5, sourcePage: 3, sourceQuote: 'PTSD', confidence: 0.9 },
+    ] }, 'd');
+    expect(it!.status).toBe('pending');
+    expect(it!.ratingPct).toBeUndefined();
+  });
+});
+
+describe('groundAndDispose — cross-category collapse (SC condition is not also a bare problem)', () => {
+  it('drops an active_problem that duplicates a service_connected condition (SC row wins)', () => {
+    const docs: BundleDocument[] = [{ id: 'd', filename: 'x.pdf', pages: [{ pageNumber: 1, text: 'PTSD 70 percent service-connected; also PTSD on problem list; GERD on problem list' }] }];
+    const sc: RawExtractedItem = { category: 'sc_condition', name: 'PTSD', status: 'service_connected', ratingPct: 70, sourceDocumentId: 'd', sourcePage: 1, sourceQuote: 'PTSD 70 percent service-connected', confidence: 0.95 };
+    const dupProblem: RawExtractedItem = { category: 'active_problem', name: 'PTSD', sourceDocumentId: 'd', sourcePage: 1, sourceQuote: 'PTSD on problem list', confidence: 0.9 };
+    const gerd: RawExtractedItem = { category: 'active_problem', name: 'GERD', sourceDocumentId: 'd', sourcePage: 1, sourceQuote: 'GERD on problem list', confidence: 0.9 };
+    const r = groundAndDispose(docs, [sc, dupProblem, gerd], { preferMoreComplete: true });
+    const names = r.items.map((i) => `${i.category}:${i.name}`);
+    expect(names).toContain('sc_condition:PTSD');
+    expect(names).toContain('active_problem:GERD'); // a non-SC problem survives
+    expect(names).not.toContain('active_problem:PTSD'); // the SC duplicate is collapsed away
   });
 });
 

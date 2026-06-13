@@ -234,9 +234,12 @@ export class WorkersStack extends Stack {
         INTERNAL_WORKER_TOKEN: workerTokenSecret.secretValue.unsafeUnwrap(),
         ANTHROPIC_SECRET_ARN: anthropicKeySecret.secretArn,
         CHART_EXTRACT_MAX_RECEIVE: '3',
-        // Full-read chunker gate (PR-1). DARK until the live Armand smoke proves recall — flip to
-        // 'on' to enable the complete-read path. Default 'off' keeps the proven header-windower live.
-        CHART_EXTRACT_FULLREAD: 'off',
+        // Full-read chunker gate (PR-1). PRODUCTION as of 2026-06-13: validated live on a real-veteran
+        // cohort (Porter/Bonnewitz/Thomas/Stocks — up to 58 items / 35 chunks, truncatedWindows 0 and
+        // uncoveredPages 0 on every run, screening-doc loop confirmed) AFTER the icd10/status/ratingPct
+        // write-hardening that closed the transaction-abort class. 'on' = the complete-read path that
+        // reads every page; revert to 'off' only to fall back to the legacy header-windower.
+        CHART_EXTRACT_FULLREAD: 'on',
       },
       logRetention: logs.RetentionDays.ONE_MONTH,
     });

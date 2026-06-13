@@ -232,8 +232,10 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
   name: 'record_chart_items',
   description:
     'Record EVERY structured chart item found VERBATIM in the provided document chunk — across all ' +
-    'three categories. Only emit an item if it literally appears in the text. Never infer, never add ' +
-    'conditions the veteran might have. Each item carries its category, exact page, and a verbatim quote.',
+    'three categories. Capture every condition that carries a VA benefit-status signal (granted / ' +
+    'pending / denied / deferred / a rating %) as an sc_condition, and every bare clinical diagnosis ' +
+    'as an active_problem. Only emit an item if it literally appears in the text. Each item carries ' +
+    'its category, exact page, and a verbatim quote.',
   input_schema: {
     type: 'object',
     properties: {
@@ -245,10 +247,10 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
             category: {
               type: 'string',
               enum: ['sc_condition', 'active_problem', 'active_medication', 'screening'],
-              description: 'sc_condition = a VA service-connected/rated disability (granted/pending/denied); active_problem = a Problem List entry; active_medication = an Active Medications entry; screening = a screening-instrument result (PHQ-9/GAD-7/PC-PTSD-5/AUDIT-C) — a DATA POINT, never a diagnosis.',
+              description: 'sc_condition = a condition the veteran is service-connected for OR claiming (any benefit status: granted/pending/denied/deferred); active_problem = a bare clinical diagnosis/problem with no benefit-status signal; active_medication = an Active Medications entry or a drug named in a note; screening = a screening-instrument result (PHQ-9/GAD-7/PC-PTSD-5/AUDIT-C) — a DATA POINT, never a diagnosis.',
             },
             name: { type: 'string', description: 'For a condition/problem: the name as written. For a medication: the DRUG NAME ONLY (generic or brand, e.g. "fluoxetine", "Lexapro") — do NOT include dose, strength, or form in the name; those go in dose. For a screening: the instrument name (e.g. "PHQ-9").' },
-            status: { type: 'string', enum: ['service_connected', 'pending', 'denied'], description: 'sc_condition only: service_connected if granted, denied if THIS condition is denied, pending if awaiting decision.' },
+            status: { type: 'string', enum: ['service_connected', 'pending', 'denied'], description: 'sc_condition only: service_connected if granted/rated/"service-connected", denied if THIS condition is denied, pending if claimed/under review/deferred (e.g. a "Conditions claimed" or claim-status list). Always set it.' },
             ratingPct: { type: 'integer', description: 'sc_condition only: rating percentage if explicitly stated.' },
             dcCode: { type: 'string', description: 'sc_condition only: diagnostic code if explicitly stated.' },
             icd10: { type: 'string', description: 'active_problem only: ICD-10 code if explicitly present.' },
@@ -275,31 +277,32 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
 function combinedSystemPrompt(): string {
   return [
     'You parse a chunk of a veteran\'s VA medical record into structured rows across THREE categories:',
-    '  - sc_condition: VA service-connected / rated disabilities (granted, pending, or denied). Set status (+ ratingPct/dcCode if stated).',
-    '  - active_problem: entries from a Problem List / Computerized Problem List.',
-    '  - active_medication: entries from an Active (Outpatient) Medications list (+ dose/frequency if written).',
-    'The VA document is the source of truth. Extract ONLY what is literally present in the text.',
-    'NEVER infer, NEVER add items the veteran "might" have, NEVER fabricate codes or percentages.',
-    'Set `category` correctly on every item. Every item needs the exact [p.N] page it appears on and a short verbatim sourceQuote copied from that page.',
+    '  - sc_condition: a condition the veteran is service-connected for OR is claiming for VA benefits — together with its benefit status.',
+    '  - active_problem: a clinical diagnosis or problem from the care record (Problem List, progress note, assessment).',
+    '  - active_medication: a drug from an Active (Outpatient) Medications list or named in a note.',
+    'The VA document is the source of truth. Extract ONLY what is literally present in the text — never infer a condition, code, or percentage that is not written.',
+    'Set `category` correctly on every item. Every item carries the exact [p.N] page it appears on and a short verbatim sourceQuote copied from that page.',
     '',
-    // RECALL ANCHOR (Ryan 2026-06-13): VA rating decisions are TEMPLATED — the same phrases mark a
-    // service connection every time. A single buried grant is the failure this rebuild exists to
-    // kill (Woodley F43.8 70% SC, missed). Naming the templated language directs the model to it.
-    'VA RATING-DECISION LANGUAGE — these templated phrases almost always mark an sc_condition; never skip a page containing them:',
-    '  GRANTED:  "Service connection for X is granted" · "Service connection for X has been established" · "An evaluation of N percent is assigned for X" · "A N percent evaluation is assigned" · "X is N percent disabling" · "N% — X (diagnostic code NNNN)".',
-    '  DENIED:   "Service connection for X is denied" · "Service connection for X is not warranted / is not established".',
-    '  DEFERRED/PENDING: "Service connection for X is deferred" · "X is deferred pending ...".',
-    '  Capture EACH itemized condition separately with its own status + ratingPct + dcCode when the decision lists them — even if many appear on one page.',
-    // RECALL FIX (Ryan 2026-06-13, Woodley): SC conditions also live in CLAIM LISTS / INTAKE SUMMARIES /
-    // claim-status pages, NOT only in rating-decision prose. The full-read missed PTSD / Sleep Apnea /
-    // specific colitis because they were listed as CLAIMED (pending/denied), not "service connection
-    // is granted." Capture those too.
-    'CLAIM LISTS & INTAKE SUMMARIES — also an sc_condition source. Capture every condition listed with a service-connection status, even when NOT phrased as a rating decision:',
-    '  - A "Claimed conditions" / "Conditions claimed" / intake-summary list, or a claim-status page, that names a condition with status pending / denied / deferred / granted (or "service-connected", "SC", a rating %) → emit it as sc_condition with that status.',
-    '  - Phrasings: "PTSD — pending", "Sleep Apnea (denied)", "Sigmoid Colitis: claim pending", "Service-connected for X", "X — 50%", a claim table row. The status word/symbol next to the condition IS the signal.',
-    '  - USE THE SPECIFIC NAMED CONDITION. Never collapse distinct conditions into a vague umbrella — "Sigmoid Colitis", "Ulcerative Colitis", and "GERD/Gastritis" are SEPARATE rows, NOT one "gastrointestinal problems". Copy the name as written.',
-    'If a benefit-summary letter states only a COMBINED percentage (e.g. "your combined evaluation is 70 percent") WITHOUT itemizing the individual conditions, do NOT invent the individual conditions — emit nothing for those rather than guess.',
-    'A COMBINED / OVERALL rating statement is NOT a condition. NEVER emit a row whose name is "Combined service-connected disabilities", "Service connected (combined rating N%)", "Service-connected rating", "Service Connected Rating", or any overall/summary percentage. An sc_condition row must name a SPECIFIC disability (e.g. "lumbar strain", "PTSD") — the combined total is a summary, not a disability.',
+    // ── THE ONE RULE that separates sc_condition from active_problem (Ryan 2026-06-13). The Woodley
+    // miss (PTSD/Sleep Apnea/CFS dropped) AND the over-emission (H. pylori gastritis/hiatal hernia/PUD
+    // emitted as SC) are the SAME failure: the old prompt keyed SC on "rated disability" instead of on
+    // a benefit-status signal. A condition is SC iff it sits next to a benefit-status signal; a bare
+    // clinical diagnosis with no such signal is a problem, not an SC condition.
+    'CAPTURE AS sc_condition: every condition that appears next to a VA BENEFIT-STATUS SIGNAL. The signal is what makes it service-connection, not the diagnosis itself. Signals — capture the condition whenever you see one beside it:',
+    '  - granted  → "Service connection for X is granted / has been established", "an evaluation of N percent is assigned for X", "X is N percent disabling", "service-connected", "SC", a rating % or diagnostic code shown for the condition.',
+    '  - denied   → "Service connection for X is denied / is not warranted / is not established", "X (denied)".',
+    '  - pending  → a claim list or intake summary — "Claimed conditions", "Conditions claimed", a claim-status / "Your claims" page — listing the condition as claimed / pending / under review / received.',
+    '  - deferred → "Service connection for X is deferred", "X — deferred pending ...".',
+    'These live in MANY document types — rating decisions, code sheets, benefit/award letters, the 21-526EZ claim, AND claim-status / intake-summary lists. A claim that is only pending or denied is STILL an sc_condition; do not wait for a "granted" sentence. Capture EACH listed condition as its own row with its own status (+ ratingPct + dcCode when shown), even when a single rating-decision page itemizes many.',
+    '  - USE THE SPECIFIC NAMED CONDITION exactly as written. "Sigmoid Colitis", "Ulcerative Colitis", and "GERD" are SEPARATE rows — never collapse distinct conditions into an umbrella like "gastrointestinal problems".',
+    '',
+    'KEEP OUT of sc_condition (these are active_problem instead): a clinical diagnosis written in a progress note, assessment, problem list, or C&P narrative with NO benefit-status signal next to it. A real diagnosis like "H. pylori gastritis", "hiatal hernia", or "peptic ulcer disease" mentioned in a GI note is an active_problem — it only becomes an sc_condition if that same record shows it claimed, granted, denied, or rated. When in doubt and there is no status signal, emit it as active_problem, not sc_condition.',
+    '',
+    'TWO THINGS THAT ARE NOT sc_conditions: (1) a COMBINED / OVERALL / TOTAL rating — a summary, never a row, EVEN THOUGH it shows a percentage. A line like "your combined evaluation is 70 percent", "combined rating 90%", or "service-connected condition (combined) 90%" is the TOTAL across all disabilities, not a disability itself — do NOT emit it. (The percentage there is a sum, not a single condition\'s rating.) If a letter gives only a combined % without itemizing the conditions, emit nothing for those rather than guess. (2) a screening score (see below).',
+    'EXAMPLES (sc_condition vs active_problem):',
+    '  "[p.14] Conditions claimed: 1. PTSD (pending) 2. Sleep apnea (pending) 3. Chronic fatigue syndrome (denied)" → THREE sc_condition rows: {category:sc_condition,name:"PTSD",status:"pending"}, {category:sc_condition,name:"Sleep apnea",status:"pending"}, {category:sc_condition,name:"Chronic fatigue syndrome",status:"denied"}.',
+    '  "[p.902] Assessment: H. pylori gastritis; hiatal hernia. Continue PPI." → TWO active_problem rows (no benefit-status signal): {category:active_problem,name:"H. pylori gastritis"}, {category:active_problem,name:"hiatal hernia"}. NOT sc_condition.',
+    '  "[p.3] Combined evaluation: 90%" → emit NOTHING (a combined/total, not a condition).',
     '',
     // BLUE BUTTON STRUCTURE (Ryan 2026-06-13): VA Blue Button / CAPRI reports are templated — the
     // problem and medication lists sit under stable headers. Naming them lifts recall on the

@@ -292,6 +292,105 @@ export function normalizeName(name: string): string {
   return NAME_SYNONYMS[base] ?? base;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// FULL-READ CHUNKER (PR-1, behind CHART_EXTRACT_FULLREAD). The header-windower above MISSES items
+// that live outside a matched section or past WINDOW_CAP_CHARS — on a 1,182-page Blue Button a
+// service-connected grant stated once deep in the rating decision never reaches the LLM (Woodley
+// F43.8 70% SC). The chunker instead reads EVERY page: it splits each document into overlapping,
+// page-boundary chunks sized to a char budget, and the worker runs ONE combined-category pass per
+// chunk (the model tags each item's category) then dedups across chunks. Pure: no model, no I/O.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** A complete-read slice of one document spanning a contiguous page range (category-agnostic). */
+export interface DocumentChunk {
+  documentId: string;
+  filename: string;
+  /** Page numbers this chunk covers, ascending. */
+  pageNumbers: number[];
+  /** Page-marked text ([p.N] prefixes) so the model cites the page + the grounding gate can verify. */
+  text: string;
+  /** Global, stable index across all documents — used to order raw items deterministically. */
+  chunkIndex: number;
+}
+
+/** Char budget per chunk (~12K input tokens for Sonnet). Whole pages only — never split mid-page. */
+export const CHUNK_CHARS = 48_000;
+/** Re-include the last N pages of the prior chunk so an item straddling a page boundary isn't lost. */
+export const CHUNK_OVERLAP_PAGES = 1;
+
+/**
+ * Split every document into overlapping page-boundary chunks covering ALL pages. A single page
+ * larger than CHUNK_CHARS becomes its own chunk (never dropped). Deterministic: chunkIndex is
+ * assigned in document then page order, so raw items collected in chunk order are already stable.
+ */
+export function chunkDocuments(documents: BundleDocument[]): DocumentChunk[] {
+  const chunks: DocumentChunk[] = [];
+  let globalIdx = 0;
+  for (const doc of documents) {
+    if (!doc.pages || doc.pages.length === 0) continue;
+    const pages = doc.pages;
+    let i = 0;
+    while (i < pages.length) {
+      const pieces: string[] = [];
+      const pageNumbers: number[] = [];
+      let total = 0;
+      let j = i;
+      while (j < pages.length) {
+        const page = pages[j]!;
+        const marked = `[p.${page.pageNumber}]\n${page.text}`;
+        // Always take at least one page, even if it alone exceeds the budget (huge OCR page).
+        if (total + marked.length > CHUNK_CHARS && pieces.length > 0) break;
+        pieces.push(marked);
+        pageNumbers.push(page.pageNumber);
+        total += marked.length;
+        j++;
+      }
+      chunks.push({ documentId: doc.id, filename: doc.filename, pageNumbers, text: pieces.join('\n'), chunkIndex: globalIdx++ });
+      if (j >= pages.length) break;
+      // Advance to the next window, stepping back CHUNK_OVERLAP_PAGES for boundary overlap. The
+      // max(i+1, …) guarantees forward progress even when a single oversized page filled the chunk.
+      i = Math.max(i + 1, j - CHUNK_OVERLAP_PAGES);
+    }
+  }
+  return chunks;
+}
+
+/**
+ * Coverage check: every page of every document must appear in at least one chunk. Returns the list
+ * of uncovered { documentId, pageNumber } (empty = full coverage). The worker logs any gap LOUD —
+ * a missed page is a silent extraction hole, the exact failure class this rebuild exists to kill.
+ */
+export function uncoveredPages(documents: BundleDocument[], chunks: DocumentChunk[]): { documentId: string; pageNumber: number }[] {
+  const covered = new Set<string>();
+  for (const c of chunks) for (const p of c.pageNumbers) covered.add(`${c.documentId}#${p}`);
+  const gaps: { documentId: string; pageNumber: number }[] = [];
+  for (const doc of documents) for (const p of doc.pages ?? []) {
+    if (!covered.has(`${doc.id}#${p.pageNumber}`)) gaps.push({ documentId: doc.id, pageNumber: p.pageNumber });
+  }
+  return gaps;
+}
+
+/**
+ * Split a chunk's page-marked text into two halves at a [p.N] boundary nearest the midpoint, for
+ * the truncation split-retry. Returns null when the chunk holds a single page (can't split without
+ * orphaning the page marker — the caller accepts the truncation + logs loud instead). Each half
+ * keeps its own [p.N] markers so grounding still works.
+ */
+export function splitChunkText(text: string): [string, string] | null {
+  const markers: number[] = [];
+  const re = /(^|\n)\[p\.\d+\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) markers.push(m.index === 0 ? 0 : m.index + 1); // index of '['
+  if (markers.length < 2) return null;
+  const mid = text.length / 2;
+  let best = markers[1]!; // never split before the first page
+  for (const idx of markers) {
+    if (idx === 0) continue;
+    if (Math.abs(idx - mid) < Math.abs(best - mid)) best = idx;
+  }
+  return [text.slice(0, best).trimEnd(), text.slice(best)];
+}
+
 /** Confidence gate thresholds (Ryan chose AUTO-FILL: write high-confidence; flag the middle band). */
 export const CONFIDENCE_AUTOFILL = 0.85;
 export const CONFIDENCE_FLOOR = 0.6;

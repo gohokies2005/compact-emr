@@ -202,7 +202,7 @@ export class WorkersStack extends Stack {
       queueName: `compact-emr-${config.envName}-chart-extract.fifo`,
       fifo: true,
       contentBasedDeduplication: false, // explicit MessageDeduplicationId = triggerHash
-      visibilityTimeout: Duration.minutes(6), // > worker timeout below
+      visibilityTimeout: Duration.minutes(11), // > worker timeout below (full-read chunker, PR-2)
       deadLetterQueue: { queue: chartExtractDlq, maxReceiveCount: 3 },
     });
     this.chartExtractQueue = chartExtractQueue;
@@ -223,13 +223,19 @@ export class WorkersStack extends Stack {
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: path.resolve(__dirname, '..', '..', 'workers', 'chart-extract', 'handler.ts'),
       handler: 'handler',
-      timeout: Duration.minutes(5),
-      memorySize: 512,
+      // Full-read chunker (PR-2): a complete read of a 1,000+ page bundle is ~25-40 LLM chunk calls
+      // at concurrency 4 — needs more wall-clock + memory than the old header-windower. Visibility
+      // timeout above is kept strictly greater so SQS can't re-deliver mid-run and double-process.
+      timeout: Duration.minutes(10),
+      memorySize: 1024,
       environment: {
         COMPACT_EMR_API_URL: apiBaseUrl,
         INTERNAL_WORKER_TOKEN: workerTokenSecret.secretValue.unsafeUnwrap(),
         ANTHROPIC_SECRET_ARN: anthropicKeySecret.secretArn,
         CHART_EXTRACT_MAX_RECEIVE: '3',
+        // Full-read chunker gate (PR-1). DARK until the live Armand smoke proves recall — flip to
+        // 'on' to enable the complete-read path. Default 'off' keeps the proven header-windower live.
+        CHART_EXTRACT_FULLREAD: 'off',
       },
       logRetention: logs.RetentionDays.ONE_MONTH,
     });

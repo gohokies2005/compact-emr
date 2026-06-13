@@ -111,6 +111,9 @@ describe('DeliveryPanel', () => {
     renderPanel();
     await screen.findByRole('button', { name: 'Send the invoice email' });
     expect(screen.queryByRole('button', { name: 'Verify the cover memo' })).toBeNull();
+    // P0d: instead of a silent absence, explain WHY no memo applies + how to fix it for appeals.
+    expect(screen.getByText(/No cover memo applies/)).toBeInTheDocument();
+    expect(screen.getByText(/appeal, supplemental, HLR, or TDIU/)).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText(/I verified the final letter is correct/));
     expect(screen.getByRole('button', { name: 'Send the invoice email' })).not.toBeDisabled();
   });

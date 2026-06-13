@@ -119,6 +119,17 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
         ) : null}
       </div>
 
+      {/* P0d (Ryan 2026-06-13): never let "no cover memo" be silent. When the case is classified as
+          an original claim, say so + how to fix it — appeals/supplementals must carry a memo, and
+          the only reason one wouldn't generate is the case not being flagged as one. */}
+      {!memoApplies ? (
+        <p className="mt-2 text-xs text-slate-500">
+          No cover memo applies — this case is classified as an original claim (no prior denial on
+          file). If it is an appeal, supplemental, HLR, or TDIU, set the claim type / prior-denial on
+          the case and a memo will generate automatically.
+        </p>
+      ) : null}
+
       {memoError ? <p className="mt-2 text-sm text-rose-600">{memoError}</p> : null}
 
       {/* Confirm checkboxes */}

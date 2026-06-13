@@ -16,6 +16,43 @@ function correspondent(e: EmailLogRow): string {
   return e.direction === 'inbound' ? e.fromAddress : e.toAddress;
 }
 
+// Decode HTML entities (Gmail snippets arrive HTML-escaped: "that&#39;s", "&lt;info@…&gt;"). The
+// textarea trick decodes named + numeric entities safely (no script execution). (Ryan 2026-06-12.)
+function decodeEntities(s: string): string {
+  if (!s) return s;
+  const el = document.createElement('textarea');
+  el.innerHTML = s;
+  return el.value;
+}
+
+// Strip the quoted reply history so each bubble shows only its OWN new content — the prior emails
+// are already their own bubbles above (Ryan 2026-06-12: "just have the response and follow
+// sequentially"). Cuts at the earliest of: an "On <date> … wrote:" attribution, an Original-Message
+// divider, a From:/Sent: header block, the first quoted ">" line, or a known mobile-client footer.
+const QUOTE_MARKERS: readonly RegExp[] = [
+  /\r?\n?On\s[\s\S]{0,300}?\bwrote:/i,
+  /\r?\n-{2,}\s*Original Message\s*-{2,}/i,
+  /\r?\nFrom:\s.*\r?\n(Sent|Date|To):\s/i,
+  /\r?\n>/,
+  /Yahoo Mail: Search, Organize, Conquer/i,
+  /Sent from my (iPhone|iPad|Android|mobile|Galaxy)/i,
+  /Get Outlook for (iOS|Android)/i,
+];
+function stripQuotedReply(text: string): string {
+  let cut = text.length;
+  for (const re of QUOTE_MARKERS) {
+    const m = text.match(re);
+    if (m && m.index !== undefined && m.index < cut) cut = m.index;
+  }
+  return text.slice(0, cut).trim();
+}
+export function cleanEmailText(text: string): string {
+  const decoded = decodeEntities(text ?? '');
+  const stripped = stripQuotedReply(decoded).trim();
+  // If stripping ate everything (a pure quote/forward), fall back to the decoded original.
+  return stripped.length > 0 ? stripped : decoded.trim();
+}
+
 function DirectionChip({ direction }: { readonly direction: 'inbound' | 'outbound' }) {
   return direction === 'inbound'
     ? <StatusChip tone="info">In</StatusChip>
@@ -95,12 +132,12 @@ function GmailBubble({ caseId, m }: { readonly caseId: string; readonly m: Gmail
           bodyQuery.isLoading ? (
             <div className="mt-1 text-xs text-steel">Loading full email…</div>
           ) : bodyQuery.data?.data.available ? (
-            <div className="mt-1 whitespace-pre-wrap break-words text-slateInk">{bodyQuery.data.data.body || <span className="text-steel">(no body captured)</span>}</div>
+            <div className="mt-1 whitespace-pre-wrap break-words text-slateInk">{cleanEmailText(bodyQuery.data.data.body) || <span className="text-steel">(no body captured)</span>}</div>
           ) : (
-            <div className="mt-1 text-slateInk"><span className="break-words">{m.snippet}</span><div className="mt-1 text-[11px] text-steel">Couldn’t load the full email — showing the preview.</div></div>
+            <div className="mt-1 text-slateInk"><span className="break-words">{cleanEmailText(m.snippet)}</span><div className="mt-1 text-[11px] text-steel">Couldn’t load the full email — showing the preview.</div></div>
           )
         ) : (
-          <div className="mt-0.5 break-words text-slateInk">{m.snippet}</div>
+          <div className="mt-0.5 break-words text-slateInk">{cleanEmailText(m.snippet)}</div>
         )}
         <div className="mt-1 text-[11px] text-navy">{open ? 'Click to collapse' : 'Click to read the full email'}</div>
       </button>
@@ -146,20 +183,26 @@ export function EmailLogPanel({ queryKey, fetcher, scope, caseId }: {
   const q = useQuery({ queryKey: [...queryKey], queryFn: fetcher });
   if (q.isLoading) return <div className="p-4 text-sm text-steel">Loading email…</div>;
   const rows = q.data?.data ?? [];
-  const log = rows.length === 0
+  const log = rows.length > 0
     ? (
-      <EmptyState
-        title="No email correspondence yet"
-        message={scope === 'claim'
-          ? 'Emails tied to this specific claim appear here. Veteran-wide correspondence is on the veteran chart’s Email tab.'
-          : 'Inbound + outbound email with this veteran appears here. If you expected messages, inbound email ingestion may not be enabled yet (ask the administrator).'}
-      />
-    )
-    : (
       <TabSection>
         {rows.map((e) => <EmailRow key={e.id} e={e} />)}
       </TabSection>
-    );
+    )
+    // Claim tab (caseId present): the live Gmail bubbles below ARE the conversation, so don't
+    // stack a "No email correspondence yet" box above an obviously-populated thread (Ryan
+    // 2026-06-12). Veteran tab (no caseId, no live-Gmail section) keeps the empty state so the
+    // tab isn't blank.
+    : caseId
+      ? null
+      : (
+        <EmptyState
+          title="No email correspondence yet"
+          message={scope === 'claim'
+            ? 'Emails tied to this specific claim appear here. Veteran-wide correspondence is on the veteran chart’s Email tab.'
+            : 'Inbound + outbound email with this veteran appears here. If you expected messages, inbound email ingestion may not be enabled yet (ask the administrator).'}
+        />
+      );
   return (
     <div>
       {log}

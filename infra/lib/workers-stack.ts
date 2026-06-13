@@ -202,7 +202,7 @@ export class WorkersStack extends Stack {
       queueName: `compact-emr-${config.envName}-chart-extract.fifo`,
       fifo: true,
       contentBasedDeduplication: false, // explicit MessageDeduplicationId = triggerHash
-      visibilityTimeout: Duration.minutes(11), // > worker timeout below (full-read chunker, PR-2)
+      visibilityTimeout: Duration.minutes(16), // > worker timeout below (kept strictly greater)
       deadLetterQueue: { queue: chartExtractDlq, maxReceiveCount: 3 },
     });
     this.chartExtractQueue = chartExtractQueue;
@@ -223,10 +223,11 @@ export class WorkersStack extends Stack {
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: path.resolve(__dirname, '..', '..', 'workers', 'chart-extract', 'handler.ts'),
       handler: 'handler',
-      // Full-read chunker (PR-2): a complete read of a 1,000+ page bundle is ~25-40 LLM chunk calls
-      // at concurrency 4 — needs more wall-clock + memory than the old header-windower. Visibility
-      // timeout above is kept strictly greater so SQS can't re-deliver mid-run and double-process.
-      timeout: Duration.minutes(10),
+      // Full-read chunker: a complete read of a 2,000+ page bundle is ~60 LLM chunk calls. At
+      // concurrency 8 that's ~7-9 min; 15 min (Lambda max) is the safety ceiling for the largest
+      // cases (Woodley 2,256pp ran 14-17 min at concurrency 4). Visibility (16 min) stays strictly
+      // greater so SQS can't re-deliver mid-run and double-process.
+      timeout: Duration.minutes(15),
       memorySize: 1024,
       environment: {
         COMPACT_EMR_API_URL: apiBaseUrl,

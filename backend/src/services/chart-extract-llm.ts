@@ -52,9 +52,10 @@ const CHUNK_MAX_TOKENS = 8192;
 // fallback that stops the rebuild from RELOCATING the buried-grant loss (architect BLOCKER). Sonnet
 // 4.x supports well above this; if a page somehow still overflows 32k items, we log loud + accept.
 const CHUNK_MAX_TOKENS_CEILING = 32_000;
-// Bounded concurrency: the architect's binding ceiling. The 10-min Lambda must not fire 30+ calls
-// at once (rate limits) nor serialize them (timeout). 4 keeps us inside both.
-const CHUNK_CONCURRENCY = 4;
+// Bounded concurrency. Raised 4→8 (Ryan 2026-06-13): Woodley (2,256pp → 60 chunks) took 14-17 min at
+// 4-wide, past the Lambda timeout. 8-wide ~halves wall-clock (~7-9 min) while staying within the
+// Anthropic direct-API rate ceiling for these short tool calls. Timeout bumped to 15 min in tandem.
+const CHUNK_CONCURRENCY = 8;
 // Split-retry depth: a truncated chunk is halved and re-run; bounded so a pathological page can't
 // recurse forever (it falls through to "accept + log loud" at the floor).
 const MAX_SPLIT_DEPTH = 2;
@@ -289,6 +290,14 @@ function combinedSystemPrompt(): string {
     '  DENIED:   "Service connection for X is denied" · "Service connection for X is not warranted / is not established".',
     '  DEFERRED/PENDING: "Service connection for X is deferred" · "X is deferred pending ...".',
     '  Capture EACH itemized condition separately with its own status + ratingPct + dcCode when the decision lists them — even if many appear on one page.',
+    // RECALL FIX (Ryan 2026-06-13, Woodley): SC conditions also live in CLAIM LISTS / INTAKE SUMMARIES /
+    // claim-status pages, NOT only in rating-decision prose. The full-read missed PTSD / Sleep Apnea /
+    // specific colitis because they were listed as CLAIMED (pending/denied), not "service connection
+    // is granted." Capture those too.
+    'CLAIM LISTS & INTAKE SUMMARIES — also an sc_condition source. Capture every condition listed with a service-connection status, even when NOT phrased as a rating decision:',
+    '  - A "Claimed conditions" / "Conditions claimed" / intake-summary list, or a claim-status page, that names a condition with status pending / denied / deferred / granted (or "service-connected", "SC", a rating %) → emit it as sc_condition with that status.',
+    '  - Phrasings: "PTSD — pending", "Sleep Apnea (denied)", "Sigmoid Colitis: claim pending", "Service-connected for X", "X — 50%", a claim table row. The status word/symbol next to the condition IS the signal.',
+    '  - USE THE SPECIFIC NAMED CONDITION. Never collapse distinct conditions into a vague umbrella — "Sigmoid Colitis", "Ulcerative Colitis", and "GERD/Gastritis" are SEPARATE rows, NOT one "gastrointestinal problems". Copy the name as written.',
     'If a benefit-summary letter states only a COMBINED percentage (e.g. "your combined evaluation is 70 percent") WITHOUT itemizing the individual conditions, do NOT invent the individual conditions — emit nothing for those rather than guess.',
     'A COMBINED / OVERALL rating statement is NOT a condition. NEVER emit a row whose name is "Combined service-connected disabilities", "Service connected (combined rating N%)", "Service-connected rating", "Service Connected Rating", or any overall/summary percentage. An sc_condition row must name a SPECIFIC disability (e.g. "lumbar strain", "PTSD") — the combined total is a summary, not a disability.',
     '',

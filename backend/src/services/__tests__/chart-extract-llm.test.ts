@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { coerceRawItems, coerceRawItemsCombined, coerceScreenings, groundScreenings, groundAndDispose, type RawExtractedItem, type ScreeningResult } from '../chart-extract-llm.js';
+import { coerceRawItems, coerceRawItemsCombined, coerceScreenings, groundScreenings, groundAndDispose, sanitizeIcd10, sanitizeCode16, type RawExtractedItem, type ScreeningResult } from '../chart-extract-llm.js';
 import type { BundleDocument, SectionWindow } from '../chart-extractor.js';
 
 const win: SectionWindow = {
@@ -113,6 +113,29 @@ describe('medication temporality — dedup key + date scrub (Ryan 2026-06-13)', 
     const c = (name: string): RawExtractedItem => ({ category: 'sc_condition', name, sourceDocumentId: 'c', sourcePage: 1, sourceQuote: name, confidence: 0.9 });
     // Two PTSD rows still collapse to one (name-only key for conditions, unchanged).
     expect(groundAndDispose(cdocs, [c('PTSD'), c('PTSD')], { preferMoreComplete: true }).items).toHaveLength(1);
+  });
+});
+
+describe('sanitizeIcd10 / sanitizeCode16 — drop bad codes, never truncate (Woodley 500 fix)', () => {
+  it('keeps a valid ICD-10 (uppercased), drops an over-length phrase or non-code', () => {
+    expect(sanitizeIcd10('g47.33')).toBe('G47.33');
+    expect(sanitizeIcd10('M54.5')).toBe('M54.5');
+    expect(sanitizeIcd10('G47.33 Obstructive sleep apnea')).toBeUndefined(); // the actual Woodley overflow
+    expect(sanitizeIcd10('see chart')).toBeUndefined();
+    expect(sanitizeIcd10('this is a very long description well over sixteen chars')).toBeUndefined();
+    expect(sanitizeIcd10(undefined)).toBeUndefined();
+  });
+  it('caps dcCode at 16 chars (drops longer), keeps short codes', () => {
+    expect(sanitizeCode16('5257')).toBe('5257');
+    expect(sanitizeCode16('a much longer string than sixteen')).toBeUndefined();
+    expect(sanitizeCode16('  ')).toBeUndefined();
+  });
+  it('coerceRawItemsCombined DROPS a bad icd10 but keeps the problem row (no overflow reaches the DB)', () => {
+    const [it] = coerceRawItemsCombined({ items: [
+      { category: 'active_problem', name: 'Obstructive sleep apnea', icd10: 'G47.33 Obstructive sleep apnea', sourcePage: 7, sourceQuote: 'OSA', confidence: 0.9 },
+    ] }, 'd');
+    expect(it!.name).toBe('Obstructive sleep apnea');
+    expect(it!.icd10).toBeUndefined(); // dropped — the row still lands
   });
 });
 

@@ -60,6 +60,24 @@ const CHUNK_CONCURRENCY = 8;
 // recurse forever (it falls through to "accept + log loud" at the floor).
 const MAX_SPLIT_DEPTH = 2;
 
+// icd10 / dcCode are short CODE columns (icd10 = Postgres VarChar(16); manual entry validates the
+// same way in chart-entry-validation.ts). A model-authored value that's over-length or not
+// code-shaped is NOT a real code — DROP it (NEVER truncate: a truncated code is a WRONG code in a
+// medico-legal chart; the problem/condition row still lands with its name). This also stops a long
+// icd10 from overflowing VarChar(16) and aborting the whole extraction write (Ryan 2026-06-13, 2
+// agents confirmed: icd10 overflow DLQ'd a 130-item Woodley run).
+const ICD10_SHAPE = /^[A-Z][0-9]{2}(?:\.[A-Z0-9]{1,4})?[A-Z0-9]?$/i;
+export function sanitizeIcd10(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const t = v.trim();
+  return t.length > 0 && t.length <= 16 && ICD10_SHAPE.test(t) ? t.toUpperCase() : undefined;
+}
+export function sanitizeCode16(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const t = v.trim();
+  return t.length > 0 && t.length <= 16 ? t : undefined; // DC code: drop if over the manual-entry limit
+}
+
 /** Raw item as returned by the model for a single window, before grounding. */
 export interface RawExtractedItem {
   category: ExtractCategory;
@@ -209,9 +227,9 @@ export function coerceRawItems(toolInput: unknown, window: SectionWindow): RawEx
       category: window.category,
       name: r.name.trim(),
       status: typeof r.status === 'string' ? (r.status as RawExtractedItem['status']) : undefined,
-      dcCode: typeof r.dcCode === 'string' ? r.dcCode : undefined,
+      dcCode: sanitizeCode16(r.dcCode),
       ratingPct: typeof r.ratingPct === 'number' ? r.ratingPct : undefined,
-      icd10: typeof r.icd10 === 'string' ? r.icd10 : undefined,
+      icd10: sanitizeIcd10(r.icd10),
       dose: typeof r.dose === 'string' ? r.dose : undefined,
       frequency: typeof r.frequency === 'string' ? r.frequency : undefined,
       indication: typeof r.indication === 'string' ? r.indication : undefined,
@@ -353,9 +371,9 @@ export function coerceRawItemsCombined(toolInput: unknown, documentId: string): 
       category: r.category as ExtractCategory,
       name: r.name.trim(),
       status: typeof r.status === 'string' ? (r.status as RawExtractedItem['status']) : undefined,
-      dcCode: typeof r.dcCode === 'string' ? r.dcCode : undefined,
+      dcCode: sanitizeCode16(r.dcCode),
       ratingPct: typeof r.ratingPct === 'number' ? r.ratingPct : undefined,
-      icd10: typeof r.icd10 === 'string' ? r.icd10 : undefined,
+      icd10: sanitizeIcd10(r.icd10),
       dose: typeof r.dose === 'string' ? r.dose : undefined,
       frequency: typeof r.frequency === 'string' ? r.frequency : undefined,
       indication: typeof r.indication === 'string' ? r.indication : undefined,

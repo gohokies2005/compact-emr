@@ -8,6 +8,7 @@ import { applyExtractionMerge } from '../services/chart-merge-apply.js';
 import { loadBundleDocuments } from '../services/chart-extract-docs.js';
 import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
 import { writeScreeningSummary } from '../services/screening-summary-write.js';
+import { sanitizeIcd10, sanitizeCode16 } from '../services/chart-extract-llm.js';
 import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { randomUUID } from 'node:crypto';
 import type { ScreeningResult } from '../services/chart-extract-llm.js';
@@ -38,9 +39,12 @@ function coerceExtractedItems(raw: readonly unknown[]): FinalExtractedItem[] {
       category: r['category'] as ExtractCategory,
       name: (r['name'] as string).trim(),
       ...(typeof r['status'] === 'string' ? { status: r['status'] as FinalExtractedItem['status'] } : {}),
-      ...(typeof r['dcCode'] === 'string' ? { dcCode: r['dcCode'] as string } : {}),
+      // Last gate before the DB write: a code that's over-length / not code-shaped is dropped, NOT
+      // truncated (a truncated code is a WRONG code). icd10 is VarChar(16) — an unsanitized value
+      // here overflows the column and DLQs the whole merge (Ryan 2026-06-13, the Woodley 500).
+      ...((): { dcCode?: string } => { const c = sanitizeCode16(r['dcCode']); return c ? { dcCode: c } : {}; })(),
       ...(typeof r['ratingPct'] === 'number' ? { ratingPct: r['ratingPct'] as number } : {}),
-      ...(typeof r['icd10'] === 'string' ? { icd10: r['icd10'] as string } : {}),
+      ...((): { icd10?: string } => { const c = sanitizeIcd10(r['icd10']); return c ? { icd10: c } : {}; })(),
       ...(typeof r['dose'] === 'string' ? { dose: r['dose'] as string } : {}),
       ...(typeof r['frequency'] === 'string' ? { frequency: r['frequency'] as string } : {}),
       ...(typeof r['indication'] === 'string' ? { indication: r['indication'] as string } : {}),

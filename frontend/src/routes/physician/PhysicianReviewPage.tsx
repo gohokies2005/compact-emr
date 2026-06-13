@@ -15,8 +15,7 @@ import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { getCase } from '../../api/cases';
 import { formatNameLastFirst } from '../../lib/format';
-import { getArtifactPdfUrl } from '../../api/drafter';
-import { approveLetter } from '../../api/letter';
+import { approveLetter, getLetter } from '../../api/letter';
 import { describeApiError } from '../../api/client';
 
 export function PhysicianReviewPage() {
@@ -60,13 +59,18 @@ export function PhysicianReviewPage() {
     c.status === 'physician_review' &&
     latestDraftJob !== null;
 
-  const openSignedDraftPdf = async () => {
-    if (!latestDraftJob) return;
+  // P0a (Ryan 2026-06-13): the physician View-PDF MUST render the current saved version, not a
+  // job-pinned artifact. The old path called getArtifactPdfUrl(latestDraftJob.id) → that draft
+  // job's version, which goes STALE the moment an editor/surgical save advances currentVersion —
+  // a physician could sign a PDF they never saw. Read from GET /cases/:id/letter (resolveCurrent at
+  // currentVersion), the SAME source CaseDetailPage and the DOCX use, so all three always agree.
+  const openLetterPdf = async () => {
     try {
-      const { data } = await getArtifactPdfUrl(c.id, latestDraftJob.id);
-      window.open(data.url, '_blank', 'noopener,noreferrer');
-    } catch {
-      window.alert('Could not open the PDF. Please try again.');
+      const { data } = await getLetter(c.id);
+      if (!data.rendered.pdfUrl) { window.alert('The letter PDF is not ready yet. If it persists, flag this case to Dr. Ryan.'); return; }
+      window.open(data.rendered.pdfUrl, '_blank', 'noopener,noreferrer');
+    } catch (e: unknown) {
+      window.alert(`Could not open the letter PDF — ${describeApiError(e)}. If it keeps failing, flag this case to Dr. Ryan.`);
     }
   };
 
@@ -132,12 +136,32 @@ export function PhysicianReviewPage() {
               c={c}
               job={latestDraftJob}
               canSendBack
-              onOpenPdf={openSignedDraftPdf}
+              onOpenPdf={openLetterPdf}
               onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
               onOpenSignOff={() => setSignOffOpen(true)}
               onChanged={onChanged}
             />
           </>
+        ) : c.status === 'delivered' || c.status === 'paid' ? (
+          // P0b (Ryan 2026-06-13): a signed/delivered letter must stay viewable to the physician
+          // who signed it — the review page used to dead-end on "Not ready for review" for these.
+          <Card>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-emerald-800">
+                  ✓ Signed and finalized{c.status === 'paid' ? ' · paid' : ' · delivered'}
+                </p>
+                <p className="mt-1 text-sm text-slate-500">This letter has been signed. You can still view the final PDF.</p>
+              </div>
+              <button
+                type="button"
+                onClick={openLetterPdf}
+                className="inline-flex items-center justify-center rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+              >
+                View final letter PDF
+              </button>
+            </div>
+          </Card>
         ) : (
           <EmptyState
             title="Not ready for review"

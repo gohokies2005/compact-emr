@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PhysicianReviewPage } from '../routes/physician/PhysicianReviewPage';
 import { getCase, type CaseDetail } from '../api/cases';
-import { approveLetter } from '../api/letter';
+import { approveLetter, getLetter } from '../api/letter';
 import { ConflictError } from '../api/client';
 import type { DraftJob } from '../types/prisma';
 
@@ -20,6 +20,7 @@ vi.mock('../api/drafter', () => ({
 
 vi.mock('../api/letter', () => ({
   approveLetter: vi.fn(),
+  getLetter: vi.fn(),
 }));
 
 vi.mock('../layout/AppShell', () => ({
@@ -45,6 +46,7 @@ vi.mock('../components/SignOffPopup', () => ({
 
 const getCaseMock = vi.mocked(getCase);
 const approveLetterMock = vi.mocked(approveLetter);
+const getLetterMock = vi.mocked(getLetter);
 
 const readyJob: DraftJob = {
   id: 'draft-job-1',
@@ -122,6 +124,25 @@ describe('PhysicianReviewPage', () => {
     expect(
       await screen.findByText('This case is not ready for physician review.'),
     ).toBeInTheDocument();
+  });
+
+  // P0a/P0b (Ryan 2026-06-13): the View-PDF resolves the CURRENT version via GET /cases/:id/letter
+  // (not a stale job-pinned artifact), and a delivered/signed letter stays viewable here.
+  it('delivered case: shows the finalized panel with a working View-final-PDF (currentVersion source)', async () => {
+    getCaseMock.mockResolvedValue({ data: { ...readyCase, status: 'delivered' } });
+    getLetterMock.mockResolvedValue({
+      data: { rendered: { pdfUrl: 'https://signed.example/current.pdf' } },
+    } as unknown as Awaited<ReturnType<typeof getLetter>>);
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    renderReview();
+
+    expect(await screen.findByText(/Signed and finalized/)).toBeInTheDocument();
+    expect(screen.queryByText('This case is not ready for physician review.')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'View final letter PDF' }));
+    await waitFor(() => expect(getLetterMock).toHaveBeenCalledWith('CASE-1'));
+    expect(openSpy).toHaveBeenCalledWith('https://signed.example/current.pdf', '_blank', 'noopener,noreferrer');
+    openSpy.mockRestore();
   });
 
   // ── Sign-off incident 2026-06-09 regression: the approve catch must surface the server's REAL

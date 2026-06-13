@@ -41,7 +41,7 @@ const SYSTEM_PROMPT = `You curate a U.S. veteran's VA disability records into a 
 KEEP a page when it carries the substance the physician actually needs:
 - The VA's service-connection decision and its stated REASONS/evidence (what condition was granted, denied, continued, or evaluated, and WHY).
 - The page that NAMES the current DIAGNOSIS of the claimed (or a directly related) condition.
-- For treatment / progress / clinical notes: keep ONLY (a) the note that establishes the diagnosis, and (b) the SINGLE most recent encounter that shows the current treatment plan. Around TWO clinical pages is the target — NOT every visit.
+- For treatment / progress / clinical notes: keep ONLY the page that names the diagnosis, PLUS the LAST 2 (most recent) treatment/progress notes pertinent to the claimed condition. Drop every older or routine note. If the diagnosis is already named within those last 2 notes, that is all you need — aim for ~2 clinical pages, never the whole record.
 - Test / imaging results: the impression/findings page ONLY (one page) — not raw data tables, trends, or repeated panels.
 - In-service events, injuries, or exposures; concise service/personnel facts (MOS, deployments, combat).
 - Prior medical opinions, DBQs, and C&P exam findings + rationale.

@@ -87,7 +87,12 @@ export async function handler(event: SqsEvent): Promise<void> {
       const documents = await fetchDocuments(msg.caseId);
       const result = await makeChartExtractor(key).extract(documents);
       await postMerge(msg.caseId, msg.runId, result.items, result.costUsd);
-      console.log(JSON.stringify({ msg: 'chart_extract_done', caseId: msg.caseId, runId: msg.runId, items: result.items.length, costUsd: result.costUsd }));
+      console.log(JSON.stringify({ msg: 'chart_extract_done', caseId: msg.caseId, runId: msg.runId, items: result.items.length, costUsd: result.costUsd, windowsProcessed: result.windowsProcessed, truncatedWindows: result.truncatedWindows }));
+      // A truncated window means the extraction is INCOMPLETE for this chart — make it loud so it's
+      // not mistaken for a clean parse (the full-read chunker, PR-1, eliminates the cause).
+      if (result.truncatedWindows > 0) {
+        console.warn(JSON.stringify({ msg: 'chart_extract_INCOMPLETE_truncation', caseId: msg.caseId, runId: msg.runId, truncatedWindows: result.truncatedWindows }));
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(JSON.stringify({ msg: 'chart_extract_error', caseId: msg.caseId, runId: msg.runId, receiveCount, error: message }));

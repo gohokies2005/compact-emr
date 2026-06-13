@@ -63,6 +63,10 @@ export interface ExtractionResult {
   droppedUngrounded: number;
   droppedLowConfidence: number;
   droppedDuplicate: number;
+  // NO-SILENT-TRUNCATION (Ryan 2026-06-13, $500-stakes): count windows where the model hit
+  // max_tokens and its tool-array was cut off mid-stream — those windows LOST items we never saw.
+  // Surfaced loudly so a truncated extraction is visible instead of silently shipping a short chart.
+  truncatedWindows: number;
   costUsd: number;
   model: string;
 }
@@ -199,6 +203,7 @@ export function makeChartExtractor(apiKey: string): ChartExtractor {
       const windows = locateExtractionInputs(documents);
       const raw: RawExtractedItem[] = [];
       let costUsd = 0;
+      let truncatedWindows = 0;
       for (const w of windows) {
         const resp = await anthropic.messages.create({
           model: MODEL,
@@ -209,6 +214,17 @@ export function makeChartExtractor(apiKey: string): ChartExtractor {
           messages: [{ role: 'user', content: windowUserPrompt(w) }],
         });
         costUsd += resp.usage.input_tokens * INPUT_USD_PER_TOKEN + resp.usage.output_tokens * OUTPUT_USD_PER_TOKEN;
+        // The model hit the output ceiling → its items[] tool-array was cut off and we silently lost
+        // whatever came after. Count + log LOUD (per architect trap #2) so a short chart is never
+        // mistaken for a complete one. (The full-read chunker, PR-1, split-retries these.)
+        if (resp.stop_reason === 'max_tokens') {
+          truncatedWindows++;
+          console.warn(JSON.stringify({
+            event: 'chart_extract_window_truncated', category: w.category, document: w.filename,
+            outputTokens: resp.usage.output_tokens, maxTokens: MAX_TOKENS,
+            note: 'tool-array hit max_tokens — items after the cutoff were lost for this window',
+          }));
+        }
         const toolUse = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
         if (toolUse) raw.push(...coerceRawItems(toolUse.input, w));
       }
@@ -220,6 +236,7 @@ export function makeChartExtractor(apiKey: string): ChartExtractor {
         droppedUngrounded,
         droppedLowConfidence,
         droppedDuplicate,
+        truncatedWindows,
         costUsd,
         model: MODEL,
       };

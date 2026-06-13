@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { coerceRawItems, coerceRawItemsCombined, groundAndDispose, type RawExtractedItem } from '../chart-extract-llm.js';
+import { coerceRawItems, coerceRawItemsCombined, coerceScreenings, groundScreenings, groundAndDispose, type RawExtractedItem, type ScreeningResult } from '../chart-extract-llm.js';
 import type { BundleDocument, SectionWindow } from '../chart-extractor.js';
 
 const win: SectionWindow = {
@@ -59,6 +59,31 @@ describe('coerceRawItemsCombined — full-read chunk (category comes from the it
     ] }, 'd');
     expect(items[0]!.confidence).toBe(1);
     expect(items[0]!.sourcePage).toBe(2);
+  });
+  it('routes a screening to screenings, NOT to chart items (dx-rule guard)', () => {
+    const input = { items: [
+      { category: 'screening', name: 'PHQ-9', score: '18', screenDate: '2024-03-01', sourcePage: 7, sourceQuote: 'PHQ-9 score 18', confidence: 0.9 },
+      { category: 'active_problem', name: 'Tinnitus', sourcePage: 2, sourceQuote: 'Tinnitus', confidence: 0.9 },
+    ] };
+    // The chart-item coercer drops the screening; only the real problem survives as a chart item.
+    expect(coerceRawItemsCombined(input, 'd').map((i) => i.name)).toEqual(['Tinnitus']);
+    // The screening coercer captures it as a labeled data point with its score + date.
+    const screens = coerceScreenings(input, 'd');
+    expect(screens).toHaveLength(1);
+    expect(screens[0]).toMatchObject({ instrument: 'PHQ-9', score: '18', date: '2024-03-01', sourceDocumentId: 'd' });
+  });
+});
+
+describe('groundScreenings — grounded + deduped screening data points', () => {
+  const sdocs: BundleDocument[] = [{ id: 'd', filename: 'bb.pdf', pages: [{ pageNumber: 7, text: 'mental health: PHQ-9 score 18 administered 2024-03-01' }] }];
+  const base: ScreeningResult = { instrument: 'PHQ-9', score: '18', date: '2024-03-01', sourceDocumentId: 'd', sourcePage: 7, sourceQuote: 'PHQ-9 score 18', confidence: 0.9 };
+  it('keeps a grounded screening and drops an ungrounded (fabricated-quote) one', () => {
+    const r = groundScreenings(sdocs, [base, { ...base, sourceQuote: 'GAD-7 score 21 (not on this page)' }]);
+    expect(r).toHaveLength(1);
+    expect(r[0]!.instrument).toBe('PHQ-9');
+  });
+  it('dedups identical (instrument, date, score) repeats from chunk overlap', () => {
+    expect(groundScreenings(sdocs, [base, { ...base }])).toHaveLength(1);
   });
 });
 

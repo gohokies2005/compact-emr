@@ -82,6 +82,22 @@ export interface FinalExtractedItem extends RawExtractedItem {
   needsReview: boolean;
 }
 
+/**
+ * A screening-instrument data point (PHQ-9, GAD-7, PC-PTSD-5, AUDIT-C, …). Captured as labeled
+ * CONTEXT for the letter narrative — NEVER as a diagnosis or chart problem (Ryan standing rule: a
+ * screen confirms nor refutes a condition). Grounded like every other item (verbatim quote on the
+ * cited page). Full-read path only.
+ */
+export interface ScreeningResult {
+  instrument: string;   // e.g. "PHQ-9", "GAD-7", "PC-PTSD-5"
+  score: string;        // as written: "18", "2/5", "moderate"
+  date: string | null;  // screen date if stated
+  sourceDocumentId: string;
+  sourcePage: number;
+  sourceQuote: string;
+  confidence: number;
+}
+
 export interface ExtractionResult {
   items: FinalExtractedItem[];
   windowsProcessed: number;
@@ -101,6 +117,9 @@ export interface ExtractionResult {
   fullRead: boolean;
   chunksProcessed?: number;
   uncoveredPages?: number;
+  // Screening data points (PHQ-9/GAD-7/PC-PTSD/AUDIT-C) — labeled context for the letter, NEVER
+  // written as chart problems/conditions. Full-read path only (undefined on the windowed path).
+  screenings?: ScreeningResult[];
 }
 
 const EXTRACT_TOOL: Anthropic.Tool = {
@@ -217,10 +236,10 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
           properties: {
             category: {
               type: 'string',
-              enum: ['sc_condition', 'active_problem', 'active_medication'],
-              description: 'sc_condition = a VA service-connected/rated disability (granted/pending/denied); active_problem = a Problem List entry; active_medication = an Active Medications entry.',
+              enum: ['sc_condition', 'active_problem', 'active_medication', 'screening'],
+              description: 'sc_condition = a VA service-connected/rated disability (granted/pending/denied); active_problem = a Problem List entry; active_medication = an Active Medications entry; screening = a screening-instrument result (PHQ-9/GAD-7/PC-PTSD-5/AUDIT-C) — a DATA POINT, never a diagnosis.',
             },
-            name: { type: 'string', description: 'The condition / problem / medication name, as written.' },
+            name: { type: 'string', description: 'The condition/problem/medication name as written; for a screening, the instrument name (e.g. "PHQ-9").' },
             status: { type: 'string', enum: ['service_connected', 'pending', 'denied'], description: 'sc_condition only: service_connected if granted, denied if THIS condition is denied, pending if awaiting decision.' },
             ratingPct: { type: 'integer', description: 'sc_condition only: rating percentage if explicitly stated.' },
             dcCode: { type: 'string', description: 'sc_condition only: diagnostic code if explicitly stated.' },
@@ -228,6 +247,8 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
             dose: { type: 'string', description: 'active_medication only: dose/strength as written (e.g. "10 mg").' },
             frequency: { type: 'string', description: 'active_medication only: frequency/sig as written.' },
             indication: { type: 'string', description: 'active_medication only: what the medication is for, if explicitly stated.' },
+            score: { type: 'string', description: 'screening only: the score as written (e.g. "18", "2/5", "moderate").' },
+            screenDate: { type: 'string', description: 'screening only: the date the screen was administered, if stated.' },
             sourcePage: { type: 'integer', description: 'The [p.N] page number this item appears on.' },
             sourceQuote: { type: 'string', description: 'A short VERBATIM substring from that page proving the item (copy exactly).' },
             confidence: { type: 'number', description: '0..1 — how clearly this is an explicit charted item (not a prose mention).' },
@@ -268,7 +289,7 @@ function combinedSystemPrompt(): string {
     '  active_medication: "Active Medications" / "Active Outpatient Medications" / "Medications" — one row per drug (with dose/frequency/sig as written).',
     // PRECISION GUARD (Ryan standing rule: a screen is NOT a diagnosis): keep screening instruments
     // out of the problem/condition rows so a positive score never becomes a fabricated dx.
-    'SCREENS ARE NOT DIAGNOSES: PHQ-9, GAD-7, PC-PTSD-5, AUDIT-C and similar screening scores are NOT conditions. NEVER emit a screen result (e.g. "PHQ-9 = 15") as an active_problem or sc_condition. Only extract an actual charted diagnosis or a VA service-connection determination.',
+    'SCREENS ARE NOT DIAGNOSES: PHQ-9, GAD-7, PC-PTSD-5, AUDIT-C and similar screening scores are DATA POINTS, not conditions. Capture each as category "screening" with name=instrument, score, and screenDate if stated. NEVER emit a screen as an active_problem or sc_condition, and never turn a positive screen into a diagnosis — only an actual charted diagnosis or a VA service-connection determination is a condition.',
     'This chunk may contain none, some, or all three categories. Return every item you find; return an empty items array if there are none.',
   ].join('\n');
 }
@@ -305,6 +326,45 @@ export function coerceRawItemsCombined(toolInput: unknown, documentId: string): 
       sourceQuote: r.sourceQuote,
       confidence: Math.max(0, Math.min(1, r.confidence)),
     });
+  }
+  return out;
+}
+
+/** Pure: pull the screening data points (category 'screening') from a chunk's combined tool output. */
+export function coerceScreenings(toolInput: unknown, documentId: string): ScreeningResult[] {
+  const obj = toolInput as { items?: unknown };
+  if (!obj || !Array.isArray(obj.items)) return [];
+  const out: ScreeningResult[] = [];
+  for (const raw of obj.items) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    if (r.category !== 'screening') continue;
+    if (typeof r.name !== 'string' || r.name.trim().length === 0) continue;
+    if (typeof r.sourcePage !== 'number' || typeof r.sourceQuote !== 'string') continue;
+    if (typeof r.confidence !== 'number') continue;
+    out.push({
+      instrument: r.name.trim(),
+      score: typeof r.score === 'string' ? r.score : typeof r.score === 'number' ? String(r.score) : '',
+      date: typeof r.screenDate === 'string' && r.screenDate.trim().length > 0 ? r.screenDate.trim() : null,
+      sourceDocumentId: documentId,
+      sourcePage: Math.trunc(r.sourcePage),
+      sourceQuote: r.sourceQuote,
+      confidence: Math.max(0, Math.min(1, r.confidence)),
+    });
+  }
+  return out;
+}
+
+/** Pure: ground screenings (verbatim quote on the cited page) + dedup on (instrument, date, score). */
+export function groundScreenings(documents: BundleDocument[], raw: ScreeningResult[]): ScreeningResult[] {
+  const seen = new Set<string>();
+  const out: ScreeningResult[] = [];
+  for (const s of raw) {
+    if (!groundExtractedItem(documents, s)) continue;
+    const key = `${s.instrument.toLowerCase()}::${s.date ?? ''}::${s.score.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
   }
   return out;
 }
@@ -362,7 +422,7 @@ export interface ChartExtractor {
 }
 
 /** Per-LLM-call result, shared by both paths' accumulation. */
-interface CallResult { raw: RawExtractedItem[]; costUsd: number; truncated: number; }
+interface CallResult { raw: RawExtractedItem[]; screenings: ScreeningResult[]; costUsd: number; truncated: number; }
 
 function toolUseInput(resp: Anthropic.Message): unknown | null {
   const block = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
@@ -398,7 +458,7 @@ async function extractOneChunk(
       // Split-retry IN ORDER (first half then second) so accumulated raw stays deterministic.
       const a = await extractOneChunk(anthropic, { ...unit, text: halves[0] }, model, depth + 1);
       const b = await extractOneChunk(anthropic, { ...unit, text: halves[1] }, model, depth + 1);
-      return { raw: [...a.raw, ...b.raw], costUsd: costUsd + a.costUsd + b.costUsd, truncated: a.truncated + b.truncated };
+      return { raw: [...a.raw, ...b.raw], screenings: [...a.screenings, ...b.screenings], costUsd: costUsd + a.costUsd + b.costUsd, truncated: a.truncated + b.truncated };
     }
     // Single dense page (unsplittable) → re-run the SAME page at the escalated ceiling before giving
     // up. This is the page-level fallback for the buried-grant case (architect BLOCKER): a rating
@@ -416,11 +476,19 @@ async function extractOneChunk(
       note: 'chunk hit max_tokens even at the ceiling and could not be split — items after the cutoff were lost (INVESTIGATE)',
     }));
     const input = toolUseInput(resp);
-    return { raw: input ? coerceRawItemsCombined(input, unit.documentId) : [], costUsd, truncated: 1 };
+    return {
+      raw: input ? coerceRawItemsCombined(input, unit.documentId) : [],
+      screenings: input ? coerceScreenings(input, unit.documentId) : [],
+      costUsd, truncated: 1,
+    };
   }
 
   const input = toolUseInput(resp);
-  return { raw: input ? coerceRawItemsCombined(input, unit.documentId) : [], costUsd, truncated: 0 };
+  return {
+    raw: input ? coerceRawItemsCombined(input, unit.documentId) : [],
+    screenings: input ? coerceScreenings(input, unit.documentId) : [],
+    costUsd, truncated: 0,
+  };
 }
 
 /** Build the live extractor. Windowed path is per-window; full-read path is per-chunk + combined. */
@@ -457,33 +525,43 @@ export function makeChartExtractor(apiKey: string): ChartExtractor {
     return { items, windowsProcessed: windows.length, rawCount: raw.length, droppedUngrounded, droppedLowConfidence, droppedDuplicate, truncatedWindows, costUsd, model: MODEL, fullRead: false };
   }
 
-  async function extractFullRead(documents: BundleDocument[]): Promise<ExtractionResult> {
-    const chunks = chunkDocuments(documents);
-    const gaps = uncoveredPages(documents, chunks);
-    // Bounded-concurrency batches; results placed back by index so raw stays in chunkIndex order
-    // (deterministic dedup survivor — architect trap #1 — without sorting the windowed path).
-    const results: CallResult[] = new Array(chunks.length);
-    for (let start = 0; start < chunks.length; start += CHUNK_CONCURRENCY) {
-      const batch = chunks.slice(start, start + CHUNK_CONCURRENCY);
-      const settled = await Promise.all(batch.map((c) => extractOneChunk(anthropic, c, FULLREAD_MODEL, 0)));
-      settled.forEach((r, k) => { results[start + k] = r; });
-    }
-    const raw = results.flatMap((r) => r.raw);
-    const costUsd = results.reduce((s, r) => s + r.costUsd, 0);
-    const truncatedWindows = results.reduce((s, r) => s + r.truncated, 0);
-    if (gaps.length > 0) {
-      console.warn(JSON.stringify({ event: 'chart_extract_coverage_gap', uncoveredPages: gaps.length, sample: gaps.slice(0, 5) }));
-    }
-    const { items, droppedUngrounded, droppedLowConfidence, droppedDuplicate } = groundAndDispose(documents, raw, { preferMoreComplete: true });
-    return {
-      items, windowsProcessed: 0, rawCount: raw.length, droppedUngrounded, droppedLowConfidence, droppedDuplicate,
-      truncatedWindows, costUsd, model: FULLREAD_MODEL, fullRead: true, chunksProcessed: chunks.length, uncoveredPages: gaps.length,
-    };
-  }
-
   return {
     async extract(documents: BundleDocument[]): Promise<ExtractionResult> {
-      return fullReadEnabled() ? extractFullRead(documents) : extractWindowed(documents);
+      return fullReadEnabled() ? extractFullRead(anthropic, documents, FULLREAD_MODEL) : extractWindowed(documents);
     },
+  };
+}
+
+/**
+ * Full-read extraction over a document bundle, with an EXPLICIT model. Module-level + exported so the
+ * A/B smoke harness can run the same code path across Sonnet/Opus/Haiku in one process. Bounded
+ * concurrency; results placed back by chunk index so raw stays in chunkIndex order (deterministic
+ * dedup survivor — architect trap #1 — without touching the windowed path).
+ */
+export async function extractFullRead(
+  anthropic: Anthropic,
+  documents: BundleDocument[],
+  model: string = FULLREAD_MODEL,
+): Promise<ExtractionResult> {
+  const chunks = chunkDocuments(documents);
+  const gaps = uncoveredPages(documents, chunks);
+  const results: CallResult[] = new Array(chunks.length);
+  for (let start = 0; start < chunks.length; start += CHUNK_CONCURRENCY) {
+    const batch = chunks.slice(start, start + CHUNK_CONCURRENCY);
+    const settled = await Promise.all(batch.map((c) => extractOneChunk(anthropic, c, model, 0)));
+    settled.forEach((r, k) => { results[start + k] = r; });
+  }
+  const raw = results.flatMap((r) => r.raw);
+  const rawScreenings = results.flatMap((r) => r.screenings);
+  const costUsd = results.reduce((s, r) => s + r.costUsd, 0);
+  const truncatedWindows = results.reduce((s, r) => s + r.truncated, 0);
+  if (gaps.length > 0) {
+    console.warn(JSON.stringify({ event: 'chart_extract_coverage_gap', uncoveredPages: gaps.length, sample: gaps.slice(0, 5) }));
+  }
+  const { items, droppedUngrounded, droppedLowConfidence, droppedDuplicate } = groundAndDispose(documents, raw, { preferMoreComplete: true });
+  const screenings = groundScreenings(documents, rawScreenings);
+  return {
+    items, windowsProcessed: 0, rawCount: raw.length, droppedUngrounded, droppedLowConfidence, droppedDuplicate,
+    truncatedWindows, costUsd, model, fullRead: true, chunksProcessed: chunks.length, uncoveredPages: gaps.length, screenings,
   };
 }

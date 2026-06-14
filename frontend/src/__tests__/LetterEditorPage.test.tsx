@@ -4,12 +4,12 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LetterEditorPage } from '../routes/cases/LetterEditorPage';
-import { applySurgicalAi, approveLetter, declineLetter, getLetter, previewSurgicalAi, saveLetter } from '../api/letter';
+import { applySurgicalAi, approveLetter, declineLetter, finalizeImportLetter, getLetter, previewSurgicalAi, saveLetter } from '../api/letter';
 import { getCase, signOffCase } from '../api/cases';
 import { ConflictError, ServiceUnavailableError } from '../api/client';
 
 vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { readonly children: ReactNode }) => <div>{children}</div> }));
-vi.mock('../api/letter', () => ({ getLetter: vi.fn(), saveLetter: vi.fn(), previewSurgicalAi: vi.fn(), applySurgicalAi: vi.fn(), approveLetter: vi.fn(), declineLetter: vi.fn() }));
+vi.mock('../api/letter', () => ({ getLetter: vi.fn(), saveLetter: vi.fn(), previewSurgicalAi: vi.fn(), applySurgicalAi: vi.fn(), approveLetter: vi.fn(), declineLetter: vi.fn(), finalizeImportLetter: vi.fn() }));
 // signOffCase is exercised by the SignOffPopup the Approve button now opens (architect fix 2026-06-08).
 vi.mock('../api/cases', () => ({ getCase: vi.fn(), signOffCase: vi.fn() }));
 
@@ -20,6 +20,7 @@ const previewMock = vi.mocked(previewSurgicalAi);
 const applyMock = vi.mocked(applySurgicalAi);
 const approveMock = vi.mocked(approveLetter);
 const declineMock = vi.mocked(declineLetter);
+const finalizeImportMock = vi.mocked(finalizeImportLetter);
 const signOffMock = vi.mocked(signOffCase);
 
 // findByText under the FULL suite's parallel load can exceed the 1000ms default poll window
@@ -35,6 +36,8 @@ const opsLetter = {
   role: 'ops_staff' as const,
 };
 const physicianLetter = { ...opsLetter, role: 'physician' as const };
+// An imported letter (current revision source='external_import') is finalized AS-IS, never approved.
+const importedPhysicianLetter = { ...opsLetter, role: 'physician' as const, source: 'external_import' as const };
 // The opaque structured proposal the proposer returns + we echo back to apply.
 const PROPOSAL = { operation: 'replace' as const, anchor_text: 'lumbosacral strain', new_text: 'lumbosacral strain (DC 5237)' };
 
@@ -59,6 +62,7 @@ beforeEach(() => {
   applyMock.mockResolvedValue({ data: { version: 6, txt: 'Applied limited edit.', warnings: [] } });
   approveMock.mockResolvedValue({ data: { version: 5, status: 'delivered', finalPdfKey: 'drafter-artifacts/CASE-1/v5/letter.pdf' } });
   declineMock.mockResolvedValue({ data: { status: 'correction_requested' } });
+  finalizeImportMock.mockResolvedValue({ data: { version: 4, status: 'delivered', signOffId: 'SO-IMP', finalPdfKey: 'drafter-artifacts/CASE-1/v4/imported-letter.pdf', source: 'external_import' } });
   signOffMock.mockResolvedValue({ data: { id: 'SO-1', caseId: 'CASE-1' } as unknown as Awaited<ReturnType<typeof signOffCase>>['data'] });
 });
 
@@ -150,6 +154,32 @@ describe('LetterEditorPage', () => {
     await completeSignOff();
     await waitFor(() => { expect(signOffMock).toHaveBeenCalledWith('CASE-1', expect.objectContaining({ answers: expect.objectContaining({ records_reviewed: true }) })); });
     await waitFor(() => { expect(approveMock).toHaveBeenCalledWith('CASE-1'); });
+  });
+
+  // ── Imported letter: finalize AS-IS (no re-render) — import deliver-as-is, 2026-06-14 ──────────
+  it('imported letter shows "Finalize for delivery (as-is, no re-render)" instead of Approve', async () => {
+    getLetterMock.mockResolvedValueOnce({ data: importedPhysicianLetter });
+    renderPage();
+    await screen.findByText('AI surgical edit');
+    expect(screen.getByRole('button', { name: 'Finalize for delivery (as-is, no re-render)' })).toBeInTheDocument();
+    // The normal Approve (which re-renders) must NOT be offered for an imported letter.
+    expect(screen.queryByRole('button', { name: 'Approve letter' })).not.toBeInTheDocument();
+  });
+
+  it('finalize-as-is opens the sign-off popup and calls finalizeImportLetter (never approveLetter)', async () => {
+    getLetterMock.mockResolvedValueOnce({ data: importedPhysicianLetter });
+    renderPage();
+    await screen.findByText('AI surgical edit');
+    fireEvent.click(screen.getByRole('button', { name: 'Finalize for delivery (as-is, no re-render)' }));
+    // The popup reads as a finalize step (custom title + submit label).
+    expect(await screen.findByText('Finalize imported letter', undefined, FIND)).toBeInTheDocument();
+    const yesButtons = await screen.findAllByRole('button', { name: 'Yes' }, FIND);
+    for (const btn of yesButtons) fireEvent.click(btn);
+    fireEvent.click(screen.getByRole('button', { name: 'Finalize for delivery' }));
+    await waitFor(() => { expect(finalizeImportMock).toHaveBeenCalledWith('CASE-1', expect.objectContaining({ answers: expect.objectContaining({ records_reviewed: true }) })); });
+    // The imported PDF is delivered as-is — the re-rendering approve path must never fire.
+    expect(approveMock).not.toHaveBeenCalled();
+    expect(signOffMock).not.toHaveBeenCalled(); // finalize binds its OWN sign-off (to the PDF), not POST /sign-off
   });
 
   it('approve onError splits by reason: 409 sign_off_required → actionable copy', async () => {

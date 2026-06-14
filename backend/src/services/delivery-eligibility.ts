@@ -1,6 +1,6 @@
 import { type S3Client } from '@aws-sdk/client-s3';
 import { isSignOffAffirmative } from './sign-off-validation.js';
-import { resolveCurrentTxtWithHash } from './letter-current.js';
+import { resolveCurrentTxtWithHash, resolveCurrentRevisionMeta, readPdfBytesWithHash } from './letter-current.js';
 import type { AppDb } from './db-types.js';
 
 /**
@@ -27,6 +27,9 @@ import type { AppDb } from './db-types.js';
  *      deterministic source of truth the sign-off bound to) and compare to the sign-off's
  *      signedContentSha256. A mismatch = the letter changed after sign-off = ineligible
  *      ('signed_bytes_changed'). This is a verbatim port of the working gate at delivery.ts:216-236.
+ *      EXCEPTION (import deliver-as-is, 2026-06-14): when the current LetterRevision is an
+ *      externally-imported letter (source='external_import'), the bound bytes are the imported PDF —
+ *      there is no real TXT — so the gate re-hashes the PDF artifact instead.
  *
  * FAIL-OPEN is allowed ONLY where delivery.ts already fails open — and ONLY for the byte step:
  *   - no bound signedContentSha256 on the latest sign-off (a legacy sign-off predating byte-binding), or
@@ -80,6 +83,31 @@ export async function assertDeliveryEligible(
   if (!hasBoundHash || deps.s3 === undefined || deps.bucketName === undefined) {
     return { eligible: true, details: { caseId, signedVersion: latest.signedVersion, byteCheckSkipped: true } };
   }
+
+  // IMPORTED LETTERS (import deliver-as-is, 2026-06-14): an externally-imported letter
+  // (LetterRevision source='external_import') has no real TXT — only a placeholder sidecar — and its
+  // canonical content is the PDF. /letter/finalize-import binds the sign-off to sha256(PDF bytes), so
+  // here we MUST re-hash the same PDF (NOT the placeholder TXT, whose hash never moves and would
+  // always "match", defeating the gate). Everything else (exists + affirmative + positive-mismatch
+  // 409, fail-open only on an unresolvable artifact) is identical to the TXT path.
+  const meta = await resolveCurrentRevisionMeta(db, caseId, currentVersion);
+  if (meta !== null && meta.source === 'external_import') {
+    if (meta.pdfKey === null) {
+      // No PDF key to compare against → nothing to re-hash; fail-open on the byte step only (matches
+      // the unresolvable-TXT case below — a POSITIVE mismatch is the only thing that blocks).
+      return { eligible: true, details: { caseId, signedVersion: latest.signedVersion, currentVersion: meta.version, byteCheckSkipped: true } };
+    }
+    const pdf = await readPdfBytesWithHash(deps.s3, deps.bucketName, meta.pdfKey, { caseId, version: meta.version });
+    if (pdf.sha256 !== latest.signedContentSha256) {
+      return {
+        eligible: false,
+        reason: 'signed_bytes_changed',
+        details: { caseId, signedVersion: latest.signedVersion, currentVersion: meta.version },
+      };
+    }
+    return { eligible: true, details: { caseId, signedVersion: latest.signedVersion, currentVersion: meta.version } };
+  }
+
   const cur = await resolveCurrentTxtWithHash(db, deps.s3, deps.bucketName, caseId, currentVersion);
   // A null current TXT (no resolvable letter) leaves nothing to compare; treat as fail-open on the
   // byte step (the exists + affirmative gates already passed) — matches delivery.ts, which 409s only

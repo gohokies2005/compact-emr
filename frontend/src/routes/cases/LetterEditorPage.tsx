@@ -16,12 +16,14 @@ import {
   applySurgicalAi,
   approveLetter,
   declineLetter,
+  finalizeImportLetter,
   getLetter,
   previewSurgicalAi,
   saveLetter,
   type LetterWarning,
   type SurgicalProposal,
 } from '../../api/letter';
+import type { SignOffAnswers } from '../../api/cases';
 
 // Turns an approve failure into an actionable physician-facing message. The render Lambda being
 // unconfigured surfaces as a 503 (ServiceUnavailableError); the approve gates are 409s carrying a
@@ -92,6 +94,10 @@ export function LetterEditorPage() {
   const role = letter?.role;
   const canOpsEdit = role === 'ops_staff' || role === 'admin';
   const canPhysicianAct = role === 'physician' || role === 'admin';
+  // Imported letter (import deliver-as-is, 2026-06-14): the current revision is an operator-imported
+  // finished PDF. It must be FINALIZED AS-IS (no re-render) — the normal Approve re-renders from the
+  // TXT and would mangle the imported PDF (and the backend now 409s Approve on an import).
+  const isImportedLetter = letter?.source === 'external_import';
   // "/cases/:id" is admin/ops-only (App.tsx) — a physician landing there hits the role guard → /403.
   // Route a physician back to their review page instead (same target as the physician queue's Review link).
   const backTo = role === 'physician' ? `/p/review/${encodeURIComponent(caseId)}` : `/cases/${encodeURIComponent(caseId)}`;
@@ -202,6 +208,23 @@ export function LetterEditorPage() {
     // not a lumped "sign-off + ready chart required" guess. The render Lambda being unconfigured
     // is a 503; the sign-off + chart gates are 409s whose `details.reason` (carried on
     // ConflictError.current) names the exact block. (architect diagnosis 2026-06-08)
+    onError: (error: unknown) => setMessage(describeApproveError(error)),
+  });
+
+  // Finalize an IMPORTED letter AS-IS (no re-render). The sign-off popup hands its affirmative
+  // answers here; this binds the sign-off to the PDF bytes + flips the case to 'delivered'. Mirrors
+  // approveMutation's success (back to the physician queue). (import deliver-as-is, 2026-06-14)
+  const finalizeImportMutation = useMutation({
+    mutationFn: (input: { answers: SignOffAnswers; notes?: string }) => finalizeImportLetter(caseId, input),
+    onSuccess: async () => {
+      setMessage('Imported letter finalized for delivery (PDF unchanged).');
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['case', caseId] }),
+        qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] }),
+        qc.invalidateQueries({ queryKey: ['case', caseId, 'sign-offs'] }),
+      ]);
+      navigate('/p/queue');
+    },
     onError: (error: unknown) => setMessage(describeApproveError(error)),
   });
 
@@ -317,7 +340,17 @@ export function LetterEditorPage() {
                     UI existed here.) */}
                 {canPhysicianAct ? (
                   <div className="mt-6 flex flex-col gap-2 border-t border-slate-200 pt-4">
-                    <Button type="button" variant="primary" className="w-full" loading={approveMutation.isPending} disabled={approveMutation.isPending} onClick={() => setSignOffOpen(true)}>Approve letter</Button>
+                    {isImportedLetter ? (
+                      <>
+                        {/* Imported letter: finalize the EXACT PDF as-is (no re-render). The normal
+                            Approve re-renders from the TXT and would mangle the imported PDF — the
+                            backend 409s it for an import. (import deliver-as-is, 2026-06-14) */}
+                        <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800">This letter was imported as a finished PDF. Finalizing delivers the exact PDF unchanged — it is not re-rendered.</div>
+                        <Button type="button" variant="primary" className="w-full" loading={finalizeImportMutation.isPending} disabled={finalizeImportMutation.isPending} onClick={() => setSignOffOpen(true)}>Finalize for delivery (as-is, no re-render)</Button>
+                      </>
+                    ) : (
+                      <Button type="button" variant="primary" className="w-full" loading={approveMutation.isPending} disabled={approveMutation.isPending} onClick={() => setSignOffOpen(true)}>Approve letter</Button>
+                    )}
                     <Button type="button" variant="secondary" className="w-full" onClick={() => setDeclineOpen(true)}>Decline and send back to RN</Button>
                   </div>
                 ) : null}
@@ -330,17 +363,31 @@ export function LetterEditorPage() {
             the approve mutation (finalize → 'delivered' → back to the queue). Same wiring as
             PhysicianReviewPage. */}
         {canPhysicianAct ? (
-          <SignOffPopup
-            caseId={caseId}
-            open={signOffOpen}
-            onClose={() => setSignOffOpen(false)}
-            onSignedOff={async () => {
-              // Chain finalize after the sign-off is recorded. approveMutation.onError already sets
-              // an actionable message (e.g. chart not ready); swallow the rejection here so the
-              // popup's onSuccess doesn't surface a duplicate/unhandled error.
-              try { await approveMutation.mutateAsync(); } catch { /* handled by approveMutation.onError */ }
-            }}
-          />
+          isImportedLetter ? (
+            // Imported letter: the popup's affirmative answers go STRAIGHT to finalize-import (which
+            // records its own PDF-bound sign-off + delivers as-is). No separate POST /sign-off — that
+            // would bind to the placeholder TXT the delivery gate can never match. (2026-06-14)
+            <SignOffPopup
+              caseId={caseId}
+              open={signOffOpen}
+              onClose={() => setSignOffOpen(false)}
+              title="Finalize imported letter"
+              submitLabel="Finalize for delivery"
+              onSubmitAnswers={(input) => finalizeImportMutation.mutateAsync(input)}
+            />
+          ) : (
+            <SignOffPopup
+              caseId={caseId}
+              open={signOffOpen}
+              onClose={() => setSignOffOpen(false)}
+              onSignedOff={async () => {
+                // Chain finalize after the sign-off is recorded. approveMutation.onError already sets
+                // an actionable message (e.g. chart not ready); swallow the rejection here so the
+                // popup's onSuccess doesn't surface a duplicate/unhandled error.
+                try { await approveMutation.mutateAsync(); } catch { /* handled by approveMutation.onError */ }
+              }}
+            />
+          )
         ) : null}
 
         {declineOpen ? (

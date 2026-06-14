@@ -1,4 +1,5 @@
 import { apiGet, apiPost, apiPut } from './client';
+import type { SignOffAnswers } from './cases';
 
 // Mirrors the backend contract (routes/letter.ts). The TXT is the single source of truth;
 // surgical-AI returns an OPAQUE structured `proposal` (echo it back to apply) plus a `preview`
@@ -28,6 +29,10 @@ export interface LetterPayload {
   readonly locked_ranges: readonly LetterLockedRange[];
   readonly rendered: LetterRenderedUrls;
   readonly role: LetterRole;
+  // The CURRENT LetterRevision's source (import deliver-as-is, 2026-06-14). 'external_import' means an
+  // operator-imported finished PDF: it must be FINALIZED AS-IS (no re-render), never re-rendered by
+  // the normal Approve. null on a plain DraftJob / older API responses (normal rendered lifecycle).
+  readonly source?: string | null;
 }
 
 export interface LetterSaveResult {
@@ -139,6 +144,23 @@ export function applySurgicalAi(caseId: string, proposal: SurgicalProposal): Pro
 
 export function approveLetter(caseId: string): Promise<{ data: LetterApproveResult }> {
   return apiPost<{ data: LetterApproveResult }, Record<string, never>>(caseLetterPath(caseId, '/approve'), {});
+}
+
+// ── Finalize an IMPORTED letter for delivery AS-IS (import deliver-as-is, 2026-06-14) ──
+// For a current revision whose source is 'external_import'. Records the physician sign-off bound to
+// the EXACT imported PDF bytes + flips the case to 'delivered' WITHOUT re-rendering — the imported
+// PDF is the final artifact. Distinct from approveLetter (which re-renders from the TXT and would
+// mangle the imported PDF). Same affirmative-answers contract as the sign-off popup.
+export interface LetterFinalizeImportResult {
+  readonly version: number;
+  readonly status: string;
+  readonly signOffId: string;
+  readonly finalPdfKey: string;
+  readonly source: 'external_import';
+}
+
+export function finalizeImportLetter(caseId: string, input: { answers: SignOffAnswers; notes?: string }): Promise<{ data: LetterFinalizeImportResult }> {
+  return apiPost<{ data: LetterFinalizeImportResult }, typeof input>(caseLetterPath(caseId, '/finalize-import'), input);
 }
 
 export function declineLetter(caseId: string, input: { reason: string }): Promise<{ data: { status: string } }> {

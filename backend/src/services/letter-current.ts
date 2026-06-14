@@ -92,3 +92,69 @@ export async function resolveCurrentTxtWithHash(
   const txt = await readTxtFromS3(s3, bucketName, ref.txtKey, { caseId, version: ref.version });
   return { version: ref.version, txt, sha256: sha256OfText(txt) };
 }
+
+/**
+ * Current-revision metadata (import deliver-as-is, 2026-06-14). The TXT-binding above is the source
+ * of truth for the NORMAL letter lifecycle, but an externally-imported letter (LetterRevision
+ * source='external_import') has no real TXT — only a placeholder sidecar — and its canonical content
+ * is the PDF artifact. The finalize-as-is path + the delivery-eligibility gate need to know the
+ * source + the PDF key of the CURRENT version so they can byte-bind to the imported PDF instead of
+ * the placeholder TXT. Resolves the LetterRevision row only (a plain DraftJob has no `source`).
+ */
+export interface CurrentRevisionMeta {
+  readonly id: string;
+  readonly version: number;
+  readonly source: string;
+  readonly pdfKey: string | null;
+}
+
+export async function resolveCurrentRevisionMeta(db: AppDb, caseId: string, currentVersion: number): Promise<CurrentRevisionMeta | null> {
+  if (!Number.isInteger(currentVersion) || currentVersion < 1) return null;
+  const rev = (await db.letterRevision.findFirst({ where: { caseId, version: currentVersion } })) as
+    | { id: string; version: number; source: string; artifactPdfS3Key: string | null }
+    | null;
+  if (rev === null) return null;
+  return { id: rev.id, version: rev.version, source: rev.source, pdfKey: rev.artifactPdfS3Key };
+}
+
+/**
+ * Fetch a binary S3 object (a PDF) and return its raw bytes + sha256 (import deliver-as-is,
+ * 2026-06-14). Used to byte-bind a sign-off to the EXACT imported PDF bytes — the same role
+ * sha256OfText(TXT) plays for a rendered letter. Reuses the readTxtFromS3 NoSuchKey→404 mapping
+ * shape so a missing PDF surfaces as a structured 404, not an unhandled 500.
+ */
+export async function readPdfBytesWithHash(
+  s3: S3Client,
+  bucketName: string,
+  key: string,
+  ctx?: LetterTxtContext,
+): Promise<{ bytes: Uint8Array; sha256: string }> {
+  let obj;
+  try {
+    obj = await s3.send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
+  } catch (e: unknown) {
+    const name = e instanceof Error ? e.name : '';
+    if (name === 'NoSuchKey' || name === 'NotFound') {
+      const baseName = key.split('/').pop() ?? key;
+      console.warn(JSON.stringify({
+        msg: 'http_error',
+        source: 'letter-current.readPdfBytesWithHash',
+        status: 404,
+        code: 'not_found',
+        reason: 'letter_artifact_missing',
+        ...(ctx !== undefined ? { caseId: ctx.caseId, version: ctx.version } : {}),
+        s3KeyBasename: baseName,
+      }));
+      throw new HttpError(
+        404,
+        'not_found',
+        `Imported letter PDF missing from storage for v${ctx?.version ?? '?'} — re-import the finished PDF.`,
+        { ...(ctx !== undefined ? { caseId: ctx.caseId, version: ctx.version } : {}), s3Key: baseName, reason: 'letter_artifact_missing' },
+      );
+    }
+    throw e;
+  }
+  if (obj.Body === undefined) throw new HttpError(502, 'internal_error', 'Imported letter PDF object had no body.', { reason: 'read_failed', key });
+  const bytes = await obj.Body.transformToByteArray();
+  return { bytes, sha256: createHash('sha256').update(bytes).digest('hex') };
+}

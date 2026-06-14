@@ -16,7 +16,9 @@ import { holdingChanged } from '../services/letter-opinion-excerpt.js';
 import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from '../services/case-status-transitions.js';
 import { resolveRateCents } from '../services/pay-earnings.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
-import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext } from '../services/letter-current.js';
+import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash } from '../services/letter-current.js';
+import { parseSignOffCreate } from '../services/sign-off-validation.js';
+import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
 import {
   parseCredentialBlock,
   substituteSignerSentinels,
@@ -215,6 +217,12 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         ? await getSignedUrl(client, new GetObjectCommand({ Bucket: bucketName, Key: cur.docxKey }), { expiresIn: PRESIGN_TTL_SECONDS })
         : null;
 
+      // source drives the editor's finalize affordance (import deliver-as-is, 2026-06-14): an
+      // 'external_import' current revision shows "Finalize for delivery (as-is)" (no re-render),
+      // never the normal Approve (which re-renders). Resolved from the LetterRevision row only — a
+      // plain DraftJob has no source (null → the normal rendered-letter lifecycle).
+      const meta = await resolveCurrentRevisionMeta(db, caseId, c.currentVersion);
+
       res.json({
         data: {
           version: cur.version,
@@ -222,6 +230,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           locked_ranges: computeLockedRanges(txt),
           rendered: { pdfUrl, docxUrl },
           role: user.role,
+          source: meta?.source ?? null,
         },
       });
     }),
@@ -527,6 +536,16 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           throw new HttpError(403, 'forbidden', 'Physician is not assigned to this case.', { caseId });
         }
       }
+      // IMPORTED-LETTER GUARD (import deliver-as-is, 2026-06-14): approve RE-RENDERS the FINAL letter
+      // from the TXT. An externally-imported letter (LetterRevision source='external_import') has only
+      // a PLACEHOLDER txt sidecar — re-rendering it would MANGLE the specially-formatted/externally-
+      // signed PDF the operator imported. Refuse here (clear 409 → the finalize-as-is action) so nobody
+      // can accidentally re-render an imported letter. This closes the placeholder-txt footgun.
+      const approveMeta = await resolveCurrentRevisionMeta(db, caseId, c.currentVersion);
+      if (approveMeta !== null && approveMeta.source === 'external_import') {
+        throw new HttpError(409, 'conflict', 'This is an imported letter — approving would re-render and mangle the original PDF. Use "Finalize for delivery (as-is)" instead to deliver the imported PDF unchanged.', { reason: 'imported_letter_use_finalize_as_is', caseId, version: approveMeta.version });
+      }
+
       // Chart-readiness gate (unbypassable — mirrors sign-offs.ts).
       const readiness = evaluateChartReadiness(await db.fileReadStatus.findMany({ where: { caseId } }));
       if (!readiness.ready) throw new HttpError(409, 'chart_not_ready', 'Approve blocked: chart-readiness gate failed.', { caseId, blockingFiles: readiness.blockingFiles });
@@ -635,6 +654,104 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         throw e;
       }
       res.json({ data: { version: newVersion, status: 'delivered', finalPdfKey: keys.pdfKey } });
+    }),
+  );
+
+  // ── POST finalize-import — finalize an IMPORTED letter for delivery WITHOUT re-rendering ──
+  // (import deliver-as-is, 2026-06-14). The normal /approve re-renders the FINAL letter from the TXT;
+  // an externally-imported letter (LetterRevision source='external_import') has only a placeholder
+  // txt, so re-rendering would mangle the specially-formatted/externally-signed PDF. This sibling
+  // route binds a physician sign-off to the EXACT imported PDF bytes (sha256) and flips the case to
+  // 'delivered' in one transaction — the imported PDF IS the final artifact, no new revision created.
+  //
+  // The same physician/admin role + assignment + chart-readiness + affirmative-sign-off gates the
+  // normal approve enforces apply here. The sign-off is CREATED here (not pre-recorded) so its
+  // signedContentSha256 binds to the PDF — the placeholder-txt sign-off the normal route produces
+  // would bind to a hash the delivery gate's PDF re-hash could never match. The delivery-eligibility
+  // gate (extended for external_import) then re-hashes that same PDF at egress, so the $500 Stripe
+  // path delivers the imported PDF only when a sign-off is bound to those exact bytes.
+  router.post(
+    '/cases/:id/letter/finalize-import',
+    requireRole(['admin', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      // Parse + affirmativeness-gate the sign-off answers (same contract + predicate as POST /sign-off).
+      const parsed = parseSignOffCreate(req.body);
+      if (!isSignOffAffirmative(parsed.answers)) {
+        throw new HttpError(409, 'conflict', 'Sign-off requires every item to be "Yes". Resolve the flagged item, or send the case back to the RN instead.', { reason: 'sign_off_not_affirmative', caseId });
+      }
+
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      if (user.role === 'physician') {
+        const physician = await resolveCurrentPhysician(db, user.sub);
+        if (physician === null || c.assignedPhysicianId !== physician.id) {
+          throw new HttpError(403, 'forbidden', 'Physician is not assigned to this case.', { caseId });
+        }
+      }
+
+      // This route is ONLY for imported letters — a rendered letter must go through /approve.
+      const meta = await resolveCurrentRevisionMeta(db, caseId, c.currentVersion);
+      if (meta === null) throw new HttpError(409, 'conflict', 'No current letter to finalize.', { reason: 'no_letter', caseId });
+      if (meta.source !== 'external_import') {
+        throw new HttpError(409, 'conflict', 'This is not an imported letter. Use "Approve letter" to finalize a rendered letter.', { reason: 'not_an_imported_letter', caseId, version: meta.version });
+      }
+      if (meta.pdfKey === null) {
+        throw new HttpError(409, 'conflict', 'The imported letter has no PDF artifact to deliver. Re-import the finished PDF.', { reason: 'imported_pdf_missing', caseId, version: meta.version });
+      }
+
+      // Chart-readiness gate (unbypassable — mirrors /approve + sign-offs.ts).
+      const readiness = evaluateChartReadiness(await db.fileReadStatus.findMany({ where: { caseId } }));
+      if (!readiness.ready) throw new HttpError(409, 'chart_not_ready', 'Finalize blocked: chart-readiness gate failed.', { caseId, blockingFiles: readiness.blockingFiles });
+
+      // Status transition must be legal + role-permitted (same target as /approve: -> delivered).
+      if (!isValidCaseStatusTransition(c.status, 'delivered') || !canRolePerformCaseStatusTransition(user.role, c.status, 'delivered')) {
+        throw new HttpError(409, 'conflict', `Cannot finalize from status '${c.status}'.`, { reason: 'bad_transition', caseId, status: c.status });
+      }
+
+      // The signing physician is whoever is ASSIGNED (never the clicker — an admin may finalize on the
+      // physician's behalf). Mirrors /approve's D2 attribution.
+      if (c.assignedPhysicianId === null) {
+        throw new HttpError(409, 'conflict', 'Cannot finalize: no physician is assigned to this case. Assign a signing physician, then finalize.', { reason: 'no_assigned_physician', caseId });
+      }
+
+      const bucketName = bucket();
+      if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
+
+      // BYTE-BINDING: hash the EXACT imported PDF bytes. The sign-off binds to THIS hash; the
+      // delivery-eligibility gate re-hashes the same PDF at egress (no re-render anywhere).
+      const pdf = await readPdfBytesWithHash(s3(), bucketName, meta.pdfKey, { caseId, version: meta.version });
+
+      let signOffId: string;
+      try {
+        signOffId = await db.$transaction(async (tx) => {
+          const row = await tx.signOff.create({
+            data: {
+              caseId,
+              physicianId: c.assignedPhysicianId as string,
+              answersJson: parsed.answers,
+              notes: parsed.notes,
+              signedVersion: meta.version,
+              signedContentSha256: pdf.sha256,
+            },
+          });
+          // No new LetterRevision — the imported PDF IS the final artifact. Set the same delivery-ready
+          // state /approve sets (status -> delivered + the doctor-pay stamps on the CURRENT imported
+          // revision). currentVersion does NOT advance (the imported revision is already current).
+          await tx.case.update({ where: { id: caseId }, data: { status: 'delivered', version: { increment: 1 } } });
+          await tx.letterRevision.update({
+            where: { id: meta.id },
+            data: { letterType: 'nexus_letter', signingPhysicianId: c.assignedPhysicianId, payCents: resolveRateCents('nexus_letter') },
+          });
+          await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_finalized_import', caseId, veteranId: c.veteranId, detailsJson: { version: meta.version, signOffId: row.id, signingPhysicianId: c.assignedPhysicianId, pdfS3Key: meta.pdfKey, signedContentSha256: pdf.sha256 } } });
+          return row.id;
+        });
+      } catch (e: unknown) {
+        if ((e as { code?: string }).code === 'P2002') throw new HttpError(409, 'conflict', 'Another change advanced the case; reload and re-finalize.', { reason: 'concurrent_save', caseId });
+        throw e;
+      }
+      res.json({ data: { version: meta.version, status: 'delivered', signOffId, finalPdfKey: meta.pdfKey, source: 'external_import' } });
     }),
   );
 

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import express from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -73,7 +74,7 @@ function currentRevision(version = 1): LetterRevisionRecord {
 
 function makeDb(
   initialCase: CaseRecord = baseCase(),
-  opts: { signOffs?: unknown[]; signer?: PhysicianRecord; self?: PhysicianRecord; roster?: PhysicianRecord[] } = {},
+  opts: { signOffs?: unknown[]; signer?: PhysicianRecord; self?: PhysicianRecord; roster?: PhysicianRecord[]; currentRevisionOverride?: Partial<LetterRevisionRecord> } = {},
 ) {
   const signOffs = opts.signOffs ?? [{
     id: 'SO-1', createdAt: new Date('2026-05-30T00:00:00.000Z'),
@@ -87,10 +88,10 @@ function makeDb(
   const tx = {
     case: { findFirst: vi.fn(async () => initialCase), findUnique: vi.fn(async () => initialCase), findMany: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn(async () => initialCase) },
     veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
-    letterRevision: { findFirst: vi.fn(async () => currentRevision(initialCase.currentVersion)), findMany: vi.fn(async () => []), create: vi.fn(async () => currentRevision()) },
+    letterRevision: { findFirst: vi.fn(async () => ({ ...currentRevision(initialCase.currentVersion), ...(opts.currentRevisionOverride ?? {}) })), findMany: vi.fn(async () => []), create: vi.fn(async () => currentRevision()), update: vi.fn(async () => currentRevision()) },
     draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
     activityLog: { create: vi.fn(async () => ({})) },
-    signOff: { findMany: vi.fn(async () => signOffs), findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn() },
+    signOff: { findMany: vi.fn(async () => signOffs), findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(async (a: { data: unknown }) => ({ id: 'SO-NEW', ...(a.data as object) })) },
     fileReadStatus: { findMany: vi.fn(async () => []), findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), upsert: vi.fn() },
     physician: {
       findUnique: vi.fn(async (a: { where?: { cognitoSub?: string } }) => (a.where?.cognitoSub === self.cognitoSub ? self : null)),
@@ -498,6 +499,86 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     const d = deps({ renderLetter: vi.fn(async (i) => ({ ok: true, version: i.version - 1, keys: i.keys, sizes: { txt: 1, pdf: 1, docx: 1 } })) });
     const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
     expect(res.status).toBe(500);
+  });
+
+  // ── Imported letter: deliver-as-is (no re-render) — import deliver-as-is, 2026-06-14 ──────────
+  // An external_import current revision must be FINALIZED via /finalize-import (binds a sign-off to
+  // the imported PDF bytes, no re-render). The normal /approve REFUSES it (it would re-render from
+  // the placeholder TXT and mangle the externally-signed PDF). $500 signed-letter path → bias SAFE.
+  const IMPORT_PDF_KEY = 'drafter-artifacts/CASE-1/v1/imported-letter.pdf';
+  const IMPORT_PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0x0a, 0x42, 0x07]);
+  const AFFIRMATIVE_BODY = { answers: { records_reviewed: true, diagnosis_documented: true, nexus_supported: true, no_phi_in_letter: true, final_pdf_correct: true } };
+  function importedRevisionOverride(): Partial<LetterRevisionRecord> {
+    return { source: 'external_import', artifactPdfS3Key: IMPORT_PDF_KEY, artifactTxtS3Key: 'drafter-artifacts/CASE-1/v1/imported-letter.txt' };
+  }
+  // S3 mock that serves the imported PDF bytes (transformToByteArray) + a placeholder TXT.
+  function importDeps(over: Partial<LetterRouterDeps> = {}): LetterRouterDeps {
+    return deps({
+      s3: { send: vi.fn(async () => ({ Body: { transformToByteArray: async () => IMPORT_PDF_BYTES, transformToString: async () => '[placeholder]' } })) } as unknown as LetterRouterDeps['s3'],
+      ...over,
+    });
+  }
+
+  it('approve 409s on an external_import current revision (would re-render + mangle the imported PDF)', async () => {
+    const { db } = makeDb(baseCase(), { currentRevisionOverride: importedRevisionOverride() });
+    const res = await request(appFor(db, importDeps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('imported_letter_use_finalize_as_is');
+  });
+
+  it('finalize-import records a sign-off bound to the PDF sha256, stamps pay, and sets delivered (no new revision)', async () => {
+    const { db, tx } = makeDb(baseCase(), { currentRevisionOverride: importedRevisionOverride() });
+    const res = await request(appFor(db, importDeps())).post('/api/v1/cases/CASE-1/letter/finalize-import').send(AFFIRMATIVE_BODY);
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('delivered');
+    expect(res.body.data.source).toBe('external_import');
+    // The sign-off binds to the EXACT imported PDF bytes (sha256), NOT the placeholder TXT.
+    const expectedPdfSha = createHash('sha256').update(IMPORT_PDF_BYTES).digest('hex');
+    const soCreate = (tx.signOff.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(soCreate.data.signedContentSha256).toBe(expectedPdfSha);
+    expect(soCreate.data.physicianId).toBe('PHYS-001'); // the ASSIGNED signer, never the clicker
+    expect(soCreate.data.signedVersion).toBe(1);
+    // NO new LetterRevision created (the imported PDF IS the final artifact); the current revision is
+    // pay-stamped in place instead.
+    expect((tx.letterRevision.create as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    const revUpdate = (tx.letterRevision.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(revUpdate.data.letterType).toBe('nexus_letter');
+    expect(revUpdate.data.signingPhysicianId).toBe('PHYS-001');
+    expect(revUpdate.data.payCents).toBe(10000);
+    // Case flips to delivered; currentVersion is NOT advanced (imported revision already current).
+    const caseUpdate = (tx.case.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(caseUpdate.data.status).toBe('delivered');
+    expect(caseUpdate.data.currentVersion).toBeUndefined();
+  });
+
+  it('finalize-import 409s (sign_off_not_affirmative) on a "No" answer — never finalize against a concern', async () => {
+    const { db } = makeDb(baseCase(), { currentRevisionOverride: importedRevisionOverride() });
+    const body = { answers: { records_reviewed: true, diagnosis_documented: false, nexus_supported: true, no_phi_in_letter: true, final_pdf_correct: true } };
+    const res = await request(appFor(db, importDeps())).post('/api/v1/cases/CASE-1/letter/finalize-import').send(body);
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('sign_off_not_affirmative');
+  });
+
+  it('finalize-import 409s (not_an_imported_letter) when the current revision is a normal rendered letter', async () => {
+    const { db } = makeDb(); // default source = drafter_run
+    const res = await request(appFor(db, importDeps())).post('/api/v1/cases/CASE-1/letter/finalize-import').send(AFFIRMATIVE_BODY);
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('not_an_imported_letter');
+  });
+
+  it('finalize-import 403s for an unassigned physician (role + assignment gate, mirrors approve)', async () => {
+    mockUser = { sub: 'OTHER-SUB', roles: ['physician'] };
+    // self resolves to a physician whose id (PHYS-002) != the case's assignedPhysicianId (PHYS-001).
+    const { db } = makeDb(baseCase(), { currentRevisionOverride: importedRevisionOverride(), self: janePhysician() });
+    const res = await request(appFor(db, importDeps())).post('/api/v1/cases/CASE-1/letter/finalize-import').send(AFFIRMATIVE_BODY);
+    expect(res.status).toBe(403);
+  });
+
+  it('finalize-import 403s for an RN (ops_staff) — only physician/admin can finalize', async () => {
+    mockUser = { sub: 'RN-SUB', roles: ['ops_staff'] };
+    const { db } = makeDb(baseCase(), { currentRevisionOverride: importedRevisionOverride() });
+    const res = await request(appFor(db, importDeps())).post('/api/v1/cases/CASE-1/letter/finalize-import').send(AFFIRMATIVE_BODY);
+    expect(res.status).toBe(403);
   });
 
   it('decline sets correction_requested + records the reason', async () => {

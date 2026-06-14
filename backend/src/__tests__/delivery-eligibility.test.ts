@@ -101,3 +101,79 @@ describe('assertDeliveryEligible (correction-round SSOT)', () => {
     expect(r.eligible).toBe(true);
   });
 });
+
+// ── Imported letters (import deliver-as-is, 2026-06-14) ──────────────────────────────────────────
+// An external_import current revision has no real TXT; the gate must re-hash the PDF artifact and
+// compare to the sign-off's PDF-bound hash. These pin: eligible (PDF matches), bytes-changed (PDF
+// changed after sign-off → block), and the affirmative + exists gates still apply.
+import { createHash } from 'node:crypto';
+
+const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0x0a, 0x99, 0x01]); // "%PDF-1.7\n.."
+const PDF_SHA = createHash('sha256').update(PDF_BYTES).digest('hex');
+const PDF_KEY = 'drafter-artifacts/C1/v7/imported-letter.pdf';
+
+function fakeS3Pdf(bytes: Uint8Array) {
+  return {
+    send: vi.fn(async () => ({ Body: { transformToByteArray: async () => bytes, transformToString: async () => '[placeholder]' } })),
+  } as unknown as import('@aws-sdk/client-s3').S3Client;
+}
+
+function makeImportDb(signOffs: SignOffRow[], opts: { pdfKey?: string | null; source?: string } = {}): AppDb {
+  const pdfKey = opts.pdfKey === undefined ? PDF_KEY : opts.pdfKey;
+  const source = opts.source ?? 'external_import';
+  return {
+    signOff: { findMany: vi.fn(async () => signOffs.map((s, i) => ({ id: `S${i}`, ...s }))) },
+    // resolveCurrentRevisionMeta reads source + artifactPdfS3Key; resolveCurrentTxtKey (TXT path) is
+    // NOT reached for an external_import row.
+    letterRevision: { findFirst: vi.fn(async () => ({ id: 'REV7', version: 7, source, artifactPdfS3Key: pdfKey, artifactTxtS3Key: 'drafter-artifacts/C1/v7/imported-letter.txt' })) },
+    draftJob: { findFirst: vi.fn(async () => null) },
+  } as unknown as AppDb;
+}
+
+describe('assertDeliveryEligible — imported letters (PDF byte-binding)', () => {
+  it('ELIGIBLE: external_import whose sign-off hash matches the imported PDF bytes', async () => {
+    const db = makeImportDb([{ answersJson: AFFIRMATIVE, signedVersion: 7, signedContentSha256: PDF_SHA }]);
+    const r = await assertDeliveryEligible(db, 'C1', 7, { s3: fakeS3Pdf(PDF_BYTES), bucketName: 'phi-bucket' });
+    expect(r.eligible).toBe(true);
+    expect(r.reason).toBeUndefined();
+    expect(r.details?.currentVersion).toBe(7);
+  });
+
+  it('BYTES_CHANGED: the imported PDF changed after sign-off → block (false ALLOW would ship the wrong PDF)', async () => {
+    const db = makeImportDb([{ answersJson: AFFIRMATIVE, signedVersion: 7, signedContentSha256: 'old_pdf_hash_deadbeef' }]);
+    const r = await assertDeliveryEligible(db, 'C1', 7, { s3: fakeS3Pdf(PDF_BYTES), bucketName: 'phi-bucket' });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('signed_bytes_changed');
+  });
+
+  it('binds to the PDF, NOT the placeholder TXT: a TXT-hash sign-off does NOT match the PDF re-hash', async () => {
+    // A sign-off bound to the placeholder TXT (the wrong source) must be rejected — the PDF is what
+    // ships. We bind to the TXT sha and confirm the PDF re-hash blocks it.
+    const placeholderTxtSha = sha256OfText('[placeholder]');
+    const db = makeImportDb([{ answersJson: AFFIRMATIVE, signedVersion: 7, signedContentSha256: placeholderTxtSha }]);
+    const r = await assertDeliveryEligible(db, 'C1', 7, { s3: fakeS3Pdf(PDF_BYTES), bucketName: 'phi-bucket' });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('signed_bytes_changed');
+  });
+
+  it('NO_SIGNOFF still blocks an imported letter (exists gate runs before the PDF re-hash)', async () => {
+    const db = makeImportDb([]);
+    const r = await assertDeliveryEligible(db, 'C1', 7, { s3: fakeS3Pdf(PDF_BYTES), bucketName: 'phi-bucket' });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('no_signoff');
+  });
+
+  it('NOT_AFFIRMATIVE still blocks an imported letter (affirmative gate runs before the PDF re-hash)', async () => {
+    const db = makeImportDb([{ answersJson: NON_AFFIRMATIVE, signedVersion: 7, signedContentSha256: PDF_SHA }]);
+    const r = await assertDeliveryEligible(db, 'C1', 7, { s3: fakeS3Pdf(PDF_BYTES), bucketName: 'phi-bucket' });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('signoff_not_affirmative');
+  });
+
+  it('FAIL-OPEN (import with no PDF key): nothing to re-hash → byte step skipped, exists+affirmative already passed', async () => {
+    const db = makeImportDb([{ answersJson: AFFIRMATIVE, signedVersion: 7, signedContentSha256: PDF_SHA }], { pdfKey: null });
+    const r = await assertDeliveryEligible(db, 'C1', 7, { s3: fakeS3Pdf(PDF_BYTES), bucketName: 'phi-bucket' });
+    expect(r.eligible).toBe(true);
+    expect(r.details?.byteCheckSkipped).toBe(true);
+  });
+});

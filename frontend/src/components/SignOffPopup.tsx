@@ -18,6 +18,14 @@ interface SignOffPopupProps {
   readonly open: boolean;
   readonly onClose: () => void;
   readonly onSignedOff?: () => void | Promise<void>;
+  // Override the default sign-off submit (import deliver-as-is, 2026-06-14). When provided, the
+  // affirmative answers are handed to this submitter INSTEAD of POST /sign-off — the imported-letter
+  // finalize path records its OWN sign-off bound to the PDF bytes, so it cannot use the TXT-binding
+  // POST /sign-off. The all-affirmative gate + UI are reused unchanged. onSignedOff still fires after.
+  readonly onSubmitAnswers?: (input: { answers: SignOffAnswers; notes?: string }) => Promise<unknown>;
+  // Optional copy overrides so the popup reads as a finalize step rather than a plain sign-off.
+  readonly title?: string;
+  readonly submitLabel?: string;
 }
 
 function toCompleteAnswers(draft: DraftAnswers): SignOffAnswers | null {
@@ -32,7 +40,7 @@ function toCompleteAnswers(draft: DraftAnswers): SignOffAnswers | null {
   };
 }
 
-export function SignOffPopup({ caseId, open, onClose, onSignedOff }: SignOffPopupProps) {
+export function SignOffPopup({ caseId, open, onClose, onSignedOff, onSubmitAnswers, title, submitLabel }: SignOffPopupProps) {
   const queryClient = useQueryClient();
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const [answers, setAnswers] = useState<DraftAnswers>({});
@@ -48,10 +56,9 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff }: SignOffPopu
   const signOffMutation = useMutation({
     mutationFn: () => {
       if (!allAffirmative || completeAnswers === null) throw new Error('Every item must be "Yes" to sign off. Resolve a "No", or use "Send back to RN" instead.');
-      return signOffCase(caseId, {
-        answers: completeAnswers,
-        ...(notes.trim().length > 0 && { notes: notes.trim() }),
-      });
+      const input = { answers: completeAnswers, ...(notes.trim().length > 0 && { notes: notes.trim() }) };
+      // Imported-letter finalize hands the same affirmative answers to its own PDF-binding submitter.
+      return onSubmitAnswers ? onSubmitAnswers(input) : signOffCase(caseId, input);
     },
     onSuccess: async () => {
       await Promise.all([
@@ -105,7 +112,7 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff }: SignOffPopu
       <div ref={dialogRef} className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-lg bg-white p-6 shadow-2xl">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 id="sign-off-title" className="text-lg font-semibold text-slate-900">Physician sign-off</h2>
+            <h2 id="sign-off-title" className="text-lg font-semibold text-slate-900">{title ?? 'Physician sign-off'}</h2>
             <p className="mt-1 text-sm text-slate-500">Confirm each item before the letter is finalized.</p>
           </div>
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>Close</Button>
@@ -144,7 +151,7 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff }: SignOffPopu
 
         <div className="mt-6 flex justify-end gap-2">
           <Button type="button" variant="secondary" onClick={onClose} disabled={signOffMutation.isPending}>Cancel</Button>
-          <Button type="button" variant="primary" loading={signOffMutation.isPending} disabled={!allAffirmative || signOffMutation.isPending} onClick={() => signOffMutation.mutate()}>Submit sign-off</Button>
+          <Button type="button" variant="primary" loading={signOffMutation.isPending} disabled={!allAffirmative || signOffMutation.isPending} onClick={() => signOffMutation.mutate()}>{submitLabel ?? 'Submit sign-off'}</Button>
         </div>
       </div>
     </div>

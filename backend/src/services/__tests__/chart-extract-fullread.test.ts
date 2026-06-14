@@ -69,3 +69,39 @@ describe('full-read truncation handling (single dense page)', () => {
     expect(result.items).toHaveLength(1);
   });
 });
+
+describe('full-read self-budget cutoff (silent-timeout root fix)', () => {
+  afterEach(() => { delete process.env.CHART_EXTRACT_SELF_BUDGET_MS; });
+
+  // 9 single-page docs → 9 chunks → 2 batches at CHUNK_CONCURRENCY=8. A zero budget makes the
+  // SECOND batch's pre-launch check trip, so only the first 8 chunks run; the 9th chunk's page is
+  // folded into uncoveredPages (→ complete_with_gaps) instead of being silently dropped on a kill.
+  function nDocs(n: number): BundleDocument[] {
+    // pageNumber 19 matches toolResp's sourcePage so items ground; unique doc ids keep the
+    // per-document page keys distinct for uncovered-page counting.
+    return Array.from({ length: n }, (_, i) => ({
+      id: `doc-${i}`, filename: `f${i}.pdf`,
+      pages: [{ pageNumber: 19, text: `decision: ${QUOTE} (item ${i})` }],
+    }));
+  }
+
+  it('stops launching new batches past the budget and records the un-run pages as uncovered', async () => {
+    process.env.CHART_EXTRACT_SELF_BUDGET_MS = '0';
+    createMock.mockResolvedValue(toolResp('end_turn'));
+    const result = await makeChartExtractor('sk-test').extract(nDocs(9));
+
+    expect(createMock).toHaveBeenCalledTimes(8);   // only the first batch ran; 9th chunk skipped
+    expect(result.chunksProcessed).toBe(8);
+    expect(result.uncoveredPages).toBe(1);          // the un-run chunk's page surfaces as a gap
+    expect(result.items.length).toBeGreaterThan(0); // partial results still captured, never dropped
+  });
+
+  it('no cutoff under a large budget: all chunks run, zero uncovered', async () => {
+    process.env.CHART_EXTRACT_SELF_BUDGET_MS = '600000';
+    createMock.mockResolvedValue(toolResp('end_turn'));
+    const result = await makeChartExtractor('sk-test').extract(nDocs(9));
+    expect(createMock).toHaveBeenCalledTimes(9);
+    expect(result.chunksProcessed).toBe(9);
+    expect(result.uncoveredPages).toBe(0);
+  });
+});

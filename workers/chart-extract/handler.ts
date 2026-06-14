@@ -60,11 +60,27 @@ async function fetchDocuments(caseId: string): Promise<BundleDocument[]> {
   return json.data.documents;
 }
 
-async function postMerge(caseId: string, runId: string, items: unknown[], costUsd: number): Promise<void> {
+// Idempotency precheck (audit 2026-06-13 ROOT FIX for double/triple-billing). Returns the run's current
+// status, or null if it can't be read. FAIL-OPEN: a status-read failure returns null → the caller
+// proceeds with extraction (better to risk a re-run than block a legitimate first run on a transient).
+async function getRunStatus(caseId: string, runId: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${apiBase()}/api/v1/internal/cases/${caseId}/chart-extract-run/${runId}`, {
+      headers: { 'X-Internal-Worker-Token': workerToken() },
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { data?: { status?: string } };
+    return json.data?.status ?? null;
+  } catch { return null; }
+}
+
+async function postMerge(caseId: string, runId: string, items: unknown[], costUsd: number, gaps: { truncatedWindows: number; uncoveredPages: number; fullRead: boolean }): Promise<void> {
   const res = await fetch(`${apiBase()}/api/v1/internal/cases/${caseId}/extracted-chart-items`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Internal-Worker-Token': workerToken() },
-    body: JSON.stringify({ runId, items, costUsd }),
+    // Thread the coverage/truncation signal (audit 2026-06-13): the merge stamps complete_with_gaps when
+    // either is >0 so a gapped extraction is never silently recorded as a clean 'complete'.
+    body: JSON.stringify({ runId, items, costUsd, ...gaps }),
   });
   if (!res.ok) throw new Error(`extracted-chart-items POST failed: ${res.status}`);
 }
@@ -92,10 +108,18 @@ export async function handler(event: SqsEvent): Promise<void> {
     try { msg = JSON.parse(rec.body) as ExtractMessage; } catch { console.error('chart-extract: bad message body', rec.body); continue; }
     const receiveCount = Number(rec.attributes?.ApproximateReceiveCount ?? '1');
     try {
+      // ROOT idempotency guard: a redelivery of a run whose extraction already COMPLETED must not
+      // re-spend ~$6 of Anthropic (the double/triple-bill class — the actual incident was a merge-500
+      // redeliver). Check status BEFORE any LLM work; if already terminal-complete, ack-and-skip.
+      const priorStatus = await getRunStatus(msg.caseId, msg.runId);
+      if (priorStatus === 'complete' || priorStatus === 'complete_with_gaps') {
+        console.log(JSON.stringify({ msg: 'chart_extract_idempotent_skip', caseId: msg.caseId, runId: msg.runId, priorStatus }));
+        continue; // terminal — message is deleted on handler return; zero tokens spent
+      }
       const key = await resolveAnthropicKey();
       const documents = await fetchDocuments(msg.caseId);
       const result = await makeChartExtractor(key).extract(documents);
-      await postMerge(msg.caseId, msg.runId, result.items, result.costUsd);
+      await postMerge(msg.caseId, msg.runId, result.items, result.costUsd, { truncatedWindows: result.truncatedWindows ?? 0, uncoveredPages: result.uncoveredPages ?? 0, fullRead: result.fullRead ?? false });
       console.log(JSON.stringify({ msg: 'chart_extract_done', caseId: msg.caseId, runId: msg.runId, items: result.items.length, screenings: result.screenings?.length ?? 0, costUsd: result.costUsd, model: result.model, fullRead: result.fullRead, windowsProcessed: result.windowsProcessed, chunksProcessed: result.chunksProcessed, uncoveredPages: result.uncoveredPages, truncatedWindows: result.truncatedWindows }));
       // A truncated window means the extraction is INCOMPLETE for this chart — make it loud so it's
       // not mistaken for a clean parse (the full-read chunker, PR-1, eliminates the cause).

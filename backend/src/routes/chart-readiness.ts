@@ -163,15 +163,21 @@ export function createChartReadinessRouter(db: AppDb): Router {
       // and the pre-draft gates (Gate-2 dx / framing / viability) read that extracted chart. So the
       // draft button must wait for extractionState==='chart_ready', not just OCR. (Ryan 2026-06-13.)
       const latestRun = await (db as unknown as {
-        chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { triggerHash: true; status: true } }) => Promise<{ triggerHash: string; status: string } | null> };
-      }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true, status: true } });
+        chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { triggerHash: true; status: true; resultJson: true } }) => Promise<{ triggerHash: string; status: string; resultJson: unknown } | null> };
+      }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true, status: true, resultJson: true } });
       const build = deriveChartBuildState(
         docs.map((d) => ({ id: d.id ?? '', s3Key: d.s3Key })),
         rows.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })),
         latestRun,
       );
+      // Surface extraction gaps (audit 2026-06-13): complete_with_gaps opens the draft door (a 3-page gap
+      // on a 2,000-page bundle shouldn't block) but the RN sees a banner. Pull the worker-recorded counts.
+      const rj = latestRun?.resultJson as { gaps?: { truncatedWindows?: number; uncoveredPages?: number } } | null | undefined;
+      const extractionGaps = (latestRun?.status === 'complete_with_gaps' && rj?.gaps)
+        ? { truncatedWindows: Number(rj.gaps.truncatedWindows ?? 0), uncoveredPages: Number(rj.gaps.uncoveredPages ?? 0) }
+        : null;
 
-      res.json({ data: { ...result, blockingFiles, extractionState: build.state } });
+      res.json({ data: { ...result, blockingFiles, extractionState: build.state, extractionGaps } });
     }),
   );
 

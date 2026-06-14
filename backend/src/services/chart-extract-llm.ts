@@ -57,6 +57,20 @@ const CHUNK_MAX_TOKENS_CEILING = 32_000;
 // 4-wide, past the Lambda timeout. 8-wide ~halves wall-clock (~7-9 min) while staying within the
 // Anthropic direct-API rate ceiling for these short tool calls. Timeout bumped to 15 min in tandem.
 const CHUNK_CONCURRENCY = 8;
+// Self-budget (audit 2026-06-13 ROOT FIX for the silent-timeout class): the worker Lambda's hard
+// timeout is 15 min. If extraction is still launching batches as that ceiling approaches, the Lambda
+// is killed mid-run — leaving the ChartExtractionRun stuck at 'queued' with nothing posted (the
+// stuck-run watcher would eventually flip it to failed, but the work + spend are lost). Instead we
+// stop launching NEW batches at this wall-clock budget and post what we have as complete_with_gaps,
+// folding the un-run chunks' pages into uncoveredPages. 12.5 min leaves ~2.5 min headroom for the
+// final in-flight batch to settle + grounding + the merge callback before the 15-min kill.
+// Env-overridable (read per-call, like fullReadEnabled) so the A/B smoke harness can disable it with a
+// large value and tests can force an early cutoff.
+const DEFAULT_SELF_BUDGET_MS = 12.5 * 60 * 1000;
+function selfBudgetMs(): number {
+  const v = Number(process.env.CHART_EXTRACT_SELF_BUDGET_MS);
+  return Number.isFinite(v) && v >= 0 ? v : DEFAULT_SELF_BUDGET_MS;
+}
 // Split-retry depth: a truncated chunk is halved and re-run; bounded so a pathological page can't
 // recurse forever (it falls through to "accept + log loud" at the floor).
 const MAX_SPLIT_DEPTH = 2;
@@ -490,6 +504,33 @@ function scrubUnquotedDates(it: RawExtractedItem): RawExtractedItem {
 }
 
 /**
+ * Status↔quote consistency gate (audit 2026-06-13 ROOT FIX). groundExtractedItem proves the sourceQuote
+ * is verbatim on the page, but NEVER checks that the emitted SC `status` is consistent with that quote —
+ * so a model could quote a real "denied" line and tag it service_connected, and grounding still passes.
+ * SC status is the single highest-stakes chart field (case-framing builds grantedScAnchors off
+ * status==='service_connected'). This makes grounding transitively cover `status`: an sc_condition keeps
+ * its status ONLY if the grounded quote actually supports it. Mismatch → drop status to undefined (the
+ * merge then defaults to 'pending', never the privileged service_connected, and it surfaces for RN
+ * confirmation). Precedence: a DENIAL phrasing can never validate a service_connected tag. Over-drops on
+ * a terse/mixed quote fail SAFE (pending), never to a fabricated grant. (Sibling to scrubUnquotedDates.)
+ */
+const STATUS_QUOTE_KEYWORDS: Record<'service_connected' | 'pending' | 'denied', RegExp> = {
+  service_connected: /service[- ]?connect|granted|grant\b|rated\b|\b\d{1,3}\s?%/i,
+  denied: /denied|denial|not warranted|not established|not service[- ]?connect/i,
+  pending: /claim|pending|under review|deferred|received/i,
+};
+function statusFromQuote(q: string): 'service_connected' | 'pending' | 'denied' | null {
+  if (STATUS_QUOTE_KEYWORDS.denied.test(q)) return 'denied'; // denial wins — a denial line can't be read as a grant
+  if (STATUS_QUOTE_KEYWORDS.service_connected.test(q)) return 'service_connected';
+  if (STATUS_QUOTE_KEYWORDS.pending.test(q)) return 'pending';
+  return null;
+}
+function scrubInconsistentStatus(it: RawExtractedItem): RawExtractedItem {
+  if (it.category !== 'sc_condition' || !it.status) return it;
+  return statusFromQuote(it.sourceQuote) === it.status ? it : { ...it, status: undefined };
+}
+
+/**
  * Completeness score for picking the survivor among duplicate rows (full-read preferMoreComplete
  * only; windowed keeps first-wins). A row carrying more concrete fields beats a bare mention;
  * confidence ∈ [0,1] is only the sub-unit tiebreak. Category-aware: SC scores status/rating/DC,
@@ -517,7 +558,7 @@ export function groundAndDispose(
 
   for (const it0 of raw) {
     if (!groundExtractedItem(documents, it0)) { droppedUngrounded++; continue; }
-    const it = scrubUnquotedDates(it0); // null out any med date not present in the grounded quote
+    const it = scrubInconsistentStatus(scrubUnquotedDates(it0)); // null med dates + an SC status the grounded quote doesn't support
     const disp = dispositionForConfidence(it.confidence);
     if (disp === 'drop') { droppedLowConfidence++; continue; }
     const key = chartDedupKey(it);
@@ -684,22 +725,45 @@ export async function extractFullRead(
   const chunks = chunkDocuments(documents);
   const gaps = uncoveredPages(documents, chunks);
   const results: CallResult[] = new Array(chunks.length);
+  const startedAt = Date.now();
+  const budgetMs = selfBudgetMs();
+  let chunksRun = 0;
+  let budgetExceeded = false;
   for (let start = 0; start < chunks.length; start += CHUNK_CONCURRENCY) {
+    // Self-budget gate: stop launching NEW batches once the wall-clock budget is spent, so the merge
+    // callback posts before the Lambda's hard kill. The first batch (start===0) always runs — a
+    // single batch must be allowed even on a degraded/slow cold start. Chunks run sequentially and
+    // in-order, so chunks[chunksRun..] are exactly the un-run remainder (counted as uncovered below).
+    if (start > 0 && Date.now() - startedAt >= budgetMs) {
+      budgetExceeded = true;
+      console.warn(JSON.stringify({ event: 'chart_extract_self_budget_exceeded', model, chunksRun, chunksTotal: chunks.length, elapsedMs: Date.now() - startedAt, budgetMs }));
+      break;
+    }
     const batch = chunks.slice(start, start + CHUNK_CONCURRENCY);
     const settled = await Promise.all(batch.map((c) => extractOneChunk(anthropic, c, model, 0)));
     settled.forEach((r, k) => { results[start + k] = r; });
+    chunksRun += batch.length;
   }
-  const raw = results.flatMap((r) => r.raw);
-  const rawScreenings = results.flatMap((r) => r.screenings);
-  const costUsd = results.reduce((s, r) => s + r.costUsd, 0);
-  const truncatedWindows = results.reduce((s, r) => s + r.truncated, 0);
-  if (gaps.length > 0) {
-    console.warn(JSON.stringify({ event: 'chart_extract_coverage_gap', uncoveredPages: gaps.length, sample: gaps.slice(0, 5) }));
+  // On a budget cutoff, results[chunksRun..] are undefined holes — only fold the chunks we actually
+  // ran. The un-run chunks' pages join the structural gaps so the run records complete_with_gaps
+  // (never a silent clean 'complete') and the RN sees exactly how much of the chart went unread.
+  const ranResults = budgetExceeded ? results.filter(Boolean) : results;
+  const unrunPages = new Set<string>();
+  for (let i = chunksRun; i < chunks.length; i++) {
+    for (const p of chunks[i]!.pageNumbers) unrunPages.add(`${chunks[i]!.documentId}#${p}`);
+  }
+  const raw = ranResults.flatMap((r) => r.raw);
+  const rawScreenings = ranResults.flatMap((r) => r.screenings);
+  const costUsd = ranResults.reduce((s, r) => s + r.costUsd, 0);
+  const truncatedWindows = ranResults.reduce((s, r) => s + r.truncated, 0);
+  const uncoveredCount = gaps.length + unrunPages.size;
+  if (uncoveredCount > 0) {
+    console.warn(JSON.stringify({ event: 'chart_extract_coverage_gap', uncoveredPages: uncoveredCount, structuralGaps: gaps.length, unrunPages: unrunPages.size, sample: gaps.slice(0, 5) }));
   }
   const { items, droppedUngrounded, droppedLowConfidence, droppedDuplicate } = groundAndDispose(documents, raw, { preferMoreComplete: true });
   const screenings = groundScreenings(documents, rawScreenings);
   return {
     items, windowsProcessed: 0, rawCount: raw.length, droppedUngrounded, droppedLowConfidence, droppedDuplicate,
-    truncatedWindows, costUsd, model, fullRead: true, chunksProcessed: chunks.length, uncoveredPages: gaps.length, screenings,
+    truncatedWindows, costUsd, model, fullRead: true, chunksProcessed: chunksRun, uncoveredPages: uncoveredCount, screenings,
   };
 }

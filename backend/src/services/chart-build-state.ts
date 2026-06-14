@@ -124,7 +124,10 @@ export function deriveChartBuildState(
   // prefix match — without it, a completed forced run would strand this state in 'extracting'
   // forever (its hash never equals the unsalted currentHash).
   if (latestRun && runMatchesHash(latestRun.triggerHash, currentHash)) {
-    if (latestRun.status === 'complete') return { state: 'chart_ready', currentHash };
+    // 'complete_with_gaps' (audit 2026-06-13): extraction finished but truncated/left pages uncovered.
+    // Door still OPENS (a 3-page gap on a 2,000-page bundle shouldn't block) — the RN is flagged via the
+    // gaps surfaced on the readiness response so a gapped chart is never silently treated as whole.
+    if (latestRun.status === 'complete' || latestRun.status === 'complete_with_gaps') return { state: 'chart_ready', currentHash };
     if (latestRun.status === 'failed') return { state: 'extract_failed', currentHash };
     return { state: 'extracting', currentHash }; // queued | running
   }

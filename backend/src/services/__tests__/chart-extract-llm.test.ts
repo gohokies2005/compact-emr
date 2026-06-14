@@ -277,4 +277,26 @@ describe('groundAndDispose', () => {
     const b = groundAndDispose(scDocs, [full, bare], { preferMoreComplete: true });
     expect(b.items[0]!.ratingPct).toBe(70); // order-independent survivor
   });
+
+  // Status↔quote consistency gate (audit 2026-06-13 ROOT FIX): an SC status the grounded quote doesn't
+  // support is dropped (→ undefined → merge defaults to pending), never written as a fabricated grant.
+  it('drops a service_connected status when the grounded quote actually says DENIED', () => {
+    const docs: BundleDocument[] = [{ id: 'd', filename: 'rd.pdf', pages: [{ pageNumber: 3, text: 'service connection for hypertension is denied' }] }];
+    const r = groundAndDispose(docs, [
+      { category: 'sc_condition', name: 'Hypertension', status: 'service_connected', sourceDocumentId: 'd', sourcePage: 3, sourceQuote: 'hypertension is denied', confidence: 0.9 },
+    ]);
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0]!.name).toBe('Hypertension'); // the row survives
+    expect(r.items[0]!.status).toBeUndefined();     // the unsupported grant is dropped → merge defaults to pending
+  });
+  it('keeps a service_connected status when the grounded quote supports it (granted/percent)', () => {
+    expect(groundAndDispose(scDocs, [full]).items[0]!.status).toBe('service_connected');
+  });
+  it('drops a "denied" status when the quote shows a grant (inverse mis-tag also caught)', () => {
+    const docs: BundleDocument[] = [{ id: 'd', filename: 'rd.pdf', pages: [{ pageNumber: 5, text: 'tinnitus is service-connected at 10 percent' }] }];
+    const r = groundAndDispose(docs, [
+      { category: 'sc_condition', name: 'Tinnitus', status: 'denied', sourceDocumentId: 'd', sourcePage: 5, sourceQuote: 'tinnitus is service-connected at 10 percent', confidence: 0.9 },
+    ]);
+    expect(r.items[0]!.status).toBeUndefined();
+  });
 });

@@ -666,6 +666,27 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       // door (the dedup/merge downstream collapses duplicates). (Ryan 2026-06-13, $500-stakes.)
       if (rawItems.length > 2000) { badRequest('items exceeds maximum of 2000', { field: 'items', max: 2000 }); return; }
       const costUsd = typeof body['costUsd'] === 'number' ? (body['costUsd'] as number) : undefined;
+      // Coverage/truncation signals (audit 2026-06-13): the merge stamps complete_with_gaps when set.
+      const truncatedWindows = typeof body['truncatedWindows'] === 'number' ? (body['truncatedWindows'] as number) : undefined;
+      const uncoveredPages = typeof body['uncoveredPages'] === 'number' ? (body['uncoveredPages'] as number) : undefined;
+      const fullRead = typeof body['fullRead'] === 'boolean' ? (body['fullRead'] as boolean) : undefined;
+
+      // Merge-route idempotent early-out (audit 2026-06-13): if this run already committed, return prior
+      // counts WITHOUT re-running the merge — prevents a double-WRITE if two callbacks race (the worker's
+      // own status precheck prevents the double LLM-SPEND; this is the DB-write half of the same guard).
+      // FAIL-OPEN: a status-read failure (or a db shape without the accessor) must NOT block a legitimate
+      // first merge — fall through and let applyExtractionMerge run (idempotent on its own writes).
+      let priorStatus: string | null = null;
+      try {
+        const priorRun = await (db as unknown as {
+          chartExtractionRun?: { findFirst: (a: { where: { id: string }; select: { status: true } }) => Promise<{ status: string } | null> };
+        }).chartExtractionRun?.findFirst({ where: { id: runId }, select: { status: true } });
+        priorStatus = priorRun?.status ?? null;
+      } catch { priorStatus = null; }
+      if (priorStatus === 'complete' || priorStatus === 'complete_with_gaps') {
+        res.json({ data: { autofill: true, written: 0, skippedManual: 0, skippedPriorExtracted: 0, skippedDuplicate: 0 } });
+        return;
+      }
 
       const c = await (db as unknown as {
         case: { findFirst: (a: { where: { id: string }; select: { veteranId: true } }) => Promise<{ veteranId: string } | null> };
@@ -673,7 +694,7 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
 
       const items = coerceExtractedItems(rawItems);
-      const result = await applyExtractionMerge(db, { caseId, veteranId: c.veteranId, runId, items, costUsd });
+      const result = await applyExtractionMerge(db, { caseId, veteranId: c.veteranId, runId, items, costUsd, truncatedWindows, uncoveredPages, fullRead });
 
       // Keystone 4c — post-merge restamp hook: new chart rows can stale the derived framing/
       // viability/cds stamps from an earlier draft. Re-derive + restamp under the pkg-5 provenance
@@ -712,6 +733,24 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       }
 
       res.json({ data: result });
+    }),
+  );
+
+  /**
+   * GET /api/v1/internal/cases/:caseId/chart-extract-run/:runId → { status }
+   * The chart-extract worker's idempotency precheck reads this BEFORE spending LLM tokens — if the run
+   * already completed (a redelivery after success), the worker ack-and-skips instead of re-billing ~$6
+   * of Anthropic. (audit 2026-06-13 double/triple-bill ROOT FIX.)
+   */
+  router.get(
+    '/internal/cases/:caseId/chart-extract-run/:runId',
+    asyncHandler(async (req: Request, res: Response) => {
+      const runId = String(req.params.runId);
+      const run = await (db as unknown as {
+        chartExtractionRun: { findFirst: (a: { where: { id: string }; select: { status: true } }) => Promise<{ status: string } | null> };
+      }).chartExtractionRun.findFirst({ where: { id: runId }, select: { status: true } });
+      if (run === null) throw new HttpError(404, 'not_found', 'Chart-extraction run not found', { runId });
+      res.json({ data: { status: run.status } });
     }),
   );
 

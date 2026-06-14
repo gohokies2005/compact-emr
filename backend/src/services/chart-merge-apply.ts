@@ -20,6 +20,13 @@ export interface ApplyExtractionInput {
   runId: string;
   items: FinalExtractedItem[];
   costUsd?: number;
+  // Coverage/truncation signals from the extractor (audit 2026-06-13 ROOT FIX). When either is >0 the
+  // extraction was INCOMPLETE — the run is stamped 'complete_with_gaps' (still chart_ready, but the RN is
+  // flagged) so a gapped chart is never silently mistaken for a clean parse. Previously these were
+  // computed by the worker, logged, and DROPPED at this boundary while status was stamped a bald 'complete'.
+  truncatedWindows?: number;
+  uncoveredPages?: number;
+  fullRead?: boolean;
 }
 
 export interface ApplyExtractionResult {
@@ -101,10 +108,11 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
       }
     }
 
+    const hasGaps = (input.truncatedWindows ?? 0) > 0 || (input.uncoveredPages ?? 0) > 0;
     await runDelegate.update({
       where: { id: input.runId },
       data: {
-        status: 'complete',
+        status: hasGaps ? 'complete_with_gaps' : 'complete',
         itemsWritten: autofill ? plan.toInsert.length : 0,
         itemsSkipped: plan.skippedManual + plan.skippedPriorExtracted + plan.skippedDuplicate,
         resultJson: {
@@ -112,6 +120,7 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
           costUsd: input.costUsd ?? null,
           items: input.items,
           skipped: { manual: plan.skippedManual, priorExtracted: plan.skippedPriorExtracted, duplicate: plan.skippedDuplicate },
+          gaps: { truncatedWindows: input.truncatedWindows ?? 0, uncoveredPages: input.uncoveredPages ?? 0, fullRead: input.fullRead ?? null },
         },
         completedAt: now,
       },

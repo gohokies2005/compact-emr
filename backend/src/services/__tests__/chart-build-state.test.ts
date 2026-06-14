@@ -105,6 +105,10 @@ describe('deriveChartBuildState', () => {
     const h = computeTriggerHash(docs, bothRead);
     expect(deriveChartBuildState(docs, bothRead, { triggerHash: h, status: 'failed' }).state).toBe('extract_failed');
   });
+  it('chart_ready when the run completed WITH GAPS — the door still opens (audit 2026-06-13)', () => {
+    const h = computeTriggerHash(docs, bothRead);
+    expect(deriveChartBuildState(docs, bothRead, { triggerHash: h, status: 'complete_with_gaps' }).state).toBe('chart_ready');
+  });
   it('is extracting (NOT chart_ready) when a complete run is STALE (new upload changed the hash)', () => {
     const staleHash = computeTriggerHash([docs[0]!], [bothRead[0]!]);
     // current set is both docs, but the complete run was for only the first doc → stale → re-extract

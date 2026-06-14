@@ -203,7 +203,7 @@ export class WorkersStack extends Stack {
       queueName: `compact-emr-${config.envName}-chart-extract.fifo`,
       fifo: true,
       contentBasedDeduplication: false, // explicit MessageDeduplicationId = triggerHash
-      visibilityTimeout: Duration.minutes(16), // > worker timeout below (kept strictly greater)
+      visibilityTimeout: Duration.minutes(23), // ≥1.5× the 15-min worker timeout (audit 2026-06-13): 16min was only 1.07× → a slow finalizer (post-merge POST + doctor-pack autogen) past 16min could redeliver mid-tail. The worker's runId idempotency guard is the primary double-bill prevention; this is the cushion.
       deadLetterQueue: { queue: chartExtractDlq, maxReceiveCount: 3 },
     });
     this.chartExtractQueue = chartExtractQueue;
@@ -664,6 +664,79 @@ export class WorkersStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+
+    // ===== Stuck-CHART-EXTRACTION-RUN watcher Lambda (audit 2026-06-13: never stuck, never silent) =====
+    // Every 5 min: find a ChartExtractionRun still status IN ('queued','running') with createdAt > 45 min
+    // — a run whose worker Lambda was killed abnormally (OOM / init crash / DLQ exhaustion) before posting
+    // a terminal status. Without this, deriveChartBuildState pins the case in 'extracting' FOREVER,
+    // invisibly (the extraction analogue of the stuck-doc/stuck-job nets). Flip it to status='failed' so the
+    // door shows the retryable 'extract_failed' state. Pure DB sweep — reuses the stuck-job watcher's SG +
+    // DB-URL construction (same DB, same VPC), no OCR invoke or queue send needed.
+    const stuckExtractRunLogGroup = new logs.LogGroup(this, 'StuckChartExtractRunWatcherLogGroup', {
+      logGroupName: `/aws/lambda/compact-emr-${config.envName}-stuck-chart-extract-run-watcher`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: config.envName === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+    const stuckExtractRunWatcher = new nodejs.NodejsFunction(this, 'StuckChartExtractRunWatcher', {
+      functionName: `compact-emr-${config.envName}-stuck-chart-extract-run-watcher`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.resolve(__dirname, '..', '..', 'backend', 'src', 'lambdas', 'stuck-chart-extract-run-watcher.ts'),
+      handler: 'handler',
+      timeout: Duration.minutes(2),
+      memorySize: 512,
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [watcherSg],
+      logGroup: stuckExtractRunLogGroup,
+      environment: {
+        ENV_NAME: config.envName,
+        DATABASE_URL: watcherDatabaseUrl,
+        DATABASE_URL_SECRET_ARN: props.databaseSecret.secretArn,
+      },
+      bundling: {
+        externalModules: ['@prisma/client', '@prisma/engines'],
+        commandHooks: {
+          beforeBundling: () => [],
+          beforeInstall: () => [],
+          afterBundling: (inputDir: string, outputDir: string) => {
+            const helper = path.join(__dirname, '..', 'scripts', 'bundle-copy.cjs');
+            const q = (s: string) => `"${s}"`;
+            return [
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/@prisma')} ${q(outputDir + '/node_modules/@prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/node_modules/.prisma')} ${q(outputDir + '/node_modules/.prisma')}`,
+              `node ${q(helper)} ${q(inputDir + '/backend/prisma')} ${q(outputDir + '/prisma')}`,
+            ];
+          },
+        },
+      },
+    });
+    props.databaseSecret.grantRead(stuckExtractRunWatcher);
+
+    new events.Rule(this, 'StuckChartExtractRunWatcherSchedule', {
+      ruleName: `compact-emr-${config.envName}-stuck-chart-extract-run-watcher-schedule`,
+      description: 'Every 5 min, fail any ChartExtractionRun stuck non-terminal > 45 min so the door shows extract_failed (retryable), not a silent permanent "extracting".',
+      schedule: events.Schedule.rate(Duration.minutes(5)),
+      targets: [new targets.LambdaFunction(stuckExtractRunWatcher, { retryAttempts: 2 })],
+    });
+
+    // Loud when the watcher reaps a stuck run: a sustained stream means worker Lambdas are dying before
+    // posting (OOM / timeout class), not isolated incidents. Metric-filter on the structured swept line.
+    const extractRunSweptMetric = stuckExtractRunLogGroup.addMetricFilter('StuckChartExtractRunSweptMetric', {
+      filterPattern: logs.FilterPattern.literal('{ $.msg = "stuck-chart-extract-run-watcher: swept" }'),
+      metricNamespace: `compact-emr-${config.envName}/chart-extract`,
+      metricName: 'StuckChartExtractRunsSwept',
+      metricValue: '1',
+    });
+    const extractRunSweptAlarm = new cloudwatch.Alarm(this, 'StuckChartExtractRunSweptAlarm', {
+      alarmName: `compact-emr-${config.envName}-stuck-chart-extract-run-swept`,
+      alarmDescription: 'The stuck-chart-extract-run watcher failed one+ runs that never posted a terminal status (worker killed before the merge callback) — investigate the worker timeout/OOM if sustained.',
+      metric: extractRunSweptMetric.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    extractRunSweptAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
 
     // ===== F7: RN Advisory cabinet loader Lambda (Approach A) =====
     // Manually invoked (`aws lambda invoke`). Idempotently builds the pgvector "cabinet" (advisory

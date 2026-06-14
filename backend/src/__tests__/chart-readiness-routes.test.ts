@@ -99,7 +99,9 @@ function makeDb(c: CaseRecord = baseCase()) {
     },
     // GET /chart-readiness now derives the extraction phase too (Ryan 2026-06-13): no run on file =
     // 'extracting'/'ocr_in_progress' depending on OCR; the tests below only assert ready/blockingFiles.
-    chartExtractionRun: { findFirst: vi.fn(async () => null) },
+    // findMany = the sticky-completion run list GET /chart-readiness reads (Ewell 2026-06-14); findFirst
+    // = the single-run load GET /extraction-coverage still uses. Both default to "no runs".
+    chartExtractionRun: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
   return { db, fileRows, orphanedPaths, tx };

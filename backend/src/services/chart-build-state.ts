@@ -102,14 +102,23 @@ export interface ChartBuildStatus {
 }
 
 /**
- * Derive where the chart-build pipeline is for a case from documents + read statuses + the latest
- * extraction run. The door uses this: only `chart_ready` evaluates real missing-docs; the other
- * states are "still building" (or a surfaced failure), never a false "documents missing".
+ * Derive where the chart-build pipeline is for a case from documents + read statuses + the case's
+ * recent extraction runs. The door uses this: only `chart_ready` evaluates real missing-docs; the
+ * other states are "still building" (or a surfaced failure), never a false "documents missing".
+ *
+ * STICKINESS (Ewell CLM-A867B8C128, 2026-06-14): a completed extraction is STICKY. Keying only on
+ * the LATEST run mis-fired live: the chart extracted successfully (195 facts, 100% coverage), but a
+ * DUPLICATE run was then enqueued ('queued') — so latest-run logic returned 'extracting' and froze
+ * the Send-to-Drafter door; the stuck-run watcher then swept that duplicate to 'failed', flipping
+ * the door to 'extract_failed' — all while a PRIOR run for the SAME doc set had already COMPLETED.
+ * Fix: consider ALL recent runs and let ANY completed run matching the current doc set win. A later
+ * duplicate (queued/running/failed) can never un-ready a chart that already extracted. Precedence
+ * among runs matching the current hash: complete(+gaps) > queued/running > failed > none.
  */
 export function deriveChartBuildState(
   documents: readonly DocRef[],
   readStatuses: readonly ReadStatusRef[],
-  latestRun: ExtractionRunRef | null,
+  runs: readonly ExtractionRunRef[],
 ): ChartBuildStatus {
   // Exclude the extraction OUTPUT (screening-summary file): it has no OCR status and would both stall
   // allTerminal and (via computeTriggerHash) churn the hash. computeTriggerHash filters it too.
@@ -124,17 +133,22 @@ export function deriveChartBuildState(
 
   if (!allTerminal) return { state: 'ocr_in_progress', currentHash };
 
-  // All docs are OCR-terminal. Has extraction for THIS exact doc set finished? A FORCED
-  // reprocess run (salted hash, keystone 4b) counts as a run of the current doc set via the
-  // prefix match — without it, a completed forced run would strand this state in 'extracting'
-  // forever (its hash never equals the unsalted currentHash).
-  if (latestRun && runMatchesHash(latestRun.triggerHash, currentHash)) {
-    // 'complete_with_gaps' (audit 2026-06-13): extraction finished but truncated/left pages uncovered.
-    // Door still OPENS (a 3-page gap on a 2,000-page bundle shouldn't block) — the RN is flagged via the
-    // gaps surfaced on the readiness response so a gapped chart is never silently treated as whole.
-    if (latestRun.status === 'complete' || latestRun.status === 'complete_with_gaps') return { state: 'chart_ready', currentHash };
-    if (latestRun.status === 'failed') return { state: 'extract_failed', currentHash };
-    return { state: 'extracting', currentHash }; // queued | running
+  // All docs are OCR-terminal. Among the runs that belong to THIS exact doc set — exact hash match,
+  // or salted-prefix match for a FORCED reprocess run (keystone 4b) — apply sticky precedence:
+  //   • ANY complete / complete_with_gaps → chart_ready (STICKY: wins over a later duplicate run).
+  //   • else ANY queued / running        → extracting.
+  //   • else ANY failed                  → extract_failed.
+  // ('complete_with_gaps', audit 2026-06-13: door still OPENS — a 3-page gap on a 2,000-page bundle
+  // shouldn't block; the RN is flagged via the gaps surfaced on the readiness response.)
+  const matching = runs.filter((r) => runMatchesHash(r.triggerHash, currentHash));
+  if (matching.some((r) => r.status === 'complete' || r.status === 'complete_with_gaps')) {
+    return { state: 'chart_ready', currentHash };
+  }
+  if (matching.some((r) => r.status === 'queued' || r.status === 'running')) {
+    return { state: 'extracting', currentHash };
+  }
+  if (matching.some((r) => r.status === 'failed')) {
+    return { state: 'extract_failed', currentHash };
   }
   // No run yet for the current doc set (it just became terminal, or a new upload changed the hash):
   // a run is about to be / was just enqueued. Treat as still-building, not chart_ready.

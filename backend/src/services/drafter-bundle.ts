@@ -210,7 +210,9 @@ export async function buildDrafterBundle(db: AppDb, caseId: string, opts: BuildD
   const extractionState = deriveChartBuildState(
     buildStateDocs,
     thisCaseReadStatuses.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })),
-    latestExtractionRun,
+    // deriveChartBuildState now takes the case's recent runs (sticky-completion fix, Ewell
+    // CLM-A867B8C128, 2026-06-14); this caller queries a single latest run → wrap to preserve behavior.
+    latestExtractionRun ? [latestExtractionRun] : [],
   ).state;
   // Extraction gap counts (P2-3, 2026-06-14). Mirrors chart-readiness.ts:175-178 exactly: only a
   // `complete_with_gaps` run with a gaps block surfaces counts; everything else is null. The drafter

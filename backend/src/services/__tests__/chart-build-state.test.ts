@@ -24,12 +24,12 @@ describe('screening-summary file is excluded from build-state', () => {
   it('does NOT stall chart_ready (no read-status on the summary doc)', () => {
     const hash = computeTriggerHash(docs, bothRead);
     const run = { triggerHash: hash, status: 'complete' };
-    expect(deriveChartBuildState(docs, bothRead, run).state).toBe('chart_ready');
-    expect(deriveChartBuildState([...docs, summaryDoc], bothRead, run).state).toBe('chart_ready');
+    expect(deriveChartBuildState(docs, bothRead, [run]).state).toBe('chart_ready');
+    expect(deriveChartBuildState([...docs, summaryDoc], bothRead, [run]).state).toBe('chart_ready');
   });
 
   it('a case with ONLY a summary doc reads as no_documents (it is not a real input)', () => {
-    expect(deriveChartBuildState([summaryDoc], [], null).state).toBe('no_documents');
+    expect(deriveChartBuildState([summaryDoc], [], []).state).toBe('no_documents');
   });
 });
 
@@ -85,40 +85,40 @@ describe('runMatchesHash (forced-run prefix match)', () => {
 
 describe('deriveChartBuildState', () => {
   it('no_documents when there are no docs', () => {
-    expect(deriveChartBuildState([], [], null).state).toBe('no_documents');
+    expect(deriveChartBuildState([], [], []).state).toBe('no_documents');
   });
   it('ocr_in_progress while any doc is not yet read', () => {
-    expect(deriveChartBuildState(docs, [bothRead[0]!], null).state).toBe('ocr_in_progress');
+    expect(deriveChartBuildState(docs, [bothRead[0]!], []).state).toBe('ocr_in_progress');
   });
   it('extracting when all read but no run yet (just enqueued / about to)', () => {
-    expect(deriveChartBuildState(docs, bothRead, null).state).toBe('extracting');
+    expect(deriveChartBuildState(docs, bothRead, []).state).toBe('extracting');
   });
   it('extracting when the run for the current hash is queued/running', () => {
     const h = computeTriggerHash(docs, bothRead);
-    expect(deriveChartBuildState(docs, bothRead, { triggerHash: h, status: 'running' }).state).toBe('extracting');
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: h, status: 'running' }]).state).toBe('extracting');
   });
   it('chart_ready when the run for the current hash is complete', () => {
     const h = computeTriggerHash(docs, bothRead);
-    expect(deriveChartBuildState(docs, bothRead, { triggerHash: h, status: 'complete' }).state).toBe('chart_ready');
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: h, status: 'complete' }]).state).toBe('chart_ready');
   });
   it('extract_failed when the current-hash run failed', () => {
     const h = computeTriggerHash(docs, bothRead);
-    expect(deriveChartBuildState(docs, bothRead, { triggerHash: h, status: 'failed' }).state).toBe('extract_failed');
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: h, status: 'failed' }]).state).toBe('extract_failed');
   });
   it('chart_ready when the run completed WITH GAPS — the door still opens (audit 2026-06-13)', () => {
     const h = computeTriggerHash(docs, bothRead);
-    expect(deriveChartBuildState(docs, bothRead, { triggerHash: h, status: 'complete_with_gaps' }).state).toBe('chart_ready');
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: h, status: 'complete_with_gaps' }]).state).toBe('chart_ready');
   });
   it('is extracting (NOT chart_ready) when a complete run is STALE (new upload changed the hash)', () => {
     const staleHash = computeTriggerHash([docs[0]!], [bothRead[0]!]);
     // current set is both docs, but the complete run was for only the first doc → stale → re-extract
-    const s = deriveChartBuildState(docs, bothRead, { triggerHash: staleHash, status: 'complete' });
+    const s = deriveChartBuildState(docs, bothRead, [{ triggerHash: staleHash, status: 'complete' }]);
     expect(s.state).toBe('extracting');
   });
   it('treats a failed-OCR (manual_summary_required) doc as terminal, not stuck in ocr_in_progress', () => {
     const rs = [bothRead[0]!, { filePath: 'cases/c/k2', terminalStatus: 'manual_summary_required' }];
     const h = computeTriggerHash(docs, rs);
-    expect(deriveChartBuildState(docs, rs, { triggerHash: h, status: 'complete' }).state).toBe('chart_ready');
+    expect(deriveChartBuildState(docs, rs, [{ triggerHash: h, status: 'complete' }]).state).toBe('chart_ready');
   });
 
   // Keystone 4b DOOR-WEDGE GUARD: a completed FORCED (salted) run of the current doc set must
@@ -126,15 +126,46 @@ describe('deriveChartBuildState', () => {
   // forever (the salted hash never equals the unsalted currentHash).
   it('chart_ready when a FORCED (salted) run of the current doc set is complete', () => {
     const salted = computeTriggerHash(docs, bothRead, 'manual:req-1');
-    expect(deriveChartBuildState(docs, bothRead, { triggerHash: salted, status: 'complete' }).state).toBe('chart_ready');
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: salted, status: 'complete' }]).state).toBe('chart_ready');
   });
   it('extracting while the forced (salted) run is queued/running; extract_failed when it failed', () => {
     const salted = computeTriggerHash(docs, bothRead, 'manual:req-1');
-    expect(deriveChartBuildState(docs, bothRead, { triggerHash: salted, status: 'queued' }).state).toBe('extracting');
-    expect(deriveChartBuildState(docs, bothRead, { triggerHash: salted, status: 'failed' }).state).toBe('extract_failed');
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: salted, status: 'queued' }]).state).toBe('extracting');
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: salted, status: 'failed' }]).state).toBe('extract_failed');
   });
   it('a forced run from a STALE doc set does not count for the current one', () => {
     const staleSalted = computeTriggerHash([docs[0]!], [bothRead[0]!], 'manual:req-1');
-    expect(deriveChartBuildState(docs, bothRead, { triggerHash: staleSalted, status: 'complete' }).state).toBe('extracting');
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: staleSalted, status: 'complete' }]).state).toBe('extracting');
+  });
+
+  // STICKY-COMPLETION GUARD (Ewell CLM-A867B8C128, 2026-06-14). The headline bug: the chart extracted
+  // successfully, then a DUPLICATE run was enqueued (queued) and later swept to 'failed' by the stuck-run
+  // watcher. Keying on the latest run alone showed 'extracting' then 'extract_failed' and froze/un-readied
+  // an already-ready chart. A completed run for the current doc set MUST win over any later duplicate.
+  it('chart_ready when a completed run coexists with LATER duplicate queued + swept-failed runs (any order)', () => {
+    const h = computeTriggerHash(docs, bothRead);
+    const failed = { triggerHash: h, status: 'failed' };
+    const queued = { triggerHash: h, status: 'queued' };
+    const complete = { triggerHash: h, status: 'complete' };
+    // newest-first as the route passes them, plus a couple of shuffles to prove order-independence
+    expect(deriveChartBuildState(docs, bothRead, [failed, queued, complete]).state).toBe('chart_ready');
+    expect(deriveChartBuildState(docs, bothRead, [complete, queued, failed]).state).toBe('chart_ready');
+    expect(deriveChartBuildState(docs, bothRead, [queued, complete, failed]).state).toBe('chart_ready');
+  });
+  it('extracting when only queued/running runs match (no completed run yet)', () => {
+    const h = computeTriggerHash(docs, bothRead);
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: h, status: 'failed' }, { triggerHash: h, status: 'queued' }]).state).toBe('extracting');
+  });
+  it('extract_failed when ALL matching runs failed (no queued/running/complete)', () => {
+    const h = computeTriggerHash(docs, bothRead);
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: h, status: 'failed' }, { triggerHash: h, status: 'failed' }]).state).toBe('extract_failed');
+  });
+  it('still keys on the CURRENT hash — a complete current-hash run wins, a complete stale-hash run is ignored', () => {
+    const h = computeTriggerHash(docs, bothRead);
+    const staleHash = computeTriggerHash([docs[0]!], [bothRead[0]!]);
+    // current-set complete + a stale-set complete present → chart_ready (the current one counts)
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: staleHash, status: 'complete' }, { triggerHash: h, status: 'complete' }]).state).toBe('chart_ready');
+    // ONLY a stale complete + a current queued → the stale complete must NOT make it ready → extracting
+    expect(deriveChartBuildState(docs, bothRead, [{ triggerHash: staleHash, status: 'complete' }, { triggerHash: h, status: 'queued' }]).state).toBe('extracting');
   });
 });

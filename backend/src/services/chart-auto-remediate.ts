@@ -88,7 +88,10 @@ export async function autoRemediateChartForDraft(
   const build = deriveChartBuildState(
     buildDocs,
     readStatuses.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })),
-    latestRun,
+    // deriveChartBuildState now takes the case's recent runs (sticky-completion fix, Ewell
+    // CLM-A867B8C128, 2026-06-14). This caller queries a single latest run; wrapping it preserves
+    // the prior single-run behavior exactly.
+    latestRun ? [latestRun] : [],
   );
   const triggerHash = computeTriggerHash(buildDocs, readStatuses);
 

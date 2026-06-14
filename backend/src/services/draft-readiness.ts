@@ -260,7 +260,9 @@ export async function getDraftReadiness(db: AppDb, caseId: string): Promise<Draf
 
   // The door: only evaluate real missing-docs once the chart is actually built. Before that, say
   // "still building" — never a false "documents missing" while OCR/extraction are still running.
-  const { state } = deriveChartBuildState(documents, readStatuses, latestRun);
+  // deriveChartBuildState now takes the case's recent runs (sticky-completion fix, Ewell
+  // CLM-A867B8C128, 2026-06-14); this caller queries a single latest run → wrap to preserve behavior.
+  const { state } = deriveChartBuildState(documents, readStatuses, latestRun ? [latestRun] : []);
   if (state !== 'chart_ready') return buildingResult(state);
 
   // Live-derive the SSOT framing through the ONE shared derivation (architect QA: consumers call

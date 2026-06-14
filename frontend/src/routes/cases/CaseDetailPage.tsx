@@ -13,6 +13,7 @@ import { TabBar, type TabItem } from '../../components/ui/TabBar';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { InFlightDrafterPanel, type InFlightDraftJob } from '../../components/InFlightDrafterPanel';
 import { SendToDrafterPanel } from '../../components/SendToDrafterPanel';
+import { ChartRecoveryBanner } from '../../components/ChartRecoveryBanner';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
 import { DeliveryPanel } from '../../components/DeliveryPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
@@ -334,6 +335,14 @@ export function CaseDetailPage() {
       <div className="rounded-lg border border-emerald-300 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-900">
         ✓ Physician signed off — letter finalized{c.status === 'paid' ? ' and paid' : ' and ready for delivery'}.
       </div>
+    ) : null}
+    {/* LAST-RESORT recovery banner (document auto-recovery loop, ADDITION B, 2026-06-14): ONE obvious
+        spot, pinned in the persistent header area so it shows on EVERY tab — when auto-recovery is
+        exhausted (a record still can't be read, no override), the staff member gets a plain directive +
+        actions, never an invisible dead-end on a non-Overview tab. Staff-only (physicians don't drive
+        the draft door); the component self-hides unless the genuine blocking state holds. */}
+    {role === 'admin' || role === 'ops_staff' ? (
+      <ChartRecoveryBanner caseId={caseId} status={c.status} canDraft={!!c.assignedPhysician && !!c.assignedRn} />
     ) : null}
     <div className="rounded-2xl border border-aegis bg-ivory px-6 py-5 shadow-aegis-panel">
       <div className="flex flex-col justify-between gap-4 lg:flex-row">

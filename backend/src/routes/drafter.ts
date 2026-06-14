@@ -6,6 +6,7 @@ import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
 import { badRequest, isRecord } from '../services/validation-helpers.js';
 import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
+import { autoRemediateChartForDraft } from '../services/chart-auto-remediate.js';
 import { getDraftReadiness } from '../services/draft-readiness.js';
 import { stampCaseFraming } from '../services/case-framing-stamp.js';
 import { caseViabilityEnabled, stampCaseViability } from '../services/case-viability-stamp.js';
@@ -463,11 +464,37 @@ export function createDrafterClientRouter(db: AppDb): Router {
       // (Ryan HARD RULE). 2026-06-08: "Draft anyway (override)" 409'd HERE because it didn't acknowledge
       // unread files, and the Gate-2 panel has no further override — a failure that cannot happen.
       if (!chartReadiness.ready && parsed.acknowledgeMissingDocs !== true && parsed.rnDecision === undefined) {
-        throw new HttpError(409, 'conflict', `${chartReadiness.manualSummaryRequired} file(s) could not be automatically read. Add a manual summary, or override to draft without them.`, {
+        // AUTO-RECOVERY (document auto-recovery loop, 2026-06-14): instead of dead-ending to a 409, try
+        // to HEAL the chart automatically so the RN can click once and walk away. autoRemediateChartForDraft
+        // is bounded — it re-fires the reprocess primitive AT MOST ONCE per doc-set (a `case_auto_remediated`
+        // marker + the in-flight build-state guard prevent a re-fire loop on the frontend's 8s poll). It
+        // reuses the existing extractionState='extracting' + that poll as the "held, auto-resuming" model
+        // (no new case state). Only when auto-recovery is EXHAUSTED (it already ran for this exact doc-set
+        // and the files are still blocked) do we fall through to the overridable 409 + the persistent
+        // last-resort banner. Logged via `case_auto_remediated`.
+        const remediation = await autoRemediateChartForDraft(db, caseId, actor.sub);
+        if (remediation.state === 'preparing') {
+          // 202-style: a remediation is running. The frontend shows the sky "Reading the documents…"
+          // panel; its readiness poll auto-resumes the draft when extractionState reaches chart_ready.
+          res.status(202).json({
+            data: {
+              preparing: true,
+              autoRemediated: remediation.remediated,
+              reocrQueued: remediation.remediated ? remediation.reocrQueued : 0,
+              caseId,
+              message: 'Reading the documents and rebuilding the chart. Drafting will start automatically when it finishes — no need to wait here.',
+            },
+          });
+          return;
+        }
+        // remediation.state === 'exhausted' — auto-recovery already ran for this doc-set; surface the
+        // overridable block (the SendToDrafter panel + the CaseDetailPage last-resort banner read this).
+        throw new HttpError(409, 'conflict', `${chartReadiness.manualSummaryRequired} file(s) could not be automatically read, and an automatic re-read did not resolve them. Add a manual summary, or override to draft without them.`, {
           caseId,
           manualSummaryRequired: chartReadiness.manualSummaryRequired,
           blockingFiles: chartReadiness.blockingFiles.map((b) => ({ filePath: b.filePath, terminalStatus: b.terminalStatus })),
           canOverride: true,
+          autoRecoveryExhausted: true,
         });
       }
 
@@ -538,7 +565,13 @@ export function createDrafterClientRouter(db: AppDb): Router {
       if (typeof bucket !== 'string' || bucket.length === 0) {
         throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured');
       }
-      const bundle = await buildDrafterBundle(db, caseId).catch((err: unknown) => {
+      // KEYSTONE (auto-recovery loop): thread the RN/admin override INTO the bundle so the Fargate
+      // drafter honors it via caseData.acknowledge_missing_docs and stops re-halting the chart the EMR
+      // just released. The override is TRUE when the RN explicitly acknowledged missing docs OR when a
+      // Gate-2 resume (rnDecision) is present — both bypass the chart-readiness 409 above, so both must
+      // tell the drafter not to re-halt on the same unread-file condition. Absent ⇒ false ⇒ legacy.
+      const acknowledgeMissingDocs = parsed.acknowledgeMissingDocs === true || parsed.rnDecision !== undefined;
+      const bundle = await buildDrafterBundle(db, caseId, { acknowledgeMissingDocs }).catch((err: unknown) => {
         if (err instanceof CaseNotFoundError) {
           throw new HttpError(404, 'not_found', 'Case not found', { caseId: err.caseId });
         }

@@ -17,6 +17,10 @@ export interface ParsedReadAttempt {
   method: ReadMethod;
   extractedText: string;
   note: string | null;
+  // Document page count (optional). Powers the SIZE-AWARE gate — a KNOWN single empty page auto-skips
+  // (document auto-recovery loop), a multi-page empty/sliver still flags, unknown stays conservative.
+  // Absent ⇒ null ⇒ treated as substantial everywhere (no regression). (2026-06-14.)
+  documentPageCount: number | null;
 }
 
 /**
@@ -43,12 +47,18 @@ export function parseReadAttempt(body: unknown): ParsedReadAttempt {
     badRequest(`extractedText exceeds ${MAX_TEXT_LEN} bytes`, { field: 'extractedText', max: MAX_TEXT_LEN });
   }
 
+  // Optional page count: a non-negative integer when present; anything else ⇒ null (conservative).
+  const rawPageCount = body['documentPageCount'];
+  const documentPageCount =
+    typeof rawPageCount === 'number' && Number.isInteger(rawPageCount) && rawPageCount >= 0 ? rawPageCount : null;
+
   return {
     filePath,
     fileSha256: fileSha256.toLowerCase(),
     method: method as ReadMethod,
     extractedText: extractedText as string,
     note: optionalString(body, 'note', 500),
+    documentPageCount,
   };
 }
 

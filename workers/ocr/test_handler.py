@@ -536,6 +536,21 @@ def test_vision_describe_skips_non_image_media(describe_rig, monkeypatch):
     assert called == []
 
 
+def test_vision_describe_error_falls_through_to_rn_flag(describe_rig, monkeypatch):
+    """Flag ON but the describe Claude call RAISES: _try_image_describe swallows + logs the error and
+    returns False, so _handle_unreadable falls through to the RN flag (never blocks the flag path on a
+    describe-call failure). The auto-recovery ladder degrades safely to the human last-resort."""
+    monkeypatch.setenv("CLAUDE_VISION_DESCRIBE", "on")
+    monkeypatch.setattr(handler.urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("anthropic 529 overloaded")))
+
+    read = handler._handle_unreadable("DOC-IMG", "EMPTY", "JOB-IMG")
+
+    assert read is False
+    assert describe_rig["pages"] == []          # nothing posted on a failed describe call
+    assert len(describe_rig["failed"]) == 1     # safely flagged for the RN (last resort)
+
+
 def test_vision_describe_on_with_text_ocr_never_reaches_describe(describe_rig, monkeypatch):
     """Flag ON, but the verbatim Claude OCR produced real text: that text is posted as-is and the describe
     path never runs (the describe call only fires when OCR yielded nothing)."""

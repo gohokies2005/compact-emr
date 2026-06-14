@@ -72,6 +72,16 @@ export interface DrafterBundle {
     // NOTHING. Carry the worker-recorded counts (mirrors chart-readiness.ts gap read) so the letter's
     // provenance can note a gapped chart. null = no gaps (or status !== complete_with_gaps).
     readonly extractionGaps: { readonly truncatedWindows: number; readonly uncoveredPages: number } | null;
+    // Auto-recovery override (document auto-recovery loop, 2026-06-14). When TRUE, the RN/admin
+    // chose to proceed past unread files (the EMR /draft override, or a Gate-2 resume) — the Fargate
+    // drafter must HONOR it via its existing `caseData.acknowledge_missing_docs` read and NOT re-halt
+    // on the same unread-file condition (the half-wired override that made the drafter re-halt after
+    // the EMR already let it through). Default false (no override) ⇒ byte-identical legacy behavior:
+    // the drafter's own chartCompleteness backstop still gates. This is the KEYSTONE that stops the
+    // drafter from re-halting a chart the EMR deliberately released. Stamped at the /draft ROUTE
+    // (buildDrafterBundle stays pure-read and cannot know the request's override flag) — see
+    // drafter.ts; absence here = false.
+    readonly acknowledgeMissingDocs: boolean;
   };
   readonly doctorPack: unknown;
   readonly activeJob: unknown;
@@ -95,9 +105,19 @@ export interface DrafterBundle {
 }
 
 /**
+ * Options for buildDrafterBundle. `acknowledgeMissingDocs` carries the RN/admin override that the
+ * /draft route parsed (or a Gate-2 resume's implicit override) THROUGH to the bundle, so the Fargate
+ * drafter honors it via `caseData.acknowledge_missing_docs` and stops re-halting on unread files.
+ * Pure-read still: this is request intent, not DB state, so it is passed in rather than queried.
+ */
+export interface BuildDrafterBundleOptions {
+  readonly acknowledgeMissingDocs?: boolean;
+}
+
+/**
  * Fetch every piece of state the drafter wrapper needs. Pure read; no mutations.
  */
-export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<DrafterBundle> {
+export async function buildDrafterBundle(db: AppDb, caseId: string, opts: BuildDrafterBundleOptions = {}): Promise<DrafterBundle> {
   const c = await db.case.findFirst({ where: { id: caseId } });
   if (c === null) throw new CaseNotFoundError(caseId);
   const cw = c as typeof c & { veteranId: string };
@@ -235,6 +255,10 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
       manualSummaryRequired: chartReadiness.manualSummaryRequired,
       extractionState,
       extractionGaps,
+      // KEYSTONE (auto-recovery loop): carry the RN/admin override INTO the bundle the drafter reads.
+      // The drafter's existing `caseData.acknowledge_missing_docs` honors it; default false keeps
+      // legacy bundles byte-identical (and the drafter's own backstop gate intact).
+      acknowledgeMissingDocs: opts.acknowledgeMissingDocs === true,
     },
     doctorPack: latestDoctorPack,
     activeJob,

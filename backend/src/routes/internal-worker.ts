@@ -370,7 +370,12 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       // Forward the page count so a legitimately small single-page intake file isn't transiently flagged
       // "needs manual" (size-aware gate). (QA 2026-06-13.)
       const outcome = classifyReadAttempt({ method: 'textract', extractedText: concatenatedText, pageCount: parsed.documentPageCount ?? parsed.pages.length });
-      const readStatus = outcome.succeeded ? 'read' : 'manual_summary_required';
+      // Honor autoSkip on the LIVE intake path too (document auto-recovery loop fix, 2026-06-14): a
+      // genuinely empty <=1-page intake file auto-skips (NON-BLOCKING) instead of dead-ending to manual.
+      // Same precedence as /files/read-attempts; intake pages are pre-assignment so there is no
+      // manual_summary_provided clearance to protect here. A substantive/multi-page sliver still flags
+      // manual (autoSkip=false) — never silently drop a real record.
+      const readStatus = outcome.succeeded ? 'read' : outcome.autoSkip === true ? 'auto_skipped' : 'manual_summary_required';
       const txDb = db as unknown as { $transaction: (fn: (tx: typeof intakePageDb) => Promise<unknown>) => Promise<unknown> };
       await txDb.$transaction(async (tx) => {
         for (const p of parsed.pages) {

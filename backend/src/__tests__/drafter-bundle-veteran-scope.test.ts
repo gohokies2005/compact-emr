@@ -154,3 +154,20 @@ describe('buildDrafterBundle — extraction gap counts', () => {
     expect(bundle.chartReadiness.extractionGaps).toBeNull();
   });
 });
+
+// KEYSTONE (document auto-recovery loop, 2026-06-14): the bundle carries the RN/admin override so the
+// Fargate drafter (which reads caseData.acknowledge_missing_docs) stops re-halting a chart the EMR
+// deliberately released. Default false ⇒ byte-identical legacy bundle.
+describe('buildDrafterBundle — acknowledgeMissingDocs override carry-through', () => {
+  it('defaults acknowledgeMissingDocs to false when no override is passed', async () => {
+    const db = makeDb({ captureDocWhere: () => {}, captureFrsWhere: () => {} });
+    const bundle = await buildDrafterBundle(db as never, 'CASE-MIGRAINE');
+    expect(bundle.chartReadiness.acknowledgeMissingDocs).toBe(false);
+  });
+
+  it('carries acknowledgeMissingDocs=true through to the bundle when the route overrides', async () => {
+    const db = makeDb({ captureDocWhere: () => {}, captureFrsWhere: () => {} });
+    const bundle = await buildDrafterBundle(db as never, 'CASE-MIGRAINE', { acknowledgeMissingDocs: true });
+    expect(bundle.chartReadiness.acknowledgeMissingDocs).toBe(true);
+  });
+});

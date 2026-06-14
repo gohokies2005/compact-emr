@@ -14,7 +14,8 @@ import {
   parseManualSummary,
   parseReadAttempt,
 } from '../services/file-read-validation.js';
-import { deriveChartBuildState } from '../services/chart-build-state.js';
+import { computeTriggerHash, deriveChartBuildState, isScreeningSummaryKey, runMatchesHash } from '../services/chart-build-state.js';
+import { AUTO_REMEDIATE_ACTION } from '../services/chart-auto-remediate.js';
 import type { AppDb, FileReadAttempt, FileReadStatusRecord } from '../services/db-types.js';
 
 // The s3Key is minted `cases/<caseId>/<uuid>-<OriginalName.ext>` (documents presign). Recover the
@@ -59,12 +60,13 @@ export function createChartReadinessRouter(db: AppDb): Router {
       const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
 
-      const outcome = classifyReadAttempt({ method: parsed.method, extractedText: parsed.extractedText });
+      const outcome = classifyReadAttempt({ method: parsed.method, extractedText: parsed.extractedText, pageCount: parsed.documentPageCount });
       const newAttempt: FileReadAttempt = {
         method: parsed.method,
         wordCount: outcome.wordCount,
         charCount: nonWhitespaceCharCount(parsed.extractedText),
         corruptedTokenRatio: outcome.corruptedTokenRatio,
+        pageCount: parsed.documentPageCount,
         attemptedAt: new Date().toISOString(),
         note: outcome.reason ?? parsed.note,
       };
@@ -76,13 +78,20 @@ export function createChartReadinessRouter(db: AppDb): Router {
 
         // Terminal-status decision:
         //   succeeded                 -> 'read'
+        //   auto-skip (empty/invalid) -> 'auto_skipped' (NON-BLOCKING; no RN action) — but NEVER
+        //                                downgrade an existing RN-cleared 'manual_summary_provided'.
         //   not succeeded + existing is manual_summary_provided -> keep 'manual_summary_provided'
         //   not succeeded + otherwise -> 'manual_summary_required' (HALT until RN intervenes)
+        // auto_skipped is checked before the manual fallthrough so a genuinely empty file self-heals
+        // (document auto-recovery loop, 2026-06-14); a substantive sliver / garbled read has
+        // autoSkip=false and still lands on manual_summary_required (never silently drop a real record).
         const terminalStatus = outcome.succeeded
           ? 'read'
           : existing?.terminalStatus === 'manual_summary_provided'
             ? 'manual_summary_provided'
-            : 'manual_summary_required';
+            : outcome.autoSkip === true
+              ? 'auto_skipped'
+              : 'manual_summary_required';
 
         const row = existing
           ? await tx.fileReadStatus.update({
@@ -178,7 +187,32 @@ export function createChartReadinessRouter(db: AppDb): Router {
         ? { truncatedWindows: Number(rj.gaps.truncatedWindows ?? 0), uncoveredPages: Number(rj.gaps.uncoveredPages ?? 0) }
         : null;
 
-      res.json({ data: { ...result, blockingFiles, extractionState: build.state, extractionGaps } });
+      // AUTO-RECOVERY EXHAUSTION (document auto-recovery loop FIX 3, 2026-06-14). The last-resort
+      // ChartRecoveryBanner must appear ONLY once auto-recovery has actually given up — NOT during a
+      // normal preparing/extracting cycle (showing it then papered over the auto-resume stall). The
+      // bounded auto-remediate writes a `case_auto_remediated` activity marker keyed on the doc-set
+      // triggerHash; "exhausted" = the chart is SETTLED (not building) AND still has real blockers AND
+      // a marker exists for the CURRENT doc-set (re-reading the same files already failed). A new upload
+      // changes the triggerHash so a genuinely-changed chart is NOT mistaken for exhausted. Computed
+      // only when there are blockers + the chart has settled (cheap short-circuit; no marker query
+      // during a build). The same (caseId, triggerHash) marker the /draft route checks — single source.
+      const settled = build.state !== 'extracting' && build.state !== 'ocr_in_progress';
+      let autoRecoveryExhausted = false;
+      if (!result.ready && settled && result.blockingFiles.length > 0) {
+        const buildDocs = docs
+          .filter((d) => !isScreeningSummaryKey(d.s3Key))
+          .map((d) => ({ id: d.id ?? '', s3Key: d.s3Key }));
+        const currentHash = computeTriggerHash(buildDocs, rows.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })));
+        const markers = await (db as unknown as {
+          activityLog: { findMany: (a: { where: { caseId: string; action: string } }) => Promise<{ detailsJson?: { triggerHash?: unknown } | null }[]> };
+        }).activityLog.findMany({ where: { caseId, action: AUTO_REMEDIATE_ACTION } });
+        autoRecoveryExhausted = markers.some((m) => {
+          const h = m.detailsJson && typeof m.detailsJson === 'object' ? (m.detailsJson as { triggerHash?: unknown }).triggerHash : undefined;
+          return typeof h === 'string' && runMatchesHash(h, currentHash);
+        });
+      }
+
+      res.json({ data: { ...result, blockingFiles, extractionState: build.state, extractionGaps, autoRecoveryExhausted } });
     }),
   );
 

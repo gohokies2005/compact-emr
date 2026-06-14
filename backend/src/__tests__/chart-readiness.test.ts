@@ -158,10 +158,35 @@ describe('classifyReadAttempt', () => {
     expect(r.reason).toBeNull();
   });
 
-  it('rejects an effectively-empty (0-char) read even on a 1-page file (textless photo → manual)', () => {
+  // AUTO-RECOVERY (2026-06-14): a KNOWN single empty page (0 chars) is AUTO-SKIPPED — non-blocking,
+  // no RN action — instead of dead-ending to manual. autoSkip=true, succeeded stays false (not a read).
+  it('AUTO-SKIPS an effectively-empty (0-char) read on a KNOWN 1-page file (empty photo → auto_skipped, non-blocking)', () => {
     const r = classifyReadAttempt({ method: 'textract', extractedText: '   ', pageCount: 1 });
     expect(r.succeeded).toBe(false);
+    expect(r.autoSkip).toBe(true);
+    expect(r.reason).toContain('auto-skipped');
+  });
+
+  it('does NOT auto-skip a 0-char read on a SUBSTANTIAL (>=2 page) file — may be a real record OCR choked on → manual', () => {
+    const r = classifyReadAttempt({ method: 'textract', extractedText: '   ', pageCount: 5 });
+    expect(r.succeeded).toBe(false);
+    expect(r.autoSkip).toBeFalsy();
     expect(r.reason).toContain('empty');
+  });
+
+  it('does NOT auto-skip a 0-char read of UNKNOWN size — conservative, flags manual (never silently drop an unknown-size record)', () => {
+    const r = classifyReadAttempt({ method: 'textract', extractedText: '' });
+    expect(r.succeeded).toBe(false);
+    expect(r.autoSkip).toBeFalsy();
+    expect(r.reason).toContain('empty');
+  });
+
+  it('does NOT auto-skip a substantive sliver — autoSkip only fires for a genuinely EMPTY (0-char) read', () => {
+    // "Error" (5 chars) on a known single page is a non-empty sliver → fails the char floor as manual,
+    // never auto_skipped (auto-skip is 0-char ONLY; a substantive sliver still flags).
+    const r = classifyReadAttempt({ method: 'native_pdf_text', extractedText: 'Error' });
+    expect(r.succeeded).toBe(false);
+    expect(r.autoSkip).toBeFalsy();
   });
 
   it('rejects a garbled 1-page read (garble beats the small-file pass)', () => {
@@ -438,9 +463,14 @@ describe('evaluateChartReadiness', () => {
       expect(isEffectivelyRead(row({ terminalStatus: 'manual_summary_required', attemptsJson: [] }))).toBe(false);
     });
 
+    it('TRUE for auto_skipped — a genuinely empty file the system auto-skipped is non-blocking (no RN action)', () => {
+      expect(isEffectivelyRead(row({ terminalStatus: 'auto_skipped', attemptsJson: [] }))).toBe(true);
+    });
+
     it('PARITY LOCK: isEffectivelyRead(row) === evaluateChartReadiness([row]).ready for every branch', () => {
       const samples: FileReadStatusRecord[] = [
         row({ terminalStatus: 'read' }),
+        row({ terminalStatus: 'auto_skipped', attemptsJson: [] }),
         row({ terminalStatus: 'manual_summary_required' }),
         row({ terminalStatus: 'manual_summary_required', filePath: 'cases/C/uuid-Intake_Summary.pdf' }),
         row({ terminalStatus: 'manual_summary_provided', manualSummary: 'A perfectly valid forty-plus character manual summary by the RN.' }),

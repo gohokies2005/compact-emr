@@ -5,6 +5,16 @@ import {
   STALE_THRESHOLD_MS,
   MAX_LIFETIME_MS,
 } from '../services/draft-job-constants.js';
+import { enqueueAutoRerunForCase, DRAFT_AUTO_RERUN_ACTION } from '../services/draft-auto-rerun.js';
+import type { AppDb } from '../services/db-types.js';
+
+// ADDITION A (document auto-recovery loop, 2026-06-14): a timed-out/interrupted draft cannot be resumed
+// from a partial (the drafter spawns a fresh pipeline from scratch), so we AUTO-RE-RUN a fresh full draft
+// ONCE per case instead of leaving the manual "click Send to Drafter again" dead-end. Bounded: at most
+// MAX_AUTO_RERUNS auto-re-runs per case in the lookback window — past that, fall to the human last resort
+// (the OpsHeldPanel) rather than loop ~$15 cloud spend on a chronically-failing case.
+const MAX_AUTO_RERUNS = 1;
+const AUTO_RERUN_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Architect QA F6: stuck-Fargate-task watcher.
@@ -56,6 +66,9 @@ function getPrisma(): PrismaClient {
 export interface StuckJobWatcherResult {
   scanned: number;
   swept: number;
+  // ADDITION A: count of swept 'running' jobs that were auto-RE-RUN (a fresh full draft, bounded once
+  // per case) instead of left at the manual dead-end.
+  autoReran: number;
   ranAt: string;
 }
 
@@ -99,10 +112,11 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
 
   if (stuckJobs.length === 0) {
     console.log(JSON.stringify({ msg: 'stuck-job-watcher: no stale jobs', scanned: 0, swept: 0, ranAt: now.toISOString() }));
-    return { scanned: 0, swept: 0, ranAt: now.toISOString() };
+    return { scanned: 0, swept: 0, autoReran: 0, ranAt: now.toISOString() };
   }
 
   let swept = 0;
+  let autoReran = 0;
   // G8: RN-friendly message we set on Case.operatorMessage so the EMR UI can render a clear
   // next-action prompt instead of leaving the RN to interpret "system error". No infra
   // jargon (no "Lambda", "Fargate", "heartbeat" etc.) — just what happened plus what to do.
@@ -157,6 +171,35 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
       ]);
       swept += 1;
       console.log(JSON.stringify({ msg: 'stuck-job-watcher: swept', jobId: job.id, caseId: job.caseId, priorState: job.state }));
+
+      // ADDITION A — bounded AUTO-RE-RUN. A 'running' job that went stale is a genuine mid-run timeout
+      // (it had a worker + heartbeats), which is exactly the "resume on timeout" case. The drafter cannot
+      // resume a partial, so we enqueue a FRESH full draft ONCE. A 'queued' job that was abandoned (never
+      // claimed) is NOT auto-re-run here — re-enqueuing an unclaimed job risks a capacity-thrash loop; the
+      // RN re-sends it. Count prior auto-re-runs in the lookback window to enforce the cap; past it, leave
+      // the human last resort (OpsHeldPanel) so a chronically-failing case never loops cloud spend.
+      if (job.state === 'running') {
+        try {
+          const priorReruns = await prisma.activityLog.count({
+            where: { caseId: job.caseId, action: DRAFT_AUTO_RERUN_ACTION, createdAt: { gt: new Date(now.getTime() - AUTO_RERUN_LOOKBACK_MS) } },
+          });
+          if (priorReruns < MAX_AUTO_RERUNS) {
+            const rerun = await enqueueAutoRerunForCase(prisma as unknown as AppDb, job.caseId, job.version);
+            if (rerun.enqueued) {
+              autoReran += 1;
+              console.log(JSON.stringify({ msg: 'stuck-job-watcher: auto-re-ran', caseId: job.caseId, supersedesVersion: job.version, newJobId: rerun.jobId, newVersion: rerun.version }));
+            } else {
+              console.log(JSON.stringify({ msg: 'stuck-job-watcher: auto-re-run skipped', caseId: job.caseId, reason: rerun.reason }));
+            }
+          } else {
+            console.log(JSON.stringify({ msg: 'stuck-job-watcher: auto-re-run cap reached; leaving for manual re-send', caseId: job.caseId, priorReruns }));
+          }
+        } catch (rerunErr) {
+          // Auto-re-run failure must never undo a completed sweep — log + continue (the case is still
+          // safely 'failed'/paused with the manual re-send affordance).
+          console.error(JSON.stringify({ msg: 'stuck-job-watcher: auto-re-run failed', caseId: job.caseId, error: rerunErr instanceof Error ? rerunErr.message : String(rerunErr) }));
+        }
+      }
     } catch (err) {
       // Don't fail the whole invocation on one row — log and continue.
       console.error(JSON.stringify({
@@ -167,7 +210,7 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
     }
   }
 
-  const summary = { scanned: stuckJobs.length, swept, ranAt: now.toISOString() };
+  const summary = { scanned: stuckJobs.length, swept, autoReran, ranAt: now.toISOString() };
   console.log(JSON.stringify({ msg: 'stuck-job-watcher: summary', ...summary }));
   return summary;
 }

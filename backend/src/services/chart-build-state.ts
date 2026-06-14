@@ -27,6 +27,11 @@ export const TERMINAL_READ_STATUSES: ReadonlySet<string> = new Set([
   'read',
   'manual_summary_provided',
   'manual_summary_required',
+  // 'auto_skipped' (document auto-recovery loop, 2026-06-14): a genuinely empty/invalid file the
+  // system auto-skipped. It is DONE being read (terminal), so it must count toward all-terminal here
+  // exactly like manual_summary_required — otherwise an auto-skipped file would wedge the build in
+  // 'ocr_in_progress' forever (it never reaches 'read').
+  'auto_skipped',
 ]);
 
 export interface DocRef {

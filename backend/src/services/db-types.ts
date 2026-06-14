@@ -685,7 +685,13 @@ export interface ClarificationDelegate {
 
 // ====================== Phase 5.2: FileReadStatus ======================
 
-export type FileTerminalStatus = 'read' | 'manual_summary_required' | 'manual_summary_provided';
+// 'auto_skipped' (document auto-recovery loop, 2026-06-14): a genuinely EMPTY/invalid file (0
+// non-whitespace chars from an empty or unparseable PDF/image) the system auto-skips instead of
+// sending an RN to manual review. It is NON-BLOCKING (treated like 'read' by every readiness gate)
+// — the chart simply drafts without that empty file, no human action. A SUBSTANTIVE sliver / garbled
+// read is NOT auto-skipped (still 'manual_summary_required' — never silently drop a real record). The
+// terminal_status column is VarChar(40), so this needs no migration.
+export type FileTerminalStatus = 'read' | 'manual_summary_required' | 'manual_summary_provided' | 'auto_skipped';
 
 /**
  * Read-attempt method. Compact-EMR INGEST_OCR_SPEC (2026-05-25, FRN-window-authored) HARD

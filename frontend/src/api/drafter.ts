@@ -58,8 +58,16 @@ export interface DraftConcurrency {
 }
 
 export interface DraftPublishResult {
-  readonly job: unknown;
-  readonly publish: unknown;
+  // AUTO-RECOVERY (document auto-recovery loop, 2026-06-14): a 202 "preparing" response means the chart
+  // wasn't ready so the backend auto-fired a re-read/re-extract instead of dead-ending. There is NO job
+  // yet — the panel shows "Reading the documents…" and its readiness poll auto-resumes the draft when
+  // the chart reaches chart_ready. Absent on a normal 201 (a real queued job).
+  readonly preparing?: boolean;
+  readonly autoRemediated?: boolean;
+  readonly reocrQueued?: number;
+  readonly message?: string;
+  readonly job?: unknown;
+  readonly publish?: unknown;
   // Folded into the POST /draft 201 so the click knows its place in line immediately. null when the
   // count could not be computed (never fails the enqueue).
   readonly concurrency?: DraftConcurrency | null;

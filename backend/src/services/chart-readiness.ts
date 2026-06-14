@@ -116,6 +116,13 @@ export interface ReadAttemptOutcome {
   readonly wordCount: number;
   readonly corruptedTokenRatio: number;
   readonly reason: string | null;
+  // 'auto_skipped' signal (document auto-recovery loop, 2026-06-14): TRUE only for a genuinely EMPTY
+  // read — 0 non-whitespace chars from an empty/invalid PDF/image — which the system auto-skips as a
+  // NON-BLOCKING terminal outcome instead of dead-ending to manual review. NEVER true for a garbled or
+  // substantive-sliver read (those still flag manual — never silently drop a real record). The
+  // /read-attempts route maps autoSkip ⇒ terminalStatus 'auto_skipped'. succeeded stays false (it is
+  // not a real read), so legacy callers that only branch on `succeeded` are unaffected.
+  readonly autoSkip?: boolean;
 }
 
 /**
@@ -146,11 +153,24 @@ export function classifyReadAttempt(input: ReadAttemptInput): ReadAttemptOutcome
   if (ratio > GARBLED_RATIO_THRESHOLD) {
     return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: `garbled (corrupted-token-ratio=${ratio.toFixed(3)} > ${GARBLED_RATIO_THRESHOLD})` };
   }
-  // An effectively-EMPTY read (0 non-whitespace chars) is NEVER a "valid small file" — it's a failed
-  // read (a textless photo, a blank scan). Flag it; never silently accept a blank. This is the only
-  // case that needs handling for a <=1-page file (it later routes to an image-describe path).
+  // An effectively-EMPTY read (0 non-whitespace chars). Two sub-cases (document auto-recovery loop,
+  // 2026-06-14):
+  //   • A KNOWN <=1-page file with 0 chars is a genuinely empty/invalid file — a textless photo, a
+  //     blank/invalid single-page PDF. AUTO-SKIP it (non-blocking terminal) so the system self-heals
+  //     with NO RN action instead of dead-ending the letter. (The image-describe rung in the OCR
+  //     worker may convert a textless IMAGE to usable text upstream BEFORE this; when describe is off
+  //     or finds nothing, auto-skip is the no-human-action floor for an empty single page.)
+  //   • A SUBSTANTIAL (>=2 page) file with 0 chars is the "OCR choked on a big scan" signal — it may
+  //     be a REAL multi-page record we failed to read, so it still FLAGS for manual review.
+  //   • UNKNOWN size (pageCount null) with 0 chars is treated CONSERVATIVELY as substantial and FLAGS
+  //     for manual — matching this module's "null/unknown ⇒ substantial" rule everywhere else. We only
+  //     auto-skip when we can POSITIVELY confirm the file is a single empty page; never silently drop a
+  //     record whose size we don't know.
   if (chars === 0) {
-    return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: 'empty (0 chars)' };
+    if (pageCount !== null && pageCount <= 1) {
+      return { succeeded: false, autoSkip: true, wordCount: wc, corruptedTokenRatio: ratio, reason: 'auto-skipped: empty single-page file (0 chars)' };
+    }
+    return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: pageCount !== null ? `empty (0 chars) for a ${pageCount}-page file` : 'empty (0 chars)' };
   }
   // SMALL-FILE EXEMPTION (preserved, Ryan 2026-06-13/14): a <=1-page file with ANY non-garbled,
   // non-empty text is a valid small file ("CPAP" = 4 chars on a 1-page note) and must NOT block —
@@ -311,6 +331,10 @@ export function isEffectivelyRead(row: FileReadStatusRecord): boolean {
   // branch when 'read', or the retroactive-threshold heal below. (consistency sweep fixes, 2026-06-14.)
   if (isIntakeSummaryPath(row.filePath) && row.terminalStatus === 'read') return true;
   if (row.terminalStatus === 'read') return true;
+  // 'auto_skipped' (document auto-recovery loop, 2026-06-14): a genuinely empty/invalid file the
+  // system auto-skipped is NON-BLOCKING — the chart drafts without it, no RN action. Treated exactly
+  // like a clean read here so it never appears in the readiness blockers or the RN manual queue.
+  if (row.terminalStatus === 'auto_skipped') return true;
   if (row.terminalStatus === 'manual_summary_provided' && isValidManualSummary(row.manualSummary)) return true;
   return lastAttemptPassesCurrentThresholds(row);
 }

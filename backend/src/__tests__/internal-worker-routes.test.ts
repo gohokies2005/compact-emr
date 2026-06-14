@@ -293,6 +293,38 @@ describe('POST /internal/documents/:id/pages', () => {
     expect(rows[0]?.terminalStatus).toBe('manual_summary_required');
   });
 
+  // ── FIX 2 (2026-06-14): the LIVE Textract /pages writer must honor outcome.autoSkip ──────────
+  // A genuinely empty <=1-page file is auto-skipped (NON-BLOCKING) — the writer used to ignore
+  // autoSkip and dead-end every non-success to manual_summary_required, so the auto-skip was DEAD in
+  // the live OCR path (only the /read-attempts route honored it).
+  it('lands terminalStatus=auto_skipped when a 0-char <=1-page file flows through the /pages writer (live path)', async () => {
+    const { db, fileReadStatuses } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-empty.pdf' });
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/documents/DOC-1/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      // 0 non-whitespace chars on a single page = a genuinely empty/invalid file → auto_skip.
+      .send({ pages: [{ pageNumber: 1, text: '   \n ', confidence: null }], documentPageCount: 1 });
+    expect(res.status).toBe(201);
+    expect(res.body.data.readTerminalStatus).toBe('auto_skipped');
+    const rows = [...fileReadStatuses.values()];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.terminalStatus).toBe('auto_skipped');
+  });
+
+  it('still lands manual_summary_required for a 0-char MULTI-PAGE file (never auto-skips a real record)', async () => {
+    // The data-loss guard: a substantial (>=2 page) file with 0 chars may be a REAL record we failed
+    // to read — it must FLAG for manual review, NOT silently auto-skip. (autoSkip=false here.)
+    const { db, fileReadStatuses } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-bigblank.pdf' });
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/documents/DOC-1/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ pages: [{ pageNumber: 1, text: '', confidence: null }], documentPageCount: 12 });
+    expect(res.status).toBe(201);
+    expect(res.body.data.readTerminalStatus).toBe('manual_summary_required');
+    const rows = [...fileReadStatuses.values()];
+    expect(rows[0]?.terminalStatus).toBe('manual_summary_required');
+  });
+
   it('does not overwrite an RN manual_summary_provided clearance on OCR success', async () => {
     const { db, fileReadStatuses, tx } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-cleared.pdf' });
     // Seed a pre-existing provided clearance.
@@ -375,6 +407,21 @@ describe('parse-at-intake (#8 v2) intake OCR endpoints', () => {
     expect(pagesRes.status).toBe(201);
     expect(pagesRes.body.data.intakeS3Key).toBe(KEY);
     expect(pagesRes.body.data.readStatus).toBe('read');
+  });
+
+  // FIX 2 (2026-06-14): the LIVE intake by-job-tag/pages writer must honor autoSkip too.
+  it('by-job-tag/pages lands readStatus=auto_skipped for a 0-char <=1-page intake file', async () => {
+    const { db } = makeDb();
+    await request(appFor(db))
+      .post('/api/v1/internal/intakes/ocr-start')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ intakeS3Key: KEY, jobTag: 'empty-job' });
+    const res = await request(appFor(db))
+      .post('/api/v1/internal/intakes/by-job-tag/pages')
+      .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
+      .send({ jobTag: 'empty-job', pages: [{ pageNumber: 1, text: '  ', confidence: null }], documentPageCount: 1 });
+    expect(res.status).toBe(201);
+    expect(res.body.data.readStatus).toBe('auto_skipped');
   });
 
   it('by-job-tag/pages returns 404 for an unknown jobTag', async () => {

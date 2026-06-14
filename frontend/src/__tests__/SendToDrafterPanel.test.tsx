@@ -251,6 +251,55 @@ describe('SendToDrafterPanel', () => {
     expect(screen.queryByText('Chart is not ready for drafting')).not.toBeInTheDocument();
   });
 
+  // ── FIX 1 (2026-06-14): auto-resume dead-spot ───────────────────────────────
+  // The 202 "preparing" auto-remediation arms an auto-resume that MUST fire the real draft itself once
+  // the chart reaches chart_ready — "click once and walk away." The guard was tautological
+  // (gated on !stillBuilding where stillBuilding folds in the armed flag itself), so the auto-submit
+  // could PHYSICALLY never fire and the panel stalled forever on "Reading the documents…".
+  it('AUTO-RESUMES the draft exactly once when a 202 preparing chart reaches chart_ready (no human click)', async () => {
+    // Drive the readiness transitions via react-query invalidation (the 202 onSuccess invalidates; we
+    // invalidate again for the extracting→ready step) — no fake timers, which fight testing-library's
+    // waitFor. The states the panel observes in order:
+    //   1) not ready, settled  → the override button is the human's ONE click
+    //   2) extracting          → button disabled, auto-resume armed + waiting (buildingFromExtraction)
+    //   3) chart_ready         → auto-resume fires the draft ITSELF
+    readinessMock
+      .mockResolvedValueOnce({ data: { ready: false, blockingFiles: [{ filePath: 'records/x.pdf', terminalStatus: 'manual_summary_required' }] } })
+      .mockResolvedValueOnce({ data: { ready: false, extractionState: 'extracting' } })
+      .mockResolvedValue({ data: { ready: true, extractionState: 'chart_ready' } });
+    // First POST (the human override click) returns 202 preparing; any later POST is the auto-resume.
+    postDraftMock
+      .mockResolvedValueOnce({ data: { preparing: true } })
+      .mockResolvedValue({ data: { job: { id: 'job-1' }, publish: {} } });
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    function Wrapper({ children }: { readonly children: ReactNode }) {
+      return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+    }
+    // No claimedCondition → gate1 disabled → the override drafts directly (no modal to drive).
+    render(<SendToDrafterPanel caseId="CASE-1" />, { wrapper: Wrapper });
+
+    // The human's ONE click: open the override, type a reason, start the draft.
+    fireEvent.click(await screen.findByRole('button', { name: 'Override and draft anyway' }));
+    fireEvent.change(screen.getByPlaceholderText('What does the file show?'), { target: { value: 'ResMed report — 7.1 hrs/night, AHI 4.2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Override and start draft' }));
+
+    // 202 preparing → arms auto-resume + invalidates readiness (refetch #2 → extracting).
+    await waitFor(() => expect(postDraftMock).toHaveBeenCalledTimes(1));
+    await screen.findByText('Reading & extracting the full chart…');
+
+    // The next poll/refetch flips readiness to chart_ready → the effect auto-submits with no human click.
+    await queryClient.invalidateQueries({ queryKey: ['case', 'CASE-1', 'chart-readiness'] });
+
+    await waitFor(() => expect(postDraftMock).toHaveBeenCalledTimes(2));
+    // It carried the ORIGINAL override args, not a bare {}.
+    expect(postDraftMock).toHaveBeenLastCalledWith('CASE-1', { acknowledgeMissingDocs: true, overrideReason: 'ResMed report — 7.1 hrs/night, AHI 4.2' });
+    // And it auto-submits EXACTLY once — no double-fire across the chart_ready re-renders.
+    await queryClient.invalidateQueries({ queryKey: ['case', 'CASE-1', 'chart-readiness'] });
+    await waitFor(() => expect(readinessMock.mock.calls.length).toBeGreaterThanOrEqual(4));
+    expect(postDraftMock).toHaveBeenCalledTimes(2);
+  });
+
   it('override reason survives a failed POST (stateful textarea, not window.prompt)', async () => {
     readinessMock.mockResolvedValue({
       data: {

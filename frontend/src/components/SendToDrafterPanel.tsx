@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
@@ -41,9 +41,27 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
     },
   });
 
+  // AUTO-RECOVERY (document auto-recovery loop, 2026-06-14): when a draft click on a not-ready chart
+  // gets a 202 "preparing" (the backend auto-fired a re-read/re-extract), we set this so the readiness
+  // poll auto-RESUMES the draft once the chart reaches chart_ready — the RN clicks once and walks away.
+  // The ref guards against a double auto-submit if the ready transition renders twice. Carries the
+  // override args (if the click that triggered remediation was an override) so the auto-resume re-sends
+  // with the same acknowledgement and doesn't bounce off the gate again.
+  const [awaitingAutoResume, setAwaitingAutoResume] = useState<DraftRequestInput | null>(null);
+  const autoResumeFiredRef = useRef(false);
+
   const draftMutation = useMutation({
     mutationFn: (input?: DraftRequestInput) => postDraft(caseId, input ?? {}),
-    onSuccess: async (res) => {
+    onSuccess: async (res, variables) => {
+      // 202 "preparing": no job yet — the chart is being rebuilt. Show "Reading the documents…" (the
+      // readiness query flips to extracting and polls). Arm the auto-resume so the draft fires itself
+      // when the chart is ready. Keep any override args so the resume carries the same acknowledgement.
+      if (res.data.preparing === true) {
+        autoResumeFiredRef.current = false;
+        setAwaitingAutoResume(variables ?? {});
+        await queryClient.invalidateQueries({ queryKey: ['case', caseId, 'chart-readiness'] });
+        return;
+      }
       // Seed the queue-position panel from the 201's concurrency block so the RN sees their place in
       // line the instant the draft is queued, before the first GET /draft-concurrency poll lands.
       const concurrency = res.data.concurrency ?? null;
@@ -53,6 +71,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
         queryClient.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }),
       ]);
       // Draft started — the override note (if any) was consumed; clear it for next time.
+      setAwaitingAutoResume(null);
       setOverrideOpen(false);
       setOverrideReason('');
     },
@@ -94,11 +113,46 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   // The chart is still building: OCR running, or the full-read extraction (minutes) hasn't finished.
   // Drafting must wait — the pre-draft gates (Gate-2 dx / framing / viability) read the EXTRACTED
   // chart, so a draft started mid-extraction sees a half-populated chart. (Ryan 2026-06-13.)
-  const stillBuilding = readiness?.extractionState === 'extracting' || readiness?.extractionState === 'ocr_in_progress';
+  const buildingFromExtraction = readiness?.extractionState === 'extracting' || readiness?.extractionState === 'ocr_in_progress';
+  // "Still building" for UI purposes = the extraction is running OR we just fired an auto-remediation and
+  // are awaiting auto-resume (covers the brief window after the 202 before the readiness poll catches up,
+  // so the RN immediately sees "Reading the documents…" and the Send button stays disabled — no flicker
+  // to the amber not-ready panel, no premature manual click). (document auto-recovery loop, 2026-06-14.)
+  const stillBuilding = buildingFromExtraction || awaitingAutoResume !== null;
   // The extraction RUN failed (worker error, or the stuck-run watcher reaped a killed run). The OCR-only
   // `ready` flag can still be true here, so WITHOUT this the panel showed a green "ready" + enabled Send on
   // a failed/empty chart → a hollow $500 letter (audit 2026-06-13 HEADLINE 1 P0). Gate the button on it.
   const extractFailed = readiness?.extractionState === 'extract_failed';
+
+  // AUTO-RESUME (document auto-recovery loop, 2026-06-14; dead-spot fixed 2026-06-14): after an
+  // auto-remediation (202 "preparing"), the readiness poll watches the chart rebuild. The moment it
+  // reaches chart_ready (ready && extraction no longer running && not failed), auto-submit the draft
+  // ONCE so the RN truly walks away.
+  //
+  // DEAD-SPOT BUG (was): the firing condition gated on `!stillBuilding`, but `stillBuilding`
+  // (line ~121) is `buildingFromExtraction || awaitingAutoResume !== null` — and inside this effect
+  // `awaitingAutoResume` is ALWAYS non-null (we return early above when it's null), so `stillBuilding`
+  // was tautologically true and `!stillBuilding` tautologically false. The auto-submit could PHYSICALLY
+  // never fire; the panel stalled forever on "Reading the documents…". The gate must read the REAL
+  // "extraction still running" signal (buildingFromExtraction), NOT the UI-flavored stillBuilding that
+  // folds in the armed flag itself.
+  //
+  // The ref guards against a double submit across re-renders; a draft already in flight or a failed
+  // extraction clears the armed state (the failed branch surfaces its own override, never a silent stall).
+  useEffect(() => {
+    if (awaitingAutoResume === null) return;
+    if (extractFailed) {
+      // The rebuild failed — disarm; the red extract-failed panel + override take over (not a dead-end).
+      setAwaitingAutoResume(null);
+      return;
+    }
+    if (ready && !buildingFromExtraction && !draftMutation.isPending && !autoResumeFiredRef.current) {
+      autoResumeFiredRef.current = true;
+      const resumeArgs = awaitingAutoResume;
+      setAwaitingAutoResume(null);
+      draftMutation.mutate(resumeArgs);
+    }
+  }, [awaitingAutoResume, ready, buildingFromExtraction, extractFailed, draftMutation]);
   // The run finished but left pages unread/truncated (complete_with_gaps → extractionState stays
   // 'chart_ready'). Door still opens; we surface HOW MUCH is missing so the RN can reprocess if it matters.
   const gaps = readiness?.extractionGaps ?? null;

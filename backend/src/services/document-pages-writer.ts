@@ -82,10 +82,26 @@ export async function writeDocumentPages(
       const prior: readonly unknown[] = (existing?.attemptsJson as readonly unknown[] | undefined) ?? [];
       const attempts = [...prior, newAttempt];
 
+      // Terminal-status decision. An existing RN clearance ('manual_summary_provided') is NEVER
+      // downgraded — it wins over everything, even a later successful re-read (this writer's original,
+      // test-locked behavior; do NOT reorder it below 'succeeded'). Then:
+      //   succeeded                                  -> 'read'
+      //   auto-skip (genuinely empty <=1-page file)  -> 'auto_skipped' (NON-BLOCKING; no RN action)
+      //   otherwise                                  -> 'manual_summary_required' (HALT until RN)
+      // BUG (was, FIX 2 2026-06-14): this writer ignored outcome.autoSkip and dead-ended every
+      // non-success to manual_summary_required, so a genuine 0-byte/empty file flowing through the
+      // Textract /pages callback (the LIVE path) was NEVER auto-skipped in production — only the
+      // /read-attempts route honored it. A substantive sliver / garbled / multi-page-empty read has
+      // autoSkip=false and still lands manual_summary_required (the data-loss guard: never silently
+      // drop a real record).
       const terminalStatus =
         existing?.terminalStatus === 'manual_summary_provided'
           ? 'manual_summary_provided'
-          : outcome.succeeded ? 'read' : 'manual_summary_required';
+          : outcome.succeeded
+            ? 'read'
+            : outcome.autoSkip === true
+              ? 'auto_skipped'
+              : 'manual_summary_required';
 
       if (existing) {
         await tx.fileReadStatus.update({

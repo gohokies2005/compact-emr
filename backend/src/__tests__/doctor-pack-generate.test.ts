@@ -758,3 +758,50 @@ describe('generateDoctorPackForCase — PR-3 pinned survival + PR-4 LLM-scope na
     expect(totalPages).toBeLessThanOrEqual(15);
   });
 });
+
+// ── P2-2 (consistency sweep fixes, 2026-06-14): the synthetic screening-summary Document (a 0-page
+// OUTPUT of extraction, NOT a source) must be excluded from the doctor-pack doc query — matching the
+// chart-extract-docs.ts / chart-build-state inputs filter. Feeding it back would put the extractor's
+// own summary into the physician pack.
+describe('generateDoctorPackForCase — screening-summary exclusion (P2-2)', () => {
+  const SCREENING_SUMMARY_S3KEY = 'cases/CASE-1/00000000-screening-summary.txt';
+
+  it('excludes a screening_summary Document (by docTag) from the assembled manifest', async () => {
+    const text = 'Assessment: obstructive sleep apnea. Plan: continue CPAP therapy nightly.';
+    const { db, created } = makeGenDb({
+      caseVersion: 6,
+      documents: [
+        { id: 'doc-real', s3Key: 'cases/CASE-1/aaaa9999-Progress_Notes.pdf', pageCount: 1, docTag: null, filename: 'Progress_Notes.pdf', contentType: 'application/pdf' },
+        // The synthetic OUTPUT: tagged screening_summary AND minted at the marker key.
+        { id: 'doc-screen', s3Key: SCREENING_SUMMARY_S3KEY, pageCount: 0, docTag: 'screening_summary', filename: 'screening-summary.txt', contentType: 'text/plain' },
+      ],
+      pageRows: [pageRow('doc-real', 1, text)],
+    });
+    await generateDoctorPackForCase(db, { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' });
+
+    const manifest = created.data?.manifestJson as ManifestShape;
+    // No manifest entry references the screening-summary key/file.
+    expect(manifest.entries.some((e) => e.filePath === SCREENING_SUMMARY_S3KEY)).toBe(false);
+    expect(manifest.entries.some((e) => e.filePath.endsWith('screening-summary.txt'))).toBe(false);
+    // The real clinical doc still made the pack (exclusion did not over-filter).
+    expect(manifest.entries.some((e) => e.filePath === 'cases/CASE-1/aaaa9999-Progress_Notes.pdf')).toBe(true);
+  });
+
+  it('excludes a screening-summary Document by s3Key marker even when docTag is null (belt-and-suspenders)', async () => {
+    const text = 'Assessment: obstructive sleep apnea. Plan: continue CPAP therapy nightly.';
+    const { db, created } = makeGenDb({
+      caseVersion: 6,
+      documents: [
+        { id: 'doc-real', s3Key: 'cases/CASE-1/aaaa9999-Progress_Notes.pdf', pageCount: 1, docTag: null, filename: 'Progress_Notes.pdf', contentType: 'application/pdf' },
+        // Untagged but the s3Key carries the screening-summary marker.
+        { id: 'doc-screen', s3Key: SCREENING_SUMMARY_S3KEY, pageCount: 0, docTag: null, filename: 'screening-summary.txt', contentType: 'text/plain' },
+      ],
+      pageRows: [pageRow('doc-real', 1, text)],
+    });
+    await generateDoctorPackForCase(db, { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' });
+
+    const manifest = created.data?.manifestJson as ManifestShape;
+    expect(manifest.entries.some((e) => e.filePath === SCREENING_SUMMARY_S3KEY)).toBe(false);
+    expect(manifest.entries.some((e) => e.filePath === 'cases/CASE-1/aaaa9999-Progress_Notes.pdf')).toBe(true);
+  });
+});

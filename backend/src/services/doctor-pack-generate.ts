@@ -21,6 +21,7 @@ import { groundedSourcePagesForCase, type GroundedPage, type GroundedPagesDb } f
 import { aggregateChartSummary } from './chart-summary-aggregator.js';
 import { publishDoctorPackQueued } from './doctor-pack-queue.js';
 import { isDoctorPackS3Key } from './s3-key-safety.js';
+import { isScreeningSummaryKey } from './chart-build-state.js';
 import type { AppDb, DoctorPackManifestEntry, DoctorPackRecord, DocumentPageRecord, KeyDocPageRange } from './db-types.js';
 
 /**
@@ -604,7 +605,13 @@ export async function generateDoctorPackForCase(
   // total. Until the worker is shipped, page_count stays null and the assembler treats
   // null as "include from page 1 onward; worker discovers exact bound at extraction".
   // We also pull existing KeyDoc rows to preserve per-doc physician overrides + notes.
-  const docList = caseWithDocs.documents as readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null; filename?: string | null; contentType?: string | null; uploadedAt?: Date | string | null }[];
+  // Exclude the synthetic screening-summary Document — a 0-page OUTPUT of extraction, never a
+  // doctor-pack source page (matches chart-extract-docs.ts:31 and the chart-build-state inputs
+  // filter). Filtered in JS, not a Prisma `{ not }` where-clause: Prisma's `not` drops NULL-docTag
+  // rows, which would silently exclude every untagged document. Belt-and-suspenders on both the
+  // docTag and the s3Key marker. (consistency sweep fixes, 2026-06-14 — last forgotten exclusion gate.)
+  const docList = (caseWithDocs.documents as readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null; filename?: string | null; contentType?: string | null; uploadedAt?: Date | string | null }[])
+    .filter((d) => d.docTag !== 'screening_summary' && !isScreeningSummaryKey(d.s3Key));
   const existingKeyDocs = await db.keyDoc.findMany({ where: { caseId } });
   const existingByPath = new Map(existingKeyDocs.map((kd) => [kd.filePath, kd]));
 

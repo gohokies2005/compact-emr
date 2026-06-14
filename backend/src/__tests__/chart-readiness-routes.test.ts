@@ -311,10 +311,14 @@ describe('files-pending-manual queues (evaluator-derived + enriched)', () => {
       filePath: `cases/CASE-1/${UUID}-Thomas_OSA_Misc_3.png`,
       attemptsJson: [{ method: 'textract', wordCount: 25, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (25 < 40)' }],
     });
-    // (2) INTAKE SUMMARY: our own generated PDF — always valid, must be ABSENT.
+    // (2) INTAKE SUMMARY that READ OK: our own generated PDF, terminalStatus 'read' — must be
+    //     ABSENT. (P0-1 consistency sweep fixes, 2026-06-14: the intake-summary short-circuit now
+    //     applies ONLY when the file actually read — a FAILED uploaded intake-summary surfaces, see
+    //     the dedicated failed-intake case below. A genuinely-read generated summary still passes.)
     const intake = seedRow(fileRows, {
+      terminalStatus: 'read',
       filePath: `cases/CASE-1/${UUID}-Intake_Summary.pdf`,
-      attemptsJson: [{ method: 'native_pdf_text', wordCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 < 20)' }],
+      attemptsJson: [{ method: 'native_pdf_text', wordCount: 12, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'read' }],
     });
     // (3) GENUINELY GARBLED jpg: fails current thresholds — must REMAIN PRESENT.
     const garbled = seedRow(fileRows, {
@@ -363,6 +367,20 @@ describe('files-pending-manual queues (evaluator-derived + enriched)', () => {
     const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/files-pending-manual');
     expect(res.body.data[0].documentId).toBe(`DOC-${garbled.id}`);
     expect(res.body.data[0].fileName).toBe('Sleep_Study_Photo.jpg');
+  });
+
+  it('P0-1: a FAILED uploaded intake-summary (manual_summary_required) NOW SURFACES in both queues (no longer masked)', async () => {
+    const { db, fileRows } = makeDb();
+    // A veteran-UPLOADED "<Last>_Intake_Summary.pdf" that failed OCR + the Claude rescue. The old
+    // mask hid it from the RN while the drafter still refused on it (undraftable + invisible).
+    const failedIntake = seedRow(fileRows, {
+      filePath: `cases/CASE-1/${UUID}-Lozano_Intake_Summary.pdf`,
+      attemptsJson: [{ method: 'native_pdf_text', wordCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 < 20)' }],
+    });
+    const rn = await request(appFor(db)).get('/api/v1/rn/files-pending-manual');
+    expect(rn.body.data.map((r: { id: string }) => r.id)).toContain(failedIntake.id);
+    const perCase = await request(appFor(db)).get('/api/v1/cases/CASE-1/files-pending-manual');
+    expect(perCase.body.data.map((r: { id: string }) => r.id)).toContain(failedIntake.id);
   });
 
   it('a manual_summary_provided row with an INVALID summary still queues (defense-in-depth parity with the gate)', async () => {

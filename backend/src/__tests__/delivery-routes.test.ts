@@ -55,9 +55,19 @@ interface MakeDbOpts {
   claimType?: string;
   previouslyDenied?: boolean;
   veteranEmail?: string;
-  // Byte-binding gate (#9 Fix 3): sign-off rows the gate reads (latest by signedAt first).
-  signOffs?: ReadonlyArray<{ signedVersion: number | null; signedContentSha256: string | null; signedAt: Date }>;
+  // Byte-binding gate (#9 Fix 3 → #17 SSOT): sign-off rows the gate reads (latest by signedAt first).
+  // answersJson defaults to an AFFIRMATIVE attestation so the gate reaches the byte step (the SSOT
+  // checks exists → affirmative → bytes); a test can pass a non-affirmative answersJson to exercise
+  // the affirmative gate.
+  signOffs?: ReadonlyArray<{ signedVersion: number | null; signedContentSha256: string | null; signedAt: Date; answersJson?: unknown }>;
+  // External-import letter (import deliver-as-is): the current LetterRevision's source + PDF artifact.
+  // When set, resolveCurrentRevisionMeta sees source='external_import' and the gate/excerpt take the
+  // PDF path instead of the placeholder TXT.
+  revisionSource?: string;
+  pdfBytes?: Uint8Array;
 }
+
+const AFFIRMATIVE_ANSWERS = { records_reviewed: true, dx_documented: true, nexus_supported: true };
 
 // Build an AppDb whose email/payment create() ENFORCE the partial unique indexes in-memory: the
 // second delivery insert for the same case throws P2002 (exactly what the DB does in prod). This
@@ -128,14 +138,24 @@ function makeDb(opts: MakeDbOpts = {}) {
   const db = {
     case: { findFirst: vi.fn(async () => (opts.caseExists === false ? null : caseRow)) },
     veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Jane', lastName: 'Doe', email: opts.veteranEmail ?? 'jane@example.com' })) },
-    letterRevision: { findFirst: vi.fn(async () => ({ version: 1, artifactTxtS3Key: 'letter-revisions/CASE-1/v1/letter.txt', artifactPdfS3Key: 'letter-revisions/CASE-1/v1/letter.pdf' })) },
+    letterRevision: { findFirst: vi.fn(async () => ({ id: 'REV-1', version: 1, source: opts.revisionSource ?? 'drafter', artifactTxtS3Key: 'letter-revisions/CASE-1/v1/letter.txt', artifactPdfS3Key: 'letter-revisions/CASE-1/v1/letter.pdf' })) },
     draftJob: { findFirst: vi.fn(async () => null) },
     physician: { findFirst: vi.fn(async () => null) },
     email: emailDelegate,
     payment: paymentDelegate,
-    // Byte-binding delivery gate (#9 Fix 3): default = no sign-off rows → gate is a no-op (pass).
-    // Tests that exercise the gate inject signOff rows via opts.signOffs.
-    signOff: { findMany: vi.fn(async () => opts.signOffs ?? []) },
+    // Byte-binding delivery gate (#9 Fix 3 → #17 SSOT): default = no sign-off rows → gate is a no-op
+    // (pass, fail-open on the exists step is NOT how the SSOT behaves — no sign-off blocks; but the
+    // legacy tests that want a clean pass pass NO signOffs to keep their original shape). Each row
+    // gets an AFFIRMATIVE answersJson by default so the gate reaches the byte step.
+    signOff: {
+      findMany: vi.fn(async () =>
+        (opts.signOffs ?? []).map((s, i) => ({
+          id: `SO-${i}`,
+          ...s,
+          answersJson: s.answersJson ?? AFFIRMATIVE_ANSWERS,
+        })),
+      ),
+    },
     activityLog: { create: vi.fn(async () => ({})) },
     $transaction: vi.fn(async (fn: (t: unknown) => unknown) => fn({ email: emailDelegate, payment: paymentDelegate, activityLog: { create: vi.fn(async () => ({})) } })),
   } as unknown as AppDb;
@@ -143,18 +163,28 @@ function makeDb(opts: MakeDbOpts = {}) {
   return { db, emails, payments, emailDelegate, paymentDelegate };
 }
 
-// A fake S3 that returns the canonical letter TXT.
-function fakeS3() {
+// A fake S3 that returns the canonical letter TXT for TXT reads and (when provided) the imported PDF
+// bytes for binary reads. The delivery email's excerpt + the TXT byte gate use transformToString; the
+// import PDF byte gate (assertDeliveryEligible → readPdfBytesWithHash) uses transformToByteArray. For
+// an external_import case the TXT served is the PLACEHOLDER (so the excerpt-skip is exercised).
+function fakeS3(opts: { txt?: string; pdfBytes?: Uint8Array } = {}) {
+  const txt = opts.txt ?? LETTER_TXT;
+  const pdfBytes = opts.pdfBytes ?? new Uint8Array([0x25, 0x50, 0x44, 0x46]); // "%PDF"
   return {
-    send: vi.fn(async () => ({ Body: { transformToString: async () => LETTER_TXT } })),
+    send: vi.fn(async () => ({
+      Body: {
+        transformToString: async () => txt,
+        transformToByteArray: async () => pdfBytes,
+      },
+    })),
   } as unknown as import('@aws-sdk/client-s3').S3Client;
 }
 
-function appFor(db: AppDb) {
+function appFor(db: AppDb, s3Opts: { txt?: string; pdfBytes?: Uint8Array } = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => { if (mockUser) (req as express.Request & { user?: MockUser }).user = mockUser; next(); });
-  app.use('/api/v1', createDeliveryRouter(db, { s3: fakeS3(), bucketName: 'phi-bucket' }));
+  app.use('/api/v1', createDeliveryRouter(db, { s3: fakeS3(s3Opts), bucketName: 'phi-bucket' }));
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (isHttpError(error)) return sendError(res, error.status, error.code, error.message, error.details);
     return sendError(res, 500, 'internal_error', 'Unexpected server error.');
@@ -401,6 +431,53 @@ describe('POST /cases/:id/delivery/send — real SES send (E3) + idempotency', (
     const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
     expect(res.status).toBe(403);
     expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  // ── P0-2 — imported-letter delivery (consistency sweep fixes, 2026-06-14) ────────────────────
+  // An external_import letter binds its sign-off to sha256(PDF); the TXT is a placeholder. The byte
+  // gate must re-hash the PDF (via the #17 SSOT), NOT the placeholder TXT. The OLD inline TXT-only
+  // re-hash ALWAYS tripped 'signed_bytes_changed' for imports → an imported letter could never ship.
+  const IMPORT_PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0x0a, 0x42]); // "%PDF-1.7\nB"
+  const IMPORT_PDF_SHA = createHash('sha256').update(IMPORT_PDF).digest('hex');
+  // For an import the served TXT is a placeholder with NO §VII/§VIII — buildOpinionExcerpt → block:null.
+  const PLACEHOLDER_TXT = '[external import placeholder]';
+
+  it('P0-2: an external_import letter whose sign-off hash matches the PDF DELIVERS (PDF byte gate, not TXT)', async () => {
+    const { db } = makeDb({
+      revisionSource: 'external_import',
+      signOffs: [{ signedVersion: 1, signedContentSha256: IMPORT_PDF_SHA, signedAt: new Date() }],
+    });
+    const res = await request(appFor(db, { txt: PLACEHOLDER_TXT, pdfBytes: IMPORT_PDF })).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.emailSent).toBe(true);
+    // The §VII excerpt was NOT built from the placeholder TXT (P1-1): the email points to the full
+    // letter instead of shipping a blank/garbled excerpt.
+    const sendArg = sendEmailMock.mock.calls[0][0];
+    expect(sendArg.textBody).toContain('contained in your full letter');
+    expect(sendArg.textBody).not.toContain('[external import placeholder]');
+  });
+
+  it('P0-2: an external_import letter whose PDF changed AFTER sign-off is BLOCKED 409 (false ALLOW would ship the wrong PDF)', async () => {
+    const { db } = makeDb({
+      revisionSource: 'external_import',
+      signOffs: [{ signedVersion: 1, signedContentSha256: 'old_pdf_hash_deadbeef', signedAt: new Date() }],
+    });
+    const res = await request(appFor(db, { txt: PLACEHOLDER_TXT, pdfBytes: IMPORT_PDF })).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('signed_bytes_changed');
+    expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  it('P1-1: GET /delivery for an external_import returns a null excerpt block (placeholder TXT never becomes the excerpt)', async () => {
+    const { db } = makeDb({
+      revisionSource: 'external_import',
+      signOffs: [{ signedVersion: 1, signedContentSha256: IMPORT_PDF_SHA, signedAt: new Date() }],
+    });
+    const res = await request(appFor(db, { txt: PLACEHOLDER_TXT, pdfBytes: IMPORT_PDF })).get('/api/v1/cases/CASE-1/delivery');
+    expect(res.status).toBe(200);
+    expect(res.body.data.excerpt.block).toBeNull();
+    // The composed email body degrades to the generic "in your full letter" line, not a garbled excerpt.
+    expect(res.body.data.email.body).toContain('contained in your full letter');
   });
 });
 

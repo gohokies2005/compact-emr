@@ -231,7 +231,15 @@ function lastAttemptPassesCurrentThresholds(row: FileReadStatusRecord): boolean 
  * (Doctor-pack inclusion consolidates onto it in Package 7.)
  */
 export function isEffectivelyRead(row: FileReadStatusRecord): boolean {
-  if (isIntakeSummaryPath(row.filePath)) return true;
+  // The intake-summary short-circuit applies ONLY when the file actually read OK (terminalStatus
+  // 'read'). A veteran-UPLOADED "<Last>_Intake_Summary.pdf" that FAILED OCR (and failed the Claude
+  // rescue) terminates at 'manual_summary_required'; masking it here as effectively-read hid it from
+  // /chart-readiness, /files-pending-manual and the RN queue while the drafter still refused on it —
+  // undraftable + invisible (Jamarious sibling; OCR-worker fix ef153c2 did NOT cover this TS mask).
+  // A failed intake-summary must fall through to the normal branches so it surfaces to the RN like
+  // any other failed file. A genuinely-read (even sparse) generated summary still passes — via this
+  // branch when 'read', or the retroactive-threshold heal below. (consistency sweep fixes, 2026-06-14.)
+  if (isIntakeSummaryPath(row.filePath) && row.terminalStatus === 'read') return true;
   if (row.terminalStatus === 'read') return true;
   if (row.terminalStatus === 'manual_summary_provided' && isValidManualSummary(row.manualSummary)) return true;
   return lastAttemptPassesCurrentThresholds(row);

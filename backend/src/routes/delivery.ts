@@ -19,7 +19,8 @@ import {
   isEmailTransportConfigured,
   coverMemoRequirement,
 } from '../services/delivery-config.js';
-import { resolveCurrentTxtWithHash } from '../services/letter-current.js';
+import { resolveCurrentRevisionMeta } from '../services/letter-current.js';
+import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
 import { sendEmail } from '../services/mailer.js';
 import { renderMemoPdf } from '../services/memo-render.js';
 import type { AppDb } from '../services/db-types.js';
@@ -144,8 +145,16 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
     const cur = await resolveCurrent(caseId, c.currentVersion);
     if (cur === null) throw new HttpError(409, 'conflict', 'No finalized letter to deliver.', { reason: 'no_letter', caseId });
 
-    const txt = await readTxtFromS3(bucketName, cur.txtKey);
-    const excerpt = buildOpinionExcerpt(txt);
+    // §VII/§VIII excerpt for the veteran email. For an external_import letter the TXT is a
+    // placeholder (the canonical content is the imported PDF), so buildOpinionExcerpt would return
+    // an empty/garbled block — the imported letter's whole point. Skip the TXT-derived excerpt for
+    // imports; the signed PDF (attached/linked in the delivery email) carries the opinion. (consistency
+    // sweep fixes, 2026-06-14.)
+    const revMeta = await resolveCurrentRevisionMeta(db, caseId, c.currentVersion);
+    const isExternalImport = revMeta !== null && revMeta.source === 'external_import';
+    const excerpt = isExternalImport
+      ? buildOpinionExcerpt('')
+      : buildOpinionExcerpt(await readTxtFromS3(bucketName, cur.txtKey));
 
     const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
     const vFirst = (veteran as { firstName?: string } | null)?.firstName ?? null;
@@ -206,30 +215,35 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       const caseId = String(req.params.id);
       const body = (req.body ?? {}) as { emailBody?: unknown; resend?: unknown };
 
-      // ── BYTE-BINDING DELIVERY GATE (#9 Fix 3) ── The real patient egress. Before composing or
-      // sending, verify the letter has not changed since the physician signed it. We re-hash the
-      // CURRENT version's TXT (deterministic source of truth) and compare to the latest sign-off's
-      // bound hash. If they differ, the letter was edited/approved after sign-off — block delivery
-      // until it is re-signed. (approve creates a new version, so any post-sign approve legitimately
-      // trips this — the intended behavior.) Skip the check only when there is no bound hash to
-      // compare against (legacy sign-off predating byte-binding, or S3/bucket unconfigured).
+      // ── BYTE-BINDING DELIVERY GATE (#9 Fix 3; consolidated onto #17 SSOT, consistency sweep fixes,
+      // 2026-06-14) ── The real patient egress. Before composing or sending, verify the letter has
+      // not changed since the physician signed it. We delegate to assertDeliveryEligible (the single
+      // source of truth in delivery-eligibility.ts), which re-hashes the CURRENT version's bound
+      // content and compares to the latest sign-off. It is IMPORT-AWARE: for an external_import
+      // letter the sign-off binds to sha256(PDF) and the TXT is a placeholder, so it re-hashes the
+      // PDF — the inline TXT-only re-hash that used to live here ALWAYS tripped 'signed_bytes_changed'
+      // for imports, so an imported letter could never be sent.
+      //
+      // SCOPE PRESERVED: the old inline gate was byte-only — it FAILED OPEN when there was no sign-off
+      // (latestSignOff === null) or no bound hash, and never checked affirmative-ness. We keep that
+      // exact scope here by translating ONLY the 'signed_bytes_changed' verdict to a 409. The SSOT's
+      // additional exists/affirmative gating is enforced on the OTHER egress paths (Stripe/portal,
+      // human ->delivered flip) where it belongs; widening it here would block legitimate already-
+      // delivered/paid cases whose sign-off rows are not re-presented to this route. A positive byte
+      // mismatch is the one thing that must block /send, exactly as before — now import-aware.
       {
         const bucketName = bucket();
         if (bucketName !== undefined) {
-          const signOffs = await db.signOff.findMany({ where: { caseId }, orderBy: { signedAt: 'desc' } });
-          const latestSignOff = signOffs.length > 0 ? signOffs[0] : null;
-          if (latestSignOff !== null && typeof latestSignOff.signedContentSha256 === 'string' && latestSignOff.signedContentSha256.length > 0) {
-            const c0 = await db.case.findFirst({ where: { id: caseId } });
-            if (c0 !== null) {
-              const cur = await resolveCurrentTxtWithHash(db, s3(), bucketName, caseId, c0.currentVersion);
-              if (cur !== null && cur.sha256 !== latestSignOff.signedContentSha256) {
-                throw new HttpError(409, 'signed_bytes_changed', 'The letter changed after it was signed. Re-sign before delivering.', {
-                  reason: 'signed_bytes_changed',
-                  caseId,
-                  signedVersion: latestSignOff.signedVersion,
-                  currentVersion: cur.version,
-                });
-              }
+          const c0 = await db.case.findFirst({ where: { id: caseId } });
+          if (c0 !== null) {
+            const verdict = await assertDeliveryEligible(db, caseId, c0.currentVersion, { s3: s3(), bucketName });
+            if (!verdict.eligible && verdict.reason === 'signed_bytes_changed') {
+              throw new HttpError(409, 'signed_bytes_changed', 'The letter changed after it was signed. Re-sign before delivering.', {
+                reason: 'signed_bytes_changed',
+                caseId,
+                signedVersion: verdict.details?.signedVersion ?? null,
+                currentVersion: verdict.details?.currentVersion ?? c0.currentVersion,
+              });
             }
           }
         }

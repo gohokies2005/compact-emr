@@ -289,12 +289,36 @@ describe('evaluateChartReadiness', () => {
       expect(isEffectivelyRead(row({ terminalStatus: 'read' }))).toBe(true);
     });
 
-    it('true for a generated intake-summary path regardless of stored status', () => {
+    // P0-1 (Jamarious sibling — consistency sweep fixes, 2026-06-14): the intake-summary
+    // short-circuit must NOT mask a FAILED file. A veteran-UPLOADED "<Last>_Intake_Summary.pdf"
+    // that fails OCR terminates at 'manual_summary_required'; it must surface to the RN like any
+    // other failed file, NOT be hidden as effectively-read. (The old behavior — masked "regardless
+    // of stored status" — left the file undraftable AND invisible.)
+    it('FALSE for a FAILED uploaded intake-summary (manual_summary_required) — it surfaces, no longer masked', () => {
       expect(isEffectivelyRead(row({
         terminalStatus: 'manual_summary_required',
-        filePath: 'cases/CASE-1/uuid-Intake_Summary.pdf',
+        filePath: 'cases/CASE-1/uuid-Lozano_Intake_Summary.pdf',
         attemptsJson: [{ method: 'native_pdf_text', wordCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 < 20)' }],
+      }))).toBe(false);
+    });
+
+    it('true for a genuinely-read intake-summary (terminalStatus read) — a sparse generated summary still passes', () => {
+      expect(isEffectivelyRead(row({
+        terminalStatus: 'read',
+        filePath: 'cases/CASE-1/uuid-Intake_Summary.pdf',
+        attemptsJson: [{ method: 'native_pdf_text', wordCount: 12, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'read' }],
       }))).toBe(true);
+    });
+
+    it('FAILED uploaded intake-summary is reported as a BLOCKING file by evaluateChartReadiness (RN queue surfaces it)', () => {
+      const r = evaluateChartReadiness([row({
+        terminalStatus: 'manual_summary_required',
+        filePath: 'cases/CASE-1/uuid-Lozano_Intake_Summary.pdf',
+        attemptsJson: [{ method: 'native_pdf_text', wordCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'failed' }],
+      })]);
+      expect(r.ready).toBe(false);
+      expect(r.blockingFiles).toHaveLength(1);
+      expect(r.blockingFiles[0].filePath).toContain('Intake_Summary.pdf');
     });
 
     it('true for manual_summary_provided with a valid (>= 40 char) summary', () => {

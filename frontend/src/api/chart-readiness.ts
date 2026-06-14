@@ -36,6 +36,10 @@ export interface ChartReadinessResult {
   // EXTRACTION phase (the full-read chunker, minutes long). Draft must wait for 'chart_ready'.
   // Optional: an older backend omits it → the UI treats absence as "not blocking" (fail-open).
   readonly extractionState?: ChartExtractionState;
+  // Present (non-null) only when the run finished 'complete_with_gaps' — extractionState is still
+  // 'chart_ready' (the door opens) but some pages went unread/truncated, surfaced here so the RN sees
+  // exactly how much of the chart is incomplete instead of trusting a silent "complete". (audit 2026-06-13)
+  readonly extractionGaps?: { readonly truncatedWindows: number; readonly uncoveredPages: number } | null;
 }
 
 export async function getChartReadiness(caseId: string): Promise<{ data: ChartReadinessResult }> {

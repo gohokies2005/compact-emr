@@ -95,6 +95,14 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   // Drafting must wait — the pre-draft gates (Gate-2 dx / framing / viability) read the EXTRACTED
   // chart, so a draft started mid-extraction sees a half-populated chart. (Ryan 2026-06-13.)
   const stillBuilding = readiness?.extractionState === 'extracting' || readiness?.extractionState === 'ocr_in_progress';
+  // The extraction RUN failed (worker error, or the stuck-run watcher reaped a killed run). The OCR-only
+  // `ready` flag can still be true here, so WITHOUT this the panel showed a green "ready" + enabled Send on
+  // a failed/empty chart → a hollow $500 letter (audit 2026-06-13 HEADLINE 1 P0). Gate the button on it.
+  const extractFailed = readiness?.extractionState === 'extract_failed';
+  // The run finished but left pages unread/truncated (complete_with_gaps → extractionState stays
+  // 'chart_ready'). Door still opens; we surface HOW MUCH is missing so the RN can reprocess if it matters.
+  const gaps = readiness?.extractionGaps ?? null;
+  const hasGaps = gaps != null && (gaps.truncatedWindows > 0 || gaps.uncoveredPages > 0);
   const blockingFiles = readiness?.blockingFiles ?? readiness?.blockers ?? [];
   const blockingFileCount = blockingFiles.length;
   // The original filename (basename of the S3 key) so the RN knows EXACTLY which file to re-upload or
@@ -141,6 +149,45 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   const isTooFewWords = (f: ChartReadinessBlockingFile): boolean => /too-few-words/i.test(f.lastAttempt?.note ?? '');
   const allTooFewWords = blockingFileCount > 0 && blockingFiles.every(isTooFewWords);
 
+  // The "override and draft anyway" controls — HARD RULE: every block is overridable. Shared by the
+  // OCR-blocker (amber) branch AND the extract-failed (red) branch so the RN always has an escape that
+  // logs a reason. Gated on assignment exactly like the main Send button.
+  const overrideControls = (
+    <div className="mt-3">
+      {!overrideOpen ? (
+        <Button type="button" variant="secondary" size="sm" className="border border-amber-300 bg-white text-amber-900 shadow-sm hover:bg-amber-50" disabled={needsAssignment} loading={draftMutation.isPending} onClick={() => setOverrideOpen(true)}>
+          Override and draft anyway
+        </Button>
+      ) : (
+        <div className="rounded-lg border border-amber-200 bg-white p-3">
+          <label className="block">
+            <span className="text-sm font-medium text-amber-900">
+              Briefly describe what the unread file(s) show (e.g. &lsquo;ResMed usage report — 7.1 hrs/night, AHI 4.2&rsquo;) so it&rsquo;s logged on the case. The drafter will run without the file itself.
+            </span>
+            <textarea
+              value={overrideReason}
+              onChange={(e) => setOverrideReason(e.target.value)}
+              rows={3}
+              className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+              placeholder="What does the file show?"
+            />
+          </label>
+          <div className="mt-2 flex items-center justify-end gap-2">
+            <Button type="button" variant="secondary" size="sm" onClick={() => setOverrideOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="button" variant="primary" size="sm" disabled={needsAssignment || trimmedOverrideReason.length === 0} loading={draftMutation.isPending} onClick={confirmOverrideAndDraft}>
+              Override and start draft
+            </Button>
+          </div>
+        </div>
+      )}
+      {needsAssignment ? (
+        <p className="mt-2 text-sm font-medium text-amber-700">{assignmentHint}</p>
+      ) : null}
+    </div>
+  );
+
   return (
     <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       {/* Pre-draft strategy preview — catch a crazy pathway before spending on a draft. While the chart is
@@ -159,7 +206,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
         <Button
           type="button"
           variant="primary"
-          disabled={!ready || needsAssignment || stillBuilding}
+          disabled={!ready || needsAssignment || stillBuilding || extractFailed}
           loading={draftMutation.isPending}
           onClick={startDraft}
         >
@@ -193,10 +240,40 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
               </p>
             </div>
           </div>
-        ) : ready ? (
-          <div className="rounded-lg border border-emerald-300 border-l-4 border-l-emerald-500 bg-emerald-50 p-4 text-sm text-emerald-800">
-            Chart is ready for drafting.
+        ) : extractFailed ? (
+          // The extraction RUN failed (worker error or a watcher-reaped killed run). Drafting is blocked
+          // so the $500 letter isn't written on an empty/half chart — but never a dead end (override below).
+          <div className="rounded-lg border border-rose-300 border-l-4 border-l-rose-500 bg-rose-50 p-4">
+            <div className="flex items-center gap-2">
+              <svg className="h-4 w-4 flex-none text-rose-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.515 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>
+              <h3 className="text-sm font-semibold text-rose-900">Chart extraction failed</h3>
+            </div>
+            <p className="mt-1 text-sm text-rose-800">
+              The chart couldn&rsquo;t be built from the records — the extraction run didn&rsquo;t finish. Drafting
+              is blocked so the letter isn&rsquo;t written on an empty chart. Re-run it from the <strong>Documents</strong> tab
+              (&ldquo;Reprocess documents&rdquo;), or override and draft anyway with a logged reason.
+            </p>
+            {overrideControls}
           </div>
+        ) : ready ? (
+          <>
+            <div className="rounded-lg border border-emerald-300 border-l-4 border-l-emerald-500 bg-emerald-50 p-4 text-sm text-emerald-800">
+              Chart is ready for drafting.
+            </div>
+            {hasGaps ? (
+              // complete_with_gaps: the door opens, but some pages were unread/truncated. Surface HOW MUCH so
+              // the RN can decide to reprocess (e.g. if a rating % might be on an unread page). (audit 2026-06-13)
+              <div className="mt-3 rounded-lg border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-4">
+                <h3 className="text-sm font-semibold text-amber-900">Chart is ready — but part of the record went unread</h3>
+                <p className="mt-1 text-sm text-amber-800">
+                  The extraction finished with gaps
+                  {gaps && gaps.uncoveredPages > 0 ? ` — ${gaps.uncoveredPages} page${gaps.uncoveredPages === 1 ? '' : 's'} not read` : ''}
+                  {gaps && gaps.truncatedWindows > 0 ? `${gaps.uncoveredPages > 0 ? ' and' : ' —'} ${gaps.truncatedWindows} dense section${gaps.truncatedWindows === 1 ? '' : 's'} only partially parsed` : ''}.
+                  You can draft now, or reprocess the documents to re-read the full record if a key detail (e.g. a rating&nbsp;%) might be on an unread page.
+                </p>
+              </div>
+            ) : null}
+          </>
         ) : (
           <div className="rounded-lg border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-4">
             <div className="flex items-center gap-2">
@@ -256,41 +333,9 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
                 {readiness?.reason ?? 'Resolve chart-readiness blockers before starting the drafter.'}
               </p>
             )}
-            <div className="mt-3">
-              {/* Gated on assignment exactly like the main Send button — an enabled override here
-                  invited a click guaranteed to 400 (assignment_required). (CLM-BBFCB3F8CE fix 2.) */}
-              {!overrideOpen ? (
-                <Button type="button" variant="secondary" size="sm" className="border border-amber-300 bg-white text-amber-900 shadow-sm hover:bg-amber-50" disabled={needsAssignment} loading={draftMutation.isPending} onClick={() => setOverrideOpen(true)}>
-                  Override and draft anyway
-                </Button>
-              ) : (
-                <div className="rounded-lg border border-amber-200 bg-white p-3">
-                  <label className="block">
-                    <span className="text-sm font-medium text-amber-900">
-                      Briefly describe what the unread file(s) show (e.g. &lsquo;ResMed usage report — 7.1 hrs/night, AHI 4.2&rsquo;) so it&rsquo;s logged on the case. The drafter will run without the file itself.
-                    </span>
-                    <textarea
-                      value={overrideReason}
-                      onChange={(e) => setOverrideReason(e.target.value)}
-                      rows={3}
-                      className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                      placeholder="What does the file show?"
-                    />
-                  </label>
-                  <div className="mt-2 flex items-center justify-end gap-2">
-                    <Button type="button" variant="secondary" size="sm" onClick={() => setOverrideOpen(false)}>
-                      Cancel
-                    </Button>
-                    <Button type="button" variant="primary" size="sm" disabled={needsAssignment || trimmedOverrideReason.length === 0} loading={draftMutation.isPending} onClick={confirmOverrideAndDraft}>
-                      Override and start draft
-                    </Button>
-                  </div>
-                </div>
-              )}
-              {needsAssignment ? (
-                <p className="mt-2 text-sm font-medium text-amber-700">{assignmentHint}</p>
-              ) : null}
-            </div>
+            {/* Gated on assignment exactly like the main Send button — an enabled override here
+                invited a click guaranteed to 400 (assignment_required). (CLM-BBFCB3F8CE fix 2.) */}
+            {overrideControls}
           </div>
         )}
 

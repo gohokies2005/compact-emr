@@ -1,6 +1,8 @@
 import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { presignDocument, recordDocument, uploadToPresignedUrl } from '../api/veterans';
 import { reprocessCase } from '../api/cases';
+import { getChartReadiness } from '../api/chart-readiness';
 import { ACCEPT_ATTR, classifyEntry, isZip, uploadErrorReason, type CandidateResult } from '../routes/veterans/documentUpload';
 import type { Case } from '../types/prisma';
 
@@ -29,7 +31,24 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
   const [docTag, setDocTag] = useState('Other');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
+  // Reprocess is a real Anthropic SPEND (re-reads the whole record) — guard it behind a confirm so
+  // nobody clicks it out of habit and runs up a bill (Ryan 2026-06-13). `watchReprocess` turns on a
+  // live readiness poll AFTER a reprocess fires, so the panel can show a "done" notice when it finishes.
+  const [confirming, setConfirming] = useState(false);
+  const [watchReprocess, setWatchReprocess] = useState(false);
   const targetCaseId = caseId ?? selectedCaseId;
+
+  // Live extraction status after a reprocess (shared queryKey with SendToDrafterPanel, so its draft
+  // button grays/un-grays in lockstep). Only polls while a reprocess is being watched AND still building.
+  const reprocessReadiness = useQuery({
+    queryKey: ['case', targetCaseId, 'chart-readiness'],
+    queryFn: () => getChartReadiness(targetCaseId),
+    enabled: watchReprocess && targetCaseId.length > 0,
+    refetchInterval: (q) => {
+      const st = q.state.data?.data?.extractionState;
+      return st === 'extracting' || st === 'ocr_in_progress' ? 8000 : false;
+    },
+  });
 
   // Upload one already-classified item via the existing presign -> upload -> record flow.
   // Throws on failure so the batch driver can record a per-file error without aborting the batch.
@@ -82,18 +101,25 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
     try {
       setStatus('Reprocessing documents…');
       const { data } = await reprocessCase(targetCaseId);
-      const parts = [`re-OCR queued for ${data.reocrQueued} file${data.reocrQueued === 1 ? '' : 's'}`];
-      parts.push(
-        data.extractEnqueued
-          ? 'chart re-extract queued'
-          : data.extractReason === 'ocr_in_progress'
-            ? 'chart re-extract will run when OCR finishes'
-            : `chart re-extract not queued (${data.extractReason ?? 'unknown'})`,
-      );
-      if (data.reocrFailed && data.reocrFailed.length > 0) {
-        parts.push(`${data.reocrFailed.length} re-OCR failed — ${data.reocrFailed.map((f) => `${f.documentId}: ${f.reason}`).join('; ')}`);
+      // Plain-language message. The old "re-OCR queued for 0 files" read like nothing happened — but 0
+      // re-OCR just means every file already read fine; the chart RE-EXTRACT is the part that matters
+      // (it re-reads the full record, e.g. to pick up a rating % an earlier windowed pass missed).
+      let msg: string;
+      if (data.extractEnqueued) {
+        msg = data.reocrQueued === 0
+          ? 'All files already read OK — a fresh full chart re-extraction is now running (~5–10 min). SC Conditions update when it finishes.'
+          : `Re-OCR started for ${data.reocrQueued} file${data.reocrQueued === 1 ? '' : 's'} and a full chart re-extraction is now running (~5–10 min).`;
+        setWatchReprocess(true); // turn on the live "done" poll
+      } else if (data.extractReason === 'ocr_in_progress') {
+        msg = 'Re-OCR started — the chart re-extraction will run automatically when OCR finishes.';
+        setWatchReprocess(true);
+      } else {
+        msg = `Chart re-extract did not start (${data.extractReason ?? 'unknown'}).`;
       }
-      setStatus(`Reprocess: ${parts.join('; ')}.`);
+      if (data.reocrFailed && data.reocrFailed.length > 0) {
+        msg += ` ${data.reocrFailed.length} re-OCR failed — ${data.reocrFailed.map((f) => `${f.documentId}: ${f.reason}`).join('; ')}.`;
+      }
+      setStatus(msg);
       await onUploaded();
     } catch (err) {
       setStatus(`Reprocess failed: ${uploadErrorReason(err)}`);
@@ -145,17 +171,55 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
         ) : null}
         <select aria-label="Document tag" className="input" value={docTag} onChange={(e) => setDocTag(e.target.value)}>{DOC_TAGS.map((t) => <option key={t}>{t}</option>)}</select>
         <input aria-label="Upload documents" className="text-sm" type="file" multiple accept={ACCEPT_ATTR} disabled={busy} onChange={(e) => { void onFiles(e.target.files); e.target.value = ''; }} />
-        <button
-          type="button"
-          className="self-start rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-          title="Re-OCR any stuck files on this claim and re-run chart extraction"
-          disabled={busy}
-          onClick={() => { void onReprocess(); }}
-        >
-          Reprocess documents
-        </button>
+        {/* Reprocess is behind a confirm step + a time/cost note so it isn't clicked out of habit — it
+            re-reads the WHOLE record (real Anthropic spend, ~5–10 min). Kept always available (not hidden
+            on "no file changes") because re-extracting unchanged files is exactly the Dorsey case: the
+            files were fine, the earlier windowed extraction missed a rating %. (Ryan 2026-06-13.) */}
+        {!confirming ? (
+          <button
+            type="button"
+            className="self-start rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            title="Re-OCR any stuck files on this claim and re-run the full chart extraction (~5–10 min, uses API time)"
+            disabled={busy}
+            onClick={() => setConfirming(true)}
+          >
+            Reprocess documents
+          </button>
+        ) : (
+          <div className="flex flex-col gap-1.5 self-start rounded-md border border-amber-300 bg-amber-50 p-2">
+            <span className="text-xs text-amber-800">
+              This re-reads the <strong>entire</strong> record and re-runs extraction — <strong>~5–10 min</strong> and uses API time.
+              Only needed if files changed or a detail was missed. Continue?
+            </span>
+            <div className="flex gap-2">
+              <button type="button" className="rounded-md border border-amber-400 bg-white px-3 py-1.5 text-sm font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50" disabled={busy} onClick={() => { setConfirming(false); void onReprocess(); }}>
+                Confirm reprocess
+              </button>
+              <button type="button" className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50" disabled={busy} onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       {status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}
+      {/* Live "where is it" + completion notice after a reprocess — shares the readiness query with the
+          draft panel, so this flips to "Done" the moment extraction settles, no refresh needed. */}
+      {watchReprocess ? (() => {
+        const st = reprocessReadiness.data?.data?.extractionState;
+        const g = reprocessReadiness.data?.data?.extractionGaps ?? null;
+        const gapped = g != null && (g.uncoveredPages > 0 || g.truncatedWindows > 0);
+        if (st === 'extracting' || st === 'ocr_in_progress') {
+          return <p className="mt-2 text-sm text-sky-700">⏳ Re-extracting the chart… (~5–10 min). You can leave this page — it keeps running.</p>;
+        }
+        if (st === 'chart_ready') {
+          return <p className="mt-2 text-sm font-medium text-emerald-700">✅ Done — the chart was re-extracted and is ready to draft.{gapped ? ' (Some pages went unread — reprocess again only if a key detail might be on a missing page.)' : ''}</p>;
+        }
+        if (st === 'extract_failed') {
+          return <p className="mt-2 text-sm font-medium text-rose-700">⚠️ Extraction failed. Click Reprocess to try again, or override on the draft panel.</p>;
+        }
+        return null;
+      })() : null}
     </>
   );
 }

@@ -99,6 +99,42 @@ describe('CaseDetailPage', () => {
     expect(tablist.className).toContain('bg-ivory');
   });
 
+  // P2 case-page tab/header restructure, 2026-06-14 (Ryan, Wayne Moseley layout): the patient
+  // header + banners are PINNED above the sticky tab bar and render on every tab, while the action
+  // panels (DoctorPack / C8c drafter-review set / Delivery / Assignments) and the summary fields
+  // moved INTO the Overview tab. These two assertions lock the new shape.
+  it('keeps the patient header pinned on EVERY tab (name renders regardless of selected tab)', async () => {
+    renderPage();
+    // Default tab (Overview): the name link is present.
+    expect(await screen.findByRole('link', { name: /Doe, Jane/i })).toBeInTheDocument();
+    // Switch to a non-Overview tab and confirm the persistent header still shows the name + the
+    // status badge (both live ABOVE the tab bar now).
+    await userEvent.click(screen.getByRole('tab', { name: 'Medications' }));
+    expect(screen.getByRole('link', { name: /Doe, Jane/i })).toBeInTheDocument();
+    expect(screen.getByText('Physician review')).toBeInTheDocument(); // status badge, still pinned
+    // And again on the SC Conditions tab — the header is tab-independent.
+    await userEvent.click(screen.getByRole('tab', { name: 'SC Conditions' }));
+    expect(screen.getByRole('link', { name: /Doe, Jane/i })).toBeInTheDocument();
+  });
+
+  it('renders the action/summary surface (Assignments + summary fields) INSIDE the Overview tab only', async () => {
+    mockRole = 'admin'; // Assignments panel is admin/ops_staff-only
+    renderPage();
+    await screen.findByText('Hypertension');
+    // Overview is the default tab: the summary fields + the Assignments panel render.
+    expect(screen.getByText('Framing')).toBeInTheDocument();
+    expect(screen.getByText('In-service event')).toBeInTheDocument();
+    expect(screen.getByText('Drafting cost (API)')).toBeInTheDocument();
+    expect(screen.getByText('Assignments')).toBeInTheDocument();
+    // Leave Overview → the Overview-scoped surface unmounts (it is NOT a persistent page section).
+    await userEvent.click(screen.getByRole('tab', { name: 'Medications' }));
+    expect(screen.queryByText('Drafting cost (API)')).not.toBeInTheDocument();
+    expect(screen.queryByText('Assignments')).not.toBeInTheDocument();
+    // Back to Overview → it returns.
+    await userEvent.click(screen.getByRole('tab', { name: 'Overview' }));
+    expect(await screen.findByText('Drafting cost (API)')).toBeInTheDocument();
+  });
+
   it('exposes the veteran clinical chart tabs on the case page', async () => {
     renderPage();
     await screen.findByText('Hypertension');

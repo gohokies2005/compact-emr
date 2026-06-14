@@ -463,168 +463,186 @@ export function CaseDetailPage() {
       </div>
     ) : null}
 
-    {/* Abridged notes and records — the curated chart abridgement, near the TOP of the claim page
-        for EVERYONE (Ryan 2026-06-12, renamed from "Doctor Pack"; was removed from the tabs, now a
-        single top-level card). Auto-generates when the records finish parsing; the Regenerate button
-        inside is RN/admin-only (physician sees view-only). */}
-    <DoctorPackPanel caseId={caseId} />
-
-    {/* CDS panel retired from the workflow (Ryan 2026-06-03). Backend route is flag-guarded off
-        (CDS_ENABLED); the engine code is kept. Re-add this panel if CDS is re-enabled. */}
-
-    {/* C8c panel stability, 2026-06-14: the drafter/review panels above the tab card. Previously a
-        keyless `&&` cascade inside an IIFE returning a fragment — on every status/poll transition the
-        region re-evaluated and, because the children were positional (keyless), a flip of one earlier
-        sibling re-paired EVERY later sibling against a different fiber and React UNMOUNTED/remounted
-        them (state lost, flicker, layout jump). Fix (stability only, behavior byte-identical):
-          (1) the gate booleans are hoisted into the pure, unit-tested resolveCaseTopPanels(...) — same
-              gates, just testable and computed once;
-          (2) the region is now ONE always-mounted container (reserves the slot in the page column so
-              a no-op poll can't make the whole region appear/disappear); and
-          (3) each conditional child carries a STABLE key, so reconciliation is identity-based — a poll
-              that doesn't change a panel's visibility re-renders it IN PLACE instead of remounting.
-        The panels are intentionally NOT mutually exclusive (drafting+failed shows BOTH the interrupted
-        OpsHeld panel AND Send-to-Drafter — the watcher copy says "click Send to Drafter again"), so
-        each keeps its own gate; we did NOT collapse them into a single primary slot. */}
-    {(() => {
-      // Phase 8: physician/ops drafter panels. Derived from latest DraftJob + Case state.
-      const latestDraftJob = c.draftJobs?.[0] as InFlightDraftJob | undefined;
-      const haltedJob = (c.draftJobs ?? []).find((j) => (j as { state?: string }).state === 'halted');
-      const p = resolveCaseTopPanels({
-        status: c.status,
-        role,
-        latestDraftState: latestDraftJob?.state,
-        hasLatestDraftJob: !!latestDraftJob,
-        hasCompletedDraft: (c.draftJobs ?? []).some((job) => job.state === 'done'),
-        hasHaltedJob: !!haltedJob,
-        hasViewableLetterJob: !!viewableLetterJob,
-        runComplete: c.runComplete,
-        shipRecommendation: c.shipRecommendation,
-        operatorState: c.operatorState,
-      });
-
-      return (
-        <div className="space-y-6" data-region="case-top-panels">
-          {p.inFlightDraft && latestDraftJob ? (
-            <InFlightDrafterPanel key="inflight" job={latestDraftJob} onCancel={() => cancelDraft.mutate(latestDraftJob.id)} cancelling={cancelDraft.isPending} concurrency={liveConcurrency} />
-          ) : null}
-
-          {p.canSendFirstDraft ? <SendToDrafterPanel key="send-first" caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} /> : null}
-
-          {!p.inFlightDraft && p.canSeePhysicianReadyPanel && latestDraftJob ? (
-            <PhysicianLetterReadyPanel
-              key="phys-ready"
-              c={c}
-              job={latestDraftJob}
-              canSendBack={role === 'admin' || role === 'physician'}
-              onOpenPdf={openLetterPdf}
-              onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
-              onOpenSignOff={() => setSignOffOpen(true)}
-              // GPT chunk 2: invalidate both queries on case-changing mutations so the
-              // panel + the draft-jobs tab both refetch.
-              onChanged={async () => {
-                await Promise.all([
-                  refetch(),
-                  qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }),
-                ]);
-              }}
-            />
-          ) : null}
-
-          {!p.inFlightDraft && p.canSeeRnReviewPanel && latestDraftJob ? (
-            <PhysicianLetterReadyPanel
-              key="rn-review"
-              c={c}
-              job={latestDraftJob}
-              canSendBack={false}
-              onOpenPdf={openLetterPdf}
-              onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
-              onSendToDoctor={() => { if (window.confirm('Send this letter to the doctor for review? It will move to the physician queue.')) sendToDoctor.mutate(); }}
-              sendToDoctorBlockedReason={c.assignedPhysician ? undefined : 'Assign a physician below before sending.'}
-              sending={sendToDoctor.isPending}
-              onChanged={async () => {
-                await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]);
-              }}
-            />
-          ) : null}
-
-          {!p.inFlightDraft && p.canSeeOpsHeldPanel ? (
-            // OpsHeldPanel.job is optional under exactOptionalPropertyTypes — spread it only
-            // when present (TS rejects passing explicit undefined to an optional prop).
-            <OpsHeldPanel
-              key="ops-held"
-              c={c}
-              {...(latestDraftJob ? { job: latestDraftJob } : {})}
-              isAdmin={role === 'admin'}
-              hasLetter={!!viewableLetterJob}
-              onViewLetter={openLetterPdf}
-            />
-          ) : null}
-
-          {/* Gate-2 dx/event verification halt — the case is parked for the RN's decision. Never a
-              dead-end: override / switch / proceed / pause, all logged. */}
-          {p.isGate2Halt ? (
-            <Gate2HaltPanel
-              key="gate2-halt"
-              c={c}
-              {...(haltedJob ? { job: haltedJob as never } : {})}
-              onChanged={async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-decisions'] })]); }}
-            />
-          ) : null}
-
-          {/* RN LOCK during physician review (Ryan 2026-06-11 — REVERSES the 2026-06-04 RN-can-edit
-              decision after Perez: while the doctor has the case, the letter is locked from RN
-              edits, both hand-edit and surgical-AI; the backend enforces the same on both routes
-              (409 locked_physician_review). Physician + admin retain their tools. */}
-          {p.isRnLockBanner ? (
-            <div key="rn-lock" className="rounded-lg border border-sky-200 bg-sky-50 px-5 py-3 text-sm text-sky-900">
-              This case is in {c.assignedPhysician ? `Dr. ${formatPhysicianLastName(c.assignedPhysician.fullName)}'s` : "the physician's"} queue. The letter is locked from edits until the doctor acts — if something needs changing, message the doctor or wait for the case to come back.
-            </div>
-          ) : null}
-
-          {/* RN letter-edit entry. The physician/admin reach the editor via the ready panel above;
-              an RN (ops_staff) otherwise has no entry to it. Shown when a letter exists, the run is
-              not in flight, and the status is RN-editable: drafting / correction_review ONLY —
-              physician_review is LOCKED for ops_staff (Ryan 2026-06-11; backend mirrors this).
-              Editing creates a NEW version; the version-safety in /draft + currentVersion pointer
-              ensure the doctor always reviews the newest version. */}
-          {p.canShowRnEditorEntry ? (
-            <div key="rn-editor-entry" className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-              <h2 className="text-base font-semibold text-slate-900">Edit {letterFilename(c.veteran?.lastName, c.veteran?.firstName, c.claimedCondition, c.currentVersion ?? c.version)}</h2>
-              <p className="mt-1 text-sm text-slate-600">
-                If a change is needed, you can revise the letter — by hand or with an AI surgical
-                edit, the same tools the physician has. Saving creates a new version, and the doctor
-                always reviews the newest version.
-              </p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                {/* View letter lives in the page header — not duplicated here. */}
-                <Button variant="primary" size="sm" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}>Open letter editor</Button>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      );
-    })()}
-
-    {/* Post-approval RN delivery panel — invoice email + cover memo + Stripe link. Pinned directly
-        under the case summary and ABOVE assignments (Ryan 2026-06-12) so when a letter is ready to
-        deliver it's the first thing in view. Shows only at delivered/paid, by which point the
-        drafting/review panels above have cleared — so in practice it sits right under the summary. */}
-    {(c.status === 'delivered' || c.status === 'paid') && (role === 'admin' || role === 'ops_staff') ? (
-      <DeliveryPanel caseId={caseId} onVerifyLetter={openLetterPdf} hasLetterPdf={!!viewableLetterJob} />
-    ) : null}
-
-    {/* Assignments — under the delivery panel / editor panels so it's apparent (Ryan 2026-06-04:
-        "move assignments just under the letter editor ... needs to be apparent"). Admin/ops_staff only. */}
-    {role === 'admin' || role === 'ops_staff' ? (
-      <CaseAssignmentPanel caseId={c.id} version={c.version} assignedPhysician={c.assignedPhysician ?? null} assignedRn={c.assignedRn ?? null} />
-    ) : null}
-
+    {/* P2 case-page tab/header restructure, 2026-06-14 (Ryan, Wayne Moseley layout): the tab bar
+        moves UP directly under the persistent patient header (above), and everything that used to
+        render BETWEEN the header and the tab card — the abridged-notes card, the C8c drafter/review
+        top-panel set, the delivery panel, and Assignments — now lives INSIDE the Overview tab. So the
+        page is: [persistent patient header + banners] → [sticky tab bar] → [tab content], where
+        Overview is the action+summary surface and the other tabs swap in below. The patient header,
+        the archived/signed-off/refund banners, and the header action buttons stay pinned above the
+        tab bar so they render IDENTICALLY on every tab. NOTHING about WHEN a panel shows changed —
+        every gate/condition is byte-identical, the panels just moved into the Overview branch. */}
     <div className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       <TabBar tabs={TABS} active={tab} onChange={setTab} />
       <div className="p-4">
         {tab === 'overview' ? (
-          <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
+          <div className="space-y-6">
+            {/* Abridged notes and records — the curated chart abridgement (Ryan 2026-06-12, renamed
+                from "Doctor Pack"). Auto-generates when the records finish parsing; the Regenerate
+                button inside is RN/admin-only (physician sees view-only). Now the first card in the
+                Overview tab. */}
+            <DoctorPackPanel caseId={caseId} />
+
+            {/* CDS panel retired from the workflow (Ryan 2026-06-03). Backend route is flag-guarded
+                off (CDS_ENABLED); the engine code is kept. Re-add this panel if CDS is re-enabled. */}
+
+            {/* C8c panel stability, 2026-06-14: the drafter/review panels. Previously a keyless `&&`
+                cascade inside an IIFE returning a fragment — on every status/poll transition the
+                region re-evaluated and, because the children were positional (keyless), a flip of one
+                earlier sibling re-paired EVERY later sibling against a different fiber and React
+                UNMOUNTED/remounted them (state lost, flicker, layout jump). Fix (stability only,
+                behavior byte-identical):
+                  (1) the gate booleans are hoisted into the pure, unit-tested resolveCaseTopPanels(...)
+                      — same gates, just testable and computed once;
+                  (2) the region is ONE always-mounted container (reserves the slot in the column so a
+                      no-op poll can't make the whole region appear/disappear); and
+                  (3) each conditional child carries a STABLE key, so reconciliation is identity-based
+                      — a poll that doesn't change a panel's visibility re-renders it IN PLACE.
+                The panels are intentionally NOT mutually exclusive (drafting+failed shows BOTH the
+                interrupted OpsHeld panel AND Send-to-Drafter — the watcher copy says "click Send to
+                Drafter again"), so each keeps its own gate; we did NOT collapse them into a single
+                primary slot. (P2 restructure 2026-06-14: relocated from above the tab card into the
+                Overview tab — gates unchanged.) */}
+            {(() => {
+              // Phase 8: physician/ops drafter panels. Derived from latest DraftJob + Case state.
+              const latestDraftJob = c.draftJobs?.[0] as InFlightDraftJob | undefined;
+              const haltedJob = (c.draftJobs ?? []).find((j) => (j as { state?: string }).state === 'halted');
+              const p = resolveCaseTopPanels({
+                status: c.status,
+                role,
+                latestDraftState: latestDraftJob?.state,
+                hasLatestDraftJob: !!latestDraftJob,
+                hasCompletedDraft: (c.draftJobs ?? []).some((job) => job.state === 'done'),
+                hasHaltedJob: !!haltedJob,
+                hasViewableLetterJob: !!viewableLetterJob,
+                runComplete: c.runComplete,
+                shipRecommendation: c.shipRecommendation,
+                operatorState: c.operatorState,
+              });
+
+              return (
+                <div className="space-y-6" data-region="case-top-panels">
+                  {p.inFlightDraft && latestDraftJob ? (
+                    <InFlightDrafterPanel key="inflight" job={latestDraftJob} onCancel={() => cancelDraft.mutate(latestDraftJob.id)} cancelling={cancelDraft.isPending} concurrency={liveConcurrency} />
+                  ) : null}
+
+                  {p.canSendFirstDraft ? <SendToDrafterPanel key="send-first" caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} /> : null}
+
+                  {!p.inFlightDraft && p.canSeePhysicianReadyPanel && latestDraftJob ? (
+                    <PhysicianLetterReadyPanel
+                      key="phys-ready"
+                      c={c}
+                      job={latestDraftJob}
+                      canSendBack={role === 'admin' || role === 'physician'}
+                      onOpenPdf={openLetterPdf}
+                      onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
+                      onOpenSignOff={() => setSignOffOpen(true)}
+                      // GPT chunk 2: invalidate both queries on case-changing mutations so the
+                      // panel + the draft-jobs tab both refetch.
+                      onChanged={async () => {
+                        await Promise.all([
+                          refetch(),
+                          qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }),
+                        ]);
+                      }}
+                    />
+                  ) : null}
+
+                  {!p.inFlightDraft && p.canSeeRnReviewPanel && latestDraftJob ? (
+                    <PhysicianLetterReadyPanel
+                      key="rn-review"
+                      c={c}
+                      job={latestDraftJob}
+                      canSendBack={false}
+                      onOpenPdf={openLetterPdf}
+                      onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
+                      onSendToDoctor={() => { if (window.confirm('Send this letter to the doctor for review? It will move to the physician queue.')) sendToDoctor.mutate(); }}
+                      sendToDoctorBlockedReason={c.assignedPhysician ? undefined : 'Assign a physician below before sending.'}
+                      sending={sendToDoctor.isPending}
+                      onChanged={async () => {
+                        await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]);
+                      }}
+                    />
+                  ) : null}
+
+                  {!p.inFlightDraft && p.canSeeOpsHeldPanel ? (
+                    // OpsHeldPanel.job is optional under exactOptionalPropertyTypes — spread it only
+                    // when present (TS rejects passing explicit undefined to an optional prop).
+                    <OpsHeldPanel
+                      key="ops-held"
+                      c={c}
+                      {...(latestDraftJob ? { job: latestDraftJob } : {})}
+                      isAdmin={role === 'admin'}
+                      hasLetter={!!viewableLetterJob}
+                      onViewLetter={openLetterPdf}
+                    />
+                  ) : null}
+
+                  {/* Gate-2 dx/event verification halt — the case is parked for the RN's decision.
+                      Never a dead-end: override / switch / proceed / pause, all logged. */}
+                  {p.isGate2Halt ? (
+                    <Gate2HaltPanel
+                      key="gate2-halt"
+                      c={c}
+                      {...(haltedJob ? { job: haltedJob as never } : {})}
+                      onChanged={async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-decisions'] })]); }}
+                    />
+                  ) : null}
+
+                  {/* RN LOCK during physician review (Ryan 2026-06-11 — REVERSES the 2026-06-04
+                      RN-can-edit decision after Perez: while the doctor has the case, the letter is
+                      locked from RN edits, both hand-edit and surgical-AI; the backend enforces the
+                      same on both routes (409 locked_physician_review). Physician + admin retain
+                      their tools. */}
+                  {p.isRnLockBanner ? (
+                    <div key="rn-lock" className="rounded-lg border border-sky-200 bg-sky-50 px-5 py-3 text-sm text-sky-900">
+                      This case is in {c.assignedPhysician ? `Dr. ${formatPhysicianLastName(c.assignedPhysician.fullName)}'s` : "the physician's"} queue. The letter is locked from edits until the doctor acts — if something needs changing, message the doctor or wait for the case to come back.
+                    </div>
+                  ) : null}
+
+                  {/* RN letter-edit entry. The physician/admin reach the editor via the ready panel
+                      above; an RN (ops_staff) otherwise has no entry to it. Shown when a letter
+                      exists, the run is not in flight, and the status is RN-editable: drafting /
+                      correction_review ONLY — physician_review is LOCKED for ops_staff (Ryan
+                      2026-06-11; backend mirrors this). Editing creates a NEW version; the
+                      version-safety in /draft + currentVersion pointer ensure the doctor always
+                      reviews the newest version. */}
+                  {p.canShowRnEditorEntry ? (
+                    <div key="rn-editor-entry" className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+                      <h2 className="text-base font-semibold text-slate-900">Edit {letterFilename(c.veteran?.lastName, c.veteran?.firstName, c.claimedCondition, c.currentVersion ?? c.version)}</h2>
+                      <p className="mt-1 text-sm text-slate-600">
+                        If a change is needed, you can revise the letter — by hand or with an AI surgical
+                        edit, the same tools the physician has. Saving creates a new version, and the doctor
+                        always reviews the newest version.
+                      </p>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {/* View letter lives in the page header — not duplicated here. */}
+                        <Button variant="primary" size="sm" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}>Open letter editor</Button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })()}
+
+            {/* Post-approval RN delivery panel — invoice email + cover memo + Stripe link. Shows only
+                at delivered/paid, by which point the drafting/review panels above have cleared.
+                Admin/ops_staff only. (P2 restructure 2026-06-14: relocated into the Overview tab —
+                gate unchanged.) */}
+            {(c.status === 'delivered' || c.status === 'paid') && (role === 'admin' || role === 'ops_staff') ? (
+              <DeliveryPanel caseId={caseId} onVerifyLetter={openLetterPdf} hasLetterPdf={!!viewableLetterJob} />
+            ) : null}
+
+            {/* Assignments — admin/ops_staff only. (P2 restructure 2026-06-14: relocated into the
+                Overview tab — gate unchanged.) */}
+            {role === 'admin' || role === 'ops_staff' ? (
+              <CaseAssignmentPanel caseId={c.id} version={c.version} assignedPhysician={c.assignedPhysician ?? null} assignedRn={c.assignedRn ?? null} />
+            ) : null}
+
+            {/* The Overview summary fields (Framing / Upstream SC / Veteran statement / In-service
+                event / Drafting cost) — the tail of the Overview tab. */}
+            <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
+          </div>
         ) : null}
         {tab === 'advisory' ? <AdvisoryPanel caseId={caseId} alwaysOpen /> : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}

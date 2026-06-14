@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildChartNotReadyMessage,
   CHART_READINESS_GATE_VERSION,
   classifyReadAttempt,
   corruptedTokenRatio,
@@ -7,6 +8,8 @@ import {
   isEffectivelyRead,
   isValidManualSummary,
   MANUAL_SUMMARY_MIN_LEN,
+  originalFileName,
+  reconcileChartReadiness,
   READ_THRESHOLD_RATIO,
   READ_THRESHOLD_WORDS,
   wordCount,
@@ -392,5 +395,90 @@ describe('evaluateChartReadiness', () => {
     ]);
     expect(r.blockingFiles[0]?.lastAttempt?.method).toBe('tesseract_ocr');
     expect(r.blockingFiles[0]?.lastAttempt?.note).toBe('garbled');
+  });
+});
+
+// ── reconcileChartReadiness — THE shared orphan-drop the gate sites + the GET route share ──
+// (CLM-4DACAF4A80, 2026-06-14). An orphaned readiness row (filePath not among the chart's live
+// document keys, and not a generated intake summary) is dropped before evaluation, so an invisible
+// deleted-file row can never hard-block sign-off/approve/finalize/draft.
+describe('reconcileChartReadiness', () => {
+  it('drops an orphaned blocking row (file not in live document keys) → ready', () => {
+    const r = reconcileChartReadiness(
+      [row({ terminalStatus: 'manual_summary_required', filePath: 'cases/C/deleted-final-letter.pdf' })],
+      [{ s3Key: 'cases/C/something-else.pdf' }], // the orphan's key is NOT live
+    );
+    expect(r.ready).toBe(true);
+    expect(r.totalFiles).toBe(0); // the orphan was reconciled away before evaluation
+  });
+
+  it('keeps a blocking row whose file IS a live document → still blocks', () => {
+    const r = reconcileChartReadiness(
+      [row({ terminalStatus: 'manual_summary_required', filePath: 'cases/C/scan.pdf' })],
+      [{ s3Key: 'cases/C/scan.pdf' }],
+    );
+    expect(r.ready).toBe(false);
+    expect(r.blockingFiles).toHaveLength(1);
+    expect(r.blockingFiles[0]?.filePath).toBe('cases/C/scan.pdf');
+  });
+
+  it('a generated intake-summary PDF is kept even when absent from the documents (never an orphan)', () => {
+    // Intake summaries are minted by us, never appear as an uploaded Document — the isIntakeSummaryPath
+    // branch keeps them. A genuinely-read intake summary is then ready; an unread one still blocks.
+    const r = reconcileChartReadiness(
+      [row({ terminalStatus: 'manual_summary_required', filePath: 'cases/C/uuid-Intake_Summary.pdf' })],
+      [], // no documents at all
+    );
+    expect(r.ready).toBe(false);
+    expect(r.blockingFiles).toHaveLength(1);
+  });
+
+  it('a read intake-summary with no document row is ready (kept + effectively read)', () => {
+    const r = reconcileChartReadiness(
+      [row({ terminalStatus: 'read', filePath: 'cases/C/uuid-Intake_Summary.pdf' })],
+      [],
+    );
+    expect(r.ready).toBe(true);
+    expect(r.totalFiles).toBe(1);
+  });
+});
+
+describe('originalFileName', () => {
+  it('strips the leading uuid- prefix from a minted s3Key', () => {
+    expect(originalFileName('cases/CLM-1/123e4567-e89b-42d3-a456-426614174000-Sleep_Study.pdf')).toBe('Sleep_Study.pdf');
+  });
+  it('falls back to the basename on a legacy/odd key (never throws)', () => {
+    expect(originalFileName('records/garbled_scan.pdf')).toBe('garbled_scan.pdf');
+    expect(originalFileName('bare.pdf')).toBe('bare.pdf');
+  });
+});
+
+describe('buildChartNotReadyMessage', () => {
+  function blocker(filePath: string, note: string | null) {
+    return { fileReadStatusId: 'FRS-1', filePath, terminalStatus: 'manual_summary_required' as const, lastAttempt: note === null ? null : { method: 'tesseract_ocr', wordCount: 0, corruptedTokenRatio: 0, note } };
+  }
+
+  it('names each blocking file by display name + the machine-read reason', () => {
+    const msg = buildChartNotReadyMessage([
+      blocker('cases/C/123e4567-e89b-42d3-a456-426614174000-Sleep_Study.pdf', 'empty (0 words)'),
+      blocker('cases/C/123e4567-e89b-42d3-a456-426614174001-DD214.pdf', 'too-few-words (5 < 20)'),
+    ], 'Sign-off');
+    expect(msg).toContain('Sign-off blocked');
+    expect(msg).toContain('Sleep_Study.pdf');
+    expect(msg).toContain('empty (0 words)');
+    expect(msg).toContain('DD214.pdf');
+    expect(msg).toContain('too-few-words (5 < 20)');
+    // Never the old cryptic wording.
+    expect(msg).not.toContain('chart-readiness gate failed');
+  });
+
+  it('tailors the lead verb per gate site', () => {
+    expect(buildChartNotReadyMessage([blocker('a/x.pdf', 'garbled')], 'Approve')).toMatch(/^Approve blocked/);
+    expect(buildChartNotReadyMessage([blocker('a/x.pdf', 'garbled')], 'Finalize')).toMatch(/^Finalize blocked/);
+  });
+
+  it('falls back to a calm reason when lastAttempt is null', () => {
+    const msg = buildChartNotReadyMessage([blocker('a/x.pdf', null)], 'Sign-off');
+    expect(msg).toContain('could not be machine-read');
   });
 });

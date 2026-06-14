@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SignOffPopup } from '../components/SignOffPopup';
 import { signOffCase, type SignOff } from '../api/cases';
+import { ConflictError } from '../api/client';
 
 vi.mock('../api/cases', async () => {
   const actual = await vi.importActual<typeof import('../api/cases')>('../api/cases');
@@ -120,6 +121,58 @@ describe('SignOffPopup', () => {
     await waitFor(() => {
       expect(signOffCaseMock).toHaveBeenCalledWith('CASE-1', expect.objectContaining({
         notes: 'Final review complete.',
+      }));
+    });
+  });
+
+  // ── Chart-readiness machine-read gate override (CLM-4DACAF4A80, 2026-06-14) ──
+
+  // A chart_not_ready 409 as the client interceptor throws it: ConflictError(details, message, code).
+  function chartNotReady409(): ConflictError {
+    return new ConflictError(
+      { blockingFiles: [{ fileReadStatusId: 'FRS-1', filePath: 'cases/C/123e4567-e89b-42d3-a456-426614174000-Sleep_Study.pdf', terminalStatus: 'manual_summary_required', lastAttempt: { note: 'empty (0 words)' } }] },
+      'Sign-off blocked: 1 uploaded file could not be automatically read…',
+      'chart_not_ready',
+    );
+  }
+
+  it('renders the blocking files + override control on a chart_not_ready 409 (does not dead-end)', async () => {
+    signOffCaseMock.mockRejectedValueOnce(chartNotReady409());
+    renderPopup();
+    screen.getAllByRole('button', { name: 'Yes' }).forEach((b) => fireEvent.click(b));
+    fireEvent.click(screen.getByRole('button', { name: /Submit sign-off/i }));
+
+    // The override panel appears, naming the blocking file in plain language.
+    await waitFor(() => expect(screen.getByTestId('chart-readiness-override')).toBeInTheDocument());
+    expect(screen.getByText('Sleep_Study.pdf')).toBeInTheDocument();
+    expect(screen.getByText(/no readable text/i)).toBeInTheDocument();
+    // The override checkbox + a "Sign off anyway" button are present.
+    expect(screen.getByRole('checkbox')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Sign off anyway/i })).toBeInTheDocument();
+  });
+
+  it('re-submits with overrideChartReadiness:true + the reason when the physician overrides', async () => {
+    signOffCaseMock.mockRejectedValueOnce(chartNotReady409());
+    renderPopup();
+    screen.getAllByRole('button', { name: 'Yes' }).forEach((b) => fireEvent.click(b));
+    fireEvent.click(screen.getByRole('button', { name: /Submit sign-off/i }));
+    await waitFor(() => expect(screen.getByTestId('chart-readiness-override')).toBeInTheDocument());
+
+    // "Sign off anyway" stays disabled until BOTH the ack checkbox + a reason are provided.
+    const overrideBtn = screen.getByRole('button', { name: /Sign off anyway/i });
+    expect(overrideBtn).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox'));
+    expect(overrideBtn).toBeDisabled(); // still no reason
+    fireEvent.change(screen.getByPlaceholderText(/I reviewed each of these scans/i), { target: { value: 'I read the sleep study in person; it is legible.' } });
+    expect(overrideBtn).not.toBeDisabled();
+
+    signOffCaseMock.mockResolvedValueOnce({ data: sampleResponse });
+    fireEvent.click(overrideBtn);
+
+    await waitFor(() => {
+      expect(signOffCaseMock).toHaveBeenLastCalledWith('CASE-1', expect.objectContaining({
+        overrideChartReadiness: true,
+        chartReadinessOverrideReason: 'I read the sleep study in person; it is legible.',
       }));
     });
   });

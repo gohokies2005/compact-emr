@@ -15,7 +15,8 @@ import { diffCitations, describeToken, type CitationDiff } from '../services/let
 import { holdingChanged } from '../services/letter-opinion-excerpt.js';
 import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from '../services/case-status-transitions.js';
 import { resolveRateCents } from '../services/pay-earnings.js';
-import { evaluateChartReadiness } from '../services/chart-readiness.js';
+import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../services/chart-readiness.js';
+import { findChartReadinessOverride } from '../services/chart-readiness-override.js';
 import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash } from '../services/letter-current.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
@@ -546,9 +547,21 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         throw new HttpError(409, 'conflict', 'This is an imported letter — approving would re-render and mangle the original PDF. Use "Finalize for delivery (as-is)" instead to deliver the imported PDF unchanged.', { reason: 'imported_letter_use_finalize_as_is', caseId, version: approveMeta.version });
       }
 
-      // Chart-readiness gate (unbypassable — mirrors sign-offs.ts).
-      const readiness = evaluateChartReadiness(await db.fileReadStatus.findMany({ where: { caseId } }));
-      if (!readiness.ready) throw new HttpError(409, 'chart_not_ready', 'Approve blocked: chart-readiness gate failed.', { caseId, blockingFiles: readiness.blockingFiles });
+      // Chart-readiness machine-read gate (mirrors sign-offs.ts). When it fails, honor an existing
+      // physician/admin OVERRIDE recorded at sign-off (CLM-4DACAF4A80, 2026-06-14): if a SignOff with
+      // chartReadinessOverridden=true exists, the physician already acknowledged the unread files when
+      // they signed — approve proceeds (and logs that it relied on the override) rather than re-prompting.
+      // Otherwise keep the gate closed with the SAME descriptive message sign-offs.ts emits.
+      // RECONCILED readiness (CLM-4DACAF4A80, 2026-06-14): orphaned rows (a deleted/superseded file's
+      // readiness row, no longer in the chart's documents) are dropped so the gate agrees with the UI.
+      const readiness = await loadReconciledChartReadiness(db, caseId);
+      if (!readiness.ready) {
+        const override = await findChartReadinessOverride(db, caseId);
+        if (override === null) {
+          throw new HttpError(409, 'chart_not_ready', buildChartNotReadyMessage(readiness.blockingFiles, 'Approve'), { caseId, blockingFiles: readiness.blockingFiles, overridable: true });
+        }
+        await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_approve_chart_readiness_override_honored', caseId, veteranId: c.veteranId, detailsJson: { caseId, signOffId: override.id, reason: override.chartReadinessOverrideReason, blockingFileCount: readiness.blockingFiles.length } } });
+      }
       // A formal sign-off must already exist (recorded via POST /cases/:id/sign-off). Approve
       // finalizes; it does not replace the sign-off questionnaire.
       const signOffs = await db.signOff.findMany({ where: { caseId } });
@@ -701,9 +714,21 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         throw new HttpError(409, 'conflict', 'The imported letter has no PDF artifact to deliver. Re-import the finished PDF.', { reason: 'imported_pdf_missing', caseId, version: meta.version });
       }
 
-      // Chart-readiness gate (unbypassable — mirrors /approve + sign-offs.ts).
-      const readiness = evaluateChartReadiness(await db.fileReadStatus.findMany({ where: { caseId } }));
-      if (!readiness.ready) throw new HttpError(409, 'chart_not_ready', 'Finalize blocked: chart-readiness gate failed.', { caseId, blockingFiles: readiness.blockingFiles });
+      // Chart-readiness machine-read gate (mirrors /approve + sign-offs.ts). Honor an existing
+      // physician/admin override recorded at sign-off (CLM-4DACAF4A80, 2026-06-14) — finalize-import
+      // CREATES its own sign-off below, but a PRIOR override sign-off for this case is the physician's
+      // acknowledgement of the unread files, so finalize proceeds (and logs it). Otherwise the same
+      // descriptive 409 the other two sites emit.
+      // RECONCILED readiness (CLM-4DACAF4A80, 2026-06-14): same orphan-drop as /approve + /sign-off so
+      // an invisible orphaned readiness row can never block finalize-import either.
+      const readiness = await loadReconciledChartReadiness(db, caseId);
+      if (!readiness.ready) {
+        const override = await findChartReadinessOverride(db, caseId);
+        if (override === null) {
+          throw new HttpError(409, 'chart_not_ready', buildChartNotReadyMessage(readiness.blockingFiles, 'Finalize'), { caseId, blockingFiles: readiness.blockingFiles, overridable: true });
+        }
+        await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_finalize_chart_readiness_override_honored', caseId, veteranId: c.veteranId, detailsJson: { caseId, signOffId: override.id, reason: override.chartReadinessOverrideReason, blockingFileCount: readiness.blockingFiles.length } } });
+      }
 
       // Status transition must be legal + role-permitted (same target as /approve: -> delivered).
       if (!isValidCaseStatusTransition(c.status, 'delivered') || !canRolePerformCaseStatusTransition(user.role, c.status, 'delivered')) {

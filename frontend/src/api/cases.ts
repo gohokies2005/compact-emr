@@ -240,6 +240,22 @@ export type SignOffAnswers = Record<SignOffQuestionKey, boolean>;
 export interface SignOffInput {
   readonly answers: SignOffAnswers;
   readonly notes?: string;
+  // Chart-readiness machine-read gate override (CLM-4DACAF4A80, 2026-06-14). Set when a physician/admin
+  // signs off despite uploaded files that could not be auto-read, which they have personally reviewed.
+  // The backend requires BOTH the flag AND a non-empty reason AND a signing role — otherwise it keeps
+  // the descriptive 409. Absent on the normal (gate-passes) flow — the payload is byte-identical then.
+  readonly overrideChartReadiness?: boolean;
+  readonly chartReadinessOverrideReason?: string;
+}
+
+// The structured chart-readiness blocking file the gate's 409 carries in error.details.blockingFiles.
+// Mirrors the backend ChartReadinessBlocker shape (the fields the override UI needs).
+export interface ChartReadinessBlockingFile {
+  readonly fileReadStatusId: string;
+  readonly filePath: string;
+  readonly terminalStatus: string;
+  readonly lastAttempt: { readonly note: string | null } | null;
+  readonly documentId?: string | null;
 }
 
 export interface SignOff {

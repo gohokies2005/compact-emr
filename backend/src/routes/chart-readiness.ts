@@ -5,9 +5,8 @@ import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
 import {
   classifyReadAttempt,
-  evaluateChartReadiness,
   isEffectivelyRead,
-  isIntakeSummaryPath,
+  reconcileChartReadiness,
   MANUAL_SUMMARY_MIN_LEN,
 } from '../services/chart-readiness.js';
 import {
@@ -152,9 +151,9 @@ export function createChartReadinessRouter(db: AppDb): Router {
       // the filename as a clickable link (presigned view) only when it has a document to open.
       // (DocumentRecord in db-types is the minimal {s3Key} view; the id is selected + cast here.)
       const docs = (await db.document.findMany({ where: { caseId }, select: { id: true, s3Key: true } })) as readonly { id?: string; s3Key: string }[];
-      const liveKeys = new Set(docs.map((d) => d.s3Key));
-      const reconciled = rows.filter((r) => liveKeys.has(r.filePath) || isIntakeSummaryPath(r.filePath));
-      const result = evaluateChartReadiness(reconciled);
+      // Reconcile through the SHARED predicate so this route and every gate site (sign-off, approve,
+      // finalize, draft) can never disagree on which rows are orphans (CLM-4DACAF4A80, 2026-06-14).
+      const result = reconcileChartReadiness(rows, docs);
       const docIdByKey = new Map(docs.filter((d): d is { id: string; s3Key: string } => typeof d.id === 'string').map((d) => [d.s3Key, d.id]));
       const blockingFiles = result.blockingFiles.map((b) => ({ ...b, documentId: docIdByKey.get(b.filePath) ?? null }));
 

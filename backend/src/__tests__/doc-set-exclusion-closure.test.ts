@@ -72,6 +72,15 @@ const ALLOW_LIST: ReadonlyArray<{ readonly relPath: string; readonly fnHint: str
   },
   {
     relPath: 'routes/chart-readiness.ts',
+    fnHint: 'reconcileChartReadiness(rows, docs)',
+    reason:
+      'GET /chart-readiness now delegates the liveKeys reconcile to the shared reconcileChartReadiness ' +
+      'helper (CLM-4DACAF4A80) — docs feed ONLY that intersection-against-FileReadStatus. The synthetic ' +
+      'screening-summary has no FileReadStatus row so it cannot leak into the verdict. Same safe-by-' +
+      'construction reconcile as the `liveKeys` entry; the exclusion is the no-matching-row invariant.',
+  },
+  {
+    relPath: 'routes/chart-readiness.ts',
     fnHint: 'candidateCaseIds',
     reason:
       'RN cross-case files-pending-manual — same liveKeys-reconcile-against-FileReadStatus construction over ' +
@@ -84,6 +93,15 @@ const ALLOW_LIST: ReadonlyArray<{ readonly relPath: string; readonly fnHint: str
       'caseDocumentIds is a MEMBERSHIP set used to confirm an extracted-fact row (sourceDocumentId) belongs ' +
       'to the case. The synthetic summary has 0 pages and is never a fact source, so its presence in the set ' +
       'is inert — no fact row ever points at it. Safe by construction.',
+  },
+  {
+    relPath: 'services/chart-readiness.ts',
+    fnHint: 'loadReconciledChartReadiness',
+    reason:
+      'THE shared reconciled-readiness loader (CLM-4DACAF4A80). Uses the per-case documents ONLY to build a ' +
+      'liveKeys SET that reconcileChartReadiness intersects with FileReadStatus rows. The synthetic ' +
+      'screening-summary has NO FileReadStatus row, so it can never match a row and cannot leak into the ' +
+      'gate verdict — same safe-by-construction reconcile as the routes/chart-readiness.ts `liveKeys` entry.',
   },
   {
     relPath: 'services/drafter-bundle.ts',

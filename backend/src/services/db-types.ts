@@ -640,6 +640,12 @@ export interface SignOffRecord {
   // skips the byte check when null, preserving back-compat).
   signedVersion: number | null;
   signedContentSha256: string | null;
+  // Chart-readiness machine-read gate override (CLM-4DACAF4A80, 2026-06-14). overridden=true when a
+  // physician/admin signed off despite unread files they personally reviewed; reason = the required
+  // legal basis; files = the blocking-file snapshot at override time (audit). Defaulted/nullable.
+  chartReadinessOverridden: boolean;
+  chartReadinessOverrideReason: string | null;
+  chartReadinessOverrideFiles: unknown;
 }
 
 export interface SignOffDelegate {

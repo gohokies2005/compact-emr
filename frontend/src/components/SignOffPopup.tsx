@@ -1,7 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
-import { signOffCase, type SignOffAnswers, type SignOffQuestionKey } from '../api/cases';
+import { signOffCase, type ChartReadinessBlockingFile, type SignOffAnswers, type SignOffQuestionKey } from '../api/cases';
+import { ConflictError } from '../api/client';
+import { documentFileName } from '../lib/documentFileName';
+
+// Plain-English rendering of the machine-read failure reason a blocking file carries (lastAttempt.note,
+// e.g. "too-few-words (22 < 20)" / "empty (0 words)" / "garbled ..."). Falls back to a calm default so
+// the physician always sees WHY a file is blocking — never a blank or a raw code.
+function readableReason(file: ChartReadinessBlockingFile): string {
+  const note = file.lastAttempt?.note ?? null;
+  if (note === null || note.trim().length === 0) return 'could not be read automatically';
+  if (note.startsWith('empty')) return 'no readable text (the scan came through blank)';
+  if (note.startsWith('too-few-words')) return 'too little readable text to verify';
+  if (note.startsWith('garbled')) return 'text came through garbled / unreadable';
+  return note;
+}
+
+// Pull the structured blocking files out of a chart-readiness 409 (ConflictError), or null if this
+// error is anything else. The override UI renders ONLY when this returns a non-empty list.
+function chartNotReadyFiles(error: unknown): ChartReadinessBlockingFile[] | null {
+  if (!(error instanceof ConflictError) || error.serverCode !== 'chart_not_ready') return null;
+  const details = error.current as { blockingFiles?: unknown } | undefined;
+  const files = details?.blockingFiles;
+  return Array.isArray(files) ? (files as ChartReadinessBlockingFile[]) : null;
+}
 
 const SIGN_OFF_QUESTIONS: readonly { readonly key: SignOffQuestionKey; readonly label: string }[] = [
   { key: 'records_reviewed', label: 'I reviewed all uploaded records and the chart.' },
@@ -22,7 +45,7 @@ interface SignOffPopupProps {
   // affirmative answers are handed to this submitter INSTEAD of POST /sign-off — the imported-letter
   // finalize path records its OWN sign-off bound to the PDF bytes, so it cannot use the TXT-binding
   // POST /sign-off. The all-affirmative gate + UI are reused unchanged. onSignedOff still fires after.
-  readonly onSubmitAnswers?: (input: { answers: SignOffAnswers; notes?: string }) => Promise<unknown>;
+  readonly onSubmitAnswers?: (input: { answers: SignOffAnswers; notes?: string; overrideChartReadiness?: boolean; chartReadinessOverrideReason?: string }) => Promise<unknown>;
   // Optional copy overrides so the popup reads as a finalize step rather than a plain sign-off.
   readonly title?: string;
   readonly submitLabel?: string;
@@ -46,6 +69,14 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff, onSubmitAnswe
   const [answers, setAnswers] = useState<DraftAnswers>({});
   const [notes, setNotes] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Chart-readiness override flow (CLM-4DACAF4A80, 2026-06-14): set when the sign-off submit hit a
+  // chart_not_ready 409. We DON'T dead-end — instead we show the blocking files + an explicit override
+  // control. overrideAck = the physician checked "I have personally reviewed these records"; the reason
+  // is a required free-text legal basis. "Sign off anyway" re-submits with overrideChartReadiness:true.
+  const [blockingFiles, setBlockingFiles] = useState<ChartReadinessBlockingFile[] | null>(null);
+  const [overrideAck, setOverrideAck] = useState(false);
+  const [overrideReason, setOverrideReason] = useState('');
+  const overrideReady = useMemo(() => overrideAck && overrideReason.trim().length > 0, [overrideAck, overrideReason]);
 
   const completeAnswers = useMemo(() => toCompleteAnswers(answers), [answers]);
   // Every question is a POSITIVE attestation — a "No" on any means the letter is NOT ready to finalize,
@@ -54,9 +85,15 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff, onSubmitAnswe
   const hasNegative = useMemo(() => Object.values(answers).some((v) => v === false), [answers]);
 
   const signOffMutation = useMutation({
-    mutationFn: () => {
+    // `override` is passed by the "Sign off anyway" button; the normal Submit calls with no arg, so the
+    // gate-passes payload is byte-identical (no override fields appear).
+    mutationFn: (override?: { reason: string }) => {
       if (!allAffirmative || completeAnswers === null) throw new Error('Every item must be "Yes" to sign off. Resolve a "No", or use "Send back to RN" instead.');
-      const input = { answers: completeAnswers, ...(notes.trim().length > 0 && { notes: notes.trim() }) };
+      const input = {
+        answers: completeAnswers,
+        ...(notes.trim().length > 0 && { notes: notes.trim() }),
+        ...(override ? { overrideChartReadiness: true, chartReadinessOverrideReason: override.reason } : {}),
+      };
       // Imported-letter finalize hands the same affirmative answers to its own PDF-binding submitter.
       return onSubmitAnswers ? onSubmitAnswers(input) : signOffCase(caseId, input);
     },
@@ -69,9 +106,20 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff, onSubmitAnswe
       setAnswers({});
       setNotes('');
       setErrorMessage(null);
+      setBlockingFiles(null);
+      setOverrideAck(false);
+      setOverrideReason('');
       onClose();
     },
     onError: (error: unknown) => {
+      // A chart-readiness 409 is NOT a dead-end: surface the blocking files + the override control
+      // instead of a flat error. Any other error keeps the existing plain-message behavior.
+      const files = chartNotReadyFiles(error);
+      if (files !== null && files.length > 0) {
+        setBlockingFiles(files);
+        setErrorMessage(null);
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Sign-off could not be saved. Please retry.';
       setErrorMessage(message);
     },
@@ -97,7 +145,14 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff, onSubmitAnswe
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [onClose, open]);
 
-  useEffect(() => { if (!open) setErrorMessage(null); }, [open]);
+  useEffect(() => {
+    if (!open) {
+      setErrorMessage(null);
+      setBlockingFiles(null);
+      setOverrideAck(false);
+      setOverrideReason('');
+    }
+  }, [open]);
 
   if (!open) return null;
 
@@ -147,11 +202,42 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff, onSubmitAnswe
           ) : null}
 
           {errorMessage ? <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{errorMessage}</div> : null}
+
+          {blockingFiles !== null ? (
+            <div className="rounded-lg border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-4 text-sm text-amber-900" data-testid="chart-readiness-override">
+              <p className="font-semibold">Some uploaded records could not be read automatically.</p>
+              <p className="mt-1">
+                {blockingFiles.length === 1 ? 'This file has' : `These ${blockingFiles.length} files have`} no machine-readable text and no manual summary yet. You can have a colleague add a manual summary, or — if you have personally reviewed {blockingFiles.length === 1 ? 'this record' : 'these records'} — sign off with the override below.
+              </p>
+              <ul className="mt-2 space-y-1">
+                {blockingFiles.map((f) => (
+                  <li key={f.fileReadStatusId} className="flex flex-col">
+                    <span className="font-medium text-amber-950">{documentFileName(f.filePath)}</span>
+                    <span className="text-xs text-amber-800">{readableReason(f)}</span>
+                  </li>
+                ))}
+              </ul>
+
+              <label className="mt-3 flex items-start gap-2">
+                <input type="checkbox" checked={overrideAck} onChange={(e) => setOverrideAck(e.target.checked)} className="mt-0.5 h-4 w-4 rounded border-amber-400 text-amber-700 focus:ring-amber-400" />
+                <span className="text-sm font-medium text-amber-950">I have personally reviewed these records that couldn’t be auto-read.</span>
+              </label>
+
+              <label className="mt-3 block">
+                <span className="text-sm font-medium text-amber-950">Reason for the override (required)</span>
+                <textarea value={overrideReason} onChange={(e) => setOverrideReason(e.target.value)} rows={3} maxLength={500} className="mt-1 w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-200" placeholder="e.g. I reviewed each of these scans in person; they are legible to me and support the opinion." />
+              </label>
+            </div>
+          ) : null}
         </div>
 
         <div className="mt-6 flex justify-end gap-2">
           <Button type="button" variant="secondary" onClick={onClose} disabled={signOffMutation.isPending}>Cancel</Button>
-          <Button type="button" variant="primary" loading={signOffMutation.isPending} disabled={!allAffirmative || signOffMutation.isPending} onClick={() => signOffMutation.mutate()}>{submitLabel ?? 'Submit sign-off'}</Button>
+          {blockingFiles !== null ? (
+            <Button type="button" variant="primary" loading={signOffMutation.isPending} disabled={!allAffirmative || !overrideReady || signOffMutation.isPending} onClick={() => signOffMutation.mutate({ reason: overrideReason.trim() })}>Sign off anyway</Button>
+          ) : (
+            <Button type="button" variant="primary" loading={signOffMutation.isPending} disabled={!allAffirmative || signOffMutation.isPending} onClick={() => signOffMutation.mutate(undefined)}>{submitLabel ?? 'Submit sign-off'}</Button>
+          )}
         </div>
       </div>
     </div>

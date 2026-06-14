@@ -1,4 +1,4 @@
-import type { FileReadStatusRecord, FileTerminalStatus } from './db-types.js';
+import type { AppDbTransaction, FileReadStatusRecord, FileTerminalStatus } from './db-types.js';
 
 /**
  * Chart-readiness gate — Phase 5.2 OCR HARD-STOP enforcement.
@@ -287,6 +287,60 @@ export function evaluateChartReadiness(rows: readonly FileReadStatusRecord[]): C
   };
 }
 
+/**
+ * THE shared reconciled-readiness loader (CLM-4DACAF4A80, 2026-06-14).
+ *
+ * Readiness rows (file_read_status) and the chart's document list are SEPARATE tables with NO
+ * FK between them. A file_read_status row whose filePath is no longer among the case's documents
+ * — a deleted/superseded/legacy file (e.g. an old final-letter PDF that was replaced) — is an
+ * ORPHAN: it can never be cleared from the UI (the chart can't even show it) yet, evaluated RAW,
+ * it still reports `ready: false` and HARD-BLOCKS sign-off / approve / finalize. Wayne Moseley
+ * (CLM-4DACAF4A80) was stuck finalizing a letter whose chart had nothing unread, because a deleted
+ * file left an orphaned readiness row.
+ *
+ * GET /chart-readiness already reconciles (drops orphans → the UI correctly shows "nothing unread")
+ * but the four GATE sites (sign-off, approve, finalize-import, approve-blockers advisory) and the
+ * two per-case DRAFT gates evaluated RAW rows — so the gate and the UI could DISAGREE. This is the
+ * single source of truth that makes that impossible: every readiness GATE derives its verdict from
+ * THIS function (or, for the bundle, the inline reconcile that mirrors it exactly), never from a
+ * raw `evaluateChartReadiness(findMany(...))`.
+ *
+ * Reconcile rule (IDENTICAL to the GET /chart-readiness route, chart-readiness.ts the router):
+ *   keep a row iff its filePath is a live document key (liveKeys.has) OR it is a generated
+ *   intake-summary PDF (isIntakeSummaryPath) — the latter is minted by us, never appears as an
+ *   uploaded Document, and must always be allowed to satisfy the gate. Self-healing: deleting the
+ *   stale file clears the block with no migration.
+ *
+ * Accepts a `Pick<AppDbTransaction, 'fileReadStatus' | 'document'>` so it works with the top-level
+ * db AND inside an existing `$transaction` (tx) at any gate site, with no extra plumbing.
+ */
+export async function loadReconciledChartReadiness(
+  db: Pick<AppDbTransaction, 'fileReadStatus' | 'document'>,
+  caseId: string,
+): Promise<ChartReadinessResult> {
+  const [rows, docs] = await Promise.all([
+    db.fileReadStatus.findMany({ where: { caseId } }),
+    db.document.findMany({ where: { caseId }, select: { s3Key: true } }) as Promise<readonly { s3Key: string }[]>,
+  ]);
+  return reconcileChartReadiness(rows, docs);
+}
+
+/**
+ * Pure reconcile-then-evaluate, factored out so callers that ALREADY hold the rows + documents
+ * (the drafter bundle pulls both veteran-wide in one Promise.all) can reuse the EXACT reconcile
+ * logic without a second DB round-trip — and so this single predicate is the one place the
+ * "live key OR intake summary" rule lives. `docs` is whatever live-key view the caller has (the
+ * loader passes this case's docs; the bundle passes this case's slice of the veteran-wide docs).
+ */
+export function reconcileChartReadiness(
+  rows: readonly FileReadStatusRecord[],
+  docs: readonly { s3Key: string }[],
+): ChartReadinessResult {
+  const liveKeys = new Set(docs.map((d) => d.s3Key));
+  const reconciled = rows.filter((r) => liveKeys.has(r.filePath) || isIntakeSummaryPath(r.filePath));
+  return evaluateChartReadiness(reconciled);
+}
+
 function lastAttemptOf(row: FileReadStatusRecord): ChartReadinessBlocker['lastAttempt'] {
   const attempts = row.attemptsJson;
   if (!Array.isArray(attempts) || attempts.length === 0) return null;
@@ -302,3 +356,51 @@ function lastAttemptOf(row: FileReadStatusRecord): ChartReadinessBlocker['lastAt
 }
 
 export const CHART_READINESS_GATE_VERSION = READINESS_GATE_VERSION;
+
+// ====================== Human filename + descriptive gate message ======================
+
+/**
+ * Recover the human filename from an s3Key minted `cases/<caseId>/<uuid>-<OriginalName.ext>`:
+ * basename minus the leading uuid- prefix. Falls back to the basename (or the whole path) on
+ * legacy/odd keys — never throws. Mirrors the frontend lib/documentFileName helper.
+ *
+ * Single copy (consistency sweep 2026-06-14): the GET /chart-readiness route, the descriptive
+ * gate-message builder, and any future consumer share THIS one — never re-implement the basename
+ * regex (a second copy is exactly the second-stale-layer drift class).
+ */
+export function originalFileName(filePath: string): string {
+  const base = filePath.split('/').pop() ?? filePath;
+  return base.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i, '');
+}
+
+/**
+ * Build the DESCRIPTIVE chart-readiness failure message shared by all three gate sites
+ * (POST /sign-off, POST /letter/approve, POST /letter/finalize-import) — the single builder so
+ * the three messages can never drift (the recurring second-stale-layer class). Lists each
+ * blocking file by its human display name + the machine-read reason (lastAttempt.note, e.g.
+ * "too-few-words (22 < 20)" / "empty (0 words)" / "garbled ...") so the physician sees WHICH file
+ * and WHY — never the old cryptic "chart-readiness gate failed."
+ *
+ * `action` tailors the lead verb ("Sign-off" / "Approve" / "Finalize") so each site reads naturally.
+ */
+export function buildChartNotReadyMessage(
+  blockingFiles: readonly ChartReadinessBlocker[],
+  action: string,
+): string {
+  if (blockingFiles.length === 0) {
+    // Defensive — callers only invoke this when !ready (>=1 blocker). Keep it honest if misused.
+    return `${action} blocked: the chart-readiness gate is failing.`;
+  }
+  const lines = blockingFiles.map((b) => {
+    const name = originalFileName(b.filePath);
+    const reason = b.lastAttempt?.note ?? 'could not be machine-read';
+    return `• ${name} — ${reason}`;
+  });
+  const n = blockingFiles.length;
+  const noun = n === 1 ? 'file' : 'files';
+  return (
+    `${action} blocked: ${n} uploaded ${noun} could not be automatically read and ${n === 1 ? 'has' : 'have'} no manual summary:\n` +
+    `${lines.join('\n')}\n` +
+    `Add a manual summary for each, or — if you have personally reviewed ${n === 1 ? 'this record' : 'these records'} — sign off with the override.`
+  );
+}

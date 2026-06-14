@@ -1,5 +1,6 @@
 import type { S3Client } from '@aws-sdk/client-s3';
-import { evaluateChartReadiness } from './chart-readiness.js';
+import { loadReconciledChartReadiness } from './chart-readiness.js';
+import { findChartReadinessOverride } from './chart-readiness-override.js';
 import {
   parseCredentialBlock,
   substituteSignerSentinels,
@@ -47,12 +48,18 @@ export async function computeApproveBlockers(
   const blockers: ApproveBlocker[] = [];
   const caseId = c.id;
 
-  // Chart-readiness gate (mirrors letter.ts approve + sign-offs.ts).
-  const readiness = evaluateChartReadiness(await db.fileReadStatus.findMany({ where: { caseId } }));
-  if (!readiness.ready) {
+  // Chart-readiness gate (mirrors letter.ts approve + sign-offs.ts). Suppress this advisory when a
+  // physician/admin override already exists (CLM-4DACAF4A80, 2026-06-14) — approve honors it, so the
+  // review page must not warn about a gate that will not actually fire (keep the advisory honest with
+  // the authoritative gate).
+  // RECONCILED readiness (CLM-4DACAF4A80, 2026-06-14): the advisory must mirror the authoritative
+  // approve gate, which now drops orphaned rows — otherwise the review page would warn about a gate
+  // that will not actually fire. Same shared loader the approve route uses.
+  const readiness = await loadReconciledChartReadiness(db, caseId);
+  if (!readiness.ready && (await findChartReadinessOverride(db, caseId)) === null) {
     blockers.push({
       code: 'chart_not_ready',
-      message: `Approve will be blocked: the chart-readiness gate is failing — ${readiness.blockingFiles.length} file(s) still need an RN manual summary.`,
+      message: `Approve will be blocked: the chart-readiness gate is failing — ${readiness.blockingFiles.length} file(s) still need an RN manual summary (or a physician override at sign-off).`,
     });
   }
 

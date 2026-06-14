@@ -38,6 +38,10 @@ function makeDb(opts: { caseRow?: Record<string, unknown> | null } = {}): AppDb 
   return {
     case: { findFirst: async () => caseRow },
     fileReadStatus: { findMany: async () => [] },
+    // CLM-4DACAF4A80 (2026-06-14): the approve readiness gate now reconciles against the chart's
+    // documents. No files here → empty doc set → reconcile is vacuously ready (falls through to the
+    // sign_off_required gate this test asserts on).
+    document: { findMany: async () => [] },
     signOff: { findMany: async () => [] },
     draftJob: { findMany: async () => [], findFirst: async () => null },
     letterRevision: { findFirst: async () => null },

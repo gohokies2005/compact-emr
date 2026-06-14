@@ -1,6 +1,6 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { evaluateChartReadiness } from './chart-readiness.js';
+import { reconcileChartReadiness } from './chart-readiness.js';
 import { deriveChartBuildState, type ChartBuildState } from './chart-build-state.js';
 import type { AppDb } from './db-types.js';
 import type { CaseFraming } from './case-framing.js';
@@ -173,7 +173,15 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
   // veteran-wide fileReadStatuses above so the drafter can use inherited manual summaries; a prior
   // case's unresolved file must not block this case's draft. (Ryan 2026-06-04 returning-customer.)
   const thisCaseReadStatuses = fileReadStatuses.filter((r) => r.caseId === caseId);
-  const chartReadiness = evaluateChartReadiness(thisCaseReadStatuses);
+  // RECONCILE this case's readiness against THIS case's live documents (CLM-4DACAF4A80, 2026-06-14):
+  // an orphaned readiness row (a deleted/superseded file no longer in the chart) must not block this
+  // case's draft, exactly as GET /chart-readiness and the sign-off/approve gates now reconcile. Scope
+  // is unchanged — the veteran-wide fileReadStatuses + documents payload still flow to the drafter for
+  // inherited manual summaries; ONLY this-case's gate verdict reconciles (drafter-bundle-veteran-scope.test.ts).
+  const thisCaseDocKeys = (documents as ReadonlyArray<{ s3Key: string; caseId: string }>)
+    .filter((d) => d.caseId === caseId)
+    .map((d) => ({ s3Key: d.s3Key }));
+  const chartReadiness = reconcileChartReadiness(thisCaseReadStatuses, thisCaseDocKeys);
   // Real extraction phase for this case (no_documents | ocr_in_progress | extracting | chart_ready |
   // extract_failed). The drafter must refuse on anything but chart_ready (Bonnewitz failed-extract).
   const buildStateDocs = (documents as ReadonlyArray<{ id: string; s3Key: string; caseId: string }>)

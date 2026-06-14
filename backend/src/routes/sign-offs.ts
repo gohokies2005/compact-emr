@@ -6,7 +6,8 @@ import { requireRole } from '../auth/roles.js';
 import { parseSignOffCreate, isSignOffAffirmative } from '../services/sign-off-validation.js';
 import { resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor } from '../services/request-actor.js';
-import { evaluateChartReadiness } from '../services/chart-readiness.js';
+import { loadReconciledChartReadiness, buildChartNotReadyMessage, originalFileName } from '../services/chart-readiness.js';
+import { resolveOverrideReason } from '../services/chart-readiness-override.js';
 import { resolveCurrentTxtWithHash } from '../services/letter-current.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -47,16 +48,34 @@ export function createSignOffsRouter(db: AppDb, deps: SignOffsRouterDeps = {}): 
         throw new HttpError(409, 'conflict', 'Sign-off requires every item to be "Yes". Resolve the flagged item, or send the case back to the RN instead.', { reason: 'sign_off_not_affirmative', caseId });
       }
 
-      // OCR HARD-STOP gate (Phase 5.2): no sign-off until every uploaded file is read or has
-      // a manual summary. Unbypassable — no admin override per Ryan's HARD RULE.
-      const fileRows = await db.fileReadStatus.findMany({ where: { caseId } });
-      const readiness = evaluateChartReadiness(fileRows);
-      if (!readiness.ready) {
-        throw new HttpError(409, 'chart_not_ready', 'Sign-off blocked: chart-readiness gate failed.', {
+      // Chart-readiness machine-read gate (Phase 5.2): no sign-off until every uploaded file is
+      // read or has a manual summary — UNLESS a physician/admin explicitly overrides because they
+      // have personally reviewed the unread records (CLM-4DACAF4A80, 2026-06-14; "everything must be
+      // overridable" HARD RULE). The override is scoped to THIS machine-read gate only; the
+      // affirmative-attestation gate above (all five answers "Yes") is the separate legal gate and is
+      // NOT weakened — the physician still attests "I reviewed all uploaded records and the chart"=Yes,
+      // which is the legal predicate for overriding.
+      // RECONCILED readiness (CLM-4DACAF4A80, 2026-06-14): drop orphaned rows (a readiness row whose
+      // file is no longer in the chart's documents) so the gate matches what GET /chart-readiness shows
+      // the UI — an invisible orphan must never hard-block sign-off. Shared single source of truth.
+      const readiness = await loadReconciledChartReadiness(db, caseId);
+      const overrideReason = resolveOverrideReason(
+        req.body?.overrideChartReadiness as boolean | undefined,
+        req.body?.chartReadinessOverrideReason as string | undefined,
+        user.role,
+      );
+      const chartReadinessOverridden = !readiness.ready && overrideReason !== null;
+      if (!readiness.ready && !chartReadinessOverridden) {
+        // No valid override (not requested, blank reason, or non-signing role) → keep the gate closed,
+        // but DESCRIPTIVE: name each blocking file + the machine-read reason so the physician knows
+        // what to review/summarize. The structured blockingFiles stay in details (the frontend renders
+        // the override control from them).
+        throw new HttpError(409, 'chart_not_ready', buildChartNotReadyMessage(readiness.blockingFiles, 'Sign-off'), {
           caseId,
           totalFiles: readiness.totalFiles,
           blockingFiles: readiness.blockingFiles,
           gateVersion: readiness.gateVersion,
+          overridable: true,
         });
       }
 
@@ -97,6 +116,12 @@ export function createSignOffsRouter(db: AppDb, deps: SignOffsRouterDeps = {}): 
         }
       }
 
+      // Audit snapshot of the blocking files AS THEY WERE at override time (display name + reason) —
+      // stored on the row + logged, never recomputed. Empty/null when not overriding.
+      const overrideFileSnapshot = chartReadinessOverridden
+        ? readiness.blockingFiles.map((b) => ({ filePath: b.filePath, terminalStatus: b.terminalStatus, note: b.lastAttempt?.note ?? null }))
+        : null;
+
       const created = await db.$transaction(async (tx) => {
         const row = await tx.signOff.create({
           data: {
@@ -106,15 +131,32 @@ export function createSignOffsRouter(db: AppDb, deps: SignOffsRouterDeps = {}): 
             notes: parsed.notes,
             signedVersion,
             signedContentSha256,
+            chartReadinessOverridden,
+            chartReadinessOverrideReason: chartReadinessOverridden ? overrideReason : null,
+            chartReadinessOverrideFiles: overrideFileSnapshot,
           },
         });
         await tx.activityLog.create({
           data: {
             actorUserId: user.sub,
-            action: 'case_signed_off',
+            // A chart-readiness override is a distinct, audit-significant act — log it under its own
+            // action with the file names, notes, and the physician's reason so the override is fully
+            // traceable (who overrode the machine-read gate on which unread files, and why).
+            action: chartReadinessOverridden ? 'case_signed_off_chart_readiness_overridden' : 'case_signed_off',
             caseId,
             ...(c.veteranId ? { veteranId: c.veteranId } : {}),
-            detailsJson: { caseId, physicianId, signOffId: row.id, answerKeys: Object.keys(parsed.answers) },
+            detailsJson: chartReadinessOverridden
+              ? {
+                  caseId,
+                  physicianId,
+                  signOffId: row.id,
+                  answerKeys: Object.keys(parsed.answers),
+                  chartReadinessOverride: {
+                    reason: overrideReason,
+                    files: (overrideFileSnapshot ?? []).map((f) => ({ name: originalFileName(f.filePath), note: f.note })),
+                  },
+                }
+              : { caseId, physicianId, signOffId: row.id, answerKeys: Object.keys(parsed.answers) },
           },
         });
         return row;

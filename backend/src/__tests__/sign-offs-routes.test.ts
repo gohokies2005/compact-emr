@@ -82,8 +82,9 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physicianBySub?: R
     return physiciansBySub[sub] ?? null;
   });
   const activityLogCreate = vi.fn(async () => ({}));
-  const signOffCreate = vi.fn(async (args: { data: { caseId: string; physicianId: string; answersJson: Record<string, unknown>; notes: string | null; signedVersion?: number | null; signedContentSha256?: string | null } }) => {
+  const signOffCreate = vi.fn(async (args: { data: { caseId: string; physicianId: string; answersJson: Record<string, unknown>; notes: string | null; signedVersion?: number | null; signedContentSha256?: string | null; chartReadinessOverridden?: boolean; chartReadinessOverrideReason?: string | null; chartReadinessOverrideFiles?: unknown } }) => {
     const now = new Date();
+    const d = args.data as typeof args.data;
     const row: SignOffRecord = {
       id: `SO-${nextId++}`,
       caseId: args.data.caseId,
@@ -94,11 +95,21 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physicianBySub?: R
       createdAt: now,
       updatedAt: now,
       version: 1,
-      signedVersion: (args.data as { signedVersion?: number | null }).signedVersion ?? null,
-      signedContentSha256: (args.data as { signedContentSha256?: string | null }).signedContentSha256 ?? null,
+      signedVersion: d.signedVersion ?? null,
+      signedContentSha256: d.signedContentSha256 ?? null,
+      chartReadinessOverridden: d.chartReadinessOverridden ?? false,
+      chartReadinessOverrideReason: d.chartReadinessOverrideReason ?? null,
+      chartReadinessOverrideFiles: d.chartReadinessOverrideFiles ?? null,
     };
     signOffs.unshift(row);
     return row;
+  });
+  const signOffFindFirst = vi.fn(async (args: { where?: { caseId?: string; chartReadinessOverridden?: boolean } }) => {
+    const cid = args.where?.caseId;
+    const wantOverride = args.where?.chartReadinessOverridden;
+    let rows = cid === undefined ? signOffs : signOffs.filter((s) => s.caseId === cid);
+    if (wantOverride === true) rows = rows.filter((s) => s.chartReadinessOverridden === true);
+    return rows[0] ?? null;
   });
   const signOffFindMany = vi.fn(async (args: { where?: { caseId?: string } }) => {
     const cid = args.where?.caseId;
@@ -110,7 +121,7 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physicianBySub?: R
     case: { findFirst: caseFindFirst, findUnique: caseFindFirst, findMany: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn() },
     physician: { findUnique: physicianFindUnique, findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), create: vi.fn(), update: vi.fn() },
     activityLog: { create: activityLogCreate },
-    signOff: { findUnique: vi.fn(async () => null), findFirst: vi.fn(async () => null), findMany: signOffFindMany, create: signOffCreate },
+    signOff: { findUnique: vi.fn(async () => null), findFirst: signOffFindFirst, findMany: signOffFindMany, create: signOffCreate },
     // Phase 5.2: OCR HARD-STOP gate. Tests run with no uploaded files (readiness vacuously ready).
     fileReadStatus: {
       findUnique: vi.fn(async () => null),
@@ -120,9 +131,20 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physicianBySub?: R
       update: vi.fn(),
       upsert: vi.fn(),
     },
+    // CLM-4DACAF4A80 (2026-06-14): the readiness gate now reconciles file_read_status rows against
+    // the chart's documents. DEFAULT mirrors fileReadStatus — every read-status row is treated as a
+    // LIVE document (filePath===s3Key) so a blocking row still blocks (existing tests keep meaning).
+    // An ORPHAN test overrides document.findMany to return [] (or a different key) — that row is then
+    // dropped by the reconcile and must NOT block.
+    document: {
+      findMany: vi.fn(async () => {
+        const rows = (await tx.fileReadStatus.findMany()) as readonly { filePath: string }[];
+        return rows.map((r) => ({ s3Key: r.filePath }));
+      }),
+    },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
-  return { db, signOffs, spies: { caseFindFirst, physicianFindUnique, activityLogCreate, signOffCreate, signOffFindMany } };
+  return { db, signOffs, spies: { caseFindFirst, physicianFindUnique, activityLogCreate, signOffCreate, signOffFindMany, signOffFindFirst } };
 }
 
 function appFor(db: AppDb) {
@@ -239,6 +261,7 @@ describe('sign-offs routes', () => {
       id: 'SO-0', caseId: 'CASE-1', physicianId: 'PHYS-001', signedAt: now,
       answersJson: { q1: true }, notes: null, createdAt: now, updatedAt: now, version: 1,
       signedVersion: null, signedContentSha256: null,
+      chartReadinessOverridden: false, chartReadinessOverrideReason: null, chartReadinessOverrideFiles: null,
     };
     const { db } = makeDb(baseCase(), { initialSignOffs: [initial] });
     const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/sign-offs');
@@ -269,5 +292,117 @@ describe('sign-offs routes', () => {
     const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/sign-off').send({ answers: { q1: true } });
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('chart_not_ready');
+  });
+
+  // ── Chart-readiness machine-read gate OVERRIDE (CLM-4DACAF4A80, 2026-06-14) ──
+
+  // A blocking file with a real machine-read note so the descriptive message has a reason to name.
+  function blockingFileRow(overrides: Record<string, unknown> = {}) {
+    const now = new Date();
+    return {
+      id: 'FRS-blocking', caseId: 'CASE-1',
+      filePath: 'cases/CASE-1/123e4567-e89b-42d3-a456-426614174000-Sleep_Study.pdf', fileSha256: 'a'.repeat(64),
+      terminalStatus: 'manual_summary_required',
+      attemptsJson: [{ method: 'tesseract_ocr', wordCount: 0, corruptedTokenRatio: 0, attemptedAt: now.toISOString(), note: 'empty (0 words)' }],
+      manualSummary: null, manualSummaryAt: null, manualSummaryBy: null,
+      lastCheckedAt: now, createdAt: now, updatedAt: now, version: 1,
+      ...overrides,
+    };
+  }
+
+  it('(e) the descriptive 409 names the blocking file + its machine-read reason', async () => {
+    mockUser = { sub: 'ADMIN-SUB', roles: ['admin'] };
+    const { db } = makeDb();
+    (db.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/sign-off').send({ answers: { records_reviewed: true } });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('chart_not_ready');
+    // Names the human filename (uuid stripped) AND the reason — never the old cryptic message.
+    expect(res.body.error.message).toContain('Sleep_Study.pdf');
+    expect(res.body.error.message).toContain('empty (0 words)');
+    expect(res.body.error.message).not.toContain('chart-readiness gate failed');
+    // Structured blockingFiles still ride in details (the frontend renders the override control from them).
+    expect(res.body.error.details.blockingFiles).toHaveLength(1);
+    expect(res.body.error.details.overridable).toBe(true);
+  });
+
+  it('(a) physician override with a reason ALLOWS the sign-off + persists the override fields + logs it', async () => {
+    mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+    const { db, spies } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-001' }), {
+      physicianBySub: { 'PHYS-SUB': buildPhysician({ id: 'PHYS-001', cognitoSub: 'PHYS-SUB' }) },
+    });
+    (db.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    const res = await request(appFor(db))
+      .post('/api/v1/cases/CASE-1/sign-off')
+      .send({ answers: { records_reviewed: true }, overrideChartReadiness: true, chartReadinessOverrideReason: 'I reviewed the sleep study in person; it is legible.' });
+    expect(res.status).toBe(201);
+    // Persisted on the row.
+    const created = spies.signOffCreate.mock.calls[0]?.[0]?.data;
+    expect(created.chartReadinessOverridden).toBe(true);
+    expect(created.chartReadinessOverrideReason).toBe('I reviewed the sleep study in person; it is legible.');
+    expect(created.chartReadinessOverrideFiles).toHaveLength(1);
+    // Logged under the dedicated override action.
+    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: 'case_signed_off_chart_readiness_overridden' }),
+    }));
+  });
+
+  it('(b) override WITHOUT a reason is REJECTED (stays the descriptive 409)', async () => {
+    mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+    const { db, spies } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-001' }), {
+      physicianBySub: { 'PHYS-SUB': buildPhysician({ id: 'PHYS-001', cognitoSub: 'PHYS-SUB' }) },
+    });
+    (db.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    const res = await request(appFor(db))
+      .post('/api/v1/cases/CASE-1/sign-off')
+      .send({ answers: { records_reviewed: true }, overrideChartReadiness: true, chartReadinessOverrideReason: '   ' });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('chart_not_ready');
+    expect(spies.signOffCreate).not.toHaveBeenCalled();
+  });
+
+  it('ORPHANED readiness row (file not in the chart documents) does NOT block sign-off (CLM-4DACAF4A80)', async () => {
+    // Wayne Moseley class: a manual_summary_required row whose filePath is no longer among the case's
+    // documents (a deleted/superseded final-letter PDF) is INVISIBLE in the UI but, evaluated raw,
+    // still hard-blocked sign-off. Reconcile drops it → sign-off proceeds (201).
+    mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+    const { db, spies } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-001' }), {
+      physicianBySub: { 'PHYS-SUB': buildPhysician({ id: 'PHYS-001', cognitoSub: 'PHYS-SUB' }) },
+    });
+    (db.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      blockingFileRow({ id: 'FRS-orphan', filePath: 'cases/CASE-1/deleted-final-letter.pdf' }),
+    ]);
+    // The chart no longer has that document (the file was deleted) → empty live-key set for the orphan.
+    (db.document.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/sign-off').send({ answers: { records_reviewed: true } });
+    expect(res.status).toBe(201);
+    // It passed the gate WITHOUT an override (the orphan was reconciled away, not overridden).
+    const created = spies.signOffCreate.mock.calls[0]?.[0]?.data;
+    expect(created.chartReadinessOverridden).toBe(false);
+  });
+
+  it('a REAL unread row whose file IS a live chart document STILL blocks sign-off (CLM-4DACAF4A80)', async () => {
+    // Control for the orphan test: when the blocking file is a genuine live document, the gate holds.
+    mockUser = { sub: 'ADMIN-SUB', roles: ['admin'] };
+    const { db } = makeDb();
+    const row = blockingFileRow();
+    (db.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([row]);
+    // The file IS in the chart's documents (live key matches the blocking row's filePath).
+    (db.document.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([{ s3Key: row.filePath }]);
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/sign-off').send({ answers: { records_reviewed: true } });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('chart_not_ready');
+  });
+
+  it('(c) a non-signing role cannot override (ops_staff is 403 at the route gate)', async () => {
+    // ops_staff is barred from POST /sign-off entirely (requireRole) — the override is only ever
+    // reachable by a signing role, so a non-physician/non-admin can never override.
+    mockUser = { sub: 'OPS-SUB', roles: ['ops_staff'] };
+    const { db } = makeDb();
+    (db.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    const res = await request(appFor(db))
+      .post('/api/v1/cases/CASE-1/sign-off')
+      .send({ answers: { records_reviewed: true }, overrideChartReadiness: true, chartReadinessOverrideReason: 'trying to override' });
+    expect(res.status).toBe(403);
   });
 });

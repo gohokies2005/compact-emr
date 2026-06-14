@@ -43,9 +43,14 @@ function physician(overrides: Partial<PhysicianRecord> = {}): PhysicianRecord {
 
 interface DbOpts {
   readonly fileReadRows?: unknown[];
+  // CLM-4DACAF4A80 (2026-06-14): the chart's live document keys for the reconcile. undefined →
+  // mirror fileReadRows (every read-status row is a live document, so a blocker still blocks).
+  // [] → no live documents (every read-status row is an ORPHAN, dropped by the reconcile).
+  readonly documentRows?: { s3Key: string }[];
   readonly revision?: { version: number; artifactTxtS3Key: string } | null;
   readonly signer?: PhysicianRecord | null;
   readonly roster?: PhysicianRecord[];
+  readonly chartReadinessOverride?: { id: string; chartReadinessOverrideReason: string | null } | null;
 }
 
 function makeDb(opts: DbOpts = {}) {
@@ -56,8 +61,18 @@ function makeDb(opts: DbOpts = {}) {
   const roster = opts.roster ?? [physician()];
   const tx = {
     fileReadStatus: { findMany: vi.fn(async () => opts.fileReadRows ?? []) },
+    // Reconcile source (CLM-4DACAF4A80): default mirrors fileReadRows so existing tests' blockers
+    // stay blockers; documentRows:[] makes them orphans the reconcile drops.
+    document: {
+      findMany: vi.fn(async () =>
+        opts.documentRows ?? (opts.fileReadRows ?? []).map((r) => ({ s3Key: (r as { filePath: string }).filePath })),
+      ),
+    },
     letterRevision: { findFirst: vi.fn(async () => revision) },
     draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
+    // Chart-readiness override lookup (CLM-4DACAF4A80): the advisory mirror suppresses the
+    // chart_not_ready banner when an override sign-off exists. Default: no override.
+    signOff: { findFirst: vi.fn(async () => opts.chartReadinessOverride ?? null) },
     physician: {
       findFirst: vi.fn(async (a: { where?: { id?: string } }) => (signer !== null && a.where?.id === signer.id ? signer : null)),
       findMany: vi.fn(async () => roster),
@@ -96,6 +111,36 @@ describe('computeApproveBlockers (advisory pre-flight mirror of the approve gate
     const blockers = await computeApproveBlockers(db, caseRow() as never, s3Deps(LETTER_NAMES_KASKY));
     expect(blockers.map((b) => b.code)).toEqual(['chart_not_ready']);
     expect(blockers[0]?.message).toContain('1 file(s)');
+  });
+
+  it('SUPPRESSES the chart_not_ready banner when a physician override sign-off exists (CLM-4DACAF4A80)', async () => {
+    const { db } = makeDb({
+      fileReadRows: [{ id: 'F1', filePath: 'cases/CASE-1/scan.pdf', terminalStatus: 'manual_summary_required', manualSummary: null, attemptsJson: [] }],
+      chartReadinessOverride: { id: 'SO-OVR', chartReadinessOverrideReason: 'reviewed in person' },
+    });
+    const blockers = await computeApproveBlockers(db, caseRow() as never, s3Deps(LETTER_NAMES_KASKY));
+    // Approve will honor the override, so the advisory mirror must not warn about the gate.
+    expect(blockers.map((b) => b.code)).not.toContain('chart_not_ready');
+  });
+
+  it('does NOT flag chart_not_ready for an ORPHANED readiness row (file not in chart documents) (CLM-4DACAF4A80)', async () => {
+    // The blocking row's file is no longer in the chart (documentRows:[]) → reconcile drops it → the
+    // advisory mirror shows no chart_not_ready banner, matching the now-reconciled approve gate + UI.
+    const { db } = makeDb({
+      fileReadRows: [{ id: 'F1', filePath: 'cases/CASE-1/deleted-final-letter.pdf', terminalStatus: 'manual_summary_required', manualSummary: null, attemptsJson: [] }],
+      documentRows: [],
+    });
+    const blockers = await computeApproveBlockers(db, caseRow() as never, s3Deps(LETTER_NAMES_KASKY));
+    expect(blockers.map((b) => b.code)).not.toContain('chart_not_ready');
+  });
+
+  it('STILL flags chart_not_ready when the blocking file IS a live chart document (CLM-4DACAF4A80 control)', async () => {
+    const { db } = makeDb({
+      fileReadRows: [{ id: 'F1', filePath: 'cases/CASE-1/scan.pdf', terminalStatus: 'manual_summary_required', manualSummary: null, attemptsJson: [] }],
+      documentRows: [{ s3Key: 'cases/CASE-1/scan.pdf' }],
+    });
+    const blockers = await computeApproveBlockers(db, caseRow() as never, s3Deps(LETTER_NAMES_KASKY));
+    expect(blockers.map((b) => b.code)).toEqual(['chart_not_ready']);
   });
 
   it('flags no_letter when no current revision or draft job exists', async () => {

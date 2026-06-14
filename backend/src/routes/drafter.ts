@@ -5,7 +5,7 @@ import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
 import { badRequest, isRecord } from '../services/validation-helpers.js';
-import { evaluateChartReadiness } from '../services/chart-readiness.js';
+import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
 import { getDraftReadiness } from '../services/draft-readiness.js';
 import { stampCaseFraming } from '../services/case-framing-stamp.js';
 import { caseViabilityEnabled, stampCaseViability } from '../services/case-viability-stamp.js';
@@ -450,8 +450,10 @@ export function createDrafterClientRouter(db: AppDb): Router {
         });
       }
 
-      const fileRows = await db.fileReadStatus.findMany({ where: { caseId } });
-      const chartReadiness = evaluateChartReadiness(fileRows);
+      // RECONCILED readiness (CLM-4DACAF4A80, 2026-06-14): drop orphaned rows (a deleted file's
+      // readiness row no longer in this case's documents) so an invisible orphan can't force the RN
+      // through the override path for a chart that has nothing unread. Same shared loader as the gates.
+      const chartReadiness = await loadReconciledChartReadiness(db, caseId);
       // OVERRIDABLE — never a dead-end (Ryan HARD RULE: EVERYTHING must be overridable). When some
       // files couldn't be auto-read, the RN may still proceed with a logged reason (the chart simply
       // drafts without those files). Names the blocking files + canOverride so the UI shows the

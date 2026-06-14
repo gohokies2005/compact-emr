@@ -93,6 +93,15 @@ function makeDb(
     activityLog: { create: vi.fn(async () => ({})) },
     signOff: { findMany: vi.fn(async () => signOffs), findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(async (a: { data: unknown }) => ({ id: 'SO-NEW', ...(a.data as object) })) },
     fileReadStatus: { findMany: vi.fn(async () => []), findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), upsert: vi.fn() },
+    // Reconcile source (CLM-4DACAF4A80, 2026-06-14): the chart-readiness gate now drops orphaned rows
+    // by reconciling against the chart's documents. DEFAULT mirrors fileReadStatus (every read-status
+    // row is a live document → a blocking row still blocks). An ORPHAN test overrides this to [].
+    document: {
+      findMany: vi.fn(async () => {
+        const rows = (await tx.fileReadStatus.findMany()) as readonly { filePath: string }[];
+        return rows.map((r) => ({ s3Key: r.filePath }));
+      }),
+    },
     physician: {
       findUnique: vi.fn(async (a: { where?: { cognitoSub?: string } }) => (a.where?.cognitoSub === self.cognitoSub ? self : null)),
       findFirst: vi.fn(async (a: { where?: { id?: string } }) => (a.where?.id === signer.id ? signer : null)),
@@ -499,6 +508,89 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     const d = deps({ renderLetter: vi.fn(async (i) => ({ ok: true, version: i.version - 1, keys: i.keys, sizes: { txt: 1, pdf: 1, docx: 1 } })) });
     const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
     expect(res.status).toBe(500);
+  });
+
+  // ── Chart-readiness machine-read gate at approve: descriptive 409 + honored override
+  //    (CLM-4DACAF4A80, 2026-06-14, item d) ──
+  function blockingFileRow() {
+    const now = new Date();
+    return {
+      id: 'FRS-b', caseId: 'CASE-1',
+      filePath: 'cases/CASE-1/123e4567-e89b-42d3-a456-426614174000-Sleep_Study.pdf', fileSha256: 'a'.repeat(64),
+      terminalStatus: 'manual_summary_required',
+      attemptsJson: [{ method: 'tesseract_ocr', wordCount: 0, corruptedTokenRatio: 0, attemptedAt: now.toISOString(), note: 'empty (0 words)' }],
+      manualSummary: null, manualSummaryAt: null, manualSummaryBy: null,
+      lastCheckedAt: now, createdAt: now, updatedAt: now, version: 1,
+    };
+  }
+
+  it('(d) approve is BLOCKED with the descriptive chart_not_ready 409 when a file is unread AND no override exists', async () => {
+    const { db, tx } = makeDb();
+    (tx.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    (tx.signOff.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null); // no override
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('chart_not_ready');
+    expect(res.body.error.message).toContain('Sleep_Study.pdf');
+    expect(res.body.error.message).toContain('empty (0 words)');
+    expect(res.body.error.message).not.toContain('chart-readiness gate failed');
+  });
+
+  it('(d) approve HONORS an existing chart-readiness override sign-off (proceeds to 200 + logs it)', async () => {
+    const { db, tx } = makeDb();
+    (tx.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    // A prior sign-off overrode the gate — findFirst({ chartReadinessOverridden: true }) finds it.
+    (tx.signOff.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'SO-OVR', chartReadinessOverrideReason: 'reviewed in person' });
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('delivered');
+    // The reliance on the override is logged.
+    const logged = (tx.activityLog.create as ReturnType<typeof vi.fn>).mock.calls.map((c) => (c[0] as { data: { action: string } }).data.action);
+    expect(logged).toContain('letter_approve_chart_readiness_override_honored');
+  });
+
+  it('(d) finalize-import HONORS an existing chart-readiness override sign-off', async () => {
+    const { db, tx } = makeDb(baseCase(), { currentRevisionOverride: importedRevisionOverride() });
+    (tx.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    (tx.signOff.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'SO-OVR', chartReadinessOverrideReason: 'reviewed in person' });
+    const res = await request(appFor(db, importDeps())).post('/api/v1/cases/CASE-1/letter/finalize-import').send(AFFIRMATIVE_BODY);
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('delivered');
+    const logged = (tx.activityLog.create as ReturnType<typeof vi.fn>).mock.calls.map((c) => (c[0] as { data: { action: string } }).data.action);
+    expect(logged).toContain('letter_finalize_chart_readiness_override_honored');
+  });
+
+  it('(d) approve is NOT blocked by an ORPHANED readiness row (file not in chart documents) (CLM-4DACAF4A80)', async () => {
+    // Wayne Moseley: a deleted final-letter PDF left a manual_summary_required row that the chart no
+    // longer lists. Reconcile drops it → approve proceeds to 200 WITHOUT needing an override sign-off.
+    const { db, tx } = makeDb();
+    (tx.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    (tx.document.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]); // chart no longer has the file
+    (tx.signOff.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null); // and NO override exists
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('delivered');
+  });
+
+  it('(d) finalize-import is NOT blocked by an ORPHANED readiness row (CLM-4DACAF4A80)', async () => {
+    const { db, tx } = makeDb(baseCase(), { currentRevisionOverride: importedRevisionOverride() });
+    (tx.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    (tx.document.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (tx.signOff.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    const res = await request(appFor(db, importDeps())).post('/api/v1/cases/CASE-1/letter/finalize-import').send(AFFIRMATIVE_BODY);
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('delivered');
+  });
+
+  it('(d) approve STILL blocks when the unread file IS a live chart document (CLM-4DACAF4A80 control)', async () => {
+    const { db, tx } = makeDb();
+    const row = blockingFileRow();
+    (tx.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([row]);
+    (tx.document.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([{ s3Key: row.filePath }]); // live doc
+    (tx.signOff.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('chart_not_ready');
   });
 
   // ── Imported letter: deliver-as-is (no re-render) — import deliver-as-is, 2026-06-14 ──────────

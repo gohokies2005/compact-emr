@@ -69,6 +69,52 @@ describe('buildDrafterBundle — veteran-scoped documents', () => {
   });
 });
 
+// Orphaned-readiness reconcile in the per-case draft gate (CLM-4DACAF4A80, 2026-06-14). The bundle's
+// chartReadiness is the THIS-case gate; it must drop a this-case readiness row whose file is no longer
+// in this case's documents (a deleted/superseded file), exactly as GET /chart-readiness + the sign-off/
+// approve gates now reconcile. Veteran-wide scope is unchanged — only the gate VERDICT reconciles.
+function makeReconcileDb(opts: { thisCaseDocKeys: string[] }) {
+  return {
+    case: {
+      findFirst: async () => ({ id: 'CASE-MIGRAINE', veteranId: 'VET-1', claimedCondition: 'Migraine', claimedConditions: [], claimType: 'initial', status: 'records', currentVersion: 0 }),
+      findMany: async () => [{ id: 'CASE-MIGRAINE' }],
+    },
+    veteran: { findUnique: async () => ({ id: 'VET-1', firstName: 'Armand', lastName: 'Frank' }) },
+    scCondition: { findMany: async () => [] }, activeProblem: { findMany: async () => [] },
+    activeMedication: { findMany: async () => [] }, chartNote: { findMany: async () => [] },
+    keyDoc: { findMany: async () => [] },
+    fileReadStatus: {
+      // THIS case has its OWN unread file (scan.pdf).
+      findMany: async () => [
+        { id: 'frs-1', caseId: 'CASE-MIGRAINE', filePath: 'scan.pdf', fileSha256: 'b', terminalStatus: 'manual_summary_required', attemptsJson: [], manualSummary: null },
+      ],
+    },
+    document: {
+      // Whether scan.pdf is among this case's live documents drives orphan-vs-live.
+      findMany: async () => opts.thisCaseDocKeys.map((k, i) => ({ id: `doc-${i}`, caseId: 'CASE-MIGRAINE', s3Key: k, pages: [] })),
+    },
+    doctorPack: { findFirst: async () => null },
+    draftJob: { findFirst: async () => null },
+    chartExtractionRun: { findFirst: async () => null },
+  };
+}
+
+describe('buildDrafterBundle — orphaned-readiness reconcile (per-case gate)', () => {
+  it('a this-case unread file that is NOT in this case documents (orphan) does NOT block the draft', async () => {
+    const db = makeReconcileDb({ thisCaseDocKeys: [] }); // scan.pdf was deleted from the chart
+    const bundle = await buildDrafterBundle(db as never, 'CASE-MIGRAINE');
+    expect(bundle.chartReadiness.ready).toBe(true);
+    expect(bundle.chartReadiness.manualSummaryRequired).toBe(0);
+  });
+
+  it('a this-case unread file that IS a live document still blocks (control)', async () => {
+    const db = makeReconcileDb({ thisCaseDocKeys: ['scan.pdf'] }); // scan.pdf is a live chart doc
+    const bundle = await buildDrafterBundle(db as never, 'CASE-MIGRAINE');
+    expect(bundle.chartReadiness.ready).toBe(false);
+    expect(bundle.chartReadiness.manualSummaryRequired).toBe(1);
+  });
+});
+
 // P2-3 (doc-set closure + sweep hardening, 2026-06-14): when the latest extraction is
 // complete_with_gaps the RN sees a banner (chart-readiness route) but the drafter previously got NO
 // signal. The bundle now carries the worker-recorded gap counts so the drafter can note a gapped

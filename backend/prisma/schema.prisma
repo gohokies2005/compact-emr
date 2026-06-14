@@ -926,6 +926,15 @@ model SignOff {
   signedVersion        Int?    @map("signed_version")
   signedContentSha256  String? @map("signed_content_sha256")
 
+  // Chart-readiness machine-read gate override (CLM-4DACAF4A80, 2026-06-14). When a physician/admin
+  // signs off despite unread files they have personally reviewed, these capture the audited act:
+  // the flag, the required free-text legal reason, and the blocking-file list AS IT WAS at override
+  // time (audit snapshot — never recomputed). Scoped to the machine-read gate ONLY; the affirmative
+  // attestation gate (all five answers "Yes") is unaffected. Defaulted/nullable — no backfill.
+  chartReadinessOverridden     Boolean @default(false) @map("chart_readiness_overridden")
+  chartReadinessOverrideReason String? @map("chart_readiness_override_reason")
+  chartReadinessOverrideFiles  Json?   @map("chart_readiness_override_files")
+
   @@index([caseId])
   @@index([physicianId])
   @@index([signedAt])

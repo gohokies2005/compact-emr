@@ -209,7 +209,7 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
           <button
             type="button"
             className="self-start rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-            title="Re-OCR any stuck files on this claim and re-run the full chart extraction (~5–10 min, uses API time)"
+            title="Re-OCR any stuck files on this claim and re-run the full chart extraction (~5 minutes, uses API time)"
             disabled={busy}
             onClick={() => setConfirming(true)}
           >
@@ -218,7 +218,7 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
         ) : (
           <div className="flex flex-col gap-1.5 self-start rounded-md border border-amber-300 bg-amber-50 p-2">
             <span className="text-xs text-amber-800">
-              This re-reads the <strong>entire</strong> record and re-runs extraction — <strong>~5–10 min</strong> and uses API time.
+              This re-reads the <strong>entire</strong> record and re-runs extraction — <strong>~5 minutes</strong> and uses API time.
               Only needed if files changed or a detail was missed. Continue?
             </span>
             <div className="flex gap-2">

@@ -299,7 +299,7 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
                 {readiness?.extractionState === 'extracting' ? 'Reading & extracting the full chart…' : 'Reading the documents…'}
               </h3>
               <p className="mt-1 text-sm text-sky-800">
-                Wait to draft until the chart finishes building (usually ~1–3 minutes). The drafter reads the
+                Wait to draft until the chart finishes building (usually ~5 minutes). The drafter reads the
                 whole record and the pre-draft checks rely on the extracted chart, so the button unlocks
                 automatically the moment it&rsquo;s done — no need to refresh.
               </p>

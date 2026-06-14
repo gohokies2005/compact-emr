@@ -46,9 +46,10 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
   });
 
   const cov = q.data?.data;
-  if (q.isLoading) {
-    return <div className="rounded-lg border border-slate-200 bg-white px-5 py-4 text-sm text-slate-500">Checking chart extraction coverage…</div>;
-  }
+  // While extraction is still running, the Send-to-Drafter "Reading the documents…" banner already says
+  // so — don't show a second, redundant "still in progress" bubble (Ryan 2026-06-14). The coverage report
+  // is only meaningful once extraction has SETTLED, so render nothing until then.
+  if (q.isLoading || (cov !== undefined && cov.status === 'in_progress')) return null;
   if (q.isError || cov === undefined) {
     return <div className="rounded-lg border border-slate-200 bg-white px-5 py-4 text-sm text-slate-500">Extraction coverage is unavailable right now.</div>;
   }

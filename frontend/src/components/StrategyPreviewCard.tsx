@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { getStrategyPreview, type StrategyTier } from '../api/strategy-preview';
 import { StatusChip, type ChipTone } from './ui/StatusChip';
 import { BAND_CHIP } from '../lib/viabilityChip';
+import { InputVisibility, ChainPathwayNote, CompletenessSignal, type CompletenessState } from './ViabilityInputSet';
 
 // Pre-draft strategy section. NEUTRAL by design (architect/nurse/UI review 2026-06-07): it never wears a
 // blocker color and never gates the button — that's chart-readiness' job. The only color here is a small
@@ -18,7 +19,18 @@ const TIER_CHIP: Record<StrategyTier, { tone: ChipTone; label: string }> = {
   Stop: { tone: 'bad', label: 'Review needed' },
 };
 
-export function StrategyPreviewCard({ caseId, chartReady }: { readonly caseId: string; readonly chartReady?: boolean }) {
+export function StrategyPreviewCard({
+  caseId,
+  chartReady,
+  completeness,
+}: {
+  readonly caseId: string;
+  readonly chartReady?: boolean;
+  // E5 (2026-06-13): how much of the record went unparsed (OCR-blocked files + extraction gaps),
+  // threaded from SendToDrafterPanel's chart-readiness query so the verdict carries a completeness
+  // caveat. Undefined = caller didn't supply it (unit tests) → no banner.
+  readonly completeness?: CompletenessState | null;
+}) {
   const q = useQuery({
     queryKey: ['case', caseId, 'strategy-preview'],
     queryFn: () => getStrategyPreview(caseId),
@@ -76,6 +88,13 @@ export function StrategyPreviewCard({ caseId, chartReady }: { readonly caseId: s
               Documents not yet extracted — checks may change once OCR completes.
             </div>
           ) : null}
+          {/* E5 INTERMEDIARY CHECK — a direct "no" auto-explored the two-hop chain; surface the result
+              (recovered pathway OR an honest "searched, none found") instead of a silent flat decline. */}
+          {p.chainAttempt ? <ChainPathwayNote chainAttempt={p.chainAttempt} /> : null}
+          {/* E5 COMPLETENESS SIGNAL — a thin parse must never masquerade as a confident verdict. */}
+          <CompletenessSignal state={completeness ?? null} />
+          {/* E5 INPUT VISIBILITY — the exact fact set the verdict was computed from. */}
+          {p.inputSet ? <InputVisibility inputSet={p.inputSet} /> : null}
         </div>
         <StatusChip tone={chip.tone} className="shrink-0">
           <span title="Advisory only — does not block drafting">{chip.label}</span>

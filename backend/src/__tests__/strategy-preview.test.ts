@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeStrategyPreview, type StrategyPreviewInput } from '../services/strategy-preview.js';
+import { computeStrategyPreview, findChainPathway, type StrategyPreviewInput } from '../services/strategy-preview.js';
 
 // Locks the deterministic tier ladder. The two anchors Ryan named: knee->blindness must STOP (no
 // established pathway), OSA->PTSD must be STRONG (a known strong Board pair). Same chart -> same tier.
@@ -225,5 +225,88 @@ describe('strategy-preview tier ladder (deterministic, reproducible)', () => {
     expect(r.primaryArgument).toContain('secondary to service-connected PTSD');
     expect(r.proposedMechanism).toBe('weight gain from PTSD meds worsened airway collapse');
     expect(r.criteria).toHaveLength(5);
+  });
+});
+
+// ── E5 trustworthy viability (2026-06-13) — input visibility + intermediary chain ────────────────
+describe('E5 — input visibility (the fact set the verdict was computed from)', () => {
+  it('returns an inputSet mirroring the SC list, meds, problems, key facts + a correct factCount', () => {
+    const r = computeStrategyPreview(input({
+      serviceConnectedConditions: ['PTSD', 'Tinnitus'],
+      activeProblems: ['OSA', 'Hypertension'],
+      medications: [{ drugName: 'sertraline', indication: 'PTSD' }],
+      keyFacts: [{ label: 'Weight', value: '240 lb' }],
+    }));
+    expect(r.inputSet).toBeDefined();
+    expect(r.inputSet!.scConditions).toEqual(['PTSD', 'Tinnitus']);
+    expect(r.inputSet!.medications).toEqual([{ drugName: 'sertraline', indication: 'PTSD' }]);
+    expect(r.inputSet!.activeProblems).toEqual(['OSA', 'Hypertension']);
+    expect(r.inputSet!.keyFacts).toEqual([{ label: 'Weight', value: '240 lb' }]);
+    // 2 SC + 1 med + 2 problems + 1 key fact = 6
+    expect(r.inputSet!.factCount).toBe(6);
+  });
+
+  it('factCount is 0-fact honest on a thin parse (no SC / meds / problems extracted)', () => {
+    // A claimed condition with an empty chart: the engine Stops (no dx), but the inputSet must show
+    // factCount 0 so the RN distrusts the verdict on sight (the Woodley lesson).
+    const r = computeStrategyPreview(input({ serviceConnectedConditions: [], activeProblems: [] }));
+    expect(r.inputSet!.factCount).toBe(0);
+  });
+});
+
+describe('E5 — intermediary chain (a direct "no" auto-runs the two-hop search)', () => {
+  it('findChainPathway composes SC → intermediary → claimed (Tinnitus → Anxiety → Hypertension)', () => {
+    // Tinnitus → Hypertension is NOT a direct atlas pair, but Tinnitus → Anxiety and Anxiety →
+    // Hypertension both are — the chain recovers the pathway the flat "no" was hiding.
+    const chain = findChainPathway('Hypertension', ['Tinnitus'], [{ label: 'Anxiety / GAD', source: 'comorbid_dx' }]);
+    expect(chain).not.toBeNull();
+    expect(chain!.anchor).toBe('Tinnitus');
+    expect(chain!.hops).toHaveLength(2);
+    expect(chain!.hops[1].to.toLowerCase()).toContain('hypertension');
+  });
+
+  it('a SECONDARY claim with no direct pair SEARCHES the chain and surfaces the recovered pathway', () => {
+    const r = computeStrategyPreview(input({
+      claimedCondition: 'Hypertension', upstreamScCondition: 'Tinnitus',
+      serviceConnectedConditions: ['Tinnitus'], activeProblems: ['Hypertension', 'Anxiety / GAD'],
+    }));
+    expect(r.chainAttempt).toBeDefined();
+    expect(r.chainAttempt!.searched).toBe(true);
+    expect(r.chainAttempt!.pathway).not.toBeNull();
+    expect(r.chainAttempt!.pathway!.intermediary.toLowerCase()).toContain('anxiety');
+  });
+
+  it('uses a med indication as the chain bridge (the med-treating-the-primary pathway)', () => {
+    // No comorbid Anxiety on the problem list, but a med treats it — the indication bridges the chain.
+    const r = computeStrategyPreview(input({
+      claimedCondition: 'Hypertension', upstreamScCondition: 'Tinnitus',
+      serviceConnectedConditions: ['Tinnitus'], activeProblems: ['Hypertension'],
+      medications: [{ drugName: 'sertraline', indication: 'Anxiety / GAD' }],
+    }));
+    expect(r.chainAttempt!.pathway).not.toBeNull();
+    expect(r.chainAttempt!.pathway!.intermediarySource).toBe('medication_indication');
+  });
+
+  it('searches but finds nothing when no intermediary bridges (honest "we looked")', () => {
+    const r = computeStrategyPreview(input({
+      claimedCondition: 'Hypertension', upstreamScCondition: 'Tinnitus',
+      serviceConnectedConditions: ['Tinnitus'], activeProblems: ['Hypertension'],
+    }));
+    expect(r.chainAttempt!.searched).toBe(true);
+    expect(r.chainAttempt!.pathway).toBeNull();
+  });
+
+  it('does NOT run the chain search when a DIRECT pathway already exists (OSA secondary to PTSD)', () => {
+    const r = computeStrategyPreview(input({})); // default = OSA secondary to PTSD, a direct pair
+    expect(r.chainAttempt).toBeUndefined();
+  });
+
+  it('the chain NEVER moves the deterministic tier (advisory only) — Tinnitus→HTN stays Thin', () => {
+    const r = computeStrategyPreview(input({
+      claimedCondition: 'Hypertension', upstreamScCondition: 'Tinnitus',
+      serviceConnectedConditions: ['Tinnitus'], activeProblems: ['Hypertension', 'Anxiety / GAD'],
+    }));
+    expect(r.tier).toBe('Thin'); // no direct pair → Thin, regardless of the recovered chain
+    expect(r.chainAttempt!.pathway).not.toBeNull();
   });
 });

@@ -69,6 +69,14 @@ function mount(p: StrategyPreview, chartReady: boolean | undefined = true) {
   return render(<StrategyPreviewCard caseId="CASE-1" chartReady={chartReady} />, { wrapper });
 }
 
+function mountWithCompleteness(
+  p: StrategyPreview,
+  completeness: { unreadFileCount: number; uncoveredPages: number; truncatedWindows: number } | null,
+) {
+  previewMock.mockResolvedValue({ data: p });
+  return render(<StrategyPreviewCard caseId="CASE-1" chartReady={true} completeness={completeness} />, { wrapper });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -133,5 +141,48 @@ describe('StrategyPreviewCard — viability re-source', () => {
   it('(v) chartReady=false renders the "documents not yet extracted" caution', async () => {
     mount(preview({ tier: 'Plausible', viability: null }), false);
     expect(await screen.findByText(/Documents not yet extracted — checks may change once OCR completes\./)).toBeInTheDocument();
+  });
+});
+
+describe('StrategyPreviewCard — E5 trustworthy viability (2026-06-13)', () => {
+  it('renders the input-visibility "Computed from N facts" line from the payload inputSet', async () => {
+    mount(preview({
+      tier: 'Plausible', viability: null,
+      inputSet: {
+        scConditions: ['PTSD'], medications: [{ drugName: 'sertraline', indication: 'PTSD' }],
+        activeProblems: ['OSA'], keyFacts: [{ label: 'Weight', value: '240 lb' }], factCount: 4,
+      },
+    }));
+    expect(await screen.findByText(/Computed from 4 facts/)).toBeInTheDocument();
+  });
+
+  it('surfaces the intermediary chain when a direct decline recovered a two-hop pathway', async () => {
+    mount(preview({
+      tier: 'Thin', viability: null,
+      chainAttempt: {
+        searched: true,
+        pathway: {
+          anchor: 'Tinnitus', intermediary: 'Anxiety / GAD',
+          hops: [
+            { from: 'Tinnitus', to: 'Anxiety / GAD', tier: 'moderate' },
+            { from: 'Anxiety / GAD', to: 'Hypertension', tier: 'moderate' },
+          ],
+          intermediarySource: 'comorbid_dx',
+        },
+      },
+    }));
+    expect(await screen.findByText(/Indirect pathway found/)).toBeInTheDocument();
+  });
+
+  it('shows the completeness caveat when part of the record went unparsed', async () => {
+    mountWithCompleteness(preview({ tier: 'Thin', viability: null }), { unreadFileCount: 1, uncoveredPages: 0, truncatedWindows: 0 });
+    expect(await screen.findByText(/verdict may be incomplete/)).toBeInTheDocument();
+    expect(screen.getByText(/1 file not read/)).toBeInTheDocument();
+  });
+
+  it('renders no completeness caveat when the chart is complete', async () => {
+    mountWithCompleteness(preview({ tier: 'Plausible', viability: null }), { unreadFileCount: 0, uncoveredPages: 0, truncatedWindows: 0 });
+    expect(await screen.findByText(/Argument:/)).toBeInTheDocument();
+    expect(screen.queryByText(/verdict may be incomplete/)).not.toBeInTheDocument();
   });
 });

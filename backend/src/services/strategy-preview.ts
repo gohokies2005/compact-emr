@@ -19,6 +19,78 @@ export interface PathwaySuggestion {
 
 const TIER_RANK: Record<string, number> = { high: 3, moderate: 2, low: 1 };
 
+// E5 trustworthy viability (2026-06-13) — INTERMEDIARY CHAIN.
+// A two-hop secondary pathway: a granted SC condition → an intermediary (a comorbid dx or a
+// med-treated condition the chart records) → the claimed condition. We compose the engine's
+// READ-ONLY findPair twice (no scoring lives here — cdsEngine is untouched). This runs ONLY as a
+// rescue when no DIRECT granted-SC pair exists, so a flat "no" auto-explores the chain the Board
+// recognizes (tinnitus→anxiety(SC)→OSA; a sedating med's indication as the bridge) before the RN
+// trusts a decline. Advisory only — never changes the deterministic tier/booleans.
+export interface ChainHop {
+  readonly from: string;
+  readonly to: string;
+  /** Each hop is a recognized Board secondary pair (findPair matched) — tier carried for display only. */
+  readonly tier: 'high' | 'moderate' | 'low';
+}
+
+export interface ChainPathway {
+  /** The granted SC condition at the head of the chain. */
+  readonly anchor: string;
+  /** The non-SC bridge (a comorbid dx or a med-treated condition) between the anchor and the claim. */
+  readonly intermediary: string;
+  /** anchor → intermediary, intermediary → claimed. */
+  readonly hops: readonly [ChainHop, ChainHop];
+  /** Where the intermediary came from, for the card's "computed from" honesty. */
+  readonly intermediarySource: 'comorbid_dx' | 'medication_indication';
+}
+
+// The weakest hop's tier ranks a candidate chain (a chain is only as strong as its weakest link);
+// ties break on the anchor-hop tier then the head anchor's stable order.
+function chainScore(c: ChainPathway): number {
+  const weakest = Math.min(TIER_RANK[c.hops[0].tier] ?? 0, TIER_RANK[c.hops[1].tier] ?? 0);
+  return weakest * 1e3 + (TIER_RANK[c.hops[0].tier] ?? 0);
+}
+
+/**
+ * Find the best SC → intermediary → claimed two-hop pathway, or null. PURE: composes the engine's
+ * exported findPair (read-only) — it introduces NO new scoring. `intermediaries` are the candidate
+ * bridges the chart actually recorded (comorbid problems + med-treated conditions), each tagged with
+ * its provenance so the UI can be honest about where the bridge came from. A self-pair
+ * (intermediary === claimed or intermediary === anchor by atlas key) is skipped — a real chain has a
+ * distinct middle node. Returns the strongest by weakest-hop tier (a chain is only as strong as its
+ * weakest link).
+ */
+export function findChainPathway(
+  claimedCondition: string,
+  grantedScConditions: readonly string[],
+  intermediaries: ReadonlyArray<{ readonly label: string; readonly source: 'comorbid_dx' | 'medication_indication' }>,
+): ChainPathway | null {
+  let best: ChainPathway | null = null;
+  for (const sc of grantedScConditions) {
+    for (const inter of intermediaries) {
+      const hop1 = findPair(sc, inter.label); // anchor → intermediary
+      if (hop1 === null) continue;
+      const hop2 = findPair(inter.label, claimedCondition); // intermediary → claimed
+      if (hop2 === null) continue;
+      // Reject a degenerate chain where the bridge collapses onto either end by atlas key — that's a
+      // direct pair, not a chain (e.g. the intermediary normalizes to the claimed or anchor key).
+      if (hop1.upstream === hop2.claimed) continue; // anchor key === claimed key
+      if (hop1.claimed === hop1.upstream || hop2.claimed === hop2.upstream) continue;
+      const candidate: ChainPathway = {
+        anchor: sc,
+        intermediary: inter.label,
+        hops: [
+          { from: hop1.upstream, to: hop1.claimed, tier: hop1.tier },
+          { from: hop2.upstream, to: hop2.claimed, tier: hop2.tier },
+        ],
+        intermediarySource: inter.source,
+      };
+      if (best === null || chainScore(candidate) > chainScore(best)) best = candidate;
+    }
+  }
+  return best;
+}
+
 // The granted-SC condition with the best high/moderate Board pair to the claimed condition, or null.
 // Shared by suggestPathway (the advisory "Anticipated" line) and computeStrategyPreview (the effective-
 // anchor scoring) — so the rubric and the suggestion are computed off the SAME derived anchor and can
@@ -67,6 +139,30 @@ export interface StrategyCriterion {
   readonly tone?: 'amber';
 }
 
+// E5 trustworthy viability (2026-06-13) — INPUT VISIBILITY. The exact fact set the verdict was
+// COMPUTED FROM, so a missing SC condition / med is obvious at a glance and a thin-parse "no" is
+// distrusted on sight (the Woodley lesson — a verdict you can't see the inputs to is untrustworthy).
+// DISPLAY ONLY: this never feeds any check; it mirrors the inputs the engine already received.
+export interface StrategyInputSet {
+  /** The granted-SC conditions the viability/engine actually scored against. */
+  readonly scConditions: readonly string[];
+  /** Current meds (drug + indication) — the bridge candidates for the intermediary chain. */
+  readonly medications: ReadonlyArray<{ readonly drugName: string; readonly indication: string | null }>;
+  /** The extracted comorbid problem list. */
+  readonly activeProblems: readonly string[];
+  /** Key clinical facts the strategy turns on (e.g. weight) — label/value pairs, never fabricated. */
+  readonly keyFacts: ReadonlyArray<{ readonly label: string; readonly value: string }>;
+  /** Total distinct facts fed in — the headline "Computed from N facts" count. */
+  readonly factCount: number;
+}
+
+// E5 — INTERMEDIARY CHECK result. Present (non-null) only when the deterministic ladder found NO
+// direct granted-SC pathway AND a two-hop chain was recovered. Advisory; never moves the tier.
+export interface ChainAttempt {
+  readonly searched: boolean;
+  readonly pathway: ChainPathway | null;
+}
+
 export interface StrategyPreview {
   // false on a bare/untriaged case (no claimed condition entered yet) — the card stays hidden rather than
   // showing an alarming "Stop" for a claim nobody has framed (architect QA FIX-2).
@@ -84,6 +180,17 @@ export interface StrategyPreview {
    * preview, byte-identical to before this feature. Lets the UI label the AI-sourced rows.
    */
   readonly aiChecked?: boolean;
+  /**
+   * E5 INPUT VISIBILITY — the fact set this verdict was computed from. Absent on legacy callers that
+   * don't supply it (the field is opt-in via input.inputSet); the card simply hides the section.
+   */
+  readonly inputSet?: StrategyInputSet;
+  /**
+   * E5 INTERMEDIARY CHECK — populated only when the direct pathway failed and we searched the chain.
+   * `pathway` is null when no chain was found (then the decline stands, but the card SHOWS that the
+   * chain was searched — an honest "we looked"). Absent when a direct pathway already exists.
+   */
+  readonly chainAttempt?: ChainAttempt;
 }
 
 export interface StrategyPreviewInput {
@@ -106,6 +213,17 @@ export interface StrategyPreviewInput {
    * (structural in the resolver).
    */
   readonly viability?: { readonly band: string; readonly why: string } | null;
+  /**
+   * E5 (2026-06-13) — the chart's current meds, each as a bridge candidate for the intermediary
+   * chain (drugName + the indication that names the condition the med treats). Absent = no chain
+   * bridge from meds (the comorbid problem list is still used). DISPLAY + chain-search only.
+   */
+  readonly medications?: ReadonlyArray<{ readonly drugName: string; readonly indication: string | null }>;
+  /**
+   * E5 — key clinical facts to surface in the input set (weight, AHI, BMI…). The route assembles
+   * these from the chart; DISPLAY ONLY, never feeds a check.
+   */
+  readonly keyFacts?: ReadonlyArray<{ readonly label: string; readonly value: string }>;
 }
 
 function framingLabel(framingChoice: string | null): string {
@@ -276,6 +394,38 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
       : cds.verdict === 'reject'
         ? 'Adverse signal on record — review the pathway before drafting.'
         : 'Verify the theory against the record before drafting.';
+
+  // E5 INPUT VISIBILITY — mirror the fact set this verdict was computed from (display only). factCount
+  // is the distinct count of SC conditions + meds + active problems + key facts: the headline number
+  // an RN scans to catch a thin parse ("computed from 2 facts" on a 1,119pp chart is a red flag).
+  const meds = input.medications ?? [];
+  const keyFacts = input.keyFacts ?? [];
+  const inputSet: StrategyInputSet = {
+    scConditions: input.serviceConnectedConditions,
+    medications: meds,
+    activeProblems: input.activeProblems,
+    keyFacts,
+    factCount: input.serviceConnectedConditions.length + meds.length + input.activeProblems.length + keyFacts.length,
+  };
+
+  // E5 INTERMEDIARY CHECK — when a SECONDARY claim found NO direct granted-SC pathway (no atlas pair
+  // matched), auto-search the two-hop chain before the decline stands. Bridges = the comorbid problem
+  // list + each med's indication (the med-treating-the-primary bridge). Advisory: the recovered chain
+  // never moves the deterministic tier — it just gives the RN the pathway the flat "no" was hiding.
+  let chainAttempt: ChainAttempt | undefined;
+  const directPathwayMissing = isSecondary && !cds.bva.matched && !gate.triggered;
+  if (directPathwayMissing) {
+    const bridges: Array<{ label: string; source: 'comorbid_dx' | 'medication_indication' }> = [
+      ...input.activeProblems.map((p) => ({ label: p, source: 'comorbid_dx' as const })),
+      ...meds
+        .map((m) => (m.indication ?? '').trim())
+        .filter((ind) => ind.length > 0)
+        .map((ind) => ({ label: ind, source: 'medication_indication' as const })),
+    ];
+    const pathway = findChainPathway(input.claimedCondition, input.serviceConnectedConditions, bridges);
+    chainAttempt = { searched: true, pathway };
+  }
+
   return {
     evaluable: input.claimedCondition.trim().length > 0,
     primaryArgument: buildPrimaryArgument(input, effectiveAnchor),
@@ -285,6 +435,8 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     recommendedPathway: suggestPathway(input),
     criteria,
     summary: plainSummary,
+    inputSet,
+    ...(chainAttempt ? { chainAttempt } : {}),
   };
 }
 

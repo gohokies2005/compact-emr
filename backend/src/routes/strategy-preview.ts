@@ -25,8 +25,12 @@ interface CaseForPreview {
     combatVeteran: string | null;
     pactArea: string | null;
     teraConceded: string | null;
+    weightLb: number | null;
     scConditions: Array<{ condition: string; status: string }>;
     activeProblems: Array<{ problem: string }>;
+    // E5 (2026-06-13): the chart's current meds — bridge candidates for the intermediary chain +
+    // the input-visibility med list. Only the active list (medStatus filter applied in the query).
+    activeMedications: Array<{ drugName: string; indication: string | null }>;
   } | null;
 }
 
@@ -73,8 +77,15 @@ export function createStrategyPreviewRouter(db: AppDb): Router {
               combatVeteran: true,
               pactArea: true,
               teraConceded: true,
+              weightLb: true,
               scConditions: { select: { condition: true, status: true } },
               activeProblems: { select: { problem: true } },
+              // Only the currently-active meds bridge the chain / show as inputs — a discontinued med
+              // shouldn't anchor a present-tense secondary theory.
+              activeMedications: {
+                where: { medStatus: 'active' },
+                select: { drugName: true, indication: true },
+              },
             },
           },
         },
@@ -118,6 +129,13 @@ export function createStrategyPreviewRouter(db: AppDb): Router {
         inServiceEvent: c.inServiceEvent ?? null,
         veteranStatement: c.veteranStatement ?? null,
         viability: viability === null ? null : { band: viability.viability, why: viability.why },
+        // E5 (2026-06-13): the active meds — bridge candidates for the intermediary chain + the
+        // input-visibility list.
+        medications: (c.veteran?.activeMedications ?? []).map((m) => ({ drugName: m.drugName, indication: m.indication })),
+        // E5: key clinical facts to surface in the input set. Only what intake/extraction recorded —
+        // NEVER fabricated. Weight is the one structured vital on the veteran today; AHI/BMI live in
+        // free-text notes (no structured column yet) so they're not asserted here.
+        keyFacts: c.veteran?.weightLb != null ? [{ label: 'Weight', value: `${c.veteran.weightLb} lb` }] : [],
         // E0: free-text deployment/exposure facts for the AI PACT/TERA judgment (flag-gated, fail-open).
         deploymentFacts: buildDeploymentFacts(c),
       });

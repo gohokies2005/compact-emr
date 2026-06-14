@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { getCaseViability } from '../api/case-viability';
 import { StatusChip } from './ui/StatusChip';
 import { BAND_CHIP } from '../lib/viabilityChip';
+import { CompletenessSignal, type CompletenessState } from './ViabilityInputSet';
 
 // RN anchor-viability panel (build plan §4.3) — pattern-mirrors StrategyPreviewCard: advisory only,
 // never wears a blocker color, never gates the Send-to-Drafter button (Gate-2 SUPERSEDES it on any
@@ -17,7 +18,15 @@ import { BAND_CHIP } from '../lib/viabilityChip';
 
 // BAND_CHIP moved to lib/viabilityChip.ts (P1 2026-06-11) — one map shared with StrategyPreviewCard.
 
-export function CaseViabilityCard({ caseId }: { readonly caseId: string }) {
+export function CaseViabilityCard({
+  caseId,
+  completeness,
+}: {
+  readonly caseId: string;
+  // E5 (2026-06-13): how much of the record went unparsed, threaded from SendToDrafterPanel — a thin
+  // parse must never masquerade as a confident anchor verdict. Undefined = caller didn't supply it.
+  readonly completeness?: CompletenessState | null;
+}) {
   const q = useQuery({
     queryKey: ['case', caseId, 'viability-card'],
     queryFn: () => getCaseViability(caseId),
@@ -67,6 +76,8 @@ export function CaseViabilityCard({ caseId }: { readonly caseId: string }) {
               Other eligible anchors: {v.alternatives.map((a) => `${a.upstream_canonical} (M${a.M_eff ?? '–'})`).join(', ')}
             </div>
           ) : null}
+          {/* E5 COMPLETENESS SIGNAL — a thin parse must never masquerade as a confident anchor verdict. */}
+          <CompletenessSignal state={completeness ?? null} />
         </div>
         <StatusChip tone={chip.tone} className="shrink-0">
           <span title="Advisory only — does not block drafting; Gate-2 supersedes on any contradiction">{chip.label}</span>

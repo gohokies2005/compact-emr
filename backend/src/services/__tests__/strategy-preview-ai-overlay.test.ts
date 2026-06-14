@@ -97,6 +97,7 @@ describe('computeStrategyPreviewWithAi — flag-on overlay', () => {
     runStrategyAiChecks.mockResolvedValueOnce({
       dxMatch: { matched: true, matchedDx: 'OSA', note: '' },
       presumptive: { eligible: false, program: null, teraAutoFlagged: false, note: 'n/a' },
+      scAnchorMatch: { matched: false, matchedCondition: null, note: 'anchor already passes deterministically' },
       costUsd: 0.002,
     });
     const deterministic = computeStrategyPreview(input());
@@ -106,5 +107,89 @@ describe('computeStrategyPreviewWithAi — flag-on overlay', () => {
     for (const key of ['anchor', 'plausible', 'pathway', 'strength'] as const) {
       expect(res.criteria.find((c) => c.key === key)).toEqual(deterministic.criteria.find((c) => c.key === key));
     }
+  });
+});
+
+// ============================================================================
+// E0 SC-anchor equivalence (2026-06-13) — the Woodley rescue overlay
+// ============================================================================
+
+// The Woodley shape: a secondary-to-PTSD claim whose service-connected trauma dx is recorded as "Other
+// Specified Trauma/Stressor Disorder" — ZERO shared tokens with "PTSD", so cdsEngine.hasScAnchor wrongly
+// fails the anchor and the deterministic tier is Stop.
+function woodley(over: Partial<StrategyPreviewInput> = {}): StrategyPreviewInput {
+  return input({
+    claimedCondition: 'OSA',
+    claimType: 'secondary',
+    framingChoice: 'causation',
+    upstreamScCondition: 'PTSD',
+    serviceConnectedConditions: ['Other Specified Trauma/Stressor Disorder'],
+    activeProblems: ['OSA'],
+    ...over,
+  });
+}
+
+describe('computeStrategyPreviewWithAi — SC-anchor rescue (rescue-only, never downgrade)', () => {
+  beforeEach(() => runStrategyAiChecks.mockReset());
+
+  it('the BUG: the deterministic anchor FAILS and the tier is Stop (token-overlap false-negative)', () => {
+    const det = computeStrategyPreview(woodley());
+    expect(det.criteria.find((c) => c.key === 'anchor')!.pass).toBe(false);
+    expect(det.tier).toBe('Stop');
+  });
+
+  it('RESCUE: a grounded clinical-equivalence SC anchor flips the anchor criterion to PASS, citing the SC condition', async () => {
+    runStrategyAiChecks.mockResolvedValueOnce({
+      dxMatch: { matched: true, matchedDx: 'OSA', note: 'OSA == obstructive sleep apnea' },
+      presumptive: { eligible: false, program: null, teraAutoFlagged: false, note: 'n/a' },
+      scAnchorMatch: { matched: true, matchedCondition: 'Other Specified Trauma/Stressor Disorder', note: 'PTSD == OSTSRD (trauma cluster)' },
+      costUsd: 0.002,
+    });
+    const res = await computeStrategyPreviewWithAi(woodley());
+    const anchor = res.criteria.find((c) => c.key === 'anchor')!;
+    expect(anchor.pass).toBe(true);
+    expect(anchor.detail).toContain('Other Specified Trauma/Stressor Disorder');
+    // No longer a flat Stop now that the anchor is recognized — the case is viable, not non-viable.
+    expect(res.tier).not.toBe('Stop');
+    expect(res.aiChecked).toBe(true);
+  });
+
+  it('NEVER DOWNGRADE: when the deterministic anchor already PASSES, scAnchorMatch:true is a no-op (anchor stays a real ✓, tier unchanged)', async () => {
+    // PTSD upstream + PTSD in the SC list → deterministic anchor already passes. A spurious AI "match"
+    // must not recompute/alter anything.
+    runStrategyAiChecks.mockResolvedValueOnce({
+      dxMatch: { matched: true, matchedDx: 'OSA', note: '' },
+      presumptive: { eligible: false, program: null, teraAutoFlagged: false, note: 'n/a' },
+      scAnchorMatch: { matched: true, matchedCondition: 'PTSD', note: 'redundant' },
+      costUsd: 0.002,
+    });
+    const baseInput = input({ upstreamScCondition: 'PTSD', serviceConnectedConditions: ['PTSD'] });
+    const det = computeStrategyPreview(baseInput);
+    const res = await computeStrategyPreviewWithAi(baseInput);
+    expect(res.tier).toBe(det.tier);
+    expect(res.criteria.find((c) => c.key === 'anchor')).toEqual(det.criteria.find((c) => c.key === 'anchor'));
+  });
+
+  it('NO RESCUE when scAnchorMatch is not matched: the deterministic Stop + failing anchor stand', async () => {
+    runStrategyAiChecks.mockResolvedValueOnce({
+      dxMatch: { matched: true, matchedDx: 'OSA', note: '' },
+      presumptive: { eligible: false, program: null, teraAutoFlagged: false, note: 'n/a' },
+      scAnchorMatch: { matched: false, matchedCondition: null, note: 'no SC condition encompasses PTSD' },
+      costUsd: 0.002,
+    });
+    const res = await computeStrategyPreviewWithAi(woodley());
+    expect(res.criteria.find((c) => c.key === 'anchor')!.pass).toBe(false);
+    expect(res.tier).toBe('Stop');
+  });
+
+  it('an older ai object WITHOUT a scAnchorMatch field never throws and performs no rescue', async () => {
+    runStrategyAiChecks.mockResolvedValueOnce({
+      dxMatch: { matched: true, matchedDx: 'OSA', note: '' },
+      presumptive: { eligible: false, program: null, teraAutoFlagged: false, note: 'n/a' },
+      costUsd: 0.002,
+    });
+    const res = await computeStrategyPreviewWithAi(woodley());
+    expect(res.criteria.find((c) => c.key === 'anchor')!.pass).toBe(false);
+    expect(res.tier).toBe('Stop');
   });
 });

@@ -26,11 +26,17 @@ function input(over: Partial<StrategyAiInput> = {}): StrategyAiInput {
   };
 }
 
-// A well-formed model response builder for the happy paths.
-function reply(dx: { matched: boolean; matchedDx: string | null; note?: string }, pres: { eligible: boolean; program: string | null; teraAutoFlagged?: boolean; note?: string }): string {
+// A well-formed model response builder for the happy paths. `sc` (E0 SC-anchor equivalence, 2026-06-13)
+// is optional — omitted = a model that did not emit the third block (the default secondary-case shape).
+function reply(
+  dx: { matched: boolean; matchedDx: string | null; note?: string },
+  pres: { eligible: boolean; program: string | null; teraAutoFlagged?: boolean; note?: string },
+  sc?: { matched: boolean; matchedCondition: string | null; note?: string },
+): string {
   return JSON.stringify({
     dxMatch: { matched: dx.matched, matchedDx: dx.matchedDx, note: dx.note ?? '' },
     presumptive: { eligible: pres.eligible, program: pres.program, teraAutoFlagged: pres.teraAutoFlagged ?? false, note: pres.note ?? '' },
+    ...(sc !== undefined ? { scAnchorMatch: { matched: sc.matched, matchedCondition: sc.matchedCondition, note: sc.note ?? '' } } : {}),
   });
 }
 
@@ -141,5 +147,96 @@ describe('runStrategyAiChecks', () => {
     aiReturns('```json\n' + reply({ matched: true, matchedDx: 'OSA' }, { eligible: false, program: null }) + '\n```');
     const res = await runStrategyAiChecks(input({ claimedCondition: 'OSA', activeProblems: ['OSA'] }));
     expect(res!.dxMatch.matched).toBe(true);
+  });
+
+  // ---- E0 SC-anchor equivalence (2026-06-13) ----
+  describe('scAnchorMatch (clinical-equivalence anchor)', () => {
+    it('WOODLEY: PTSD upstream anchored by service-connected "Other Specified Trauma/Stressor Disorder"', async () => {
+      aiReturns(
+        reply(
+          { matched: true, matchedDx: 'OSA' },
+          { eligible: false, program: null },
+          { matched: true, matchedCondition: 'Other Specified Trauma/Stressor Disorder', note: 'PTSD == OSTSRD (trauma cluster)' },
+        ),
+      );
+      const res = await runStrategyAiChecks(
+        input({
+          claimedCondition: 'obstructive sleep apnea',
+          upstreamScCondition: 'PTSD',
+          serviceConnectedConditions: ['Other Specified Trauma/Stressor Disorder'],
+        }),
+      );
+      expect(res!.scAnchorMatch).not.toBeNull();
+      expect(res!.scAnchorMatch!.matched).toBe(true);
+      expect(res!.scAnchorMatch!.matchedCondition).toBe('Other Specified Trauma/Stressor Disorder');
+    });
+
+    it('GROUNDING: rejects an SC anchor the model names but is NOT in the SC list → matched:false', async () => {
+      aiReturns(
+        reply(
+          { matched: false, matchedDx: null },
+          { eligible: false, program: null },
+          { matched: true, matchedCondition: 'PTSD', note: 'fabricated — PTSD not in the SC list' },
+        ),
+      );
+      const res = await runStrategyAiChecks(
+        input({ upstreamScCondition: 'PTSD', serviceConnectedConditions: ['Other Specified Trauma/Stressor Disorder'] }),
+      );
+      // The model NAMED "PTSD" but the only SC condition is OSTSRD → ungrounded → rejected.
+      expect(res!.scAnchorMatch!.matched).toBe(false);
+      expect(res!.scAnchorMatch!.matchedCondition).toBeNull();
+      expect(res!.scAnchorMatch!.note).toMatch(/not in the record/);
+    });
+
+    it('GROUNDING: verifies the matched SC condition leniently across whitespace/case', async () => {
+      aiReturns(
+        reply(
+          { matched: true, matchedDx: 'OSA' },
+          { eligible: false, program: null },
+          { matched: true, matchedCondition: '  other specified trauma/stressor DISORDER  ' },
+        ),
+      );
+      const res = await runStrategyAiChecks(
+        input({ upstreamScCondition: 'PTSD', serviceConnectedConditions: ['Other Specified Trauma/Stressor Disorder'] }),
+      );
+      expect(res!.scAnchorMatch!.matched).toBe(true);
+    });
+
+    it('NO MATCH: honest false when no SC condition encompasses the upstream', async () => {
+      aiReturns(
+        reply(
+          { matched: true, matchedDx: 'OSA' },
+          { eligible: false, program: null },
+          { matched: false, matchedCondition: null, note: 'no SC condition encompasses PTSD' },
+        ),
+      );
+      const res = await runStrategyAiChecks(
+        input({ upstreamScCondition: 'PTSD', serviceConnectedConditions: ['hypertension', 'tinnitus'] }),
+      );
+      expect(res!.scAnchorMatch!.matched).toBe(false);
+      expect(res!.scAnchorMatch!.matchedCondition).toBeNull();
+    });
+
+    it('NO UPSTREAM (direct claim) → scAnchorMatch is null, regardless of what the model emits', async () => {
+      aiReturns(
+        reply(
+          { matched: true, matchedDx: 'OSA' },
+          { eligible: false, program: null },
+          { matched: true, matchedCondition: 'PTSD', note: 'should be ignored — no upstream' },
+        ),
+      );
+      const res = await runStrategyAiChecks(input({ upstreamScCondition: null }));
+      expect(res!.scAnchorMatch).toBeNull();
+    });
+
+    it('a model that omits the scAnchorMatch block on a secondary claim → matched:false (not a fail-open)', async () => {
+      // reply() without the 3rd arg = no scAnchorMatch key; dx+presumptive still present so NOT a fail-open.
+      aiReturns(reply({ matched: true, matchedDx: 'OSA' }, { eligible: false, program: null }));
+      const res = await runStrategyAiChecks(
+        input({ upstreamScCondition: 'PTSD', serviceConnectedConditions: ['Other Specified Trauma/Stressor Disorder'] }),
+      );
+      expect(res).not.toBeNull();
+      expect(res!.scAnchorMatch!.matched).toBe(false);
+    });
   });
 });

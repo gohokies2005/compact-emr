@@ -298,10 +298,15 @@ export interface StrategyAiOverlayInput {
 }
 
 /**
- * Overlay the two AI JUDGMENT checks onto a deterministic preview. HYBRID: the deterministic
+ * Overlay the AI JUDGMENT checks onto a deterministic preview. HYBRID: the deterministic
  * `computeStrategyPreview` runs first (it always does), then — only when the flag is on AND the Sonnet
- * call succeeds — we REPLACE the dumb "diagnosis count" check with a GROUNDED dx-match, and SURFACE a
- * PACT/TERA presumptive row FIRST when eligible.
+ * call succeeds — we apply three overlays:
+ *   1. RESCUE a token-overlap false-negative SC-ANCHOR (E0 SC-anchor equivalence, 2026-06-13) by
+ *      recomputing the deterministic ladder with the grounded clinically-equivalent SC condition as the
+ *      anchor — rescue-only, never a downgrade (Stop is the floor; the AI only supplies a verified SC
+ *      string the engine then scores honestly). It can never turn a passing anchor into a fail.
+ *   2. REPLACE the dumb "diagnosis count" check with a GROUNDED dx-match.
+ *   3. SURFACE a PACT/TERA presumptive row FIRST when eligible.
  *
  * FAIL-OPEN + FLAG-OFF: `runStrategyAiChecks` returns null when the flag is off or on any error, and on
  * null we return the deterministic preview OBJECT UNCHANGED (byte-identical, `aiChecked` absent). The AI
@@ -320,10 +325,60 @@ export async function computeStrategyPreviewWithAi(
     claimedCondition: input.claimedCondition,
     activeProblems: input.activeProblems,
     serviceConnectedConditions: input.serviceConnectedConditions,
+    upstreamScCondition: input.upstreamScCondition ?? null,
     deploymentFacts: input.deploymentFacts ?? null,
     veteranStatement: input.veteranStatement ?? null,
   });
   if (ai === null) return base; // flag off OR fail-open → deterministic preview, byte-identical
+
+  // SC-ANCHOR RESCUE (E0 SC-anchor equivalence, 2026-06-13). The deterministic anchor check is dumb
+  // TOKEN-OVERLAP (cdsEngine.hasScAnchor): Woodley's secondary-to-PTSD theory failed the ✗ because his
+  // service-connected trauma dx is recorded as "Other Specified Trauma/Stressor Disorder" — zero shared
+  // tokens with "PTSD", though it is the SAME clinical entity. When the deterministic anchor criterion
+  // FAILED but the AI found a GROUNDED clinically-equivalent SC condition, we RECOMPUTE the deterministic
+  // preview with that real SC string injected as the upstream anchor — the engine then scores the whole
+  // ladder honestly (anchor ✓, real BVA pair, real tier) instead of a contradictory ✓-anchor-on-a-Stop.
+  //
+  // RESCUE-ONLY, NEVER DOWNGRADE (HARD): we recompute on a VERIFIED service-connected condition the AI
+  // grounded against the SC list, so the new base can only be EQUAL-OR-BETTER than the prior Stop (Stop
+  // is the floor tier). We apply it ONLY when the deterministic anchor criterion was failing — the AI
+  // can rescue a false-negative anchor, but it can NEVER turn a passing anchor into a fail (a matched:true
+  // when the anchor already passed is a no-op). Barred-theory / no-diagnosis gates are NOT anchor failures
+  // and are untouched by this path.
+  const detAnchor = base.criteria.find((c) => c.key === 'anchor') ?? null;
+  const isSecondaryBase =
+    input.claimType.toLowerCase().includes('secondary') ||
+    base.anchor != null ||
+    /secondary|aggravat/.test((input.framingChoice ?? '').toLowerCase());
+  const anchorWasFailing = isSecondaryBase && detAnchor !== null && detAnchor.pass === false;
+  let rescuedBase = base;
+  // Nullish-guard: a mocked/older ai object may omit scAnchorMatch entirely (treated as no rescue).
+  const scMatch = ai.scAnchorMatch ?? null;
+  if (
+    anchorWasFailing &&
+    scMatch !== null &&
+    scMatch.matched &&
+    scMatch.matchedCondition !== null
+  ) {
+    const matchedSc = scMatch.matchedCondition;
+    // Recompute deterministically with the grounded SC condition as the anchor. matchedSc is verified to
+    // be one of serviceConnectedConditions, so cdsEngine.hasScAnchor now passes and the no_sc_anchor gate
+    // no longer fires — the tier + downstream criteria recompute off a real, service-connected anchor.
+    const recomputed = computeStrategyPreview({ ...input, upstreamScCondition: matchedSc });
+    // Cite the equivalence on the anchor row so the card explains WHY the token-mismatched anchor holds.
+    const rescuedAnchor: StrategyCriterion = {
+      key: 'anchor',
+      label: recomputed.criteria.find((c) => c.key === 'anchor')?.label ?? 'Service-connected anchor present',
+      pass: true,
+      detail: `${input.upstreamScCondition ?? 'Upstream'} anchored by service-connected ${matchedSc} — ${scMatch.note}`,
+    };
+    rescuedBase = {
+      ...recomputed,
+      criteria: recomputed.criteria.map((c) => (c.key === 'anchor' ? rescuedAnchor : c)),
+    };
+  }
+  // From here the overlay (dx-match replace + presumptive surface) runs on the (possibly rescued) base.
+  const overlayBase = rescuedBase;
 
   // Replace the diagnosis criterion with the GROUNDED dx-match. The model cites the documented dx it
   // matched (verified present in strategy-ai-checks) or we render an honest "no documented match" — the
@@ -336,7 +391,7 @@ export async function computeStrategyPreviewWithAi(
       ? `Matched documented diagnosis: "${ai.dxMatch.matchedDx}"`
       : `No documented diagnosis matches "${input.claimedCondition}" — ${ai.dxMatch.note}`,
   };
-  const overlaid: StrategyCriterion[] = base.criteria.map((c) => (c.key === 'diagnosis' ? dxCriterion : c));
+  const overlaid: StrategyCriterion[] = overlayBase.criteria.map((c) => (c.key === 'diagnosis' ? dxCriterion : c));
 
   // SURFACE PRESUMPTIVE FIRST when eligible (PACT/TERA short-circuits the usual secondary analysis —
   // a presumptive claim is the strongest path and the RN should see it before anything else). When not
@@ -353,5 +408,6 @@ export async function computeStrategyPreviewWithAi(
   };
   const criteria = ai.presumptive.eligible ? [presRow, ...overlaid] : [...overlaid, presRow];
 
-  return { ...base, criteria, aiChecked: true };
+  // Spread overlayBase (NOT base) so a rescued tier/anchor/summary carries through to the response.
+  return { ...overlayBase, criteria, aiChecked: true };
 }

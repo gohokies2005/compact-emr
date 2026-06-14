@@ -27,6 +27,20 @@ vi.mock('../auth/roles', () => ({
 vi.mock('../services/mailer', () => ({ sendEmail: vi.fn() }));
 const sendEmailMock = vi.mocked(sendEmail);
 
+// E4 (memo-verify presign fix): the memo.pdf route renders → PUTs to S3 → returns a PRESIGNED GET
+// URL (mirroring the letter-verify path) instead of streaming bytes through the Lambda (API Gateway
+// corrupts raw binary). Stub the presigner so no AWS credentials/clock are needed.
+vi.mock('@aws-sdk/s3-request-presigner', () => ({
+  getSignedUrl: vi.fn(async () => 'https://signed.example/cover-memo.pdf'),
+}));
+// Keep the SDK command constructors real-enough to capture their input (the test asserts the memo
+// key + SSE on the PutObjectCommand) without constructing a live S3 client.
+vi.mock('@aws-sdk/client-s3', () => ({
+  S3Client: class { send = vi.fn(); },
+  GetObjectCommand: class { constructor(public readonly input: Record<string, unknown>) {} },
+  PutObjectCommand: class { constructor(public readonly input: Record<string, unknown>) {} },
+}));
+
 const FROM = 'info@flatratenexus.com';
 const SUBJECT = 'Your nexus letter is ready, invoice enclosed';
 
@@ -513,23 +527,37 @@ describe('POST /cases/:id/delivery/send — real SES send (E3) + idempotency', (
 describe('GET /cases/:id/delivery/memo.pdf — self-contained memo PDF (E4)', () => {
   beforeEach(() => { mockUser = { sub: 'admin-sub', roles: ['admin'] }; });
 
-  // supertest does not buffer application/pdf by default — collect the raw bytes ourselves.
-  const binary = (res: request.Response, cb: (err: Error | null, body: Buffer) => void) => {
-    const chunks: Buffer[] = [];
-    res.on('data', (c: Buffer) => chunks.push(c));
-    res.on('end', () => cb(null, Buffer.concat(chunks)));
-  };
-
-  it('returns a real inline PDF for a memo-applicable case (supplemental claim)', async () => {
+  it('renders the memo, PUTs it to S3 (KMS), and returns a presigned URL (NOT streamed bytes)', async () => {
+    // Mirrors the working letter-verify path: streaming raw PDF bytes through the API Lambda is
+    // corrupted by API Gateway (serverless-http binary:false), which produced the "Failed to load
+    // PDF document" blob. The route now returns { data: { url } } pointing straight at S3.
     const { db } = makeDb({ claimType: 'supplemental' });
-    const res = await request(appFor(db))
-      .get('/api/v1/cases/CASE-1/delivery/memo.pdf')
-      .buffer(true)
-      .parse(binary);
+    const s3 = fakeS3();
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { if (mockUser) (req as express.Request & { user?: MockUser }).user = mockUser; next(); });
+    app.use('/api/v1', createDeliveryRouter(db, { s3, bucketName: 'phi-bucket' }));
+    app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      if (isHttpError(error)) return sendError(res, error.status, error.code, error.message, error.details);
+      return sendError(res, 500, 'internal_error', 'Unexpected server error.');
+    });
+
+    const res = await request(app).get('/api/v1/cases/CASE-1/delivery/memo.pdf');
     expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toContain('application/pdf');
-    expect(res.headers['content-disposition']).toContain('inline');
-    const body = res.body as Buffer;
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(res.body.data.url).toBe('https://signed.example/cover-memo.pdf');
+
+    // The bytes were PUT to a versioned cover-memo key, KMS-encrypted, as application/pdf — and the
+    // body is a REAL %PDF document (the render is sound).
+    const sendMock = (s3 as unknown as { send: ReturnType<typeof vi.fn> }).send;
+    const putCall = sendMock.mock.calls
+      .map((c) => c[0] as { input?: Record<string, unknown> })
+      .find((cmd) => cmd?.input?.Key !== undefined && cmd?.input?.Body !== undefined);
+    expect(putCall).toBeDefined();
+    expect(putCall?.input?.Key).toBe('cases/CASE-1/delivery/cover-memo-v1.pdf');
+    expect(putCall?.input?.ContentType).toBe('application/pdf');
+    expect(putCall?.input?.ServerSideEncryption).toBe('aws:kms');
+    const body = putCall?.input?.Body as Buffer;
     expect(body.length).toBeGreaterThan(500);
     expect(body.subarray(0, 5).toString('utf-8')).toBe('%PDF-');
   });

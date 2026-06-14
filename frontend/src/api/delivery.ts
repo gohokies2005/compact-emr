@@ -1,4 +1,4 @@
-import { apiClient, apiGet, apiPost } from './client';
+import { apiGet, apiPost } from './client';
 
 // Mirrors the backend delivery route (routes/delivery.ts). The delivery preview is composed
 // server-side from the finalized letter TXT (§VII+§VIII excerpt), the fixed delivery email, the
@@ -98,19 +98,15 @@ export function sendDelivery(
 }
 
 /**
- * Open the cover memo as a PDF in a new tab (E4). The memo PDF route is an authenticated API GET,
- * and a plain window.open can't carry the Bearer token — so fetch the bytes through apiClient
- * (token rides the interceptor, same pattern as reports.ts fetchCostCsv) and open a Blob URL.
- * Throws on failure so the caller can surface the REAL error.
+ * Open the cover memo as a PDF in a new tab (E4). MIRRORS the letter-verify path
+ * (CaseDetailPage.openLetterPdf): the authenticated API GET returns a short-lived PRESIGNED S3 URL
+ * (not the raw bytes), and the browser opens that URL straight from S3. This avoids streaming
+ * binary back through the API Lambda — API Gateway (serverless-http, binary:false) corrupts a raw
+ * application/pdf body, which is what produced "Failed to load PDF document". The token rides the
+ * apiClient interceptor on the JSON GET; the presigned URL needs no token. Throws on failure so the
+ * caller can surface the REAL error.
  */
 export async function openMemoPdf(caseId: string): Promise<void> {
-  const response = await apiClient.get(deliveryPath(caseId, '/memo.pdf'), { responseType: 'blob' });
-  const blob = response.data instanceof Blob
-    ? response.data
-    : new Blob([response.data as BlobPart], { type: 'application/pdf' });
-  const typed = blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
-  const url = URL.createObjectURL(typed);
-  window.open(url, '_blank', 'noopener,noreferrer');
-  // Give the new tab time to load the blob before revoking (revoke-immediately breaks Firefox).
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  const { data } = await apiGet<{ data: { url: string } }>(deliveryPath(caseId, '/memo.pdf'));
+  window.open(data.url, '_blank', 'noopener,noreferrer');
 }

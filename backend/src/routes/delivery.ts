@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
@@ -40,6 +41,10 @@ import type { AppDb } from '../services/db-types.js';
 const LETTER_500_CENTS = 50000;
 // The delivery panel only applies once the letter is finalized.
 const DELIVERY_STATUSES: ReadonlySet<string> = new Set(['delivered', 'paid']);
+// Cover-memo presigned-GET lifetime — short, single-use "open in a new tab" window (mirrors the
+// letter-editor's PRESIGN_TTL_SECONDS). The RN clicks "Verify the cover memo" and the browser opens
+// it immediately; 5 minutes is ample and keeps the URL from lingering as a usable PHI link.
+const MEMO_PRESIGN_TTL_SECONDS = 300;
 
 export interface DeliveryRouterDeps {
   s3?: S3Client;
@@ -486,6 +491,15 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
   // Same role guard as the other delivery reads. Self-contained render (services/memo-render.ts,
   // pdf-lib) — deliberately NOT the FRN render Lambda, which only knows the nexus-letter shape
   // (signature compositing + letter chrome) and would corrupt a plain memo (decision E-2 / E-4b).
+  //
+  // We do NOT stream the rendered bytes back through the API Lambda: API Gateway (HttpApi + the
+  // serverless-http adapter, which runs binary:false) returns a non-base64 text body, so a raw
+  // application/pdf response is corrupted on the wire — the browser blob then fails with "Failed to
+  // load PDF document" (confirmed root cause). Instead we mirror the WORKING letter-verify path:
+  // render → PUT the bytes to the PHI bucket (KMS-encrypted, like every other artifact) → return a
+  // short-lived presigned GET URL. The browser opens the URL straight from S3 = clean binary.
+  // Re-rendering to the same versioned key on each click is safe: renderMemoPdf is deterministic
+  // (byte-identical output for the same memo text), so the overwrite is a no-op in content.
   router.get(
     '/cases/:id/delivery/memo.pdf',
     requireRole(['admin', 'ops_staff']),
@@ -496,6 +510,10 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       if (!DELIVERY_STATUSES.has(c.status)) {
         throw new HttpError(409, 'conflict', `Delivery is available only after the letter is finalized (status delivered/paid). Current status: '${c.status}'.`, { reason: 'not_deliverable', caseId, status: c.status });
       }
+      const bucketName = bucket();
+      if (bucketName === undefined) {
+        throw new HttpError(500, 'internal_error', 'PHI bucket is not configured.', { reason: 'bucket_unconfigured', caseId });
+      }
       const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
       const vFirst = (veteran as { firstName?: string } | null)?.firstName ?? null;
       const vLast = (veteran as { lastName?: string } | null)?.lastName ?? '';
@@ -504,9 +522,20 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
         throw new HttpError(404, 'not_found', 'No cover memo applies to this case (original claim, no prior denial).', { reason: 'no_memo', caseId });
       }
       const pdf = await renderMemoPdf(memo.text);
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', 'inline; filename="cover-memo.pdf"');
-      res.send(Buffer.from(pdf));
+      // Versioned key so the URL is scoped to the current letter version (matches the
+      // letter-revisions/cover-memo naming convention) and never collides across cases.
+      const current = await resolveCurrent(caseId, c.currentVersion);
+      const memoKey = `cases/${caseId}/delivery/cover-memo-v${current?.version ?? c.currentVersion}.pdf`;
+      const client = s3();
+      await client.send(new PutObjectCommand({
+        Bucket: bucketName,
+        Key: memoKey,
+        Body: Buffer.from(pdf),
+        ContentType: 'application/pdf',
+        ServerSideEncryption: 'aws:kms',
+      }));
+      const url = await getSignedUrl(client, new GetObjectCommand({ Bucket: bucketName, Key: memoKey }), { expiresIn: MEMO_PRESIGN_TTL_SECONDS });
+      res.json({ data: { url } });
     }),
   );
 

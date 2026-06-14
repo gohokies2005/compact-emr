@@ -278,13 +278,230 @@ def test_doc_binary_garbage_flags_unreadable(rig):
     assert "unreadable .doc" in note
 
 
-# ===== guards around the native branch =====
+# ===== Layer 1: native PDF text-layer extraction (pypdf, BEFORE Textract) =====
+# A born-digital VA Blue Button dump (a real EMBEDDED text layer on every page) is read DIRECTLY with
+# pypdf and POSTed through the SAME /pages pipeline as Textract — Lozano's 2,294-page dump choked
+# Textract image-OCR and stored NO pages. A true image-only scan (thin/empty text layer) FALLS THROUGH
+# to Textract exactly as before. These tests use a real hand-built PDF for the text-layer + scanned
+# cases (exercising the actual pypdf open + extract), and a mocked PdfReader for the >2000-page
+# batching + error-fall-through cases.
 
-def test_pdf_still_goes_to_textract(rig, monkeypatch):
+
+def _make_text_pdf(page_texts: list[str]) -> bytes:
+    """Build a valid multi-page PDF with correct xref byte-offsets and a REAL text layer per page
+    (a content stream with a `(...) Tj` show-text op pypdf extracts). No external dependency — the
+    born-digital fixture the Layer-1 probe must accept."""
+    n = len(page_texts)
+    page_obj_nums = [3 + 2 * i for i in range(n)]
+    content_obj_nums = [4 + 2 * i for i in range(n)]
+    font_obj_num = 3 + 2 * n
+    parts: list[bytes] = [b"%PDF-1.4\n"]
+    offsets: dict[int, int] = {}
+
+    def add(num: int, body: bytes) -> None:
+        offsets[num] = sum(len(p) for p in parts)
+        parts.append(("%d 0 obj" % num).encode() + body + b"endobj\n")
+
+    add(1, b"<</Type/Catalog/Pages 2 0 R>>")
+    kids = " ".join("%d 0 R" % p for p in page_obj_nums)
+    add(2, ("<</Type/Pages/Kids[%s]/Count %d>>" % (kids, n)).encode())
+    for i in range(n):
+        stream = ("BT /F1 14 Tf 72 700 Td (%s) Tj ET" % page_texts[i]).encode()
+        add(page_obj_nums[i], ("<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 %d 0 R>>>>/Contents %d 0 R>>" % (font_obj_num, content_obj_nums[i])).encode())
+        add(content_obj_nums[i], ("<</Length %d>>stream\n" % len(stream)).encode() + stream + b"\nendstream")
+    add(font_obj_num, b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>")
+    xref_pos = sum(len(p) for p in parts)
+    total = font_obj_num + 1
+    xref = ["xref", "0 %d" % total, "0000000000 65535 f "]
+    for num in range(1, total):
+        xref.append("%010d 00000 n " % offsets[num])
+    parts.append(("\n".join(xref) + "\n").encode())
+    parts.append(("trailer<</Root 1 0 R/Size %d>>\nstartxref\n%d\n%%%%EOF" % (total, xref_pos)).encode())
+    return b"".join(parts)
+
+
+def _make_blank_pdf(n: int = 1) -> bytes:
+    """An n-page PDF with NO text layer (blank pages) — the image-only-scan stand-in. pypdf opens it
+    fine but extract_text() yields '' per page, so the probe is thin → Textract fall-through."""
+    from pypdf import PdfWriter
+
+    w = PdfWriter()
+    for _ in range(n):
+        w.add_blank_page(width=200, height=200)
+    buf = io.BytesIO()
+    w.write(buf)
+    return buf.getvalue()
+
+
+def test_native_pdf_text_layer_posts_per_page_and_never_calls_textract(rig):
+    """A digital text-layer PDF is read by pypdf and POSTed per page through the SAME /pages upsert —
+    NO Textract (rig's textract is the _TextractBomb)."""
+    # Realistic Blue Button page density (hundreds of chars/page) so the probe clears the text-layer
+    # floor — a real digital VA export is text-dense, not three short phrases.
+    rig["with_bytes"](_make_text_pdf([
+        "Page one sleep study report. AHI 36.4 events per hour, severe obstructive sleep apnea confirmed. Nadir oxygen saturation 81 percent. Continuous positive airway pressure therapy recommended at this visit.",
+        "Page two treatment plan. CPAP initiated nightly use, pressure 11 cm H2O. Veteran reports daytime somnolence, Epworth Sleepiness Scale score 16. Compliance to be reviewed at the ninety day follow-up appointment.",
+        "Page three follow-up note. Sleep study ordered for titration. Service connection sought for obstructive sleep apnea secondary to post traumatic stress disorder. Records forwarded to the rating specialist for review.",
+    ]))
+    result = handler.start_handler(_event("cases/C1/u30-bluebutton.pdf"), None)
+
+    assert result["native"] == "pdf"
+    assert result["method"] == "native_pdf_text"
+    assert result["via"] == "pypdf"
+    assert result["started"] == []
+    assert rig["failed"] == []
+    [(doc_id, pages, count)] = rig["pages"]
+    assert doc_id == "DOC-1"
+    assert count == 3                      # the TRUE pdf page count is sent as documentPageCount
+    assert [p["pageNumber"] for p in pages] == [1, 2, 3]
+    assert "AHI 36.4" in pages[0]["text"]
+    assert "CPAP initiated" in pages[1]["text"]
+    assert "follow-up note" in pages[2]["text"]
+    assert all(p["confidence"] is None for p in pages)  # native read has no OCR confidence
+
+
+def test_scanned_pdf_with_no_text_layer_falls_through_to_textract(rig, monkeypatch):
+    """A textless (image-only) PDF: pypdf opens it but the probe is thin → Textract starts, exactly
+    as before Layer 1. The native branch posts NOTHING."""
     stub = _TextractStub()
     monkeypatch.setattr(handler, "textract", stub)
     monkeypatch.setenv("COMPLETION_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:0:topic")
     monkeypatch.setenv("TEXTRACT_SNS_ROLE_ARN", "arn:aws:iam::0:role/textract")
+    rig["with_bytes"](_make_blank_pdf(3))
+
+    result = handler.start_handler(_event("cases/C1/u31-scan.pdf"), None)
+
+    assert result == {"started": [{"documentId": "DOC-1", "jobId": "JOB-1"}]}
+    assert rig["pages"] == [] and rig["failed"] == []
+    [call] = stub.calls
+    assert call["JobTag"] == "DOC-1"
+    assert call["DocumentLocation"] == {"S3Object": {"Bucket": "phi-bucket", "Name": "cases/C1/u31-scan.pdf"}}
+
+
+def test_corrupt_pdf_falls_through_to_textract_without_raising(rig, monkeypatch):
+    """Garbage bytes that aren't a PDF at all: pypdf raises on open → _native_pdf_read returns the
+    fall-through sentinel (never crashes start_handler) → Textract owns it."""
+    stub = _TextractStub()
+    monkeypatch.setattr(handler, "textract", stub)
+    monkeypatch.setenv("COMPLETION_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:0:topic")
+    monkeypatch.setenv("TEXTRACT_SNS_ROLE_ARN", "arn:aws:iam::0:role/textract")
+    rig["with_bytes"](b"this is not a pdf at all, not even a header")
+
+    result = handler.start_handler(_event("cases/C1/u32-broken.pdf"), None)
+
+    assert result == {"started": [{"documentId": "DOC-1", "jobId": "JOB-1"}]}
+    assert rig["pages"] == [] and rig["failed"] == []
+    assert len(stub.calls) == 1
+
+
+def test_native_pdf_hybrid_doc_posts_empty_for_image_pages(rig):
+    """A digital doc with a couple of scanned image pages mixed in: the image pages extract to '' and
+    post as EMPTY pages (acceptable, noted) — the whole doc is NOT failed for a few image pages. Built
+    by interleaving blank (image-only) pages into a real text PDF."""
+    from pypdf import PdfWriter, PdfReader as _RR
+
+    text_pdf = _make_text_pdf([
+        f"Clinical progress note page {i}. Veteran seen in primary care clinic for chronic conditions "
+        f"with real text content documented including vital signs, active problem list, and current "
+        f"medications reconciled at this encounter on the dated visit for page {i} of the record."
+        for i in range(1, 7)
+    ])
+    w = PdfWriter()
+    for i, pg in enumerate(_RR(io.BytesIO(text_pdf)).pages):
+        w.add_page(pg)
+        if i in (1, 3):  # interleave a blank (image-only) page after some text pages
+            w.add_blank_page(width=200, height=200)
+    buf = io.BytesIO()
+    w.write(buf)
+    rig["with_bytes"](buf.getvalue())
+
+    result = handler.start_handler(_event("cases/C1/u33-hybrid.pdf"), None)
+
+    assert result["method"] == "native_pdf_text"
+    assert result["emptyPages"] >= 2          # the 2 interleaved blank pages posted empty
+    [(_, pages, count)] = rig["pages"]
+    assert count == result["pdfPages"]
+    assert len([p for p in pages if p["text"] == ""]) >= 2
+    assert any("real text content" in p["text"] for p in pages)  # text pages kept their content
+
+
+def test_native_pdf_batches_posts_over_2000_pages(rig, monkeypatch):
+    """A dump larger than the route's 2,000-entries-per-POST cap is split into batches of
+    _PAGES_PER_POST, the TRUE page count sent on EVERY batch. Mock PdfReader so the test stays fast
+    (no 2,300-page real PDF)."""
+
+    class _FakePage:
+        def __init__(self, n: int):
+            self._n = n
+
+        def extract_text(self) -> str:
+            return (
+                f"Page {self._n} clinical record. Substantive medical content for this page including "
+                f"the encounter date, the assessment and plan, the active medication list, and the "
+                f"provider signature block, well above the per-page text-layer probe floor for page {self._n}."
+            )
+
+    class _FakePages:
+        def __init__(self, count: int):
+            self._count = count
+
+        def __len__(self) -> int:
+            return self._count
+
+        def __getitem__(self, i: int) -> "_FakePage":
+            return _FakePage(i)
+
+    class _FakeReader:
+        is_encrypted = False
+
+        def __init__(self, _stream):
+            self.pages = _FakePages(2300)
+
+    import pypdf
+    monkeypatch.setattr(pypdf, "PdfReader", _FakeReader)
+    rig["with_bytes"](b"%PDF-1.4 fake header; PdfReader is mocked")
+
+    posts: list = []
+    monkeypatch.setattr(handler, "_post_pages_to_api",
+                        lambda doc_id, pages, count: posts.append((doc_id, len(pages), count)))
+
+    result = handler.start_handler(_event("cases/C1/u34-huge.pdf"), None)
+
+    assert result["method"] == "native_pdf_text"
+    assert result["pdfPages"] == 2300
+    # 2300 pages / 1000 per POST = 3 batches (1000, 1000, 300); EVERY batch carries the true 2300 count.
+    assert [n for (_, n, _) in posts] == [1000, 1000, 300]
+    assert all(count == 2300 for (_, _, count) in posts)
+    assert all(doc_id == "DOC-1" for (doc_id, _, _) in posts)
+
+
+def test_native_pdf_over_size_cap_defers_to_textract(rig, monkeypatch):
+    """A PDF larger than MAX_OCR_BYTES is not buffered for a native read — Textract (which streams
+    from S3) owns it. The native branch must not even open it."""
+    stub = _TextractStub()
+    monkeypatch.setattr(handler, "textract", stub)
+    monkeypatch.setenv("COMPLETION_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:0:topic")
+    monkeypatch.setenv("TEXTRACT_SNS_ROLE_ARN", "arn:aws:iam::0:role/textract")
+    monkeypatch.setattr(handler, "MAX_OCR_BYTES", 16)
+    rig["with_bytes"](b"x" * 64)  # over the 16-byte cap
+
+    result = handler.start_handler(_event("cases/C1/u35-oversize.pdf"), None)
+
+    assert result == {"started": [{"documentId": "DOC-1", "jobId": "JOB-1"}]}
+    assert rig["pages"] == [] and rig["failed"] == []
+    assert len(stub.calls) == 1
+
+
+# ===== guards around the native branch =====
+
+def test_pdf_still_goes_to_textract_when_text_layer_thin(rig, monkeypatch):
+    """The original guard, updated for Layer 1: a PDF with no usable text layer still reaches Textract
+    with JobTag=documentId. (A textless single-page PDF stands in for the generic scan.)"""
+    stub = _TextractStub()
+    monkeypatch.setattr(handler, "textract", stub)
+    monkeypatch.setenv("COMPLETION_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:0:topic")
+    monkeypatch.setenv("TEXTRACT_SNS_ROLE_ARN", "arn:aws:iam::0:role/textract")
+    rig["with_bytes"](_make_blank_pdf(1))
 
     result = handler.start_handler(_event("cases/C1/u14-records.pdf"), None)
 

@@ -275,8 +275,13 @@ export class WorkersStack extends Stack {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'handler.start_handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'workers', 'ocr')),
-      timeout: Duration.minutes(2),
-      memorySize: 256,
+      // Layer 1 native-PDF read (2026-06-14): ocr-start now extracts a PDF's embedded text layer inline
+      // (pypdf) instead of always firing Textract. A digital VA Blue Button dump (Lozano: 2,294 pages /
+      // ~3M chars) extracts in ~22s AT A FULL vCPU — but at 256MB (~0.15 vCPU) that's >120s → timeout →
+      // DLQ. RAM is a non-issue (peak ~55MB); 1769MB buys the FULL vCPU (6×+ timeout headroom). Tiny
+      // .txt/.docx/normal-PDF invocations still finish sub-second, so the bigger memory costs ~nothing.
+      timeout: Duration.minutes(5),
+      memorySize: 1769,
       environment: {
         COMPACT_EMR_API_URL: apiBaseUrl,
         INTERNAL_WORKER_TOKEN: workerTokenSecret.secretValue.unsafeUnwrap(),

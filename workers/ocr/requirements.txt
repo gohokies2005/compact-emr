@@ -6,3 +6,10 @@
 # boto3 is deliberately NOT listed: the Lambda Python 3.12 runtime provides it, and vendoring
 # it would add ~80MB of botocore to the asset. For local dev: `pip install boto3` separately.
 python-docx>=1.1,<2.0
+# pypdf: native PDF text-layer extraction (Layer 1) — a digital text-layer PDF (a VA Blue Button
+# dump like Lozano CLM-44F17A108A, 2,294 pages / 3.04M chars) is read DIRECTLY here instead of
+# going to Textract image-OCR, which choked on it and stored no pages. pypdf is PURE PYTHON
+# (Root-Is-Purelib: true, Tag: py3-none-any — NO compiled extensions, unlike lxml), so it ships
+# safely as-is in the Code.fromAsset(workers/ocr) directory with no platform risk. Same dep the
+# doctor-pack-assembler worker already vendors.
+pypdf>=4.0,<7.0

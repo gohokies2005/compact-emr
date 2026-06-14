@@ -190,6 +190,17 @@ def start_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     if ext in _NATIVE_TEXT_EXTS:
         return _native_read(bucket, key, document_id, ext)
 
+    # Layer 1: a .pdf with a real EMBEDDED TEXT LAYER (a born-digital VA Blue Button dump) is read
+    # DIRECTLY with pypdf BEFORE Textract — Textract image-OCR choked on Lozano's 2,294-page dump and
+    # stored NO pages. _native_pdf_read probes the text layer: a hit posts pages through the same
+    # /pages pipeline and returns a result; a true image-only scan (or any pypdf error) returns the
+    # _PDF_TEXTRACT_FALLTHROUGH sentinel and we start Textract exactly as before. See the DEPLOY NOTE
+    # in _native_pdf_read: ocr-start must be raised to ~1769MB/5min for a big dump to finish inline.
+    if ext == "pdf":
+        pdf_result = _native_pdf_read(bucket, key, document_id)
+        if pdf_result is not _PDF_TEXTRACT_FALLTHROUGH:
+            return pdf_result
+
     sns_topic = os.environ["COMPLETION_SNS_TOPIC_ARN"]
     sns_role_arn = os.environ["TEXTRACT_SNS_ROLE_ARN"]
 
@@ -382,6 +393,26 @@ _NATIVE_TEXT_EXTS = {"txt", "docx", "doc", "html", "htm"}
 _MAX_PAGE_CHARS = 95_000  # /pages route rejects text over 100k chars/page; chunk with headroom
 _OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # genuine legacy .doc (OLE compound file)
 _LEGACY_DOC_NOTE = "legacy .doc format — ask the veteran for PDF/docx, or summarize manually"
+
+# ===== Layer 1: native PDF text-layer extraction (pypdf, BEFORE Textract) =====
+# A DIGITAL text-layer PDF (a VA Blue Button dump exported from VA.gov — born-digital, every page
+# carries a real embedded text layer) is read DIRECTLY with pypdf instead of going to Textract
+# image-OCR. Textract treats every page as an image to OCR; on a 2,294-page dump (Lozano
+# CLM-44F17A108A) it choked and stored NO pages, stranding the case in ocr_in_progress. pypdf reads
+# the same file's 3.04M-char text layer in ~21s (dev box; ~one full vCPU on Lambda). A TRUE image-only
+# scan has a thin/empty text layer → the probe fails → we fall through to Textract exactly as before.
+#
+# DECIDE native-vs-Textract with a PER-DOCUMENT PROBE: sample first/middle/last N pages and require a
+# per-page char floor. A born-digital dump scores hundreds-to-thousands of chars/page on the sample; a
+# scan scores ~0. The probe is cheap (open + ~9 pages ≈ 0.3s) and runs inline in start_handler; the
+# full extraction is the only heavy part (see the DEPLOY NOTE in _native_pdf_read).
+_PDF_PROBE_PAGES = 4          # sample size from EACH of head / middle / tail (≤12 pages probed total)
+_PDF_PROBE_MIN_CHARS = 50     # mean non-whitespace chars/page across the probe to call it a text layer
+_PDF_TEXTRACT_FALLTHROUGH = None  # sentinel: probe was thin → caller starts Textract as before
+# Pages per /pages POST. The route caps a request at 2,000 entries (internal-worker.ts
+# parsePageUpsertBody); 1,000 keeps each batch well under that AND under the writer's 30s Prisma
+# transaction window for the per-page upserts. A 2,294-page dump posts in 3 batches.
+_PAGES_PER_POST = 1_000
 
 
 def _key_extension(key: str) -> str:
@@ -577,6 +608,141 @@ def _native_read(bucket: str, key: str, document_id: str, ext: str) -> dict[str,
     _post_pages_to_api(document_id, pages, len(pages))
     print(json.dumps({"msg": "ocr: native read posted", "documentId": document_id, "ext": ext, "method": method, "via": via, "pages": len(pages), "chars": len(text)}))
     return {"started": [], "native": ext, "method": method, "via": via, "pages": len(pages)}
+
+
+# ===== Layer 1 native PDF text-layer extractor =====
+
+
+def _nonws_len(text: str) -> int:
+    """Non-whitespace char count — mirrors the server-side chart-readiness `nonWhitespaceCharCount`
+    so the probe floor speaks the same 'is this real content?' language the gate does."""
+    return len("".join(text.split()))
+
+
+def _probe_indices(n: int) -> list[int]:
+    """Sample page indices from the head, middle, and tail of an n-page PDF (deduped, in range).
+    A born-digital dump has text EVERYWHERE; a scan with a sparse cover page only wouldn't pass a
+    head-only probe, so we look at the middle and tail too before trusting the text layer."""
+    if n <= 0:
+        return []
+    if n <= _PDF_PROBE_PAGES * 3:
+        return list(range(n))
+    head = list(range(_PDF_PROBE_PAGES))
+    mid_start = max(0, n // 2 - _PDF_PROBE_PAGES // 2)
+    middle = list(range(mid_start, mid_start + _PDF_PROBE_PAGES))
+    tail = list(range(n - _PDF_PROBE_PAGES, n))
+    return sorted(set(head + middle + tail))
+
+
+def _build_pdf_native_pages(reader: Any, page_count: int) -> tuple[list[dict[str, Any]], int]:
+    """Extract per-page text for the WHOLE doc, preserving page_number so the downstream chunker +
+    grounding gate keep their [p.N] structure. A page whose text-layer extraction yields nothing (a
+    scanned image page inside an otherwise-digital PDF) posts as an EMPTY page — acceptable, noted in
+    the return; we never fail the whole doc for a few image pages. Any single page over the route's
+    100k-char cap is hard-chunked into extra page entries (same headroom as the native-text readers),
+    so the emitted pageNumber sequence is dense + monotonic but may exceed page_count when chunking
+    fires. Returns (pages, empty_page_count)."""
+    pages: list[dict[str, Any]] = []
+    empty = 0
+    seq = 0
+    for idx in range(page_count):
+        try:
+            raw = reader.pages[idx].extract_text() or ""
+        except Exception as exc:  # noqa: BLE001 — one bad page must not sink a 2,294-page read
+            print(json.dumps({"msg": "ocr: pypdf page extract error (posting empty page)", "page": idx + 1, "error": f"{type(exc).__name__}: {exc}"}))
+            raw = ""
+        text = raw.strip("\n\r")
+        if not text.strip():
+            empty += 1
+            seq += 1
+            pages.append({"pageNumber": seq, "text": "", "confidence": None})
+            continue
+        # Hard-chunk a page over the route cap (rare for a real text page, but VA exports can pack a
+        # whole table onto one page); each chunk is its own /pages entry, exactly like the native readers.
+        for i in range(0, len(text), _MAX_PAGE_CHARS):
+            seq += 1
+            pages.append({"pageNumber": seq, "text": text[i : i + _MAX_PAGE_CHARS], "confidence": None})
+    return pages, empty
+
+
+def _post_pages_batched(document_id: str, pages: list[dict[str, Any]], document_page_count: int) -> None:
+    """POST pages through the SAME /pages upsert as Textract + the native readers, but in batches of
+    <= _PAGES_PER_POST so a big dump stays under the route's 2,000-entries-per-request cap
+    (internal-worker.ts parsePageUpsertBody). The TRUE document_page_count is sent on EVERY batch (so
+    the readiness gate's size-aware floor always sees the real size, and Document.pageCount is correct
+    regardless of batch order). The /pages upsert is idempotent (keyed on documentId+pageNumber), so a
+    re-fire / retry overwrites in place. NOTE (single-batch terminal-status): writeDocumentPages runs
+    the chart-readiness classifier on the pages IN EACH POST and writes file_read_status from that
+    subset — for a real text-layer dump every batch is substantive so the last batch resolves to
+    'read', but a hypothetical sparse-TAIL batch could mis-park; see the DEPLOY NOTE."""
+    for start in range(0, len(pages), _PAGES_PER_POST):
+        batch = pages[start : start + _PAGES_PER_POST]
+        _post_pages_to_api(document_id, batch, document_page_count)
+
+
+def _native_pdf_read(bucket: str, key: str, document_id: str) -> dict[str, Any] | None:
+    """Layer 1: try to read a .pdf's EMBEDDED TEXT LAYER directly with pypdf, BEFORE Textract.
+
+    Returns a result dict when the native path HANDLED the doc (text-layer found → pages posted).
+    Returns _PDF_TEXTRACT_FALLTHROUGH (None) when the doc is NOT a usable text-layer PDF (a true
+    image-only scan, an encrypted/garbage PDF, or any pypdf error) — the caller then starts Textract
+    exactly as before. NEVER raises for a parse problem: a bad PDF must degrade to Textract, never
+    crash start_handler (which would burn the orphan-race retry budget + hit the DLQ).
+
+    DEPLOY NOTE (infra, ocr-start Lambda — REQUIRED before this can read a big dump in production):
+    full extraction of Lozano's 2,294-page PDF is ~21s on a dev box → ~21-30s at a FULL Lambda vCPU
+    (1769MB) but >120s at the current 256MB (~0.15 vCPU). ocr-start is timeout=2min/memory=256MB
+    (workers-stack.ts:278). To run this inline, ocr-start MUST be raised to memorySize≈1769MB (full
+    vCPU; pypdf is single-threaded CPU-bound, RAM peak is only ~55MB) and timeout to ≈5min. Cost of the
+    bump is negligible (the tiny .txt/.docx/Textract-start invocations finish sub-second). A doc that
+    is too large for the bumped budget would time out → raise → DLQ; the size guard below caps the
+    bytes we even attempt so a pathological file flags rather than loops."""
+    data = s3.get_object(Bucket=bucket, Key=key)["Body"].read(MAX_OCR_BYTES + 1)
+    if len(data) > MAX_OCR_BYTES:
+        # Too big to buffer for a native read — let Textract (which streams from S3) own it.
+        print(json.dumps({"msg": "ocr: pdf over native size cap; deferring to textract", "documentId": document_id, "bytes": len(data)}))
+        return _PDF_TEXTRACT_FALLTHROUGH
+
+    from pypdf import PdfReader  # lazy: only a .pdf with a text layer pays the import
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if getattr(reader, "is_encrypted", False):
+            # An encrypted PDF: pypdf can't read the text layer without the password. Let Textract try.
+            print(json.dumps({"msg": "ocr: pdf encrypted; deferring to textract", "documentId": document_id}))
+            return _PDF_TEXTRACT_FALLTHROUGH
+        page_count = len(reader.pages)
+    except Exception as exc:  # noqa: BLE001 — unreadable/corrupt PDF → Textract owns it (never crash)
+        print(json.dumps({"msg": "ocr: pypdf could not open pdf; deferring to textract", "documentId": document_id, "error": f"{type(exc).__name__}: {exc}"}))
+        return _PDF_TEXTRACT_FALLTHROUGH
+
+    if page_count == 0:
+        return _PDF_TEXTRACT_FALLTHROUGH
+
+    # PROBE: sample head/middle/tail; mean non-whitespace chars/page must clear the floor to trust the
+    # text layer. A born-digital dump scores hundreds/page; a scan scores ~0 → fall through to Textract.
+    probe = _probe_indices(page_count)
+    probe_chars = 0
+    for idx in probe:
+        try:
+            probe_chars += _nonws_len(reader.pages[idx].extract_text() or "")
+        except Exception:  # noqa: BLE001 — a probe-page error just contributes 0 (conservative)
+            pass
+    mean = probe_chars / len(probe) if probe else 0
+    if mean < _PDF_PROBE_MIN_CHARS:
+        print(json.dumps({"msg": "ocr: pdf text-layer thin; deferring to textract", "documentId": document_id, "pages": page_count, "probeMeanChars": round(mean, 1)}))
+        return _PDF_TEXTRACT_FALLTHROUGH
+
+    # Text layer confirmed → extract the WHOLE doc natively and POST through the same /pages pipeline.
+    pages, empty = _build_pdf_native_pages(reader, page_count)
+    total_chars = sum(len(p["text"]) for p in pages)
+    _post_pages_batched(document_id, pages, page_count)
+    print(json.dumps({
+        "msg": "ocr: native pdf text-layer read posted", "documentId": document_id,
+        "path": "native-text-layer", "pdfPages": page_count, "postedPages": len(pages),
+        "emptyPages": empty, "chars": total_chars, "probeMeanChars": round(mean, 1),
+    }))
+    return {"started": [], "native": "pdf", "method": "native_pdf_text", "via": "pypdf", "pages": len(pages), "pdfPages": page_count, "emptyPages": empty}
 
 
 def _claude_enabled() -> bool:

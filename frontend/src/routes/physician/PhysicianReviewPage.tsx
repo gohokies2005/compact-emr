@@ -114,7 +114,7 @@ export function PhysicianReviewPage() {
   // Imported letter (2026-06-14): the SignOffPopup hands its affirmative answers STRAIGHT to
   // finalizeImportLetter (which records its own PDF-bound sign-off + delivers the imported PDF as-is —
   // no re-render). Mirrors LetterEditorPage's finalizeImportMutation. On success, back to the queue.
-  const onFinalizeImport = async (input: { answers: SignOffAnswers; notes?: string }) => {
+  const onFinalizeImport = async (input: { answers: SignOffAnswers; notes?: string; overrideChartReadiness?: boolean; chartReadinessOverrideReason?: string }) => {
     await finalizeImportLetter(caseId, input);
     await qc.invalidateQueries({ queryKey: ['case', caseId] });
     await qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] });

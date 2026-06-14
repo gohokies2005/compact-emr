@@ -215,7 +215,7 @@ export function LetterEditorPage() {
   // answers here; this binds the sign-off to the PDF bytes + flips the case to 'delivered'. Mirrors
   // approveMutation's success (back to the physician queue). (import deliver-as-is, 2026-06-14)
   const finalizeImportMutation = useMutation({
-    mutationFn: (input: { answers: SignOffAnswers; notes?: string }) => finalizeImportLetter(caseId, input),
+    mutationFn: (input: { answers: SignOffAnswers; notes?: string; overrideChartReadiness?: boolean; chartReadinessOverrideReason?: string }) => finalizeImportLetter(caseId, input),
     onSuccess: async () => {
       setMessage('Imported letter finalized for delivery (PDF unchanged).');
       await Promise.all([

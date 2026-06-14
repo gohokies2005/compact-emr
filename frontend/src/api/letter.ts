@@ -159,7 +159,13 @@ export interface LetterFinalizeImportResult {
   readonly source: 'external_import';
 }
 
-export function finalizeImportLetter(caseId: string, input: { answers: SignOffAnswers; notes?: string }): Promise<{ data: LetterFinalizeImportResult }> {
+export function finalizeImportLetter(
+  caseId: string,
+  // overrideChartReadiness + reason: the finalize-import modal submits the chart-readiness override
+  // INLINE (this route creates the sign-off, so there's no prior POST /sign-off to carry it). The
+  // backend parses these and records the override on the sign-off it creates. (CLM-4DACAF4A80.)
+  input: { answers: SignOffAnswers; notes?: string; overrideChartReadiness?: boolean; chartReadinessOverrideReason?: string },
+): Promise<{ data: LetterFinalizeImportResult }> {
   return apiPost<{ data: LetterFinalizeImportResult }, typeof input>(caseLetterPath(caseId, '/finalize-import'), input);
 }
 

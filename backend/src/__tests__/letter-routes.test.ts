@@ -560,6 +560,36 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     expect(logged).toContain('letter_finalize_chart_readiness_override_honored');
   });
 
+  it('(d) finalize-import accepts an INLINE override (overrideChartReadiness + reason) with NO prior sign-off — the dead-link fix (CLM-4DACAF4A80)', async () => {
+    const { db, tx } = makeDb(baseCase(), { currentRevisionOverride: importedRevisionOverride() });
+    // A real unread (garbled) file is in the chart, and there is NO prior override sign-off — exactly
+    // Moseley's situation. The finalize modal submits the override inline; before the fix this 409'd
+    // ("Sign off anyway" was a dead link) because the route only looked for a PRIOR override sign-off.
+    (tx.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    (tx.signOff.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    const res = await request(appFor(db, importDeps()))
+      .post('/api/v1/cases/CASE-1/letter/finalize-import')
+      .send({ ...AFFIRMATIVE_BODY, overrideChartReadiness: true, chartReadinessOverrideReason: 'I reviewed the garbled intake PDF in person; it is legible to me.' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('delivered');
+    const so = (tx.signOff.create as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { data: { chartReadinessOverridden?: boolean; chartReadinessOverrideReason?: string | null } };
+    expect(so.data.chartReadinessOverridden).toBe(true);
+    expect(so.data.chartReadinessOverrideReason).toContain('reviewed');
+    const logged = (tx.activityLog.create as ReturnType<typeof vi.fn>).mock.calls.map((c) => (c[0] as { data: { action: string } }).data.action);
+    expect(logged).toContain('letter_finalized_import_chart_readiness_overridden');
+  });
+
+  it('(d) finalize-import still 409s when the override flag is set WITHOUT a reason (blank reason cannot slip the gate)', async () => {
+    const { db, tx } = makeDb(baseCase(), { currentRevisionOverride: importedRevisionOverride() });
+    (tx.fileReadStatus.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([blockingFileRow()]);
+    (tx.signOff.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    const res = await request(appFor(db, importDeps()))
+      .post('/api/v1/cases/CASE-1/letter/finalize-import')
+      .send({ ...AFFIRMATIVE_BODY, overrideChartReadiness: true, chartReadinessOverrideReason: '   ' });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('chart_not_ready');
+  });
+
   it('(d) approve is NOT blocked by an ORPHANED readiness row (file not in chart documents) (CLM-4DACAF4A80)', async () => {
     // Wayne Moseley: a deleted final-letter PDF left a manual_summary_required row that the chart no
     // longer lists. Reconcile drops it → approve proceeds to 200 WITHOUT needing an override sign-off.

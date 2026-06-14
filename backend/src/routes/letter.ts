@@ -16,7 +16,7 @@ import { holdingChanged } from '../services/letter-opinion-excerpt.js';
 import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from '../services/case-status-transitions.js';
 import { resolveRateCents } from '../services/pay-earnings.js';
 import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../services/chart-readiness.js';
-import { findChartReadinessOverride } from '../services/chart-readiness-override.js';
+import { findChartReadinessOverride, resolveOverrideReason } from '../services/chart-readiness-override.js';
 import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash } from '../services/letter-current.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
@@ -714,21 +714,33 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         throw new HttpError(409, 'conflict', 'The imported letter has no PDF artifact to deliver. Re-import the finished PDF.', { reason: 'imported_pdf_missing', caseId, version: meta.version });
       }
 
-      // Chart-readiness machine-read gate (mirrors /approve + sign-offs.ts). Honor an existing
-      // physician/admin override recorded at sign-off (CLM-4DACAF4A80, 2026-06-14) — finalize-import
-      // CREATES its own sign-off below, but a PRIOR override sign-off for this case is the physician's
-      // acknowledgement of the unread files, so finalize proceeds (and logs it). Otherwise the same
-      // descriptive 409 the other two sites emit.
-      // RECONCILED readiness (CLM-4DACAF4A80, 2026-06-14): same orphan-drop as /approve + /sign-off so
-      // an invisible orphaned readiness row can never block finalize-import either.
+      // Chart-readiness machine-read gate (mirrors /approve + sign-offs.ts) with RECONCILED readiness
+      // (orphan-drop) so an invisible orphaned readiness row can never block finalize-import.
+      // The finalize-import modal submits the override INLINE (overrideChartReadiness + reason) because
+      // this route CREATES the sign-off — there is no prior POST /sign-off to carry it. So we parse the
+      // inline override here (physician/admin + non-empty reason) AND also honor a PRIOR override sign-off
+      // if one exists. (CLM-4DACAF4A80, 2026-06-14: "Sign off anyway" was a DEAD LINK on this path because
+      // the inline override was never parsed — only a prior override sign-off was checked, which the
+      // inline import path never creates, so the gate 409'd forever.)
       const readiness = await loadReconciledChartReadiness(db, caseId);
-      if (!readiness.ready) {
-        const override = await findChartReadinessOverride(db, caseId);
-        if (override === null) {
+      const inlineOverrideReason = resolveOverrideReason(
+        req.body?.overrideChartReadiness as boolean | undefined,
+        req.body?.chartReadinessOverrideReason as string | undefined,
+        user.role,
+      );
+      const chartReadinessOverridden = !readiness.ready && inlineOverrideReason !== null;
+      if (!readiness.ready && !chartReadinessOverridden) {
+        const priorOverride = await findChartReadinessOverride(db, caseId);
+        if (priorOverride === null) {
           throw new HttpError(409, 'chart_not_ready', buildChartNotReadyMessage(readiness.blockingFiles, 'Finalize'), { caseId, blockingFiles: readiness.blockingFiles, overridable: true });
         }
-        await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_finalize_chart_readiness_override_honored', caseId, veteranId: c.veteranId, detailsJson: { caseId, signOffId: override.id, reason: override.chartReadinessOverrideReason, blockingFileCount: readiness.blockingFiles.length } } });
+        await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_finalize_chart_readiness_override_honored', caseId, veteranId: c.veteranId, detailsJson: { caseId, signOffId: priorOverride.id, reason: priorOverride.chartReadinessOverrideReason, blockingFileCount: readiness.blockingFiles.length } } });
       }
+      // Audit snapshot of the blocking files AS THEY WERE at inline-override time (mirrors sign-offs.ts) —
+      // stored on the SignOff row + logged, never recomputed. Null when not overriding inline.
+      const overrideFileSnapshot = chartReadinessOverridden
+        ? readiness.blockingFiles.map((b) => ({ filePath: b.filePath, terminalStatus: b.terminalStatus, note: b.lastAttempt?.note ?? null }))
+        : null;
 
       // Status transition must be legal + role-permitted (same target as /approve: -> delivered).
       if (!isValidCaseStatusTransition(c.status, 'delivered') || !canRolePerformCaseStatusTransition(user.role, c.status, 'delivered')) {
@@ -759,6 +771,9 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
               notes: parsed.notes,
               signedVersion: meta.version,
               signedContentSha256: pdf.sha256,
+              chartReadinessOverridden,
+              chartReadinessOverrideReason: chartReadinessOverridden ? inlineOverrideReason : null,
+              chartReadinessOverrideFiles: overrideFileSnapshot,
             },
           });
           // No new LetterRevision — the imported PDF IS the final artifact. Set the same delivery-ready
@@ -769,7 +784,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
             where: { id: meta.id },
             data: { letterType: 'nexus_letter', signingPhysicianId: c.assignedPhysicianId, payCents: resolveRateCents('nexus_letter') },
           });
-          await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_finalized_import', caseId, veteranId: c.veteranId, detailsJson: { version: meta.version, signOffId: row.id, signingPhysicianId: c.assignedPhysicianId, pdfS3Key: meta.pdfKey, signedContentSha256: pdf.sha256 } } });
+          await tx.activityLog.create({ data: { actorUserId: user.sub, action: chartReadinessOverridden ? 'letter_finalized_import_chart_readiness_overridden' : 'letter_finalized_import', caseId, veteranId: c.veteranId, detailsJson: { version: meta.version, signOffId: row.id, signingPhysicianId: c.assignedPhysicianId, pdfS3Key: meta.pdfKey, signedContentSha256: pdf.sha256, ...(chartReadinessOverridden ? { chartReadinessOverrideReason: inlineOverrideReason, overriddenFiles: overrideFileSnapshot } : {}) } } });
           return row.id;
         });
       } catch (e: unknown) {

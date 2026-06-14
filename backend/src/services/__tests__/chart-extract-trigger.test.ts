@@ -63,4 +63,18 @@ describe('maybeEnqueueChartExtract — force salt (keystone 4b)', () => {
     const out = await maybeEnqueueChartExtract(db, 'C-1', { forceSalt: 'manual:req-1' });
     expect(out).toEqual({ enqueued: false, reason: 'already_enqueued' });
   });
+
+  // Regression (Jamarious, 2026-06-13): the auto-generated screening-summary OUTPUT file
+  // (cases/<id>/00000000-screening-summary.txt) has NO terminal read-status (ocr-start skips it),
+  // so counting it in the all-terminal gate wedged EVERY re-extract at 'ocr_in_progress' forever
+  // once the first extraction created it — the forced reprocess silently never re-extracted. The
+  // gate must exclude it (like computeTriggerHash / deriveChartBuildState do).
+  it('excludes the screening-summary OUTPUT from the all-terminal gate so a forced re-extract still fires', async () => {
+    const SUMMARY = { id: 'sum', s3Key: 'cases/C-1/00000000-screening-summary.txt' };
+    const { db, creates } = makeDb({ docs: [...DOCS, SUMMARY], readStatuses: READ }); // summary has NO read-status
+    const out = await maybeEnqueueChartExtract(db, 'C-1', { forceSalt: 'manual:req-2' });
+    expect(out.enqueued).toBe(true); // not wedged at ocr_in_progress
+    // the hash is over the REAL docs only (computeTriggerHash already filters the summary), salted
+    expect(creates[0]?.['triggerHash']).toBe(`${computeTriggerHash(DOCS, READ)}:manual:req-2`);
+  });
 });

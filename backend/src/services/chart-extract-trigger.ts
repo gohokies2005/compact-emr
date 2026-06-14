@@ -11,7 +11,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { computeTriggerHash, TERMINAL_READ_STATUSES } from './chart-build-state.js';
+import { computeTriggerHash, TERMINAL_READ_STATUSES, isScreeningSummaryKey } from './chart-build-state.js';
 import { publishChartExtractQueued } from './chart-extract-queue.js';
 import type { AppDb } from './db-types.js';
 
@@ -34,9 +34,15 @@ export async function maybeEnqueueChartExtract(db: AppDb, caseId: string, opts: 
   const c = (await db.case.findFirst({ where: { id: caseId } })) as { veteranId: string } | null;
   if (c === null) return { enqueued: false, reason: 'case_not_found' };
 
-  const docs = await (db as unknown as {
+  const allDocs = await (db as unknown as {
     document: { findMany: (args: { where: { caseId: string }; select: { id: true; s3Key: true } }) => Promise<{ id: string; s3Key: string }[]> };
   }).document.findMany({ where: { caseId }, select: { id: true, s3Key: true } });
+  // Exclude the auto-generated screening-summary OUTPUT file (cases/<id>/00000000-screening-summary.txt):
+  // it is NOT an OCR input — ocr-start skips it, so it NEVER gets a terminal FileReadStatus. Counting it
+  // in the all-terminal gate made every RE-extract (and the forced reprocess) wedge at 'ocr_in_progress'
+  // FOREVER once the first extraction created the summary — the bug Ryan caught on Jamarious 2026-06-13.
+  // computeTriggerHash + deriveChartBuildState already exclude it via the same marker; this gate must too.
+  const docs = allDocs.filter((d) => !isScreeningSummaryKey(d.s3Key));
   if (docs.length === 0) return { enqueued: false, reason: 'no_documents' };
 
   const readStatuses = (await db.fileReadStatus.findMany({ where: { caseId } })) as unknown as { filePath: string; terminalStatus: string }[];

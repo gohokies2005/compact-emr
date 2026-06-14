@@ -7,7 +7,7 @@ import { prisma as defaultPrisma } from '../db/client.js';
 import { requireRole } from '../auth/roles.js';
 import { isCaseDocumentS3Key } from '../services/s3-key-safety.js';
 import { nudgeDocumentReocr } from '../services/document-reocr.js';
-import { TERMINAL_READ_STATUSES } from '../services/chart-build-state.js';
+import { TERMINAL_READ_STATUSES, isScreeningSummaryKey } from '../services/chart-build-state.js';
 import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -241,6 +241,10 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     const reocrFailed: { documentId: string; reason: string }[] = [];
     for (const doc of documents) {
       if (terminalKeys.has(doc.s3Key)) continue;
+      // The screening-summary OUTPUT file never has a terminal read-status (ocr-start skips it), so it
+      // would be futilely re-OCR'd every reprocess + then never reach terminal — inflating reocrQueued
+      // and never un-wedging anything. It is not an OCR input; skip it (matches the trigger's exclusion).
+      if (isScreeningSummaryKey(doc.s3Key)) continue;
       try {
         await nudgeDocumentReocr(s3, bucketName, doc);
         reocrQueued += 1;

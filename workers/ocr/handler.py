@@ -612,10 +612,17 @@ def _claude_ocr(document_id: str) -> str:
     s3_key = src.get("s3Key")
     if not s3_key:
         return ""
-    # Skip our OWN generated Intake Summary — a short one is valid (it's just a sparse intake) and the
-    # readiness gate already excludes it, so don't waste a Claude call on it.
-    if re.search(r"-intake_summary\.pdf$", str(s3_key), re.IGNORECASE):
-        return ""
+    # NOTE (Ryan, Jamarious 2026-06-14 — root fix): we USED to skip anything matching
+    # `-intake_summary.pdf` here to save a Claude call on our OWN sparse-but-valid generated summary.
+    # But that regex ALSO matched a VETERAN-UPLOADED "Intake_Summary.pdf" (the presign key is
+    # <uuid>-<OriginalName>, so an uploaded file ends in `-Intake_Summary.pdf` too). When such an
+    # uploaded file FAILED Textract, the Claude rescue skipped it, the readiness gate hid it, yet the
+    # DRAFTER still refused ("1 record file failed extraction and was NOT reviewed") — undraftable
+    # FOREVER, invisible in the RN queue, with no way to clear it (10+ dead draft attempts). The whole
+    # point of this fallback is "if Textract couldn't read it, TRY Claude" — we must NEVER skip a file
+    # that already failed extraction. The optimization is removed; a wasted call on the rare genuinely
+    # short generated summary is trivial next to dead-ending a $500 letter. (Original ask: if in doubt,
+    # send it to Anthropic.)
     media = _media_type(s3_key, src.get("contentType"))
     if media is None:  # e.g. .docx — not a Claude vision input; let it flag (overridable)
         return ""

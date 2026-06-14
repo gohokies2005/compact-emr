@@ -260,7 +260,12 @@ export function CaseDetailPage() {
   //   - drafting: a bare flip; Redraft / Send to Drafter / the Gate-2 resume are the real paths.
   //   - needs_records / needs_rn_decision: machine-only — the drafter's Gate-2 /halt parks the case there.
   //     A human flags a records gap with an "Awaiting records" note, not a status move.
-  const HUMAN_MOVE_DENYLIST: readonly CaseStatus[] = ['physician_review', 'drafting', 'needs_records', 'needs_rn_decision'];
+  //   - records / viability: VESTIGIAL pre-draft stepping. "Send to Drafter" sets the case straight to
+  //     'drafting' from ANY prior status (drafter.ts: case.update status:'drafting'), so the manual
+  //     intake->records->viability advance is bypassed — the only real pre-draft actions are Send to
+  //     Drafter / Reject / Archive. "Move to records" was just confusing clutter (Ryan 2026-06-14: "what
+  //     does this even mean?"). Records is tracked by the "Awaiting records" note, not a status flip.
+  const HUMAN_MOVE_DENYLIST: readonly CaseStatus[] = ['physician_review', 'drafting', 'records', 'viability', 'needs_records', 'needs_rn_decision'];
   const nextStatuses = allowedNextStatusesForRole(role, c.status).filter((to) => !HUMAN_MOVE_DENYLIST.includes(to));
   // Archive / Reopen lifecycle (C6 lifecycle, 2026-06-13). RN + admin only. An archived claim shows
   // ONLY Reopen (the workflow buttons are suppressed — there's nothing to drive while it's archived);

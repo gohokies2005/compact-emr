@@ -129,18 +129,18 @@ describe('buildCoverMemoText (E4 bug fixes)', () => {
     expect(memo).toContain('Independent Medical Opinion regarding Obstructive Sleep Apnea (OSA)');
     expect(memo).toContain('OSA');
     expect(memo).not.toMatch(/regarding osa\b/);
-    // The mid-sentence BODY use is the LOWERCASE form (coverMemo.js formatConditionLowercase): it
-    // preserves an already-uppercase acronym but does NOT uppercase a lowercase slug — so the body
-    // reads "...claim for osa". The header-vs-body split is the canonical FRN convention; only the
-    // header was buggy (raw slug). This asserts the body is untouched by the header fix.
-    expect(memo).toMatch(/supplemental claim for osa\b/);
+    // The BODY now canonicalizes the slug first (formatConditionLabel) then lowercases the prose while
+    // PRESERVING the acronym → "obstructive sleep apnea (OSA)", never the lowercase slug "osa" (Ryan
+    // 2026-06-14: the first sentence still read "osa"). Header is title-case; body is lowercase-prose.
+    expect(memo).toMatch(/supplemental claim for obstructive sleep apnea \(OSA\)/);
+    expect(memo).not.toMatch(/claim for osa\b/);
   });
 
   it('SUBJECT CASING: a properly-cased input acronym is preserved in BOTH header and body', () => {
     const memo = buildCoverMemoText({ ...base, claimedCondition: 'OSA', priorDecisionDate: '2026-01-15' });
     expect(memo).toContain('Independent Medical Opinion regarding Obstructive Sleep Apnea (OSA)');
-    // formatConditionLowercase preserves the all-caps acronym in the body too.
-    expect(memo).toMatch(/supplemental claim for OSA\b/);
+    // Body canonicalizes then lowercases-with-acronym → "obstructive sleep apnea (OSA)".
+    expect(memo).toMatch(/supplemental claim for obstructive sleep apnea \(OSA\)/);
   });
 
   it('NO unfilled [BRACKET] tokens ever appear (only the [SIGNATURE] render sentinel)', () => {

@@ -202,7 +202,10 @@ function reliablePriorDate(input: BuildCoverMemoInput): string | null {
 
 function bodyForPathway(input: BuildCoverMemoInput): string[] {
   const v = honorificLast(input);
-  const cond = conditionLowercase(input.claimedCondition);
+  // Canonicalize the raw slug ("osa") to the proper label FIRST, then lowercase the prose words while
+  // conditionLowercase PRESERVES the acronym → "obstructive sleep apnea (OSA)", not "osa" (Ryan
+  // 2026-06-14: the body first sentence still read lowercase "osa"). The header uses the title-case label.
+  const cond = conditionLowercase(formatConditionLabel(input.claimedCondition));
   const priorDate = reliablePriorDate(input);
   const p = PRONOUNS[input.salutation ?? 'Mr.'] ?? PRONOUNS['Mr.'];
 

@@ -42,6 +42,9 @@ const MIN_CHARS_FOR_READ = 10;
 // scan with 12 chars still flags. (8 chars on 2 pages must fail per the owner's acceptance case.)
 const MIN_CHARS_FOR_BIG_SCAN = 10;
 const GARBLED_RATIO_THRESHOLD = 0.08;
+// Below this many COUNTABLE (non-exempt, letter-bearing) tokens there isn't enough signal to call a doc
+// "garbled" from the ratio alone — a few edge tokens would dominate. HARD garble overrides this. (#2)
+const MIN_COUNTABLE_FOR_GARBLE = 6;
 const MANUAL_SUMMARY_MIN_LENGTH = 40;
 
 const CLEAN_CODE_PATTERN = /^(?:[A-Z]\d{1,2}(?:[.-]\d{1,3}[A-Z]?){0,3}|L\d-L\d|S\d-S\d|T\d{1,2}-T\d{1,2}|C\d-C\d)$/;
@@ -70,9 +73,17 @@ const EMBEDDED_SYMBOL_IN_LETTERS = /(?:[A-Za-z][^A-Za-z0-9\s][A-Za-z])|(?:[A-Za-
 // corrupt UP FRONT — before the letter-bearing gate, the markup exemption, and the word exemption — so no
 // exemption can ever launder real corruption, and a standalone mojibake token (not ASCII-letter-bearing)
 // still counts.
-const NORMAL_HYPHENATED_WORD = /^[A-Za-z]+(?:[-'][A-Za-z0-9]+)*$/;
+// Normal language joins letters with single hyphens, apostrophes, SLASHES (snoring/gasping, and/or,
+// his/her) or PERIODS (e.g., i.e., U.S.A) — none of which is OCR corruption. Real garble (c0nn3@ct€d)
+// joins with embedded digits/symbols, which this does NOT match. (2026-06-14 #2: snoring/gasping + e.g.
+// were false-flagged in a tiny denominator → 0.571.)
+const NORMAL_HYPHENATED_WORD = /^[A-Za-z]+(?:[-'/.][A-Za-z0-9]+)*\.?$/;
 const TRIM_EDGE_PUNCT = /^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g;
-const MARKUP_OR_URL = /[<>]|=["']|<\/?[a-z]|https?:\/\/|^\/\/|\.(?:com|org|net|gov|io)\b|href=|\bpi_[A-Za-z0-9]{8,}|\bCj0[A-Za-z0-9_-]{10,}/i;
+// MARKUP/URL/tracking junk — HTML, URLs, href=, Stripe pi_/gclid Cj0, AND query-string/ad-tracking
+// fragments (gad_source=1&gad_campaignid=…, utm_…, gbraid) that the Jotform payment block leaks. Excluded
+// from BOTH numerator and denominator. The generated summary should not contain these at all
+// (intake-summary-pdf.ts FIX 2); this is defense for OLD summaries that still carry them.
+const MARKUP_OR_URL = /[<>]|=["']|<\/?[a-z]|https?:\/\/|^\/\/|\.(?:com|org|net|gov|io)\b|href=|\bpi_[A-Za-z0-9]{8,}|\bCj0[A-Za-z0-9_-]{10,}|[?&][A-Za-z_]{2,}=|\b(?:gad_source|gad_campaignid|gbraid|gclid|utm_[a-z]+)\b/i;
 // eslint-disable-next-line no-control-regex -- intentionally matches OCR/encoding control chars + replacement char
 const HARD_GARBLE = /[�\x00-\x08\x0B\x0C\x0E-\x1F]|â€|Ã‚|Ã©|Ã¢|â„¢/;
 
@@ -100,23 +111,30 @@ export function corruptedTokenRatio(text: string): number {
   const tokens = text.split(TOKEN_SPLIT).filter((t) => t.length > 0);
   let total = 0;
   let corrupted = 0;
+  let hardGarble = 0;
   for (const tok of tokens) {
     // Real garble counts up front — before any exemption, and even if the token has no ASCII letter
     // (a standalone mojibake/replacement-char fragment). This is the load-bearing guard that keeps the
     // exemptions below from ever hiding genuine corruption.
-    if (HARD_GARBLE.test(tok)) { total++; corrupted++; continue; }
+    if (HARD_GARBLE.test(tok)) { total++; corrupted++; hardGarble++; continue; }
     if (!LETTER_BEARING.test(tok)) continue;
     // Embedded markup / URL / opaque payment-tracking IDs are not language — drop them from both the
     // numerator and the denominator so they can never tip the ratio (FIX 1 + FIX 2, 2026-06-14).
     if (MARKUP_OR_URL.test(tok)) continue;
-    // A normal hyphenated/apostrophe word (after trimming edge punctuation that TOKEN_SPLIT leaves on,
-    // e.g. a trailing period) is NOT corruption.
+    // A normal hyphenated/apostrophe/slash/period word (after trimming edge punctuation that TOKEN_SPLIT
+    // leaves on, e.g. a trailing period) is NOT corruption.
     const core = tok.replace(TRIM_EDGE_PUNCT, '');
     if (core.length > 0 && NORMAL_HYPHENATED_WORD.test(core)) continue;
     if (CLEAN_CODE_PATTERN.test(tok)) continue;
     total++;
     if (EMBEDDED_SYMBOL_IN_LETTERS.test(tok)) corrupted++;
   }
+  // MIN-DENOMINATOR GUARD (2026-06-14 #2): the exemptions (markup/codes/normal words) can shrink the
+  // countable set so far that a couple of edge tokens dominate — Moseley scored 4/7 = 0.571 on CLEAN
+  // ASCII (a slash word + "e.g." + two tracking URLs). Too few countable tokens = not enough signal to
+  // declare "garbled"; a clean doc must never be condemned by noise on a tiny denominator. HARD garble
+  // (control/replacement/mojibake) is definitive corruption at ANY count and overrides the guard.
+  if (hardGarble === 0 && total < MIN_COUNTABLE_FOR_GARBLE) return 0;
   return total === 0 ? 0 : corrupted / total;
 }
 

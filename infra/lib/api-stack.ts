@@ -161,6 +161,16 @@ export class ApiStack extends Stack {
         // sequence (build plan §3.5): staging ON → smoke + Playwright green → flip prod. Revert =
         // context→'false' + deploy (the backend reads it at request time; no image rebuild).
         EMR_CASE_VIABILITY_ENABLED: (this.node.tryGetContext('case_viability_enabled') as string | undefined) ?? 'false',
+        // Doctor-pack grounded source pages (PR-1..PR-4, 2026-06-13): map every extracted chart fact
+        // back to the EXACT source page that grounded it and pull those pages into the physician pack
+        // (the rating-grant page, the sleep-study AHI, the med list) — protected in the page budget
+        // (policy-b: capped-but-protected, lowest-yield-fact trimmed last) + cover why-lines, and the
+        // Opus LLM page-picker is narrowed off bulk/Blue-Button docs (the $0 back-map owns them). Default
+        // 'on' (Ryan-authorized flip). KILL SWITCH: cdk.json context `doctor_pack_grounded_pages: "off"`
+        // → byte-identical to the pre-feature pack. Read at request time in doctor-pack-generate (no image
+        // rebuild). LIVE SMOKE owed: regenerate a Blue-Button case's pack + confirm the grant/AHI/med pages
+        // + cover why-lines appear; physician review is the backstop, revert is one context flip.
+        DOCTOR_PACK_GROUNDED_PAGES: (this.node.tryGetContext('doctor_pack_grounded_pages') as string | undefined) ?? 'on',
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue

@@ -57,6 +57,10 @@ export interface StuckDocWatcherResult {
   sweptToManual: number;
   waiting: number;
   stamped: number;
+  // FIX 4 (2026-06-14): rows healed by Phase 3 re-classify — a manual_summary_required row whose stored
+  // pages PASS the (now-corrected) heuristic and flip to 'read' with NO re-OCR. Self-heals the false-garble
+  // backlog after the corruptedTokenRatio fix deploys.
+  reclassified: number;
   errors: number;
 }
 
@@ -108,6 +112,7 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
   let sweptToManual = 0;
   let waiting = 0;
   let stamped = 0;
+  let reclassified = 0;
   let errors = 0;
 
   // Candidates: Documents with NO DocumentPage rows (no successful read), old enough to be stuck. Most
@@ -244,7 +249,61 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
     }
   }
 
-  const summary: StuckDocWatcherResult = { ranAt: now.toISOString(), refired, sweptToManual, waiting, stamped, errors };
+  // ===== Phase 3: re-classify false-garble manual_summary_required rows (FIX 4, 2026-06-14) =====
+  // The corruptedTokenRatio fix narrowed the garble heuristic, but terminalStatus is written ONCE at
+  // classification time, so rows already parked at 'manual_summary_required' under the OLD over-broad
+  // heuristic stay parked forever. The retroactive heal in chart-readiness (lastAttemptPassesCurrentThresholds)
+  // can't save a FALSE-GARBLE row — it short-circuits on the stored corruptedTokenRatio > 0.08. Phase 2
+  // above can't reach these either: it requires NOT EXISTS file_read_status, and these DO have a row.
+  //
+  // So: scan rows still at 'manual_summary_required' that HAVE document pages, RE-RUN classifyReadAttempt
+  // on the stored page text (NO re-OCR), and if it NOW succeeds, flip to 'read'. Bounded by BATCH_LIMIT.
+  // Guards: only 'manual_summary_required' is touched (never an RN's manual_summary_provided, never an
+  // already-good 'read'/'auto_skipped'); the row only HEALS (we never re-park a row that still fails —
+  // it is already correctly parked + RN-visible). The whole class self-heals within one sweep cycle.
+  const stuckGarbleRows = await prisma.fileReadStatus.findMany({
+    where: { terminalStatus: 'manual_summary_required' },
+    take: BATCH_LIMIT,
+    select: { id: true, caseId: true, filePath: true, attemptsJson: true },
+  });
+  for (const frs of stuckGarbleRows) {
+    try {
+      if (isScreeningSummaryKey(frs.filePath) || frs.filePath.includes(RENDERED_MARKER)) continue;
+      // Find the matching Document (same s3Key) so we can read its stored pages — no FK between the tables.
+      const doc = await prisma.document.findFirst({ where: { caseId: frs.caseId, s3Key: frs.filePath }, select: { id: true } });
+      if (doc === null) continue; // orphan readiness row (reconciled away by the GET route) — leave it
+      const pageRows = await prisma.documentPage.findMany({ where: { documentId: doc.id }, orderBy: { pageNumber: 'asc' }, select: { text: true } });
+      if (pageRows.length === 0) continue; // no stored text to re-judge — Phase 1/2 own the no-pages case
+      const text = pageRows.map((p) => p.text ?? '').join('\n');
+      const outcome = classifyReadAttempt({ method: 'textract', extractedText: text, pageCount: pageRows.length });
+      if (!outcome.succeeded) continue; // still genuinely fails the (corrected) heuristic — correctly parked
+
+      const prior: readonly unknown[] = Array.isArray(frs.attemptsJson) ? (frs.attemptsJson as readonly unknown[]) : [];
+      const attempt = {
+        method: 'textract' as const,
+        wordCount: outcome.wordCount,
+        charCount: nonWhitespaceCharCount(text),
+        corruptedTokenRatio: outcome.corruptedTokenRatio,
+        pageCount: pageRows.length,
+        attemptedAt: now.toISOString(),
+        note: 'watcher re-classified stored pages under corrected heuristic — read OK (no re-OCR)',
+      };
+      await prisma.fileReadStatus.update({
+        where: { id: frs.id },
+        data: { terminalStatus: 'read', attemptsJson: [...prior, attempt] as unknown as Prisma.InputJsonValue, lastCheckedAt: now, version: { increment: 1 } },
+      });
+      await prisma.activityLog.create({
+        data: { actorUserId: SERVICE_ACTORS.STUCK_JOB_WATCHER, caseId: frs.caseId, action: 'ocr_reclassified_to_read', detailsJson: { documentId: doc.id, s3Key: frs.filePath, wordCount: outcome.wordCount, ratio: outcome.corruptedTokenRatio } },
+      });
+      reclassified += 1;
+      console.log(JSON.stringify({ msg: 'stuck-doc-watcher: re-classified false-garble row to read', documentId: doc.id, caseId: frs.caseId, s3Key: frs.filePath, ratio: outcome.corruptedTokenRatio }));
+    } catch (err) {
+      errors += 1;
+      console.error(JSON.stringify({ msg: 'stuck-doc-watcher: re-classify failed', fileReadStatusId: frs.id, caseId: frs.caseId, error: err instanceof Error ? err.message : String(err) }));
+    }
+  }
+
+  const summary: StuckDocWatcherResult = { ranAt: now.toISOString(), refired, sweptToManual, waiting, stamped, reclassified, errors };
   console.log(JSON.stringify({ msg: 'stuck-doc-watcher: summary', ...summary }));
   return summary;
 }

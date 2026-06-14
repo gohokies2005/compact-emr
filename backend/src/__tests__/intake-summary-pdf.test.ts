@@ -43,4 +43,32 @@ describe('intake-summary-pdf', () => {
     const bytes = await renderIntakeSummaryPdf({}, {});
     expect(Buffer.from(bytes.slice(0, 5)).toString('latin1')).toBe('%PDF-');
   });
+
+  // FIX 2 (2026-06-14): the raw Jotform payment/tracking block (payment <table>, Stripe Transaction ID,
+  // Google gclid) was pasted into the CLINICAL summary — PII that does not belong in a clinical doc AND
+  // the 2nd false-garble trigger. The summary must carry the veteran Q&A only, no payment/tracking markup.
+  const STAGE2_WITH_PAYMENT = {
+    ...MARCUS_STAGE2,
+    payQ: { type: 'control_payment', name: 'paymentField', text: 'Payment', answer: 'paid', order: 13, prettyFormat: '$350.00 Stripe' },
+    txnQ: { type: 'control_textbox', name: 'stripe_transaction_id', text: 'Transaction ID', answer: 'pi_3Abc123Def456Ghi789', order: 14 },
+    gclidQ: { type: 'control_textbox', name: 'gclid', text: 'gclid', answer: 'Cj0KCQjwhL-WBhCmARIsAPSLqqExample', order: 15 },
+    htmlQ: { type: 'control_textarea', name: 's2_extra', text: 'Notes', answer: '<table cellpadding="0"><tr><td>Total</td></tr></table>', order: 16 },
+    urlQ: { type: 'control_textbox', name: 's2_link', text: 'Receipt', answer: 'href="https://flatratenexus.com/pay"', order: 17 },
+  };
+
+  it('excludes the payment/tracking/HTML block from the generated summary (no <table / href= / pi_ / Transaction ID)', () => {
+    const pairs = intakeQuestionPairs(STAGE2_WITH_PAYMENT);
+    const blob = pairs.map((p) => `${p.q} ${p.a}`).join(' ');
+    // The clinical Q&A still survives…
+    expect(pairs.some((p) => p.q.startsWith('Why you believe'))).toBe(true);
+    // …but none of the payment/tracking/HTML markup does.
+    expect(blob).not.toContain('<table');
+    expect(blob).not.toContain('href=');
+    expect(blob).not.toContain('cellpadding=');
+    expect(blob).not.toMatch(/\bpi_[A-Za-z0-9]{8,}/);
+    expect(blob).not.toContain('Cj0KCQ'); // gclid value
+    // The Transaction-ID field (name-matched) and the gclid field are dropped entirely.
+    expect(pairs.some((p) => /transaction id/i.test(p.q))).toBe(false);
+    expect(pairs.some((p) => p.q === 'gclid')).toBe(false);
+  });
 });

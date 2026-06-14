@@ -15,22 +15,35 @@ const MIN = 60 * 1000;
 interface Candidate { id: string; caseId: string; s3Key: string; uploadedAt: Date }
 interface RefireLog { ts: Date; detailsJson: unknown }
 
+// A manual_summary_required row to be re-judged by Phase 3 (FIX 4 re-classify).
+interface StuckRow { id: string; caseId: string; filePath: string; attemptsJson: unknown }
+
 function makeDeps(opts: {
   candidates: Candidate[];
   frsByKey?: Record<string, { id: string; terminalStatus: string; attemptsJson: unknown } | null>;
   refiresByCase?: Record<string, RefireLog[]>;
   orphanPaged?: Array<{ id: string; case_id: string; s3_key: string }>;
   pagesByDoc?: Record<string, Array<{ text: string }>>;
+  // Phase 3: manual_summary_required rows to re-classify, the Document each maps to (by caseId+s3Key),
+  // and the stored pages keyed by documentId (reuses pagesByDoc).
+  stuckManualRows?: StuckRow[];
+  docByCaseKey?: Record<string, { id: string } | null>;
 }) {
   const logsCreated: Array<{ action: string; detailsJson: unknown }> = [];
   const frsUpdated: Array<Record<string, unknown>> = [];
   const frsCreated: Array<{ data: Record<string, unknown> }> = [];
   const invokeOcr = vi.fn(async () => {});
   const prisma = {
-    document: { findMany: vi.fn(async () => opts.candidates) },
+    document: {
+      findMany: vi.fn(async () => opts.candidates),
+      // Phase 3 resolves the Document for a stuck readiness row by (caseId, s3Key).
+      findFirst: vi.fn(async (a: { where: { caseId: string; s3Key: string } }) => opts.docByCaseKey?.[`${a.where.caseId}|${a.where.s3Key}`] ?? null),
+    },
     documentPage: { findMany: vi.fn(async (a: { where: { documentId: string } }) => opts.pagesByDoc?.[a.where.documentId] ?? []) },
     fileReadStatus: {
       findFirst: vi.fn(async (a: { where: { filePath: string } }) => opts.frsByKey?.[a.where.filePath] ?? null),
+      // Phase 3 batch query for manual_summary_required rows.
+      findMany: vi.fn(async () => opts.stuckManualRows ?? []),
       update: vi.fn(async (a: Record<string, unknown>) => { frsUpdated.push(a); }),
       create: vi.fn(async (a: { data: Record<string, unknown> }) => { frsCreated.push(a); }),
     },
@@ -148,5 +161,52 @@ describe('stuck-doc watcher — one-re-fire-then-flag, anti-join, clobber-guard'
     expect(r.stamped).toBe(1);
     const created = frsCreated.find((f) => f.data['filePath'] === 'cases/CASE-3/xyz-BadScan.pdf');
     expect(created?.data['terminalStatus']).toBe('manual_summary_required');
+  });
+
+  // ── Phase 3: re-classify the false-garble backlog (FIX 4, 2026-06-14) ───────────────────────────
+  // A row parked at manual_summary_required under the OLD over-broad garble heuristic whose stored pages
+  // now PASS the corrected heuristic must self-heal to 'read' with NO re-OCR. These have a file_read_status
+  // row (so Phase 2's NOT-EXISTS can't see them) and a stored corruptedTokenRatio > 0.08 (so the eval-time
+  // retro-heal can't save them) — Phase 3 is the only path that clears the class.
+
+  it('Phase 3: RE-CLASSIFIES a false-garble manual_summary_required row to read (hyphen-dense summary, NO re-OCR)', async () => {
+    // The live false-positive: clean hyphen-dense text that the OLD heuristic scored > 0.08.
+    const cleanHyphenDense = 'The veteran is service-connected for PTSD. Follow-up PC-PTSD-5 screen was well-documented. An x-ray and the auto-extracted notes confirm the diagnosis and the patient ongoing care plan today.';
+    const { deps, invokeOcr, frsUpdated, logsCreated } = makeDeps({
+      candidates: [],
+      stuckManualRows: [{ id: 'FRS-FG', caseId: 'CASE-9', filePath: 'cases/CASE-9/uuid-Intake_Summary.pdf', attemptsJson: [{ method: 'textract', corruptedTokenRatio: 0.16, note: 'garbled' }] }],
+      docByCaseKey: { 'CASE-9|cases/CASE-9/uuid-Intake_Summary.pdf': { id: 'DOC-FG' } },
+      pagesByDoc: { 'DOC-FG': [{ text: cleanHyphenDense }] },
+    });
+    const r = await handler(deps);
+    expect(invokeOcr).not.toHaveBeenCalled(); // NEVER re-OCR — re-judge the stored text only
+    expect(r.reclassified).toBe(1);
+    const upd = frsUpdated.find((u) => (u['where'] as { id: string }).id === 'FRS-FG');
+    expect((upd?.['data'] as Record<string, unknown>)['terminalStatus']).toBe('read');
+    expect(logsCreated.some((l) => l.action === 'ocr_reclassified_to_read')).toBe(true);
+  });
+
+  it('Phase 3: does NOT re-classify a GENUINELY garbled row — it stays parked (no weakening of garble detection)', async () => {
+    const garbled = 'c0nn3@ct€d th3 r3c0rd Pati$nt p#esent!ng kn$e p$in lim%ted m0t!on n0 ev!d#nce im+pro!vement'.repeat(3);
+    const { deps, frsUpdated } = makeDeps({
+      candidates: [],
+      stuckManualRows: [{ id: 'FRS-G', caseId: 'CASE-10', filePath: 'cases/CASE-10/uuid-BadScan.pdf', attemptsJson: [] }],
+      docByCaseKey: { 'CASE-10|cases/CASE-10/uuid-BadScan.pdf': { id: 'DOC-G2' } },
+      pagesByDoc: { 'DOC-G2': [{ text: garbled }] },
+    });
+    const r = await handler(deps);
+    expect(r.reclassified).toBe(0);
+    expect(frsUpdated).toHaveLength(0); // still correctly parked + RN-visible
+  });
+
+  it('Phase 3: skips an ORPHAN readiness row (no matching Document) — never touches it', async () => {
+    const { deps, frsUpdated } = makeDeps({
+      candidates: [],
+      stuckManualRows: [{ id: 'FRS-O', caseId: 'CASE-11', filePath: 'cases/CASE-11/deleted-file.pdf', attemptsJson: [] }],
+      docByCaseKey: { 'CASE-11|cases/CASE-11/deleted-file.pdf': null }, // no Document → orphan
+    });
+    const r = await handler(deps);
+    expect(r.reclassified).toBe(0);
+    expect(frsUpdated).toHaveLength(0);
   });
 });

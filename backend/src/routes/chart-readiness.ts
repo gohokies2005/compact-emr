@@ -133,6 +133,21 @@ export function createChartReadinessRouter(db: AppDb): Router {
           },
         });
 
+        // FAIL-LOUD (FIX 5, 2026-06-14): one structured CloudWatch line per classification on this
+        // producer path so a parking decision (manual_summary_required) is visible outside the RN UI —
+        // a future false-garble pile-up surfaces in logs / a metric-filter alarm instead of silently.
+        console.log(JSON.stringify({
+          msg: 'read_classified',
+          caseId,
+          filePath: parsed.filePath,
+          method: parsed.method,
+          terminalStatus,
+          reason: outcome.reason,
+          ratio: outcome.corruptedTokenRatio,
+          chars: newAttempt.charCount,
+          words: outcome.wordCount,
+        }));
+
         return row;
       });
 

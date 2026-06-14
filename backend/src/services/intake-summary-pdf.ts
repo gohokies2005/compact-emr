@@ -19,11 +19,29 @@ export interface IntakeSummaryMeta {
 
 type RawAnswer = { type?: string; name?: string; text?: string; answer?: unknown; prettyFormat?: string; order?: string | number };
 
-// Field types that are layout/instruction only — never a real answer.
+// Field types that are layout/instruction only — never a real answer. The payment/tracking family
+// (control_payment + Stripe / Square / PayPal / Authnet gateways, hidden tracking fields) is excluded
+// here too (FIX 2, 2026-06-14): the raw Jotform payment block pasted a payment <table>, the Stripe
+// Transaction ID, and the Google gclid into the CLINICAL summary body — that is PII/tracking that does
+// not belong in a clinical doc, AND its HTML/URL/opaque-id tokens were the 2nd false-garble trigger that
+// parked the summary in the RN manual queue (the 1st was hyphenated medical compounds; see
+// chart-readiness.ts corruptedTokenRatio). A clinical intake summary carries the veteran's Q&A only.
 const SKIP_TYPES = new Set([
   'control_text', 'control_button', 'control_pagebreak', 'control_head', 'control_widget',
   'control_captcha', 'control_divider', 'control_collapse', 'control_image', 'control_fileupload',
+  'control_payment', 'control_stripe', 'control_square', 'control_paypal', 'control_authnet',
+  'control_paypalcomplete', 'control_paypalpro', 'control_braintree', 'control_clickbank',
 ]);
+
+// Field NAMES that carry payment/tracking metadata regardless of declared type (Jotform hidden fields,
+// gateway widgets, and ad-attribution params). Matched case-insensitively as a substring of the field
+// `name`. Excluded so neither the value nor the question label reaches the clinical summary.
+const TRACKING_NAME = /payment|transaction|stripe|paypal|gclid|utm_|fbclid|gateway|charge|invoice|receipt|checkout/i;
+
+// An ANSWER value that is HTML markup, a URL, or an opaque transaction/tracking id — defense-in-depth in
+// case a payment/tracking value lands on a generic field type we didn't enumerate. These never describe
+// the veteran's condition and would re-introduce the false-garble tokens into the summary text.
+const MARKUP_OR_TRACKING_VALUE = /<[a-z!/][^>]*>|https?:\/\/|href=|cellpadding=|\bpi_[A-Za-z0-9]{8,}\b|\bCj0[A-Za-z0-9_-]{10,}\b/i;
 
 const ENTITIES: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&apos;': "'", '&nbsp;': ' ' };
 
@@ -63,12 +81,18 @@ function formatAnswer(a: RawAnswer): string {
 export function intakeQuestionPairs(rawAnswers: unknown): Array<{ q: string; a: string }> {
   if (!rawAnswers || typeof rawAnswers !== 'object') return [];
   const entries = Object.entries(rawAnswers as Record<string, RawAnswer>)
-    .filter(([, a]) => a && typeof a === 'object' && !SKIP_TYPES.has((a.type ?? '').toLowerCase()))
+    .filter(([, a]) =>
+      a && typeof a === 'object' &&
+      !SKIP_TYPES.has((a.type ?? '').toLowerCase()) &&
+      !TRACKING_NAME.test(a.name ?? ''))
     .sort(([ka, a], [kb, b]) => (Number(a.order ?? ka) || 0) - (Number(b.order ?? kb) || 0));
   const pairs: Array<{ q: string; a: string }> = [];
   for (const [, a] of entries) {
     const ans = formatAnswer(a);
     if (!ans) continue;
+    // Defense-in-depth: drop any answer that came through as raw markup / a URL / a payment-tracking id
+    // even on a field type we didn't enumerate — it is never clinical content and re-seeds false-garble.
+    if (MARKUP_OR_TRACKING_VALUE.test(ans)) continue;
     const q = stripHtml(a.text ?? '') || (a.name ?? 'Question');
     pairs.push({ q, a: ans });
   }

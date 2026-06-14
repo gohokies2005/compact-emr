@@ -114,6 +114,22 @@ export async function writeDocumentPages(
         });
       }
       readStatus = { terminalStatus, wordCount: outcome.wordCount, corruptedTokenRatio: outcome.corruptedTokenRatio };
+
+      // FAIL-LOUD (FIX 5, 2026-06-14): the classify decision that PARKS a file (manual_summary_required)
+      // was previously invisible outside the RN UI — a false-garble pile-up could grow silently. Emit one
+      // structured CloudWatch line for every classification on this LIVE producer path so a regression in
+      // the heuristic is visible in logs (a metric-filter alarm keys on reason='garbled' parks).
+      console.log(JSON.stringify({
+        msg: 'read_classified',
+        caseId: doc.caseId,
+        filePath: doc.s3Key,
+        method: 'textract',
+        terminalStatus,
+        reason: outcome.reason,
+        ratio: outcome.corruptedTokenRatio,
+        chars: nonWhitespaceCharCount(concatenatedText),
+        words: outcome.wordCount,
+      }));
     }
 
     await tx.activityLog.create({

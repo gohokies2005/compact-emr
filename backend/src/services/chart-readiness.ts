@@ -49,20 +49,51 @@ const TOKEN_SPLIT = /[\s,;:()[\]{}!?"'`]+/;
 const LETTER_BEARING = /[A-Za-z]/;
 const EMBEDDED_SYMBOL_IN_LETTERS = /(?:[A-Za-z][^A-Za-z0-9\s][A-Za-z])|(?:[A-Za-z][0-9\W]+[A-Za-z][0-9\W]+[A-Za-z])/;
 
+// FALSE-POSITIVE FIX (2026-06-14): the naive EMBEDDED_SYMBOL_IN_LETTERS regex condemned clean text as
+// "garbled" because a hyphen/apostrophe between letters is a letter-symbol-letter pattern. EVERY normal
+// hyphenated/apostrophe medical compound (service-connected, follow-up, auto-extracted, PC-PTSD-5,
+// well-documented, x-ray, patient's) tripped it, and the auto-generated intake/screening summary scored
+// 0.16 > 0.08 → parked in the RN manual queue. Two narrow exemptions below restore precision WITHOUT
+// weakening real garble detection (proven by the positive controls in the test suite):
+//
+//   NORMAL_HYPHENATED_WORD — letters joined only by SINGLE hyphens/apostrophes, optionally with trailing
+//     alnum (PC-PTSD-5). This is normal language, NOT corruption. Real OCR soup (c0nn3@ct€d) does NOT
+//     match: its joiners are embedded symbols/digits, not '-'/'\''. Edge punctuation (a trailing period on
+//     "well-documented.") is trimmed before the test since TOKEN_SPLIT doesn't split on '.'.
+//   MARKUP_OR_URL — HTML tags/attributes, URLs, href=, Stripe pi_… and gclid Cj0… opaque IDs. These are
+//     embedded markup (from a payment/tracking block that should never be in a clinical doc — see
+//     intake-summary-pdf.ts FIX 2), not language; they are excluded from BOTH numerator and denominator
+//     so stray markup can never tip the ratio.
+//
+// GENUINE garble is preserved AND hardened: HARD_GARBLE (control chars, the Unicode replacement char
+// '�', and the classic mojibake bigrams 'â€'/'Ã‚'/… from double-decoded UTF-8) is counted as
+// corrupt UP FRONT — before the letter-bearing gate, the markup exemption, and the word exemption — so no
+// exemption can ever launder real corruption, and a standalone mojibake token (not ASCII-letter-bearing)
+// still counts.
+const NORMAL_HYPHENATED_WORD = /^[A-Za-z]+(?:[-'][A-Za-z0-9]+)*$/;
+const TRIM_EDGE_PUNCT = /^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g;
+const MARKUP_OR_URL = /[<>]|=["']|<\/?[a-z]|https?:\/\/|^\/\/|\.(?:com|org|net|gov|io)\b|href=|\bpi_[A-Za-z0-9]{8,}|\bCj0[A-Za-z0-9_-]{10,}/i;
+// eslint-disable-next-line no-control-regex -- intentionally matches OCR/encoding control chars + replacement char
+const HARD_GARBLE = /[�\x00-\x08\x0B\x0C\x0E-\x1F]|â€|Ã‚|Ã©|Ã¢|â„¢/;
+
 /**
  * Compute the corrupted-token ratio for an OCR'd / extracted text payload.
  *
- * Definition (from FRN calibration):
+ * Definition (from FRN calibration, with the 2026-06-14 false-positive fix):
  *   - Tokenize on whitespace + common punctuation.
- *   - Letter-bearing token = contains at least one A-Z or a-z character.
- *   - Skip tokens matching the CLEAN_CODE_PATTERN (e.g. "L4-L5", "M47.817", "T2DM") — these
- *     look corrupted to a naive regex but are valid medical / coding tokens.
- *   - A token is "corrupted" if it contains a non-alphanumeric symbol embedded between
- *     letters, OR multiple letter/digit/symbol transitions (the classic OCR-garbled signature).
- *   - Return corrupted / total letter-bearing tokens. 0 when no letter tokens are present.
+ *   - HARD garble (control chars / replacement char / mojibake bigrams) ALWAYS counts as corrupt,
+ *     checked first so no exemption can launder it (a standalone mojibake token counts too).
+ *   - Letter-bearing token = contains at least one A-Z or a-z character; non-letter tokens are ignored.
+ *   - EXEMPT (skip, not corruption): a MARKUP_OR_URL token (HTML/URL/opaque-id — out of num + denom),
+ *     a NORMAL_HYPHENATED_WORD (service-connected, follow-up, PC-PTSD-5), and the CLEAN_CODE_PATTERN
+ *     (L4-L5, M47.817, T2DM) — all look corrupted to a naive regex but are valid.
+ *   - A surviving token is "corrupted" if it has a non-alphanumeric symbol embedded between letters,
+ *     OR multiple letter/digit/symbol transitions (the classic OCR-garbled signature).
+ *   - Return corrupted / total counted tokens. 0 when no countable tokens are present.
  *
- * Calibrated to keep clean docs (audiograms, rating decisions, CPT/lab tables) below 0.02,
- * and garbled scans above 0.14. The 0.08 threshold sits in the empirical gap.
+ * Calibrated to keep clean docs (audiograms, rating decisions, CPT/lab tables, AND hyphen-dense
+ * intake/screening summaries) below 0.02, and garbled scans above 0.14. The 0.08 threshold sits in
+ * the empirical gap.
  */
 export function corruptedTokenRatio(text: string): number {
   if (typeof text !== 'string' || text.length === 0) return 0;
@@ -70,7 +101,18 @@ export function corruptedTokenRatio(text: string): number {
   let total = 0;
   let corrupted = 0;
   for (const tok of tokens) {
+    // Real garble counts up front — before any exemption, and even if the token has no ASCII letter
+    // (a standalone mojibake/replacement-char fragment). This is the load-bearing guard that keeps the
+    // exemptions below from ever hiding genuine corruption.
+    if (HARD_GARBLE.test(tok)) { total++; corrupted++; continue; }
     if (!LETTER_BEARING.test(tok)) continue;
+    // Embedded markup / URL / opaque payment-tracking IDs are not language — drop them from both the
+    // numerator and the denominator so they can never tip the ratio (FIX 1 + FIX 2, 2026-06-14).
+    if (MARKUP_OR_URL.test(tok)) continue;
+    // A normal hyphenated/apostrophe word (after trimming edge punctuation that TOKEN_SPLIT leaves on,
+    // e.g. a trailing period) is NOT corruption.
+    const core = tok.replace(TRIM_EDGE_PUNCT, '');
+    if (core.length > 0 && NORMAL_HYPHENATED_WORD.test(core)) continue;
     if (CLEAN_CODE_PATTERN.test(tok)) continue;
     total++;
     if (EMBEDDED_SYMBOL_IN_LETTERS.test(tok)) corrupted++;

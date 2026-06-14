@@ -52,12 +52,17 @@ export function formatScreeningSummary(screenings: readonly ScreeningResult[], m
     (bySection.get(sec) ?? bySection.set(sec, []).get(sec)!).push(s);
   }
 
+  // ASCII-SAFE separators (FIX 3, 2026-06-14): this is a PLAIN-TEXT generator (no toWinAnsi pass like
+  // intake-summary-pdf), so the em-dash '—' and middot '·' could surface as mojibake if the artifact is
+  // ever re-encoded, AND they are exactly the kind of non-ASCII punctuation that feeds the garble
+  // heuristic. Use '-' for the dash and '|' for the middot so the generated screening summary can never
+  // display as mojibake and never trips corruptedTokenRatio.
   const lines: string[] = [];
-  lines.push('SCREENING SUMMARY — auto-extracted from the records');
-  lines.push(`Case ${meta.caseId}${meta.veteranName ? ` · ${meta.veteranName}` : ''}`);
-  lines.push(`Extracted ${meta.extractedAtIso} · ${screenings.length} result${screenings.length === 1 ? '' : 's'} · run ${meta.runId}`);
+  lines.push('SCREENING SUMMARY - auto-extracted from the records');
+  lines.push(`Case ${meta.caseId}${meta.veteranName ? ` | ${meta.veteranName}` : ''}`);
+  lines.push(`Extracted ${meta.extractedAtIso} | ${screenings.length} result${screenings.length === 1 ? '' : 's'} | run ${meta.runId}`);
   lines.push('');
-  lines.push('Reference only — screening scores are NOT diagnoses. Each line: date — instrument score [source page].');
+  lines.push('Reference only - screening scores are NOT diagnoses. Each line: date - instrument score [source page].');
   lines.push('');
 
   // Emit sections in the declared order, then OTHER last.
@@ -68,7 +73,7 @@ export function formatScreeningSummary(screenings: readonly ScreeningResult[], m
     rows.sort((a, b) => dateSortKey(a.date) - dateSortKey(b.date) || a.instrument.localeCompare(b.instrument));
     lines.push(title);
     for (const r of rows) {
-      lines.push(`  ${r.date ?? '(undated)'} — ${r.instrument} ${r.score} [p.${r.sourcePage}]`);
+      lines.push(`  ${r.date ?? '(undated)'} - ${r.instrument} ${r.score} [p.${r.sourcePage}]`);
     }
     lines.push('');
   }

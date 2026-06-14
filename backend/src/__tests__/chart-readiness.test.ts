@@ -16,6 +16,8 @@ import {
   READ_THRESHOLD_RATIO,
   wordCount,
 } from '../services/chart-readiness.js';
+import { formatScreeningSummary } from '../services/screening-summary.js';
+import type { ScreeningResult } from '../services/chart-extract-llm.js';
 import type { FileReadStatusRecord } from '../services/db-types.js';
 
 const now = new Date('2026-05-26T00:00:00.000Z');
@@ -63,6 +65,50 @@ describe('corruptedTokenRatio', () => {
   it('crosses the 0.08 threshold cleanly for clearly-garbled text', () => {
     const veryGarbled = 'TH$ pa%ti#en+t wa@s ad!mit-ted f0r r$evi^ew of c$ompl#aint of l@umb%ar p@a!n';
     expect(corruptedTokenRatio(veryGarbled)).toBeGreaterThan(0.14);
+  });
+
+  // ── FALSE-POSITIVE FIX calibration lock (2026-06-14) ─────────────────────────────────────────
+  // The naive embedded-symbol heuristic condemned clean hyphen-dense text as "garbled", parking nearly
+  // every intake/screening summary in the RN manual queue. These lock the fix: clean compounds + the
+  // generated summary stay <= 0.08, genuine garble (incl. mojibake + the replacement char) stays > 0.08.
+
+  it('does NOT flag common hyphenated/apostrophe medical compounds (the live false-positive class)', () => {
+    const compounds = "The veteran is service-connected for PTSD. Follow-up PC-PTSD-5 screen was well-documented. An x-ray and the auto-extracted notes confirm the patient's diagnosis.";
+    expect(corruptedTokenRatio(compounds)).toBeLessThanOrEqual(0.08);
+    // Each compound individually is clean (ratio 0) — none is corruption.
+    for (const w of ['service-connected', 'follow-up', 'PC-PTSD-5', 'auto-extracted', 'well-documented', 'x-ray']) {
+      expect(corruptedTokenRatio(w), `${w} must not be flagged`).toBe(0);
+    }
+  });
+
+  it('the generated screening/intake summary text scores <= 0.08 (was 0.16 before the fix → condemned)', () => {
+    const summary = formatScreeningSummary(
+      [
+        { instrument: 'PHQ-9', score: '14', date: '2024-03-01', sourcePage: 4 } as unknown as ScreeningResult,
+        { instrument: 'PC-PTSD-5', score: '4/5', date: '2024-03-01', sourcePage: 5 } as unknown as ScreeningResult,
+      ],
+      { caseId: 'CLM-1', veteranName: 'Lozano, Marcus', runId: 'run-1', extractedAtIso: '2026-06-14T00:00:00Z' },
+    );
+    expect(corruptedTokenRatio(summary)).toBeLessThanOrEqual(0.08);
+  });
+
+  it('a real intake-summary WITH an embedded payment/tracking block still scores < 0.08 (markup out of the ratio)', () => {
+    const withPayment =
+      'The veteran is service-connected for PTSD and reports follow-up care. ' +
+      '<table cellpadding="0"><tr><td>Total $350</td></tr></table> ' +
+      'Transaction ID pi_3Abc123Def456Ghi789 gclid Cj0KCQjwhL-WBhCmARIsAPSLqqExample href="https://flatratenexus.com/pay"';
+    expect(corruptedTokenRatio(withPayment)).toBeLessThan(0.08);
+  });
+
+  it('POSITIVE CONTROL: genuinely garbled OCR soup still flags (> 0.08) — the fix did not weaken detection', () => {
+    expect(corruptedTokenRatio('c0nn3@ct€d th3 r3c0rd Pati$nt p#esent!ng kn$e p$in lim%ted m0t!on')).toBeGreaterThan(0.08);
+  });
+
+  it('POSITIVE CONTROL: mojibake (double-decoded UTF-8) and the replacement char still flag (> 0.08)', () => {
+    // The classic 'â€'/'Ã‚' mojibake bigrams + the Unicode replacement char are hard-garble — counted
+    // up front so no word/markup exemption can launder them.
+    expect(corruptedTokenRatio('patient reported chronic pain â€” worse since service Ã‚ documented today fully')).toBeGreaterThan(0.08);
+    expect(corruptedTokenRatio('The pati�nt was se�n in cli�ic for f�llow up of chronic conditions')).toBeGreaterThan(0.08);
   });
 });
 

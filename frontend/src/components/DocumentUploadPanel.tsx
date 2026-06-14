@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { presignDocument, recordDocument, uploadToPresignedUrl } from '../api/veterans';
 import { reprocessCase } from '../api/cases';
@@ -36,19 +36,49 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
   // live readiness poll AFTER a reprocess fires, so the panel can show a "done" notice when it finishes.
   const [confirming, setConfirming] = useState(false);
   const [watchReprocess, setWatchReprocess] = useState(false);
+  // The chart is ALREADY chart_ready before a reprocess; the new run takes minutes to flip the state.
+  // Without this gate the first (cached/stale) readiness read shows chart_ready and the panel flashed a
+  // FALSE "Done" in ~1s (Ryan, Jamarious 2026-06-13). We only call it Done once we've actually OBSERVED
+  // the re-extraction building (extracting/ocr_in_progress), bounded by a 3-min fallback so a sub-poll
+  // instant completion can't hang on "Starting". sawBuildingRef mirrors the state for refetchInterval.
+  const [sawBuilding, setSawBuilding] = useState(false);
+  const sawBuildingRef = useRef(false);
+  const reprocessStartRef = useRef(0);
+  function beginWatch() {
+    sawBuildingRef.current = false;
+    reprocessStartRef.current = Date.now();
+    setSawBuilding(false);
+    setWatchReprocess(true);
+  }
   const targetCaseId = caseId ?? selectedCaseId;
 
   // Live extraction status after a reprocess (shared queryKey with SendToDrafterPanel, so its draft
-  // button grays/un-grays in lockstep). Only polls while a reprocess is being watched AND still building.
+  // button grays/un-grays in lockstep). Polls while building, AND keeps polling through the stale
+  // pre-reprocess chart_ready window until building is observed (or the 3-min fallback) so it doesn't
+  // false-"Done" on the prior state.
   const reprocessReadiness = useQuery({
     queryKey: ['case', targetCaseId, 'chart-readiness'],
     queryFn: () => getChartReadiness(targetCaseId),
     enabled: watchReprocess && targetCaseId.length > 0,
     refetchInterval: (q) => {
       const st = q.state.data?.data?.extractionState;
-      return st === 'extracting' || st === 'ocr_in_progress' ? 8000 : false;
+      if (st === 'extracting' || st === 'ocr_in_progress') return 8000; // building → keep polling
+      // chart_ready / extract_failed / no-data: keep polling until we've actually seen building (so a
+      // stale prior chart_ready can't end the watch), bounded by a 3-min fallback.
+      const settled = sawBuildingRef.current || Date.now() - reprocessStartRef.current > 180000;
+      return settled ? false : 8000;
     },
   });
+
+  // Latch "we saw the new run building" the moment the poll observes a building state — this is what
+  // distinguishes a genuine post-reprocess completion from the stale prior chart_ready (see beginWatch).
+  useEffect(() => {
+    const st = reprocessReadiness.data?.data?.extractionState;
+    if (st === 'extracting' || st === 'ocr_in_progress') {
+      sawBuildingRef.current = true;
+      setSawBuilding(true);
+    }
+  }, [reprocessReadiness.data]);
 
   // Upload one already-classified item via the existing presign -> upload -> record flow.
   // Throws on failure so the batch driver can record a per-file error without aborting the batch.
@@ -109,10 +139,10 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
         msg = data.reocrQueued === 0
           ? 'All files already read OK — a fresh full chart re-extraction is now running (~5–10 min). SC Conditions update when it finishes.'
           : `Re-OCR started for ${data.reocrQueued} file${data.reocrQueued === 1 ? '' : 's'} and a full chart re-extraction is now running (~5–10 min).`;
-        setWatchReprocess(true); // turn on the live "done" poll
+        beginWatch(); // turn on the live "done" poll (gated on observing the new run build)
       } else if (data.extractReason === 'ocr_in_progress') {
         msg = 'Re-OCR started — the chart re-extraction will run automatically when OCR finishes.';
-        setWatchReprocess(true);
+        beginWatch();
       } else {
         msg = `Chart re-extract did not start (${data.extractReason ?? 'unknown'}).`;
       }
@@ -209,8 +239,14 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
         const st = reprocessReadiness.data?.data?.extractionState;
         const g = reprocessReadiness.data?.data?.extractionGaps ?? null;
         const gapped = g != null && (g.uncoveredPages > 0 || g.truncatedWindows > 0);
+        // "Done"/"failed" only AFTER we've observed the new run building (sawBuilding) or the 3-min
+        // fallback — otherwise a stale pre-reprocess chart_ready/extract_failed read would false-report.
+        const settled = sawBuilding || Date.now() - reprocessStartRef.current > 180000;
         if (st === 'extracting' || st === 'ocr_in_progress') {
           return <p className="mt-2 text-sm text-sky-700">⏳ Re-extracting the chart… (~5–10 min). You can leave this page — it keeps running.</p>;
+        }
+        if (!settled) {
+          return <p className="mt-2 text-sm text-sky-700">⏳ Starting re-extraction… (~5–10 min). You can leave this page — it keeps running.</p>;
         }
         if (st === 'chart_ready') {
           return <p className="mt-2 text-sm font-medium text-emerald-700">✅ Done — the chart was re-extracted and is ready to draft.{gapped ? ' (Some pages went unread — reprocess again only if a key detail might be on a missing page.)' : ''}</p>;

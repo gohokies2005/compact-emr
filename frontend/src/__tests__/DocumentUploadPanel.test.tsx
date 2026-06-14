@@ -6,6 +6,7 @@ import type { ReactElement } from 'react';
 import { DocumentUploadPanel } from '../components/DocumentUploadPanel';
 import { presignDocument, recordDocument, uploadToPresignedUrl } from '../api/veterans';
 import { reprocessCase } from '../api/cases';
+import { getChartReadiness } from '../api/chart-readiness';
 import { ACCEPT_ATTR, MAX_BYTES } from '../routes/veterans/documentUpload';
 import type { Case } from '../types/prisma';
 
@@ -215,5 +216,18 @@ describe('DocumentUploadPanel — Reprocess documents (keystone 4b)', () => {
     await clickReprocess();
     expect(await screen.findByText('Create or select a case before reprocessing.')).toBeInTheDocument();
     expect(reprocess).not.toHaveBeenCalled();
+  });
+
+  // Regression (Jamarious, 2026-06-13): the chart is ALREADY chart_ready before a reprocess, so the
+  // first (stale) readiness read must NOT flash a FALSE "Done" — it shows "Starting…" until the new
+  // run is actually observed building.
+  it('does NOT false-"Done" on the stale pre-reprocess chart_ready — shows Starting until building seen', async () => {
+    vi.mocked(getChartReadiness).mockResolvedValue({ data: { ready: true, extractionState: 'chart_ready' } } as never);
+    reprocess.mockResolvedValueOnce({ data: { reocrQueued: 0, extractEnqueued: true, requestId: 'req-stale' } });
+    renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    await clickReprocess();
+    expect(await screen.findByText(/Starting re-extraction/)).toBeInTheDocument();
+    expect(screen.queryByText(/✅ Done/)).not.toBeInTheDocument(); // never the stale-chart_ready false done
+    vi.mocked(getChartReadiness).mockResolvedValue({ data: { ready: false, extractionState: 'extracting' } } as never);
   });
 });

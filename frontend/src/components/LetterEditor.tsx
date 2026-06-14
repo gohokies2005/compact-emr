@@ -9,6 +9,12 @@ interface LetterEditorProps {
   readonly mode: LetterEditorMode;
   readonly zoom: number;
   readonly onChange: (txt: string) => void;
+  // Guided Revision UI (2026-06-13): fires when the physician selects text in the letter, with the
+  // selected string IF it is a verbatim substring of the current letter (the only selections the
+  // guided-revision backend can anchor). A collapsed/empty/out-of-editor/non-verbatim selection
+  // fires with null so the parent can clear any stale captured passage. Optional — the RN/readonly
+  // surfaces pass nothing.
+  readonly onSelectPassage?: (passage: string | null) => void;
 }
 
 interface LetterPiece {
@@ -78,7 +84,7 @@ function lockedSlicesChanged(original: string, next: string, lockedRanges: reado
   return normalizeRanges(lockedRanges, original.length).some((range) => original.slice(range.start, range.end) !== next.slice(range.start, range.end));
 }
 
-export function LetterEditor({ txt, lockedRanges, mode, zoom, onChange }: LetterEditorProps) {
+export function LetterEditor({ txt, lockedRanges, mode, zoom, onChange, onSelectPassage }: LetterEditorProps) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   // Last accepted text — for the incremental locked-region check + revert. Deliberately a ref, NOT
   // React state: updating it must NOT trigger a re-render, or React would reconcile the
@@ -93,6 +99,21 @@ export function LetterEditor({ txt, lockedRanges, mode, zoom, onChange }: Letter
   // keystrokes in a ref for Save instead of echoing them back into txt). Stable pieces mean React
   // never overwrites the browser-owned contentEditable DOM during typing, so edits + caret persist.
   const pieces = useMemo(() => splitIntoPieces(txt, lockedRanges), [txt, lockedRanges]);
+
+  // Guided Revision UI (2026-06-13): report the current text selection as a candidate `passage`.
+  // We render RAW text in editable mode, so the visible selection string equals the letter text —
+  // and we only report it when it is a verbatim substring of `txt` (what the backend can anchor;
+  // a selection that spans a locked piece or normalizes oddly would otherwise 422 passage_not_found
+  // downstream). A collapsed/foreign selection clears the captured passage.
+  function reportSelection() {
+    if (onSelectPassage === undefined) return;
+    const sel = typeof window !== 'undefined' ? window.getSelection() : null;
+    if (sel === null || sel.isCollapsed || sel.rangeCount === 0) { onSelectPassage(null); return; }
+    const root = editorRef.current;
+    if (root === null || !root.contains(sel.anchorNode) || !root.contains(sel.focusNode)) { onSelectPassage(null); return; }
+    const picked = sel.toString();
+    onSelectPassage(picked.trim().length > 0 && txt.includes(picked) ? picked : null);
+  }
 
   function handleInput() {
     if (editorRef.current === null || !editable) return;
@@ -125,6 +146,8 @@ export function LetterEditor({ txt, lockedRanges, mode, zoom, onChange }: Letter
           suppressContentEditableWarning
           spellCheck
           onInput={handleInput}
+          onMouseUp={reportSelection}
+          onKeyUp={reportSelection}
           className={`mx-auto min-h-[900px] max-w-[816px] whitespace-pre-wrap rounded-sm bg-white px-20 py-16 font-['Times_New_Roman',Times,serif] text-slate-950 shadow-sm outline-none focus:ring-2 focus:ring-slate-300 ${zoomClass(zoom)}`}
         >
           {pieces.map((piece) => {

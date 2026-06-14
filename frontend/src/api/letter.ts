@@ -53,6 +53,51 @@ export interface SurgicalPreviewResult {
   readonly model: string;
 }
 
+// ── Guided Revision (Guided Revision UI, 2026-06-13) ─────────────────────────────────────────
+// The broader physician edit tier: highlight a verbatim `passage` of the current letter + give an
+// instruction; Opus reshapes ONLY that passage. The backend pins operation='replace' +
+// anchor_text=passage, runs the §VII-holding lock + citation-integrity guard, and returns a SAFE,
+// dry-run preview the physician must inspect before accepting. Distinct response shape from the
+// surgical preview: `warnings` is string[] (human sentences), plus `sanity` + `citationDiff`.
+
+/** A cited-fact token (PMID / author-year / statistic) the integrity guard tracks. */
+export interface CitationToken {
+  readonly kind: 'pmid' | 'author_year' | 'stat';
+  readonly key: string;
+  readonly raw: string;
+}
+
+/** Cited facts ADDED (model-invented → backend REJECTS) vs REMOVED (dropped → backend WARNS). */
+export interface CitationDiff {
+  readonly added: readonly CitationToken[];
+  readonly removed: readonly CitationToken[];
+}
+
+/** A letter-sanity finding on the would-be revised letter (rule + human-readable detail). */
+export interface SanityFinding {
+  readonly rule: string;
+  readonly detail: string;
+}
+
+export interface GuidedRevisionResult {
+  readonly mode: 'guided_revision';
+  readonly proposal: SurgicalProposal;
+  readonly preview: string; // full resulting letter text (dry-run), for on-screen preview
+  readonly warnings: readonly string[]; // human sentences (e.g. a dropped-citation acknowledgement)
+  readonly sanity: readonly SanityFinding[];
+  readonly citationDiff: CitationDiff;
+  readonly costUsd: number;
+  readonly model: string;
+}
+
+/** The reasons a guided-revision PROPOSE is rejected (422) — carried on the error `details.reason`. */
+export type GuidedRevisionRejectReason =
+  | 'citation_invented'
+  | 'holding_changed'
+  | 'edit_unappliable'
+  | 'passage_not_found'
+  | 'passage_required';
+
 export interface LetterApproveResult {
   readonly version: number;
   readonly status: string;
@@ -73,6 +118,19 @@ export function saveLetter(caseId: string, input: { base_version: number; txt: s
 
 export function previewSurgicalAi(caseId: string, input: { instruction: string }): Promise<{ data: SurgicalPreviewResult }> {
   return apiPost<{ data: SurgicalPreviewResult }, typeof input>(caseLetterPath(caseId, '/surgical-ai'), input);
+}
+
+// Guided-revision PROPOSE. Propose-only — never auto-applies. On success returns the dry-run
+// preview + warnings + citationDiff; on a guard trip the API returns 422 (mapped to
+// SurgicalEditUnappliableError by client.ts, whose `details.reason` is one of
+// GuidedRevisionRejectReason and may carry `citationDiff`) or 503 (ServiceUnavailableError when the
+// GUIDED_REVISION_ENABLED flag is off). APPLY reuses applySurgicalAi (the shared { apply, proposal }
+// door) unchanged. (Guided Revision UI, 2026-06-13)
+export function proposeGuidedRevision(caseId: string, input: { passage: string; instruction: string }): Promise<{ data: GuidedRevisionResult }> {
+  return apiPost<{ data: GuidedRevisionResult }, { mode: 'guided_revision'; passage: string; instruction: string }>(
+    caseLetterPath(caseId, '/surgical-ai'),
+    { mode: 'guided_revision', passage: input.passage, instruction: input.instruction },
+  );
 }
 
 export function applySurgicalAi(caseId: string, proposal: SurgicalProposal): Promise<{ data: LetterSaveResult }> {

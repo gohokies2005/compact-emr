@@ -7,6 +7,7 @@ import { Card } from '../../components/ui/Card';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import { LetterEditor } from '../../components/LetterEditor';
+import { GuidedRevisionPanel } from '../../components/GuidedRevisionPanel';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { getCase } from '../../api/cases';
 import { letterFilename } from '../../lib/letterFilename';
@@ -74,6 +75,11 @@ export function LetterEditorPage() {
   const [declineReason, setDeclineReason] = useState('');
   const [signOffOpen, setSignOffOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // Guided Revision UI (2026-06-13): the verbatim passage the physician highlighted in the letter,
+  // and a session-sticky flag set once the backend 503s GUIDED_REVISION_ENABLED=off (so we stop
+  // offering a dead feature). The apply path REUSES the surgical applyMutation below.
+  const [selectedPassage, setSelectedPassage] = useState<string | null>(null);
+  const [guidedRevisionDisabled, setGuidedRevisionDisabled] = useState(false);
   const navigate = useNavigate();
 
   const letterQuery = useQuery({
@@ -160,24 +166,26 @@ export function LetterEditorPage() {
     },
   });
 
+  // Shared apply path for BOTH the surgical Apply button and Guided Revision Accept — both echo an
+  // opaque {operation,anchor_text,new_text} proposal back through the same { apply, proposal } door
+  // (Guided Revision UI, 2026-06-13). The proposal is passed as the mutation variable so the two
+  // callers don't fight over a single `proposal` state slot.
   const applyMutation = useMutation({
-    mutationFn: () => {
-      if (proposal === null) throw new Error('Proposal is missing.');
-      return applySurgicalAi(caseId, proposal);
-    },
+    mutationFn: (p: SurgicalProposal) => applySurgicalAi(caseId, p),
     onSuccess: (res) => {
       setProposal(null);
       setPreview('');
       setProposalCostUsd(null);
       setInstruction('');
+      setSelectedPassage(null);
       setTxt(res.data.txt);
       editedTextRef.current = res.data.txt;
       setBaseVersion(res.data.version);
       setWarnings(res.data.warnings ?? []);
-      setMessage(`Applied limited scope edit. Current version ${res.data.version}.`);
+      setMessage(`Applied edit. Current version ${res.data.version}.`);
       void qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] });
     },
-    onError: (error: unknown) => setMessage(error instanceof ServiceUnavailableError ? 'Surgical AI is not available in this environment.' : 'Limited scope edit could not be applied.'),
+    onError: (error: unknown) => setMessage(error instanceof ServiceUnavailableError ? 'Surgical AI is not available in this environment.' : 'Edit could not be applied.'),
   });
 
   const approveMutation = useMutation({
@@ -250,7 +258,7 @@ export function LetterEditorPage() {
         <WarningList warnings={warnings} />
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <LetterEditor key={baseVersion ?? letter.version} txt={txt} lockedRanges={letter.locked_ranges} mode={canOpsEdit || canPhysicianAct ? 'editable' : 'readonly'} zoom={zoom} onChange={(t) => { editedTextRef.current = t; }} />
+          <LetterEditor key={baseVersion ?? letter.version} txt={txt} lockedRanges={letter.locked_ranges} mode={canOpsEdit || canPhysicianAct ? 'editable' : 'readonly'} zoom={zoom} onChange={(t) => { editedTextRef.current = t; }} onSelectPassage={setSelectedPassage} />
 
           <aside className="space-y-4">
             {canOpsEdit || canPhysicianAct ? (
@@ -283,11 +291,23 @@ export function LetterEditorPage() {
                     <div className="text-sm font-semibold text-slate-900">Proposed edit{proposalCostUsd !== null ? ` · $${proposalCostUsd.toFixed(2)}` : ''}</div>
                     <div className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-white p-3 font-['Times_New_Roman',Times,serif] text-sm text-slate-800">{preview}</div>
                     <div className="mt-3 flex gap-2">
-                      <Button type="button" variant="primary" loading={applyMutation.isPending} disabled={applyMutation.isPending} onClick={() => applyMutation.mutate()}>Apply edit</Button>
+                      <Button type="button" variant="primary" loading={applyMutation.isPending} disabled={applyMutation.isPending || proposal === null} onClick={() => { if (proposal !== null) applyMutation.mutate(proposal); }}>Apply edit</Button>
                       <Button type="button" variant="secondary" onClick={() => { setProposal(null); setPreview(''); setProposalCostUsd(null); }}>Discard</Button>
                     </div>
                   </div>
                 ) : null}
+
+                {/* Guided Revision — the broader edit tier (highlight a passage → instruction →
+                    Opus reshapes only that passage). Sibling of the surgical card above; shares the
+                    applyMutation door. Same edit-parity audience as surgical (RN + physician); the
+                    backend role/flag gates enforce. (Guided Revision UI, 2026-06-13.) */}
+                <GuidedRevisionPanel
+                  caseId={caseId}
+                  passage={selectedPassage}
+                  disabledByFlag={guidedRevisionDisabled}
+                  onFlagDisabled={() => setGuidedRevisionDisabled(true)}
+                  onApply={(p) => applyMutation.mutateAsync(p).then(() => undefined)}
+                />
 
                 {/* Approve / Decline — physician (or admin) only; an RN never signs off a letter.
                     Approve OPENS the sign-off popup first (the backend /approve 409s with

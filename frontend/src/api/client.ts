@@ -26,10 +26,20 @@ export class ServiceUnavailableError extends Error { readonly status = 503; cons
 // does not apply to the current draft. Distinct from a 409/conflict because the physician WAS
 // charged — the UI must say so ("the AI ran but its edit didn't fit; try rephrasing") rather than
 // show a generic failure. details carries { reason: 'edit_unappliable', costUsd, proposal }.
+// Guided Revision UI (2026-06-13): the guided-revision PROPOSE shares this 422 door but carries a
+// richer `reason` set (citation_invented / holding_changed / passage_not_found / edit_unappliable /
+// passage_required) and, on citation_invented, a `citationDiff` naming the invented citations.
+// Optional fields — `reason` is the discriminator; the surgical path only ever sets edit_unappliable.
+export interface SurgicalEditErrorDetails {
+  reason?: string;
+  costUsd?: number;
+  proposal?: unknown;
+  citationDiff?: { added?: ReadonlyArray<{ raw?: string }>; removed?: ReadonlyArray<{ raw?: string }> };
+}
 export class SurgicalEditUnappliableError extends Error {
   readonly status = 422;
   readonly costUsd: number | undefined;
-  constructor(readonly details?: { reason?: string; costUsd?: number; proposal?: unknown }) {
+  constructor(readonly details?: SurgicalEditErrorDetails) {
     super('Proposed AI edit does not apply');
     this.name = 'SurgicalEditUnappliableError';
     this.costUsd = typeof details?.costUsd === 'number' ? details.costUsd : undefined;
@@ -98,7 +108,7 @@ apiClient.interceptors.response.use((response) => response, async (error: AxiosE
   if (error.response?.status === 401 && !env.demoMode) { await signOut(); window.location.assign('/'); }
   if (error.response?.status === 403) throw new ForbiddenError();
   if (error.response?.status === 409) throw new ConflictError(error.response.data?.error?.details, error.response.data?.error?.message, error.response.data?.error?.code);
-  if (error.response?.status === 422) throw new SurgicalEditUnappliableError(error.response.data?.error?.details as { reason?: string; costUsd?: number; proposal?: unknown } | undefined);
+  if (error.response?.status === 422) throw new SurgicalEditUnappliableError(error.response.data?.error?.details as SurgicalEditErrorDetails | undefined);
   if (error.response?.status === 503) throw new ServiceUnavailableError(error.response.data?.error?.details);
   throw error;
 });

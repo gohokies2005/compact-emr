@@ -39,6 +39,7 @@ import { ConflictError, describeApiError } from '../../api/client';
 import { letterFilename } from '../../lib/letterFilename';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
+import { resolveCaseTopPanels } from '../../lib/caseTopPanels';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
 import {
@@ -471,58 +472,48 @@ export function CaseDetailPage() {
     {/* CDS panel retired from the workflow (Ryan 2026-06-03). Backend route is flag-guarded off
         (CDS_ENABLED); the engine code is kept. Re-add this panel if CDS is re-enabled. */}
 
+    {/* C8c panel stability, 2026-06-14: the drafter/review panels above the tab card. Previously a
+        keyless `&&` cascade inside an IIFE returning a fragment — on every status/poll transition the
+        region re-evaluated and, because the children were positional (keyless), a flip of one earlier
+        sibling re-paired EVERY later sibling against a different fiber and React UNMOUNTED/remounted
+        them (state lost, flicker, layout jump). Fix (stability only, behavior byte-identical):
+          (1) the gate booleans are hoisted into the pure, unit-tested resolveCaseTopPanels(...) — same
+              gates, just testable and computed once;
+          (2) the region is now ONE always-mounted container (reserves the slot in the page column so
+              a no-op poll can't make the whole region appear/disappear); and
+          (3) each conditional child carries a STABLE key, so reconciliation is identity-based — a poll
+              that doesn't change a panel's visibility re-renders it IN PLACE instead of remounting.
+        The panels are intentionally NOT mutually exclusive (drafting+failed shows BOTH the interrupted
+        OpsHeld panel AND Send-to-Drafter — the watcher copy says "click Send to Drafter again"), so
+        each keeps its own gate; we did NOT collapse them into a single primary slot. */}
     {(() => {
       // Phase 8: physician/ops drafter panels. Derived from latest DraftJob + Case state.
       const latestDraftJob = c.draftJobs?.[0] as InFlightDraftJob | undefined;
-      const inFlightDraft =
-        latestDraftJob?.state === 'queued' || latestDraftJob?.state === 'running';
-
-      // Gap 1: first-draft trigger. RN/admin can kick off the drafter when no run is in
-      // flight and none has completed yet. Chart-readiness is enforced inside the panel.
-      const hasCompletedDraft = (c.draftJobs ?? []).some((job) => job.state === 'done');
-      // Hide the "Send to Drafter" card while the case is PARKED at a Gate-2 halt — the halt panel
-      // below owns the decision (override / re-run / pause), so showing both produced two redundant,
-      // misaligned amber boxes (Ryan 2026-06-06). The halt panel is the single source of action here.
-      const isParkedAtHalt = c.status === 'needs_rn_decision' || c.status === 'needs_records';
-      const canSendFirstDraft =
-        (role === 'admin' || role === 'ops_staff') && !inFlightDraft && !hasCompletedDraft && !isParkedAtHalt;
-
-      // Physician's view — any case the RN has sent (status physician_review). The RN's explicit
-      // send IS the gate now, so we no longer require ship/runComplete here (the RN may send a
-      // letter the grader flagged 'revise' after improving it). (Ryan 2026-06-04.)
-      const canSeePhysicianReadyPanel =
-        c.status === 'physician_review' &&
-        (role === 'admin' || role === 'physician');
-
-      // RN's view of a completed draft awaiting send (status rn_review): same grade + top-3 +
-      // view/edit as the physician panel, but the primary action is "Send to doctor for review".
-      const canSeeRnReviewPanel =
-        c.status === 'rn_review' &&
-        (role === 'admin' || role === 'ops_staff');
-
-      // Held panel is for a draft still in 'drafting' that failed / came back non-ready (re-run +
-      // send-back). Completed drafts now live in rn_review (handled above), so scope this to
-      // drafting only to avoid a double panel.
-      const canSeeOpsHeldPanel =
-        (role === 'admin' || role === 'ops_staff') &&
-        c.status === 'drafting' &&
-        (c.runComplete === false ||
-          c.shipRecommendation === 'revise' ||
-          (c.operatorState !== undefined &&
-            c.operatorState !== null &&
-            c.operatorState !== 'ready' &&
-            c.operatorState !== 'ready_with_notes'));
+      const haltedJob = (c.draftJobs ?? []).find((j) => (j as { state?: string }).state === 'halted');
+      const p = resolveCaseTopPanels({
+        status: c.status,
+        role,
+        latestDraftState: latestDraftJob?.state,
+        hasLatestDraftJob: !!latestDraftJob,
+        hasCompletedDraft: (c.draftJobs ?? []).some((job) => job.state === 'done'),
+        hasHaltedJob: !!haltedJob,
+        hasViewableLetterJob: !!viewableLetterJob,
+        runComplete: c.runComplete,
+        shipRecommendation: c.shipRecommendation,
+        operatorState: c.operatorState,
+      });
 
       return (
-        <>
-          {inFlightDraft && latestDraftJob ? (
-            <InFlightDrafterPanel job={latestDraftJob} onCancel={() => cancelDraft.mutate(latestDraftJob.id)} cancelling={cancelDraft.isPending} concurrency={liveConcurrency} />
+        <div className="space-y-6" data-region="case-top-panels">
+          {p.inFlightDraft && latestDraftJob ? (
+            <InFlightDrafterPanel key="inflight" job={latestDraftJob} onCancel={() => cancelDraft.mutate(latestDraftJob.id)} cancelling={cancelDraft.isPending} concurrency={liveConcurrency} />
           ) : null}
 
-          {canSendFirstDraft ? <SendToDrafterPanel caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} /> : null}
+          {p.canSendFirstDraft ? <SendToDrafterPanel key="send-first" caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} /> : null}
 
-          {!inFlightDraft && canSeePhysicianReadyPanel && latestDraftJob ? (
+          {!p.inFlightDraft && p.canSeePhysicianReadyPanel && latestDraftJob ? (
             <PhysicianLetterReadyPanel
+              key="phys-ready"
               c={c}
               job={latestDraftJob}
               canSendBack={role === 'admin' || role === 'physician'}
@@ -540,8 +531,9 @@ export function CaseDetailPage() {
             />
           ) : null}
 
-          {!inFlightDraft && canSeeRnReviewPanel && latestDraftJob ? (
+          {!p.inFlightDraft && p.canSeeRnReviewPanel && latestDraftJob ? (
             <PhysicianLetterReadyPanel
+              key="rn-review"
               c={c}
               job={latestDraftJob}
               canSendBack={false}
@@ -556,10 +548,11 @@ export function CaseDetailPage() {
             />
           ) : null}
 
-          {!inFlightDraft && canSeeOpsHeldPanel ? (
+          {!p.inFlightDraft && p.canSeeOpsHeldPanel ? (
             // OpsHeldPanel.job is optional under exactOptionalPropertyTypes — spread it only
             // when present (TS rejects passing explicit undefined to an optional prop).
             <OpsHeldPanel
+              key="ops-held"
               c={c}
               {...(latestDraftJob ? { job: latestDraftJob } : {})}
               isAdmin={role === 'admin'}
@@ -570,10 +563,11 @@ export function CaseDetailPage() {
 
           {/* Gate-2 dx/event verification halt — the case is parked for the RN's decision. Never a
               dead-end: override / switch / proceed / pause, all logged. */}
-          {c.status === 'needs_rn_decision' || c.status === 'needs_records' ? (
+          {p.isGate2Halt ? (
             <Gate2HaltPanel
+              key="gate2-halt"
               c={c}
-              {...((c.draftJobs ?? []).find((j) => (j as { state?: string }).state === 'halted') ? { job: (c.draftJobs ?? []).find((j) => (j as { state?: string }).state === 'halted') as never } : {})}
+              {...(haltedJob ? { job: haltedJob as never } : {})}
               onChanged={async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-decisions'] })]); }}
             />
           ) : null}
@@ -582,8 +576,8 @@ export function CaseDetailPage() {
               decision after Perez: while the doctor has the case, the letter is locked from RN
               edits, both hand-edit and surgical-AI; the backend enforces the same on both routes
               (409 locked_physician_review). Physician + admin retain their tools. */}
-          {role === 'ops_staff' && c.status === 'physician_review' ? (
-            <div className="rounded-lg border border-sky-200 bg-sky-50 px-5 py-3 text-sm text-sky-900">
+          {p.isRnLockBanner ? (
+            <div key="rn-lock" className="rounded-lg border border-sky-200 bg-sky-50 px-5 py-3 text-sm text-sky-900">
               This case is in {c.assignedPhysician ? `Dr. ${formatPhysicianLastName(c.assignedPhysician.fullName)}'s` : "the physician's"} queue. The letter is locked from edits until the doctor acts — if something needs changing, message the doctor or wait for the case to come back.
             </div>
           ) : null}
@@ -594,9 +588,8 @@ export function CaseDetailPage() {
               physician_review is LOCKED for ops_staff (Ryan 2026-06-11; backend mirrors this).
               Editing creates a NEW version; the version-safety in /draft + currentVersion pointer
               ensure the doctor always reviews the newest version. */}
-          {!inFlightDraft && role === 'ops_staff' && viewableLetterJob &&
-            (c.status === 'drafting' || c.status === 'correction_review') ? (
-            <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+          {p.canShowRnEditorEntry ? (
+            <div key="rn-editor-entry" className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
               <h2 className="text-base font-semibold text-slate-900">Edit {letterFilename(c.veteran?.lastName, c.veteran?.firstName, c.claimedCondition, c.currentVersion ?? c.version)}</h2>
               <p className="mt-1 text-sm text-slate-600">
                 If a change is needed, you can revise the letter — by hand or with an AI surgical
@@ -609,7 +602,7 @@ export function CaseDetailPage() {
               </div>
             </div>
           ) : null}
-        </>
+        </div>
       );
     })()}
 

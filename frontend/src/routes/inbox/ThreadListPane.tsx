@@ -3,18 +3,22 @@ import { Spinner } from '../../components/ui/Spinner';
 import { EmptyState } from '../../components/ui/EmptyState';
 import type { InboxThreadSummary } from '../../api/messaging';
 import { senderLabel, type SubDirectory } from '../../components/messaging/directory';
+import { resolveCaseLabel, type CaseLabelParts } from '../../components/messaging/caseLabel';
 
 // Left master pane (360px) for the Inbox. Unread threads get an indigo left-accent + dot + bold
 // subject; case-linked threads show a case chip; selected thread is highlighted.
+// C4 (messaging, 2026-06-14): the case chip shows "Veteran — Condition", not the raw caseId UUID.
 export function ThreadListItem({
   thread,
   selected,
   directory,
+  caseLabels = {},
   onSelect,
 }: {
   readonly thread: InboxThreadSummary;
   readonly selected: boolean;
   readonly directory: SubDirectory;
+  readonly caseLabels?: Readonly<Record<string, CaseLabelParts>>;
   readonly onSelect: () => void;
 }) {
   return (
@@ -42,7 +46,7 @@ export function ThreadListItem({
       <p className="truncate text-xs text-slate-500">{thread.lastMessageBody}</p>
       {thread.caseId ? (
         <span className="mt-0.5 inline-flex w-fit items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
-          {thread.caseId}
+          {resolveCaseLabel(thread.caseId, caseLabels).label}
         </span>
       ) : null}
     </button>
@@ -54,12 +58,14 @@ export function ThreadListPane({
   isLoading,
   selectedThreadId,
   directory,
+  caseLabels = {},
   onSelect,
 }: {
   readonly threads: readonly InboxThreadSummary[];
   readonly isLoading: boolean;
   readonly selectedThreadId: string | null;
   readonly directory: SubDirectory;
+  readonly caseLabels?: Readonly<Record<string, CaseLabelParts>>;
   readonly onSelect: (threadId: string) => void;
 }) {
   if (isLoading) {
@@ -85,6 +91,7 @@ export function ThreadListPane({
           thread={t}
           selected={t.threadId === selectedThreadId}
           directory={directory}
+          caseLabels={caseLabels}
           onSelect={() => onSelect(t.threadId)}
         />
       ))}

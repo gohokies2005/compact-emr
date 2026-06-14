@@ -23,6 +23,7 @@ import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { DocumentUploadPanel } from '../../components/DocumentUploadPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
+import { joinCaseLabel } from '../../components/messaging/caseLabel';
 import { EmailLogPanel } from '../../components/EmailLogPanel';
 import { ChartNotesPanel } from '../veterans/ChartNotesPanel';
 import { ConditionsPanel, MedicationsPanel, ProblemsPanel } from '../../components/ClinicalChartPanels';
@@ -637,7 +638,12 @@ export function CaseDetailPage() {
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} role={role} /> : null}
         {tab === 'emails' ? <EmailLogPanel queryKey={['case', caseId, 'emails']} fetcher={() => listCaseEmails(caseId)} scope="claim" caseId={caseId} /> : null}
         {tab === 'messages' ? (
-          <CaseMessagesPanel caseId={caseId} assignedRn={c.assignedRn ?? null} assignedPhysician={c.assignedPhysician ?? null} />
+          <CaseMessagesPanel
+            caseId={caseId}
+            caseLabel={joinCaseLabel(formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, ''), formatConditionLabel(c.claimedCondition), caseId)}
+            assignedRn={c.assignedRn ?? null}
+            assignedPhysician={c.assignedPhysician ?? null}
+          />
         ) : null}
         {/* Clinical chart tabs — same veteran data + same panels as the veteran chart page. The case
             carries the veteran id (c.veteranId); the clinical sections fetch the veteran detail and

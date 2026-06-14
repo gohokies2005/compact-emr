@@ -7,6 +7,7 @@ import { ForbiddenError, describeApiError } from '../../api/client';
 import { getThread, markThreadRead, replyToThread } from '../../api/messaging';
 import { MessageBubble } from './MessageBubble';
 import type { SubDirectory } from './directory';
+import { resolveCaseLabel, type CaseLabelParts } from './caseLabel';
 import { MessageAttachmentPicker, type StagedAttachment } from './MessageAttachmentPicker';
 
 // SHARED, standalone ThreadView — reused by the Inbox (CHUNK 4) AND the chart Messages tab (CHUNK 5).
@@ -24,11 +25,15 @@ import { MessageAttachmentPicker, type StagedAttachment } from './MessageAttachm
 export function ThreadView({
   threadId,
   directory = {},
+  caseLabels = {},
   onReplied,
   className,
 }: {
   readonly threadId: string;
   readonly directory?: SubDirectory;
+  // C4 (messaging, 2026-06-14): caseId -> "Veteran — Condition" so the linked-case line reads a name,
+  // not a raw UUID. Optional; an id not in the map falls back to the raw caseId (prior behavior).
+  readonly caseLabels?: Readonly<Record<string, CaseLabelParts>>;
   readonly onReplied?: () => void;
   readonly className?: string;
 }) {
@@ -122,7 +127,7 @@ export function ThreadView({
         <h2 className="text-base font-semibold text-slate-900">{thread.subject ?? '(no subject)'}</h2>
         <p className="mt-0.5 text-xs text-slate-500">
           {recipients.length} recipient{recipients.length === 1 ? '' : 's'}
-          {thread.caseId ? ` · linked to ${thread.caseId}` : ''}
+          {thread.caseId ? ` · linked to ${resolveCaseLabel(thread.caseId, caseLabels).label}` : ''}
         </p>
       </div>
 

@@ -11,6 +11,7 @@ import { ThreadView } from '../../components/messaging/ThreadView';
 import { ComposeMessageModal } from '../../components/messaging/ComposeMessageModal';
 import { ThreadListPane } from './ThreadListPane';
 import type { SubDirectory, BubbleRole } from '../../components/messaging/directory';
+import { useCaseLabelDirectory } from '../../components/messaging/caseLabel';
 
 // Build the sub -> { name, role } directory by unioning staff users + physicians. Used to label
 // senders and color bubbles in both the list pane and the ThreadView. `sub` is the cross-role key.
@@ -42,6 +43,9 @@ export function InboxPage() {
   const [unreadOnly, setUnreadOnly] = useState(false);
 
   const directory = useSubDirectory();
+  // C4 (messaging, 2026-06-14): resolve linked-case UUIDs to "Veteran — Condition" for the list chip
+  // + the open thread's header.
+  const caseLabels = useCaseLabelDirectory();
 
   const inboxQuery = useQuery({
     queryKey: ['messages', 'inbox'],
@@ -94,12 +98,13 @@ export function InboxPage() {
               isLoading={inboxQuery.isLoading}
               selectedThreadId={selectedThreadId}
               directory={directory}
+              caseLabels={caseLabels}
               onSelect={setSelectedThreadId}
             />
           </div>
           <div className="flex-1 overflow-y-auto p-6">
             {selectedThreadId ? (
-              <ThreadView threadId={selectedThreadId} directory={directory} />
+              <ThreadView threadId={selectedThreadId} directory={directory} caseLabels={caseLabels} />
             ) : (
               <EmptyState title="No conversation selected" message="Pick a thread on the left, or start a new message." />
             )}

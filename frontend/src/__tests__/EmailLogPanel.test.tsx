@@ -91,3 +91,32 @@ describe('cleanEmailText — decode entities + strip quoted reply (Ryan 2026-06-
     expect(cleanEmailText(pureQuote).length).toBeGreaterThan(0);
   });
 });
+
+// C4c (messaging, 2026-06-14): the EXPANDED bubble uses mode 'full' — it must NOT clip legitimate
+// body text (the prior bug cut mid-sentence). 'full' strips only an unambiguous quoted reply chain;
+// footers/bare-quote lines are trimmed in 'preview' (collapsed snippet) only.
+describe('cleanEmailText — full mode keeps the complete new message (C4c, 2026-06-14)', () => {
+  it('keeps a long multi-sentence body intact in full mode', () => {
+    const body =
+      'Thanks for the update. I reviewed the sleep study and the AHI clearly supports the claim. ' +
+      'I will draft the nexus letter today and send it for your review tomorrow morning.';
+    expect(cleanEmailText(body, 'full')).toBe(body);
+  });
+
+  it('does not clip on the word "on" when there is no quote attribution', () => {
+    const body = 'I worked on the records on Monday and everything looks good on our end.';
+    expect(cleanEmailText(body, 'full')).toBe(body);
+  });
+
+  it('full mode keeps a mobile footer that preview mode would trim', () => {
+    const body = 'Here is the document you asked for.\nSent from my iPhone';
+    // 'full' leaves the footer (it is legit-text-adjacent); 'preview' trims it for brevity.
+    expect(cleanEmailText(body, 'full')).toContain('Sent from my iPhone');
+    expect(cleanEmailText(body, 'preview')).toBe('Here is the document you asked for.');
+  });
+
+  it('full mode still strips an unambiguous quoted reply chain', () => {
+    const reply = 'My new reply with real content.\nOn Fri, Jun 12, 2026 at 12:18 AM, Someone <a@b.com> wrote: old quoted text';
+    expect(cleanEmailText(reply, 'full')).toBe('My new reply with real content.');
+  });
+});

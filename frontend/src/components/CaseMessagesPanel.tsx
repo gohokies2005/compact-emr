@@ -20,6 +20,11 @@ import type { CasePhysicianLite, AssignedRnLite } from '../api/cases';
 
 interface CaseMessagesPanelProps {
   readonly caseId: string;
+  // C4 (messaging, 2026-06-14): the case's friendly "Veteran — Condition" label, supplied by
+  // CaseDetailPage (which already holds c.veteran + c.claimedCondition). Used for the locked-case chip
+  // when composing and for the ThreadView "linked to …" line, so neither shows the raw caseId UUID.
+  // Optional — falls back to the caseId when absent.
+  readonly caseLabel?: string;
   // The case's assigned RN + physician, surfaced by CaseDetailPage. Used to seed the default recipients
   // when composing a new case-linked thread (their Cognito sub is resolved by email against the staff +
   // physician directory). Optional — an unassigned case just composes with no defaults.
@@ -32,7 +37,15 @@ interface CaseMessagesPanelProps {
 // auto-linked: getCaseThreads returns only threads linked to this case, and composing a new thread locks
 // the case link + defaults recipients to the assigned RN + physician. The reusable ThreadView (CHUNK 4)
 // owns each thread's fetch / mark-read / reply-all; this panel just lists threads and drives compose.
-export function CaseMessagesPanel({ caseId, assignedRn, assignedPhysician }: CaseMessagesPanelProps) {
+export function CaseMessagesPanel({ caseId, caseLabel, assignedRn, assignedPhysician }: CaseMessagesPanelProps) {
+  // Single-entry caseId -> label map for THIS case, so the shared ThreadView renders "Veteran —
+  // Condition" instead of the raw caseId on the "linked to …" line. The label is supplied by the
+  // parent (which holds the veteran + condition); the panel itself only knows the caseId.
+  const display = caseLabel ?? caseId;
+  const caseLabels = useMemo(
+    () => ({ [caseId]: { veteran: '', condition: '', label: display } }),
+    [caseId, display],
+  );
   const [composing, setComposing] = useState(false);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
 
@@ -190,6 +203,7 @@ export function CaseMessagesPanel({ caseId, assignedRn, assignedPhysician }: Cas
         <ThreadView
           threadId={activeThreadId}
           directory={directory}
+          caseLabels={caseLabels}
           className="mt-6 border-t border-aegis pt-6"
           onReplied={() => threadsQuery.refetch()}
         />
@@ -197,7 +211,7 @@ export function CaseMessagesPanel({ caseId, assignedRn, assignedPhysician }: Cas
 
       {composing ? (
         <ComposeMessageModal
-          lockedCase={{ id: caseId, label: caseId }}
+          lockedCase={{ id: caseId, label: display }}
           initialRecipients={defaultRecipients}
           onClose={() => setComposing(false)}
           onSent={(threadId) => {

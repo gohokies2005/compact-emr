@@ -40,9 +40,26 @@ describe('ThreadListItem', () => {
     expect(screen.getByText('Records question').className).not.toContain('font-semibold');
   });
 
-  it('renders a case chip when the thread is case-linked', () => {
+  it('renders a case chip when the thread is case-linked (raw id when unresolved)', () => {
     render(<ThreadListItem thread={makeThread({ caseId: 'CASE-42' })} selected={false} directory={directory} onSelect={() => {}} />);
     expect(screen.getByText('CASE-42')).toBeInTheDocument();
+  });
+
+  it('renders the case chip as "Veteran — Condition", NOT the raw caseId UUID, when resolvable (C4)', () => {
+    const caseLabels = {
+      'case-uuid-1234': { veteran: 'Lozano, Maria', condition: 'PTSD', label: 'Lozano, Maria — PTSD' },
+    };
+    render(
+      <ThreadListItem
+        thread={makeThread({ caseId: 'case-uuid-1234' })}
+        selected={false}
+        directory={directory}
+        caseLabels={caseLabels}
+        onSelect={() => {}}
+      />,
+    );
+    expect(screen.getByText('Lozano, Maria — PTSD')).toBeInTheDocument();
+    expect(screen.queryByText('case-uuid-1234')).not.toBeInTheDocument();
   });
 
   it('resolves the sender label from the directory', () => {

@@ -8,6 +8,10 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 
 export const ADVISORY_MODEL_ID = 'us.anthropic.claude-opus-4-6-v1';
+// Sonnet 4.6 US inference profile — live-invokable on this account (verified via the Ask-Aegis email
+// Lambda, which runs Sonnet 4.6 on Bedrock today). Cheaper + faster than Opus; adequate for a small
+// GROUNDED classification call (the strategy-preview dx-match / PACT check). NOT the advisory default.
+export const SONNET_MODEL_ID = 'us.anthropic.claude-sonnet-4-6';
 // Output cap = the cost ceiling on each answer. 1024 tokens (~750 words) keeps a typical question at
 // ~5-10¢ (Ryan target): output 1024 @ $75/M ≈ 7.7¢ + input (cached system prompt) ≈ 1-3¢. Advisory
 // answers should be concise anyway.
@@ -17,6 +21,10 @@ export const ADVISORY_MAX_TOKENS = 1024;
 // trusting the cost log for billing — these are cost-attribution rates for the oversight dashboard.
 export const PRICE_PER_M_INPUT_USD = 15;
 export const PRICE_PER_M_OUTPUT_USD = 75;
+// Sonnet 4.6 list price, per 1M tokens (Bedrock). Pass these to computeCostUsd / invokeAdvisory so a
+// Sonnet call doesn't get attributed at Opus rates in the cost log.
+export const SONNET_PRICE_PER_M_INPUT_USD = 3;
+export const SONNET_PRICE_PER_M_OUTPUT_USD = 15;
 
 export interface AdvisoryUsage {
   input_tokens?: number;
@@ -37,11 +45,17 @@ export function estimateTokens(text: string): number {
   return Math.ceil((text?.length ?? 0) / 4);
 }
 
-export function computeCostUsd(usage: AdvisoryUsage): number {
+export function computeCostUsd(
+  usage: AdvisoryUsage,
+  // Default to Opus-class rates (the advisory path). A Sonnet caller passes the Sonnet rates so the
+  // cost log attributes the cheaper model correctly.
+  pricePerMInput: number = PRICE_PER_M_INPUT_USD,
+  pricePerMOutput: number = PRICE_PER_M_OUTPUT_USD,
+): number {
   const inT =
     (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
   const outT = usage.output_tokens ?? 0;
-  const usd = (inT / 1_000_000) * PRICE_PER_M_INPUT_USD + (outT / 1_000_000) * PRICE_PER_M_OUTPUT_USD;
+  const usd = (inT / 1_000_000) * pricePerMInput + (outT / 1_000_000) * pricePerMOutput;
   return Math.round(usd * 10000) / 10000;
 }
 
@@ -84,12 +98,20 @@ function client(): BedrockRuntimeClient {
 export async function invokeAdvisory(
   systemPrompt: string,
   userContent: string,
-  opts: { maxTokens?: number; temperature?: number } = {},
+  // modelId / pricing default to the advisory Opus path — every existing caller is byte-identical.
+  // A Sonnet caller (the strategy-preview AI checks) passes SONNET_MODEL_ID + the Sonnet rates.
+  opts: {
+    maxTokens?: number;
+    temperature?: number;
+    modelId?: string;
+    pricePerMInput?: number;
+    pricePerMOutput?: number;
+  } = {},
 ): Promise<AdvisoryResult> {
   const body = buildAdvisoryBody(systemPrompt, userContent, opts.maxTokens ?? ADVISORY_MAX_TOKENS, opts.temperature);
   const res = await client().send(
     new InvokeModelCommand({
-      modelId: ADVISORY_MODEL_ID,
+      modelId: opts.modelId ?? ADVISORY_MODEL_ID,
       contentType: 'application/json',
       accept: 'application/json',
       body: JSON.stringify(body),
@@ -101,5 +123,10 @@ export async function invokeAdvisory(
     stop_reason?: string;
   };
   const usage = parsed.usage ?? {};
-  return { text: extractText(parsed), usage, stopReason: parsed.stop_reason ?? null, costUsd: computeCostUsd(usage) };
+  return {
+    text: extractText(parsed),
+    usage,
+    stopReason: parsed.stop_reason ?? null,
+    costUsd: computeCostUsd(usage, opts.pricePerMInput, opts.pricePerMOutput),
+  };
 }

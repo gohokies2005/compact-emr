@@ -8,6 +8,7 @@
 // read the stale Case.cdsVerdict column.
 
 import { evaluateCds, findPair, type PairMatch } from './cdsEngine.js';
+import { runStrategyAiChecks, type StrategyAiChecks } from './strategy-ai-checks.js';
 
 export interface PathwaySuggestion {
   readonly kind: 'direct' | 'secondary';
@@ -54,7 +55,7 @@ export function suggestPathway(input: StrategyPreviewInput): PathwaySuggestion {
 export type StrategyTier = 'Strong' | 'Plausible' | 'Thin' | 'Stop';
 
 export interface StrategyCriterion {
-  readonly key: 'diagnosis' | 'anchor' | 'plausible' | 'pathway' | 'strength';
+  readonly key: 'diagnosis' | 'anchor' | 'plausible' | 'pathway' | 'strength' | 'presumptive';
   readonly label: string;
   readonly pass: boolean;
   readonly detail: string;
@@ -77,6 +78,12 @@ export interface StrategyPreview {
   readonly recommendedPathway: PathwaySuggestion;
   readonly criteria: readonly StrategyCriterion[];
   readonly summary: string;
+  /**
+   * True only when the AI judgment checks (Sonnet 4.6) ran and overlaid the dx-match / presumptive
+   * criteria (flag STRATEGY_AI_CHECKS_ENABLED on, call succeeded). Absent/false = the deterministic
+   * preview, byte-identical to before this feature. Lets the UI label the AI-sourced rows.
+   */
+  readonly aiChecked?: boolean;
 }
 
 export interface StrategyPreviewInput {
@@ -279,4 +286,72 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     criteria,
     summary: plainSummary,
   };
+}
+
+// ============================================================================
+// E0 — AI judgment-check overlay (Sonnet 4.6, behind STRATEGY_AI_CHECKS_ENABLED)
+// ============================================================================
+
+export interface StrategyAiOverlayInput {
+  /** Free-text deployment / exposure facts (locations, dates, MOS) for the PACT/TERA judgment. */
+  readonly deploymentFacts?: string | null;
+}
+
+/**
+ * Overlay the two AI JUDGMENT checks onto a deterministic preview. HYBRID: the deterministic
+ * `computeStrategyPreview` runs first (it always does), then — only when the flag is on AND the Sonnet
+ * call succeeds — we REPLACE the dumb "diagnosis count" check with a GROUNDED dx-match, and SURFACE a
+ * PACT/TERA presumptive row FIRST when eligible.
+ *
+ * FAIL-OPEN + FLAG-OFF: `runStrategyAiChecks` returns null when the flag is off or on any error, and on
+ * null we return the deterministic preview OBJECT UNCHANGED (byte-identical, `aiChecked` absent). The AI
+ * is never called when the flag is off, so there is no spend in the default path.
+ *
+ * Async + separate from computeStrategyPreview so the deterministic core stays sync and its other
+ * consumers (case-framing, cds) are untouched. The route awaits this.
+ */
+export async function computeStrategyPreviewWithAi(
+  input: StrategyPreviewInput & StrategyAiOverlayInput,
+): Promise<StrategyPreview> {
+  const base = computeStrategyPreview(input);
+  if (!base.evaluable) return base; // nothing framed yet — never spend a call on a bare case
+
+  const ai: StrategyAiChecks | null = await runStrategyAiChecks({
+    claimedCondition: input.claimedCondition,
+    activeProblems: input.activeProblems,
+    serviceConnectedConditions: input.serviceConnectedConditions,
+    deploymentFacts: input.deploymentFacts ?? null,
+    veteranStatement: input.veteranStatement ?? null,
+  });
+  if (ai === null) return base; // flag off OR fail-open → deterministic preview, byte-identical
+
+  // Replace the diagnosis criterion with the GROUNDED dx-match. The model cites the documented dx it
+  // matched (verified present in strategy-ai-checks) or we render an honest "no documented match" — the
+  // Porter fix: a claim with no matching dx no longer shows a false "dx on file ✓".
+  const dxCriterion: StrategyCriterion = {
+    key: 'diagnosis',
+    label: 'Documented diagnosis matches the claim',
+    pass: ai.dxMatch.matched,
+    detail: ai.dxMatch.matched && ai.dxMatch.matchedDx !== null
+      ? `Matched documented diagnosis: "${ai.dxMatch.matchedDx}"`
+      : `No documented diagnosis matches "${input.claimedCondition}" — ${ai.dxMatch.note}`,
+  };
+  const overlaid: StrategyCriterion[] = base.criteria.map((c) => (c.key === 'diagnosis' ? dxCriterion : c));
+
+  // SURFACE PRESUMPTIVE FIRST when eligible (PACT/TERA short-circuits the usual secondary analysis —
+  // a presumptive claim is the strongest path and the RN should see it before anything else). When not
+  // eligible we still add a (passing-N/A) row so the auto-TERA flag is visible, but at the END.
+  const presRow: StrategyCriterion = {
+    key: 'presumptive',
+    label: 'Presumptive eligibility (PACT / TERA)',
+    pass: ai.presumptive.eligible,
+    detail: ai.presumptive.eligible
+      ? `${ai.presumptive.program ?? 'Presumptive'} presumptive${ai.presumptive.teraAutoFlagged ? ' — TERA auto-flagged from a covered deployment' : ''}: ${ai.presumptive.note}`
+      : ai.presumptive.teraAutoFlagged
+        ? `TERA auto-flagged from a covered deployment, but the claimed condition is not presumptive: ${ai.presumptive.note}`
+        : `Not presumptive under PACT/TERA: ${ai.presumptive.note}`,
+  };
+  const criteria = ai.presumptive.eligible ? [presRow, ...overlaid] : [...overlaid, presRow];
+
+  return { ...base, criteria, aiChecked: true };
 }

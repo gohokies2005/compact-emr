@@ -7,7 +7,7 @@ import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb } from '../services/db-types.js';
-import { computeStrategyPreview } from '../services/strategy-preview.js';
+import { computeStrategyPreviewWithAi } from '../services/strategy-preview.js';
 import { deriveCaseFramingForCase } from '../services/case-framing-stamp.js';
 import { deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
 
@@ -19,9 +19,34 @@ interface CaseForPreview {
   inServiceEvent: string | null;
   veteranStatement: string | null;
   veteran: {
+    branch: string | null;
+    serviceStartYear: number | null;
+    serviceEndYear: number | null;
+    combatVeteran: string | null;
+    pactArea: string | null;
+    teraConceded: string | null;
     scConditions: Array<{ condition: string; status: string }>;
     activeProblems: Array<{ problem: string }>;
   } | null;
+}
+
+// Assemble the free-text deployment/exposure facts the AI PACT/TERA check reads. Structured intake flags
+// (combat/PACT-area/TERA-conceded) + service window + branch + the case's in-service-event narrative.
+// Plain prose so the model can reason over it; null when nothing is on file (the model then returns
+// not-eligible). NEVER fabricate a location — only what intake recorded.
+function buildDeploymentFacts(c: CaseForPreview): string | null {
+  const v = c.veteran;
+  const parts: string[] = [];
+  if (v?.branch) parts.push(`Branch: ${v.branch}.`);
+  if (v?.serviceStartYear || v?.serviceEndYear) {
+    parts.push(`Service years: ${v.serviceStartYear ?? '?'}–${v.serviceEndYear ?? '?'}.`);
+  }
+  if (v?.combatVeteran && v.combatVeteran !== 'unknown') parts.push(`Combat veteran: ${v.combatVeteran}.`);
+  if (v?.pactArea && v.pactArea !== 'unknown') parts.push(`Served in a PACT-Act covered area: ${v.pactArea}.`);
+  if (v?.teraConceded && v.teraConceded !== 'unknown') parts.push(`TERA self-reported/conceded: ${v.teraConceded}.`);
+  const evt = (c.inServiceEvent ?? '').trim();
+  if (evt.length > 0) parts.push(`In-service event/exposure on record: ${evt}`);
+  return parts.length > 0 ? parts.join(' ') : null;
 }
 
 export function createStrategyPreviewRouter(db: AppDb): Router {
@@ -42,6 +67,12 @@ export function createStrategyPreviewRouter(db: AppDb): Router {
           veteranStatement: true,
           veteran: {
             select: {
+              branch: true,
+              serviceStartYear: true,
+              serviceEndYear: true,
+              combatVeteran: true,
+              pactArea: true,
+              teraConceded: true,
               scConditions: { select: { condition: true, status: true } },
               activeProblems: { select: { problem: true } },
             },
@@ -65,7 +96,7 @@ export function createStrategyPreviewRouter(db: AppDb): Router {
       // falls back to the legacy criteria copy.
       const viability = await deriveCaseViabilityForCase(db, caseId);
 
-      const preview = computeStrategyPreview({
+      const preview = await computeStrategyPreviewWithAi({
         claimedCondition: c.claimedCondition,
         claimType: c.claimType ?? '',
         framingChoice: useSsot && cf.framing !== 'undetermined' ? cf.framing : c.framingChoice,
@@ -87,6 +118,8 @@ export function createStrategyPreviewRouter(db: AppDb): Router {
         inServiceEvent: c.inServiceEvent ?? null,
         veteranStatement: c.veteranStatement ?? null,
         viability: viability === null ? null : { band: viability.viability, why: viability.why },
+        // E0: free-text deployment/exposure facts for the AI PACT/TERA judgment (flag-gated, fail-open).
+        deploymentFacts: buildDeploymentFacts(c),
       });
       res.json({ data: { ...preview, viability } });
     }),

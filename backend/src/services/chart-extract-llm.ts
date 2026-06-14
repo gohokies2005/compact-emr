@@ -322,9 +322,9 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
             category: {
               type: 'string',
               enum: ['sc_condition', 'active_problem', 'active_medication', 'screening'],
-              description: 'sc_condition = a condition the veteran is service-connected for OR claiming (any benefit status: granted/pending/denied/deferred); active_problem = a bare clinical diagnosis/problem with no benefit-status signal; active_medication = an Active Medications entry or a drug named in a note; screening = a screening-instrument result (PHQ-9/GAD-7/PC-PTSD-5/AUDIT-C) — a DATA POINT, never a diagnosis.',
+              description: 'sc_condition = a condition the veteran is service-connected for OR claiming (any benefit status: granted/pending/denied/deferred); active_problem = a CURRENTLY ACTIVE bare clinical diagnosis/problem with no benefit-status signal (NOT a resolved/inactive entry and NOT a "history of"/"h/o" past mention); active_medication = an Active Medications entry or a drug named in a note; screening = a screening-instrument result (PHQ-9/GAD-7/PC-PTSD-5/AUDIT-C) — a DATA POINT, never a diagnosis.',
             },
-            name: { type: 'string', description: 'For a condition/problem: the name as written. For a medication: the DRUG NAME ONLY (generic or brand, e.g. "fluoxetine", "Lexapro") — do NOT include dose, strength, or form in the name; those go in dose. For a screening: the instrument name (e.g. "PHQ-9").' },
+            name: { type: 'string', description: 'For a condition/problem: the DIAGNOSIS as written (a body part / disease / disorder) — NEVER a percentage, the word "Combined", or the bare phrase "service-connected" (those are a rating/status, not a name; the % goes in ratingPct). For a medication: the DRUG NAME ONLY (generic or brand, e.g. "fluoxetine", "Lexapro") — do NOT include dose, strength, or form in the name; those go in dose. For a screening: the instrument name (e.g. "PHQ-9").' },
             status: { type: 'string', enum: ['service_connected', 'pending', 'denied'], description: 'sc_condition only: service_connected if granted/rated/"service-connected", denied if THIS condition is denied, pending if claimed/under review/deferred (e.g. a "Conditions claimed" or claim-status list). Always set it.' },
             ratingPct: { type: 'integer', description: 'sc_condition only: rating percentage if explicitly stated.' },
             dcCode: { type: 'string', description: 'sc_condition only: the BARE VA diagnostic code ALONE (the digits, e.g. "6260") if explicitly stated — the code ONLY, never the condition name or any words. Omit if not shown.' },
@@ -370,13 +370,29 @@ function combinedSystemPrompt(): string {
     '  - deferred → "Service connection for X is deferred", "X — deferred pending ...".',
     'These live in MANY document types — rating decisions, code sheets, benefit/award letters, the 21-526EZ claim, AND claim-status / intake-summary lists. A claim that is only pending or denied is STILL an sc_condition; do not wait for a "granted" sentence. Capture EACH listed condition as its own row with its own status (+ ratingPct + dcCode when shown), even when a single rating-decision page itemizes many.',
     '  - USE THE SPECIFIC NAMED CONDITION exactly as written. "Sigmoid Colitis", "Ulcerative Colitis", and "GERD" are SEPARATE rows — never collapse distinct conditions into an umbrella like "gastrointestinal problems".',
+    // NAME MUST BE A DIAGNOSIS, NEVER A RATING (extraction precision (Woodley), 2026-06-13). Woodley's
+    // SC tab showed a single row "90% service-connected" — the model put the COMBINED PERCENTAGE in the
+    // `name` field and captured zero named conditions. The `name` is ALWAYS the condition's diagnosis
+    // (a body part / disease / disorder); a percentage, the word "combined", or the bare phrase
+    // "service-connected" is a STATUS, never a name. The percentage belongs in ratingPct, the status in
+    // status — never in name.
+    '  - THE name FIELD IS A DIAGNOSIS, NOT A RATING. name is the medical condition (e.g. "Other Specified Trauma or Stressor-Related Disorder", "Tinnitus", "Lumbar Strain"). NEVER put a percentage, the word "Combined", or the bare phrase "service-connected" in name. If the only thing beside a percentage is "service-connected" with NO condition diagnosis attached, that is a COMBINED/total line — do NOT emit it (see below). A row whose name would be "90% service-connected" or "Combined" is WRONG: drop it and instead capture the individually-named conditions that the page itemizes.',
     '',
     'KEEP OUT of sc_condition (these are active_problem instead): a clinical diagnosis written in a progress note, assessment, problem list, or C&P narrative with NO benefit-status signal next to it. A real diagnosis like "H. pylori gastritis", "hiatal hernia", or "peptic ulcer disease" mentioned in a GI note is an active_problem — it only becomes an sc_condition if that same record shows it claimed, granted, denied, or rated. When in doubt and there is no status signal, emit it as active_problem, not sc_condition.',
     '',
-    'TWO THINGS THAT ARE NOT sc_conditions: (1) a COMBINED / OVERALL / TOTAL rating — a summary, never a row, EVEN THOUGH it shows a percentage. A line like "your combined evaluation is 70 percent", "combined rating 90%", or "service-connected condition (combined) 90%" is the TOTAL across all disabilities, not a disability itself — do NOT emit it. (The percentage there is a sum, not a single condition\'s rating.) If a letter gives only a combined % without itemizing the conditions, emit nothing for those rather than guess. (2) a screening score (see below).',
+    // THE COMBINED-LINE TRAP, HARDENED (extraction precision (Woodley), 2026-06-13). A VA rating decision
+    // ALWAYS shows the per-condition grants (each with its own name + %) AND a single "Combined
+    // evaluation: N%" / "Combined rating" total. Capture the NAMED ones; NEVER the combined total. The
+    // combined % is a mathematical roll-up (VA combined-ratings table), not a disability — emitting it as
+    // a condition both fabricates a non-existent "condition" AND tends to crowd out the real named rows.
+    'NEVER EMIT A COMBINED / OVERALL / TOTAL RATING AS A CONDITION. A line like "Combined evaluation: 90%", "combined rating 90%", "your overall/total evaluation is 90 percent", or a bare "90% service-connected" with no condition diagnosis on it is the SUM across all disabilities — it is NOT a disability and has NO name. Do NOT emit it as an sc_condition. On a rating decision that lists named conditions AND a combined total, capture EACH NAMED condition with its own % and DROP the combined line entirely. If a letter gives ONLY a combined % and never itemizes the conditions, emit nothing for those rather than invent names.',
+    'ONE MORE THING THAT IS NOT an sc_condition: a screening score (see below).',
     'EXAMPLES (sc_condition vs active_problem):',
     '  "[p.14] Conditions claimed: 1. PTSD (pending) 2. Sleep apnea (pending) 3. Chronic fatigue syndrome (denied)" → THREE sc_condition rows: {category:sc_condition,name:"PTSD",status:"pending"}, {category:sc_condition,name:"Sleep apnea",status:"pending"}, {category:sc_condition,name:"Chronic fatigue syndrome",status:"denied"}.',
     '  "[p.902] Assessment: H. pylori gastritis; hiatal hernia. Continue PPI." → TWO active_problem rows (no benefit-status signal): {category:active_problem,name:"H. pylori gastritis"}, {category:active_problem,name:"hiatal hernia"}. NOT sc_condition.',
+    // The exact Woodley rating-decision shape: named grants + a combined total on one page. Forces the
+    // right split — three NAMED rows, and the combined line emitted as NOTHING.
+    '  "[p.5] Other Specified Trauma or Stressor-Related Disorder ... 70% ... Tinnitus ... 10% ... Lumbar Strain ... 20% ... Combined evaluation: 90%" → THREE sc_condition rows: {category:sc_condition,name:"Other Specified Trauma or Stressor-Related Disorder",status:"service_connected",ratingPct:70}, {category:sc_condition,name:"Tinnitus",status:"service_connected",ratingPct:10}, {category:sc_condition,name:"Lumbar Strain",status:"service_connected",ratingPct:20}. The "Combined evaluation: 90%" line is emitted as NOTHING — it is a total, not a condition.',
     '  "[p.3] Combined evaluation: 90%" → emit NOTHING (a combined/total, not a condition).',
     '',
     // BLUE BUTTON STRUCTURE (Ryan 2026-06-13): VA Blue Button / CAPRI reports are templated — the
@@ -385,6 +401,20 @@ function combinedSystemPrompt(): string {
     'BLUE BUTTON SECTION HEADERS — extract every row beneath these when present:',
     '  active_problem: "Problem List" / "VA Problem List" / "Computerized Problem List" — one row per listed problem (with its ICD-10 if shown).',
     '  active_medication: "Active Medications" / "Active Outpatient Medications" / "Medications" — one row per drug (with dose/frequency/sig as written).',
+    '',
+    // ACTIVE-PROBLEM PRECISION (extraction precision (Woodley), 2026-06-13). The full read now reads
+    // every page, and the model was recording RESOLVED / historical / duplicate lines as ACTIVE — Woodley
+    // came back with 147 "active problems", implausible for one veteran. active_problem means a CURRENT,
+    // ACTIVE diagnosis. Bias is asymmetric on purpose: NEVER drop a real active dx (a lost dx breaks the
+    // letter), but DO stop recording the obviously-resolved / "history of" / duplicate lines as active.
+    'active_problem MEANS A CURRENTLY ACTIVE PROBLEM — not every diagnosis ever mentioned. Apply these rules:',
+    '  - DO NOT emit a problem that is marked RESOLVED / INACTIVE / "resolved" / a struck-through or dated-resolved entry, or that is explicitly in a Resolved/Inactive/Past Medical History list. A "Date Resolved" populated for the row = resolved; do not emit it as active.',
+    '  - DO NOT emit a "history of" / "h/o" / "hx of" / "s/p" (status-post) / "in remission" mention as an active problem — that phrasing states a PAST condition, not a current active one. (A genuinely current chronic dx written plainly — "Hypertension", "PTSD" — IS active; the guard is the explicit past/resolved wording, not the diagnosis itself.)',
+    '  - DE-DUPLICATE: if the SAME diagnosis appears multiple times (repeated across pages, or listed once active and once resolved), emit it ONCE as active. Do not emit one row per occurrence of the same problem.',
+    '  - WHEN THE STATUS IS GENUINELY UNCLEAR — a problem-list row with no resolved marker and no "history of" wording — KEEP IT as active. Never drop a real diagnosis because you are unsure; only the EXPLICIT resolved / past-tense / duplicate signals above remove a row. Under-pruning (a stray active row) is acceptable; losing a real active dx is not.',
+    'EXAMPLES (active_problem precision):',
+    '  "[p.20] Problem List: Hypertension (active); Tobacco use disorder, resolved 2019; History of appendectomy; Hypertension" → ONE active_problem row {category:active_problem,name:"Hypertension"} (the resolved tobacco line, the "History of appendectomy" line, and the duplicate Hypertension are all NOT emitted as active).',
+    '  "[p.21] Active Problems: 1. PTSD 2. Obstructive sleep apnea 3. Chronic low back pain" → THREE active_problem rows (no resolved/past markers — all current).',
     '',
     // MEDICATION TEMPORALITY (Ryan 2026-06-13): a flat "active" list is wrong — the owner wants the
     // treatment HISTORY with dates + an active-vs-old split. Set from EXPLICIT page signals ONLY.

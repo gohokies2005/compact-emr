@@ -405,6 +405,30 @@ export interface CoverIndexEntryInput {
   readonly category: PackCategory;
   readonly pageRanges: readonly KeyDocPageRange[];
   readonly mentionsClaimedCondition: boolean;
+  // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): one short "why" line PER PINNED PAGE in
+  // this entry that survived the budget — built from the grounding fact's kind + source quote (e.g.
+  // "p412: rating decision granting condition - 'PTSD 70% service-connected'"). Empty/absent unless
+  // DOCTOR_PACK_GROUNDED_PAGES is on AND the entry has surviving pinned pages → flag-off cover text
+  // is byte-identical. FRN style: plain hyphen separators, straight quotes (no em dashes / smart
+  // quotes) for the new lines.
+  readonly pinnedWhyLines?: readonly string[];
+}
+
+// doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): the per-pinned-page cover "why" line.
+// Built from the back-map's factKind + the representative source quote so the physician sees WHY a
+// page was force-included from an otherwise-excluded bulk doc (the rating-grant page out of a
+// 900-page Blue Button dump). FRN-style: concise, plain hyphen, straight quotes, no em dashes.
+const PINNED_FACT_KIND_PHRASE: Readonly<Record<GroundedPage['factKind'], string>> = {
+  sc_condition: 'service-connected condition grant',
+  screening: 'objective test / screening result',
+  active_problem: 'active problem / diagnosis',
+  active_medication: 'active medication',
+};
+export function coverPinnedWhyLine(page: number, factKind: GroundedPage['factKind'], sourceQuote: string): string {
+  const phrase = PINNED_FACT_KIND_PHRASE[factKind] ?? 'chart fact';
+  const quote = (sourceQuote ?? '').replace(/\s+/g, ' ').trim();
+  const quotePart = quote.length > 0 ? ` - "${quote}"` : '';
+  return `p${page}: ${phrase}${quotePart}`;
 }
 
 /** D. The cover-index page body (line-per-line; rendered via record-text-render). Pure. */
@@ -432,6 +456,12 @@ export function buildCoverIndexLines(input: {
         ? 'all pages'
         : e.pageRanges.map((r) => (r.from === r.to ? `p${r.from}` : `p${r.from}-${r.to}`)).join(', ');
     lines.push(`${i + 1}. ${e.displayLabel} — ${pages} — ${coverWhyLine(e.category, e.mentionsClaimedCondition)}`);
+    // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): annotate each surviving PINNED page
+    // with its grounding "why" line, indented under the entry. Absent unless the flag is on AND the
+    // entry has pinned survivors → flag-off cover text is byte-identical.
+    for (const why of e.pinnedWhyLines ?? []) {
+      lines.push(`   pinned ${why}`);
+    }
   });
   lines.push('');
   lines.push('Not included:');
@@ -671,7 +701,18 @@ export async function generateDoctorPackForCase(
     });
     let selection: PageSelectorResult;
     const textPageCount = pagesInput.filter((p) => (p.text ?? '').trim().length > 0).length;
-    if (!physicianOverride && LLM_PICKER_DOCTYPES.has(cls.docType) && shouldUseLlmPicker(textPageCount)) {
+    // doctor-pack grounded pages PR-4, 2026-06-13 (CODE ONLY, flag-gated): narrow the LLM page-
+    // picker's effective scope. Now the back-map DETERMINISTICALLY owns the high-yield pages of
+    // bulk dumps (the rating-grant page, the AHI page, the med-list page get unioned in for $0),
+    // the LLM picker should no longer spend tokens RANKING bulk-classified docs — every page it
+    // would keep there is either already pinned by the back-map or low-value bulk boilerplate. So
+    // when the flag is on we route bulk-classified docs (and blue_button explicitly) straight to
+    // the deterministic regex selector (which still applies the grounded-page union). Per-call cost
+    // drops: a bulk doc that previously paid for an LLM ranking pass now pays $0. Flag OFF ⇒ this
+    // predicate is false ⇒ the picker dispatch is byte-identical to PR-2/PR-3.
+    const narrowOutOfLlmScope =
+      groundedPagesEnabled && (cls.classification === 'bulk' || cls.docType === 'blue_button');
+    if (!physicianOverride && !narrowOutOfLlmScope && LLM_PICKER_DOCTYPES.has(cls.docType) && shouldUseLlmPicker(textPageCount)) {
       const llm = await selectPagesLlm({
         docType: cls.docType,
         pages: pagesInput,
@@ -948,6 +989,27 @@ export async function generateDoctorPackForCase(
   //      whole-doc passthrough.)
   // The budget keys off entry.filePath (which may be a rendered key); we map its output back to the
   // metas by that same key, and separately back to ORIGINAL paths for KeyDoc bookkeeping below.
+  // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): for each ordered meta, resolve the
+  // PINNED pages (the back-mapped pages that grounded an extracted chart fact) + their fact kind so
+  // the budget protects them ahead of regex/LLM pages and trims them last by yield. Keyed off the
+  // ORIGINAL document path (entry.filePath may be a rendered key) → documentId → groundedByDocumentId.
+  // Pinning applies ONLY to a NON-rendered entry (entry.filePath === originalFilePath): a rendered
+  // non-PDF entry renumbers its pages 1..N, so the source-page-numbered grounded pages no longer map
+  // (and the union never applied to it either). Flag OFF ⇒ groundedByDocumentId is empty ⇒ every meta
+  // resolves to no pinned pages ⇒ orderedBudgetEntries carry no pinned fields ⇒ applyPackPageBudget
+  // runs byte-identically.
+  const pinnedFor = (m: PackEntryMeta): { pinnedPages: number[]; pinnedFactKindByPage: Record<number, GroundedPage['factKind']> } => {
+    const empty = { pinnedPages: [] as number[], pinnedFactKindByPage: {} as Record<number, GroundedPage['factKind']> };
+    if (!groundedPagesEnabled) return empty;
+    if (m.originalFilePath === null || m.entry.filePath !== m.originalFilePath) return empty; // rendered/synthetic → no source-page pins
+    const documentId = docMetaByPath.get(m.originalFilePath)?.id;
+    if (documentId === undefined) return empty;
+    const grounded = groundedByDocumentId.get(documentId) ?? [];
+    if (grounded.length === 0) return empty;
+    const pinnedFactKindByPage: Record<number, GroundedPage['factKind']> = {};
+    for (const g of grounded) pinnedFactKindByPage[g.page] = g.factKind;
+    return { pinnedPages: grounded.map((g) => g.page), pinnedFactKindByPage };
+  };
   const orderedBudgetEntries: BudgetEntry[] = orderedMetas.map((m) => {
     const e = m.entry;
     const hasRanges = e.pageRanges.length > 0;
@@ -957,6 +1019,7 @@ export async function generateDoctorPackForCase(
       ? e.pageRanges
       : (m.availablePageCount !== null ? [{ from: 1, to: m.availablePageCount }] : []);
     const pageCount = ranges.reduce((sum, r) => sum + Math.max(0, r.to - r.from + 1), 0);
+    const pinned = pinnedFor(m);
     return {
       filePath: e.filePath,
       docType: e.docType,
@@ -964,6 +1027,11 @@ export async function generateDoctorPackForCase(
       pageRanges: ranges,
       pageCount,
       importance: m.importance,
+      // PR-3 (POLICY B): only attach pinned fields when there ARE pinned pages — an absent field is
+      // the byte-identical flag-off shape the budget's `hasPinned` fast-path keys on.
+      ...(pinned.pinnedPages.length > 0
+        ? { pinnedPages: pinned.pinnedPages, pinnedFactKindByPage: pinned.pinnedFactKindByPage }
+        : {}),
     };
   });
   const budget = applyPackPageBudget(orderedBudgetEntries, PACK_PAGE_BUDGET);
@@ -990,6 +1058,27 @@ export async function generateDoctorPackForCase(
     if (m.originalFilePath !== null) finalRangesByPath.set(m.originalFilePath, m.entry.pageRanges);
   }
 
+  // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): per-entry cover "why" lines for the
+  // PINNED pages that SURVIVED the budget. Intersect the entry's final (budgeted) pages with the
+  // back-map's grounded pages for that document, and emit one line per surviving pinned page (in
+  // page order) carrying the grounding fact's kind + source quote. Same gate + same non-rendered
+  // restriction as pinnedFor() above — flag off (or no grounded survivors) ⇒ no pinned why-lines ⇒
+  // cover text byte-identical.
+  const pinnedWhyLinesFor = (m: PackEntryMeta): string[] => {
+    if (!groundedPagesEnabled) return [];
+    if (m.originalFilePath === null || m.entry.filePath !== m.originalFilePath) return [];
+    const documentId = docMetaByPath.get(m.originalFilePath)?.id;
+    if (documentId === undefined) return [];
+    const grounded = groundedByDocumentId.get(documentId) ?? [];
+    if (grounded.length === 0) return [];
+    const survivingPages = new Set<number>();
+    for (const r of m.entry.pageRanges) for (let p = r.from; p <= r.to; p++) survivingPages.add(p);
+    return grounded
+      .filter((g) => survivingPages.has(g.page))
+      .sort((a, b) => a.page - b.page)
+      .map((g) => coverPinnedWhyLine(g.page, g.factKind, g.sourceQuote));
+  };
+
   // ROUND 2 (D): one-page cover index, rendered + prepended as manifest entry #1. Fail-open:
   // a cover render failure drops only the cover (note in trimNotes), never the pack.
   const dedupAndBudgetNotes = [...dedup.notes, ...budget.trimNotes];
@@ -1002,12 +1091,16 @@ export async function generateDoctorPackForCase(
         claimType: caseWithDocs.claimType ?? null,
         framingChoice: caseWithDocs.framingChoice ?? null,
         upstreamScCondition: caseWithDocs.upstreamScCondition ?? null,
-        entries: budgetedMetas.map((m) => ({
-          displayLabel: m.entry.displayLabel,
-          category: packCategoryOf(m.entry.docType),
-          pageRanges: m.entry.pageRanges,
-          mentionsClaimedCondition: m.mentionsClaimedCondition,
-        })),
+        entries: budgetedMetas.map((m) => {
+          const pinnedWhyLines = pinnedWhyLinesFor(m);
+          return {
+            displayLabel: m.entry.displayLabel,
+            category: packCategoryOf(m.entry.docType),
+            pageRanges: m.entry.pageRanges,
+            mentionsClaimedCondition: m.mentionsClaimedCondition,
+            ...(pinnedWhyLines.length > 0 ? { pinnedWhyLines } : {}),
+          };
+        }),
         notIncluded: humanizeTrimNotes([...dedupAndBudgetNotes, ...renderNotes], displayNameByPath),
       });
       const rendered = await renderRecordTextPdf({

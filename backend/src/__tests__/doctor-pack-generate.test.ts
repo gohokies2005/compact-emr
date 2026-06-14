@@ -24,6 +24,16 @@ vi.mock('../services/doctor-pack-queue.js', () => ({
   publishDoctorPackQueued: vi.fn(async () => ({ skipped: true })),
 }));
 
+// doctor-pack grounded pages PR-4, 2026-06-13: mock the LLM page-picker so we can assert WHEN it is
+// (not) invoked. shouldUseLlmPicker keeps its real >=3-text-pages threshold; selectPagesLlm is a
+// spy returning null (→ regex fallback) so output is unaffected — only the CALL is observed. Every
+// pre-existing test in this file uses docs with < 3 usable text pages, so the real picker would
+// never have fired for them either; this mock is behavior-neutral for them.
+vi.mock('../services/doctor-pack-page-llm.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/doctor-pack-page-llm.js')>();
+  return { ...actual, selectPagesLlm: vi.fn(async () => null) };
+});
+
 interface ExistingPack {
   readonly id: string;
   readonly caseId: string;
@@ -648,5 +658,103 @@ describe('generateDoctorPackForCase — grounded-page layer (PR-2, flag-gated)',
       { s3: { send: vi.fn(async () => ({})) }, recordsBucketName: 'phi-test-bucket' },
     );
     expect(scFindMany).not.toHaveBeenCalled();
+  });
+});
+
+// doctor-pack grounded pages PR-3/PR-4, 2026-06-13 (POLICY B + LLM-scope narrowing): end-to-end
+// through generateDoctorPackForCase. PR-3: a pinned BB page survives the budget even when the pack
+// is over budget. PR-4: a bulk-classified LLM-eligible doc is routed to the deterministic regex
+// selector (no LLM ranking spend) when the flag is on; flag off it still hits the LLM picker.
+// ============================================================================================
+describe('generateDoctorPackForCase — PR-3 pinned survival + PR-4 LLM-scope narrowing', () => {
+  // progress_notes is classified 'bulk' AND is in LLM_PICKER_DOCTYPES — the exact doc PR-4 narrows.
+  // 4 usable text pages clears shouldUseLlmPicker's >=3 threshold.
+  const NOTES_DOC: MockDocument = {
+    id: 'doc-notes',
+    s3Key: 'cases/CASE-1/dddd4444-Progress_Notes.pdf',
+    pageCount: 4,
+    docTag: null,
+    filename: 'Progress_Notes.pdf',
+    contentType: 'application/pdf',
+  };
+  const NOTES_PAGES = [
+    pageRow('doc-notes', 1, 'Office visit 01/02/2024. Obstructive sleep apnea reviewed; CPAP tolerated.'),
+    pageRow('doc-notes', 2, 'Office visit 02/02/2024. Hypertension stable. Medication refilled.'),
+    pageRow('doc-notes', 3, 'Office visit 03/02/2024. Obstructive sleep apnea follow-up, AHI improved.'),
+    pageRow('doc-notes', 4, 'Office visit 04/02/2024. Routine labs ordered.'),
+  ];
+
+  const ORIGINAL_FLAG = process.env['DOCTOR_PACK_GROUNDED_PAGES'];
+  afterEach(() => {
+    if (ORIGINAL_FLAG === undefined) delete process.env['DOCTOR_PACK_GROUNDED_PAGES'];
+    else process.env['DOCTOR_PACK_GROUNDED_PAGES'] = ORIGINAL_FLAG;
+  });
+
+  it('PR-4 flag OFF: a bulk LLM-eligible progress_notes doc DOES hit the LLM page-picker', async () => {
+    delete process.env['DOCTOR_PACK_GROUNDED_PAGES'];
+    const llm = vi.mocked((await import('../services/doctor-pack-page-llm.js')).selectPagesLlm);
+    llm.mockClear();
+    const { db } = makeGenDb({ caseVersion: 6, documents: [NOTES_DOC], pageRows: NOTES_PAGES });
+    await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: vi.fn(async () => ({})) }, recordsBucketName: 'phi-test-bucket' },
+    );
+    expect(llm).toHaveBeenCalled();
+  });
+
+  it('PR-4 flag ON: the SAME bulk doc is routed to the regex selector — the LLM picker is NOT called (cost drops)', async () => {
+    process.env['DOCTOR_PACK_GROUNDED_PAGES'] = 'on';
+    const llm = vi.mocked((await import('../services/doctor-pack-page-llm.js')).selectPagesLlm);
+    llm.mockClear();
+    const { db } = makeGenDb({ caseVersion: 6, documents: [NOTES_DOC], pageRows: NOTES_PAGES });
+    await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: vi.fn(async () => ({})) }, recordsBucketName: 'phi-test-bucket' },
+    );
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it('PR-3 flag ON: a pinned BB page survives even when the pack would otherwise be over budget', async () => {
+    process.env['DOCTOR_PACK_GROUNDED_PAGES'] = 'on';
+    // A 900-page Blue Button dump whose page 412 grounded the PTSD grant, alongside a big rating
+    // decision (30 pages) that would otherwise eat the whole budget. The pinned page must survive.
+    const BB_DOC: MockDocument = {
+      id: 'doc-bb', s3Key: 'cases/CASE-1/eeee5555-Blue_Button_VA.pdf', pageCount: 900, docTag: null,
+      filename: 'Blue_Button_VA.pdf', contentType: 'application/pdf',
+    };
+    const RATING_DOC: MockDocument = {
+      id: 'doc-rating', s3Key: 'cases/CASE-1/ffff6666-Rating_Decision.pdf', pageCount: 30, docTag: null,
+      filename: 'Rating_Decision.pdf', contentType: 'application/pdf',
+    };
+    const pageRows = [
+      pageRow('doc-bb', 412, 'Rating decision: PTSD evaluated as 70 percent service-connected.'),
+      ...Array.from({ length: 30 }, (_, i) =>
+        pageRow('doc-rating', i + 1, `Rating decision page ${i + 1}: reasons and bases, evidence considered, we have granted.`)),
+    ];
+    const { db, created } = makeGenDb({
+      caseVersion: 6,
+      documents: [RATING_DOC, BB_DOC],
+      pageRows,
+      groundedScRows: [{ sourceDocumentId: 'doc-bb', sourcePage: 412, sourceQuote: 'PTSD 70% service-connected' }],
+    });
+    const result = await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: vi.fn(async () => ({})) }, recordsBucketName: 'phi-test-bucket' },
+    );
+    expect(result.outcome).toBe('queued');
+    const manifest = created.data?.manifestJson as ManifestShape;
+    const bbEntry = manifest.entries.find((e) => e.filePath === 'cases/CASE-1/eeee5555-Blue_Button_VA.pdf');
+    // The BB doc is in the pack with exactly its pinned page 412 — protected against the rating
+    // decision that would otherwise consume the whole budget.
+    expect(bbEntry).toBeDefined();
+    expect(bbEntry?.pageRanges).toEqual([{ from: 412, to: 412 }]);
+    // The whole pack respects the budget.
+    const totalPages = manifest.entries
+      .filter((e) => e.docType !== 'cover_index')
+      .reduce((sum, e) => sum + e.pageCount, 0);
+    expect(totalPages).toBeLessThanOrEqual(15);
   });
 });

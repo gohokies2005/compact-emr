@@ -4,6 +4,7 @@ import { applyPackPageBudget, PACK_PAGE_BUDGET, type BudgetEntry } from '../serv
 import {
   buildCoverIndexLines,
   computeTextFingerprint,
+  coverPinnedWhyLine,
   dedupPackDocuments,
   orderPackEntriesMedicineFirst,
   type DedupCandidate,
@@ -398,5 +399,64 @@ describe('ROUND 2 (D) — cover-index page body', () => {
     const minimal = buildCoverIndexLines({ caseId: 'C2', claimedCondition: 'tinnitus', claimType: 'initial', framingChoice: null, upstreamScCondition: null, entries: [], notIncluded: [] });
     expect(minimal[1]).toBe('Theory: initial');
     expect(minimal.join('\n')).toContain('(nothing was omitted)');
+  });
+});
+
+// ============ doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): cover WHY lines ============
+describe('cover index — pinned-page WHY lines (PR-3)', () => {
+  it('(c) coverPinnedWhyLine carries the grant quote + the fact-kind phrase, FRN-style (no em dash / smart quotes)', () => {
+    const line = coverPinnedWhyLine(412, 'sc_condition', 'PTSD 70% service-connected');
+    expect(line).toBe('p412: service-connected condition grant - "PTSD 70% service-connected"');
+    // FRN style guard: plain hyphen + straight quotes only.
+    expect(line).not.toMatch(/[—–“”‘’]/);
+  });
+
+  it('(c) the cover index emits one indented pinned line per surviving pinned page, carrying the grant quote', () => {
+    const lines = buildCoverIndexLines({
+      caseId: 'CASE-BB',
+      claimedCondition: 'obstructive sleep apnea',
+      claimType: 'secondary',
+      framingChoice: 'secondary to service-connected condition',
+      upstreamScCondition: 'PTSD',
+      entries: [
+        {
+          displayLabel: 'Blue Button dump — Blue_Button_VA.pdf',
+          category: 'other',
+          pageRanges: [{ from: 412, to: 412 }, { from: 870, to: 870 }],
+          mentionsClaimedCondition: false,
+          pinnedWhyLines: [
+            coverPinnedWhyLine(412, 'sc_condition', 'PTSD 70% service-connected'),
+            coverPinnedWhyLine(870, 'active_medication', 'prazosin 2mg nightly'),
+          ],
+        },
+      ],
+      notIncluded: [],
+    });
+    const body = lines.join('\n');
+    // The grant quote rides into the cover under its document, indented as a pinned line.
+    expect(body).toContain('   pinned p412: service-connected condition grant - "PTSD 70% service-connected"');
+    expect(body).toContain('   pinned p870: active medication - "prazosin 2mg nightly"');
+  });
+
+  it('(d) NO pinnedWhyLines ⇒ cover body byte-identical to the pre-PR-3 cover (no pinned lines emitted)', () => {
+    const args = {
+      caseId: 'CASE-NP',
+      claimedCondition: 'tinnitus',
+      claimType: 'initial' as const,
+      framingChoice: null,
+      upstreamScCondition: null,
+      entries: [
+        { displayLabel: 'DD-214 — dd214.pdf', category: 'service' as const, pageRanges: [{ from: 1, to: 1 }], mentionsClaimedCondition: false },
+      ],
+      notIncluded: [],
+    };
+    const withoutField = buildCoverIndexLines(args).join('\n');
+    // Adding an EMPTY pinnedWhyLines array must not change a single byte (absent === empty).
+    const withEmpty = buildCoverIndexLines({
+      ...args,
+      entries: [{ ...args.entries[0]!, pinnedWhyLines: [] }],
+    }).join('\n');
+    expect(withEmpty).toBe(withoutField);
+    expect(withoutField).not.toContain('pinned ');
   });
 });

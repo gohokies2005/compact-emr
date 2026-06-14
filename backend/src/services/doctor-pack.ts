@@ -7,6 +7,10 @@ import type {
 } from './db-types.js';
 import { classifyFile, CLASSIFIER_VERSION, type ClassificationResult } from './key-docs-classifier.js';
 import { isEffectivelyRead } from './chart-readiness.js';
+// doctor-pack grounded pages PR-3, 2026-06-13: the back-map's fact-kind union is the SOURCE OF
+// TRUTH for the pinned-page yield ranking. Type-only import — erased at runtime, no import cycle
+// (doctor-pack-grounded-pages.ts has no runtime dependency on this module).
+import type { GroundedFactKind } from './doctor-pack-grounded-pages.js';
 
 /**
  * Phase 7B: Doctor Pack manifest assembly.
@@ -242,6 +246,36 @@ export interface BudgetEntry extends DoctorPackManifestEntry {
   // Importance from the classification - the trim rank's second key. The manifest entry itself
   // doesn't persist it; the route supplies it from the per-file classification.
   readonly importance: number;
+  // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B — capped-but-protected): the pages in
+  // THIS entry that grounded an extracted chart fact (from the facts→pages back-map). These are
+  // PINNED — protected ahead of regex/LLM-selected pages, allocated FIRST (Phase 0), and trimmed
+  // LAST. They still respect the page budget: if the pinned set ITSELF overflows the budget, the
+  // LOWEST-yield pinned pages (by pinnedFactKindByPage) drop last. The cover index annotates each
+  // pinned page with a "why" line. ABSENT/empty ⇒ the entry has no pinned pages ⇒ byte-identical
+  // to the pre-PR-3 budget (Phase 0 allocates nothing, the per-doc take is the legacy prefix-take).
+  // Only ever populated when DOCTOR_PACK_GROUNDED_PAGES === 'on'.
+  readonly pinnedPages?: readonly number[];
+  // Per-pinned-page fact kind — the yield-ranking key for the forced-over-budget pinned trim
+  // (sc_condition > screening > active_problem > active_medication). A page absent from this map
+  // ranks last (lowest yield). Only meaningful alongside pinnedPages.
+  readonly pinnedFactKindByPage?: Readonly<Record<number, GroundedFactKind>>;
+}
+
+// doctor-pack grounded pages PR-3, 2026-06-13: pinned-page YIELD ranking for the forced-
+// over-budget trim — lower number = higher yield = trimmed LAST. Mirrors the back-map's
+// FACT_KIND_QUOTE_PRIORITY (sc_condition grant > screening/objective-test > active_problem dx >
+// active_medication) so the page that grounded a 70% PTSD grant is the very last pinned page to go.
+const PINNED_FACT_KIND_YIELD: Readonly<Record<GroundedFactKind, number>> = {
+  sc_condition: 0,
+  screening: 1,
+  active_problem: 2,
+  active_medication: 3,
+};
+// A pinned page with no recorded fact kind ranks below every known kind (lowest yield, drops first).
+const PINNED_YIELD_UNKNOWN = 99;
+function pinnedPageYield(entry: BudgetEntry, page: number): number {
+  const kind = entry.pinnedFactKindByPage?.[page];
+  return kind !== undefined ? PINNED_FACT_KIND_YIELD[kind] : PINNED_YIELD_UNKNOWN;
 }
 
 export interface PackBudgetResult {
@@ -271,12 +305,80 @@ function takeFirstPages(ranges: readonly KeyDocPageRange[], quota: number): read
   return out;
 }
 
+// doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): expand a doc's ranges to a flat,
+// ascending, de-duped page list (the budget reasons over individual pages when an entry carries
+// pinned pages, so a pinned page that is NOT the prefix still survives a partial trim).
+function flattenRanges(ranges: readonly KeyDocPageRange[]): number[] {
+  const pages: number[] = [];
+  for (const r of ranges) for (let p = r.from; p <= r.to; p++) pages.push(p);
+  return [...new Set(pages)].sort((a, b) => a - b);
+}
+
+// doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): pinned-aware per-doc page take. Given a
+// doc's full selected pages + which of them are pinned + a quota, keep `quota` pages, PROTECTING
+// pinned pages: pinned pages are kept first (highest-yield pinned page first, then page order),
+// then the remaining quota is filled from non-pinned pages in page order. The result is re-folded
+// into ascending ranges for the assembler (page order is the pack's reading order; the yield order
+// governs only WHICH pinned page drops if even the pinned set overflows). When the entry has no
+// pinned pages this reduces EXACTLY to the legacy prefix-take (the `byEntry` fast-path in the
+// caller skips it entirely, so flag-off is byte-identical).
+function takePinnedAware(
+  entry: BudgetEntry,
+  quota: number,
+): readonly KeyDocPageRange[] {
+  if (quota <= 0) return [];
+  const allPages = flattenRanges(entry.pageRanges);
+  const pinnedSet = new Set((entry.pinnedPages ?? []).filter((p) => allPages.includes(p)));
+  // Pinned pages, highest yield FIRST (so a forced over-budget pinned trim drops the lowest-yield
+  // pinned page last), then page order as the deterministic tiebreak.
+  const pinnedOrdered = [...pinnedSet].sort((a, b) => {
+    const ya = pinnedPageYield(entry, a);
+    const yb = pinnedPageYield(entry, b);
+    if (ya !== yb) return ya - yb;
+    return a - b;
+  });
+  const kept = new Set<number>();
+  for (const p of pinnedOrdered) {
+    if (kept.size >= quota) break;
+    kept.add(p);
+  }
+  // Fill the rest from non-pinned pages in page order (the legacy prefix behavior for the tail).
+  for (const p of allPages) {
+    if (kept.size >= quota) break;
+    if (!pinnedSet.has(p)) kept.add(p);
+  }
+  return rangesFromSortedPages([...kept].sort((a, b) => a - b));
+}
+
+// Fold an ascending, de-duped page list back into contiguous ranges.
+function rangesFromSortedPages(sorted: readonly number[]): readonly KeyDocPageRange[] {
+  if (sorted.length === 0) return [];
+  const ranges: KeyDocPageRange[] = [];
+  let start = sorted[0]!;
+  let prev = start;
+  for (let i = 1; i < sorted.length; i++) {
+    const cur = sorted[i]!;
+    if (cur === prev + 1) { prev = cur; continue; }
+    ranges.push({ from: start, to: prev });
+    start = cur;
+    prev = cur;
+  }
+  ranges.push({ from: start, to: prev });
+  return ranges;
+}
+
 /**
  * Deterministic pack-level page-budget trim (Ryan: pack targets 10-15pp, max ~20).
  *
  * Assessment 2026-06-12 §1c — CATEGORY BUDGET. The old flat prefix-fill let the "protected"
  * rating decision fill all 20 pages before any clinical note was reached. Allocation is now
- * three deterministic phases:
+ * a Phase-0 pinned reservation followed by three deterministic category phases:
+ *   0. (doctor-pack grounded pages PR-3, POLICY B) PINNED pages reserve budget FIRST — the pages
+ *      the back-map proved grounded a granted SC condition / objective test / problem / med. They
+ *      are protected ahead of the clinical floor and every regex/LLM page, but still CAPPED by the
+ *      budget: if the pinned set itself overflows, the LOWEST-yield pinned pages (sc_condition >
+ *      screening > active_problem > active_medication) drop last. No pinned entries ⇒ no-op ⇒
+ *      byte-identical to the pre-PR-3 budget.
  *   1. FLOORS fill first: clinical (progress_notes / c_and_p_exam / dbq) is guaranteed
  *      CLINICAL_PAGE_FLOOR (4) pages — the dx note is the page the PCP refuses to sign without.
  *   2. CATEGORY SOFT CAPS in priority order (clinical, denial, sc_proof, tests, service, lay):
@@ -338,6 +440,55 @@ export function applyPackPageBudget(
   const categoryTaken = (cat: PackCategory): number =>
     ranked.reduce((sum, e) => sum + (packCategoryOf(e.docType) === cat ? (takenByPath.get(e.filePath) ?? 0) : 0), 0);
 
+  // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B — Phase 0): PINNED pages reserve budget
+  // FIRST, ahead of the clinical floor and every regex/LLM-selected page. A pinned page grounded a
+  // granted SC condition / objective test / active problem / med — the back-map's high-yield set —
+  // so it is sorted to the TOP tier and a forced over-budget trim never drops it before an ordinary
+  // page. CAPPED, not uncapped: pinned reservation stops at `remaining` (the budget). If the pinned
+  // SET ITSELF overflows the budget, pinned pages are reserved in global YIELD order (sc_condition >
+  // screening > active_problem > active_medication, then doc rank, then page order) so the LOWEST-
+  // yield pinned page is the one left out. Each reserved pinned page bumps takenByPath, so the
+  // count-based phases below see pinned docs as already partly filled and never double-count them.
+  // When NO entry carries pinned pages this loop reserves nothing ⇒ the three phases + the legacy
+  // prefix-take run byte-identically to the pre-PR-3 budget.
+  const hasPinned = ranked.some((e) => (e.pinnedPages ?? []).length > 0);
+  // Per-doc pinned pages actually RESERVED (so emission keeps exactly these, highest-yield first).
+  const reservedPinnedByPath = new Map<string, Set<number>>();
+  if (hasPinned) {
+    // Flatten every (entry, pinnedPage) into one globally-ranked list: yield kind asc, then doc
+    // global-rank (the `ranked` index), then page number asc — fully deterministic.
+    const rankIndex = new Map(ranked.map((e, i) => [e.filePath, i]));
+    interface PinnedSlot { entry: BudgetEntry; page: number }
+    const slots: PinnedSlot[] = [];
+    for (const entry of ranked) {
+      const valid = flattenRanges(entry.pageRanges);
+      const seen = new Set<number>();
+      for (const p of entry.pinnedPages ?? []) {
+        if (!valid.includes(p) || seen.has(p)) continue; // only pin real, de-duped selected pages
+        seen.add(p);
+        slots.push({ entry, page: p });
+      }
+    }
+    slots.sort((a, b) => {
+      const ya = pinnedPageYield(a.entry, a.page);
+      const yb = pinnedPageYield(b.entry, b.page);
+      if (ya !== yb) return ya - yb;
+      const ra = rankIndex.get(a.entry.filePath) ?? 0;
+      const rb = rankIndex.get(b.entry.filePath) ?? 0;
+      if (ra !== rb) return ra - rb;
+      return a.page - b.page;
+    });
+    for (const slot of slots) {
+      if (remaining <= 0) break;
+      const got = takeFor(slot.entry, 1); // reserve one page of budget for this pinned page
+      if (got > 0) {
+        const set = reservedPinnedByPath.get(slot.entry.filePath) ?? new Set<number>();
+        set.add(slot.page);
+        reservedPinnedByPath.set(slot.entry.filePath, set);
+      }
+    }
+  }
+
   // Phase 1 — clinical floor fills first.
   let clinicalTaken = 0;
   for (const entry of ranked) {
@@ -368,10 +519,19 @@ export function applyPackPageBudget(
   const trimmedFilePaths: string[] = [];
   for (const entry of ranked) {
     const take = takenByPath.get(entry.filePath) ?? 0;
+    // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): an entry with pinned pages uses the
+    // pinned-aware take so the RESERVED pinned pages survive even when they are not the page-order
+    // prefix (e.g. BB page 412 grounded a grant — it is kept though it is far from page 1). The
+    // non-pinned tail still fills in page order. Entries with no pinned pages take the legacy
+    // prefix-take → byte-identical to the pre-PR-3 budget.
+    const entryHasPinned = (reservedPinnedByPath.get(entry.filePath)?.size ?? 0) > 0;
     if (take === entry.pageCount) {
       keptRangesByPath.set(entry.filePath, entry.pageRanges);
     } else if (take > 0) {
-      keptRangesByPath.set(entry.filePath, takeFirstPages(entry.pageRanges, take));
+      keptRangesByPath.set(
+        entry.filePath,
+        entryHasPinned ? takePinnedAware(entry, take) : takeFirstPages(entry.pageRanges, take),
+      );
       trimNotes.push(`${entry.filePath}: kept ${take} of ${entry.pageCount} selected pages (budget trim)`);
       trimmedFilePaths.push(entry.filePath);
     } else {

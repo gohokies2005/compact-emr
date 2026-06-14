@@ -337,6 +337,112 @@ describe('applyPackPageBudget', () => {
   });
 });
 
+// ============ doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B — capped-but-protected) ===========
+// Pinned pages (the back-mapped pages that grounded a granted SC condition / test / problem / med)
+// are protected AHEAD of regex/LLM-selected pages and trimmed LAST. But the pack still respects
+// PACK_PAGE_BUDGET: if the pinned set itself overflows, the LOWEST-yield pinned page drops last
+// (sc_condition > screening > active_problem > active_medication). No pinned fields ⇒ byte-identical.
+describe('applyPackPageBudget — PINNED pages (PR-3, policy B)', () => {
+  // A budget entry carrying pinned grounded pages (the back-map's high-yield page set for this doc)
+  // plus their per-page fact kind (the yield-ranking key for a forced over-budget pinned trim).
+  function bePinned(
+    filePath: string,
+    docType: BudgetEntry['docType'],
+    classification: BudgetEntry['classification'],
+    importance: number,
+    pageCount: number,
+    pinnedPages: readonly number[],
+    pinnedFactKindByPage: Readonly<Record<number, 'sc_condition' | 'screening' | 'active_problem' | 'active_medication'>>,
+  ): BudgetEntry {
+    return { ...be(filePath, docType, classification, importance, pageCount), pinnedPages, pinnedFactKindByPage };
+  }
+
+  it('(a) flag-on: a pinned grounded page survives a forced over-budget trim while an ordinary regex page is dropped', () => {
+    // A bulk personnel_record (category 'other' — NO floor, NO cap; it only ever gets pages from
+    // leftover global rank) of 900 pages whose page 412 grounded the PTSD grant (pinned). Plus a
+    // rating decision big enough to devour the ENTIRE budget by rank. Without pinning, the 'other'
+    // bulk doc gets ZERO pages (the rating eats the budget) → its grounded page 412 would be lost.
+    // Policy B: Phase 0 reserves page 412 BEFORE the rating decision allocates, so it survives.
+    const entries = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 30),
+      bePinned('bulk.pdf', 'personnel_record', 'bulk', 30, 900, [412], { 412: 'sc_condition' }),
+    ];
+    const r = applyPackPageBudget(entries, PACK_PAGE_BUDGET);
+    expect(r.trimmed).toBe(true);
+    expect(r.postTrimPageCount).toBeLessThanOrEqual(PACK_PAGE_BUDGET);
+    // The pinned page 412 is PROTECTED (Phase 0) even though its doc is the lowest-rank bulk 'other'
+    // doc that would otherwise get nothing — and ONLY page 412 (no floor/cap pulls extra pages).
+    const bulk = r.entries.find((e) => e.filePath === 'bulk.pdf');
+    expect(bulk).toBeDefined();
+    expect(bulk?.pageRanges).toEqual([{ from: 412, to: 412 }]);
+    // The rating decision absorbs the rest of the budget but did NOT push the pinned page out: it
+    // keeps 14 (budget 15 minus the 1 reserved pinned page), i.e. an ORDINARY rating page was the
+    // thing dropped to make room for the pin.
+    const rating = r.entries.find((e) => e.filePath === 'rating.pdf');
+    expect(rating?.pageCount).toBe(PACK_PAGE_BUDGET - 1); // 14
+  });
+
+  it('(a2) a pinned page that is NOT the page-order prefix still survives a partial trim of its own doc', () => {
+    // One doc, 20 selected pages, budget forces a trim. Page 18 is pinned (a grant page deep in the
+    // doc). The legacy prefix-take would drop p18 (keeps p1..p15); pinned-aware MUST keep p18.
+    const entries = [
+      bePinned('rating.pdf', 'rating_decision', 'high_signal', 100, 20, [18], { 18: 'sc_condition' }),
+    ];
+    const r = applyPackPageBudget(entries, PACK_PAGE_BUDGET);
+    const rating = r.entries.find((e) => e.filePath === 'rating.pdf');
+    // 15 pages kept: the pinned p18 + the first 14 by page order.
+    const kept = (rating?.pageRanges ?? []).flatMap((rg) => {
+      const out: number[] = [];
+      for (let p = rg.from; p <= rg.to; p++) out.push(p);
+      return out;
+    });
+    expect(kept).toContain(18);
+    expect(kept.length).toBe(PACK_PAGE_BUDGET);
+  });
+
+  it('(b) when the PINNED set itself overflows the budget, the LOWEST-yield kind (active_medication) drops before sc_condition', () => {
+    // A single bulk doc with 20 pinned pages — more than the budget. 1 sc_condition (highest yield),
+    // 1 active_medication (lowest yield), and 18 active_problem fillers. Budget 15 can hold only 15
+    // of the 20 pinned pages. The forced pinned trim must keep sc_condition and drop the lowest-yield
+    // pages first (active_medication before any sc_condition).
+    const pinnedPages = Array.from({ length: 20 }, (_, i) => i + 1); // pages 1..20
+    const kinds: Record<number, 'sc_condition' | 'screening' | 'active_problem' | 'active_medication'> = {
+      1: 'sc_condition',
+      2: 'active_medication',
+    };
+    for (let p = 3; p <= 20; p++) kinds[p] = 'active_problem';
+    const entries = [bePinned('bb.pdf', 'blue_button', 'bulk', 30, 20, pinnedPages, kinds)];
+    const r = applyPackPageBudget(entries, PACK_PAGE_BUDGET);
+    const bb = r.entries.find((e) => e.filePath === 'bb.pdf');
+    const kept = new Set((bb?.pageRanges ?? []).flatMap((rg) => {
+      const out: number[] = [];
+      for (let p = rg.from; p <= rg.to; p++) out.push(p);
+      return out;
+    }));
+    expect(kept.size).toBe(PACK_PAGE_BUDGET); // exactly 15 of the 20 pinned pages
+    expect(kept.has(1)).toBe(true);  // sc_condition (highest yield) ALWAYS kept
+    expect(kept.has(2)).toBe(false); // active_medication (lowest yield) dropped before any sc_condition
+  });
+
+  it('(d) NO pinned fields ⇒ byte-identical to the pre-PR-3 budget (Phase 0 is a no-op)', () => {
+    // The exact over-budget fixture from the legacy test above, run with no pinned fields, must
+    // produce identical output (same kept pages, same trim notes) — proving Phase 0 + pinned-aware
+    // take collapse to the legacy prefix-take when nothing is pinned.
+    const entries = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 8),
+      be('dbq.pdf', 'dbq', 'high_signal', 90, 6),
+      be('audio.pdf', 'audiogram', 'high_signal', 80, 4),
+      be('notes.pdf', 'progress_notes', 'bulk', 35, 10),
+    ];
+    const r = applyPackPageBudget(entries);
+    expect(r.entries.find((e) => e.filePath === 'rating.pdf')?.pageCount).toBe(8);
+    expect(r.entries.find((e) => e.filePath === 'dbq.pdf')?.pageCount).toBe(5);
+    expect(r.entries.find((e) => e.filePath === 'audio.pdf')?.pageCount).toBe(2);
+    expect(r.entries.find((e) => e.filePath === 'notes.pdf')).toBeUndefined();
+    expect(r.trimmedFilePaths).toEqual(['dbq.pdf', 'audio.pdf', 'notes.pdf']);
+  });
+});
+
 // ============ Assessment 2026-06-12 §1c: CATEGORY budget (caps + clinical floor) ============
 // The flat prefix-fill let "protected" rating decisions fill all 20 pages before any clinical
 // note was reached. Categories now have soft caps + a clinical floor that fills FIRST.

@@ -266,17 +266,22 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
     take: BATCH_LIMIT,
     select: { id: true, caseId: true, filePath: true, attemptsJson: true },
   });
+  // DIAGNOSTIC (2026-06-14): the first deploy healed 0 — instrument WHY each parked row is skipped so we
+  // can see (rows found / no matching Document / no stored pages / still-fails-corrected-heuristic) instead
+  // of a silent 0. Remove once the self-heal is confirmed clearing the backlog.
+  let dxFound = stuckGarbleRows.length;
+  let dxNoDoc = 0, dxNoPages = 0, dxStillFails = 0;
   for (const frs of stuckGarbleRows) {
     try {
       if (isScreeningSummaryKey(frs.filePath) || frs.filePath.includes(RENDERED_MARKER)) continue;
       // Find the matching Document (same s3Key) so we can read its stored pages — no FK between the tables.
       const doc = await prisma.document.findFirst({ where: { caseId: frs.caseId, s3Key: frs.filePath }, select: { id: true } });
-      if (doc === null) continue; // orphan readiness row (reconciled away by the GET route) — leave it
+      if (doc === null) { dxNoDoc += 1; console.log(JSON.stringify({ msg: 'stuck-doc-watcher: phase3 skip no-doc', caseId: frs.caseId, filePath: frs.filePath })); continue; } // orphan readiness row
       const pageRows = await prisma.documentPage.findMany({ where: { documentId: doc.id }, orderBy: { pageNumber: 'asc' }, select: { text: true } });
-      if (pageRows.length === 0) continue; // no stored text to re-judge — Phase 1/2 own the no-pages case
+      if (pageRows.length === 0) { dxNoPages += 1; console.log(JSON.stringify({ msg: 'stuck-doc-watcher: phase3 skip no-pages', caseId: frs.caseId, filePath: frs.filePath, documentId: doc.id })); continue; } // no stored text — Phase 1/2 own no-pages
       const text = pageRows.map((p) => p.text ?? '').join('\n');
       const outcome = classifyReadAttempt({ method: 'textract', extractedText: text, pageCount: pageRows.length });
-      if (!outcome.succeeded) continue; // still genuinely fails the (corrected) heuristic — correctly parked
+      if (!outcome.succeeded) { dxStillFails += 1; console.log(JSON.stringify({ msg: 'stuck-doc-watcher: phase3 still-fails', caseId: frs.caseId, filePath: frs.filePath, reason: outcome.reason, ratio: outcome.corruptedTokenRatio, chars: nonWhitespaceCharCount(text) })); continue; } // still genuinely fails — correctly parked
 
       const prior: readonly unknown[] = Array.isArray(frs.attemptsJson) ? (frs.attemptsJson as readonly unknown[]) : [];
       const attempt = {
@@ -304,6 +309,6 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
   }
 
   const summary: StuckDocWatcherResult = { ranAt: now.toISOString(), refired, sweptToManual, waiting, stamped, reclassified, errors };
-  console.log(JSON.stringify({ msg: 'stuck-doc-watcher: summary', ...summary }));
+  console.log(JSON.stringify({ msg: 'stuck-doc-watcher: summary', ...summary, phase3: { found: dxFound, noDoc: dxNoDoc, noPages: dxNoPages, stillFails: dxStillFails, healed: reclassified } }));
   return summary;
 }

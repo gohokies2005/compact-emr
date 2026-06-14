@@ -66,6 +66,12 @@ export interface DrafterBundle {
     // Fargate drafter REFUSE on a failed/reaped/incomplete extraction (Bonnewitz) instead of trusting
     // the worker's fabricated stage2_semantic:'done'. Only 'chart_ready' is safe to draft on.
     readonly extractionState: ChartBuildState;
+    // Extraction gap counts (P2-3, doc-set closure + sweep hardening, 2026-06-14). When the latest run
+    // is `complete_with_gaps` the chart drafted on a chart the extractor could not fully read (windows
+    // truncated / pages never covered). The RN sees a banner (chart-readiness route); the drafter saw
+    // NOTHING. Carry the worker-recorded counts (mirrors chart-readiness.ts gap read) so the letter's
+    // provenance can note a gapped chart. null = no gaps (or status !== complete_with_gaps).
+    readonly extractionGaps: { readonly truncatedWindows: number; readonly uncoveredPages: number } | null;
   };
   readonly doctorPack: unknown;
   readonly activeJob: unknown;
@@ -156,9 +162,11 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
     }),
     // THIS case's latest extraction run, for the real build-state (extractionState below). Scoped to
     // caseId (not the veteran) — a prior case's failed run must not taint this draft.
+    // resultJson added (P2-3, 2026-06-14): carries the worker-recorded gap counts for a
+    // complete_with_gaps run so the drafter (not just the RN banner) learns the chart was gapped.
     (db as unknown as {
-      chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { triggerHash: true; status: true } }) => Promise<{ triggerHash: string; status: string } | null> };
-    }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true, status: true } }),
+      chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { triggerHash: true; status: true; resultJson: true } }) => Promise<{ triggerHash: string; status: string; resultJson: unknown } | null> };
+    }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true, status: true, resultJson: true } }),
   ]);
 
   // Gate on THIS case's own files only (empty set = ready). The bundle payload still carries the
@@ -176,6 +184,13 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
     thisCaseReadStatuses.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })),
     latestExtractionRun,
   ).state;
+  // Extraction gap counts (P2-3, 2026-06-14). Mirrors chart-readiness.ts:175-178 exactly: only a
+  // `complete_with_gaps` run with a gaps block surfaces counts; everything else is null. The drafter
+  // can then note a gapped chart in the letter provenance instead of silently drafting on a partial read.
+  const rj = latestExtractionRun?.resultJson as { gaps?: { truncatedWindows?: number; uncoveredPages?: number } } | null | undefined;
+  const extractionGaps = (latestExtractionRun?.status === 'complete_with_gaps' && rj?.gaps)
+    ? { truncatedWindows: Number(rj.gaps.truncatedWindows ?? 0), uncoveredPages: Number(rj.gaps.uncoveredPages ?? 0) }
+    : null;
 
   return {
     case: {
@@ -211,6 +226,7 @@ export async function buildDrafterBundle(db: AppDb, caseId: string): Promise<Dra
       ready: chartReadiness.ready,
       manualSummaryRequired: chartReadiness.manualSummaryRequired,
       extractionState,
+      extractionGaps,
     },
     doctorPack: latestDoctorPack,
     activeJob,

@@ -6,7 +6,13 @@ import { buildDrafterBundle } from '../services/drafter-bundle.js';
 // still be computed from THIS case's own files only, so a prior case's unresolved file never blocks
 // a new case's draft.
 
-function makeDb(opts: { captureDocWhere: (w: unknown) => void; captureFrsWhere: (w: unknown) => void }) {
+function makeDb(opts: {
+  captureDocWhere: (w: unknown) => void;
+  captureFrsWhere: (w: unknown) => void;
+  // P2-3 (2026-06-14): optional latest ChartExtractionRun so the gap-count tests can drive a
+  // complete_with_gaps run. Default null = no run yet (matches the prior single-arg callers).
+  extractionRun?: { triggerHash: string; status: string; resultJson: unknown } | null;
+}) {
   const empty = { findMany: async () => [] as unknown[] };
   return {
     case: {
@@ -39,7 +45,7 @@ function makeDb(opts: { captureDocWhere: (w: unknown) => void; captureFrsWhere: 
     doctorPack: { findFirst: async () => null },
     draftJob: { findFirst: async () => null },
     // extractionState derivation (Ryan 2026-06-13): latest run for this case; null = no run yet.
-    chartExtractionRun: { findFirst: async () => null },
+    chartExtractionRun: { findFirst: async () => opts.extractionRun ?? null },
   };
 }
 
@@ -60,5 +66,45 @@ describe('buildDrafterBundle — veteran-scoped documents', () => {
     const bundle = await buildDrafterBundle(db as never, 'CASE-MIGRAINE');
     // CASE-MIGRAINE has zero files of its own → empty set → ready, despite CASE-OSA's blocked file.
     expect(bundle.chartReadiness.ready).toBe(true);
+  });
+});
+
+// P2-3 (doc-set closure + sweep hardening, 2026-06-14): when the latest extraction is
+// complete_with_gaps the RN sees a banner (chart-readiness route) but the drafter previously got NO
+// signal. The bundle now carries the worker-recorded gap counts so the drafter can note a gapped
+// chart in the letter provenance. Mirrors chart-readiness.ts:175-178 read shape exactly.
+describe('buildDrafterBundle — extraction gap counts', () => {
+  it('carries truncatedWindows/uncoveredPages when the latest run is complete_with_gaps', async () => {
+    const db = makeDb({
+      captureDocWhere: () => {}, captureFrsWhere: () => {},
+      extractionRun: { triggerHash: 'h1', status: 'complete_with_gaps', resultJson: { gaps: { truncatedWindows: 2, uncoveredPages: 5 } } },
+    });
+    const bundle = await buildDrafterBundle(db as never, 'CASE-MIGRAINE');
+    expect(bundle.chartReadiness.extractionGaps).toEqual({ truncatedWindows: 2, uncoveredPages: 5 });
+  });
+
+  it('coerces missing gap fields to 0 (a complete_with_gaps run whose gaps block is partial)', async () => {
+    const db = makeDb({
+      captureDocWhere: () => {}, captureFrsWhere: () => {},
+      extractionRun: { triggerHash: 'h1', status: 'complete_with_gaps', resultJson: { gaps: { uncoveredPages: 3 } } },
+    });
+    const bundle = await buildDrafterBundle(db as never, 'CASE-MIGRAINE');
+    expect(bundle.chartReadiness.extractionGaps).toEqual({ truncatedWindows: 0, uncoveredPages: 3 });
+  });
+
+  it('extractionGaps is null for a clean complete run (no gaps to report)', async () => {
+    const db = makeDb({
+      captureDocWhere: () => {}, captureFrsWhere: () => {},
+      extractionRun: { triggerHash: 'h1', status: 'complete', resultJson: { gaps: { truncatedWindows: 9, uncoveredPages: 9 } } },
+    });
+    const bundle = await buildDrafterBundle(db as never, 'CASE-MIGRAINE');
+    // status !== complete_with_gaps → null even though a stale gaps block is present.
+    expect(bundle.chartReadiness.extractionGaps).toBeNull();
+  });
+
+  it('extractionGaps is null when there is no extraction run yet', async () => {
+    const db = makeDb({ captureDocWhere: () => {}, captureFrsWhere: () => {} });
+    const bundle = await buildDrafterBundle(db as never, 'CASE-MIGRAINE');
+    expect(bundle.chartReadiness.extractionGaps).toBeNull();
   });
 });

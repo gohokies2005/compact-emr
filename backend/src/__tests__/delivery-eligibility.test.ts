@@ -170,9 +170,43 @@ describe('assertDeliveryEligible — imported letters (PDF byte-binding)', () =>
     expect(r.reason).toBe('signoff_not_affirmative');
   });
 
-  it('FAIL-OPEN (import with no PDF key): nothing to re-hash → byte step skipped, exists+affirmative already passed', async () => {
+  // ── P2-1 (doc-set closure + sweep hardening, 2026-06-14): imports NEVER fail open ──
+  // For an external_import the PDF byte-bind is the ONLY proof the delivered bytes match the
+  // attestation — there is no TXT re-render backstop. So whenever the byte step CANNOT run, an import
+  // must BLOCK ('cannot_verify_import'), unlike a normal letter which fails open to the TXT backstop.
+  it('CANNOT_VERIFY_IMPORT (no PDF key): an import with nothing to re-hash BLOCKS — never fail-open', async () => {
     const db = makeImportDb([{ answersJson: AFFIRMATIVE, signedVersion: 7, signedContentSha256: PDF_SHA }], { pdfKey: null });
     const r = await assertDeliveryEligible(db, 'C1', 7, { s3: fakeS3Pdf(PDF_BYTES), bucketName: 'phi-bucket' });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('cannot_verify_import');
+  });
+
+  it('CANNOT_VERIFY_IMPORT (S3 unconfigured): an import with no s3/bucket BLOCKS (a normal letter would fail-open here)', async () => {
+    const db = makeImportDb([{ answersJson: AFFIRMATIVE, signedVersion: 7, signedContentSha256: PDF_SHA }]);
+    const r = await assertDeliveryEligible(db, 'C1', 7, {}); // no s3, no bucket
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('cannot_verify_import');
+  });
+
+  it('CANNOT_VERIFY_IMPORT (legacy sign-off, no bound hash): an import with no signedContentSha256 BLOCKS', async () => {
+    const db = makeImportDb([{ answersJson: AFFIRMATIVE, signedVersion: null, signedContentSha256: null }]);
+    const r = await assertDeliveryEligible(db, 'C1', 7, { s3: fakeS3Pdf(PDF_BYTES), bucketName: 'phi-bucket' });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('cannot_verify_import');
+  });
+
+  it('exists + affirmative gates STILL run before the import-verify block (no_signoff beats cannot_verify_import)', async () => {
+    // An import with no s3/bucket AND no sign-off must report no_signoff (the more fundamental gate),
+    // proving the import-block didn't short-circuit ahead of the exists check.
+    const db = makeImportDb([]);
+    const r = await assertDeliveryEligible(db, 'C1', 7, {});
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe('no_signoff');
+  });
+
+  it('REGRESSION: a NORMAL (non-import) letter with no s3/bucket STILL fails open (TXT backstop) — import-block must not bleed into the normal path', async () => {
+    const db = makeDb([{ answersJson: AFFIRMATIVE, signedVersion: 7, signedContentSha256: SIGNED_SHA }]);
+    const r = await assertDeliveryEligible(db, 'C1', 7, {}); // no s3, no bucket
     expect(r.eligible).toBe(true);
     expect(r.details?.byteCheckSkipped).toBe(true);
   });

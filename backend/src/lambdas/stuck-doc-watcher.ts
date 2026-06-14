@@ -281,7 +281,18 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
       if (pageRows.length === 0) { dxNoPages += 1; console.log(JSON.stringify({ msg: 'stuck-doc-watcher: phase3 skip no-pages', caseId: frs.caseId, filePath: frs.filePath, documentId: doc.id })); continue; } // no stored text — Phase 1/2 own no-pages
       const text = pageRows.map((p) => p.text ?? '').join('\n');
       const outcome = classifyReadAttempt({ method: 'textract', extractedText: text, pageCount: pageRows.length });
-      if (!outcome.succeeded) { dxStillFails += 1; console.log(JSON.stringify({ msg: 'stuck-doc-watcher: phase3 still-fails', caseId: frs.caseId, filePath: frs.filePath, reason: outcome.reason, ratio: outcome.corruptedTokenRatio, chars: nonWhitespaceCharCount(text) })); continue; } // still genuinely fails — correctly parked
+      if (!outcome.succeeded) {
+        dxStillFails += 1;
+        // DIAGNOSTIC: capture WHAT the stored text actually is — mojibake (â€/Â·), replacement chars (�),
+        // control chars, or genuine OCR soup — so we fix the real root (encoding break vs OCR garble vs
+        // heuristic). Sample the first 220 chars + char-class counts. (2026-06-14)
+        const replacementChars = (text.match(/�/g) ?? []).length;
+        const mojibakeMarks = (text.match(/â€|Ã‚|Â[^\x00-\x7F]?|Ã.|â€™|â€œ/g) ?? []).length;
+        const controlChars = (text.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) ?? []).length;
+        const nonAscii = (text.match(/[^\x00-\x7F]/g) ?? []).length;
+        console.log(JSON.stringify({ msg: 'stuck-doc-watcher: phase3 still-fails', caseId: frs.caseId, filePath: frs.filePath, reason: outcome.reason, ratio: outcome.corruptedTokenRatio, chars: nonWhitespaceCharCount(text), replacementChars, mojibakeMarks, controlChars, nonAscii, sample: text.slice(0, 220) }));
+        continue;
+      } // still genuinely fails — correctly parked
 
       const prior: readonly unknown[] = Array.isArray(frs.attemptsJson) ? (frs.attemptsJson as readonly unknown[]) : [];
       const attempt = {

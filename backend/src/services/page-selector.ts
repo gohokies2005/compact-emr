@@ -334,6 +334,13 @@ export interface PageSelectorInput {
   // rule) include pages that mention what the letter is actually about. Optional: absent keeps
   // the recent-encounter rule alone.
   readonly claimedCondition?: string;
+  // doctor-pack grounded pages, 2026-06-13 (PR-2, DARK): the page numbers in THIS document that
+  // grounded an extracted chart fact (the rating-grant page, the AHI page, the med-list page),
+  // from the facts→pages back-map (doctor-pack-grounded-pages.ts). These are UNIONED into the
+  // selection on EVERY path — including the blue_button hard-exclude (a BB page that grounded a
+  // fact gets pulled even though the BB as a whole stays excluded). The generator only populates
+  // this when DOCTOR_PACK_GROUNDED_PAGES === 'on'; absent ⇒ byte-identical to today.
+  readonly groundedPages?: readonly number[];
 }
 
 export interface PageSelectorResult {
@@ -466,7 +473,45 @@ function pageMatchesRule(text: string, rule: RuleSet, docHasStrongAnchor: boolea
  *   8. High-signal confidence fallback: if rules selected < 2 pages, include all
  *      NON-boilerplate pages + flag for RN (1.2.0: was all pages).
  */
+// doctor-pack grounded pages, 2026-06-13 (PR-2): expand a result's pageRanges to also include the
+// grounded pages (the back-mapped pages that grounded an extracted chart fact). UNION applied on
+// EVERY selectPages path — including the blue_button hard-exclude — so a grounded BB page is pulled
+// while the BB as a whole stays excluded. No-op when groundedPages is empty/absent (flag off ⇒
+// byte-identical). Grounded pages outside [1, pageCount] are dropped (defensive against bad OCR
+// page numbers). The rationale gains a '+ N grounded page(s)' suffix ONLY when pages were added.
+// Exported so the generator's LLM-picker branch (which bypasses selectPages) can apply the SAME
+// grounded-page union to its result.
+export function unionGroundedPagesIntoResult(
+  result: PageSelectorResult,
+  pageCount: number,
+  groundedPages: readonly number[] | undefined,
+): PageSelectorResult {
+  const grounded = (groundedPages ?? []).filter((p) => Number.isInteger(p) && p >= 1 && (pageCount <= 0 || p <= pageCount));
+  if (grounded.length === 0) return result;
+  const existing: number[] = [];
+  for (const r of result.pageRanges) for (let p = r.from; p <= r.to; p++) existing.push(p);
+  const before = new Set(existing);
+  const added = grounded.filter((p) => !before.has(p));
+  if (added.length === 0) return result;
+  return {
+    ...result,
+    pageRanges: rangesFromIncluded([...existing, ...grounded]),
+    selectorRationale: `${result.selectorRationale}; +${added.length} grounded page(s) (chart provenance)`,
+  };
+}
+
+function unionGroundedPages(
+  result: PageSelectorResult,
+  input: PageSelectorInput,
+): PageSelectorResult {
+  return unionGroundedPagesIntoResult(result, input.pageCount, input.groundedPages);
+}
+
 export function selectPages(input: PageSelectorInput): PageSelectorResult {
+  return unionGroundedPages(selectPagesCore(input), input);
+}
+
+function selectPagesCore(input: PageSelectorInput): PageSelectorResult {
   if (input.physicianIncludeAllPages === true) {
     return {
       pageRanges: allPages(input.pageCount),

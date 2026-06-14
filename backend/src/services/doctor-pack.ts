@@ -38,9 +38,14 @@ const MAX_PAGES_PER_FILE = 80;
 // compress / page-image-downsample. This is NOT the curation target - that's PACK_PAGE_BUDGET.
 export const PACK_PAGE_TARGET = 250;
 
-// Chunk D: Ryan's curation budget - the pack targets 10-15pp, hard-trims at 20. After per-doc
-// page selection, applyPackPageBudget() deterministically rank-trims the manifest down to this.
-export const PACK_PAGE_BUDGET = 20;
+// Chunk D: Ryan's curation budget - the pack targets ~15pp. After per-doc page selection,
+// applyPackPageBudget() deterministically rank-trims the manifest down to this.
+// doctor-pack grounded pages, 2026-06-13 (E2): tightened 20 -> 15. The budget now runs LAST over
+// the COMPLETE entry set (rendered non-PDF pages, the veteran statement, grounded pages) — only
+// the cover index is exempt and added on top — so the delivered pack lands ~15-17pp (15 budgeted
+// content + 1 cover, with the whole-doc-passthrough exemption retired so null-pageCount docs are
+// trimmable, not whole-shipped). Caps below re-sum to 15 to match.
+export const PACK_PAGE_BUDGET = 15;
 
 // Assessment 2026-06-12 §1c (category budget): docType -> pack category. Soft caps + floors
 // replace the old flat "protected docTypes fill first" rule, which let a rating decision eat
@@ -78,15 +83,17 @@ export function packCategoryOf(docType: KeyDocRecord['docType']): PackCategory {
 
 // Soft caps for the priority allocation phase. clinical's "cap" equals its floor — its
 // guaranteed pages come from the floor phase; anything more comes from leftover global rank.
-// 4 + 4 + 6 + 3 + 1 + 2 = 20 = PACK_PAGE_BUDGET: under full contention every category gets
-// exactly its allowance.
+// doctor-pack grounded pages, 2026-06-13 (E2): re-summed to the tightened PACK_PAGE_BUDGET=15.
+// 4 + 3 + 4 + 2 + 1 + 1 = 15: under full contention every category gets exactly its allowance.
+// The clinical floor (4) is unchanged — the dx note the PCP refuses to sign without is sacred;
+// the squeeze came out of sc_proof (6->4), denial (4->3), tests (3->2), lay (2->1).
 const CATEGORY_SOFT_CAPS: Record<Exclude<PackCategory, 'other'>, number> = {
   clinical: 4,
-  denial: 4,
-  sc_proof: 6,
-  tests: 3,
+  denial: 3,
+  sc_proof: 4,
+  tests: 2,
   service: 1,
-  lay: 2,
+  lay: 1,
 };
 
 // Clinical dx pages have a guaranteed FLOOR that fills FIRST (PCP: "a pack without the

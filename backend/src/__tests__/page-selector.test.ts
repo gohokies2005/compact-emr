@@ -404,3 +404,63 @@ describe('selectPages — invariants', () => {
     expect(JSON.stringify(input)).toBe(before);
   });
 });
+
+// doctor-pack grounded pages, 2026-06-13 (PR-2): grounded pages union into EVERY path, including
+// the blue_button hard-exclude. groundedPages absent ⇒ byte-identical (covered implicitly by the
+// 37 tests above that never pass it; here we assert the union behavior when present).
+describe('selectPages — grounded-page union (PR-2)', () => {
+  const bbPages = Array.from({ length: 20 }, (_, i) => p(i + 1, 'blue button dump page'));
+
+  it('pulls a grounded page out of a hard-excluded large Blue Button (BB-as-a-whole stays excluded)', () => {
+    const r = selectPages({
+      filePath: 'records/Blue_Button_VA.pdf',
+      docType: 'blue_button',
+      classification: 'bulk',
+      pageCount: 900,
+      pages: bbPages,
+      groundedPages: [412, 870],
+    });
+    // Only the grounded pages — NOT the whole dump.
+    expect(r.pageRanges).toEqual([{ from: 412, to: 412 }, { from: 870, to: 870 }]);
+    expect(r.selectorRationale).toContain('grounded page');
+  });
+
+  it('unions grounded pages WITH a normal selection and coalesces adjacency', () => {
+    const r = selectPages({
+      filePath: 'records/rating.pdf',
+      docType: 'rating_decision',
+      classification: 'high_signal',
+      pageCount: 5,
+      pages: [p(1, 'Rating decision: granted.'), p(2, 'continued'), p(3, 'x'), p(4, 'y'), p(5, 'z')],
+      groundedPages: [2, 3],
+    });
+    // rating_decision (high_signal) selects all 5; grounded [2,3] already inside → no change, no suffix.
+    expect(r.pageRanges).toEqual([{ from: 1, to: 5 }]);
+    expect(r.selectorRationale).not.toContain('grounded page');
+  });
+
+  it('drops grounded page numbers outside [1, pageCount] (defensive)', () => {
+    const r = selectPages({
+      filePath: 'records/Blue_Button_VA.pdf',
+      docType: 'blue_button',
+      classification: 'bulk',
+      pageCount: 100,
+      pages: bbPages,
+      groundedPages: [50, 0, 999, -3],
+    });
+    expect(r.pageRanges).toEqual([{ from: 50, to: 50 }]);
+  });
+
+  it('groundedPages empty ⇒ unchanged blue_button hard-exclude (flag-off shape)', () => {
+    const r = selectPages({
+      filePath: 'records/Blue_Button_VA.pdf',
+      docType: 'blue_button',
+      classification: 'bulk',
+      pageCount: 900,
+      pages: bbPages,
+      groundedPages: [],
+    });
+    expect(r.pageRanges).toEqual([]);
+    expect(r.selectorRationale).not.toContain('grounded page');
+  });
+});

@@ -14,8 +14,10 @@ import {
   type PackCategory,
 } from './doctor-pack.js';
 import { classifyDocument, CLASSIFIER_VERSION_NUM } from './key-docs-classifier.js';
-import { selectPages, type PageSelectorInputPage, type PageSelectorResult } from './page-selector.js';
+import { selectPages, unionGroundedPagesIntoResult, type PageSelectorInputPage, type PageSelectorResult } from './page-selector.js';
 import { selectPagesLlm, shouldUseLlmPicker, PAGE_LLM_VERSION } from './doctor-pack-page-llm.js';
+// doctor-pack grounded pages, 2026-06-13 (PR-2): facts→pages back-map.
+import { groundedSourcePagesForCase, type GroundedPage, type GroundedPagesDb } from './doctor-pack-grounded-pages.js';
 import { aggregateChartSummary } from './chart-summary-aggregator.js';
 import { publishDoctorPackQueued } from './doctor-pack-queue.js';
 import { isDoctorPackS3Key } from './s3-key-safety.js';
@@ -626,6 +628,18 @@ export async function generateDoctorPackForCase(
     'imaging', 'sleep_study', 'personnel_record', 'service_treatment_record_summary',
     'benefit_summary', 'unspecified', 'progress_notes',
   ]);
+
+  // doctor-pack grounded pages, 2026-06-13 (PR-2, DARK): pull the EXACT source pages that grounded
+  // an extracted chart fact (the rating-grant page, the AHI page, the med-list page) and UNION them
+  // into each document's selected page set — so a 1,000-page Blue Button dump still contributes the
+  // one page that grounded a granted condition. Gated behind DOCTOR_PACK_GROUNDED_PAGES === 'on'
+  // (mirrors the CHART_EXTRACT_FULLREAD dark-launch discipline). Flag OFF ⇒ empty map ⇒ selectPages
+  // receives no groundedPages ⇒ byte-identical to today. The back-map is a $0 pure read (no LLM).
+  const groundedPagesEnabled = process.env['DOCTOR_PACK_GROUNDED_PAGES'] === 'on';
+  const groundedByDocumentId: Map<string, GroundedPage[]> = groundedPagesEnabled
+    ? await groundedSourcePagesForCase(db as unknown as GroundedPagesDb, caseId)
+    : new Map();
+
   let packPickerCostUsd = 0;
   const perFileSelection = await Promise.all(classifiedFiles.map(async (f) => {
     const pageRows = pagesByDocumentId.get(f.documentId) ?? [];
@@ -638,16 +652,22 @@ export async function generateDoctorPackForCase(
     }));
     const existing = existingByPath.get(f.filePath);
     const physicianOverride = existing?.physicianIncludeAllPages ?? false;
+    // PR-2 (DARK): the grounded pages for THIS document (empty unless the flag is on). Passed into
+    // selectPages so the union (incl. the blue_button hard-exclude override) happens in one place;
+    // the LLM-picker branch bypasses selectPages, so it gets the same union applied explicitly.
+    const groundedPages = (groundedByDocumentId.get(f.documentId) ?? []).map((g) => g.page);
+    const pickerPageCount = f.pageCount ?? pageRows.length ?? 0;
     // Deterministic regex selector — the fail-safe. Used directly for non-LLM docTypes, and as the
     // fallback whenever the LLM picker is unavailable / errors / returns nothing usable.
     const runRegex = (): PageSelectorResult => selectPages({
       filePath: f.filePath,
       docType: cls.docType,
       classification: cls.classification,
-      pageCount: f.pageCount ?? pageRows.length ?? 0,
+      pageCount: pickerPageCount,
       pages: pagesInput,
       physicianIncludeAllPages: physicianOverride,
       ...(claimedCondition !== undefined ? { claimedCondition } : {}),
+      ...(groundedPages.length > 0 ? { groundedPages } : {}),
     });
     let selection: PageSelectorResult;
     const textPageCount = pagesInput.filter((p) => (p.text ?? '').trim().length > 0).length;
@@ -659,7 +679,10 @@ export async function generateDoctorPackForCase(
       });
       if (llm !== null) {
         packPickerCostUsd += llm.costUsd;
-        selection = { pageRanges: llm.pageRanges, selectorRationale: llm.rationale, needsRnReview: false, selectorVersion: PAGE_LLM_VERSION };
+        const llmResult: PageSelectorResult = { pageRanges: llm.pageRanges, selectorRationale: llm.rationale, needsRnReview: false, selectorVersion: PAGE_LLM_VERSION };
+        // PR-2: union grounded pages into the LLM picker's output too (it never saw them). When the
+        // flag is off groundedPages is empty ⇒ this is the unchanged llmResult.
+        selection = unionGroundedPagesIntoResult(llmResult, pickerPageCount, groundedPages);
       } else {
         selection = runRegex();
       }
@@ -739,9 +762,14 @@ export async function generateDoctorPackForCase(
       pageCount: s.selection.pageRanges.reduce((sum, r) => sum + Math.max(0, r.to - r.from + 1), 0),
     }));
 
-  // Re-sort the combined set with the manifest's own comparator (tier > importance > path)
-  // so appended bulk docs land last, then apply Ryan's pack page budget (10-15pp target,
-  // hard trim at PACK_PAGE_BUDGET=20) deterministically.
+  // Re-sort the combined set with the manifest's own comparator (tier > importance > path) so
+  // appended bulk docs land last. doctor-pack grounded pages, 2026-06-13 (E2): the page BUDGET
+  // no longer runs here. It used to trim THIS (PDF-only) set, after which the rendered non-PDF
+  // pages, the veteran statement, and (PR-2) the grounded pages were APPENDED — escaping the
+  // budget entirely, so a "15-page" pack shipped 25+. The budget now runs ONCE, LAST, over the
+  // COMPLETE post-render/post-statement set (the cover index is the only exemption — it is added
+  // on top afterward). So here we only ORDER + carry the full selector ranges forward; the trim
+  // happens at applyPackPageBudget(orderedBudgetEntries) below.
   const tierOrder: Record<string, number> = { high_signal: 0, normal: 1, bulk: 2 };
   const combinedEntries: BudgetEntry[] = [...refinedEntries, ...appendedEntries]
     .map((e) => ({ ...e, importance: clsByPath.get(e.filePath)?.importance ?? 50 }))
@@ -752,12 +780,9 @@ export async function generateDoctorPackForCase(
       if (a.importance !== b.importance) return b.importance - a.importance;
       return a.filePath.localeCompare(b.filePath);
     });
-  const budget = applyPackPageBudget(combinedEntries, PACK_PAGE_BUDGET);
-  const trimmedPaths = new Set(budget.trimmedFilePaths);
   // Strip the budget-only `importance` so manifestJson keeps the exact entry contract the
-  // assembler + RN review UI already consume.
-  const finalEntries = budget.entries.map(({ importance: _importance, ...entry }) => entry);
-  const finalRangesByPath = new Map(finalEntries.map((e) => [e.filePath, e.pageRanges]));
+  // assembler + RN review UI already consume. No trim yet — full selector ranges flow into render.
+  const finalEntries = combinedEntries.map(({ importance: _importance, ...entry }) => entry);
 
   // ===== WAVE 2 (assessment 2026-06-12 §1b/1d/§3) + ROUND 2 (C/D/E/F): label, render, gate =====
 
@@ -794,6 +819,16 @@ export async function generateDoctorPackForCase(
     readonly entry: LabeledEntry;
     readonly importance: number;
     readonly mentionsClaimedCondition: boolean;
+    // doctor-pack grounded pages, 2026-06-13 (E2): the ORIGINAL source filePath (the KeyDoc key).
+    // For a non-PDF source whose entry.filePath was swapped to a rendered `_rendered/...` key, this
+    // stays the original document path so the LATE budget's per-entry trim can be mapped back to
+    // its KeyDoc row. Rendered-only entries (veteran statement, cover) have no KeyDoc row → null.
+    readonly originalFilePath: string | null;
+    // doctor-pack grounded pages, 2026-06-13 (E2): the document's available page-text count. For a
+    // whole-doc passthrough entry (empty pageRanges + null Document.pageCount) this is what makes
+    // it TRIMMABLE — the budget previously saw pageCount 0 and shipped the whole PDF. null when
+    // unknown (no per-page OCR) — the budget keeps the legacy whole-doc passthrough for those.
+    readonly availablePageCount: number | null;
   }
   const renderNotes: string[] = [];
   const packEntryMetas: PackEntryMeta[] = [];
@@ -802,8 +837,9 @@ export async function generateDoctorPackForCase(
     const importance = clsByPath.get(entry.filePath)?.importance ?? 50;
     const docText = (pagesByDocumentId.get(meta?.id ?? '') ?? []).map((p) => p.text).join('\n');
     const mentionsClaimedCondition = textMentionsCondition(docText, claimedCondition);
+    const availablePageCount = meta !== undefined ? (pagesByDocumentId.get(meta.id ?? '') ?? []).length || null : null;
     if (meta === undefined || !isNonPdfSource(entry.filePath, meta.filename ?? null, meta.contentType ?? null)) {
-      packEntryMetas.push({ entry, importance, mentionsClaimedCondition });
+      packEntryMetas.push({ entry, importance, mentionsClaimedCondition, originalFilePath: entry.filePath, availablePageCount });
       continue;
     }
     const displayName = displayFileName(entry.filePath, meta.filename ?? null);
@@ -832,6 +868,9 @@ export async function generateDoctorPackForCase(
         },
         importance,
         mentionsClaimedCondition,
+        // E2: KeyDoc bookkeeping follows the ORIGINAL document path, not the rendered key.
+        originalFilePath: entry.filePath,
+        availablePageCount: rendered.pageCount,
       });
     } catch (renderErr) {
       console.warn(`doctor-pack: could not render non-PDF source ${displayName} (entry dropped, pack continues):`, renderErr);
@@ -879,6 +918,9 @@ export async function generateDoctorPackForCase(
           },
           importance: 70,
           mentionsClaimedCondition: textMentionsCondition(statementText, claimedCondition),
+          // E2: a rendered-only entry with no source Document → no KeyDoc row to map back to.
+          originalFilePath: null,
+          availablePageCount: rendered.pageCount,
         });
       } catch (statementErr) {
         console.warn('doctor-pack: could not render the veteran statement (pack continues):', statementErr);
@@ -895,6 +937,59 @@ export async function generateDoctorPackForCase(
     filePath: m.entry.filePath,
   }));
 
+  // ===== doctor-pack grounded pages, 2026-06-13 (E2): THE budget — run LAST, over the COMPLETE set
+  // (rendered non-PDF pages + the veteran statement are now INSIDE the budget; the cover index is
+  // the ONLY exemption and is added on top afterward). Two correctness fixes vs the old early pass:
+  //   1. Rendered/statement pages used to be appended AFTER the trim, escaping the budget.
+  //   2. A whole-doc passthrough entry (empty pageRanges + null Document.pageCount) had pageCount 0,
+  //      so the budget couldn't see its size and shipped the WHOLE PDF. We now derive a real
+  //      pageCount from the document's available page-text count (availablePageCount) so it is
+  //      TRIMMABLE. (Only entries with genuinely-unknown size — no per-page OCR — keep the legacy
+  //      whole-doc passthrough.)
+  // The budget keys off entry.filePath (which may be a rendered key); we map its output back to the
+  // metas by that same key, and separately back to ORIGINAL paths for KeyDoc bookkeeping below.
+  const orderedBudgetEntries: BudgetEntry[] = orderedMetas.map((m) => {
+    const e = m.entry;
+    const hasRanges = e.pageRanges.length > 0;
+    // Whole-doc passthrough with a KNOWN available page count → synthesize a 1..N range so the
+    // budget can trim it. Unknown (null) → leave empty ranges (legacy passthrough, budget-exempt).
+    const ranges = hasRanges
+      ? e.pageRanges
+      : (m.availablePageCount !== null ? [{ from: 1, to: m.availablePageCount }] : []);
+    const pageCount = ranges.reduce((sum, r) => sum + Math.max(0, r.to - r.from + 1), 0);
+    return {
+      filePath: e.filePath,
+      docType: e.docType,
+      classification: e.classification,
+      pageRanges: ranges,
+      pageCount,
+      importance: m.importance,
+    };
+  });
+  const budget = applyPackPageBudget(orderedBudgetEntries, PACK_PAGE_BUDGET);
+  const budgetByKey = new Map(budget.entries.map((e) => [e.filePath, e]));
+  // Re-emit the metas in their ordered sequence, dropping any the budget evicted entirely and
+  // applying the budgeted ranges/pageCount to the survivors. The cover is added AFTER this.
+  const budgetedMetas: PackEntryMeta[] = [];
+  for (const m of orderedMetas) {
+    const budgeted = budgetByKey.get(m.entry.filePath);
+    if (budgeted === undefined) continue; // evicted by the budget
+    budgetedMetas.push({ ...m, entry: { ...m.entry, pageRanges: budgeted.pageRanges, pageCount: budgeted.pageCount } });
+  }
+  // KeyDoc bookkeeping (keyed by ORIGINAL document path): which originals were trimmed, and the
+  // exact ranges that ended up in the pack. Rendered keys map back to originalFilePath; the budget
+  // also reports trims under the rendered key, so translate.
+  const trimmedPaths = new Set<string>();
+  const finalRangesByPath = new Map<string, readonly { from: number; to: number }[]>();
+  const renderedKeyToOriginal = new Map(orderedMetas.map((m) => [m.entry.filePath, m.originalFilePath]));
+  for (const tp of budget.trimmedFilePaths) {
+    const orig = renderedKeyToOriginal.get(tp);
+    if (orig != null) trimmedPaths.add(orig);
+  }
+  for (const m of budgetedMetas) {
+    if (m.originalFilePath !== null) finalRangesByPath.set(m.originalFilePath, m.entry.pageRanges);
+  }
+
   // ROUND 2 (D): one-page cover index, rendered + prepended as manifest entry #1. Fail-open:
   // a cover render failure drops only the cover (note in trimNotes), never the pack.
   const dedupAndBudgetNotes = [...dedup.notes, ...budget.trimNotes];
@@ -907,7 +1002,7 @@ export async function generateDoctorPackForCase(
         claimType: caseWithDocs.claimType ?? null,
         framingChoice: caseWithDocs.framingChoice ?? null,
         upstreamScCondition: caseWithDocs.upstreamScCondition ?? null,
-        entries: orderedMetas.map((m) => ({
+        entries: budgetedMetas.map((m) => ({
           displayLabel: m.entry.displayLabel,
           category: packCategoryOf(m.entry.docType),
           pageRanges: m.entry.pageRanges,
@@ -937,7 +1032,7 @@ export async function generateDoctorPackForCase(
     }
   }
 
-  const packEntries: LabeledEntry[] = [...(coverEntry !== null ? [coverEntry] : []), ...orderedMetas.map((m) => m.entry)];
+  const packEntries: LabeledEntry[] = [...(coverEntry !== null ? [coverEntry] : []), ...budgetedMetas.map((m) => m.entry)];
   const packTrimNotes = [...dedupAndBudgetNotes, ...renderNotes];
   const refinedTotalPageCount = packEntries.reduce((sum, e) => sum + e.pageCount, 0);
 

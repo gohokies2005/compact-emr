@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildVeteranStatementHeader,
   generateDoctorPackForCase,
@@ -111,6 +111,11 @@ function makeGenDb(
     // ROUND 2 (C): the lay-statement source field + the intake date its header carries.
     veteranStatement?: string | null;
     caseCreatedAt?: Date;
+    // doctor-pack grounded pages, 2026-06-13 (PR-2): extracted, page-grounded chart rows. Each
+    // injected as a sc_conditions row with source='extracted' + sourceDocumentId/sourcePage so the
+    // back-map (doctor-pack-grounded-pages.ts) maps it to a page. Only consulted when the
+    // DOCTOR_PACK_GROUNDED_PAGES flag is on (else the delegates are never called).
+    groundedScRows?: readonly { sourceDocumentId: string; sourcePage: number; sourceQuote: string }[];
   } = {},
 ) {
   const caseVersion = opts.caseVersion ?? 6;
@@ -154,6 +159,15 @@ function makeGenDb(
     fileReadStatus: { findMany: vi.fn(async () => []) },
     keyDoc: { findMany: vi.fn(async () => []) },
     documentPage: { findMany: vi.fn(async () => opts.pageRows ?? DEFAULT_PAGE_ROWS) },
+    // doctor-pack grounded pages, 2026-06-13 (PR-2): the three provenance delegates the back-map
+    // reads. Injected SC rows carry source='extracted'; problems/meds default empty here.
+    scCondition: {
+      findMany: vi.fn(async () =>
+        (opts.groundedScRows ?? []).map((r) => ({ source: 'extracted', sourceDocumentId: r.sourceDocumentId, sourcePage: r.sourcePage, sourceQuote: r.sourceQuote, confidence: null })),
+      ),
+    },
+    activeProblem: { findMany: vi.fn(async () => []) },
+    activeMedication: { findMany: vi.fn(async () => []) },
     $transaction: vi.fn(async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx)),
   };
   return { db: db as never, tx, created, spies: { doctorPackCreate, activityLogCreate, packFindFirst: db.doctorPack.findFirst } };
@@ -547,5 +561,92 @@ describe('generateDoctorPackForCase — ROUND 2', () => {
     expect(keys).toContain('cases/CASE-1/_rendered/veteran-statement-v6.pdf');
     const totalPages = manifest.entries.reduce((sum, e) => sum + e.pageCount, 0);
     expect(created.data?.pageCount).toBe(totalPages);
+  });
+});
+
+// ============================================================================================
+// doctor-pack grounded pages, 2026-06-13 (PR-2, DARK): the grounded-page layer behind
+// DOCTOR_PACK_GROUNDED_PAGES. Flag ON ⇒ a Blue Button page that grounded an extracted SC fact is
+// pulled even though the BB as a whole stays excluded. Flag OFF ⇒ unchanged (BB contributes
+// nothing). Uses the existing pack-test rig (makeGenDb + injectable S3).
+// ============================================================================================
+describe('generateDoctorPackForCase — grounded-page layer (PR-2, flag-gated)', () => {
+  // A large Blue Button dump (hard-excluded by the selector) whose pages 412 + 870 grounded the
+  // PTSD grant + a med. 900 pages so both grounded pages are in range and it is NOT a small-BB.
+  const BB_DOC: MockDocument = {
+    id: 'doc-bb',
+    s3Key: 'cases/CASE-1/cccc3333-Blue_Button_VA.pdf',
+    pageCount: 900,
+    docTag: null,
+    filename: 'Blue_Button_VA.pdf',
+    contentType: 'application/pdf',
+  };
+  const BB_PAGES = [
+    pageRow('doc-bb', 412, 'Rating decision: PTSD evaluated as 70 percent service-connected.'),
+    pageRow('doc-bb', 870, 'Active medications: prazosin 2mg nightly.'),
+  ];
+  const GROUNDED = [
+    { sourceDocumentId: 'doc-bb', sourcePage: 412, sourceQuote: 'PTSD 70% service-connected' },
+    { sourceDocumentId: 'doc-bb', sourcePage: 870, sourceQuote: 'prazosin 2mg nightly' },
+  ];
+
+  const ORIGINAL_FLAG = process.env['DOCTOR_PACK_GROUNDED_PAGES'];
+  afterEach(() => {
+    if (ORIGINAL_FLAG === undefined) delete process.env['DOCTOR_PACK_GROUNDED_PAGES'];
+    else process.env['DOCTOR_PACK_GROUNDED_PAGES'] = ORIGINAL_FLAG;
+  });
+
+  it('flag ON: a Blue Button doc whose grounded facts cite pages [412, 870] includes exactly those pages', async () => {
+    process.env['DOCTOR_PACK_GROUNDED_PAGES'] = 'on';
+    const { db, created } = makeGenDb({
+      caseVersion: 6,
+      documents: [BB_DOC],
+      pageRows: BB_PAGES,
+      groundedScRows: GROUNDED,
+    });
+    const s3Send = vi.fn(async () => ({}));
+    const result = await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: s3Send }, recordsBucketName: 'phi-test-bucket' },
+    );
+    expect(result.outcome).toBe('queued');
+    const manifest = created.data?.manifestJson as ManifestShape;
+    const bbEntry = manifest.entries.find((e) => e.filePath === 'cases/CASE-1/cccc3333-Blue_Button_VA.pdf');
+    expect(bbEntry).toBeDefined();
+    // The BB-as-a-whole stays excluded; ONLY the two grounded pages are pulled.
+    expect(bbEntry?.pageRanges).toEqual([{ from: 412, to: 412 }, { from: 870, to: 870 }]);
+  });
+
+  it('flag OFF: the same Blue Button doc contributes NOTHING (byte-identical to today)', async () => {
+    delete process.env['DOCTOR_PACK_GROUNDED_PAGES'];
+    const { db, created } = makeGenDb({
+      caseVersion: 6,
+      documents: [BB_DOC],
+      pageRows: BB_PAGES,
+      groundedScRows: GROUNDED, // present but never read (flag off)
+    });
+    const s3Send = vi.fn(async () => ({}));
+    const result = await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: s3Send }, recordsBucketName: 'phi-test-bucket' },
+    );
+    expect(result.outcome).toBe('queued');
+    const manifest = created.data?.manifestJson as ManifestShape;
+    const bbEntry = manifest.entries.find((e) => e.filePath === 'cases/CASE-1/cccc3333-Blue_Button_VA.pdf');
+    expect(bbEntry).toBeUndefined();
+  });
+
+  it('flag OFF: the grounded delegates are never queried (the back-map is not even called)', async () => {
+    delete process.env['DOCTOR_PACK_GROUNDED_PAGES'];
+    const { db } = makeGenDb({ caseVersion: 6, documents: [BB_DOC], pageRows: BB_PAGES, groundedScRows: GROUNDED });
+    const scFindMany = (db as unknown as { scCondition: { findMany: ReturnType<typeof vi.fn> } }).scCondition.findMany;
+    await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: vi.fn(async () => ({})) }, recordsBucketName: 'phi-test-bucket' },
+    );
+    expect(scFindMany).not.toHaveBeenCalled();
   });
 });

@@ -228,6 +228,11 @@ model ScCondition {
   @@index([veteranId])
   @@index([condition])
   @@index([dcCode])
+  // doctor-pack grounded pages, 2026-06-13: the back-map (doctor-pack-grounded-pages.ts) joins
+  // extracted chart rows to their source Document by sourceDocumentId to pull the exact pages
+  // that grounded each fact into the pack. Index the join column on each provenance-carrying
+  // table so the per-case lookup is a probe, not a scan.
+  @@index([sourceDocumentId])
   @@map("sc_conditions")
 }
 
@@ -254,6 +259,8 @@ model ActiveProblem {
   @@index([veteranId])
   @@index([problem])
   @@index([icd10])
+  // doctor-pack grounded pages, 2026-06-13: see ScCondition — the back-map joins on this column.
+  @@index([sourceDocumentId])
   @@map("active_problems")
 }
 
@@ -288,6 +295,8 @@ model ActiveMedication {
   @@index([veteranId, medStatus])
   @@index([drugName])
   @@index([indication])
+  // doctor-pack grounded pages, 2026-06-13: see ScCondition — the back-map joins on this column.
+  @@index([sourceDocumentId])
   @@map("active_medications")
 }
 

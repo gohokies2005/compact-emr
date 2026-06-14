@@ -242,13 +242,16 @@ describe('applyPackPageBudget', () => {
     const r = applyPackPageBudget(entries);
     expect(r.trimmed).toBe(true);
     expect(r.postTrimPageCount).toBeLessThanOrEqual(PACK_PAGE_BUDGET);
-    // rating (protected) + dbq + audio = 18 pages keep everything; notes gets the 2 leftover.
+    // doctor-pack grounded pages, 2026-06-13 (E2): re-derived for budget 15 + caps (clinical 4
+    // floor, sc_proof 4, tests 2). dbq + notes are BOTH clinical (dbq high_signal wins the floor).
+    // Floor: dbq 4. Caps: sc_proof -> rating 4, tests -> audio 2. Leftover 5 by rank: rating +4=8,
+    // dbq +1=5. notes (bulk clinical) drops. Total 8+5+2 = 15.
     expect(r.entries.find((e) => e.filePath === 'rating.pdf')?.pageCount).toBe(8);
-    expect(r.entries.find((e) => e.filePath === 'dbq.pdf')?.pageCount).toBe(6);
-    expect(r.entries.find((e) => e.filePath === 'audio.pdf')?.pageCount).toBe(4);
-    expect(r.entries.find((e) => e.filePath === 'notes.pdf')?.pageCount).toBe(2);
-    expect(r.trimmedFilePaths).toEqual(['notes.pdf']);
-    expect(r.trimNotes.join(' ')).toContain('notes.pdf: kept 2 of 10');
+    expect(r.entries.find((e) => e.filePath === 'dbq.pdf')?.pageCount).toBe(5);
+    expect(r.entries.find((e) => e.filePath === 'audio.pdf')?.pageCount).toBe(2);
+    expect(r.entries.find((e) => e.filePath === 'notes.pdf')).toBeUndefined();
+    expect(r.trimmedFilePaths).toEqual(['dbq.pdf', 'audio.pdf', 'notes.pdf']);
+    expect(r.trimNotes.join(' ')).toContain('notes.pdf: dropped (10');
   });
 
   // Architect QA IMPORTANT-1 (2026-06-11): a legacy whole-doc entry (no per-page OCR + null
@@ -276,9 +279,11 @@ describe('applyPackPageBudget', () => {
       be('denial.pdf', 'denial_letter', 'high_signal', 100, 14),
     ];
     const r = applyPackPageBudget(entries);
-    // denial (protected) keeps all 14; rated_view (95, unprotected) gets the remaining 6.
-    expect(r.entries.find((e) => e.filePath === 'denial.pdf')?.pageCount).toBe(14);
-    expect(r.entries.find((e) => e.filePath === 'rated_view.pdf')?.pageCount).toBe(6);
+    // doctor-pack grounded pages, 2026-06-13 (E2): budget 15. denial cap 3 -> takes 3 first
+    // (protected/priority), sc_proof cap 4 -> rated_view 4. Leftover 8 by rank: denial (importance
+    // 100) +8 = 11, rated_view stays 4. denial still keeps MORE than the unprotected rated_view.
+    expect(r.entries.find((e) => e.filePath === 'denial.pdf')?.pageCount).toBe(11);
+    expect(r.entries.find((e) => e.filePath === 'rated_view.pdf')?.pageCount).toBe(4);
   });
 
   it('drops zero-allocation docs ENTIRELY (empty ranges would make the assembler ship the whole doc)', () => {
@@ -343,9 +348,10 @@ describe('applyPackPageBudget — category budget (assessment §1c)', () => {
       be('notes.pdf', 'progress_notes', 'normal', 60, 6),
     ];
     const r = applyPackPageBudget(entries);
-    // Floor 4 fills first; sc_proof cap 6 next; leftover flows back to the rating by rank.
+    // doctor-pack grounded pages, 2026-06-13 (E2): budget 15. Floor 4 -> notes 4; sc_proof cap 4
+    // -> rating 4; leftover 7 by rank -> rating +7 = 11. notes still keeps its guaranteed 4.
     expect(r.entries.find((e) => e.filePath === 'notes.pdf')?.pageCount).toBe(4);
-    expect(r.entries.find((e) => e.filePath === 'rating_18pp.pdf')?.pageCount).toBe(16);
+    expect(r.entries.find((e) => e.filePath === 'rating_18pp.pdf')?.pageCount).toBe(11);
     expect(r.postTrimPageCount).toBeLessThanOrEqual(PACK_PAGE_BUDGET);
   });
 
@@ -355,29 +361,35 @@ describe('applyPackPageBudget — category budget (assessment §1c)', () => {
       be('denial.pdf', 'denial_letter', 'high_signal', 100, 4),
     ];
     const r = applyPackPageBudget(entries);
-    // clinical floor 4 -> denial cap 4 (all 4 selected pages, protected) -> leftover 12 to the
-    // C&P exam by global rank.
+    // doctor-pack grounded pages, 2026-06-13 (E2): budget 15, denial cap 3. clinical floor 4 ->
+    // C&P 4; denial cap 3 -> all 4 selected? cap is 3 so denial gets its 4 selected pages capped
+    // to... the cap is SOFT and denial is protected up to its cap (3) + it has exactly 4 pages.
+    // Floor: C&P 4. denial cap 3 -> denial 3. Wait denial has 4 selected pages; cap 3 takes 3,
+    // then leftover phase tops denial up by rank (importance 100, highest) +1 = 4 full. Remaining
+    // 15-4-4 = 7 to C&P by rank -> C&P 11. denial keeps all 4 selected (protected).
     expect(r.entries.find((e) => e.filePath === 'denial.pdf')?.pageCount).toBe(4);
-    expect(r.entries.find((e) => e.filePath === 'cp_exam_30pp.pdf')?.pageCount).toBe(16);
+    expect(r.entries.find((e) => e.filePath === 'cp_exam_30pp.pdf')?.pageCount).toBe(11);
   });
 
-  it('soft caps under full contention: every category gets its allowance (4+4+6+3+1+2 = 20)', () => {
+  it('soft caps under full contention: every category gets its allowance (4+3+4+2+1+1 = 15)', () => {
     const entries = [
-      be('rating.pdf', 'rating_decision', 'high_signal', 100, 10),  // sc_proof cap 6
-      be('denial.pdf', 'denial_letter', 'high_signal', 100, 10),    // denial cap 4
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 10),  // sc_proof cap 4
+      be('denial.pdf', 'denial_letter', 'high_signal', 100, 10),    // denial cap 3
       be('dbq.pdf', 'dbq', 'high_signal', 90, 10),                  // clinical floor/cap 4
-      be('sleep.pdf', 'sleep_study', 'high_signal', 85, 10),        // tests cap 3
+      be('sleep.pdf', 'sleep_study', 'high_signal', 85, 10),        // tests cap 2
       be('dd214.pdf', 'dd_214', 'high_signal', 95, 2),              // service cap 1
-      be('lay.pdf', 'lay_statement', 'high_signal', 70, 5),         // lay cap 2
+      be('lay.pdf', 'lay_statement', 'high_signal', 70, 5),         // lay cap 1
     ];
     const r = applyPackPageBudget(entries);
     const count = (p: string) => r.entries.find((e) => e.filePath === p)?.pageCount ?? 0;
+    // doctor-pack grounded pages, 2026-06-13 (E2): every category capped, budget fully consumed,
+    // no leftover (4+3+4+2+1+1 = 15 exactly).
     expect(count('dbq.pdf')).toBe(4);
-    expect(count('denial.pdf')).toBe(4);
-    expect(count('rating.pdf')).toBe(6);
-    expect(count('sleep.pdf')).toBe(3);
+    expect(count('denial.pdf')).toBe(3);
+    expect(count('rating.pdf')).toBe(4);
+    expect(count('sleep.pdf')).toBe(2);
     expect(count('dd214.pdf')).toBe(1);
-    expect(count('lay.pdf')).toBe(2);
+    expect(count('lay.pdf')).toBe(1);
     expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET);
   });
 
@@ -387,10 +399,10 @@ describe('applyPackPageBudget — category budget (assessment §1c)', () => {
       be('notes.pdf', 'progress_notes', 'normal', 60, 14),
     ];
     const r = applyPackPageBudget(entries);
-    // floor: notes 4; caps: tests 3; leftover 13 by rank: sleep (high_signal) +7 = 10 full,
-    // then notes +6 = 10.
+    // doctor-pack grounded pages, 2026-06-13 (E2): budget 15. floor: notes 4; caps: tests 2;
+    // leftover 9 by rank: sleep (high_signal) +8 = 10 full, then notes +1 = 5. Total 10+5 = 15.
     expect(r.entries.find((e) => e.filePath === 'sleep_10pp.pdf')?.pageCount).toBe(10);
-    expect(r.entries.find((e) => e.filePath === 'notes.pdf')?.pageCount).toBe(10);
+    expect(r.entries.find((e) => e.filePath === 'notes.pdf')?.pageCount).toBe(5);
     expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET);
   });
 
@@ -401,9 +413,10 @@ describe('applyPackPageBudget — category budget (assessment §1c)', () => {
     ];
     const r = applyPackPageBudget(entries);
     const joined = r.trimNotes.join(' | ');
-    expect(joined).toContain('rating_18pp.pdf: kept 16 of 18');
+    // doctor-pack grounded pages, 2026-06-13 (E2): budget 15 -> rating keeps 11 (was 16).
+    expect(joined).toContain('rating_18pp.pdf: kept 11 of 18');
     expect(joined).toContain('notes.pdf: kept 4 of 6');
-    expect(joined).toContain('category sc_proof: kept 16 of 18');
+    expect(joined).toContain('category sc_proof: kept 11 of 18');
     expect(joined).toContain('category clinical: kept 4 of 6');
   });
 
@@ -414,10 +427,12 @@ describe('applyPackPageBudget — category budget (assessment §1c)', () => {
       be('personnel.pdf', 'personnel_record', 'high_signal', 75, 20), // other
     ];
     const r = applyPackPageBudget(entries);
-    // floor: notes 4; caps: rating 6; leftover 10 by rank: rating +4 = 10 full, personnel +6.
+    // doctor-pack grounded pages, 2026-06-13 (E2): budget 15. floor: notes 4; caps: sc_proof ->
+    // rating 4; leftover 7 by rank: rating (importance 100) +6 = 10 full, personnel ('other',
+    // global rank only) +1 = 1. Total 4+10+1 = 15.
     expect(r.entries.find((e) => e.filePath === 'notes.pdf')?.pageCount).toBe(4);
     expect(r.entries.find((e) => e.filePath === 'rating.pdf')?.pageCount).toBe(10);
-    expect(r.entries.find((e) => e.filePath === 'personnel.pdf')?.pageCount).toBe(6);
+    expect(r.entries.find((e) => e.filePath === 'personnel.pdf')?.pageCount).toBe(1);
     expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET);
   });
 });

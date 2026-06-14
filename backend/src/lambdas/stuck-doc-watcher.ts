@@ -290,7 +290,9 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
         const mojibakeMarks = (text.match(/â€|Ã‚|Â[^\x00-\x7F]?|Ã.|â€™|â€œ/g) ?? []).length;
         const controlChars = (text.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) ?? []).length;
         const nonAscii = (text.match(/[^\x00-\x7F]/g) ?? []).length;
-        console.log(JSON.stringify({ msg: 'stuck-doc-watcher: phase3 still-fails', caseId: frs.caseId, filePath: frs.filePath, reason: outcome.reason, ratio: outcome.corruptedTokenRatio, chars: nonWhitespaceCharCount(text), replacementChars, mojibakeMarks, controlChars, nonAscii, sample: text.slice(0, 220) }));
+        // NOTE: do NOT log a text sample here — page text is PHI. Char-class counts (non-PHI) are enough
+        // to tell mojibake/replacement/control from a clean false-positive.
+        console.log(JSON.stringify({ msg: 'stuck-doc-watcher: phase3 still-fails', caseId: frs.caseId, filePath: frs.filePath, reason: outcome.reason, ratio: outcome.corruptedTokenRatio, chars: nonWhitespaceCharCount(text), replacementChars, mojibakeMarks, controlChars, nonAscii }));
         continue;
       } // still genuinely fails — correctly parked
 

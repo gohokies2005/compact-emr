@@ -1,4 +1,4 @@
-import { classifyReadAttempt } from './chart-readiness.js';
+import { classifyReadAttempt, nonWhitespaceCharCount } from './chart-readiness.js';
 import { maybeEnqueueChartExtract } from './chart-extract-trigger.js';
 import { SERVICE_ACTORS } from './service-actors.js';
 import type { AppDb } from './db-types.js';
@@ -73,6 +73,7 @@ export async function writeDocumentPages(
       const newAttempt = {
         method: 'textract' as const,
         wordCount: outcome.wordCount,
+        charCount: nonWhitespaceCharCount(concatenatedText),
         corruptedTokenRatio: outcome.corruptedTokenRatio,
         pageCount: docPages,
         attemptedAt: now.toISOString(),

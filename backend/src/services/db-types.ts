@@ -704,10 +704,15 @@ export type FileReadMethod =
 export interface FileReadAttempt {
   readonly method: FileReadMethod;
   readonly wordCount: number;
+  // Non-whitespace character count at read time (Ryan 2026-06-14). The CHAR floor replaced the word
+  // floor as the read-success bar; new attempts persist this so the retroactive heal can mirror the
+  // char floor exactly. Optional: pre-2026-06-14 attempts omit it → the heal falls back to a
+  // wordCount-based proxy (any real word ⇒ real content, err toward bypass per the owner directive).
+  readonly charCount?: number | null;
   readonly corruptedTokenRatio: number;
-  // Document page count at read time (Ryan 2026-06-13). Powers the SIZE-AWARE word floor — a <=1-page
+  // Document page count at read time (Ryan 2026-06-13). Powers the SIZE-AWARE floor — a <=1-page
   // file with little text is a valid small file, not "incomplete". Optional: pre-2026-06-13 attempts
-  // omit it → the reconciliation treats them as substantial (full 20-word floor; no regression).
+  // omit it → the reconciliation treats them as substantial (the big-scan guard applies; no regression).
   readonly pageCount?: number | null;
   readonly attemptedAt: string;
   readonly note: string | null;

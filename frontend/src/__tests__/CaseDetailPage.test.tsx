@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CaseDetailPage } from '../routes/cases/CaseDetailPage';
 import { archiveCase, getCase, restoreCase } from '../api/cases';
 import { getLetter } from '../api/letter';
-import { presignDocument, recordDocument } from '../api/veterans';
+import { deleteDocument, listDocuments, presignDocument, recordDocument } from '../api/veterans';
 import type { Role } from '../types/prisma';
 
 // Mutable role (TopNav.test pattern) — the P2 banner tests flip between admin and ops_staff.
@@ -33,6 +33,7 @@ vi.mock('../api/veterans', () => ({
   getVeteran: vi.fn(async () => ({ data: { id: 'VET-1', firstName: 'Jane', lastName: 'Doe', email: 'j@x.com', version: 1, scConditions: [{ id: 'SC-1', condition: 'PTSD', status: 'service_connected', version: 1 }], activeProblems: [], activeMedications: [], cases: [] } })),
   listDocuments: vi.fn(async () => ({ data: [] })),
   reocrDocument: vi.fn(),
+  deleteDocument: vi.fn(async () => undefined),
   // Mutation fns the shared clinical panels import (add/edit/delete).
   addScCondition: vi.fn(), updateScCondition: vi.fn(), deleteScCondition: vi.fn(),
   addProblem: vi.fn(), deleteProblem: vi.fn(),
@@ -172,6 +173,88 @@ describe('CaseDetailPage', () => {
     expect(nameLink).toHaveAttribute('href', '/veterans/VET-1');
     await userEvent.click(nameLink);
     expect(await screen.findByText(/VETERAN CHART for/i)).toBeInTheDocument();
+  });
+});
+
+// ── Case-page Documents tab DELETE control (Ryan 2026-06-14: "I DON'T HAVE A DELETE BUTTON") ──
+// The only delete used to live on the veteran chart; this adds it to the case Documents tab so a
+// misuploaded/junk file (e.g. a 0-byte Intake_Summary.pdf) can be removed where ops actually works.
+// Same deleteDocument API + same "removes it from the chart for ALL claims" confirm; on success it
+// invalidates BOTH the documents list AND ['case', caseId, 'chart-readiness'] so the readiness gate
+// re-evaluates immediately (delete the blocker → gate clears, no manual refresh).
+describe('CaseDetailPage — Documents tab delete control', () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.mocked(deleteDocument).mockClear(); vi.mocked(listDocuments).mockResolvedValue({ data: [] }); mockRole = 'admin'; });
+
+  // One file on THIS claim (DocumentsTab filters docs to d.caseId === caseId).
+  const oneDocOnClaim = () => vi.mocked(listDocuments).mockResolvedValue({ data: [
+    { id: 'DOC-9', veteranId: 'VET-1', caseId: 'CASE-1', filename: 'Intake_Summary.pdf', docTag: 'Other', contentType: 'application/pdf', uploadedAt: new Date(Date.now() - 3_600_000).toISOString() },
+  ] as never });
+
+  it('admin: Delete fires the same-claim confirm and calls deleteDocument with the row id', async () => {
+    mockRole = 'admin';
+    oneDocOnClaim();
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    renderPage();
+    await screen.findByText('Hypertension');
+    await userEvent.click(screen.getByRole('tab', { name: 'Documents' }));
+
+    expect(await screen.findByText('Intake_Summary.pdf')).toBeInTheDocument();
+    const deleteBtn = screen.getByRole('button', { name: 'Delete' });
+    await userEvent.click(deleteBtn);
+
+    // The explicit warning matches the chart's copy: removes it for ALL the veteran's claims.
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('ALL of their claims'));
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Intake_Summary.pdf'));
+    // React Query v5 passes a second mutation-context arg to the mutationFn, so match the first arg only.
+    await waitFor(() => expect(vi.mocked(deleteDocument).mock.calls[0]?.[0]).toBe('DOC-9'));
+  });
+
+  it('admin: cancelling the confirm does NOT call deleteDocument', async () => {
+    mockRole = 'admin';
+    oneDocOnClaim();
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderPage();
+    await screen.findByText('Hypertension');
+    await userEvent.click(screen.getByRole('tab', { name: 'Documents' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    expect(deleteDocument).not.toHaveBeenCalled();
+  });
+
+  it('invalidates the chart-readiness query on a successful delete so the gate re-evaluates', async () => {
+    mockRole = 'admin';
+    oneDocOnClaim();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/cases/CASE-1']}>
+          <Routes>
+            <Route path="/cases/:id" element={<CaseDetailPage />} />
+            <Route path="/veterans/:id" element={<div>VETERAN CHART for VET-1</div>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByText('Hypertension');
+    await userEvent.click(screen.getByRole('tab', { name: 'Documents' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => expect(vi.mocked(deleteDocument).mock.calls[0]?.[0]).toBe('DOC-9'));
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['documents', 'VET-1'] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['case', 'CASE-1', 'chart-readiness'] });
+    });
+  });
+
+  it('physician: the Delete control is NOT exposed (destructive op stays OPS-gated)', async () => {
+    mockRole = 'physician';
+    oneDocOnClaim();
+    renderPage();
+    await screen.findByText('Hypertension');
+    await userEvent.click(screen.getByRole('tab', { name: 'Documents' }));
+    expect(await screen.findByText('Intake_Summary.pdf')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
   });
 });
 

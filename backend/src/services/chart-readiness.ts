@@ -19,12 +19,28 @@ import type { AppDbTransaction, FileReadStatusRecord, FileTerminalStatus } from 
 
 // ====================== Corrupted-token-ratio detector ======================
 
-// 40 → 20 (Ryan 2026-06-11): a legible 37-word image (Thomas_OSA_Misc_3.png) blocked drafting —
-// "thats a stupid fail." 20 words still screens out empty photos/fax covers while letting short
-// real documents through. NOTE: terminalStatus is written ONCE at classification time, so the
-// retroactive reconciliation in evaluateChartReadiness (below) is what heals rows classified
-// under the old threshold — lowering this constant alone would not.
-const MIN_WORDS_FOR_READ = 20;
+// WORD floor → CHARACTER floor (Ryan 2026-06-14): "maybe make the min like 10 characters for the
+// block? not much is ever less than that other than something just saying error … id rather it
+// bypass completely in some cases." A 22-word/legible intake summary (Thomas_Intake_Summary.pdf,
+// CLM-BBFCB3F8CE) still blocked under the 20-WORD floor because its stored attempt's wordCount sat
+// below 20 (sparse summary; words split differently than a human counts) — a stupid fail for real
+// content. The "is this real text?" bar is now 10 NON-WHITESPACE CHARACTERS: a bare "Error" / "N/A"
+// (5-9 chars) still fails; anything substantive sails through. The only true-fail cases are an
+// effectively-empty read (0 chars — a textless photo, later routed to image-describe) and a
+// SUBSTANTIAL multi-page scan that yielded only a sliver of text (genuine OCR choke). terminalStatus
+// is written ONCE at classification time, so the retroactive reconciliation in evaluateChartReadiness
+// (below) mirrors this char floor to self-heal rows classified under the old word floor with no re-OCR.
+//
+// MIN_WORDS_FOR_READ is RETIRED as the per-file read bar; MIN_CHARS_FOR_READ replaces it. The
+// failed-big-scan guard keeps a sane multi-page minimum so a 500-page scan that produced 12 chars
+// still flags (MIN_CHARS_FOR_BIG_SCAN, page-scaled).
+const MIN_CHARS_FOR_READ = 10;
+// A SUBSTANTIAL (>=2 page) file that yields only a tiny sliver of text is the "OCR choked on a big
+// scan" signal — keep flagging it. We require a per-page minimum so brevity scales with size: a
+// 2-page scan with 8 chars fails, but a genuinely short 2-page note (e.g. a cover + a one-line order)
+// clears a low absolute floor. Floor at MIN_CHARS_FOR_BIG_SCAN regardless of page count so a 500-page
+// scan with 12 chars still flags. (8 chars on 2 pages must fail per the owner's acceptance case.)
+const MIN_CHARS_FOR_BIG_SCAN = 10;
 const GARBLED_RATIO_THRESHOLD = 0.08;
 const MANUAL_SUMMARY_MIN_LENGTH = 40;
 
@@ -71,6 +87,17 @@ export function wordCount(text: string): number {
   return text.split(/\s+/).filter((t) => t.length > 0).length;
 }
 
+/**
+ * Non-whitespace character count — the "is this real content?" bar (Ryan 2026-06-14). Strips ALL
+ * whitespace (spaces, tabs, newlines) and counts what's left, so a pure-whitespace read counts 0 and
+ * a 22-word document counts in the hundreds. This is the read-success measure that REPLACED the word
+ * floor: "not much is ever less than [10 chars] other than something just saying error."
+ */
+export function nonWhitespaceCharCount(text: string): number {
+  if (typeof text !== 'string' || text.length === 0) return 0;
+  return text.replace(/\s+/g, '').length;
+}
+
 // ====================== Read-attempt classifier ======================
 
 export interface ReadAttemptInput {
@@ -92,15 +119,25 @@ export interface ReadAttemptOutcome {
 }
 
 /**
- * Decide whether a read attempt produced usable text. The threshold contract:
- *   - wordCount >= MIN_WORDS_FOR_READ (20), AND
- *   - corruptedTokenRatio <= 0.08 (GARBLED_RATIO_THRESHOLD)
+ * Decide whether a read attempt produced usable text (Ryan 2026-06-14, WORD floor → CHAR floor):
+ *   - NOT garbled (corruptedTokenRatio <= 0.08), AND
+ *   - >= MIN_CHARS_FOR_READ (10) non-whitespace characters.
+ *
+ * 0 chars / pure-whitespace → fail (the lone true-fail case: a textless photo, later routed to an
+ * image-describe path; for now it stays manual_summary_required, the rare case). A bare "Error" /
+ * "N/A" (5-9 chars) → fail (the owner's point — the 10-char floor catches it). A SUBSTANTIAL
+ * (>=2 page) file that yields only a sliver of text still flags as a failed big scan.
  *
  * Returns succeeded=true with reason=null when both hold; otherwise succeeded=false with a
- * human-readable reason that the worker can log + surface to the RN UI.
+ * human-readable reason the worker can log + surface to the RN UI. The reason still carries the
+ * "too-few-words" token for blocked multi-page scans so the frontend `allTooFewWords` regex keeps
+ * matching (the gate decision is char-based; the note wording is the only word-flavored thing left).
+ *
+ * `wordCount` is retained in the outcome (UI display + audit), but it no longer gates anything.
  */
 export function classifyReadAttempt(input: ReadAttemptInput): ReadAttemptOutcome {
   const wc = wordCount(input.extractedText);
+  const chars = nonWhitespaceCharCount(input.extractedText);
   const ratio = corruptedTokenRatio(input.extractedText);
   const pageCount = input.pageCount ?? null;
 
@@ -109,20 +146,29 @@ export function classifyReadAttempt(input: ReadAttemptInput): ReadAttemptOutcome
   if (ratio > GARBLED_RATIO_THRESHOLD) {
     return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: `garbled (corrupted-token-ratio=${ratio.toFixed(3)} > ${GARBLED_RATIO_THRESHOLD})` };
   }
-  // An EMPTY read (0 words) is NEVER a "valid small file" — it's a failed read (e.g. a scanned 1-page
-  // DD-214 OCR couldn't see). Flag it so Claude/RN handle it; never silently accept a blank.
-  if (wc === 0) {
-    return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: 'empty (0 words)' };
+  // An effectively-EMPTY read (0 non-whitespace chars) is NEVER a "valid small file" — it's a failed
+  // read (a textless photo, a blank scan). Flag it; never silently accept a blank. This is the only
+  // case that needs handling for a <=1-page file (it later routes to an image-describe path).
+  if (chars === 0) {
+    return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: 'empty (0 chars)' };
   }
-  // SIZE-AWARE word floor (Ryan 2026-06-13): a legitimately small file — a 1-page note that just says
-  // "CPAP" — is VALID and must NOT block the case as "incomplete". Only a SUBSTANTIAL file (>=2 pages,
-  // or unknown size) that STILL has <20 words after the upstream Claude re-read is the genuine
-  // "unreadable big scan" → flag for the RN. A <=1-page file with any non-garbled text → accept.
+  // SMALL-FILE EXEMPTION (preserved, Ryan 2026-06-13/14): a <=1-page file with ANY non-garbled,
+  // non-empty text is a valid small file ("CPAP" = 4 chars on a 1-page note) and must NOT block —
+  // "id rather it bypass completely in some cases." The char floor below applies to UNKNOWN-size and
+  // multi-page reads (where a bare "Error" sliver is a failed read, not a real one-line note).
   if (pageCount !== null && pageCount <= 1) {
     return { succeeded: true, wordCount: wc, corruptedTokenRatio: ratio, reason: null };
   }
-  if (wc < MIN_WORDS_FOR_READ) {
-    return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: `too-few-words (${wc} < ${MIN_WORDS_FOR_READ}) for a ${pageCount ?? 'multi'}-page file` };
+  // SIZE-AWARE: a SUBSTANTIAL (>=2 page) file that yields only a tiny sliver of text is the "OCR
+  // choked on a big scan" signal — keep flagging it (a 500-page scan that produced 12 chars must still
+  // surface). Checked before the general floor so a multi-page sliver can't slip through.
+  if (pageCount !== null && pageCount >= 2 && chars < MIN_CHARS_FOR_BIG_SCAN) {
+    return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: `too-few-words (${chars} chars < ${MIN_CHARS_FOR_BIG_SCAN}) for a ${pageCount}-page file` };
+  }
+  // The real-content bar for UNKNOWN-size / multi-page reads: >= 10 non-whitespace chars. A bare
+  // "Error"/"N/A" (5-9 chars) fails here (the owner's point — the 10-char floor catches it).
+  if (chars < MIN_CHARS_FOR_READ) {
+    return { succeeded: false, wordCount: wc, corruptedTokenRatio: ratio, reason: `too-few-words (${chars} chars < ${MIN_CHARS_FOR_READ})` };
   }
   return { succeeded: true, wordCount: wc, corruptedTokenRatio: ratio, reason: null };
 }
@@ -136,7 +182,10 @@ export function isValidManualSummary(summary: unknown): summary is string {
 
 export const MANUAL_SUMMARY_MIN_LEN = MANUAL_SUMMARY_MIN_LENGTH;
 export const READ_THRESHOLD_RATIO = GARBLED_RATIO_THRESHOLD;
-export const READ_THRESHOLD_WORDS = MIN_WORDS_FOR_READ;
+// The read-success bar is now CHARACTER-based (Ryan 2026-06-14). READ_THRESHOLD_CHARS is the floor;
+// READ_THRESHOLD_BIG_SCAN_CHARS is the failed-big-scan minimum for >=2-page files.
+export const READ_THRESHOLD_CHARS = MIN_CHARS_FOR_READ;
+export const READ_THRESHOLD_BIG_SCAN_CHARS = MIN_CHARS_FOR_BIG_SCAN;
 
 // ====================== Chart-readiness aggregator ======================
 
@@ -144,7 +193,7 @@ export interface ChartReadinessBlocker {
   readonly fileReadStatusId: string;
   readonly filePath: string;
   readonly terminalStatus: FileTerminalStatus;
-  readonly lastAttempt: { method: string; wordCount: number; corruptedTokenRatio: number; note: string | null; pageCount?: number | null } | null;
+  readonly lastAttempt: { method: string; wordCount: number; charCount?: number | null; corruptedTokenRatio: number; note: string | null; pageCount?: number | null } | null;
   // The chart Document row matching this file (joined on s3Key by the route) — lets the UI render the
   // blocking file as a clickable link (presigned view), not a dead name. Optional: the pure evaluator
   // has no DB access; the GET /chart-readiness route enriches it. (CLM-BBFCB3F8CE fix 5, 2026-06-11.)
@@ -181,30 +230,51 @@ export function isIntakeSummaryPath(filePath: unknown): boolean {
 }
 
 /**
- * Retroactive threshold reconciliation (Ryan 2026-06-11, MIN_WORDS_FOR_READ 40 → 20).
+ * Retroactive threshold reconciliation (Ryan 2026-06-14, WORD floor → CHAR floor; was 40→20 word).
  *
  * terminalStatus is written ONCE, at classification time (POST /files/read-attempts →
- * classifyReadAttempt). Rows classified under the OLD threshold therefore sit at
- * 'manual_summary_required' forever even though their stored attempt stats would pass today —
- * lowering the constant does nothing for them on its own. Re-judge the LAST attempt's stored
- * wordCount/corruptedTokenRatio against the CURRENT thresholds at evaluation time: if it would
- * succeed now, the row is treated as 'read'. Existing victims (Thomas_OSA_Misc_3.png, 37 words)
- * self-heal without re-OCR, and because every consumer (drafter gate, sign-off, viability,
- * letter approve, doctor pack, GET /chart-readiness) derives readiness through this evaluator,
- * the heal applies everywhere with no DB write or migration.
+ * classifyReadAttempt). Rows classified under the OLD floor therefore sit at
+ * 'manual_summary_required' forever even though their stored attempt would pass today — changing the
+ * constant does nothing for them on its own. Re-judge the LAST attempt's stored stats against the
+ * CURRENT char floor at evaluation time: if it would succeed now, the row is treated as 'read'. The
+ * live victim (Thomas_Intake_Summary.pdf, 22 words but a sub-20 stored wordCount) self-heals without
+ * re-OCR, and because every consumer (drafter gate, sign-off, viability, letter approve, doctor pack,
+ * GET /chart-readiness) derives readiness through this evaluator, the heal applies everywhere with no
+ * DB write or migration.
+ *
+ * Char source: new attempts persist `charCount` → mirror the char floor exactly. Pre-2026-06-14
+ * attempts omit it and only carry `wordCount`; for those we use wordCount as a real-content proxy
+ * (any whole word ⇒ real text ⇒ clears the 10-char bar in practice), erring toward bypass per the
+ * owner directive ("id rather it bypass completely in some cases"). The big-scan guard still applies
+ * to BOTH sources so a substantial multi-page sliver never heals.
  */
 function lastAttemptPassesCurrentThresholds(row: FileReadStatusRecord): boolean {
   const last = lastAttemptOf(row);
   if (last === null) return false;
   if (typeof last.wordCount !== 'number' || typeof last.corruptedTokenRatio !== 'number') return false;
   if (last.corruptedTokenRatio > GARBLED_RATIO_THRESHOLD) return false;
-  if (last.wordCount === 0) return false;
-  // Mirror classifyReadAttempt's SIZE-AWARE floor so an already-stored small-file attempt self-heals (a
-  // 1-page "CPAP" note classified manual_summary_required under the bare 20-word floor). pageCount absent
-  // on pre-2026-06-13 attempts → treated as substantial (require the 20-word floor; no regression).
+
   const pageCount = typeof last.pageCount === 'number' ? last.pageCount : null;
+
+  // Prefer the stored non-whitespace char count when present (new attempts) — mirror classifyReadAttempt
+  // exactly. Fall back to wordCount-as-proxy for legacy rows that only persisted words.
+  const storedChars = typeof last.charCount === 'number' ? last.charCount : null;
+  if (storedChars !== null) {
+    if (storedChars === 0) return false;
+    // Small-file exemption (mirror classifyReadAttempt): a <=1-page non-empty read self-heals.
+    if (pageCount !== null && pageCount <= 1) return true;
+    if (pageCount !== null && pageCount >= 2 && storedChars < MIN_CHARS_FOR_BIG_SCAN) return false;
+    return storedChars >= MIN_CHARS_FOR_READ;
+  }
+
+  // Legacy proxy: wordCount (pre-2026-06-14 rows carry no charCount). 0 words = empty (fail). A <=1-page
+  // non-empty read self-heals (small-file exemption). A substantial multi-page file with almost no words
+  // is still a failed big scan. Otherwise any real word clears the char bar (a single word is rarely
+  // < 10 chars, and the owner wants to err toward bypass).
+  if (last.wordCount === 0) return false;
   if (pageCount !== null && pageCount <= 1) return true;
-  return last.wordCount >= MIN_WORDS_FOR_READ;
+  if (pageCount !== null && pageCount >= 2 && last.wordCount < 2) return false;
+  return last.wordCount >= 1;
 }
 
 /**
@@ -349,6 +419,7 @@ function lastAttemptOf(row: FileReadStatusRecord): ChartReadinessBlocker['lastAt
   return {
     method: last.method,
     wordCount: last.wordCount,
+    charCount: typeof last.charCount === 'number' ? last.charCount : null,
     corruptedTokenRatio: last.corruptedTokenRatio,
     note: last.note,
     pageCount: typeof last.pageCount === 'number' ? last.pageCount : null,

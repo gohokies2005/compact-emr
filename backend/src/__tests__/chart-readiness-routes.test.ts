@@ -375,7 +375,7 @@ describe('files-pending-manual queues (evaluator-derived + enriched)', () => {
     // mask hid it from the RN while the drafter still refused on it (undraftable + invisible).
     const failedIntake = seedRow(fileRows, {
       filePath: `cases/CASE-1/${UUID}-Lozano_Intake_Summary.pdf`,
-      attemptsJson: [{ method: 'native_pdf_text', wordCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 < 20)' }],
+      attemptsJson: [{ method: 'native_pdf_text', wordCount: 1, charCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 chars < 10)' }],
     });
     const rn = await request(appFor(db)).get('/api/v1/rn/files-pending-manual');
     expect(rn.body.data.map((r: { id: string }) => r.id)).toContain(failedIntake.id);
@@ -389,7 +389,7 @@ describe('files-pending-manual queues (evaluator-derived + enriched)', () => {
       filePath: `cases/CASE-1/${UUID}-Denial_Letter.pdf`,
       terminalStatus: 'manual_summary_provided',
       manualSummary: 'too short',
-      attemptsJson: [{ method: 'tesseract_ocr', wordCount: 6, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (6 < 20)' }],
+      attemptsJson: [{ method: 'tesseract_ocr', wordCount: 1, charCount: 6, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (6 chars < 10)' }],
     });
     const rn = await request(appFor(db)).get('/api/v1/rn/files-pending-manual');
     expect(rn.body.data.map((r: { id: string }) => r.id)).toContain(bogus.id);

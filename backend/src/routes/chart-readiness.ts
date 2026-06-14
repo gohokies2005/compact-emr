@@ -6,6 +6,7 @@ import { currentActor } from '../services/request-actor.js';
 import {
   classifyReadAttempt,
   isEffectivelyRead,
+  nonWhitespaceCharCount,
   reconcileChartReadiness,
   MANUAL_SUMMARY_MIN_LEN,
 } from '../services/chart-readiness.js';
@@ -62,6 +63,7 @@ export function createChartReadinessRouter(db: AppDb): Router {
       const newAttempt: FileReadAttempt = {
         method: parsed.method,
         wordCount: outcome.wordCount,
+        charCount: nonWhitespaceCharCount(parsed.extractedText),
         corruptedTokenRatio: outcome.corruptedTokenRatio,
         attemptedAt: new Date().toISOString(),
         note: outcome.reason ?? parsed.note,

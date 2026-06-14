@@ -101,12 +101,13 @@ describe('selectKeyDocs', () => {
   });
 
   // The heal requires the stored attempt to actually PASS: a genuinely unreadable file (last
-  // attempt under the word floor) stays excluded.
+  // attempt below the char floor, unknown size) stays excluded. (CHAR floor, Ryan 2026-06-14.)
   it('still excludes a manual_summary_required file whose last attempt fails current thresholds', () => {
     const unreadable: FileReadStatusRecord = {
       ...readStatusRow('fax_cover.pdf', 'manual_summary_required'),
       attemptsJson: [
-        { method: 'tesseract_ocr', wordCount: 4, corruptedTokenRatio: 0.0, note: null },
+        // 4 non-whitespace chars, unknown page size → below the char floor → not healed.
+        { method: 'tesseract_ocr', wordCount: 1, charCount: 4, corruptedTokenRatio: 0.0, note: null },
       ] as unknown as FileReadStatusRecord['attemptsJson'],
     };
     const selected = selectKeyDocs({

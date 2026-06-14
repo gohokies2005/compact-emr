@@ -251,12 +251,15 @@ describe('POST /internal/documents/:id/pages', () => {
     expect(rows[0]?.terminalStatus).toBe('read');
   });
 
-  it('lands manual_summary_required when a MULTI-PAGE OCR success returns too few words (choked big scan)', async () => {
+  it('lands manual_summary_required when a MULTI-PAGE OCR success returns only a tiny char sliver (choked big scan)', async () => {
+    // CHAR floor (Ryan 2026-06-14): the big-scan guard now flags a >=2-page file with < 10 non-whitespace
+    // chars (a genuine OCR choke), NOT merely "few words" — a multi-page file with a real sentence is
+    // valid content. 8 chars on 5 pages = a choked scan; still surfaces for the RN.
     const { db, fileReadStatuses } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-short.pdf' });
     const res = await request(appFor(db))
       .post('/api/v1/internal/documents/DOC-1/pages')
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
-      .send({ pages: [{ pageNumber: 1, text: 'only a handful of words here total', confidence: 0.6 }], documentPageCount: 5 });
+      .send({ pages: [{ pageNumber: 1, text: 'abcd efg', confidence: 0.6 }], documentPageCount: 5 });
     expect(res.status).toBe(201);
     expect(res.body.data.readTerminalStatus).toBe('manual_summary_required');
     const rows = [...fileReadStatuses.values()];

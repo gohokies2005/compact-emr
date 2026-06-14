@@ -584,8 +584,9 @@ export function createInternalWorkerRouter(db: AppDb): Router {
         const newAttempt = {
           method: 'textract' as const,
           wordCount: 0,
+          charCount: 0, // a total read failure has no text; 0 chars keeps it manual_summary_required (char floor)
           corruptedTokenRatio: 0,
-          pageCount: null, // a total read failure has no page count; wordCount 0 keeps it manual_summary_required
+          pageCount: null, // a total read failure has no page count
           attemptedAt: now.toISOString(),
           note: noteText,
         };

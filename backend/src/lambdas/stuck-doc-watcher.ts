@@ -2,7 +2,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { TERMINAL_READ_STATUSES, isScreeningSummaryKey } from '../services/chart-build-state.js';
-import { classifyReadAttempt } from '../services/chart-readiness.js';
+import { classifyReadAttempt, nonWhitespaceCharCount } from '../services/chart-readiness.js';
 
 /**
  * Stuck-DOCUMENT watcher (Ryan 2026-06-13: "no errors, no babysitting, no silent failures").
@@ -224,6 +224,7 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
       const attempt = {
         method: 'textract' as const,
         wordCount: outcome.wordCount,
+        charCount: nonWhitespaceCharCount(text),
         corruptedTokenRatio: outcome.corruptedTokenRatio,
         pageCount: pageRows.length,
         attemptedAt: now.toISOString(),

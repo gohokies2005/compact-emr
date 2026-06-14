@@ -30,7 +30,7 @@ import { ConditionsPanel, MedicationsPanel, ProblemsPanel } from '../../componen
 import { listCaseEmails } from '../../api/emails';
 import { getArtifactPdfUrl, postDraft, cancelDraftJob, getDraftConcurrency, uploadAndImportLetter, type DraftConcurrencyResult } from '../../api/drafter';
 import { getLetter } from '../../api/letter';
-import { getVeteran, listDocuments, reocrDocument } from '../../api/veterans';
+import { deleteDocument, getVeteran, listDocuments, reocrDocument } from '../../api/veterans';
 import { PdfViewerModal, type ViewableDoc } from '../../components/PdfViewerModal';
 import { formatConditionLabel } from '../../lib/conditionLabel';
 import { Gate1ChecklistModal } from '../../components/Gate1ChecklistModal';
@@ -854,11 +854,29 @@ function DocumentsTab({ veteranId, caseId, role }: { readonly veteranId: string;
   const q = useQuery({ queryKey: ['documents', veteranId], queryFn: () => listDocuments(veteranId), enabled: veteranId.length > 0 });
   const [viewDoc, setViewDoc] = useState<ViewableDoc | null>(null);
   const reocr = useMutation({ mutationFn: reocrDocument, onSuccess: () => window.alert('Re-running OCR on this file (Textract → Claude fallback). Refresh in a minute to see it read.') });
+  // Delete a misuploaded/junk file from RIGHT HERE on the case page (Ryan 2026-06-14: "I DON'T HAVE A
+  // DELETE BUTTON" — the only delete lived on the veteran chart, not where he works). Same deleteDocument
+  // API + same explicit confirm as the chart (removes the file AND its parsed text from the veteran's
+  // chart for ALL their claims — the drafter bundle is veteran-wide). On success we invalidate the
+  // documents list AND this case's chart-readiness query (['case', caseId, 'chart-readiness']) so the
+  // readiness gate re-evaluates immediately: that is the whole point — delete the 0-byte/junk blocker,
+  // the SendToDrafter gate clears without a manual refresh.
+  const del = useMutation({
+    mutationFn: deleteDocument,
+    onSuccess: async () => { await Promise.all([
+      qc.invalidateQueries({ queryKey: ['documents', veteranId] }),
+      qc.invalidateQueries({ queryKey: ['case', caseId, 'chart-readiness'] }),
+    ]); },
+    onError: () => window.alert('Could not delete the file. Please retry.'),
+  });
   const all = q.data?.data ?? [];
   const docs = all.filter((d) => d.caseId === caseId); // this claim's files
   // Upload presign/record is OPS-gated server-side (documents.ts) — mirror it here so a physician
   // sees the read-only list, never an upload control that 403s on presign. (Keystone Package 3.)
+  // The same OPS gate governs DELETE server-side, so the danger control mirrors canUpload — a
+  // physician sees the read-only list, never a delete that 403s.
   const canUpload = role === 'admin' || role === 'ops_staff';
+  const canDelete = canUpload;
   return (
     <>
       {/* Case-page upload, caseId PRE-PINNED (Keystone Package 3): same shared presign → S3 PUT →
@@ -887,7 +905,12 @@ function DocumentsTab({ veteranId, caseId, role }: { readonly veteranId: string;
               lead={d.filename}
               meta={`${d.docTag ?? 'Other'} · ${formatRelativeTime(d.uploadedAt)}`}
               trailing={
-                <RowAction disabled={reocr.isPending} title="Re-run OCR (Textract → Claude fallback) — use if this file shows as unreadable" onClick={(e) => { e.stopPropagation(); reocr.mutate(d.id); }}>Re-run OCR</RowAction>
+                <span className="flex items-center gap-3">
+                  <RowAction disabled={reocr.isPending} title="Re-run OCR (Textract → Claude fallback) — use if this file shows as unreadable" onClick={(e) => { e.stopPropagation(); reocr.mutate(d.id); }}>Re-run OCR</RowAction>
+                  {canDelete ? (
+                    <RowAction kind="danger" disabled={del.isPending} title="Delete this file (use for a misuploaded or junk file)" onClick={(e) => { e.stopPropagation(); if (window.confirm(`Delete "${d.filename}"? This removes the file and its parsed text from this veteran's chart for ALL of their claims. Use this only for a file uploaded to the wrong place.`)) del.mutate(d.id); }}>Delete</RowAction>
+                  ) : null}
+                </span>
               }
             />
           ))

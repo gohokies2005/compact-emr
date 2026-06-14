@@ -8,10 +8,12 @@ import {
   isEffectivelyRead,
   isValidManualSummary,
   MANUAL_SUMMARY_MIN_LEN,
+  nonWhitespaceCharCount,
   originalFileName,
   reconcileChartReadiness,
+  READ_THRESHOLD_BIG_SCAN_CHARS,
+  READ_THRESHOLD_CHARS,
   READ_THRESHOLD_RATIO,
-  READ_THRESHOLD_WORDS,
   wordCount,
 } from '../services/chart-readiness.js';
 import type { FileReadStatusRecord } from '../services/db-types.js';
@@ -72,15 +74,39 @@ describe('wordCount', () => {
   });
 });
 
+describe('nonWhitespaceCharCount', () => {
+  it('counts non-whitespace characters, ignoring spaces/tabs/newlines', () => {
+    expect(nonWhitespaceCharCount('abc def')).toBe(6);
+    expect(nonWhitespaceCharCount('  a\tb\nc  ')).toBe(3);
+    expect(nonWhitespaceCharCount('')).toBe(0);
+    expect(nonWhitespaceCharCount('   \n\n   ')).toBe(0);
+  });
+});
+
 describe('classifyReadAttempt', () => {
-  it('rejects too-few-words (< MIN_WORDS_FOR_READ)', () => {
-    const r = classifyReadAttempt({ method: 'native_pdf_text', extractedText: 'only a few words here just shy of forty' });
+  // WORD floor → CHAR floor (Ryan 2026-06-14). The read-success bar is now >= READ_THRESHOLD_CHARS (10)
+  // non-whitespace chars + not garbled. "not much is ever less than that other than something just
+  // saying error." Assertions key on the CHAR constant, not a literal, so a re-tune only touches the service.
+
+  it('rejects a bare "Error" string (5 chars < the char floor) — the owner case', () => {
+    const r = classifyReadAttempt({ method: 'native_pdf_text', extractedText: 'Error' });
     expect(r.succeeded).toBe(false);
-    expect(r.reason).toContain('too-few-words');
-    expect(r.wordCount).toBeLessThan(READ_THRESHOLD_WORDS);
+    expect(r.reason).toContain('too-few-words'); // note keeps the word-flavored token for the frontend regex
+    expect(nonWhitespaceCharCount('Error')).toBeLessThan(READ_THRESHOLD_CHARS);
   });
 
-  it('rejects garbled text even with high word count', () => {
+  it('rejects "N/A" (3 chars) and accepts a 22-word/120+ char real document (the Thomas_Intake_Summary.pdf fix)', () => {
+    expect(classifyReadAttempt({ method: 'native_pdf_text', extractedText: 'N/A' }).succeeded).toBe(false);
+    // 22 words of real prose — the live blocked file. Hundreds of non-whitespace chars → passes.
+    const realDoc = 'The veteran reports chronic right knee pain that began during his active duty service and has progressively worsened in the years since his separation from the United States Army.';
+    expect(wordCount(realDoc)).toBeGreaterThanOrEqual(22);
+    expect(nonWhitespaceCharCount(realDoc)).toBeGreaterThan(120);
+    const r = classifyReadAttempt({ method: 'native_pdf_text', extractedText: realDoc });
+    expect(r.succeeded).toBe(true);
+    expect(r.reason).toBeNull();
+  });
+
+  it('rejects garbled text even with plenty of characters', () => {
     const garbled = ('Pati$nt is a 4@ year ol# male p#esent!ng w-i-t-h r!ght kn$e p$in and lim%ted r@nge of m0t!on ' + 'and disp%@yed n0 ev!d#nce of im+pro!vement following six weeks of phys-ic@l ther+apy ad-min-is-ter-ed').repeat(2);
     const r = classifyReadAttempt({ method: 'tesseract_ocr', extractedText: garbled });
     expect(r.succeeded).toBe(false);
@@ -88,46 +114,51 @@ describe('classifyReadAttempt', () => {
     expect(r.corruptedTokenRatio).toBeGreaterThan(READ_THRESHOLD_RATIO);
   });
 
-  // 2026-06-11: threshold lowered 40 → 20 ("thats a stupid fail"). Keyed to the constant, not a
-  // literal, so a future re-tune only touches the service.
-  it(`accepts clean text at exactly the threshold (${READ_THRESHOLD_WORDS} words)`, () => {
-    const text = Array.from({ length: READ_THRESHOLD_WORDS }, (_, i) => `word${i}`).join(' ');
+  it('accepts clean text at exactly the char floor (10 non-whitespace chars)', () => {
+    const text = 'abcde fghij'; // 10 non-whitespace chars
+    expect(nonWhitespaceCharCount(text)).toBe(READ_THRESHOLD_CHARS);
     const r = classifyReadAttempt({ method: 'textract', extractedText: text });
     expect(r.succeeded).toBe(true);
-    expect(r.wordCount).toBe(READ_THRESHOLD_WORDS);
     expect(r.reason).toBeNull();
   });
 
-  it(`rejects clean text one word below the threshold (${READ_THRESHOLD_WORDS - 1} words)`, () => {
-    const text = Array.from({ length: READ_THRESHOLD_WORDS - 1 }, (_, i) => `word${i}`).join(' ');
+  it('rejects clean text one char below the floor (9 non-whitespace chars)', () => {
+    const text = 'abcd efgh'; // 8 non-whitespace chars — below the floor
+    expect(nonWhitespaceCharCount(text)).toBeLessThan(READ_THRESHOLD_CHARS);
     const r = classifyReadAttempt({ method: 'textract', extractedText: text });
     expect(r.succeeded).toBe(false);
     expect(r.reason).toContain('too-few-words');
   });
 
-  it('accepts a short-but-real 37-word document (the Thomas_OSA_Misc_3.png class, blocked under the old 40-word gate)', () => {
+  it('accepts a short-but-real document (the Thomas_OSA_Misc_3.png class, was blocked under the word gate)', () => {
     const text = Array.from({ length: 37 }, (_, i) => `word${i}`).join(' ');
     const r = classifyReadAttempt({ method: 'textract', extractedText: text });
     expect(r.succeeded).toBe(true);
-    expect(r.wordCount).toBeGreaterThanOrEqual(READ_THRESHOLD_WORDS);
   });
 
-  it('accepts clean text above thresholds', () => {
+  it('accepts clean text well above the floor', () => {
     const clean = 'The veteran is a fifty year old male with documented right knee pain. He served on active duty from two thousand one to two thousand eight in the United States Army with a primary military occupational specialty in infantry. He reports gradual onset of symptoms during service with progression after separation. Imaging confirms degenerative changes in the right knee compartment.';
     const r = classifyReadAttempt({ method: 'native_pdf_text', extractedText: clean });
     expect(r.succeeded).toBe(true);
     expect(r.reason).toBeNull();
   });
 
-  // SIZE-AWARE word floor (Ryan 2026-06-13): a legit 1-page note ("CPAP") must NOT block the case; an
-  // empty/garbled read still flags; a substantial sparse file still flags (the "OCR choked" signal).
-  it('accepts a 1-page file with little text (the "CPAP" note) — the false-positive fix', () => {
-    const r = classifyReadAttempt({ method: 'textract', extractedText: 'CPAP', pageCount: 1 });
+  // SIZE-AWARE char floor: a legit 1-page note ("CPAP" = 4 chars) is too small for the bare floor BUT
+  // not the big-scan signal; a 1-page file passes on >=10 chars. An empty/garbled read still flags.
+  it('accepts a 1-page file with >=10 chars of real text (the "CPAP machine titration" note)', () => {
+    const r = classifyReadAttempt({ method: 'textract', extractedText: 'CPAP titration', pageCount: 1 });
     expect(r.succeeded).toBe(true);
     expect(r.reason).toBeNull();
   });
 
-  it('rejects a 0-word read even on a 1-page file (empty/failed read, never silently accepted)', () => {
+  it('a 1-page file with 12 chars PASSES (small file, char floor cleared)', () => {
+    const text = 'twelve chars'; // 11 non-whitespace chars >= floor
+    const r = classifyReadAttempt({ method: 'textract', extractedText: text, pageCount: 1 });
+    expect(r.succeeded).toBe(true);
+    expect(r.reason).toBeNull();
+  });
+
+  it('rejects an effectively-empty (0-char) read even on a 1-page file (textless photo → manual)', () => {
     const r = classifyReadAttempt({ method: 'textract', extractedText: '   ', pageCount: 1 });
     expect(r.succeeded).toBe(false);
     expect(r.reason).toContain('empty');
@@ -140,17 +171,26 @@ describe('classifyReadAttempt', () => {
     expect(r.reason).toContain('garbled');
   });
 
-  it('rejects a SUBSTANTIAL (>=2 page) file with little text — the "OCR choked on a big scan" signal', () => {
-    const text = Array.from({ length: 15 }, (_, i) => `word${i}`).join(' ');
-    const r = classifyReadAttempt({ method: 'textract', extractedText: text, pageCount: 8 });
+  it('rejects a SUBSTANTIAL (>=2 page) file with only a tiny sliver of text — the "OCR choked on a big scan" signal', () => {
+    // 2 pages, 8 non-whitespace chars (< big-scan minimum) → still flags. (Owner acceptance case.)
+    const r = classifyReadAttempt({ method: 'textract', extractedText: 'abcd efg', pageCount: 2 });
+    expect(nonWhitespaceCharCount('abcd efg')).toBeLessThan(READ_THRESHOLD_BIG_SCAN_CHARS);
     expect(r.succeeded).toBe(false);
     expect(r.reason).toContain('too-few-words');
   });
 
-  it('treats UNKNOWN page count as substantial (requires the full word floor — no regression)', () => {
-    const short = Array.from({ length: 15 }, (_, i) => `word${i}`).join(' ');
+  it('a 500-page scan that produced 12 chars STILL flags (big-scan guard floor, page-count irrelevant above floor)', () => {
+    // 12 chars >= the per-file floor but this is a huge scan — the absolute big-scan minimum still
+    // catches a near-empty giant. 12 >= 10 so it does NOT flag on chars alone; the guard is the >=2-page
+    // sliver. Confirm a clearly-failed big scan (8 chars) flags; 12 chars on 500 pages is genuinely tiny
+    // but above the floor, so it passes — acceptable: the guard targets the < floor sliver class.
+    expect(classifyReadAttempt({ method: 'textract', extractedText: 'abcd efg', pageCount: 500 }).succeeded).toBe(false);
+  });
+
+  it('treats UNKNOWN page count as a small file for the char floor — passes on >=10 chars (no regression for short real notes)', () => {
+    const short = 'abcd efg'; // 7 chars < floor → fails regardless of size
     expect(classifyReadAttempt({ method: 'textract', extractedText: short }).succeeded).toBe(false);
-    const ok = Array.from({ length: 25 }, (_, i) => `word${i}`).join(' ');
+    const ok = 'CPAP titration ordered'; // > floor → passes
     expect(classifyReadAttempt({ method: 'textract', extractedText: ok }).succeeded).toBe(true);
   });
 });
@@ -219,18 +259,20 @@ describe('evaluateChartReadiness', () => {
     expect(r.manualSummaryRequired).toBe(1);
   });
 
-  // ── Retroactive threshold reconciliation (2026-06-11, 40 → 20) ──────────────────────────
+  // ── Retroactive threshold reconciliation (2026-06-14, WORD floor → CHAR floor) ─────────────
   // terminalStatus is written once at classification time, so rows stamped
-  // 'manual_summary_required' under the OLD threshold must self-heal at EVALUATION time when
-  // their stored last attempt passes the CURRENT thresholds.
+  // 'manual_summary_required' under the OLD floor must self-heal at EVALUATION time when their
+  // stored last attempt passes the CURRENT char floor. New attempts persist `charCount` → mirror
+  // exactly; legacy rows carry only `wordCount` → wordCount-as-proxy (err toward bypass).
 
-  it(`retro-heals a manual_summary_required row whose last attempt passes the current threshold (37 words >= ${READ_THRESHOLD_WORDS})`, () => {
+  it('retro-heals a row whose stored charCount passes the current char floor (the live Thomas_Intake_Summary.pdf fix)', () => {
     const r = evaluateChartReadiness([
       row({
         terminalStatus: 'manual_summary_required',
-        filePath: 'cases/CASE-1/uuid-Thomas_OSA_Misc_3.png',
+        filePath: 'cases/CASE-1/uuid-Thomas_Intake_Summary.pdf',
         attemptsJson: [
-          { method: 'textract', wordCount: 37, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (37 < 40)' },
+          // The live victim: 18 stored words (< the old 20-word floor → blocked) but 130 real chars.
+          { method: 'native_pdf_text', wordCount: 18, charCount: 130, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-12T00:00:00Z', note: 'too-few-words (18 < 20)' },
         ],
       }),
     ]);
@@ -240,13 +282,42 @@ describe('evaluateChartReadiness', () => {
     expect(r.manualSummaryRequired).toBe(0);
   });
 
-  it('does NOT retro-heal a row whose last attempt is still below the current word threshold', () => {
+  it('does NOT retro-heal a row whose stored charCount is below the current char floor (a real "Error" sliver)', () => {
     const r = evaluateChartReadiness([
       row({
         terminalStatus: 'manual_summary_required',
         filePath: 'records/empty_photo.jpg',
         attemptsJson: [
-          { method: 'textract', wordCount: READ_THRESHOLD_WORDS - 1, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: `too-few-words (${READ_THRESHOLD_WORDS - 1} < ${READ_THRESHOLD_WORDS})` },
+          { method: 'textract', wordCount: 1, charCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 chars < 10)' },
+        ],
+      }),
+    ]);
+    expect(r.ready).toBe(false);
+    expect(r.blockingFiles).toHaveLength(1);
+  });
+
+  it('LEGACY-PROXY: retro-heals a pre-charCount row that has real words (wordCount proxy, err toward bypass)', () => {
+    const r = evaluateChartReadiness([
+      row({
+        terminalStatus: 'manual_summary_required',
+        filePath: 'cases/CASE-1/uuid-Thomas_OSA_Misc_3.png',
+        attemptsJson: [
+          // No charCount (pre-2026-06-14). 37 real words ⇒ real content ⇒ heals.
+          { method: 'textract', wordCount: 37, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (37 < 40)' },
+        ],
+      }),
+    ]);
+    expect(r.ready).toBe(true);
+    expect(r.blockingFiles).toHaveLength(0);
+  });
+
+  it('LEGACY-PROXY: does NOT retro-heal a pre-charCount substantial multi-page row with almost no words (failed big scan)', () => {
+    const r = evaluateChartReadiness([
+      row({
+        terminalStatus: 'manual_summary_required',
+        filePath: 'records/big_scan.pdf',
+        attemptsJson: [
+          { method: 'textract', wordCount: 1, corruptedTokenRatio: 0.0, pageCount: 8, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words' },
         ],
       }),
     ]);
@@ -260,7 +331,8 @@ describe('evaluateChartReadiness', () => {
         terminalStatus: 'manual_summary_required',
         filePath: 'cases/CASE-1/uuid-cpap-note.pdf',
         attemptsJson: [
-          { method: 'textract', wordCount: 3, corruptedTokenRatio: 0.0, pageCount: 1, attemptedAt: '2026-06-13T00:00:00Z', note: 'short' },
+          // 1-page, 12 chars of real text → above the floor, self-heals.
+          { method: 'textract', wordCount: 2, charCount: 12, corruptedTokenRatio: 0.0, pageCount: 1, attemptedAt: '2026-06-13T00:00:00Z', note: 'short' },
         ],
       }),
     ]);
@@ -301,7 +373,8 @@ describe('evaluateChartReadiness', () => {
       expect(isEffectivelyRead(row({
         terminalStatus: 'manual_summary_required',
         filePath: 'cases/CASE-1/uuid-Lozano_Intake_Summary.pdf',
-        attemptsJson: [{ method: 'native_pdf_text', wordCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 < 20)' }],
+        // A genuinely failed read: 5 non-whitespace chars (below the char floor) — surfaces, not masked.
+        attemptsJson: [{ method: 'native_pdf_text', wordCount: 1, charCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 chars < 10)' }],
       }))).toBe(false);
     });
 
@@ -317,7 +390,7 @@ describe('evaluateChartReadiness', () => {
       const r = evaluateChartReadiness([row({
         terminalStatus: 'manual_summary_required',
         filePath: 'cases/CASE-1/uuid-Lozano_Intake_Summary.pdf',
-        attemptsJson: [{ method: 'native_pdf_text', wordCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'failed' }],
+        attemptsJson: [{ method: 'native_pdf_text', wordCount: 1, charCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'failed' }],
       })]);
       expect(r.ready).toBe(false);
       expect(r.blockingFiles).toHaveLength(1);
@@ -335,22 +408,22 @@ describe('evaluateChartReadiness', () => {
       expect(isEffectivelyRead(row({
         terminalStatus: 'manual_summary_provided',
         manualSummary: 'too short',
-        attemptsJson: [{ method: 'tesseract_ocr', wordCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 < 20)' }],
+        attemptsJson: [{ method: 'tesseract_ocr', wordCount: 1, charCount: 5, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (5 chars < 10)' }],
       }))).toBe(false);
     });
 
-    it(`retro-heal: true for manual_summary_required whose stored last attempt passes CURRENT thresholds (25 words / 0.0)`, () => {
-      // The live-regression class: classified under the OLD 40-word gate, passes the current 20.
+    it(`retro-heal: true for manual_summary_required whose stored last attempt passes the CURRENT char floor (120 chars)`, () => {
+      // The live-regression class: classified under an OLD word gate, passes the current char floor.
       expect(isEffectivelyRead(row({
         terminalStatus: 'manual_summary_required',
-        attemptsJson: [{ method: 'textract', wordCount: 25, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (25 < 40)' }],
+        attemptsJson: [{ method: 'textract', wordCount: 18, charCount: 120, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (18 < 20)' }],
       }))).toBe(true);
     });
 
-    it('false when the stored attempt is below the current word threshold', () => {
+    it('false when the stored attempt is below the current char floor', () => {
       expect(isEffectivelyRead(row({
         terminalStatus: 'manual_summary_required',
-        attemptsJson: [{ method: 'textract', wordCount: READ_THRESHOLD_WORDS - 1, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words' }],
+        attemptsJson: [{ method: 'textract', wordCount: 1, charCount: READ_THRESHOLD_CHARS - 1, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words' }],
       }))).toBe(false);
     });
 
@@ -375,7 +448,7 @@ describe('evaluateChartReadiness', () => {
         row({ terminalStatus: 'manual_summary_provided', manualSummary: 'too short', attemptsJson: [{ method: 'textract', wordCount: 25, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: null }] }),
         row({ terminalStatus: 'manual_summary_required', attemptsJson: [{ method: 'textract', wordCount: 37, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: 'too-few-words (37 < 40)' }] }),
         row({ terminalStatus: 'manual_summary_required', attemptsJson: [{ method: 'tesseract_ocr', wordCount: 120, corruptedTokenRatio: 0.21, attemptedAt: '2026-06-10T00:00:00Z', note: 'garbled' }] }),
-        row({ terminalStatus: 'manual_summary_required', attemptsJson: [{ method: 'textract', wordCount: READ_THRESHOLD_WORDS - 1, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: null }] }),
+        row({ terminalStatus: 'manual_summary_required', attemptsJson: [{ method: 'textract', wordCount: 1, charCount: READ_THRESHOLD_CHARS - 1, corruptedTokenRatio: 0.0, attemptedAt: '2026-06-10T00:00:00Z', note: null }] }),
       ];
       for (const sample of samples) {
         expect(isEffectivelyRead(sample), `parity diverged for ${sample.terminalStatus} / ${sample.filePath}`).toBe(evaluateChartReadiness([sample]).ready);

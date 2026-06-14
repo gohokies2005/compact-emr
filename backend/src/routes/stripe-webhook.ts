@@ -1,15 +1,24 @@
 import { Router, type Request, type Response } from 'express';
+import { type S3Client } from '@aws-sdk/client-s3';
 import { asyncHandler } from '../http/async-handler.js';
 import { verifyStripeSignature } from '../services/stripe-signature.js';
 import { readSecretByName } from '../services/mailer.js';
 import { parseCaseRef, processStripePayment } from '../services/payment-delivery.js';
 import type { AppDb } from '../services/db-types.js';
 
+// s3 + bucketName feed the delivery-eligibility byte re-hash inside processStripePayment
+// (correction-round SSOT, audit 2026-06-13). OPTIONAL: when absent the byte step fails open (same as
+// delivery.ts), but the sign-off exists + affirmative checks still gate every Stripe egress.
+export interface StripeWebhookRouterDeps {
+  readonly s3?: S3Client;
+  readonly bucketName?: string;
+}
+
 // PUBLIC Stripe webhook (no Cognito; the SIGNATURE is the auth). Mounted with express.raw() so the body
 // is the exact bytes Stripe signed. Verifies the signature against the operator-populated webhook secret
 // (Secrets Manager, read by NAME at runtime), then hands a paid checkout session to the delivery
 // orchestration. Always returns 200 on a handled event so Stripe doesn't retry a non-error no-op.
-export function createStripeWebhookRouter(db: AppDb): Router {
+export function createStripeWebhookRouter(db: AppDb, deps: StripeWebhookRouterDeps = {}): Router {
   const router = Router();
   router.post('/', asyncHandler(async (req: Request, res: Response) => {
     // serverless-http rebuilds req.body via Buffer.from(event.body,'utf8') — a RE-ENCODED copy, NOT
@@ -59,6 +68,8 @@ export function createStripeWebhookRouter(db: AppDb): Router {
     const result = await processStripePayment(db, { caseId, amountCents, chargeId }, {
       portalBaseUrl: process.env.DELIVERY_PORTAL_BASE_URL ?? 'https://emr.flatratenexus.com',
       ...(process.env.DELIVERY_ADMIN_BCC ? { adminBcc: process.env.DELIVERY_ADMIN_BCC } : {}),
+      ...(deps.s3 ? { s3: deps.s3 } : {}),
+      ...(deps.bucketName ? { bucketName: deps.bucketName } : {}),
     });
     console.log(`[stripe-webhook] result=${result.status}${result.reason ? ` reason=${result.reason}` : ''} caseId=${caseId}`);
     res.json({ received: true, result: result.status });

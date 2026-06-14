@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildDeliveryEmailText, parseCaseRef, processStripePayment } from '../services/payment-delivery.js';
+import { sha256OfText } from '../services/letter-current.js';
 import type { AppDb } from '../services/db-types.js';
 
 vi.mock('../services/mailer.js', () => ({
@@ -7,7 +8,15 @@ vi.mock('../services/mailer.js', () => ({
   readSecretByName: vi.fn(async () => 'whsec'),
 }));
 
-function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boolean; phone?: string | null; approvedRevision?: boolean; invoicedRow?: boolean } = {}) {
+// Correction-round SSOT (audit 2026-06-13): processStripePayment now gates token+email on
+// assertDeliveryEligible. The default cfg passes NO s3/bucket, so the byte step fails open and an
+// affirmative sign-off alone is sufficient for the happy-path tests below. The ineligible tests at
+// the bottom override the sign-off (missing / non-affirmative) to prove delivery is withheld while
+// the payment is STILL recorded + the case STILL flips to paid.
+const SIGNED_TXT = 'Signed letter body.\n';
+const AFFIRMATIVE_SIGNOFF = { answersJson: { a: true, b: true }, signedVersion: 7, signedContentSha256: sha256OfText(SIGNED_TXT) };
+
+function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boolean; phone?: string | null; approvedRevision?: boolean; invoicedRow?: boolean; signOff?: { answersJson: unknown; signedVersion: number | null; signedContentSha256: string | null } | null } = {}) {
   const calls = {
     paymentCreate: vi.fn(async () => ({})),
     paymentUpdate: vi.fn(async () => ({})),
@@ -34,6 +43,14 @@ function makeDb(over: { existingPayment?: boolean; noPdf?: boolean; noCase?: boo
     veteran: { findUnique: vi.fn(async () => ({ email: 'vet@example.com', firstName: 'Sam', phone: over.phone !== undefined ? over.phone : '(702) 555-1234' })) },
     deliveryToken: { create: calls.tokenCreate },
     activityLog: { create: calls.activity },
+    // Default: an affirmative sign-off so the eligibility gate passes (byte step fails open — the
+    // default cfg below passes no s3/bucket). over.signOff===null => no sign-off; an object overrides.
+    signOff: {
+      findMany: vi.fn(async () => {
+        if (over.signOff === null) return [];
+        return [{ id: 'S0', ...(over.signOff ?? AFFIRMATIVE_SIGNOFF) }];
+      }),
+    },
   };
   // $transaction runs its callback against the SAME delegate spies (so tx writes are observed).
   const db = { ...delegates, $transaction: vi.fn(async (fn: (tx: typeof delegates) => unknown) => fn(delegates)) } as unknown as AppDb;
@@ -186,5 +203,41 @@ describe('payment-delivery', () => {
     expect(r.status).toBe('delivered');
     expect(calls.tokenCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ passwordHash: null }) }));
     expect(calls.activity).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'delivery_identity_unlock_needs_phone' }) }));
+  });
+
+  // ── Delivery-eligibility gate (correction-round SSOT, audit 2026-06-13) ───────────────────────
+  // A paid letter whose case has NO sign-off (or a non-affirmative one, or post-sign edited bytes)
+  // must STILL record the payment + flip the case to paid (never lose money tracking) but mint NO
+  // token, send NO email, and leave a LOUD breadcrumb so an admin can re-sign + deliver manually.
+
+  it('NO sign-off → payment recorded + case flips to paid, but NO token minted + loud breadcrumb (blocked_ineligible)', async () => {
+    const { db, calls } = makeDb({ signOff: null });
+    const r = await processStripePayment(db, { caseId: 'C1', amountCents: 50000, chargeId: 'pi_nosign' }, cfg);
+    expect(r.status).toBe('blocked_ineligible');
+    // Money tracking is preserved: payment created, case -> paid.
+    expect(calls.paymentCreate).toHaveBeenCalled();
+    expect(calls.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'paid' } }));
+    // But delivery is withheld: no token, no email send.
+    expect(calls.tokenCreate).not.toHaveBeenCalled();
+    // Loud breadcrumb naming the reason (the reason rides detailsJson, like the other breadcrumbs).
+    expect(calls.activity).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'payment_received_not_affirmative', detailsJson: expect.objectContaining({ reason: 'no_signoff' }) }) }));
+  });
+
+  it('NON-AFFIRMATIVE sign-off (a "No" attestation) → blocked_ineligible, payment+paid recorded, no token', async () => {
+    const { db, calls } = makeDb({ signOff: { answersJson: { a: true, b: false }, signedVersion: 7, signedContentSha256: null } });
+    const r = await processStripePayment(db, { caseId: 'C1', amountCents: 50000, chargeId: 'pi_notaffirm' }, cfg);
+    expect(r.status).toBe('blocked_ineligible');
+    expect(calls.paymentCreate).toHaveBeenCalled();
+    expect(calls.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'paid' } }));
+    expect(calls.tokenCreate).not.toHaveBeenCalled();
+    expect(calls.activity).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'payment_received_not_affirmative', detailsJson: expect.objectContaining({ reason: 'signoff_not_affirmative' }) }) }));
+  });
+
+  it('ELIGIBLE-by-default (affirmative sign-off, byte check fails open with no s3) → delivers normally', async () => {
+    // Guards that the gate does NOT over-block: the default affirmative sign-off + no-s3 cfg is eligible.
+    const { db, calls } = makeDb();
+    const r = await processStripePayment(db, { caseId: 'C1', amountCents: 50000, chargeId: 'pi_ok' }, cfg);
+    expect(r.status).toBe('delivered');
+    expect(calls.tokenCreate).toHaveBeenCalled();
   });
 });

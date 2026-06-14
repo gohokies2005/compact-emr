@@ -1,6 +1,8 @@
+import { type S3Client } from '@aws-sdk/client-s3';
 import type { AppDb } from './db-types.js';
 import { generateToken, phoneLast4 } from './delivery-token.js';
 import { sendEmail } from './mailer.js';
+import { assertDeliveryEligible } from './delivery-eligibility.js';
 
 // Stripe payment → password-portal delivery orchestration (Ryan 2026-06-06). Thin route, testable
 // service. IDEMPOTENT on the Stripe charge id (a Payment row already on that charge = already handled).
@@ -39,7 +41,7 @@ async function resolveSignedPdf(db: AppDb, caseId: string, currentVersion: numbe
 }
 
 export interface ProcessResult {
-  readonly status: 'delivered' | 'delivered_email_pending' | 'logged' | 'duplicate' | 'no_case' | 'no_pdf' | 'ignored_amount';
+  readonly status: 'delivered' | 'delivered_email_pending' | 'logged' | 'duplicate' | 'no_case' | 'no_pdf' | 'blocked_ineligible' | 'ignored_amount';
   readonly emailId?: string;
   readonly reason?: string;
 }
@@ -49,7 +51,11 @@ const isP2002 = (e: unknown): boolean => typeof e === 'object' && e !== null && 
 export async function processStripePayment(
   db: AppDb,
   input: { caseId: string; amountCents: number; chargeId: string },
-  cfg: { portalBaseUrl: string; adminBcc?: string },
+  // s3 + bucketName feed the delivery-eligibility byte re-hash (correction-round SSOT, audit
+  // 2026-06-13). The real Stripe→portal egress previously had NO sign/byte gate — a version
+  // advanced after sign-off shipped unsigned/wrong bytes. They are OPTIONAL: when absent the byte
+  // step fails open (same as delivery.ts), but the sign-off exists + affirmative checks still run.
+  cfg: { portalBaseUrl: string; adminBcc?: string; s3?: S3Client; bucketName?: string },
 ): Promise<ProcessResult> {
   const { caseId, amountCents, chargeId } = input;
   const kind = paymentKindForAmount(amountCents);
@@ -75,6 +81,43 @@ export async function processStripePayment(
   }
 
   const isLetter = kind === 'letter_500' || kind === 'letter_350';
+
+  // ── DELIVERY-ELIGIBILITY GATE (correction-round SSOT, audit 2026-06-13) ── The REAL patient egress.
+  // Before minting a DeliveryToken + emailing the portal link, the letter must pass the same sign/byte
+  // contract the RN delivery panel enforces: an AFFIRMATIVE physician sign-off bound to the CURRENT
+  // letter bytes. Without this gate a version advanced after sign-off (an editor save, a correction
+  // round, a bare status flip) shipped UNSIGNED or WRONG bytes — a signed legal opinion the physician
+  // never attested to, for money. CRITICAL: the payment is ALWAYS recorded + the case ALWAYS flips to
+  // paid (we never lose money tracking); only the DELIVERY (token + email) is withheld. An ineligible
+  // case takes the same shape as the pdf===null branch below (paid, loud breadcrumb, no token), so an
+  // admin can re-sign + deliver manually. Byte step fails open exactly where assertDeliveryEligible /
+  // delivery.ts do (legacy/no-hash sign-off, or S3/bucket unconfigured); exists + affirmative do NOT.
+  const eligibility = isLetter
+    ? await assertDeliveryEligible(db, caseId, c.currentVersion, { ...(cfg.s3 ? { s3: cfg.s3 } : {}), ...(cfg.bucketName ? { bucketName: cfg.bucketName } : {}) })
+    : { eligible: true as const };
+  if (isLetter && !eligibility.eligible) {
+    const action = eligibility.reason === 'signed_bytes_changed' ? 'payment_received_unsigned_bytes' : 'payment_received_not_affirmative';
+    try {
+      await db.$transaction(async (tx) => {
+        const invoicedRow = await tx.payment.findFirst({ where: { caseId, kind, status: 'invoiced' } });
+        if (invoicedRow !== null) {
+          await tx.payment.update({ where: { id: invoicedRow.id }, data: { status: 'paid', settledAt: new Date(), stripeChargeId: chargeId } });
+        } else {
+          await tx.payment.create({ data: { caseId, kind, amountCents, status: 'paid', settledAt: new Date(), stripeChargeId: chargeId } });
+        }
+        await tx.case.update({ where: { id: caseId }, data: { status: 'paid' } });
+        // LOUD breadcrumb: money recorded + case paid, but NO token/email — the letter is not
+        // deliverable until it is re-signed against its current bytes. An admin re-signs, then
+        // re-issues delivery (the token path is intact; nothing was minted to clean up).
+        await tx.activityLog.create({ data: { actorUserId: STRIPE_ACTOR, action, caseId, veteranId: c.veteranId, detailsJson: { chargeId, amountCents, reason: eligibility.reason, ...(eligibility.details ?? {}) } } });
+      });
+    } catch (e) {
+      if (isP2002(e)) return { status: 'duplicate', reason: 'charge already processed (race)' };
+      throw e;
+    }
+    return { status: 'blocked_ineligible', reason: `delivery blocked: ${eligibility.reason}` };
+  }
+
   // Reads + pure generation happen BEFORE the transaction (no side effects to roll back).
   const pdf = isLetter ? await resolveSignedPdf(db, caseId, c.currentVersion) : null;
   const vet = isLetter && pdf !== null ? ((await db.veteran.findUnique({ where: { id: c.veteranId } })) as { email?: string; firstName?: string; phone?: string | null } | null) : null;

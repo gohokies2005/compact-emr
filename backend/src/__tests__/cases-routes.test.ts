@@ -81,6 +81,11 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
     return null;
   });
 
+  // Default sign-off for the delivery-eligibility gate (correction-round SSOT, audit 2026-06-13):
+  // an affirmative sign-off with NO bound hash → the byte step fails open (createCasesRouter here is
+  // mounted with no s3/bucket deps), so a valid ->delivered transition passes the gate. The gate's
+  // own behavior (block on missing/non-affirmative sign-off) is covered in delivery-eligibility.test.
+  const signOffFindMany = vi.fn(async () => [{ id: 'SO-1', answersJson: { ready: true }, signedVersion: null, signedContentSha256: null }]);
   const tx = {
     case: { findMany: caseFindMany, findFirst: caseFindFirst, findUnique: caseFindFirst, count: caseCount, create: caseCreate, update: caseUpdate, delete: caseDelete },
     veteran: { findUnique: veteranFindUnique },
@@ -88,6 +93,7 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
     correction: { findMany: correctionFindMany },
     activityLog: { create: activityLogCreate },
     physician: { findUnique: physicianFindUnique },
+    signOff: { findMany: signOffFindMany },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
 

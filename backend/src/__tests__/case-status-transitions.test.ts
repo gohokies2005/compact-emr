@@ -32,7 +32,10 @@ describe('case status transitions', () => {
       'rejected',
     ]);
     expect(CASE_STATUS_TRANSITIONS.correction_requested).toEqual(['correction_review']);
-    expect(CASE_STATUS_TRANSITIONS.correction_review).toEqual(['delivered', 'rejected']);
+    // correction_review -> physician_review = RN "Send corrected letter back to the doctor" for a
+    // fresh sign-off (correction-round SSOT, audit 2026-06-13); -> delivered stays but is physician/
+    // admin-only (the bare RN flip the audit closed).
+    expect(CASE_STATUS_TRANSITIONS.correction_review).toEqual(['physician_review', 'delivered', 'rejected']);
     // delivered -> physician_review is the G4 stale-signature return (ratified sign/edit
     // lifecycle, Ryan 2026-06-12): an edit over the signed version sends the case back to the
     // doctor's queue for re-signature instead of sitting delivered with changed bytes.
@@ -60,6 +63,18 @@ describe('case status transitions', () => {
 
   it('lets the RN (ops_staff) send rn_review to the doctor (physician_review)', () => {
     expect(canRolePerformCaseStatusTransition('ops_staff', 'rn_review', 'physician_review')).toBe(true);
+  });
+
+  // ── Correction-round SSOT role gates (audit 2026-06-13) ───────────────────
+  it('correction_review -> delivered is physician/admin-only — the RN can NOT bare-flip a corrected case to delivered (skipping /letter/approve + the sign-off byte gate)', () => {
+    expect(canRolePerformCaseStatusTransition('ops_staff', 'correction_review', 'delivered')).toBe(false);
+    expect(canRolePerformCaseStatusTransition('physician', 'correction_review', 'delivered')).toBe(true);
+    expect(canRolePerformCaseStatusTransition('admin', 'correction_review', 'delivered')).toBe(true);
+  });
+
+  it('correction_review -> physician_review exists and the RN (ops_staff) may send a corrected letter back to the doctor for a fresh sign-off', () => {
+    expect(CASE_STATUS_TRANSITIONS.correction_review).toContain('physician_review');
+    expect(canRolePerformCaseStatusTransition('ops_staff', 'correction_review', 'physician_review')).toBe(true);
   });
 
   it('allows admin on any transition', () => {

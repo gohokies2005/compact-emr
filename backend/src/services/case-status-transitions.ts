@@ -35,7 +35,14 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   // correction_requested (decline / "Send back to RN").
   physician_review: ['correction_requested', 'delivered', 'rn_review', 'rejected'],
   correction_requested: ['correction_review'],
-  correction_review: ['delivered', 'rejected'],
+  // correction_review -> physician_review is the RN "Send corrected letter back to the doctor"
+  // action (correction-round SSOT, audit 2026-06-13): after a doctor decline + RN fix the corrected
+  // letter MUST return to the physician's queue for a fresh sign-off — there was previously no edge
+  // back to the doctor at all, so a corrected case could only go straight to 'delivered' (the bare
+  // flip the audit closed). Mirrors rn_review->physician_review (the canonical "send to doctor" hop).
+  // correction_review -> delivered stays, but is physician/admin-only below (an RN can no longer
+  // bare-flip a corrected case to delivered, skipping /letter/approve and the sign-off byte gate).
+  correction_review: ['physician_review', 'delivered', 'rejected'],
   // delivered -> physician_review is the G4 stale-signature return (ratified sign/edit lifecycle,
   // Ryan 2026-06-12): if a new letter version is ever created over the signed one post-approve,
   // the case returns to the doctor's queue for re-signature instead of sitting 'delivered' with
@@ -83,6 +90,15 @@ export function requiredRolesForCaseStatusTransition(from: CaseStatus, to: CaseS
     from === 'physician_review' &&
     (to === 'delivered' || to === 'correction_requested')
   ) {
+    return ['physician', 'admin'];
+  }
+  // correction_review -> delivered is physician/admin-only (correction-round SSOT, audit 2026-06-13):
+  // 'delivered' is the approve-transition target, reached through /letter/approve (re-render FINAL +
+  // fraud/signer/affirmativeness gates). The default below would have let ops_staff (the RN) bare-flip
+  // a corrected case to 'delivered', skipping every one of those gates. Mirrors the physician_review
+  // ->delivered rule above. (The RN's path forward on a corrected case is correction_review->
+  // physician_review — send it BACK to the doctor for a fresh sign-off, the new edge added above.)
+  if (from === 'correction_review' && to === 'delivered') {
     return ['physician', 'admin'];
   }
 

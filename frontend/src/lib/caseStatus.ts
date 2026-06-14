@@ -7,10 +7,15 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   viability: ['drafting', 'rejected'],
   drafting: ['rn_review', 'physician_review', 'needs_rn_decision', 'needs_records', 'rejected'],
   rn_review: ['physician_review', 'drafting', 'rejected'],
-  physician_review: ['correction_requested', 'delivered', 'rejected'],
+  // physician_review -> rn_review: drafter /complete legalization (admin-only as a human move).
+  physician_review: ['correction_requested', 'delivered', 'rn_review', 'rejected'],
   correction_requested: ['correction_review'],
-  correction_review: ['delivered', 'rejected'],
-  delivered: ['paid'],
+  // correction_review -> physician_review: RN "Send corrected letter back to the doctor" for a fresh
+  // sign-off (correction-round SSOT, audit 2026-06-13). correction_review -> delivered is physician/
+  // admin-only below (closes the RN bare-flip that skipped /letter/approve + the sign-off byte gate).
+  correction_review: ['physician_review', 'delivered', 'rejected'],
+  // delivered -> physician_review: G4 stale-signature return (admin-only as a human move).
+  delivered: ['paid', 'physician_review'],
   paid: [],
   rejected: [],
   needs_rn_decision: ['drafting', 'records', 'rejected'],
@@ -59,7 +64,13 @@ export function isValidCaseStatusTransition(from: CaseStatus, to: CaseStatus): b
 // physician_review->delivered/correction_requested needs physician or admin; everything else admin or ops_staff.
 export function requiredRolesForCaseStatusTransition(from: CaseStatus, to: CaseStatus): readonly Role[] {
   if (from === 'delivered' && to === 'paid') return ['admin'];
+  // G4 stale-signature return + drafter /complete legalization are admin-only as human moves.
+  if (from === 'delivered' && to === 'physician_review') return ['admin'];
+  if (from === 'physician_review' && to === 'rn_review') return ['admin'];
   if (from === 'physician_review' && (to === 'delivered' || to === 'correction_requested')) return ['physician', 'admin'];
+  // correction_review -> delivered is physician/admin-only (audit 2026-06-13) — the RN can no longer
+  // bare-flip a corrected case to delivered, skipping /letter/approve + the sign-off byte gate.
+  if (from === 'correction_review' && to === 'delivered') return ['physician', 'admin'];
   return ['admin', 'ops_staff'];
 }
 

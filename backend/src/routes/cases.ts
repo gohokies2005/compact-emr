@@ -19,6 +19,7 @@ import {
 import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor, type RequestActor } from '../services/request-actor.js';
 import { computeApproveBlockers, type ApproveBlocker, type ApproveBlockerDeps } from '../services/approve-blockers.js';
+import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
 import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
 
 const CASE_LITE_SELECT = {
@@ -569,6 +570,39 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
       const user = currentUser(req);
       const id = String(req.params.id);
       const parsed = parseStatusTransition(req.body);
+
+      // ── DELIVERY-ELIGIBILITY GATE (correction-round SSOT, audit 2026-06-13) ── Any HUMAN status
+      // move whose target is 'delivered' must pass the same sign/byte contract the RN delivery panel
+      // and the Stripe egress enforce — a signed nexus letter may not reach 'delivered' (the
+      // pre-payment egress gate) unless an AFFIRMATIVE sign-off is bound to the CURRENT letter bytes.
+      // This closes the bare-flip (correction_review->delivered, or any ->delivered) BEYOND the
+      // role-gating: even an admin cannot flip a case to delivered with a missing/non-affirmative
+      // sign-off or post-sign edited bytes. assertDeliveryEligible NEVER throws — it returns a verdict
+      // we translate to a 409 (matching delivery.ts:226 codes). Byte step fails open exactly where
+      // delivery.ts does (legacy/no-hash sign-off, or S3/bucket unconfigured). The exists +
+      // affirmative checks do NOT fail open. (The drafter /complete + internal routes do not pass
+      // through this client route, so this gate only governs human moves, as intended.) Runs ONLY for
+      // a VALID ->delivered transition — an invalid from->delivered must still surface as the 400 the
+      // transaction raises below (isValidCaseStatusTransition), not get pre-empted by this gate.
+      if (parsed.to === 'delivered' && isValidCaseStatusTransition(parsed.from, parsed.to)) {
+        const cForGate = await db.case.findFirst({ where: { id }, select: { id: true, currentVersion: true } });
+        if (cForGate !== null) {
+          const verdict = await assertDeliveryEligible(db, id, cForGate.currentVersion, deps);
+          if (!verdict.eligible) {
+            // code is the wire ErrorCode (signed_bytes_changed mirrors delivery.ts:226; the sign-off
+            // cases use the generic 'conflict' code with the specific reason in details — matching
+            // sign-offs.ts:47, which 409s 'conflict' + reason:'sign_off_not_affirmative').
+            const code = verdict.reason === 'signed_bytes_changed' ? 'signed_bytes_changed' : 'conflict';
+            const message =
+              verdict.reason === 'signed_bytes_changed'
+                ? 'The letter changed after it was signed. Re-sign before delivering.'
+                : verdict.reason === 'no_signoff'
+                  ? 'Cannot deliver: the case has no physician sign-off. Send it to the doctor for sign-off first.'
+                  : 'Cannot deliver: the physician sign-off is not affirmative (a "No" attestation). Resolve it and re-sign before delivering.';
+            throw new HttpError(409, code, message, { caseId: id, reason: verdict.reason, ...(verdict.details ?? {}) });
+          }
+        }
+      }
 
       const updated = await db.$transaction(async (tx) => {
         const existing = await tx.case.findFirst({

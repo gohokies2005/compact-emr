@@ -115,7 +115,14 @@ export function createApp(options: CreateAppOptions = {}) {
   // Public Stripe webhook (signature-gated, no Cognito). express.raw so the body is the EXACT bytes
   // Stripe signed — express.json would re-serialize them and break HMAC verification. (Mounted before
   // the authenticateJwt blanket; the API Gateway routes /stripe/webhook without the Cognito authorizer.)
-  app.use('/api/v1/stripe/webhook', express.raw({ type: '*/*', limit: '1mb' }), createStripeWebhookRouter(db));
+  // S3 + bucket feed the delivery-eligibility byte re-hash in processStripePayment (correction-round
+  // SSOT, audit 2026-06-13) — the real Stripe→portal egress now gates token+email on an affirmative
+  // sign-off bound to the current letter bytes. Absent bucket = byte check fails open, exists +
+  // affirmative still enforced. (Mirrors the sign-offs + delivery router wiring above.)
+  app.use('/api/v1/stripe/webhook', express.raw({ type: '*/*', limit: '1mb' }), createStripeWebhookRouter(db, {
+    s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
+    bucketName: process.env.PHI_BUCKET_NAME,
+  }));
   // Public password-protected delivery portal (token + password gated, no Cognito). The global json
   // parser above already parsed the unlock body (this path isn't in the skip list).
   app.use('/api/v1/delivery', createDeliveryPortalRouter(db, { bucketName: process.env.PHI_BUCKET_NAME, s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) }));

@@ -21,6 +21,7 @@ import { createViabilityRouter } from './routes/viability.js';
 import { createChartReadinessRouter } from './routes/chart-readiness.js';
 import { createDoctorPackRouter } from './routes/doctor-pack.js';
 import { createReportsRouter } from './routes/reports.js';
+import { createDashboardRouter } from './routes/dashboard.js';
 import { createPayRouter } from './routes/pay.js';
 import { createInternalWorkerRouter } from './routes/internal-worker.js';
 import { createJotformWebhookRouter } from './routes/jotform-webhook.js';
@@ -170,6 +171,9 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createDoctorPackRouter(db));
   // Admin-only drafting-cost report (per-claim LLM spend aggregated from DraftJob.costUsd).
   app.use('/api/v1', authenticateJwt(), createReportsRouter(db));
+  // D1 dashboard metrics (2026-06-13): one read-only endpoint returning every tile's count + its
+  // declarative filter contract (admin/ops_staff). Replaces the client-side HomePage tile math.
+  app.use('/api/v1', authenticateJwt(), createDashboardRouter(db));
   // Doctor-pay tracking (Track pay tab): physician self-serve earnings + admin per-physician
   // view + memo-tag stub. ACCURACY-CRITICAL — see docs/DOCTOR_PAY_BUILD_PLAN_2026-06-11.md.
   app.use('/api/v1', authenticateJwt(), createPayRouter(db));

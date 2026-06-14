@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
@@ -88,8 +89,17 @@ function sortRows(rows: readonly IntakeListItem[], key: SortKey, dir: 1 | -1): I
   return [...rows].sort((a, b) => { const av = val(a); const bv = val(b); return av < bv ? -1 * dir : av > bv ? 1 * dir : 0; });
 }
 
+// The status values the intake-pool dropdown accepts (deep-link allow-list).
+const INTAKE_STATUS_VALUES = new Set(['ready', 'pending', 'failed', 'assigned', 'dismissed', '']);
+
 export function IntakePoolPage() {
-  const [status, setStatus] = useState('ready');
+  // Deep-link seed (D2 dashboard tiles, 2026-06-13): the "Delinquent intakes" tile navigates here
+  // with ?status=pending. Honored ONCE on mount (a known value only); default stays 'ready'.
+  const [searchParams] = useSearchParams();
+  const [status, setStatus] = useState(() => {
+    const s = searchParams.get('status');
+    return s !== null && INTAKE_STATUS_VALUES.has(s) ? s : 'ready';
+  });
   const [q, setQ] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'received', dir: -1 });

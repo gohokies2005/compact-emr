@@ -59,6 +59,9 @@ export interface CaseListResult {
 
 export interface ListCasesParams {
   readonly status?: CaseStatus;
+  // Multi-status filter (group-tile deep-links, D2). Sent as a comma-joined `statuses` param →
+  // where.status.in. Takes precedence over single `status` server-side when both are present.
+  readonly statuses?: readonly CaseStatus[];
   readonly claimType?: ClaimType;
   readonly veteranId?: string;
   readonly assignedPhysicianId?: string;
@@ -71,7 +74,8 @@ export interface ListCasesParams {
 
 export async function listCases(params: ListCasesParams = {}): Promise<CaseListResult> {
   const sp = new URLSearchParams();
-  if (params.status) sp.set('status', params.status);
+  if (params.statuses && params.statuses.length > 0) sp.set('statuses', params.statuses.join(','));
+  else if (params.status) sp.set('status', params.status);
   if (params.claimType) sp.set('claimType', params.claimType);
   if (params.veteranId) sp.set('veteranId', params.veteranId);
   if (params.assignedPhysicianId) sp.set('assignedPhysicianId', params.assignedPhysicianId);

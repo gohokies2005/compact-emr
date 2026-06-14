@@ -626,4 +626,50 @@ describe('cases routes', () => {
     const call = spies.caseFindMany.mock.calls[0] as unknown as Array<{ select?: { assignedRn?: { select?: Record<string, unknown> } } }>;
     expect(call?.[0]?.select?.assignedRn?.select).toEqual({ id: true, email: true, name: true });
   });
+
+  // === `statuses` (multi-status) filter — dashboard GROUP-tile deep-links (D2, 2026-06-13) ===
+  // The RN-queue / pre-draft tiles emit a statuses[] filter and deep-link here; a comma list maps to
+  // where.status.in, validates each value against CASE_STATUSES, and supersedes single ?status=.
+  it('statuses=rn_review,needs_rn_decision maps to where.status.in (group-tile deep-link)', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?statuses=rn_review,needs_rn_decision');
+    expect(res.status).toBe(200);
+    expect(listWhere(spies).status).toEqual({ in: ['rn_review', 'needs_rn_decision'] });
+  });
+
+  it('statuses de-dupes and trims tokens', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?statuses=intake,%20viability%20,intake');
+    expect(res.status).toBe(200);
+    expect(listWhere(spies).status).toEqual({ in: ['intake', 'viability'] });
+  });
+
+  it('statuses takes precedence over a single status when both are sent', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?status=delivered&statuses=intake,viability');
+    expect(res.status).toBe(200);
+    expect(listWhere(spies).status).toEqual({ in: ['intake', 'viability'] });
+  });
+
+  it('an unknown value in statuses 400s', async () => {
+    const { db } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?statuses=intake,not_a_status');
+    expect(res.status).toBe(400);
+  });
+
+  it('an all-blank statuses param is ignored (no status filter)', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?statuses=%20,%20');
+    expect(res.status).toBe(200);
+    expect(listWhere(spies).status).toBeUndefined();
+  });
+
+  it('count + findMany see the SAME statuses where (pagination totals stay truthful)', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases?statuses=intake,viability');
+    expect(res.status).toBe(200);
+    const findManyWhere = listWhere(spies);
+    const countCall = spies.caseCount.mock.calls[0] as unknown as Array<{ where?: Record<string, unknown> }>;
+    expect(countCall?.[0]?.where).toEqual(findManyWhere);
+  });
 });

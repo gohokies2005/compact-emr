@@ -1,4 +1,44 @@
 import { apiClient, apiGet } from './client';
+import type { CaseStatus } from '../types/prisma';
+
+// === D2 dashboard tiles (2026-06-13) — mirrors backend/src/routes/dashboard.ts ===
+// One read-only endpoint returns every tile's count PLUS a declarative `filter` contract the
+// frontend translates into a deep-link to the filtered list. Keep this shape in lockstep with the
+// backend TileFilter / Tile / DashboardResponse types.
+
+export type DashboardTileFilter =
+  | { readonly kind: 'cases'; readonly status: CaseStatus }
+  | { readonly kind: 'cases'; readonly statuses: readonly CaseStatus[] }
+  | { readonly kind: 'cases'; readonly status: CaseStatus; readonly unpaidLetter500OlderThanDays: number }
+  | { readonly kind: 'intakes'; readonly createdSince: string }
+  | { readonly kind: 'intakes'; readonly status: string; readonly olderThanDays: number }
+  | { readonly kind: 'draft-jobs'; readonly stuck: true; readonly startedBeforeMinutes: number; readonly staleHeartbeat: boolean }
+  | { readonly kind: 'veterans' };
+
+export interface DashboardTile {
+  readonly key: string;
+  readonly label: string;
+  readonly count?: number;
+  // Tile 2 only (the 7-day turnaround): a duration metric, not a list. null when uncomputable.
+  readonly value?: number | null;
+  readonly unit?: string;
+  readonly reason?: string;
+  readonly clickable: boolean;
+  readonly filter?: DashboardTileFilter;
+}
+
+export interface DashboardResponse {
+  readonly generatedAt: string;
+  readonly timezone: string;
+  readonly pacificMidnightUtc: string;
+  readonly tiles: readonly DashboardTile[];
+}
+
+/** Admin/ops_staff dashboard metrics (GET /api/v1/reports/dashboard). Single source of truth for
+ *  the HomePage tiles — replaces the old ~7 client-side listCases counts + browser-tz "today" math. */
+export async function getDashboard(): Promise<DashboardResponse> {
+  return apiGet<DashboardResponse>('/api/v1/reports/dashboard');
+}
 
 export interface CostReportRow {
   readonly caseId: string;

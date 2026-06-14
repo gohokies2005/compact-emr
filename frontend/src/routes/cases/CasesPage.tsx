@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
@@ -131,14 +131,38 @@ function sortCases(rows: readonly CaseLite[], sort: CasesSortState): CaseLite[] 
   });
 }
 
+// Deep-link params (D2 dashboard tiles, 2026-06-13). A dashboard tile navigates here with
+// ?status=<one> (single-status tile) or ?statuses=<csv> (group tile). Parsed ONCE on mount and
+// seeded into filter state so the list reproduces the tile's count. When present, the URL wins over
+// the sticky sessionStorage filters (an explicit deep-link is a deliberate "show me THIS" action);
+// with no params the stored filters drive, preserving the navigate-into-a-claim-and-back UX.
+// Only canonical CASE_STATUS values are honored — an unknown one is ignored (no crash).
+function parseStatusesParam(raw: string | null): readonly CaseStatus[] {
+  if (!raw) return [];
+  return raw.split(',').map((t) => t.trim()).filter((t) => t in CASE_STATUS_LABELS) as CaseStatus[];
+}
+
 export function CasesPage() {
   const navigate = useNavigate();
   const { role } = useAuth();
+  // Deep-link override (parsed ONCE via lazy init, like storedFilters).
+  const [searchParams] = useSearchParams();
+  const [deepLink] = useState(() => {
+    const statusesFromUrl = parseStatusesParam(searchParams.get('statuses'));
+    const statusFromUrl = searchParams.get('status');
+    const singleStatus = statusFromUrl && statusFromUrl in CASE_STATUS_LABELS ? (statusFromUrl as CaseStatus) : null;
+    return { statuses: statusesFromUrl, status: singleStatus };
+  });
+  const hasDeepLink = deepLink.statuses.length > 0 || deepLink.status !== null;
   // Filters rehydrate from sessionStorage so navigating into a claim and back keeps the working
   // set (parsed ONCE via lazy useState — not per render). Cleared with the tab; page # excluded
-  // on purpose (the reset-to-1 effect below fires on mount and would fight it).
-  const [storedFilters] = useState(loadStoredFilters);
-  const [status, setStatus] = useState<CaseStatus | ''>(storedFilters?.status ?? '');
+  // on purpose (the reset-to-1 effect below fires on mount and would fight it). A deep-link from a
+  // dashboard tile takes precedence over the stored filters for THIS mount.
+  const [storedFilters] = useState(() => (hasDeepLink ? null : loadStoredFilters()));
+  // A group-tile deep-link drives a multi-status filter that the single-status dropdown can't
+  // express; we hold it separately and clear it the moment the RN touches the dropdown.
+  const [statuses, setStatuses] = useState<readonly CaseStatus[]>(deepLink.statuses);
+  const [status, setStatus] = useState<CaseStatus | ''>(deepLink.status ?? storedFilters?.status ?? '');
   const [vetQuery, setVetQuery] = useState('');
   const [veteran, setVeteran] = useState<{ id: string; label: string } | null>(storedFilters?.veteran ?? null);
   const [archived, setArchived] = useState(storedFilters?.archived ?? false); // show the Archive (soft-deleted claims)
@@ -178,7 +202,8 @@ export function CasesPage() {
   const debouncedVet = useDebounced(vetQuery, 300);
   // Reset to page 1 whenever a filter changes.
   const rnSelKey = rnSel.join(',');
-  useEffect(() => { setPage(1); }, [status, rnSelKey, veteran?.id, pageSize, archived]);
+  const statusesKey = statuses.join(',');
+  useEffect(() => { setPage(1); }, [status, statusesKey, rnSelKey, veteran?.id, pageSize, archived]);
 
   const vetMatches = useQuery({
     queryKey: ['veteran-search', debouncedVet],
@@ -186,10 +211,12 @@ export function CasesPage() {
     enabled: debouncedVet.trim().length > 0 && veteran === null,
   });
 
+  // A multi-status group-tile deep-link (statuses[]) supersedes the single-status dropdown.
+  const statusesParam = statuses.length > 0 ? statuses : undefined;
   const cases = useQuery({
-    queryKey: ['cases', { status, assignedRnId: assignedRnParam ?? '', veteranId: veteran?.id ?? '', archived, page, pageSize }],
+    queryKey: ['cases', { status, statuses: statusesParam?.join(',') ?? '', assignedRnId: assignedRnParam ?? '', veteranId: veteran?.id ?? '', archived, page, pageSize }],
     queryFn: () => listCases({
-      ...(status && { status }),
+      ...(statusesParam ? { statuses: statusesParam } : status ? { status } : {}),
       ...(assignedRnParam && { assignedRnId: assignedRnParam }),
       ...(veteran && { veteranId: veteran.id }),
       ...(archived && { archived: true }),
@@ -200,7 +227,7 @@ export function CasesPage() {
     enabled: !rnSel.includes(RN_ME) || meResolved,
   });
 
-  function clearFilters() { setStatus(''); setRnSel(defaultRnSel); setVetQuery(''); setVeteran(null); setArchived(false); }
+  function clearFilters() { setStatus(''); setStatuses([]); setRnSel(defaultRnSel); setVetQuery(''); setVeteran(null); setArchived(false); }
   const total = cases.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -268,7 +295,7 @@ export function CasesPage() {
 
     <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
       <label className="block text-sm lg:w-56"><span className="mb-1 block font-medium text-slate-700">Status</span>
-        <select className="input" value={status} onChange={(e) => setStatus(e.target.value as CaseStatus | '')}><option value="">All statuses</option>{STATUS_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+        <select className="input" value={statuses.length > 0 ? '' : status} onChange={(e) => { setStatuses([]); setStatus(e.target.value as CaseStatus | ''); }}><option value="">{statuses.length > 0 ? `Grouped (${statuses.length} statuses)` : 'All statuses'}</option>{STATUS_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
       </label>
       <RnFilterDropdown selection={rnSel} onChange={setRnSel} showMe={!me.isError} meId={meId} others={rnRoster.filter((u) => u.id !== meId)} />
       <div className="relative block text-sm lg:flex-1">

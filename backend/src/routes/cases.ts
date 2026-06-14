@@ -126,6 +126,30 @@ function parseOptionalCaseStatus(value: unknown): CaseStatus | undefined {
   return value;
 }
 
+// `statuses` (comma-separated, or a repeated query param Express collapses into an array) → a
+// multi-status filter (where.status.in). The dashboard GROUP tiles (D2, 2026-06-13) emit a
+// `statuses[]` filter (e.g. the RN-queue group = rn_review,needs_rn_decision,correction_requested,
+// correction_review) and deep-link to this list to reproduce their count, so the list must accept
+// the same set in ONE query (keeps the findMany+count pair a single server-paginated pair). Each
+// value is validated against the canonical CASE_STATUSES list — an unknown one 400s, same as
+// ?status=. Empty/blank tokens are dropped; an all-blank param yields undefined (no filter).
+function parseOptionalCaseStatuses(value: unknown): readonly CaseStatus[] | undefined {
+  const raw: string[] = Array.isArray(value)
+    ? value.flatMap((v) => (typeof v === 'string' ? v.split(',') : []))
+    : typeof value === 'string'
+      ? value.split(',')
+      : [];
+  const tokens = raw.map((t) => t.trim()).filter((t) => t.length > 0);
+  if (tokens.length === 0) return undefined;
+  for (const t of tokens) {
+    if (!isCaseStatus(t)) {
+      throw new HttpError(400, 'bad_request', 'statuses filter is invalid', { field: 'statuses', value: t });
+    }
+  }
+  // De-dupe so the IN list is clean; preserve first-seen order for stable, testable output.
+  return [...new Set(tokens)] as CaseStatus[];
+}
+
 function optionalStringQuery(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
@@ -133,12 +157,17 @@ function optionalStringQuery(value: unknown): string | undefined {
 function buildCaseListWhere(query: Request['query']): Record<string, unknown> {
   const where: Record<string, unknown> = {};
   const status = parseOptionalCaseStatus(query.status);
+  const statuses = parseOptionalCaseStatuses(query.statuses);
   const claimType = optionalStringQuery(query.claimType);
   const veteranId = optionalStringQuery(query.veteranId);
   const assignedPhysicianId = optionalStringQuery(query.assignedPhysicianId);
   const assignedRnId = optionalStringQuery(query.assignedRnId);
 
-  if (status !== undefined) where.status = status;
+  // `statuses` (multi) takes precedence over single `status` when BOTH are present — a group tile
+  // deep-link carries `statuses`, and an `in` over a set is the more general filter. Single `status`
+  // stays fully back-compatible (the Cases dropdown + every legacy caller send `status`).
+  if (statuses !== undefined) where.status = { in: statuses };
+  else if (status !== undefined) where.status = status;
   if (claimType !== undefined) where.claimType = claimType;
   if (veteranId !== undefined) where.veteranId = veteranId;
   // '__none__' is the admin-triage sentinel for "unassigned" — a shippable-but-unassigned case

@@ -52,7 +52,17 @@ export interface CaseTopPanels {
   readonly isRnLockBanner: boolean;
   // ops_staff letter-edit entry card (drafting / correction_review, letter present, nothing in flight)
   readonly canShowRnEditorEntry: boolean;
+  // Extraction-coverage report — visible across the WHOLE staff working window (pre-draft, drafting, a
+  // Gate-2 halt, rn_review), not just the narrow Send-to-Drafter moment, so the RN can always check how
+  // much of the chart was read (Ryan 2026-06-14: it was missing during a Gate-2 halt). Advisory only.
+  readonly canSeeExtractionCoverage: boolean;
 }
+
+// The staff working window where the chart matters + the extraction-coverage score is relevant. NOT
+// physician_review / delivered / paid / rejected (the chart's read job is done by then).
+const CHART_WORKING_STATUSES: readonly CaseStatus[] = [
+  'intake', 'records', 'viability', 'drafting', 'needs_rn_decision', 'needs_records', 'rn_review',
+];
 
 // Pure resolution of which top-region panels are visible. Mirrors the prior inline gates EXACTLY.
 export function resolveCaseTopPanels(input: CaseTopPanelInputs): CaseTopPanels {
@@ -100,5 +110,6 @@ export function resolveCaseTopPanels(input: CaseTopPanelInputs): CaseTopPanels {
     hasHaltedJob: input.hasHaltedJob,
     isRnLockBanner,
     canShowRnEditorEntry,
+    canSeeExtractionCoverage: isStaff && CHART_WORKING_STATUSES.includes(status),
   };
 }

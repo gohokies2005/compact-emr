@@ -548,10 +548,10 @@ export function CaseDetailPage() {
                   {p.canSendFirstDraft ? <SendToDrafterPanel key="send-first" caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} /> : null}
 
                   {/* Chart Extraction Coverage transparency report (Ryan 2026-06-14): advisory "N% of
-                      pages extracted" + a specific, hyperlinked list of what was not. Shown in the
-                      pre-draft window (the same gate as Send-to-Drafter) so the RN can see exactly how
-                      much of the chart was read before sending it on. Never blocks. */}
-                  {p.canSendFirstDraft ? <ExtractionCoveragePanel key="extraction-coverage" caseId={caseId} /> : null}
+                      pages extracted" + a specific, hyperlinked list of what was not. Shown across the
+                      whole staff working window (pre-draft, drafting, Gate-2 halt, rn_review) so the RN
+                      can ALWAYS see how much of the chart was read — not just at Send-to-Drafter. Never blocks. */}
+                  {p.canSeeExtractionCoverage ? <ExtractionCoveragePanel key="extraction-coverage" caseId={caseId} /> : null}
 
                   {!p.inFlightDraft && p.canSeePhysicianReadyPanel && latestDraftJob ? (
                     <PhysicianLetterReadyPanel

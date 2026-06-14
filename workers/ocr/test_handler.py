@@ -152,6 +152,46 @@ def test_txt_empty_file_still_posts_a_page_for_the_classifier(rig):
     assert rig["failed"] == []  # word-count gating happens server-side in the SAME /pages path
 
 
+# ===== .html (E4 — VA Rated-Disabilities / Blue Button exports, tags stripped, no Textract) =====
+
+def test_html_strips_tags_and_posts_native_text(rig):
+    html = (
+        b"<html><head><style>td{color:red}</style></head><body>"
+        b"<h2>Rated Disabilities</h2>"
+        b"<table><tr><td>PTSD</td><td>70%</td><td>Service Connected</td></tr>"
+        b"<tr><td>Tinnitus</td><td>10%</td><td>Service Connected</td></tr></table>"
+        b"<script>track();</script></body></html>"
+    )
+    rig["with_bytes"](html)
+    result = handler.start_handler(_event("cases/C1/u7-Rated_Disabilities.html"), None)
+
+    assert result["native"] == "html"
+    assert result["method"] == "native_html"
+    assert result["started"] == []
+    assert rig["failed"] == []
+    [(_, pages, _)] = rig["pages"]
+    text = pages[0]["text"]
+    assert "PTSD" in text and "70%" in text and "Service Connected" in text
+    assert "Tinnitus" in text
+    assert "track()" not in text and "color:red" not in text  # script/style dropped
+
+
+def test_html_extension_is_case_insensitive_and_htm_supported(rig):
+    rig["with_bytes"](b"<html><body><p>Service connection granted.</p></body></html>")
+    result = handler.start_handler(_event("cases/C1/u8-DECISION.HTM"), None)
+    assert result["method"] == "native_html"
+    [(_, pages, _)] = rig["pages"]
+    assert "Service connection granted." in pages[0]["text"]
+
+
+def test_html_with_no_readable_text_flags_for_rn(rig):
+    rig["with_bytes"](b"<html><head><script>var x=1;</script></head><body></body></html>")
+    result = handler.start_handler(_event("cases/C1/u9-empty.html"), None)
+    assert result.get("flaggedForRn") is True
+    assert rig["pages"] == []          # never posts an empty page when the strip yields nothing
+    assert len(rig["failed"]) == 1     # actionable RN flag, never silent
+
+
 # ===== .docx =====
 
 def test_docx_extracts_paragraphs_and_tables_in_document_order(rig):

@@ -14,6 +14,9 @@ describe('documentUpload helpers', () => {
     expect(inferContentType('x.pdf', 'application/pdf')).toBe('application/pdf');
     expect(inferContentType('x.pdf', 'application/zip')).toBe('application/pdf'); // disallowed MIME falls back to ext
     expect(inferContentType('notes.txt')).toBe('text/plain'); // .txt is supported (pure text)
+    expect(inferContentType('Rated_Disabilities.html')).toBe('text/html'); // E4 — VA/Blue Button HTML
+    expect(inferContentType('decision.htm')).toBe('text/html');
+    expect(ACCEPT_ATTR).toContain('.html');
     expect(inferContentType('x.exe', 'application/octet-stream')).toBeNull();
   });
 

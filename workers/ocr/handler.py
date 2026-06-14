@@ -365,7 +365,7 @@ def _post_failed_read_attempt(document_id: str, textract_status: str, job_id: st
 # bytes directly and POSTs through the SAME /pages upsert as Textract — the server-side
 # classifyReadAttempt word-count/garble gating therefore applies to native reads unchanged.
 
-_NATIVE_TEXT_EXTS = {"txt", "docx", "doc"}
+_NATIVE_TEXT_EXTS = {"txt", "docx", "doc", "html", "htm"}
 _MAX_PAGE_CHARS = 95_000  # /pages route rejects text over 100k chars/page; chunk with headroom
 _OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # genuine legacy .doc (OLE compound file)
 _LEGACY_DOC_NOTE = "legacy .doc format — ask the veteran for PDF/docx, or summarize manually"
@@ -386,6 +386,52 @@ def _decode_text_bytes(data: bytes) -> str:
     if data.startswith(b"\xef\xbb\xbf"):
         return data.decode("utf-8-sig", errors="replace")
     return data.decode("utf-8", errors="replace")
+
+
+def _strip_html(data: bytes) -> str:
+    """Best-effort HTML -> text using only the Python stdlib (no BeautifulSoup dependency).
+    VA "Rated Disabilities" + Blue Button HTML exports are plain tables of SC conditions / meds /
+    problems — stripping the tags yields exactly the text the chart-extractor needs (E4, 2026-06-13).
+    script/style content is dropped; block tags become newlines and cells become tabs so the table
+    structure survives as readable text; entities are unescaped (convert_charrefs). Never raises on
+    malformed markup — the downstream word-count / garble gate judges whether the read is usable,
+    same as every other native reader."""
+    from html.parser import HTMLParser
+
+    block_tags = {"br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "table", "ul", "ol"}
+
+    class _TextExtractor(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.parts: list[str] = []
+            self._skip_depth = 0
+
+        def handle_starttag(self, tag: str, attrs: Any) -> None:
+            if tag in ("script", "style", "head"):
+                self._skip_depth += 1
+            elif tag in block_tags:
+                self.parts.append("\n")
+            elif tag in ("td", "th"):
+                self.parts.append("\t")
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag in ("script", "style", "head") and self._skip_depth > 0:
+                self._skip_depth -= 1
+            elif tag in block_tags:
+                self.parts.append("\n")
+
+        def handle_data(self, data: str) -> None:
+            if self._skip_depth == 0:
+                self.parts.append(data)
+
+    parser = _TextExtractor()
+    parser.feed(_decode_text_bytes(data))
+    parser.close()
+    text = "".join(parser.parts)
+    text = re.sub(r"[ \t]+", " ", text)        # collapse runs of spaces/tabs
+    text = re.sub(r" *\n *", "\n", text)        # trim spaces around newlines
+    text = re.sub(r"\n{3,}", "\n\n", text)      # collapse blank-line runs
+    return text.strip()
 
 
 def _extract_docx_text(data: bytes) -> str:
@@ -498,6 +544,14 @@ def _native_read(bucket: str, key: str, document_id: str, ext: str) -> dict[str,
         except Exception as exc:  # noqa: BLE001 — deterministic parse failure → RN flag
             text, method, via = None, "", ""
             note = f".docx could not be parsed ({type(exc).__name__}) — re-save as PDF or .docx, or summarize manually"
+    elif ext in ("html", "htm"):
+        try:
+            text, method, via = _strip_html(data), "native_html", "stdlib-htmlparser"
+            if not text:  # tags stripped to nothing (e.g. an all-script page) → flag, don't post an empty read
+                text, note = None, "HTML file had no readable text after tag-strip — ask for a PDF, or summarize manually"
+        except Exception as exc:  # noqa: BLE001 — deterministic parse failure → RN flag
+            text, method, via = None, "", ""
+            note = f".html could not be parsed ({type(exc).__name__}) — re-save as PDF, or summarize manually"
     else:  # legacy .doc — best-effort ladder
         text, method, via, note, status = _read_legacy_doc(data)
 

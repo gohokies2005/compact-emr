@@ -21,6 +21,7 @@ const ALLOWED_CONTENT_TYPES = new Set([
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'text/plain',
+  'text/html', // .html — VA Rated-Disabilities / Blue Button; native-read strips tags → text (E4, 2026-06-13)
 ]);
 
 interface DocumentsRouterDeps {

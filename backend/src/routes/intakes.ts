@@ -20,12 +20,13 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 // flagged per-file on assign, never copied into a case as an un-OCR-able Document. (Spec P1-3.)
 const ASSIGN_ALLOWED_CONTENT_TYPES = new Set([
   'application/pdf', 'image/jpeg', 'image/png', 'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain', 'text/html',
 ]);
 
 const EXT_CONTENT_TYPE: Record<string, string> = {
   txt: 'text/plain', pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
   doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  html: 'text/html', htm: 'text/html', // VA Rated-Disabilities / Blue Button HTML (E4, 2026-06-13)
 };
 // Jotform/S3 frequently store a .txt as application/octet-stream or an empty type, so the declared
 // content-type check rejected real .txt files even after text/plain was allowlisted. Infer a SUPPORTED

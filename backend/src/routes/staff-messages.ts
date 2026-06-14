@@ -31,11 +31,12 @@ const INBOX_PAGE_SIZE = 50;
 // stamp a .txt as application/octet-stream). Same map as intakes.effectiveContentType.
 const ALLOWED_CONTENT_TYPES = new Set([
   'application/pdf', 'image/jpeg', 'image/png', 'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain', 'text/html',
 ]);
 const EXT_CONTENT_TYPE: Record<string, string> = {
   txt: 'text/plain', pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
   doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  html: 'text/html', htm: 'text/html', // VA Rated-Disabilities / Blue Button HTML (E4, 2026-06-13)
 };
 function effectiveContentType(name: string | undefined, declared: string): string {
   if (ALLOWED_CONTENT_TYPES.has(declared)) return declared;

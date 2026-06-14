@@ -8,6 +8,7 @@ export const ALLOWED_TYPES = [
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'text/plain', // .txt — the purest format; content IS the text (read directly, no OCR). (2026-06-07)
+  'text/html', // .html — VA Rated-Disabilities / Blue Button exports; tags stripped → text, no OCR. (E4, 2026-06-13)
 ] as const;
 
 export const MAX_BYTES = 50 * 1024 * 1024;
@@ -16,7 +17,7 @@ export const MAX_BYTES = 50 * 1024 * 1024;
 // filter and the JS validation cannot drift: .txt was accepted by classifyEntry but missing from the
 // accept attr, so the OS picker greyed out .txt files the upload path could handle (Package 2/3 fold,
 // 2026-06-11). .zip appears only here — zips are expanded client-side, never uploaded as-is.
-export const ACCEPT_ATTR = '.pdf,.jpg,.jpeg,.png,.doc,.docx,.txt,.zip,application/pdf,image/jpeg,image/png,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,application/zip,application/x-zip-compressed';
+export const ACCEPT_ATTR = '.pdf,.jpg,.jpeg,.png,.doc,.docx,.txt,.html,.htm,.zip,application/pdf,image/jpeg,image/png,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/html,application/zip,application/x-zip-compressed';
 
 // Extension -> contentType for files unpacked from a zip (a JSZip entry has no MIME type) and as a
 // fallback for OS file pickers that hand us an empty `file.type`.
@@ -28,6 +29,8 @@ const EXT_TO_TYPE: Record<string, (typeof ALLOWED_TYPES)[number]> = {
   doc: 'application/msword',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   txt: 'text/plain',
+  html: 'text/html',
+  htm: 'text/html',
 };
 
 export function extensionOf(filename: string): string {

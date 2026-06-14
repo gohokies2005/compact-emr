@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PhysicianReviewPage } from '../routes/physician/PhysicianReviewPage';
 import { getCase, type CaseDetail } from '../api/cases';
-import { approveLetter, getLetter } from '../api/letter';
+import { approveLetter, finalizeImportLetter, getLetter } from '../api/letter';
 import { ConflictError } from '../api/client';
 import type { DraftJob } from '../types/prisma';
 
@@ -20,6 +20,7 @@ vi.mock('../api/drafter', () => ({
 
 vi.mock('../api/letter', () => ({
   approveLetter: vi.fn(),
+  finalizeImportLetter: vi.fn(),
   getLetter: vi.fn(),
 }));
 
@@ -33,12 +34,39 @@ vi.mock('../components/DoctorPackPanel', () => ({
   DoctorPackPanel: () => <div data-testid="doctor-pack-panel" />,
 }));
 
-// Stub the attestation popup: when open, expose a single button that fires onSignedOff — the
-// page-level approve chain (the code under test) runs exactly as in production.
+// Stub the attestation popup: when open, expose a single button. For the normal (drafter_run) path it
+// fires onSignedOff (chains approve); for an imported letter the page wires onSubmitAnswers instead, so
+// the stub fires that with a complete affirmative answer set. The page-level chain (the code under
+// test) runs exactly as in production for whichever prop is supplied.
 vi.mock('../components/SignOffPopup', () => ({
-  SignOffPopup: ({ open, onSignedOff }: { open: boolean; onSignedOff?: () => void | Promise<void> }) =>
+  SignOffPopup: ({
+    open,
+    onSignedOff,
+    onSubmitAnswers,
+  }: {
+    open: boolean;
+    onSignedOff?: () => void | Promise<void>;
+    onSubmitAnswers?: (input: { answers: Record<string, boolean>; notes?: string }) => Promise<unknown>;
+  }) =>
     open ? (
-      <button type="button" onClick={() => { void onSignedOff?.(); }}>
+      <button
+        type="button"
+        onClick={() => {
+          if (onSubmitAnswers) {
+            void onSubmitAnswers({
+              answers: {
+                records_reviewed: true,
+                diagnosis_documented: true,
+                nexus_supported: true,
+                no_phi_in_letter: true,
+                final_pdf_correct: true,
+              },
+            });
+          } else {
+            void onSignedOff?.();
+          }
+        }}
+      >
         complete sign-off
       </button>
     ) : null,
@@ -47,6 +75,7 @@ vi.mock('../components/SignOffPopup', () => ({
 const getCaseMock = vi.mocked(getCase);
 const approveLetterMock = vi.mocked(approveLetter);
 const getLetterMock = vi.mocked(getLetter);
+const finalizeImportLetterMock = vi.mocked(finalizeImportLetter);
 
 const readyJob: DraftJob = {
   id: 'draft-job-1',
@@ -103,6 +132,11 @@ function renderReview() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: a normal (non-import) rendered letter. The page now reads the current revision's `source`
+  // from GET /cases/:id/letter to detect an imported letter; the drafter_run tests want source≠import.
+  getLetterMock.mockResolvedValue({
+    data: { source: 'drafter' },
+  } as unknown as Awaited<ReturnType<typeof getLetter>>);
 });
 
 describe('PhysicianReviewPage', () => {
@@ -206,5 +240,42 @@ describe('PhysicianReviewPage', () => {
     renderReview();
     expect(await screen.findByText('Letter is ready for your review')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  // ── Imported-letter finalize (functional gap fix, 2026-06-14) ─────────────────────────────────
+  // An external_import letter in physician_review NEVER sets runComplete/shipRecommendation, so the
+  // normal "ready" gate dead-ended the physician on "Not ready for review". The page must instead
+  // detect the import (via GET /cases/:id/letter source) and render the finalize control, routing the
+  // sign-off through finalizeImportLetter (NOT approveLetter, which 409s on imports).
+  it('external_import in physician_review renders the finalize control (NOT "Not ready") even without runComplete/ship', async () => {
+    // No runComplete, no shipRecommendation — exactly how the import txn leaves the case.
+    getCaseMock.mockResolvedValue({
+      data: { ...readyCase, runComplete: false, shipRecommendation: undefined, draftJobs: [] },
+    } as unknown as { data: CaseDetail });
+    getLetterMock.mockResolvedValue({ data: { source: 'external_import' } } as unknown as Awaited<ReturnType<typeof getLetter>>);
+    renderReview();
+
+    expect(await screen.findByText('Imported letter ready to finalize')).toBeInTheDocument();
+    expect(screen.queryByText('This case is not ready for physician review.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Finalize for delivery (as-is, no re-render)' })).toBeInTheDocument();
+  });
+
+  it('submitting the imported-letter sign-off routes to finalizeImportLetter (not approveLetter)', async () => {
+    getCaseMock.mockResolvedValue({
+      data: { ...readyCase, runComplete: false, shipRecommendation: undefined, draftJobs: [] },
+    } as unknown as { data: CaseDetail });
+    getLetterMock.mockResolvedValue({ data: { source: 'external_import' } } as unknown as Awaited<ReturnType<typeof getLetter>>);
+    finalizeImportLetterMock.mockResolvedValue({ data: { status: 'delivered' } } as unknown as Awaited<ReturnType<typeof finalizeImportLetter>>);
+    renderReview();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Finalize for delivery (as-is, no re-render)' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'complete sign-off' }));
+
+    await waitFor(() => expect(finalizeImportLetterMock).toHaveBeenCalledTimes(1));
+    expect(finalizeImportLetterMock).toHaveBeenCalledWith('CASE-1', expect.objectContaining({
+      answers: expect.objectContaining({ records_reviewed: true, final_pdf_correct: true }),
+    }));
+    // The normal drafter_run path was NOT taken.
+    expect(approveLetterMock).not.toHaveBeenCalled();
   });
 });

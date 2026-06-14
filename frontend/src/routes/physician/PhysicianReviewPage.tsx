@@ -13,9 +13,9 @@ import {
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
-import { getCase } from '../../api/cases';
+import { getCase, type SignOffAnswers } from '../../api/cases';
 import { formatNameLastFirst } from '../../lib/format';
-import { approveLetter, getLetter } from '../../api/letter';
+import { approveLetter, finalizeImportLetter, getLetter } from '../../api/letter';
 import { describeApiError } from '../../api/client';
 
 export function PhysicianReviewPage() {
@@ -30,6 +30,20 @@ export function PhysicianReviewPage() {
     queryFn: () => getCase(caseId),
     enabled: caseId.length > 0,
   });
+
+  // Imported-letter detection (functional gap fix, 2026-06-14): an externally-imported finished PDF
+  // (LetterRevision source='external_import') flows import → rn_review → physician_review, but its
+  // import txn NEVER sets runComplete/shipRecommendation, so the normal "ready" gate below dead-ended
+  // the physician on "Not ready for review" — forcing a detour through the letter editor to finalize.
+  // We read the CURRENT revision's `source` from GET /cases/:id/letter (the SAME source LetterEditorPage
+  // uses) and, for an import, render the finalize panel as READY + route the sign-off through
+  // finalizeImportLetter (NOT approveLetter, which 409s on imports). Mirrors LetterEditorPage exactly.
+  const letterQuery = useQuery({
+    queryKey: ['case', caseId, 'letter'],
+    queryFn: () => getLetter(caseId),
+    enabled: caseId.length > 0,
+  });
+  const isImportedLetter = letterQuery.data?.data.source === 'external_import';
 
   if (caseQuery.isLoading) {
     return (
@@ -97,6 +111,16 @@ export function PhysicianReviewPage() {
     }
   };
 
+  // Imported letter (2026-06-14): the SignOffPopup hands its affirmative answers STRAIGHT to
+  // finalizeImportLetter (which records its own PDF-bound sign-off + delivers the imported PDF as-is —
+  // no re-render). Mirrors LetterEditorPage's finalizeImportMutation. On success, back to the queue.
+  const onFinalizeImport = async (input: { answers: SignOffAnswers; notes?: string }) => {
+    await finalizeImportLetter(caseId, input);
+    await qc.invalidateQueries({ queryKey: ['case', caseId] });
+    await qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] });
+    navigate('/p/queue');
+  };
+
   return (
     <AppShell>
       <div className="space-y-6">
@@ -116,7 +140,37 @@ export function PhysicianReviewPage() {
           </p>
         </Card>
 
-        {readyForPhysician && latestDraftJob ? (
+        {isImportedLetter && c.status === 'physician_review' ? (
+          // Imported letter ready to finalize (2026-06-14). Distinct from the drafter_run ready panel:
+          // there is no grade/hints/draftJob — the imported PDF is the final artifact. Render READY and
+          // finalize AS-IS (no re-render). Mirrors LetterEditorPage's import block.
+          <Card>
+            <div className="flex flex-col gap-4">
+              <div>
+                <h2 className="text-base font-semibold text-slate-900">Imported letter ready to finalize</h2>
+                <p className="mt-1 text-sm text-slate-600">
+                  This letter was imported as a finished PDF. Finalizing delivers the exact PDF unchanged — it is not re-rendered.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={openLetterPdf}
+                  className="inline-flex items-center justify-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  View letter PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSignOffOpen(true)}
+                  className="inline-flex items-center justify-center rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+                >
+                  Finalize for delivery (as-is, no re-render)
+                </button>
+              </div>
+            </div>
+          </Card>
+        ) : readyForPhysician && latestDraftJob ? (
           <>
             {approveBlockers.length > 0 ? (
               // Sign-off incident 2026-06-09: the physician completed the whole attestation and
@@ -174,12 +228,26 @@ export function PhysicianReviewPage() {
 
         {caseId ? <AdvisoryPanel caseId={caseId} /> : null}
 
-        <SignOffPopup
-          caseId={caseId}
-          open={signOffOpen}
-          onClose={() => setSignOffOpen(false)}
-          onSignedOff={onSignedOff}
-        />
+        {isImportedLetter ? (
+          // Imported letter: the popup's affirmative answers go STRAIGHT to finalize-import (records
+          // its own PDF-bound sign-off + delivers as-is). No separate POST /sign-off — that binds to
+          // the placeholder TXT the delivery gate can never match. (Mirrors LetterEditorPage, 2026-06-14.)
+          <SignOffPopup
+            caseId={caseId}
+            open={signOffOpen}
+            onClose={() => setSignOffOpen(false)}
+            title="Finalize imported letter"
+            submitLabel="Finalize for delivery"
+            onSubmitAnswers={onFinalizeImport}
+          />
+        ) : (
+          <SignOffPopup
+            caseId={caseId}
+            open={signOffOpen}
+            onClose={() => setSignOffOpen(false)}
+            onSignedOff={onSignedOff}
+          />
+        )}
       </div>
     </AppShell>
   );

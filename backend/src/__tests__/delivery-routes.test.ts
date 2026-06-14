@@ -425,6 +425,35 @@ describe('POST /cases/:id/delivery/send — real SES send (E3) + idempotency', (
     expect(res.body.data.emailSent).toBe(true);
   });
 
+  // ── Defense-in-depth (2026-06-14): /send now blocks on a NON-AFFIRMATIVE sign-off too, not just a
+  // byte mismatch. A latest sign-off carrying a "No" answer must never egress, even if a future direct
+  // status-flip reached /send. (no_signoff + cannot_verify_import stay fail-open by design.) ──
+  it('non-affirmative sign-off blocks /delivery/send with 409 signoff_not_affirmative and nothing transmits', async () => {
+    const NON_AFFIRMATIVE = { records_reviewed: true, dx_documented: false, nexus_supported: true };
+    const sha = createHash('sha256').update(LETTER_TXT, 'utf-8').digest('hex');
+    const { db } = makeDb({ signOffs: [{ signedVersion: 1, signedContentSha256: sha, signedAt: new Date(), answersJson: NON_AFFIRMATIVE }] });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(409);
+    // Code is the generic 'conflict' (a valid ErrorCode, mirroring letter.ts /approve); the precise
+    // cause is carried in details.reason.
+    expect(res.body.error.details.reason).toBe('signoff_not_affirmative');
+    expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  // The legitimate import-deliver-as-is path must NOT be blocked: an import with no way to PDF-re-hash
+  // (legacy sign-off, no bound hash) returns cannot_verify_import (eligible:false) from the SSOT, but
+  // /send deliberately does NOT block it — it is a real, deliverable imported letter.
+  it('cannot_verify_import (legacy import, no bound hash) is NOT blocked at /send — the import path survives', async () => {
+    const { db } = makeDb({
+      revisionSource: 'external_import',
+      signOffs: [{ signedVersion: 1, signedContentSha256: null, signedAt: new Date() }],
+    });
+    const IMPORT_PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    const res = await request(appFor(db, { txt: '[external import placeholder]', pdfBytes: IMPORT_PDF })).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.emailSent).toBe(true);
+  });
+
   it('physician role is forbidden from the delivery panel -> 403', async () => {
     const { db } = makeDb();
     mockUser = { sub: 'dr-sub', roles: ['physician'] };

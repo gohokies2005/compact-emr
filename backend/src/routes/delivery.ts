@@ -224,19 +224,36 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       // PDF — the inline TXT-only re-hash that used to live here ALWAYS tripped 'signed_bytes_changed'
       // for imports, so an imported letter could never be sent.
       //
-      // SCOPE PRESERVED: the old inline gate was byte-only — it FAILED OPEN when there was no sign-off
-      // (latestSignOff === null) or no bound hash, and never checked affirmative-ness. We keep that
-      // exact scope here by translating ONLY the 'signed_bytes_changed' verdict to a 409. The SSOT's
-      // additional exists/affirmative gating is enforced on the OTHER egress paths (Stripe/portal,
-      // human ->delivered flip) where it belongs; widening it here would block legitimate already-
-      // delivered/paid cases whose sign-off rows are not re-presented to this route. A positive byte
-      // mismatch is the one thing that must block /send, exactly as before — now import-aware.
+      // SCOPE (defense-in-depth hardening, 2026-06-14): block egress on ANY verdict that PROVES the
+      // current letter is unsigned-against or its bytes don't match the attestation — i.e. a positive
+      // 'signoff_not_affirmative' or 'signed_bytes_changed'. This prevents a future direct status-flip
+      // to delivered from egressing a letter the physician signed off AGAINST, or whose bytes drifted
+      // after sign-off, even though /send is only reachable post-approve today.
+      //
+      // DELIBERATELY NOT BLOCKED here: 'no_signoff' and 'cannot_verify_import' remain FAIL-OPEN —
+      //   - 'no_signoff': the original inline gate failed open when there was no sign-off, and /send is
+      //     legitimately reachable on already-delivered/paid cases whose sign-off rows are not re-
+      //     presented to this route. Blocking it would regress those + the documented scope above.
+      //   - 'cannot_verify_import': a LEGITIMATE imported letter that can't be PDF-re-hashed (no bound
+      //     hash / no S3) — the hard-won import-deliver-as-is path. Blocking it would break that path.
+      // So we allow-list the two truly-bad, route-provable reasons rather than `if (!verdict.eligible)`.
       {
         const bucketName = bucket();
         if (bucketName !== undefined) {
           const c0 = await db.case.findFirst({ where: { id: caseId } });
           if (c0 !== null) {
             const verdict = await assertDeliveryEligible(db, caseId, c0.currentVersion, { s3: s3(), bucketName });
+            // Allow-list the two truly-bad, route-provable reasons. The HttpError CODE must be a valid
+            // ErrorCode: 'signed_bytes_changed' has its own code; the non-affirmative case reuses the
+            // 'conflict' code (mirroring letter.ts /approve) and carries its precise reason in details.
+            if (!verdict.eligible && verdict.reason === 'signoff_not_affirmative') {
+              throw new HttpError(409, 'conflict', 'The latest sign-off has a "No" attestation — this letter cannot be delivered. Resolve it or send the case back to the RN.', {
+                reason: 'signoff_not_affirmative',
+                caseId,
+                signedVersion: verdict.details?.signedVersion ?? null,
+                currentVersion: verdict.details?.currentVersion ?? c0.currentVersion,
+              });
+            }
             if (!verdict.eligible && verdict.reason === 'signed_bytes_changed') {
               throw new HttpError(409, 'signed_bytes_changed', 'The letter changed after it was signed. Re-sign before delivering.', {
                 reason: 'signed_bytes_changed',

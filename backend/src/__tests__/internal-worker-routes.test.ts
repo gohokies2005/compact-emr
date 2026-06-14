@@ -281,8 +281,9 @@ describe('POST /internal/documents/:id/pages', () => {
 
   it('lands manual_summary_required when OCR success returns garbled text', async () => {
     const { db, fileReadStatuses } = makeDb(null, { id: 'DOC-1', caseId: 'CASE-1', s3Key: 'cases/CASE-1/abc-garbled.pdf' });
-    // 60+ tokens but heavily garbled (embedded symbols between letters) => ratio > 0.08.
-    const garbled = Array.from({ length: 60 }, () => 'th!s i$ g@rbl#d t0x@t').join(' ');
+    // 60+ tokens of symbol-soup garble (v2 signal): every word slot embeds symbols/digits => ratio ~1.0,
+    // far above the 0.40 gate.
+    const garbled = Array.from({ length: 60 }, () => 'th!s g@rbl#d c0nn3@ct r3c0rd p#esent kn$e').join(' ');
     const res = await request(appFor(db))
       .post('/api/v1/internal/documents/DOC-1/pages')
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)

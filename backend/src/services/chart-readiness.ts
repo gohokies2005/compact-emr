@@ -41,101 +41,110 @@ const MIN_CHARS_FOR_READ = 10;
 // clears a low absolute floor. Floor at MIN_CHARS_FOR_BIG_SCAN regardless of page count so a 500-page
 // scan with 12 chars still flags. (8 chars on 2 pages must fail per the owner's acceptance case.)
 const MIN_CHARS_FOR_BIG_SCAN = 10;
-const GARBLED_RATIO_THRESHOLD = 0.08;
-// Below this many COUNTABLE (non-exempt, letter-bearing) tokens there isn't enough signal to call a doc
-// "garbled" from the ratio alone — a few edge tokens would dominate. HARD garble overrides this. (#2)
+// REPLACED 2026-06-14 (Ryan, 5th false-flag): 0.08 → 0.40. The signal below is the WORD-SLOT-GARBAGE
+// design, not the old embedded-symbol count. Real VA/medical docs verified <= 0.10 (Ewell remand 0.01,
+// 1.35M-char recs 0.017, Moseley intake 0.10); symbol-soup 0.67; the replacement-char path returns 1.0.
+// 0.40 sits in a huge empirical gap (0.10 clean ceiling → 0.67 soup floor) so there is no realistic
+// way for a clean document to cross it. See corruptedTokenRatio below for the full rationale.
+const GARBLED_RATIO_THRESHOLD = 0.40;
+// Below this many WORD-SLOT tokens there isn't enough signal to call a doc "garbled" from the ratio
+// alone — a few edge tokens would dominate. CHARACTER-corruption (step 1) overrides this. (design step 3)
 const MIN_COUNTABLE_FOR_GARBLE = 6;
 const MANUAL_SUMMARY_MIN_LENGTH = 40;
 
-const CLEAN_CODE_PATTERN = /^(?:[A-Z]\d{1,2}(?:[.-]\d{1,3}[A-Z]?){0,3}|L\d-L\d|S\d-S\d|T\d{1,2}-T\d{1,2}|C\d-C\d)$/;
 const TOKEN_SPLIT = /[\s,;:()[\]{}!?"'`]+/;
 const LETTER_BEARING = /[A-Za-z]/;
-const EMBEDDED_SYMBOL_IN_LETTERS = /(?:[A-Za-z][^A-Za-z0-9\s][A-Za-z])|(?:[A-Za-z][0-9\W]+[A-Za-z][0-9\W]+[A-Za-z])/;
 
-// FALSE-POSITIVE FIX (2026-06-14): the naive EMBEDDED_SYMBOL_IN_LETTERS regex condemned clean text as
-// "garbled" because a hyphen/apostrophe between letters is a letter-symbol-letter pattern. EVERY normal
-// hyphenated/apostrophe medical compound (service-connected, follow-up, auto-extracted, PC-PTSD-5,
-// well-documented, x-ray, patient's) tripped it, and the auto-generated intake/screening summary scored
-// 0.16 > 0.08 → parked in the RN manual queue. Two narrow exemptions below restore precision WITHOUT
-// weakening real garble detection (proven by the positive controls in the test suite):
+// ── corruptedTokenRatio v2 — WORD-SLOT GARBAGE signal (REPLACES the embedded-symbol heuristic) ──
 //
-//   NORMAL_HYPHENATED_WORD — letters joined only by SINGLE hyphens/apostrophes, optionally with trailing
-//     alnum (PC-PTSD-5). This is normal language, NOT corruption. Real OCR soup (c0nn3@ct€d) does NOT
-//     match: its joiners are embedded symbols/digits, not '-'/'\''. Edge punctuation (a trailing period on
-//     "well-documented.") is trimmed before the test since TOKEN_SPLIT doesn't split on '.'.
-//   MARKUP_OR_URL — HTML tags/attributes, URLs, href=, Stripe pi_… and gclid Cj0… opaque IDs. These are
-//     embedded markup (from a payment/tracking block that should never be in a clinical doc — see
-//     intake-summary-pdf.ts FIX 2), not language; they are excluded from BOTH numerator and denominator
-//     so stray markup can never tip the ratio.
+// The old signal counted "embedded-symbol tokens" and false-flagged real VA/medical documents FOUR
+// times, because legitimate clinical text is dense with dates, codes, dollar amounts, percentages, file
+// numbers, and form numbers — every one of which contains a digit/symbol between or beside letters. A
+// VA Board remand letter scored 0.72; a 199K-word records PDF scored 0.166; both > the old 0.08 gate →
+// parked as "garbled" when they read perfectly. This rewrite throws that signal away entirely.
 //
-// GENUINE garble is preserved AND hardened: HARD_GARBLE (control chars, the Unicode replacement char
-// '�', and the classic mojibake bigrams 'â€'/'Ã‚'/… from double-decoded UTF-8) is counted as
-// corrupt UP FRONT — before the letter-bearing gate, the markup exemption, and the word exemption — so no
-// exemption can ever launder real corruption, and a standalone mojibake token (not ASCII-letter-bearing)
-// still counts.
-// Normal language joins letters with single hyphens, apostrophes, SLASHES (snoring/gasping, and/or,
-// his/her) or PERIODS (e.g., i.e., U.S.A) — none of which is OCR corruption. Real garble (c0nn3@ct€d)
-// joins with embedded digits/symbols, which this does NOT match. (2026-06-14 #2: snoring/gasping + e.g.
-// were false-flagged in a tiny denominator → 0.571.)
-const NORMAL_HYPHENATED_WORD = /^[A-Za-z]+(?:[-'/.][A-Za-z0-9]+)*\.?$/;
+// THE NEW SIGNAL asks a different question — "what fraction of the WORD SLOTS in this text are garbage
+// (not a clean word)?" — and treats codes/IDs/numbers/markup as legitimate non-words that occupy no word
+// slot (so they cannot inflate the ratio):
+//
+//   STEP 1 — CHARACTER CORRUPTION (definitive). If the density of replacement chars (U+FFFD), control
+//     chars, and mojibake bigrams (â€/Ã‚/Ã©/Ã¢) exceeds CHAR_CORRUPTION_DENSITY (~2%) of all chars,
+//     return 1 — this is genuine byte-level corruption, no further analysis needed.
+//   STEP 2 — WORD-SLOT GARBAGE ratio. Tokenize on TOKEN_SPLIT. For each token:
+//     • skip if not letter-bearing (pure number/symbol) — occupies no word slot.
+//     • skip as a LEGIT NON-WORD (not counted) if it is an EMAIL, a URL/markup (`http(s):`/`www.`, or
+//       contains `<`/`>` or `=["']`), or "mostly digits" (digits/length >= 0.35 → a code/ID/form number
+//       like 21-526EZ, 1018515859V860352, B12, ICD10). These are valid content, not words, so they
+//       cannot be garbage.
+//     • otherwise it occupies a WORD slot: total++. It is GARBAGE unless its core (edge-punct trimmed)
+//       matches CLEAN_WORD — letters joined only by a single hyphen/apostrophe/slash/period
+//       (service-connected, snoring/gasping, e.g., U.S.A), with NO embedded digit/symbol.
+//     return garbage / total.
+//   STEP 3 — MIN-DENOMINATOR. If fewer than MIN_COUNTABLE_FOR_GARBLE word-slot tokens AND no character
+//     corruption, return 0 (not enough signal).
+//
+// INTENTIONAL ACCEPTED LIMITATION: a pure-letter OCR fragment with vowels (tlie, amel) is NOT flagged —
+// there is no dictionary here, so a misread that happens to be all-letters reads as a clean word. That
+// rare residual garble is caught downstream by extraction. This is a deliberate trade: the OVERWHELMING
+// priority is that a real document is NEVER again called garbled. False-negatives on exotic all-letter
+// OCR noise are acceptable; a false-positive on a clean VA letter is not.
+
+const EMAIL = /^[\w.+-]+@[\w-]+\.[\w.-]+$/;
+// URL / markup: an http(s)/www URL, or any token carrying an HTML angle bracket or an attribute `=["']`.
+const URL_OR_MARKUP = /^(?:https?:|www\.)|[<>]|=["']/;
+// A clean word: letters joined ONLY by single hyphen/apostrophe/slash/period, optional trailing period.
+// NO embedded digits or other symbols. (service-connected, snoring/gasping, e.g., U.S.A, patient's)
+const CLEAN_WORD = /^[A-Za-z]+(?:[-'/.][A-Za-z]+)*\.?$/;
 const TRIM_EDGE_PUNCT = /^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g;
-// MARKUP/URL/tracking junk — HTML, URLs, href=, Stripe pi_/gclid Cj0, AND query-string/ad-tracking
-// fragments (gad_source=1&gad_campaignid=…, utm_…, gbraid) that the Jotform payment block leaks. Excluded
-// from BOTH numerator and denominator. The generated summary should not contain these at all
-// (intake-summary-pdf.ts FIX 2); this is defense for OLD summaries that still carry them.
-const MARKUP_OR_URL = /[<>]|=["']|<\/?[a-z]|https?:\/\/|^\/\/|\.(?:com|org|net|gov|io)\b|href=|\bpi_[A-Za-z0-9]{8,}|\bCj0[A-Za-z0-9_-]{10,}|[?&][A-Za-z_]{2,}=|\b(?:gad_source|gad_campaignid|gbraid|gclid|utm_[a-z]+)\b/i;
-// eslint-disable-next-line no-control-regex -- intentionally matches OCR/encoding control chars + replacement char
-const HARD_GARBLE = /[�\x00-\x08\x0B\x0C\x0E-\x1F]|â€|Ã‚|Ã©|Ã¢|â„¢/;
+const DIGIT = /\d/g;
+// "Mostly digits" cutoff — a token whose digits are >= 35% of its length is a code/ID/form/date, not a
+// word (21-526EZ, 1018515859V860352, B12, ICD10, 2024-03-01). It occupies no word slot.
+const MOSTLY_DIGITS_RATIO = 0.35;
+// eslint-disable-next-line no-control-regex -- intentionally matches OCR/encoding control + replacement chars
+const CHAR_CORRUPTION = /[�\x00-\x08\x0B\x0C\x0E-\x1F]|â€|Ã‚|Ã©|Ã¢/g;
+// Char-corruption density that DEFINITIVELY condemns the text as byte-corrupted (step 1). Empirically a
+// clean doc has ~0; a double-decoded / replacement-char-riddled read blows far past 2%.
+const CHAR_CORRUPTION_DENSITY = 0.02;
 
 /**
- * Compute the corrupted-token ratio for an OCR'd / extracted text payload.
+ * Compute the corrupted-token ratio for an OCR'd / extracted text payload (v2, 2026-06-14).
  *
- * Definition (from FRN calibration, with the 2026-06-14 false-positive fix):
- *   - Tokenize on whitespace + common punctuation.
- *   - HARD garble (control chars / replacement char / mojibake bigrams) ALWAYS counts as corrupt,
- *     checked first so no exemption can launder it (a standalone mojibake token counts too).
- *   - Letter-bearing token = contains at least one A-Z or a-z character; non-letter tokens are ignored.
- *   - EXEMPT (skip, not corruption): a MARKUP_OR_URL token (HTML/URL/opaque-id — out of num + denom),
- *     a NORMAL_HYPHENATED_WORD (service-connected, follow-up, PC-PTSD-5), and the CLEAN_CODE_PATTERN
- *     (L4-L5, M47.817, T2DM) — all look corrupted to a naive regex but are valid.
- *   - A surviving token is "corrupted" if it has a non-alphanumeric symbol embedded between letters,
- *     OR multiple letter/digit/symbol transitions (the classic OCR-garbled signature).
- *   - Return corrupted / total counted tokens. 0 when no countable tokens are present.
+ * Returns a number in [0, 1]. The chart-readiness gate condemns a read as "garbled" when this exceeds
+ * GARBLED_RATIO_THRESHOLD (0.40). See the block comment above for the full three-step design and the
+ * intentional accepted limitation (no dictionary → all-letter OCR noise is not flagged here).
  *
- * Calibrated to keep clean docs (audiograms, rating decisions, CPT/lab tables, AND hyphen-dense
- * intake/screening summaries) below 0.02, and garbled scans above 0.14. The 0.08 threshold sits in
- * the empirical gap.
+ * Verified on the real files: Ewell remand 0.01, 1.35M-char recs 0.017, Moseley intake 0.10 (all
+ * clean → pass); symbol-soup 0.67, replacement-char string 1.0 (garble → flag). Huge margin to 0.40.
  */
 export function corruptedTokenRatio(text: string): number {
   if (typeof text !== 'string' || text.length === 0) return 0;
+
+  // STEP 1 — character corruption is definitive: replacement/control chars + mojibake bigrams over ~2%
+  // of all characters means the bytes themselves are corrupt. Return 1 immediately.
+  const corruptChars = (text.match(CHAR_CORRUPTION) ?? []).length;
+  if (corruptChars / text.length > CHAR_CORRUPTION_DENSITY) return 1;
+
+  // STEP 2 — word-slot garbage ratio.
   const tokens = text.split(TOKEN_SPLIT).filter((t) => t.length > 0);
   let total = 0;
-  let corrupted = 0;
-  let hardGarble = 0;
+  let garbage = 0;
   for (const tok of tokens) {
-    // Real garble counts up front — before any exemption, and even if the token has no ASCII letter
-    // (a standalone mojibake/replacement-char fragment). This is the load-bearing guard that keeps the
-    // exemptions below from ever hiding genuine corruption.
-    if (HARD_GARBLE.test(tok)) { total++; corrupted++; hardGarble++; continue; }
-    if (!LETTER_BEARING.test(tok)) continue;
-    // Embedded markup / URL / opaque payment-tracking IDs are not language — drop them from both the
-    // numerator and the denominator so they can never tip the ratio (FIX 1 + FIX 2, 2026-06-14).
-    if (MARKUP_OR_URL.test(tok)) continue;
-    // A normal hyphenated/apostrophe/slash/period word (after trimming edge punctuation that TOKEN_SPLIT
-    // leaves on, e.g. a trailing period) is NOT corruption.
-    const core = tok.replace(TRIM_EDGE_PUNCT, '');
-    if (core.length > 0 && NORMAL_HYPHENATED_WORD.test(core)) continue;
-    if (CLEAN_CODE_PATTERN.test(tok)) continue;
+    if (!LETTER_BEARING.test(tok)) continue; // pure number/symbol — occupies no word slot
+    // Legit non-words: email, URL/markup, or a mostly-digits code/ID/form/date. Not words → not garbage,
+    // not counted in the denominator (so a doc full of codes can never look garbled).
+    if (EMAIL.test(tok) || URL_OR_MARKUP.test(tok)) continue;
+    const digitCount = (tok.match(DIGIT) ?? []).length;
+    if (digitCount / tok.length >= MOSTLY_DIGITS_RATIO) continue;
+    // A real WORD slot.
     total++;
-    if (EMBEDDED_SYMBOL_IN_LETTERS.test(tok)) corrupted++;
+    const core = tok.replace(TRIM_EDGE_PUNCT, '');
+    if (core.length === 0 || !CLEAN_WORD.test(core)) garbage++;
   }
-  // MIN-DENOMINATOR GUARD (2026-06-14 #2): the exemptions (markup/codes/normal words) can shrink the
-  // countable set so far that a couple of edge tokens dominate — Moseley scored 4/7 = 0.571 on CLEAN
-  // ASCII (a slash word + "e.g." + two tracking URLs). Too few countable tokens = not enough signal to
-  // declare "garbled"; a clean doc must never be condemned by noise on a tiny denominator. HARD garble
-  // (control/replacement/mojibake) is definitive corruption at ANY count and overrides the guard.
-  if (hardGarble === 0 && total < MIN_COUNTABLE_FOR_GARBLE) return 0;
-  return total === 0 ? 0 : corrupted / total;
+
+  // STEP 3 — min-denominator: too few word slots = not enough signal. (Char corruption already returned
+  // above, so reaching here means the text is byte-clean; trust nothing on a tiny denominator.)
+  if (total < MIN_COUNTABLE_FOR_GARBLE) return 0;
+  return garbage / total;
 }
 
 /**
@@ -187,7 +196,7 @@ export interface ReadAttemptOutcome {
 
 /**
  * Decide whether a read attempt produced usable text (Ryan 2026-06-14, WORD floor → CHAR floor):
- *   - NOT garbled (corruptedTokenRatio <= 0.08), AND
+ *   - NOT garbled (corruptedTokenRatio <= GARBLED_RATIO_THRESHOLD, 0.40 under the v2 signal), AND
  *   - >= MIN_CHARS_FOR_READ (10) non-whitespace characters.
  *
  * 0 chars / pure-whitespace → fail (the lone true-fail case: a textless photo, later routed to an
@@ -327,6 +336,13 @@ export function isIntakeSummaryPath(filePath: unknown): boolean {
  * (any whole word ⇒ real text ⇒ clears the 10-char bar in practice), erring toward bypass per the
  * owner directive ("id rather it bypass completely in some cases"). The big-scan guard still applies
  * to BOTH sources so a substantial multi-page sliver never heals.
+ *
+ * The garble short-circuit below mirrors the LIVE threshold (GARBLED_RATIO_THRESHOLD, now 0.40 under
+ * the v2 word-slot signal): a stored attempt whose ratio exceeds it never heals. Rows parked under the
+ * OLD over-broad embedded-symbol heuristic (which could store a ratio like 0.72 on a CLEAN VA letter)
+ * are NOT reached by this heal — their stored ratio is stale-garbled — so the stuck-doc-watcher Phase 3
+ * re-classifies them by RE-RUNNING classifyReadAttempt on the stored page text (no re-OCR) under the
+ * v2 signal, which scores them clean and flips them to 'read'.
  */
 function lastAttemptPassesCurrentThresholds(row: FileReadStatusRecord): boolean {
   const last = lastAttemptOf(row);

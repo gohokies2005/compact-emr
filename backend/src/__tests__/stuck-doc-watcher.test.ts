@@ -136,7 +136,10 @@ describe('stuck-doc watcher — one-re-fire-then-flag, anti-join, clobber-guard'
   });
 
   it('Phase 2: STAMPS a text-but-no-status doc as read (classifies existing pages — NO re-OCR)', async () => {
-    const cleanText = Array.from({ length: 40 }, (_, i) => `clinical${i}`).join(' ');
+    // Real prose words (NOT "clinical0 clinical1 …" — those embed a digit and read as garbage word slots
+    // under the v2 signal; a token must be an actual clean word to count as readable).
+    const lex = ['the', 'veteran', 'reports', 'chronic', 'knee', 'pain', 'during', 'active', 'duty', 'service', 'with', 'progressive', 'onset'];
+    const cleanText = Array.from({ length: 40 }, (_, i) => lex[i % lex.length]).join(' ');
     const { deps, invokeOcr, frsCreated, logsCreated } = makeDeps({
       candidates: [], // no no-pages candidates this run
       orphanPaged: [{ id: 'DOC-PG', case_id: 'CASE-2', s3_key: 'cases/CASE-2/xyz-Buddy-Statement.pdf' }],

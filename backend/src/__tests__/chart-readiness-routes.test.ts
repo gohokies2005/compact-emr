@@ -144,7 +144,9 @@ function appFor(db: AppDb) {
 }
 
 const CLEAN_TEXT = 'The veteran is a fifty year old male with documented right knee pain. He served on active duty from two thousand one to two thousand eight in the United States Army with a primary military occupational specialty in infantry. He reports gradual onset of symptoms during service with progression after separation. Imaging confirms degenerative changes in the right knee compartment.';
-const GARBLED = ('Pati$nt is a 4@ year ol# male p#esent!ng w-i-t-h r!ght kn$e p$in and lim%ted r@nge of m0t!on '.repeat(4));
+// Symbol-soup garble (v2 signal, threshold 0.40): every word slot embeds symbols/digits → ratio ~1.0.
+// (NOT the old hyphen-spaced "w-i-t-h" fixture — v2 correctly reads hyphenated text as clean words.)
+const GARBLED = ('Pati$nt 4@ ol# p#esent kn$e p$in lim%ted m0t br0k3n ev!d#nce f@!led r@nge '.repeat(4));
 const SHA = 'a'.repeat(64);
 
 describe('chart-readiness routes', () => {
@@ -323,7 +325,7 @@ describe('files-pending-manual queues (evaluator-derived + enriched)', () => {
     // (3) GENUINELY GARBLED jpg: fails current thresholds — must REMAIN PRESENT.
     const garbled = seedRow(fileRows, {
       filePath: `cases/CASE-1/${UUID}-Sleep_Study_Photo.jpg`,
-      attemptsJson: [{ method: 'tesseract_ocr', wordCount: 120, corruptedTokenRatio: 0.21, attemptedAt: '2026-06-10T00:00:00Z', note: 'garbled (corrupted-token-ratio=0.210 > 0.08)' }],
+      attemptsJson: [{ method: 'tesseract_ocr', wordCount: 120, corruptedTokenRatio: 0.55, attemptedAt: '2026-06-10T00:00:00Z', note: 'garbled (corrupted-token-ratio=0.550 > 0.40)' }],
     });
     return { healed, intake, garbled };
   }
@@ -413,7 +415,7 @@ describe('files-pending-manual queues (evaluator-derived + enriched)', () => {
     for (let i = 0; i < 3; i++) {
       seedRow(fileRows, {
         filePath: `cases/CASE-1/${UUID}-garbled_${i}.jpg`,
-        attemptsJson: [{ method: 'tesseract_ocr', wordCount: 120, corruptedTokenRatio: 0.21, attemptedAt: '2026-06-10T00:00:00Z', note: 'garbled' }],
+        attemptsJson: [{ method: 'tesseract_ocr', wordCount: 120, corruptedTokenRatio: 0.55, attemptedAt: '2026-06-10T00:00:00Z', note: 'garbled' }],
       });
     }
     const res = await request(appFor(db)).get('/api/v1/rn/files-pending-manual?limit=2');

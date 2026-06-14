@@ -15,6 +15,7 @@ import {
   parseReadAttempt,
 } from '../services/file-read-validation.js';
 import { computeTriggerHash, deriveChartBuildState, isScreeningSummaryKey, runMatchesHash } from '../services/chart-build-state.js';
+import { computeExtractionCoverage, type CoverageDocInput } from '../services/extraction-coverage.js';
 import { AUTO_REMEDIATE_ACTION } from '../services/chart-auto-remediate.js';
 import type { AppDb, FileReadAttempt, FileReadStatusRecord } from '../services/db-types.js';
 
@@ -262,6 +263,43 @@ export function createChartReadinessRouter(db: AppDb): Router {
           fileName: originalFileName(r.filePath),
         })),
       });
+    }),
+  );
+
+  /**
+   * GET /api/v1/cases/:id/extraction-coverage
+   *
+   * TRANSPARENCY report (Ryan 2026-06-14): "95% of pages successfully extracted" + a specific,
+   * hyperlinked list of what was NOT extracted (file + page + reason). ADVISORY — never blocks.
+   *
+   * Assembles existing data; re-extracts nothing. Mirrors the GET /chart-readiness auth + data loads:
+   *   • Document rows (id, s3Key, filename, contentType, pageCount) = the chart-page universe.
+   *   • file_read_status rows = the per-file read outcome, judged through the SHARED isEffectivelyRead
+   *     predicate inside computeExtractionCoverage (no divergent readiness read).
+   *   • the latest ChartExtractionRun (status + resultJson.gaps) = the EXTRACTION-phase gaps.
+   *
+   * Each file-level gap carries documentId (joined on s3Key the same way /chart-readiness joins
+   * blockingFiles) so the frontend can open a presigned inline view. Run-level gaps carry null.
+   */
+  router.get(
+    '/cases/:id/extraction-coverage',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      // Same select shape the coverage service consumes (id for the presigned view join; filename +
+      // contentType for the image/AI-describe affordance; pageCount for honest page totals). Cast like
+      // the chart-readiness route does — DocumentRecord in db-types is the minimal {s3Key} view.
+      const docs = (await db.document.findMany({
+        where: { caseId },
+        select: { id: true, s3Key: true, filename: true, contentType: true, pageCount: true },
+      })) as readonly CoverageDocInput[];
+      const rows = await db.fileReadStatus.findMany({ where: { caseId } });
+      const latestRun = await (db as unknown as {
+        chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { status: true; resultJson: true } }) => Promise<{ status: string; resultJson: unknown } | null> };
+      }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true } });
+
+      const coverage = computeExtractionCoverage(docs, rows, latestRun);
+      res.json({ data: coverage });
     }),
   );
 

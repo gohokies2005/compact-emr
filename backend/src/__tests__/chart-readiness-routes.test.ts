@@ -420,4 +420,76 @@ describe('files-pending-manual queues (evaluator-derived + enriched)', () => {
     expect(res.body.data).toHaveLength(2);
     expect(res.body.total).toBe(3);
   });
+
+  // ===================== GET /cases/:id/extraction-coverage =====================
+  // Transparency report (Ryan 2026-06-14). Mirrors the chart-readiness auth + data loads; the
+  // service is unit-tested separately, so these assert the WIRING (document select with pageCount +
+  // contentType, the chartExtractionRun load, the documentId join on file-level gaps).
+
+  // The route selects { id, s3Key, filename, contentType, pageCount } — the shared makeDb document
+  // mock only returns { id, s3Key }. Override it per-test so coverage sees real page counts.
+  function withCoverageDocs(db: AppDb, docs: readonly { id: string; s3Key: string; filename?: string; contentType?: string | null; pageCount?: number | null }[]): void {
+    (db.document.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(
+      docs.map((d) => ({ id: d.id, s3Key: d.s3Key, filename: d.filename ?? 'file.pdf', contentType: d.contentType ?? null, pageCount: d.pageCount ?? null })),
+    );
+  }
+
+  it('GET extraction-coverage reports 100% for a clean fully-read chart', async () => {
+    const { db, fileRows } = makeDb();
+    seedRow(fileRows, { id: 'R1', filePath: 'cases/CASE-1/k1.pdf', terminalStatus: 'read' });
+    seedRow(fileRows, { id: 'R2', filePath: 'cases/CASE-1/k2.pdf', terminalStatus: 'read' });
+    withCoverageDocs(db, [
+      { id: 'D1', s3Key: 'cases/CASE-1/k1.pdf', pageCount: 5 },
+      { id: 'D2', s3Key: 'cases/CASE-1/k2.pdf', pageCount: 7 },
+    ]);
+    (db as unknown as { chartExtractionRun: { findFirst: ReturnType<typeof vi.fn> } }).chartExtractionRun.findFirst.mockResolvedValue({ status: 'complete', resultJson: { gaps: { uncoveredPages: 0, truncatedWindows: 0 } } });
+
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/extraction-coverage');
+    expect(res.status).toBe(200);
+    expect(res.body.data.coveragePct).toBe(100);
+    expect(res.body.data.totalPages).toBe(12);
+    expect(res.body.data.extractedPages).toBe(12);
+    expect(res.body.data.gaps).toHaveLength(0);
+    expect(res.body.data.status).toBe('complete');
+  });
+
+  it('GET extraction-coverage surfaces an unread image gap with documentId + isImage', async () => {
+    const { db, fileRows } = makeDb();
+    seedRow(fileRows, { id: 'R1', filePath: 'cases/CASE-1/k1.pdf', terminalStatus: 'read' });
+    seedRow(fileRows, { id: 'R2', filePath: 'cases/CASE-1/photo.jpg', terminalStatus: 'manual_summary_required' });
+    withCoverageDocs(db, [
+      { id: 'D1', s3Key: 'cases/CASE-1/k1.pdf', pageCount: 5 },
+      { id: 'DI', s3Key: 'cases/CASE-1/photo.jpg', filename: 'photo.jpg', contentType: 'image/jpeg', pageCount: 1 },
+    ]);
+    (db as unknown as { chartExtractionRun: { findFirst: ReturnType<typeof vi.fn> } }).chartExtractionRun.findFirst.mockResolvedValue({ status: 'complete_with_gaps', resultJson: { gaps: { uncoveredPages: 0, truncatedWindows: 0 } } });
+
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/extraction-coverage');
+    expect(res.status).toBe(200);
+    expect(res.body.data.gaps).toHaveLength(1);
+    expect(res.body.data.gaps[0].documentId).toBe('DI');
+    expect(res.body.data.gaps[0].isImage).toBe(true);
+    expect(res.body.data.gaps[0].reason).toBe('unreadable_image');
+    expect(res.body.data.gaps[0].fileName).toBe('photo.jpg');
+    expect(res.body.data.coveragePct).toBe(83);
+  });
+
+  it('GET extraction-coverage folds a truncated run into a truncated_dense gap', async () => {
+    const { db, fileRows } = makeDb();
+    seedRow(fileRows, { id: 'R1', filePath: 'cases/CASE-1/k1.pdf', terminalStatus: 'read' });
+    withCoverageDocs(db, [{ id: 'D1', s3Key: 'cases/CASE-1/k1.pdf', pageCount: 40 }]);
+    (db as unknown as { chartExtractionRun: { findFirst: ReturnType<typeof vi.fn> } }).chartExtractionRun.findFirst.mockResolvedValue({ status: 'complete_with_gaps', resultJson: { gaps: { uncoveredPages: 0, truncatedWindows: 2 } } });
+
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/extraction-coverage');
+    expect(res.body.data.gaps).toHaveLength(1);
+    expect(res.body.data.gaps[0].reason).toBe('truncated_dense');
+    expect(res.body.data.gaps[0].documentId).toBeNull();
+    expect(res.body.data.status).toBe('complete_with_gaps');
+  });
+
+  it('GET extraction-coverage requires auth (401 without a user)', async () => {
+    const { db } = makeDb();
+    mockUser = undefined;
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/extraction-coverage');
+    expect(res.status).toBe(401);
+  });
 });

@@ -13,6 +13,7 @@ import { TabBar, type TabItem } from '../../components/ui/TabBar';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { InFlightDrafterPanel, type InFlightDraftJob } from '../../components/InFlightDrafterPanel';
 import { SendToDrafterPanel } from '../../components/SendToDrafterPanel';
+import { ExtractionCoveragePanel } from '../../components/ExtractionCoveragePanel';
 import { ChartRecoveryBanner } from '../../components/ChartRecoveryBanner';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
 import { DeliveryPanel } from '../../components/DeliveryPanel';
@@ -540,6 +541,12 @@ export function CaseDetailPage() {
                   ) : null}
 
                   {p.canSendFirstDraft ? <SendToDrafterPanel key="send-first" caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} /> : null}
+
+                  {/* Chart Extraction Coverage transparency report (Ryan 2026-06-14): advisory "N% of
+                      pages extracted" + a specific, hyperlinked list of what was not. Shown in the
+                      pre-draft window (the same gate as Send-to-Drafter) so the RN can see exactly how
+                      much of the chart was read before sending it on. Never blocks. */}
+                  {p.canSendFirstDraft ? <ExtractionCoveragePanel key="extraction-coverage" caseId={caseId} /> : null}
 
                   {!p.inFlightDraft && p.canSeePhysicianReadyPanel && latestDraftJob ? (
                     <PhysicianLetterReadyPanel

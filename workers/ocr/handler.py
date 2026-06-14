@@ -61,6 +61,19 @@ CLAUDE_REREAD_PER_PAGE_FLOOR = 50  # chars/page below which a MULTI-page doc is 
 _MEDIA_BY_EXT = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}
 _cached_anthropic_key: str | None = None
 
+# CLAUDE_VISION_DESCRIBE (dark, default OFF): when the verbatim-OCR path yields effectively-no text
+# AND the media is a textless image (a photo of an injured leg, a scar, hardware — no chart text to
+# read), make a SECOND, separate Claude vision call that DESCRIBES what is medically observable, so
+# the description becomes usable record text and the readiness char-floor passes instead of dead-ending
+# a $500 letter. Ryan 2026-06-14: "with pic only without text maybe that's the rare time where a manual
+# person reviews it before submitting." The description is therefore stamped as AI-generated visual
+# evidence (NOT OCR'd record text) and surfaced for human confirm — never silently treated as a clean read.
+# The "effectively-no text" gate is the _handle_unreadable chokepoint itself: it is reached only when the
+# verbatim path produced no usable text (Textract FAILED/EMPTY, or _claude_ocr returned '' after .strip()).
+_IMAGE_DESCRIBE_MEDIA = {"image/png", "image/jpeg"}  # describe path is image-only (not PDFs)
+_IMAGE_EVIDENCE_PREFIX = "[IMAGE EVIDENCE — AI visual description, not OCR text]\n"
+_NO_CLINICAL_CONTENT = "NO CLINICAL CONTENT"  # exact sentinel the describe prompt returns when nothing is visible
+
 
 def _api_base_url() -> str:
     url = os.environ["COMPACT_EMR_API_URL"]
@@ -570,6 +583,13 @@ def _claude_enabled() -> bool:
     return os.environ.get("CLAUDE_OCR_FALLBACK", "off").lower() == "on"
 
 
+def _vision_describe_enabled() -> bool:
+    """Dark flag (default OFF): textless-image auto-describe. Ships dark so it cannot change live
+    behavior until smoke-tested — flip CLAUDE_VISION_DESCRIBE=on to activate. Independent of
+    CLAUDE_OCR_FALLBACK (the describe call still uses _anthropic_key/_phi_bucket, but is a distinct path)."""
+    return os.environ.get("CLAUDE_VISION_DESCRIBE", "off").lower() == "on"
+
+
 def _phi_bucket() -> str:
     return os.environ["RECORDS_BUCKET"]
 
@@ -668,6 +688,87 @@ def _claude_ocr(document_id: str) -> str:
     return text
 
 
+def _claude_describe_image(document_id: str) -> str:
+    """SECOND Claude vision call — a DESCRIBE pass (separate from the verbatim-OCR prompt in _claude_ocr).
+    Fires only for a textless IMAGE when CLAUDE_VISION_DESCRIBE is on. Returns the raw description text
+    (caller stamps provenance), '' when disabled / not an image / too large / on error, and '' when the
+    model reports NO CLINICAL CONTENT (caller then leaves it as a failed read → manual path; we never post
+    a meaningless description). Ports the _claude_ocr plumbing but with a documentarian prompt that
+    describes (does NOT transcribe, diagnose, or speculate)."""
+    if not _vision_describe_enabled():
+        return ""
+    api_key = _anthropic_key()
+    if not api_key:
+        return ""
+    src = _document_source(document_id)
+    s3_key = src.get("s3Key")
+    if not s3_key:
+        return ""
+    media = _media_type(s3_key, src.get("contentType"))
+    if media not in _IMAGE_DESCRIBE_MEDIA:  # PDFs and non-image media never take the describe path
+        return ""
+    data = s3.get_object(Bucket=_phi_bucket(), Key=s3_key)["Body"].read(MAX_OCR_BYTES + 1)
+    if len(data) > MAX_OCR_BYTES:
+        print(json.dumps({"msg": "ocr: image too large for Claude vision describe", "documentId": document_id, "bytes": len(data)}))
+        return ""
+    b64 = base64.b64encode(data).decode("ascii")
+    body = json.dumps({
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 4000,
+        "system": (
+            "You are a clinical documentarian. Describe ONLY what is medically observable in this "
+            "photograph of a veteran's body or record — anatomical region, visible findings (swelling, "
+            "deformity, scar, surgical hardware, skin changes, laterality), and any visible text/labels. "
+            "Do NOT diagnose, infer cause, or speculate. If nothing clinically relevant is visible, output "
+            f"exactly: {_NO_CLINICAL_CONTENT}"
+        ),
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}},
+            {"type": "text", "text": "Describe what is medically observable in this photograph."},
+        ]}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=body, method="POST",
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=300) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    parts = payload.get("content") or []
+    text = "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+    # NO CLINICAL CONTENT → don't post a description; leave it as a failed read so the manual path owns it.
+    if not text or text.strip() == _NO_CLINICAL_CONTENT:
+        print(json.dumps({"msg": "ocr: vision describe found no clinical content; not posting (manual path)", "documentId": document_id}))
+        return ""
+    return text
+
+
+def _try_image_describe(document_id: str) -> bool:
+    """If CLAUDE_VISION_DESCRIBE is on and this is a textless image, run the describe pass and, on a real
+    description, POST it as the page text PREFIXED with an AI-visual-evidence provenance marker so it never
+    reads as charted OCR text. Returns True if a description was posted (the file now has usable text →
+    readiness char-floor passes → the $500 letter isn't blocked).
+
+    HUMAN-CONFIRM (option b, lightest correct): because this is an AI description of an image and NOT a real
+    record read, it must be surfaced for a quick RN/physician confirm rather than silently accepted as a
+    clean machine read. The in-band `_IMAGE_EVIDENCE_PREFIX` is the durable provenance signal every
+    downstream reader (RN queue, drafter, chart-extractor) sees on the page text itself. A dedicated
+    confirm-surface (a distinct file_read_status method/UI flag) is OWED as a follow-up — see the
+    `needsHumanConfirm` log breadcrumb below; we deliberately do NOT route through
+    _post_failed_read_attempt here because that sets terminalStatus='manual_summary_required', which would
+    re-block the very letter we just unblocked."""
+    description = ""
+    try:
+        description = _claude_describe_image(document_id)
+    except Exception as exc:  # noqa: BLE001 — surface the reason, never a silent drop
+        print(json.dumps({"msg": "ocr: vision describe error", "documentId": document_id, "error": f"{type(exc).__name__}: {exc}"}))
+    if not description:
+        return False
+    page_text = _IMAGE_EVIDENCE_PREFIX + description
+    _post_pages_to_api(document_id, [{"pageNumber": 1, "text": page_text, "confidence": None}], 1)
+    print(json.dumps({"msg": "ocr: image-described (needs human confirm)", "documentId": document_id, "chars": len(description), "needsHumanConfirm": True}))
+    return True
+
+
 def _handle_unreadable(document_id: str, textract_status: str, job_id: str) -> bool:
     """Textract could not read this file. Try the Claude OCR fallback; if it yields text, post it as
     a page so the file reads (no dead-end). Otherwise flag for the RN (overridable). Never silent."""
@@ -679,6 +780,13 @@ def _handle_unreadable(document_id: str, textract_status: str, job_id: str) -> b
     if text:
         _post_pages_to_api(document_id, [{"pageNumber": 1, "text": text, "confidence": None}], 1)
         print(json.dumps({"msg": "ocr: claude fallback succeeded", "documentId": document_id, "chars": len(text)}))
+        return True
+    # Verbatim OCR yielded effectively no text. If this is a textless IMAGE and CLAUDE_VISION_DESCRIBE is
+    # on, auto-describe it (stamped as AI visual evidence, surfaced for human confirm) so the readiness
+    # char-floor passes instead of dead-ending the letter. Dark-by-default: when the flag is off this is a
+    # no-op and the code falls straight through to the unchanged RN flag below. Guarded so any error here
+    # can never block the flag path (_try_image_describe swallows + logs its own errors and returns False).
+    if _try_image_describe(document_id):
         return True
     try:
         _post_failed_read_attempt(document_id, textract_status, job_id)

@@ -9,6 +9,7 @@ No network, no AWS: _resolve_document / _post_pages_to_api / _post_failed_read_a
 s3 / textract are all monkeypatched.
 """
 import io
+import json
 
 import pytest
 
@@ -412,3 +413,142 @@ def test_resolved_cases_key_is_unaffected_by_the_orphan_raise(rig, monkeypatch):
     assert result["started"] == []
     assert result["native"] == "txt"
     assert len(rig["pages"]) == 1 and rig["failed"] == []
+
+
+# ===== CLAUDE_VISION_DESCRIBE: textless-image auto-describe (dark, default OFF) =====
+# A textless clinical photo (e.g. an injured leg) yields 0 chars from Textract + Claude OCR, so it hits
+# _handle_unreadable. With the flag ON we make a SECOND Claude vision DESCRIBE call and post the stamped
+# description as page text so the readiness char-floor passes; "NO CLINICAL CONTENT" must NOT post; with
+# the flag OFF the describe call must never fire (behavior unchanged → file flags for the RN).
+
+
+class _DescribeUrlopen:
+    """Stub of urllib.request.urlopen for the describe call. Captures the request body and returns a
+    canned Anthropic /v1/messages response carrying `text` as a single text content block."""
+
+    def __init__(self, text: str):
+        self.text = text
+        self.requests: list = []
+
+    def __call__(self, req, timeout=None):  # noqa: D401 — mimics urlopen(req, timeout=...)
+        self.requests.append(req)
+        payload = {"content": [{"type": "text", "text": self.text}], "stop_reason": "end_turn"}
+        return _FakeHTTPResponse(json.dumps(payload).encode("utf-8"))
+
+
+class _FakeHTTPResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+        self.status = 200
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.fixture
+def describe_rig(monkeypatch):
+    """Wire _handle_unreadable's describe path: a resolvable image document, a stubbed S3 + secret +
+    Claude vision call, and capture of every /pages and failed-read-attempt post."""
+    state = {"pages": [], "failed": []}
+    monkeypatch.setattr(handler, "_post_pages_to_api",
+                        lambda doc_id, pages, count: state["pages"].append((doc_id, pages, count)))
+    monkeypatch.setattr(handler, "_post_failed_read_attempt",
+                        lambda doc_id, status, job_id, error_message=None: state["failed"].append((doc_id, status, job_id, error_message)))
+    # describe-call dependencies
+    monkeypatch.setattr(handler, "_anthropic_key", lambda: "sk-ant-test")
+    monkeypatch.setattr(handler, "_document_source", lambda doc_id: {"s3Key": "cases/C1/u20-leg.png", "contentType": "image/png"})
+    monkeypatch.setattr(handler, "_phi_bucket", lambda: "phi-bucket")
+    monkeypatch.setattr(handler, "s3", _S3Stub(b"\x89PNG\r\n\x1a\n fake image bytes"))
+    # the verbatim Claude OCR path is exercised separately; here it reads nothing so the describe path runs
+    monkeypatch.setattr(handler, "_claude_ocr", lambda doc_id: "")
+    state["set_urlopen"] = lambda text: monkeypatch.setattr(handler.urllib.request, "urlopen", _DescribeUrlopen(text))
+    return state
+
+
+def test_vision_describe_off_does_not_post_or_call(describe_rig, monkeypatch):
+    """Flag OFF (default): _handle_unreadable falls straight through to the RN flag — no describe call,
+    no posted page. Behavior is identical to before this change."""
+    monkeypatch.delenv("CLAUDE_VISION_DESCRIBE", raising=False)
+    called = []
+    monkeypatch.setattr(handler.urllib.request, "urlopen",
+                        lambda *a, **k: called.append(a) or (_ for _ in ()).throw(AssertionError("describe must not call urlopen when flag off")))
+
+    read = handler._handle_unreadable("DOC-IMG", "EMPTY", "JOB-IMG")
+
+    assert read is False
+    assert describe_rig["pages"] == []          # nothing posted as text
+    assert len(describe_rig["failed"]) == 1     # flagged for RN exactly as before
+    assert called == []
+
+
+def test_vision_describe_on_posts_stamped_description(describe_rig, monkeypatch):
+    """Flag ON + a real description: the description is posted as page text PREFIXED with the AI-visual-
+    evidence provenance marker (never reads as OCR'd record text), and the file is NOT flagged for RN."""
+    monkeypatch.setenv("CLAUDE_VISION_DESCRIBE", "on")
+    describe_rig["set_urlopen"]("Right lower leg with a 6 cm linear surgical scar; mild swelling over the ankle.")
+
+    read = handler._handle_unreadable("DOC-IMG", "EMPTY", "JOB-IMG")
+
+    assert read is True
+    [(doc_id, pages, count)] = describe_rig["pages"]
+    assert doc_id == "DOC-IMG" and count == 1
+    text = pages[0]["text"]
+    assert text.startswith(handler._IMAGE_EVIDENCE_PREFIX)  # provenance stamp present
+    assert "not OCR text" in text
+    assert "surgical scar" in text                          # the description body survived
+    assert describe_rig["failed"] == []                     # not dead-ended; letter unblocked
+
+
+def test_vision_describe_no_clinical_content_does_not_post(describe_rig, monkeypatch):
+    """Flag ON but the model returns the exact NO CLINICAL CONTENT sentinel: do NOT post a description —
+    leave it as a failed read so the manual path owns it (flagged for RN)."""
+    monkeypatch.setenv("CLAUDE_VISION_DESCRIBE", "on")
+    describe_rig["set_urlopen"](handler._NO_CLINICAL_CONTENT)
+
+    read = handler._handle_unreadable("DOC-IMG", "EMPTY", "JOB-IMG")
+
+    assert read is False
+    assert describe_rig["pages"] == []          # no meaningless description posted
+    assert len(describe_rig["failed"]) == 1     # falls through to the RN flag
+
+
+def test_vision_describe_skips_non_image_media(describe_rig, monkeypatch):
+    """Flag ON but the media is a PDF (not png/jpeg): the describe path is image-only, so it must not post
+    a description — a textless PDF still flags for the RN."""
+    monkeypatch.setenv("CLAUDE_VISION_DESCRIBE", "on")
+    monkeypatch.setattr(handler, "_document_source",
+                        lambda doc_id: {"s3Key": "cases/C1/u21-scan.pdf", "contentType": "application/pdf"})
+    called = []
+    monkeypatch.setattr(handler.urllib.request, "urlopen",
+                        lambda *a, **k: called.append(a) or (_ for _ in ()).throw(AssertionError("describe must not call urlopen for non-image media")))
+
+    read = handler._handle_unreadable("DOC-PDF", "EMPTY", "JOB-PDF")
+
+    assert read is False
+    assert describe_rig["pages"] == []
+    assert len(describe_rig["failed"]) == 1
+    assert called == []
+
+
+def test_vision_describe_on_with_text_ocr_never_reaches_describe(describe_rig, monkeypatch):
+    """Flag ON, but the verbatim Claude OCR produced real text: that text is posted as-is and the describe
+    path never runs (the describe call only fires when OCR yielded nothing)."""
+    monkeypatch.setenv("CLAUDE_VISION_DESCRIBE", "on")
+    monkeypatch.setattr(handler, "_claude_ocr", lambda doc_id: "AHI 36.4 events/hour. Severe OSA.")
+    called = []
+    monkeypatch.setattr(handler.urllib.request, "urlopen",
+                        lambda *a, **k: called.append(a) or (_ for _ in ()).throw(AssertionError("describe must not run when OCR read real text")))
+
+    read = handler._handle_unreadable("DOC-IMG", "EMPTY", "JOB-IMG")
+
+    assert read is True
+    [(_, pages, _)] = describe_rig["pages"]
+    assert pages[0]["text"] == "AHI 36.4 events/hour. Severe OSA."   # verbatim OCR, NOT stamped
+    assert not pages[0]["text"].startswith(handler._IMAGE_EVIDENCE_PREFIX)
+    assert called == []

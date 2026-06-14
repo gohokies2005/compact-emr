@@ -363,13 +363,17 @@ export function CaseDetailPage() {
             // Email leads the line, hyperlinked to a Gmail compose window (Ryan 2026-06-13, David
             // Porter: "put his email at the top, hyperlinked so Gmail opens"). Staff are on Workspace
             // Gmail, so the compose-URL is the right target (mailto would open a random local client).
+            // authuser pins the compose to the FRN team inbox (info@) instead of Gmail's /u/0 default
+            // (whichever Google account was logged in first in the browser — Ryan 2026-06-14: "I cannot
+            // tell what account I am on"). su prefills a subject so the compose isn't blank; the full
+            // §VII/payment-link body is Email Chunk E.
             const emailLink = v?.email ? (
               <a
-                href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(v.email)}`}
+                href={`https://mail.google.com/mail/?view=cm&fs=1&authuser=${encodeURIComponent('info@flatratenexus.com')}&to=${encodeURIComponent(v.email)}&su=${encodeURIComponent(`Flat Rate Nexus — your nexus letter case${c.veteran?.firstName ? ` (${c.veteran.firstName})` : ''}`)}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-medium text-navy hover:underline"
-                title="Compose an email to this veteran in Gmail"
+                title="Compose an email to this veteran from info@flatratenexus.com in Gmail"
               >
                 {v.email}
               </a>

@@ -52,6 +52,45 @@ export function caseDisplayLabel(status: CaseStatus, opts?: { invoiced?: boolean
   return CASE_STATUS_LABELS[status];
 }
 
+// Coarse display BUCKETS for the dashboard tiles + the cases-list status grouping (C0). These are
+// presentation-only — they collapse the fine-grained workflow statuses into the ~9 buckets the RN
+// thinks in ("whose ball is it"). The enum values are unchanged; nothing keys on these strings.
+// 'Archived' is NOT a status — it comes from Case.archivedAt (a soft-delete flag), so it's an
+// optional override here, matching the "archived = a flag, not a status" decision (Ryan 2026-06-13).
+export type CaseStatusDisplayGroup =
+  | 'Pre-draft'
+  | 'Awaiting records'
+  | 'Drafting'
+  | 'RN review'
+  | 'Physician review'
+  | 'Awaiting payment'
+  | 'Paid'
+  | 'Rejected'
+  | 'Archived';
+
+const STATUS_DISPLAY_GROUP: Record<CaseStatus, CaseStatusDisplayGroup> = {
+  intake: 'Pre-draft',
+  viability: 'Pre-draft',
+  records: 'Awaiting records',
+  needs_records: 'Awaiting records',
+  drafting: 'Drafting',
+  // Gate-2 park, RN must decide; the doctor-declined corrections are RN work too — all "RN's ball".
+  needs_rn_decision: 'RN review',
+  rn_review: 'RN review',
+  correction_requested: 'RN review',
+  correction_review: 'RN review',
+  physician_review: 'Physician review',
+  // 'delivered' = physician-approved, pre-payment → the case is waiting on the veteran's payment.
+  delivered: 'Awaiting payment',
+  paid: 'Paid',
+  rejected: 'Rejected',
+};
+
+export function statusDisplayGroup(status: CaseStatus, opts?: { archived?: boolean | undefined }): CaseStatusDisplayGroup {
+  if (opts?.archived === true) return 'Archived';
+  return STATUS_DISPLAY_GROUP[status];
+}
+
 export function validNextStatuses(from: CaseStatus): readonly CaseStatus[] {
   return CASE_STATUS_TRANSITIONS[from];
 }

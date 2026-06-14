@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CASE_STATUS_LABELS, CASE_STATUS_TRANSITIONS } from '../lib/caseStatus';
+import { CASE_STATUS_LABELS, CASE_STATUS_TRANSITIONS, statusDisplayGroup } from '../lib/caseStatus';
 import type { CaseStatus } from '../types/prisma';
 
 describe('caseStatus maps', () => {
@@ -32,5 +32,33 @@ describe('caseStatus maps', () => {
   // value stays 'delivered'.
   it("labels 'delivered' as Ready for delivery (pre-payment, nothing sent to the veteran yet)", () => {
     expect(CASE_STATUS_LABELS.delivered).toBe('Ready for delivery');
+  });
+
+  // C0 — statusDisplayGroup() is the foundation for the dashboard tiles + cases-list grouping.
+  describe('statusDisplayGroup', () => {
+    it('maps every status to a non-empty bucket (no orphan status renders blank)', () => {
+      for (const status of transitionKeys) {
+        expect(statusDisplayGroup(status).length).toBeGreaterThan(0);
+      }
+    });
+
+    it('buckets the load-bearing statuses where the RN expects them', () => {
+      expect(statusDisplayGroup('intake')).toBe('Pre-draft');
+      expect(statusDisplayGroup('records')).toBe('Awaiting records');
+      expect(statusDisplayGroup('needs_records')).toBe('Awaiting records');
+      expect(statusDisplayGroup('drafting')).toBe('Drafting');
+      expect(statusDisplayGroup('rn_review')).toBe('RN review');
+      expect(statusDisplayGroup('correction_requested')).toBe('RN review');
+      expect(statusDisplayGroup('physician_review')).toBe('Physician review');
+      expect(statusDisplayGroup('delivered')).toBe('Awaiting payment'); // pre-payment, not "Paid"
+      expect(statusDisplayGroup('paid')).toBe('Paid');
+      expect(statusDisplayGroup('rejected')).toBe('Rejected');
+    });
+
+    it('the archived flag overrides the status bucket (archived = a flag, not a status)', () => {
+      expect(statusDisplayGroup('paid', { archived: true })).toBe('Archived');
+      expect(statusDisplayGroup('rn_review', { archived: true })).toBe('Archived');
+      expect(statusDisplayGroup('rn_review', { archived: false })).toBe('RN review');
+    });
   });
 });

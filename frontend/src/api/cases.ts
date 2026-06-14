@@ -28,6 +28,9 @@ export interface CaseLite {
   readonly quickNoteAt?: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+  // Soft-delete timestamp (C5 lifecycle, 2026-06-13). Non-null = archived → the Closed view
+  // labels it under the "Archived" status group. Absent on older API responses → treated active.
+  readonly archivedAt?: string | null;
   readonly veteran?: CaseVeteranLite | null;
   readonly assignedPhysician?: CasePhysicianLite | null;
   readonly assignedRn?: AssignedRnLite | null;
@@ -67,7 +70,9 @@ export interface ListCasesParams {
   readonly assignedPhysicianId?: string;
   // Single AppUser id, '__none__' (unassigned), or a comma-separated mix — the RN multi-filter.
   readonly assignedRnId?: string;
-  readonly archived?: boolean; // true = show only archived (soft-deleted) claims
+  // true = archived ONLY; 'all' = active + archived in one query (the Closed toggle, C5
+  // lifecycle 2026-06-13); omitted/false = active only (default).
+  readonly archived?: boolean | 'all';
   readonly page?: number;
   readonly pageSize?: number;
 }
@@ -80,7 +85,8 @@ export async function listCases(params: ListCasesParams = {}): Promise<CaseListR
   if (params.veteranId) sp.set('veteranId', params.veteranId);
   if (params.assignedPhysicianId) sp.set('assignedPhysicianId', params.assignedPhysicianId);
   if (params.assignedRnId) sp.set('assignedRnId', params.assignedRnId);
-  if (params.archived) sp.set('archived', 'true');
+  if (params.archived === 'all') sp.set('archived', 'all');
+  else if (params.archived) sp.set('archived', 'true');
   if (params.page) sp.set('page', String(params.page));
   if (params.pageSize) sp.set('pageSize', String(params.pageSize));
   const qs = sp.toString();
@@ -110,6 +116,9 @@ export interface ApproveBlocker { readonly code: string; readonly message: strin
 
 export interface CaseDetail extends Case {
   readonly approveBlockers?: readonly ApproveBlocker[];
+  // Soft-delete timestamp (C6 lifecycle, 2026-06-13). Non-null = archived → the claim page shows
+  // Reopen instead of Archive. GET /cases/:id returns the full Case row, so this is already present.
+  readonly archivedAt?: string | null;
   readonly quickNote?: string | null;
   readonly quickNoteBy?: string | null;
   readonly quickNoteAt?: string | null;
@@ -362,45 +371,11 @@ export async function postManualSummary(
   );
 }
 
-// === Phase 7B-revised closeout: KeyDoc RN acknowledgement ===
-
-export interface KeyDocAckInput {
-  readonly notes?: string;
-}
-
-export async function acknowledgeKeyDoc(
-  keyDocId: string,
-  input: KeyDocAckInput = {},
-): Promise<{ data: { id: string; needsRnReview: boolean; selectorAcknowledgedAt: string | null } }> {
-  return apiPost(`/api/v1/key-docs/${encodeURIComponent(keyDocId)}/acknowledge`, input);
-}
-
-export interface KeyDocReviewRow {
-  readonly id: string;
-  readonly caseId: string;
-  readonly filePath: string;
-  readonly docType: string;
-  readonly classification: string;
-  readonly importance: number;
-  readonly needsRnReview: boolean;
-  readonly selectorVersion: string | null;
-  readonly selectorRationale: string | null;
-  readonly notes: string | null;
-  readonly updatedAt: string;
-  readonly version: number;
-  // Item 3 (2026-06-11): server-side join on Document.s3Key — human filename for display +
-  // documentId for the presigned "Open" viewer. Null when the source Document is gone.
-  readonly filename?: string | null;
-  readonly documentId?: string | null;
-  // WAVE 2 (assessment 2026-06-12 §3): server-computed '<DocType human name> — <original
-  // filename>' ('unspecified' → just the filename). Card copy renders it when present.
-  readonly displayLabel?: string | null;
-}
-
-export async function listKeyDocsNeedingReview(limit?: number): Promise<{ data: readonly KeyDocReviewRow[]; total: number }> {
-  const qs = typeof limit === 'number' ? `?limit=${encodeURIComponent(String(limit))}` : '';
-  return apiGet(`/api/v1/rn/key-docs-needing-review${qs}`);
-}
+// REMOVED (C7 lifecycle, 2026-06-13): KeyDocAckInput / acknowledgeKeyDoc / KeyDocReviewRow /
+// listKeyDocsNeedingReview — the API client for the vestigial RN "Confirm pack pages" review tab.
+// The backend endpoints (GET /rn/key-docs-needing-review, POST /key-docs/:id/acknowledge) were
+// deleted with it. The live doctor-pack panel uses the separate /cases/:id/key-docs path (see
+// api/doctorPack.ts), which is untouched.
 
 // Keystone 4b — case-level reprocess: re-OCR every document lacking a terminal read status (the
 // shared CopyObject nudge) + force a chart re-extract via a salted triggerHash. Idempotent;

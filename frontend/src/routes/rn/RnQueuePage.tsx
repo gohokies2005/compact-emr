@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
@@ -9,12 +9,9 @@ import { Spinner } from '../../components/ui/Spinner';
 import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { ManualSummaryForm } from '../../components/ManualSummaryForm';
 import {
-  acknowledgeKeyDoc,
   listCases,
   listFilesPendingManualGlobal,
-  listKeyDocsNeedingReview,
   type FileReadStatus,
-  type KeyDocReviewRow,
 } from '../../api/cases';
 import { viewDocument } from '../../api/veterans';
 import { formatRelativeTime } from '../../lib/date';
@@ -41,114 +38,11 @@ async function openPendingFile(documentId: string) {
   }
 }
 
-// Item 3 (2026-06-11): display-only plain-language map for the page-selector rationale codes —
-// the raw codes ("unspecified_large_doc_first_8") meant nothing to the RN. Selector rationales
-// often carry suffixes (`no_rules_for_doctype (dbq); include_all + RN review`), so match on
-// PREFIX. All 12 codes page-selector.ts can emit are covered; anything unrecognized (e.g. the
-// per-page `p1: matched …` joins) renders as "Needs review".
-const SELECTOR_RATIONALE_LABELS: readonly (readonly [string, string])[] = [
-  ['unspecified_small_doc_all_pages', 'Document type unknown — small file, all pages included by default'],
-  ['unspecified_large_doc_first_8', 'Document type unknown — large file, only the first 8 pages included; confirm the right pages made it in'],
-  ['no_rules_for_doctype', 'No selection rules exist for this document type — selection needs a human eye'],
-  ['high_signal_fallback', 'Included as a best guess from content signals — confirm'],
-  ['physician_override', 'Included in full at physician request'],
-  ['no_per_page_text_available', 'No readable page text yet — page selection deferred'],
-  ['small_doc_always_all', 'Short document type — included in full'],
-  ['small_doc_shortcut', 'Small document — included in full'],
-  ['default_exclude', 'Bulk record dump — excluded by default'],
-  ['progress_notes_no_condition_or_recent_match', 'Progress notes — no mention of the claimed condition and no recent visit; excluded'],
-  ['progress_notes_condition_or_recent', 'Progress notes — pages mentioning the claimed condition or from the most recent visit included'],
-  // Small blue-button exports ride the same condition-keyed selection (Perez dx-note fix 2026-06-12).
-  ['blue_button_no_condition_or_recent_match', 'Health-record export — no mention of the claimed condition; excluded'],
-  ['blue_button_condition_or_recent', 'Health-record export — pages mentioning the claimed condition included'],
-  ['benefit_summary_first_3_pages', 'Benefit summary — first 3 pages included'],
-];
-
-function selectorRationaleLabel(rationale: string | null): string {
-  if (rationale !== null) {
-    for (const [code, label] of SELECTOR_RATIONALE_LABELS) {
-      if (rationale.startsWith(code)) return label;
-    }
-  }
-  return 'Needs review';
-}
-
-function KeyDocReviewQueue() {
-  const queryClient = useQueryClient();
-  const reviewQuery = useQuery({
-    queryKey: ['rn', 'key-docs-needing-review'],
-    queryFn: () => listKeyDocsNeedingReview(50),
-  });
-
-  const ackMutation = useMutation({
-    mutationFn: (keyDocId: string) => acknowledgeKeyDoc(keyDocId, {}),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['rn', 'key-docs-needing-review'] });
-    },
-  });
-
-  if (reviewQuery.isLoading) {
-    return (
-      <div className="flex items-center gap-2 text-sm text-slate-500">
-        <Spinner /> Loading review queue
-      </div>
-    );
-  }
-
-  const rows = reviewQuery.data?.data ?? [];
-  const total = reviewQuery.data?.total ?? 0;
-
-  if (rows.length === 0) {
-    return <EmptyState title="Nothing to review" message="The page-selector ran clean on every Doctor Pack — no docs flagged for human verification." />;
-  }
-
-  return (
-    <div className="space-y-4">
-      <p className="text-xs text-slate-400">{total} doc(s) flagged for RN selection review across all cases.</p>
-      {rows.map((row) => {
-        // Item 3: human filename (server-enriched; documentFileName fallback strips the uuid
-        // prefix off legacy raw-key payloads) + presigned Open + plain-language rationale.
-        const docId = row.documentId ?? null;
-        return (
-          <Card key={row.id}>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">{row.docType}</span>
-                  <span className="font-mono text-xs text-slate-500">case {row.caseId}</span>
-                  <span className="text-xs text-slate-500">updated {formatRelativeTime(row.updatedAt)}</span>
-                </div>
-                {/* WAVE 2 §3: server-computed displayLabel ('Rating decision — Misc_5.pdf')
-                    when present; legacy fallback = human filename (uuid prefix stripped). */}
-                <p className="mt-2 break-words text-sm font-medium text-slate-800">{row.displayLabel ?? documentFileName(row.filename ?? row.filePath)}</p>
-                {/* The raw selector code rides along in the tooltip for debugging. */}
-                <p className="mt-2 text-xs italic text-slate-500" title={row.selectorRationale ?? undefined}>
-                  {selectorRationaleLabel(row.selectorRationale)}
-                </p>
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                {docId ? (
-                  <Button type="button" variant="secondary" onClick={() => void openPendingFile(docId)}>
-                    Open
-                  </Button>
-                ) : null}
-                <Button
-                  type="button"
-                  variant="primary"
-                  loading={ackMutation.isPending && ackMutation.variables === row.id}
-                  disabled={ackMutation.isPending}
-                  onClick={() => ackMutation.mutate(row.id)}
-                >
-                  Mark reviewed
-                </Button>
-              </div>
-            </div>
-          </Card>
-        );
-      })}
-    </div>
-  );
-}
+// REMOVED (C7 lifecycle, 2026-06-13): the "Confirm pack pages" review tab — KeyDocReviewQueue
+// component + the SELECTOR_RATIONALE_LABELS plain-language map. The page-selector still flags docs
+// (needsRnReview) and the live Doctor Pack panel shows them; the standalone cross-case RN
+// review/ack queue was vestigial and is gone. The manual-summary ("Can't read — type it") and
+// invoice-release queues below are unchanged.
 
 // Post-sign-off release queue. After the physician approves, the case becomes `delivered` and the
 // DeliveryPanel (invoice email + Stripe link + optional cover memo + final-letter upload) appears
@@ -227,7 +121,7 @@ function DeliveryReleaseQueue() {
   );
 }
 
-type QueueTab = 'manual_summary' | 'doc_review' | 'release';
+type QueueTab = 'manual_summary' | 'release';
 
 export function RnQueuePage() {
   const [tab, setTab] = useState<QueueTab>('manual_summary');
@@ -274,23 +168,12 @@ export function RnQueuePage() {
           </button>
           <button
             type="button"
-            onClick={() => setTab('doc_review')}
-            className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === 'doc_review' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
-          >
-            Confirm pack pages
-          </button>
-          <button
-            type="button"
             onClick={() => setTab('release')}
             className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === 'release' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
           >
             Invoice + release
           </button>
         </div>
-
-        {tab === 'doc_review' ? (
-          <KeyDocReviewQueue />
-        ) : null}
 
         {tab === 'release' ? (
           <DeliveryReleaseQueue />

@@ -310,4 +310,64 @@ describe('CasesPage', () => {
     expect(statusSelect().value).toBe('intake');
     expect(listCasesMock).toHaveBeenCalledWith(expect.objectContaining({ status: 'intake' }));
   });
+
+  // === C5 lifecycle (2026-06-13): Active/Closed toggle + status grouping ===
+
+  it('defaults to the Active toggle and queries the ACTIVE status set (paid/rejected excluded, no archived param)', async () => {
+    mockRole = 'admin';
+    renderPage();
+    await screen.findByText('CASE-001');
+    expect(screen.getByRole('tab', { name: 'Active' })).toHaveAttribute('aria-selected', 'true');
+    // Default query: a statuses[] set that EXCLUDES paid + rejected, and no archived param.
+    const params = listCasesMock.mock.calls.at(-1)?.[0] as { statuses?: string[]; archived?: unknown };
+    expect(params.statuses).toBeDefined();
+    expect(params.statuses).not.toContain('paid');
+    expect(params.statuses).not.toContain('rejected');
+    expect(params.statuses).toContain('drafting');
+    expect(params.archived).toBeUndefined();
+  });
+
+  it('Closed toggle queries [paid, rejected] with archived=all (paid + rejected + archived in one page)', async () => {
+    mockRole = 'admin';
+    renderPage();
+    await screen.findByText('CASE-001');
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed' }));
+    await waitFor(() => {
+      const params = listCasesMock.mock.calls.at(-1)?.[0] as { statuses?: string[]; archived?: unknown };
+      expect(params.statuses?.slice().sort()).toEqual(['paid', 'rejected']);
+      expect(params.archived).toBe('all');
+    });
+  });
+
+  it('groups rows under display-group headers; an archived row falls under the Archived group', async () => {
+    mockRole = 'admin';
+    listCasesMock.mockResolvedValue({
+      data: [
+        { ...CASES_RESULT.data[0], id: 'CASE-PAID', status: 'paid' },
+        { ...CASES_RESULT.data[1], id: 'CASE-ARCH', status: 'rejected', archivedAt: '2026-06-12T00:00:00Z' },
+      ],
+      page: 1, pageSize: 25, total: 2,
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Closed' }));
+    await screen.findByText('CASE-PAID');
+    // Group header rows are <th scope="colgroup">; the same words appear in the status <option>s,
+    // so scope the assertion to the colgroup headers (role=columnheader carries scope=colgroup).
+    const groupHeaders = screen.getAllByRole('columnheader')
+      .filter((el) => el.getAttribute('scope') === 'colgroup')
+      .map((el) => el.textContent ?? '');
+    // statusDisplayGroup(paid)='Paid'; an archived case folds into 'Archived' regardless of status.
+    expect(groupHeaders.some((t) => t.startsWith('Paid'))).toBe(true);
+    expect(groupHeaders.some((t) => t.startsWith('Archived'))).toBe(true);
+    // The archived row shows Restore (keyed on archivedAt), the paid row shows Archive.
+    expect(screen.getByRole('button', { name: 'Restore' })).toBeInTheDocument();
+  });
+
+  it('legacy stored archived=true blob maps to the Closed toggle on remount (back-compat)', async () => {
+    sessionStorage.setItem('emr.cases.filters.v1', JSON.stringify({ status: '', rnSel: [], archived: true, pageSize: 25, veteran: null }));
+    mockRole = 'admin';
+    renderPage();
+    await screen.findByText('CASE-001');
+    expect(screen.getByRole('tab', { name: 'Closed' })).toHaveAttribute('aria-selected', 'true');
+  });
 });

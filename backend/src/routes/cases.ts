@@ -38,6 +38,9 @@ const CASE_LITE_SELECT = {
   quickNoteAt: true,
   createdAt: true,
   updatedAt: true,
+  // archivedAt (soft-delete timestamp) rides on the list row so the client can label an archived
+  // case in the "Closed" view's status grouping (C5 lifecycle, 2026-06-13). Null = active.
+  archivedAt: true,
   veteran: {
     select: {
       id: true,
@@ -188,8 +191,15 @@ function buildCaseListWhere(query: Request['query']): Record<string, unknown> {
     else if (ids.length > 1) where.assignedRnId = { in: ids };
   }
 
-  // Soft-archive: default views EXCLUDE archived cases; `?archived=true` shows only the archive.
-  if (optionalStringQuery(query.archived) === 'true') where.archivedAt = { not: null };
+  // Soft-archive (C5 lifecycle, 2026-06-13 — extended): default views EXCLUDE archived cases;
+  //   ?archived=true → archived ONLY (the legacy "Show archived" semantics, unchanged);
+  //   ?archived=all  → BOTH active and archived (no archivedAt filter) — the Closed toggle needs
+  //                    this so "paid + rejected (active) + archived (any status)" come back in ONE
+  //                    server-paginated query rather than two unmergeable pages;
+  //   anything else  → active ONLY (archivedAt = null), the default.
+  const archivedParam = optionalStringQuery(query.archived);
+  if (archivedParam === 'true') where.archivedAt = { not: null };
+  else if (archivedParam === 'all') { /* no archivedAt constraint — include active + archived */ }
   else where.archivedAt = null;
 
   // NOTE (Ryan 2026-06-04): the old ship/runComplete read-filter on physician_review was removed.

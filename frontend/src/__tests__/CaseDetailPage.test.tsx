@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AxiosError, AxiosHeaders } from 'axios';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CaseDetailPage } from '../routes/cases/CaseDetailPage';
-import { getCase } from '../api/cases';
+import { archiveCase, getCase, restoreCase } from '../api/cases';
 import { getLetter } from '../api/letter';
 import { presignDocument, recordDocument } from '../api/veterans';
 import type { Role } from '../types/prisma';
@@ -24,6 +24,7 @@ vi.mock('../api/cases', () => ({
     documents: [], draftJobs: [], corrections: [], emails: [], payments: [],
   } })),
   patchCase: vi.fn(), transitionCaseStatus: vi.fn(), deleteCase: vi.fn(),
+  archiveCase: vi.fn(async () => undefined), restoreCase: vi.fn(async () => ({ data: {} })),
   listDraftJobs: vi.fn(async () => ({ data: [] })), listCorrections: vi.fn(async () => ({ data: [] })),
 }));
 // Clinical tabs fetch the veteran detail; Staff Notes lists chart notes. Stub both so the case page's
@@ -317,5 +318,51 @@ describe('CaseDetailPage — Redraft lock (G1, ratified 2026-06-12)', () => {
     renderPage();
     await screen.findByText('Hypertension');
     expect(screen.getByRole('button', { name: 'Redraft' })).toBeInTheDocument();
+  });
+});
+
+// ── C6 lifecycle (2026-06-13): Archive / Reopen buttons on the claim page ──────────────────────
+describe('CaseDetailPage — Archive / Reopen (C6 lifecycle, 2026-06-13)', () => {
+  afterEach(() => { mockRole = 'admin'; vi.restoreAllMocks(); });
+
+  it('a live claim shows the Archive button (RN/admin); clicking it confirms + archives via archiveCase', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ status: 'intake', archivedAt: null });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    renderPage();
+    await screen.findByText('Hypertension');
+    const archiveBtn = screen.getByRole('button', { name: 'Archive' });
+    expect(archiveBtn).toBeInTheDocument();
+    // A live claim has no Reopen affordance.
+    expect(screen.queryByRole('button', { name: /reopen/i })).not.toBeInTheDocument();
+    await userEvent.click(archiveBtn);
+    await waitFor(() => expect(archiveCase).toHaveBeenCalledWith('CASE-1'));
+    confirmSpy.mockRestore();
+  });
+
+  it('an archived claim shows the Archived banner + Reopen; clicking Reopen restores via restoreCase', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ status: 'intake', archivedAt: '2026-06-12T00:00:00Z' });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    renderPage();
+    await screen.findByText('Hypertension');
+    // Archived banner is visible.
+    expect(screen.getByText(/hidden from the active Cases list/i)).toBeInTheDocument();
+    // The workflow Archive button is suppressed while archived.
+    expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument();
+    // Reopen appears (the banner button + the action-bar button both read "Reopen…"); click the
+    // action-bar primary "Reopen claim".
+    await userEvent.click(screen.getByRole('button', { name: 'Reopen claim' }));
+    await waitFor(() => expect(restoreCase).toHaveBeenCalledWith('CASE-1'));
+    confirmSpy.mockRestore();
+  });
+
+  it('a physician does NOT get Archive or Reopen (RN/admin only)', async () => {
+    mockRole = 'physician';
+    mockCase({ status: 'physician_review', archivedAt: null, assignedPhysician: { id: 'PHY-1', fullName: 'A B, MD', email: 'd@x.test' } });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /reopen/i })).not.toBeInTheDocument();
   });
 });

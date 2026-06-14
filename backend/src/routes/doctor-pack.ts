@@ -209,90 +209,12 @@ export function createDoctorPackRouter(db: AppDb, opts?: { s3?: Pick<S3Client, '
     }),
   );
 
-  /**
-   * GET /api/v1/rn/key-docs-needing-review
-   *
-   * Closeout item #5: cross-case queue of KeyDocs the page-selector flagged for RN review
-   * (needsRnReview=true). Oldest first (FIFO). Optional ?limit (default 50, max 200).
-   * admin + ops_staff only. The RN page surfaces this alongside the manual-summary queue;
-   * RNs ack via POST /api/v1/key-docs/:id/acknowledge.
-   */
-  router.get(
-    '/rn/key-docs-needing-review',
-    requireRole(['admin', 'ops_staff']),
-    asyncHandler(async (req: Request, res: Response) => {
-      const limitRaw = req.query['limit'];
-      let limit = 50;
-      if (typeof limitRaw === 'string') {
-        const parsed = Number.parseInt(limitRaw, 10);
-        if (Number.isInteger(parsed) && parsed > 0) limit = Math.min(parsed, 200);
-      }
-      const rows = await db.keyDoc.findMany({
-        where: { needsRnReview: true },
-        orderBy: { updatedAt: 'asc' },
-      });
-      // Item 3 (2026-06-11): the queue used to ship raw S3 keys with no way to open the file.
-      // Enrich the returned page (not the full set) with filename + documentId via the shared
-      // helper so the RN sees a human name and gets a presigned "Open" affordance.
-      const page = rows.slice(0, limit);
-      const docByKey = await keyDocEnrichmentByS3Key(db, page);
-      const enriched = page.map((r) => ({
-        ...r,
-        filename: docByKey.get(r.filePath)?.filename ?? null,
-        documentId: docByKey.get(r.filePath)?.documentId ?? null,
-        // WAVE 2 §3: '<DocType human name> — <original filename>' for the RN queue card copy.
-        displayLabel: docByKey.get(r.filePath)?.displayLabel ?? null,
-      }));
-      res.json({ data: enriched, total: rows.length });
-    }),
-  );
-
-  /**
-   * POST /api/v1/key-docs/:id/acknowledge
-   *
-   * Architect QA finding (REVIEW.md 0cd4df0, Build 1 follow-up): RN-durable clearance.
-   * Marks a KeyDoc as RN-reviewed. Clears needsRnReview AND stamps selectorAcknowledgedAt
-   * so the next /generate doesn't reset the flag. Body: optional `notes` (free text).
-   */
-  router.post(
-    '/key-docs/:id/acknowledge',
-    requireRole(['admin', 'ops_staff']),
-    asyncHandler(async (req: Request, res: Response) => {
-      const actor = currentActor(req);
-      const id = String(req.params.id);
-      const notesRaw = (req.body as { notes?: unknown })?.notes;
-      const notesUpdate = typeof notesRaw === 'string' && notesRaw.trim().length > 0
-        ? notesRaw.trim().slice(0, 2000)
-        : undefined;
-
-      const existing = await db.keyDoc.findUnique({ where: { id } });
-      if (existing === null) throw new HttpError(404, 'not_found', 'KeyDoc not found', { keyDocId: id });
-
-      const updated = await db.$transaction(async (tx) => {
-        const row = await tx.keyDoc.update({
-          where: { id },
-          data: {
-            needsRnReview: false,
-            selectorAcknowledgedAt: new Date(),
-            selectorAcknowledgedBy: actor.sub,
-            version: { increment: 1 },
-            ...(notesUpdate !== undefined ? { notes: notesUpdate } : {}),
-          },
-        });
-        await tx.activityLog.create({
-          data: {
-            actorUserId: actor.sub,
-            action: 'key_doc_rn_acknowledged',
-            caseId: existing.caseId,
-            detailsJson: { keyDocId: id, caseId: existing.caseId, filePath: existing.filePath },
-          },
-        });
-        return row;
-      });
-
-      res.json({ data: updated });
-    }),
-  );
+  // REMOVED (C7 lifecycle, 2026-06-13): the RN-facing "Confirm pack pages" review queue —
+  // GET /rn/key-docs-needing-review + POST /key-docs/:id/acknowledge — was vestigial. The
+  // page-selector's needsRnReview flag is still set + carried by the live classifier and the
+  // /cases/:id/key-docs panel, but the standalone cross-case RN review/ack tab is gone. The
+  // KeyDoc GENERATION + classification code (key-docs-classifier, page-selector, /generate,
+  // /cases/:id/key-docs, reclassify-stale) is untouched.
 
   // ============================================================================================
   // STALE-ROW BACKFILL (assessment 2026-06-12 §2 — appended as a SEPARATE block; the routes

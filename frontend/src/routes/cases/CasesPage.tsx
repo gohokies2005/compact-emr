@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { CASE_STATUS_LABELS, caseDisplayLabel } from '../../lib/caseStatus';
+import { CASE_STATUS_LABELS, caseDisplayLabel, statusDisplayGroup, type CaseStatusDisplayGroup } from '../../lib/caseStatus';
 import { formatAbsoluteDate, formatRelativeTime } from '../../lib/date';
 import { listCases, deleteCase, restoreCase, updateQuickNote, assignCaseRn, type CaseLite } from '../../api/cases';
 import { describeApiError } from '../../api/client';
@@ -27,6 +27,17 @@ function useDebounced<T>(value: T, ms: number): T {
 const CLAIM_TYPE_LABELS: Record<ClaimType, string> = { initial: 'Initial', supplemental: 'Supplemental', hlr: 'Higher-level review', appeal_bva: 'Board appeal' };
 const STATUS_OPTIONS = Object.entries(CASE_STATUS_LABELS) as [CaseStatus, string][];
 const PAGE_SIZES = [25, 50, 100];
+
+// === Active / Closed lifecycle toggle (C5 lifecycle, 2026-06-13) ===
+// "Closed" = paid OR rejected OR archived (the archived flag is a separate dimension handled via
+// the ?archived param). "Active" = every other status, archived excluded. The closed STATUS set is
+// just {paid, rejected}; archived cases of ANY status fold into Closed via ?archived=all. Deriving
+// the active set as "all enum statuses minus the closed ones" keeps it in lock-step with the enum —
+// a new workflow status is Active by default, no edit here.
+const CLOSED_STATUSES: readonly CaseStatus[] = ['paid', 'rejected'];
+const ACTIVE_STATUSES: readonly CaseStatus[] = (Object.keys(CASE_STATUS_LABELS) as CaseStatus[])
+  .filter((s) => !CLOSED_STATUSES.includes(s));
+type Lifecycle = 'active' | 'closed';
 // RN-filter tokens. '__me__' is CLIENT-ONLY (resolved to my AppUser id via /users/me before the
 // request); '__none__' is the backend's unassigned sentinel and goes over the wire as-is.
 const RN_ME = '__me__';
@@ -85,7 +96,7 @@ function loadStoredSort(): CasesSortState {
 interface StoredFilters {
   readonly status: CaseStatus | '';
   readonly rnSel: readonly string[];
-  readonly archived: boolean;
+  readonly lifecycle: Lifecycle;
   readonly pageSize: number;
   readonly veteran: { readonly id: string; readonly label: string } | null;
 }
@@ -93,12 +104,15 @@ function loadStoredFilters(): StoredFilters | null {
   try {
     const raw = sessionStorage.getItem(FILTERS_STORAGE_KEY);
     if (!raw) return null;
-    const v = JSON.parse(raw) as Partial<StoredFilters>;
+    const v = JSON.parse(raw) as Partial<StoredFilters> & { archived?: unknown };
     const statusOk = v.status === '' || (typeof v.status === 'string' && v.status in CASE_STATUS_LABELS);
     const rnOk = Array.isArray(v.rnSel) && v.rnSel.every((t) => typeof t === 'string');
     const vetOk = v.veteran == null || (typeof v.veteran.id === 'string' && typeof v.veteran.label === 'string');
-    if (statusOk && rnOk && vetOk && typeof v.archived === 'boolean' && typeof v.pageSize === 'number' && PAGE_SIZES.includes(v.pageSize)) {
-      return { status: v.status as CaseStatus | '', rnSel: v.rnSel as string[], archived: v.archived, pageSize: v.pageSize, veteran: v.veteran ?? null };
+    // Back-compat: a v1 blob stored a boolean `archived` (the old "Show archived" checkbox). Map a
+    // legacy archived=true to the Closed toggle; everything else defaults to Active.
+    const lifecycle: Lifecycle = v.lifecycle === 'closed' || v.archived === true ? 'closed' : 'active';
+    if (statusOk && rnOk && vetOk && typeof v.pageSize === 'number' && PAGE_SIZES.includes(v.pageSize)) {
+      return { status: v.status as CaseStatus | '', rnSel: v.rnSel as string[], lifecycle, pageSize: v.pageSize, veteran: v.veteran ?? null };
     }
   } catch { /* corrupted or unavailable storage → role defaults */ }
   return null;
@@ -165,7 +179,9 @@ export function CasesPage() {
   const [status, setStatus] = useState<CaseStatus | ''>(deepLink.status ?? storedFilters?.status ?? '');
   const [vetQuery, setVetQuery] = useState('');
   const [veteran, setVeteran] = useState<{ id: string; label: string } | null>(storedFilters?.veteran ?? null);
-  const [archived, setArchived] = useState(storedFilters?.archived ?? false); // show the Archive (soft-deleted claims)
+  // Active|Closed lifecycle toggle (C5). Active = working set (archived excluded, paid/rejected drop
+  // off); Closed = paid + rejected + archived. Default Active.
+  const [lifecycle, setLifecycle] = useState<Lifecycle>(storedFilters?.lifecycle ?? 'active');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(storedFilters?.pageSize ?? 25);
   // RN filter (P3.3): [] = "All active" (param omitted). Default: admins see ALL active; everyone
@@ -176,8 +192,8 @@ export function CasesPage() {
   const [sort, setSort] = useState<CasesSortState>(loadStoredSort);
   useEffect(() => { try { sessionStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sort)); } catch { /* storage unavailable */ } }, [sort]);
   useEffect(() => {
-    try { sessionStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify({ status, rnSel, archived, pageSize, veteran } satisfies StoredFilters)); } catch { /* storage unavailable */ }
-  }, [status, rnSel, archived, pageSize, veteran]);
+    try { sessionStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify({ status, rnSel, lifecycle, pageSize, veteran } satisfies StoredFilters)); } catch { /* storage unavailable */ }
+  }, [status, rnSel, lifecycle, pageSize, veteran]);
 
   // "Me" = my AppUser id (assignedRnId keys on it, NOT the Cognito sub) — resolved once via
   // /users/me. A login without an AppUser row 404s: degrade by hiding [Me] and falling back to
@@ -203,7 +219,7 @@ export function CasesPage() {
   // Reset to page 1 whenever a filter changes.
   const rnSelKey = rnSel.join(',');
   const statusesKey = statuses.join(',');
-  useEffect(() => { setPage(1); }, [status, statusesKey, rnSelKey, veteran?.id, pageSize, archived]);
+  useEffect(() => { setPage(1); }, [status, statusesKey, rnSelKey, veteran?.id, pageSize, lifecycle]);
 
   const vetMatches = useQuery({
     queryKey: ['veteran-search', debouncedVet],
@@ -211,15 +227,31 @@ export function CasesPage() {
     enabled: debouncedVet.trim().length > 0 && veteran === null,
   });
 
-  // A multi-status group-tile deep-link (statuses[]) supersedes the single-status dropdown.
-  const statusesParam = statuses.length > 0 ? statuses : undefined;
+  // ── Effective status + archived params, composed from the lifecycle toggle (C5) ──────────────
+  // Precedence:
+  //   1. A group-tile deep-link (`statuses[]`) wins outright — it carries its own explicit set and
+  //      always targets active workflow groups, so archived stays excluded (legacy behavior).
+  //   2. A single-status dropdown pick narrows WITHIN the current lifecycle — send that one status,
+  //      and let `archived` follow the toggle (so e.g. you can view paid/rejected under Closed, or
+  //      a specific active status under Active).
+  //   3. No explicit status → send the lifecycle's status SET (Active = everything but paid/rejected;
+  //      Closed = [paid, rejected]) so paid auto-drops from Active and Closed is paid+rejected.
+  // The `archived` param: Closed → 'all' (active paid/rejected PLUS archived-of-any-status in one
+  // server-paginated page); Active → omitted (archivedAt=null default, archived excluded).
+  const deepLinkStatuses = statuses.length > 0 ? statuses : undefined;
+  const lifecycleStatusSet = lifecycle === 'closed' ? CLOSED_STATUSES : ACTIVE_STATUSES;
+  const archivedParam: 'all' | undefined = lifecycle === 'closed' ? 'all' : undefined;
+  const effectiveStatuses: readonly CaseStatus[] | undefined =
+    deepLinkStatuses ?? (status ? undefined : lifecycleStatusSet);
+  const effectiveStatus: CaseStatus | undefined = deepLinkStatuses ? undefined : (status || undefined);
+
   const cases = useQuery({
-    queryKey: ['cases', { status, statuses: statusesParam?.join(',') ?? '', assignedRnId: assignedRnParam ?? '', veteranId: veteran?.id ?? '', archived, page, pageSize }],
+    queryKey: ['cases', { status: effectiveStatus ?? '', statuses: effectiveStatuses?.join(',') ?? '', assignedRnId: assignedRnParam ?? '', veteranId: veteran?.id ?? '', archived: archivedParam ?? '', page, pageSize }],
     queryFn: () => listCases({
-      ...(statusesParam ? { statuses: statusesParam } : status ? { status } : {}),
+      ...(effectiveStatuses ? { statuses: effectiveStatuses } : effectiveStatus ? { status: effectiveStatus } : {}),
       ...(assignedRnParam && { assignedRnId: assignedRnParam }),
       ...(veteran && { veteranId: veteran.id }),
-      ...(archived && { archived: true }),
+      ...(archivedParam && { archived: archivedParam }),
       page,
       pageSize,
     }),
@@ -227,7 +259,7 @@ export function CasesPage() {
     enabled: !rnSel.includes(RN_ME) || meResolved,
   });
 
-  function clearFilters() { setStatus(''); setStatuses([]); setRnSel(defaultRnSel); setVetQuery(''); setVeteran(null); setArchived(false); }
+  function clearFilters() { setStatus(''); setStatuses([]); setRnSel(defaultRnSel); setVetQuery(''); setVeteran(null); setLifecycle('active'); }
   const total = cases.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -276,6 +308,23 @@ export function CasesPage() {
   const pageRows = cases.data?.data ?? [];
   const rows = sortCases(pageRows, sort);
   const pageTruncated = total > pageRows.length;
+  // Status grouping (C5 lifecycle, 2026-06-13): collapse the fine-grained workflow statuses into the
+  // coarse display BUCKETS the RN thinks in ("whose ball is it"), via the shared statusDisplayGroup()
+  // SSOT. An archived case (archivedAt set) folds into the 'Archived' bucket regardless of status.
+  // We preserve the active sort WITHIN each group: walk the already-sorted rows once, bucketing in
+  // first-seen order, so the table stays sorted and every row appears exactly once.
+  const groupedRows: readonly { readonly group: CaseStatusDisplayGroup; readonly rows: readonly CaseLite[] }[] = (() => {
+    const order: CaseStatusDisplayGroup[] = [];
+    const byGroup = new Map<CaseStatusDisplayGroup, CaseLite[]>();
+    for (const c of rows) {
+      const g = statusDisplayGroup(c.status, { archived: c.archivedAt != null });
+      let bucket = byGroup.get(g);
+      if (bucket === undefined) { bucket = []; byGroup.set(g, bucket); order.push(g); }
+      bucket.push(c);
+    }
+    return order.map((g) => ({ group: g, rows: byGroup.get(g) as CaseLite[] }));
+  })();
+  const COLUMN_COUNT = CASE_COLUMNS.length + 1; // +1 for the trailing actions column
   function exportCsv() {
     // Cases is server-paginated, so this exports the CURRENT page only (after filters + sort).
     if (pageTruncated) console.warn(`cases CSV export: current page only (${pageRows.length} of ${total}); backend full-export is a follow-up.`);
@@ -293,6 +342,23 @@ export function CasesPage() {
       <Button variant="secondary" onClick={exportCsv} disabled={rows.length === 0}>Export to Excel</Button>
     </div>
 
+    {/* Active | Closed lifecycle toggle (C5 lifecycle, 2026-06-13). Active = the working set
+        (archived hidden, paid/rejected dropped off); Closed = paid + rejected + archived. */}
+    <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 text-sm" role="tablist" aria-label="Case lifecycle">
+      {(['active', 'closed'] as const).map((lc) => (
+        <button
+          key={lc}
+          type="button"
+          role="tab"
+          aria-selected={lifecycle === lc}
+          onClick={() => { setLifecycle(lc); setStatus(''); setStatuses([]); }}
+          className={`rounded-md px-4 py-1.5 font-medium transition-colors ${lifecycle === lc ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:text-slate-900'}`}
+        >
+          {lc === 'active' ? 'Active' : 'Closed'}
+        </button>
+      ))}
+    </div>
+
     <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
       <label className="block text-sm lg:w-56"><span className="mb-1 block font-medium text-slate-700">Status</span>
         <select className="input" value={statuses.length > 0 ? '' : status} onChange={(e) => { setStatuses([]); setStatus(e.target.value as CaseStatus | ''); }}><option value="">{statuses.length > 0 ? `Grouped (${statuses.length} statuses)` : 'All statuses'}</option>{STATUS_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
@@ -307,7 +373,6 @@ export function CasesPage() {
           ? <ul className="absolute z-10 mt-1 w-full overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">{vetMatches.data.data.slice(0, 5).map((v) => <li key={v.id}><button type="button" className="flex w-full justify-between px-3 py-2 text-left hover:bg-slate-50" onClick={() => { setVeteran({ id: v.id, label: `${formatNameLastFirst(v.firstName, v.lastName)} (${v.id})` }); }}><span>{formatNameLastFirst(v.firstName, v.lastName)}</span><span className="text-slate-500">{v.dob?.slice(0, 4) ?? ''}</span></button></li>)}</ul>
           : null}
       </div>
-      <label className="flex items-center gap-2 text-sm lg:pb-2"><input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} /> Show archived</label>
       <Button variant="secondary" onClick={clearFilters}>Clear filters</Button>
     </div>
 
@@ -320,7 +385,13 @@ export function CasesPage() {
           <th className="px-4 py-3" />
         </tr></thead>
         <tbody className="divide-y divide-slate-100">
-          {rows.map((c) => <tr key={c.id} className="cursor-pointer hover:bg-slate-50" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}`)}>
+          {groupedRows.map(({ group, rows: groupRows }) => <Fragment key={group}>
+            <tr className="bg-slate-100/70">
+              <th colSpan={COLUMN_COUNT} scope="colgroup" className="px-4 py-1.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                {group} <span className="ml-1 font-normal text-slate-400">({groupRows.length})</span>
+              </th>
+            </tr>
+            {groupRows.map((c) => <tr key={c.id} className="cursor-pointer hover:bg-slate-50" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}`)}>
             <td className="px-4 py-3 font-medium"><Link className="text-indigo-600" to={`/cases/${encodeURIComponent(c.id)}`} onClick={(e) => e.stopPropagation()}>{c.id}</Link></td>
             <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`} onClick={(e) => e.stopPropagation()}>{formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}</Link></td>
             <td className="px-4 py-3 text-slate-700">{formatConditionLabel(c.claimedCondition)}</td>
@@ -351,16 +422,17 @@ export function CasesPage() {
             <td className="px-4 py-3 text-slate-500" title={new Date(c.updatedAt).toLocaleString()}>{formatRelativeTime(c.updatedAt)}</td>
             <td className="px-4 py-3 text-slate-400">{c.version}</td>
             <td className="px-4 py-3 text-right whitespace-nowrap">
-              {archived ? (
+              {c.archivedAt != null ? (
                 <button type="button" className="text-xs font-medium text-indigo-600 hover:text-indigo-700 disabled:opacity-50" disabled={restoreMut.isPending}
                   onClick={(e) => { e.stopPropagation(); restoreMut.mutate(c.id); }}>Restore</button>
               ) : (
                 <button type="button" className="text-xs font-medium text-rose-600 hover:text-rose-700 disabled:opacity-50" disabled={archiveMut.isPending}
-                  onClick={(e) => { e.stopPropagation(); if (window.confirm(`Archive claim ${c.id} (${formatConditionLabel(c.claimedCondition)})? It's hidden from the list but kept and can be Restored from "Show archived".`)) archiveMut.mutate(c.id); }}
+                  onClick={(e) => { e.stopPropagation(); if (window.confirm(`Archive claim ${c.id} (${formatConditionLabel(c.claimedCondition)})? It's hidden from the list but kept and can be Restored from the Closed tab.`)) archiveMut.mutate(c.id); }}
                 >Archive</button>
               )}
             </td>
           </tr>)}
+          </Fragment>)}
         </tbody>
       </table>
       {cases.isLoading ? <div className="p-6 text-sm text-slate-500">Loading cases…</div> : null}

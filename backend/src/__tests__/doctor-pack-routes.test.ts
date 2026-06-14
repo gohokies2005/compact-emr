@@ -221,20 +221,9 @@ describe('key-docs enrichment (shared helper)', () => {
     });
   });
 
-  it('GET /rn/key-docs-needing-review returns filename + documentId; unmatched keys yield nulls (Item 3)', async () => {
-    const orphanRow = { ...KEY_DOC_ROW, id: 'kd-2', caseId: 'CASE-2', filePath: 'cases/CASE-2/zzzz-deleted.pdf' };
-    const prisma = {
-      keyDoc: { findMany: vi.fn(async () => [KEY_DOC_ROW, orphanRow]) },
-      document: { findMany: vi.fn(async () => [DOCUMENT_ROW]) },
-    };
-    const res = await request(appFor(prisma)).get('/api/v1/rn/key-docs-needing-review').expect(200);
-    expect(res.body.total).toBe(2);
-    expect(res.body.data[0].filename).toBe('Misc_1.pdf');
-    expect(res.body.data[0].documentId).toBe('doc-1');
-    // A KeyDoc whose Document row is gone still renders — enrichment is null, never a throw.
-    expect(res.body.data[1].filename).toBeNull();
-    expect(res.body.data[1].documentId).toBeNull();
-  });
+  // REMOVED (C7 lifecycle, 2026-06-13): GET /rn/key-docs-needing-review tests — the endpoint
+  // was deleted with the vestigial RN "Confirm pack pages" review tab. The /cases/:id/key-docs
+  // enrichment tests below stay (that endpoint feeds the live Doctor Pack panel).
 
   // ── WAVE 2 (assessment 2026-06-12 §3): displayLabel = '<DocType human name> — <original
   // filename>'; 'unspecified' → just the filename. Emitted by BOTH key-docs GET endpoints. ──
@@ -257,16 +246,4 @@ describe('key-docs enrichment (shared helper)', () => {
     expect(res.body.data[0].displayLabel).toBe('Misc_1.pdf');
   });
 
-  it('GET /rn/key-docs-needing-review emits displayLabel; a gone Document falls back to the key basename', async () => {
-    const orphanRow = { ...KEY_DOC_ROW, id: 'kd-2', caseId: 'CASE-2', docType: 'denial_letter', filePath: 'cases/CASE-2/zzzz-deleted.pdf' };
-    const prisma = {
-      keyDoc: { findMany: vi.fn(async () => [{ ...KEY_DOC_ROW, docType: 'nexus_letter_prior' }, orphanRow]) },
-      document: { findMany: vi.fn(async () => [DOCUMENT_ROW]) },
-    };
-    const res = await request(appFor(prisma)).get('/api/v1/rn/key-docs-needing-review').expect(200);
-    expect(res.body.data[0].displayLabel).toBe('Prior nexus letter — Misc_1.pdf');
-    // Document row gone → filename falls back to the S3 key basename (uuid prefix stripped
-    // when present); the human docType still leads.
-    expect(res.body.data[1].displayLabel).toBe('Denial letter — zzzz-deleted.pdf');
-  });
 });

@@ -41,7 +41,7 @@ import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
 import {
-  deleteCase, getCase, listDraftJobs, patchCase, transitionCaseStatus, updateQuickNote,
+  archiveCase, deleteCase, getCase, listDraftJobs, patchCase, restoreCase, transitionCaseStatus, updateQuickNote,
   type CaseDetail, type PatchCaseInput, type TransitionInput,
 } from '../../api/cases';
 import type { CaseStatus, Role } from '../../types/prisma';
@@ -161,6 +161,23 @@ export function CaseDetailPage() {
     },
   });
 
+  // Archive (soft-delete, reversible) — RN/admin (C6 lifecycle, 2026-06-13). Distinct from Reject:
+  // Archive hides a mis-filed/duplicate claim from the active list (kept + restorable), it does NOT
+  // mark the claim rejected. Wired to DELETE /cases/:id (sets archivedAt). After archiving the claim
+  // drops out of the active Cases list; this detail page is still reachable and shows Reopen.
+  const archive = useMutation({
+    mutationFn: () => archiveCase(caseId),
+    onSuccess: () => refetch(),
+    onError: (e: unknown) => window.alert(`Could not archive this claim — ${describeApiError(e)}.`),
+  });
+  // Reopen (un-archive) — clears archivedAt via POST /cases/:id/restore. Shown only on an archived
+  // claim. The claim returns to the active list at whatever status it held (status is untouched).
+  const reopen = useMutation({
+    mutationFn: () => restoreCase(caseId),
+    onSuccess: () => refetch(),
+    onError: (e: unknown) => window.alert(`Could not reopen this claim — ${describeApiError(e)}.`),
+  });
+
   // Redraft (re-run the drafter). RATIFIED LIFECYCLE (Ryan 2026-06-12): redraft LOCKS when the
   // RN sends the case to the doctor — ops_staff can redraft post-draft (rn_review,
   // correction_review, a held 'drafting') but NOT in physician_review; the doctor's "Send back
@@ -227,6 +244,11 @@ export function CaseDetailPage() {
   //     A human flags a records gap with an "Awaiting records" note, not a status move.
   const HUMAN_MOVE_DENYLIST: readonly CaseStatus[] = ['physician_review', 'drafting', 'needs_records', 'needs_rn_decision'];
   const nextStatuses = allowedNextStatusesForRole(role, c.status).filter((to) => !HUMAN_MOVE_DENYLIST.includes(to));
+  // Archive / Reopen lifecycle (C6 lifecycle, 2026-06-13). RN + admin only. An archived claim shows
+  // ONLY Reopen (the workflow buttons are suppressed — there's nothing to drive while it's archived);
+  // a live claim shows the Archive button alongside its workflow actions.
+  const isArchived = c.archivedAt != null;
+  const canArchiveOrReopen = role === 'admin' || role === 'ops_staff';
   // CDS retired from the workflow (Ryan 2026-06-03): it no longer gates sign-off. A stale
   // cdsVerdict='reject' must NOT hide the sign-off button (the CDS panel is gone, so there'd be no
   // explanation and no way to recover — an RN/physician dead-end). (architect MF-2)
@@ -272,6 +294,18 @@ export function CaseDetailPage() {
   }
 
   return <AppShell><div className="space-y-6">
+    {/* Archived banner (C6 lifecycle, 2026-06-13): an archived claim is reachable by direct link but
+        hidden from the active list — make that obvious, and offer Reopen inline for RN/admin. */}
+    {isArchived ? (
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-300 bg-slate-100 px-5 py-3 text-sm text-slate-700">
+        <span><span className="font-semibold">Archived</span> — this claim is hidden from the active Cases list (it lives under the Closed tab). It is kept and can be reopened.</span>
+        {canArchiveOrReopen ? (
+          <Button variant="secondary" size="sm" loading={reopen.isPending} disabled={reopen.isPending}
+            onClick={() => { if (window.confirm('Reopen this claim? It returns to the active Cases list at its current status.')) reopen.mutate(); }}
+          >Reopen</Button>
+        ) : null}
+      </div>
+    ) : null}
     {c.status === 'delivered' || c.status === 'paid' ? (
       <div className="rounded-lg border border-emerald-300 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-900">
         ✓ Physician signed off — letter finalized{c.status === 'paid' ? ' and paid' : ' and ready for delivery'}.
@@ -346,13 +380,30 @@ export function CaseDetailPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-start gap-2">
-          {/* View letter only when the review panel (which has its own "Open PDF") isn't showing —
-              no duplicate view button (Ryan 2026-06-05). */}
-          {viewableLetterJob && c.status !== 'rn_review' && c.status !== 'physician_review' ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}
-          {canRedraft ? <Button variant="secondary" size="sm" loading={redraft.isPending} disabled={redraft.isPending} onClick={() => setRedraftGate1Open(true)}>Redraft</Button> : null}
-          {canShowSignOff ? <Button variant="primary" size="sm" onClick={() => setSignOffOpen(true)}>Sign off</Button> : null}
-          {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>{to === 'rejected' ? 'Reject claim' : `Move to ${CASE_STATUS_LABELS[to].toLowerCase()}`}</Button>)}
-          {role === 'admin' ? <Button variant="destructive" size="sm" onClick={() => { if (window.confirm('Reject and soft-delete this case? It will be marked rejected.')) del.mutate(); }} loading={del.isPending}>Reject + soft delete</Button> : null}
+          {isArchived ? (
+            // Archived claim: the only meaningful action is Reopen (un-archive). Workflow buttons are
+            // hidden — there's nothing to drive while the claim is out of the active list.
+            canArchiveOrReopen ? (
+              <Button variant="primary" size="sm" loading={reopen.isPending} disabled={reopen.isPending}
+                onClick={() => { if (window.confirm('Reopen this claim? It returns to the active Cases list at its current status.')) reopen.mutate(); }}
+              >Reopen claim</Button>
+            ) : null
+          ) : (
+            <>
+              {/* View letter only when the review panel (which has its own "Open PDF") isn't showing —
+                  no duplicate view button (Ryan 2026-06-05). */}
+              {viewableLetterJob && c.status !== 'rn_review' && c.status !== 'physician_review' ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}
+              {canRedraft ? <Button variant="secondary" size="sm" loading={redraft.isPending} disabled={redraft.isPending} onClick={() => setRedraftGate1Open(true)}>Redraft</Button> : null}
+              {canShowSignOff ? <Button variant="primary" size="sm" onClick={() => setSignOffOpen(true)}>Sign off</Button> : null}
+              {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>{to === 'rejected' ? 'Reject claim' : `Move to ${CASE_STATUS_LABELS[to].toLowerCase()}`}</Button>)}
+              {/* Archive (RN/admin): soft-delete a mis-filed/duplicate claim. Reversible via Reopen.
+                  Distinct from "Reject claim" (a status move that keeps the claim, marked rejected). */}
+              {canArchiveOrReopen ? <Button variant="secondary" size="sm" loading={archive.isPending} disabled={archive.isPending}
+                onClick={() => { if (window.confirm(`Archive this claim? It's hidden from the active Cases list but kept and can be Reopened from the Closed tab.`)) archive.mutate(); }}
+              >Archive</Button> : null}
+              {role === 'admin' ? <Button variant="destructive" size="sm" onClick={() => { if (window.confirm('Reject and soft-delete this case? It will be marked rejected.')) del.mutate(); }} loading={del.isPending}>Reject + soft delete</Button> : null}
+            </>
+          )}
         </div>
       </div>
     </div>

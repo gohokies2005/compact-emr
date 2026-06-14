@@ -181,6 +181,42 @@ describe('cases routes', () => {
     expect(spies.caseFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 10 }));
   });
 
+  // === C5 lifecycle (2026-06-13): the `archived` param tri-state (active / archived-only / all) ===
+
+  // The spy's call tuple is typed as 0-length; read the first arg through `unknown` (same pattern
+  // as the _count test above).
+  function firstFindManyArg(spy: { mock: { calls: unknown[] } }): { where?: Record<string, unknown>; select?: Record<string, unknown> } {
+    const calls = spy.mock.calls as unknown as Array<Array<{ where?: Record<string, unknown>; select?: Record<string, unknown> }>>;
+    return calls[0]?.[0] ?? {};
+  }
+
+  it('default (no archived param) filters to ACTIVE only: where.archivedAt = null', async () => {
+    const { db, spies } = makeDb();
+    await request(appFor(db)).get('/api/v1/cases');
+    expect(firstFindManyArg(spies.caseFindMany).where?.archivedAt).toBeNull();
+  });
+
+  it('archived=true filters to ARCHIVED only: where.archivedAt = { not: null }', async () => {
+    const { db, spies } = makeDb();
+    await request(appFor(db)).get('/api/v1/cases?archived=true');
+    expect(firstFindManyArg(spies.caseFindMany).where?.archivedAt).toEqual({ not: null });
+  });
+
+  it('archived=all imposes NO archivedAt constraint (Closed toggle: active + archived in one query)', async () => {
+    const { db, spies } = makeDb();
+    await request(appFor(db)).get('/api/v1/cases?archived=all&statuses=paid,rejected');
+    const where = firstFindManyArg(spies.caseFindMany).where ?? {};
+    expect('archivedAt' in where).toBe(false);
+    // The Closed status set still rides alongside (paid + rejected).
+    expect(where.status).toEqual({ in: ['paid', 'rejected'] });
+  });
+
+  it('CASE_LITE_SELECT requests archivedAt so the list rows can label the Archived display-group', async () => {
+    const { db, spies } = makeDb();
+    await request(appFor(db)).get('/api/v1/cases');
+    expect(firstFindManyArg(spies.caseFindMany).select?.archivedAt).toBe(true);
+  });
+
   // === RECORDS signal (binary: veteran-uploaded records present vs Stage-1-only) ===
 
   it('queries a FILTERED documents _count that excludes the intake summary + doctor pack', async () => {

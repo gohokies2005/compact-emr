@@ -265,7 +265,11 @@ export function CaseDetailPage() {
   //     intake->records->viability advance is bypassed — the only real pre-draft actions are Send to
   //     Drafter / Reject / Archive. "Move to records" was just confusing clutter (Ryan 2026-06-14: "what
   //     does this even mean?"). Records is tracked by the "Awaiting records" note, not a status flip.
-  const HUMAN_MOVE_DENYLIST: readonly CaseStatus[] = ['physician_review', 'drafting', 'records', 'viability', 'needs_records', 'needs_rn_decision'];
+  //   - rn_review: a DRAFTING case auto-moves to rn_review when the draft /complete fires; manually
+  //     flipping it mid-draft is harmful, not helpful, and "Move to rn review" on a drafting case just
+  //     looks wrong (Ryan 2026-06-14: "looks shitty, remove"). A completed/stuck draft is handled by the
+  //     OpsHeld panel + auto-rerun; the physician's "send back to RN" is its own path on the review page.
+  const HUMAN_MOVE_DENYLIST: readonly CaseStatus[] = ['physician_review', 'drafting', 'records', 'viability', 'rn_review', 'needs_records', 'needs_rn_decision'];
   const nextStatuses = allowedNextStatusesForRole(role, c.status).filter((to) => !HUMAN_MOVE_DENYLIST.includes(to));
   // Archive / Reopen lifecycle (C6 lifecycle, 2026-06-13). RN + admin only. An archived claim shows
   // ONLY Reopen (the workflow buttons are suppressed — there's nothing to drive while it's archived);

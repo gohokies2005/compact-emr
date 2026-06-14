@@ -97,6 +97,49 @@ export function extractOpinionFull(letterText: string): string | null {
   return full.length >= 20 ? full : null;
 }
 
+/**
+ * §VII HOLDING LOCK (Guided Revision, 2026-06-13).
+ *
+ * The drafter assembles Section VII deterministically (the local FRN opinionSentence.js
+ * catch-and-REPLACE path); it must stay write-protected through the guided-revision editor too. A
+ * guided revision reshapes a highlighted PASSAGE; if that passage overlaps Section VII, the model
+ * must NOT change the legal holding — the "at least as likely as not" / "more likely than not"
+ * conclusion or its CFR cite.
+ *
+ * `holdingChanged(oldLetter, newLetter)` compares the canonical Section VII opinion SENTENCE
+ * (extractOpinionSentence — the bolded conclusion) before and after. It returns true when the
+ * holding sentence is present in the old letter and differs (or vanished) in the new one. The route
+ * uses this as a HARD reject: a guided revision can never alter the holding even if the highlighted
+ * passage sits inside §VII.
+ *
+ * Conservatism (bias to block, medico-legal): if the old letter HAS a holding and the new letter no
+ * longer yields one (extraction returns null), that counts as CHANGED — a revision that destroys the
+ * detectable holding is exactly what we refuse. If the OLD letter has no detectable holding (a
+ * non-canonical letter), there is nothing to protect and we return false (no false block).
+ */
+export function holdingChanged(oldLetter: string, newLetter: string): boolean {
+  const before = extractOpinionSentence(oldLetter);
+  if (before === null) return false; // nothing to protect
+  const after = extractOpinionSentence(newLetter);
+  if (after === null) return true; // the holding was destroyed/obscured — refuse
+  return normalizeHolding(before) !== normalizeHolding(after);
+}
+
+/**
+ * The "at least as likely as not" / "more likely than not" probabilistic conclusion the holding
+ * MUST carry, plus the >=50% phrasing. Exposed so the route can give a precise rejection reason and
+ * so a test can assert the conclusion clause is what is being protected.
+ */
+const HOLDING_CONCLUSION_RE = /\b(?:at least as likely as not|more likely than not|less likely than not|at least a fifty percent|>=?\s*50\s*%|fifty percent or greater)\b/i;
+export function hasHoldingConclusion(text: string): boolean {
+  return typeof text === 'string' && HOLDING_CONCLUSION_RE.test(text);
+}
+
+/** Collapse whitespace + lowercase so trivial reflow is not treated as a holding change. */
+function normalizeHolding(s: string): string {
+  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
 /** Extract the Section VIII reference lines (numbered or bulleted), in order. */
 export function extractReferences(letterText: string): readonly string[] {
   if (typeof letterText !== 'string' || letterText.trim() === '') return [];

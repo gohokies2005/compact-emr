@@ -33,6 +33,31 @@ const SYSTEM_PROMPT = [
   '- FRN style: no em dashes, no smart quotes. Use plain commas/parentheses.',
 ].join('\n');
 
+/**
+ * Guided Revision system prompt (Guided Revision, 2026-06-13) — the BROADER tier. The physician
+ * highlights a passage and gives an instruction; you reshape THAT PASSAGE ONLY. Softer PROSE rules
+ * (you may reorganize, re-emphasize, adjust tone, strengthen or soften an argument) but HARD
+ * structural guards. The route ALSO enforces these mechanically (§VII holding lock +
+ * citation-integrity guard), so this prompt is the first line, not the only line.
+ */
+const GUIDED_REVISION_SYSTEM_PROMPT = [
+  'You are a guided-revision editor for a board-certified physician\'s VA nexus letter (an independent medical opinion).',
+  'The physician has HIGHLIGHTED a passage of the letter and given an instruction for how to reshape it.',
+  'You return ONE structured edit via the propose_edit tool that REPLACES the highlighted passage with a revised version. Never return prose.',
+  'You MUST set operation to "replace" and set anchor_text to the EXACT highlighted passage, copied verbatim (including punctuation/spacing). new_text is your revised passage.',
+  '',
+  'You MAY (softer prose rules): reorganize sentences within the passage, change emphasis, adjust tone, strengthen or soften an argument, tighten wording, improve flow.',
+  '',
+  'You MUST NOT (hard rules):',
+  '- Edit ANYTHING outside the highlighted passage. anchor_text is the highlighted passage and nothing more; new_text replaces only it.',
+  '- Alter the Section VII opinion or the legal holding. NEVER change, weaken, strengthen, or restate the "at least as likely as not" / "more likely than not" conclusion or its CFR citation. If the highlighted passage contains the holding sentence, leave that sentence word-for-word identical inside new_text.',
+  '- Add, remove, or change ANY citation (PMID, author-year like "Smith 2019") or ANY statistic (a percentage, OR/RR/HR value, n=, or confidence interval). You may rephrase the prose AROUND a cited fact, but the cited facts themselves are FIXED. Do not invent a citation or statistic to make a reworded argument sound supported. If softening an argument would leave a citation unsupported, reword around it rather than deleting it.',
+  '- Alter or remove the locked blocks: the Section I credentials sentence ("I, Ryan J. Kasky, DO, am board-certified..."), the "no treatment relationship" sentence, or the Section II Nieves-Rodriguez paragraph.',
+  '- Emit bracketed placeholders like [VERIFY ...] or [citation needed], or any fabricated fact.',
+  '',
+  'FRN style: no em dashes, no smart quotes. Use plain commas/parentheses.',
+].join('\n');
+
 const PROPOSE_TOOL: Anthropic.Tool = {
   name: 'propose_edit',
   description: 'Propose one limited-scope structured edit to the nexus letter.',
@@ -106,27 +131,46 @@ export function makeSurgicalProposerFromEnv(): SurgicalProposer {
 
 export function makeSurgicalProposer(apiKey: string): SurgicalProposer {
   const anthropic = new Anthropic({ apiKey });
-  return async ({ instruction, letterText }: SurgicalProposeInput): Promise<SurgicalProposeOutput> => {
+  return async ({ instruction, letterText, mode, passage }: SurgicalProposeInput): Promise<SurgicalProposeOutput> => {
+    const isGuided = mode === 'guided_revision';
+    // Guided revision (Guided Revision, 2026-06-13): the user message frames the highlighted passage
+    // explicitly so the model reshapes ONLY it. The route has already validated `passage` is a
+    // verbatim substring of the letter; we surface it to the model AND pin the anchor server-side.
+    const userContent = isGuided
+      ? `CURRENT LETTER:\n${letterText}\n\nHIGHLIGHTED PASSAGE (reshape ONLY this, return it as anchor_text verbatim):\n${passage ?? ''}\n\nINSTRUCTION:\n${instruction}`
+      : `CURRENT LETTER:\n${letterText}\n\nINSTRUCTION:\n${instruction}`;
     const resp = await anthropic.messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
+      temperature: 0, // low temperature — deterministic, medico-legal edits
+      system: isGuided ? GUIDED_REVISION_SYSTEM_PROMPT : SYSTEM_PROMPT,
       tools: [PROPOSE_TOOL],
       tool_choice: { type: 'tool', name: 'propose_edit' },
-      messages: [{ role: 'user', content: `CURRENT LETTER:\n${letterText}\n\nINSTRUCTION:\n${instruction}` }],
+      messages: [{ role: 'user', content: userContent }],
     });
 
     const toolUse = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
     if (toolUse === undefined) throw new Error('surgical proposer: model returned no structured edit');
     const raw = toolUse.input as { operation?: unknown; anchor_text?: unknown; new_text?: unknown };
-    if (typeof raw.operation !== 'string' || typeof raw.anchor_text !== 'string' || typeof raw.new_text !== 'string') {
+    if (typeof raw.new_text !== 'string') {
       throw new Error('surgical proposer: malformed tool input');
     }
-    const proposal: EditProposal = {
-      operation: raw.operation as EditOperation,
-      anchor_text: raw.anchor_text,
-      new_text: raw.new_text,
-    };
+    // Guided revision is a passage-scoped REPLACE by construction: the route guarantees `passage`
+    // is a verbatim substring, so we PIN operation='replace' + anchor_text=passage server-side. This
+    // makes "edit ONLY within the highlighted passage" a structural guarantee, not a prompt promise
+    // (the model cannot widen the edit beyond the highlight by returning a longer anchor).
+    let proposal: EditProposal;
+    if (isGuided) {
+      if (typeof passage !== 'string' || passage.length === 0) {
+        throw new Error('guided-revision proposer: passage is required');
+      }
+      proposal = { operation: 'replace', anchor_text: passage, new_text: raw.new_text };
+    } else {
+      if (typeof raw.operation !== 'string' || typeof raw.anchor_text !== 'string') {
+        throw new Error('surgical proposer: malformed tool input');
+      }
+      proposal = { operation: raw.operation as EditOperation, anchor_text: raw.anchor_text, new_text: raw.new_text };
+    }
     const costUsd = resp.usage.input_tokens * INPUT_USD_PER_TOKEN + resp.usage.output_tokens * OUTPUT_USD_PER_TOKEN;
     return { proposal, costUsd, model: MODEL };
   };

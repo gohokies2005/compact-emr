@@ -1,6 +1,6 @@
 import express from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLetterRouter, staleSignOffOutcome, type LetterRouterDeps } from '../routes/letter.js';
 import { isHttpError, sendError } from '../http/errors.js';
 import { KASKY_CREDENTIALS, type SignerCredentials } from '../services/credential-block.js';
@@ -177,6 +177,161 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     expect(tx.letterRevision.create).toHaveBeenCalled();
     const arg = (tx.letterRevision.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(arg.data.source).toBe('surgical_ai');
+  });
+
+  // ── Guided Revision (Guided Revision, 2026-06-13) ────────────────────────────────────────────
+  // The broader edit tier: the physician highlights a passage + instructs; Opus reshapes ONLY that
+  // passage (softer prose, HARD guards). Propose-only. Behind GUIDED_REVISION_ENABLED.
+  describe('guided revision', () => {
+    // A letter that carries a §VII holding + a cited passage, so the holding lock + citation guard
+    // have real material to act on. The highlighted passage is the mechanism sentence.
+    const GR_LETTER = [
+      '**I. Physician Qualifications**',
+      'I, Ryan J. Kasky, DO, am board-certified in Family Medicine.',
+      '',
+      '**VI. Discussion**',
+      'The mechanism is supported by Smith 2019, which reported a 22% prevalence.',
+      '',
+      '**VII. Opinion**',
+      "**It is my opinion that the veteran's condition is at least as likely as not (50 percent or greater probability) caused by service, under 38 CFR 3.310.**",
+      '',
+      '**VIII. References**',
+      '1. Smith 2019.',
+    ].join('\n');
+    const GR_PASSAGE = 'The mechanism is supported by Smith 2019, which reported a 22% prevalence.';
+
+    function grDeps(over: Partial<LetterRouterDeps> = {}): LetterRouterDeps {
+      return deps({
+        s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => GR_LETTER } })) } as unknown as LetterRouterDeps['s3'],
+        ...over,
+      });
+    }
+    function grProposer(newText: string) {
+      // Mirror the concrete proposer's guided contract: anchor_text is pinned to the passage.
+      return vi.fn(async (i: { passage?: string }) => ({ proposal: { operation: 'replace' as const, anchor_text: i.passage ?? GR_PASSAGE, new_text: newText }, costUsd: 0.03, model: 'claude-opus-4-8' }));
+    }
+
+    beforeEach(() => { process.env.GUIDED_REVISION_ENABLED = 'true'; mockUser = { sub: 'PHYS-SUB', roles: ['physician'] }; });
+    afterEach(() => { delete process.env.GUIDED_REVISION_ENABLED; });
+
+    it('PROPOSE returns a passage-scoped replace + preview (anchor_text === the highlighted passage)', async () => {
+      const newText = 'The physiologic mechanism is well documented by Smith 2019, with a 22% prevalence.';
+      const d = grDeps({ proposeSurgicalEdit: grProposer(newText) });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'tighten and de-emphasize' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.mode).toBe('guided_revision');
+      expect(res.body.data.proposal.operation).toBe('replace');
+      expect(res.body.data.proposal.anchor_text).toBe(GR_PASSAGE);
+      expect(res.body.data.preview).toContain('physiologic mechanism is well documented');
+      // pure rewording keeping Smith 2019 + 22% → no added, no removed, no warnings
+      expect(res.body.data.citationDiff.added).toHaveLength(0);
+      expect(res.body.data.citationDiff.removed).toHaveLength(0);
+      expect(res.body.data.warnings).toHaveLength(0);
+    });
+
+    it('REJECTS (422 citation_invented) a revision that invents a new PMID', async () => {
+      const newText = 'The mechanism is supported by Smith 2019 (PMID: 31234567), which reported a 22% prevalence.';
+      const d = grDeps({ proposeSurgicalEdit: grProposer(newText) });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'add a reference' });
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('citation_invented');
+      expect(res.body.error.details.citationDiff.added.map((t: { key: string }) => t.key)).toContain('pmid:31234567');
+    });
+
+    it('REJECTS (422 citation_invented) a revision that invents a new statistic', async () => {
+      const newText = 'The mechanism is supported by Smith 2019, which reported a 22% prevalence (OR 3.1).';
+      const d = grDeps({ proposeSurgicalEdit: grProposer(newText) });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'strengthen' });
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('citation_invented');
+    });
+
+    it('WARNS (200 + warning) when a revision DROPS a citation (physician decides)', async () => {
+      const newText = 'The physiologic mechanism is well documented in the medical literature.';
+      const d = grDeps({ proposeSurgicalEdit: grProposer(newText) });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'de-emphasize this marginal theory' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.warnings.length).toBeGreaterThan(0);
+      expect(res.body.data.warnings[0]).toMatch(/removes 2 citation\/statistic|removes/);
+      expect(res.body.data.citationDiff.removed.map((t: { key: string }) => t.key)).toContain('ay:smith:2019');
+    });
+
+    it('REJECTS (422 holding_changed) a revision that would alter the §VII holding even via a passage overlapping it', async () => {
+      // Highlight the §VII holding sentence; the model tries to weaken it. The holding lock blocks it.
+      const holding = "**It is my opinion that the veteran's condition is at least as likely as not (50 percent or greater probability) caused by service, under 38 CFR 3.310.**";
+      const weakened = "**It is my opinion that the veteran's condition is less likely than not caused by service, under 38 CFR 3.310.**";
+      const d = grDeps({ proposeSurgicalEdit: vi.fn(async () => ({ proposal: { operation: 'replace' as const, anchor_text: holding, new_text: weakened }, costUsd: 0.03, model: 'claude-opus-4-8' })) });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: holding, instruction: 'soften the conclusion' });
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('holding_changed');
+    });
+
+    it('422 (passage_not_found) when the highlighted passage is not a verbatim substring of the letter', async () => {
+      const d = grDeps({ proposeSurgicalEdit: grProposer('x') });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: 'text that is not in the letter at all', instruction: 'edit it' });
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('passage_not_found');
+    });
+
+    it('400 (passage_required) when mode is guided_revision but no passage is given', async () => {
+      const d = grDeps({ proposeSurgicalEdit: grProposer('x') });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', instruction: 'edit it' });
+      expect(res.status).toBe(400);
+      expect(res.body.error.details.reason).toBe('passage_required');
+    });
+
+    it('503 (guided_revision_disabled) when the flag is OFF', async () => {
+      delete process.env.GUIDED_REVISION_ENABLED;
+      const d = grDeps({ proposeSurgicalEdit: grProposer('x') });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'edit it' });
+      expect(res.status).toBe(503);
+      expect(res.body.error.details.reason).toBe('guided_revision_disabled');
+    });
+
+    it('does not run the proposer when the flag is OFF (no spend)', async () => {
+      delete process.env.GUIDED_REVISION_ENABLED;
+      const proposer = grProposer('x');
+      const d = grDeps({ proposeSurgicalEdit: proposer });
+      await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'edit it' });
+      expect(proposer).not.toHaveBeenCalled();
+    });
+
+    it('403 for a role outside the allow-set (no auth user)', async () => {
+      mockUser = undefined; // requireRole → 401/403 before the handler
+      const d = grDeps({ proposeSurgicalEdit: grProposer('x') });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'edit it' });
+      expect([401, 403]).toContain(res.status);
+    });
+
+    it('locks ops_staff guided revision while in physician_review (the AI door matches the hand door)', async () => {
+      mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+      const d = grDeps({ proposeSurgicalEdit: grProposer('x') });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'edit it' });
+      expect(res.status).toBe(409);
+      expect(res.body.error.details.reason).toBe('locked_physician_review');
+    });
+
+    it('APPLY of a guided-revision proposal that changes the holding is BLOCKED (422 holding_changed) defense-in-depth', async () => {
+      // Even a hand-crafted apply payload that bypassed propose cannot change the holding.
+      const holding = "**It is my opinion that the veteran's condition is at least as likely as not (50 percent or greater probability) caused by service, under 38 CFR 3.310.**";
+      const weakened = "**It is my opinion that the veteran's condition is less likely than not caused by service, under 38 CFR 3.310.**";
+      const d = grDeps();
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ apply: true, proposal: { operation: 'replace', anchor_text: holding, new_text: weakened } });
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('holding_changed');
+    });
   });
 
   it('approve is BLOCKED (409) when no sign-off exists', async () => {

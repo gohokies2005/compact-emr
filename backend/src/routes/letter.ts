@@ -11,6 +11,8 @@ import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services
 import { buildLetterRevisionKey } from '../services/s3-key-safety.js';
 import { cleanProseForSave, sanityCheckLetterText, computeLockedRanges, type SanityFinding } from '../services/letter-sanity.js';
 import { applyStructuredEdit, type EditProposal } from '../services/letter-edit-apply.js';
+import { diffCitations, describeToken, type CitationDiff } from '../services/letter-citation-integrity.js';
+import { holdingChanged } from '../services/letter-opinion-excerpt.js';
 import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from '../services/case-status-transitions.js';
 import { resolveRateCents } from '../services/pay-earnings.js';
 import { evaluateChartReadiness } from '../services/chart-readiness.js';
@@ -106,7 +108,23 @@ export type RenderInvoker = (input: RenderInvokeInput) => Promise<RenderInvokeRe
  *  unit tests (same pattern as renderLetter). It returns a STRUCTURED edit + the metered cost;
  *  the deterministic applyStructuredEdit applies it. The concrete impl (Anthropic SDK + the
  *  bounded-edit prompt) is wired at mount. Cloud meters the key (no free Claude-Max lane). */
-export interface SurgicalProposeInput { instruction: string; letterText: string; }
+// mode distinguishes the two edit tiers that share this proposer (Guided Revision, 2026-06-13):
+//   'surgical'         — the narrow tier: ONE bounded {operation, anchor_text, new_text}, "change
+//                        ONLY what is asked". `passage` is unused.
+//   'guided_revision'  — the broader tier: the physician HIGHLIGHTS a verbatim `passage` of the
+//                        current letter and gives an instruction; the model reshapes ONLY that
+//                        passage (always operation 'replace', anchor_text === the highlighted
+//                        passage). Softer prose rules, HARD structural guards (the route enforces
+//                        the §VII holding lock + citation-integrity guard on the result).
+// Defaulting to 'surgical' keeps every existing caller byte-identical.
+export type ProposeMode = 'surgical' | 'guided_revision';
+export interface SurgicalProposeInput {
+  instruction: string;
+  letterText: string;
+  mode?: ProposeMode;
+  /** guided_revision only: the verbatim highlighted substring of letterText to reshape. */
+  passage?: string;
+}
 export interface SurgicalProposeOutput { proposal: EditProposal; costUsd: number; model: string; }
 export type SurgicalProposer = (input: SurgicalProposeInput) => Promise<SurgicalProposeOutput>;
 
@@ -344,7 +362,8 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const user = currentActor(req);
       const caseId = String(req.params.id);
-      const body = (req.body ?? {}) as { instruction?: unknown; apply?: unknown; proposal?: EditProposal };
+      const body = (req.body ?? {}) as { instruction?: unknown; apply?: unknown; proposal?: EditProposal; mode?: unknown; passage?: unknown };
+      const isGuided = body.mode === 'guided_revision';
 
       const c = await db.case.findFirst({ where: { id: caseId } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
@@ -367,6 +386,12 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         if (body.proposal === undefined) throw new HttpError(400, 'bad_request', 'apply:true requires proposal', { caseId });
         const applied = applyStructuredEdit(oldText, body.proposal);
         if (!applied.ok) throw new HttpError(422, 'conflict', `surgical edit no longer applies: ${applied.error}`, { reason: 'edit_unappliable', caseId });
+        // §VII HOLDING LOCK at APPLY (defense-in-depth, Guided Revision 2026-06-13): the holding can
+        // never change through ANY structured-edit door, even a hand-crafted apply payload that
+        // bypassed the propose-time guard. Cheap deterministic re-check on the would-be letter.
+        if (holdingChanged(oldText, applied.newText)) {
+          throw new HttpError(422, 'conflict', 'This edit would alter the Section VII opinion / legal holding, which is locked. Edit cannot be applied.', { reason: 'holding_changed', caseId });
+        }
         const warnings: SanityFinding[] = sanityCheckLetterText(oldText, applied.newText);
         const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
         if (veteran === null) throw new HttpError(409, 'conflict', 'Veteran not found for case.', { caseId });
@@ -400,6 +425,73 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           throw e;
         }
         res.json({ data: { version: newVersion, txt: applied.newText, warnings, notice: stale?.notice ?? null } });
+        return;
+      }
+
+      // ── GUIDED REVISION PROPOSE (Guided Revision, 2026-06-13) ─────────────────────────────────
+      // The broader edit tier: the physician highlights a verbatim passage + gives an instruction;
+      // Opus reshapes ONLY that passage (softer prose, HARD structural guards). Propose-only — never
+      // auto-applies. Behind GUIDED_REVISION_ENABLED (default off). Role: the requireRole +
+      // physician-assignment + RN-lock gates above already apply (shared with surgical).
+      if (isGuided) {
+        if (process.env.GUIDED_REVISION_ENABLED !== 'true') {
+          throw new HttpError(503, 'internal_error', 'Guided revision is not enabled.', { reason: 'guided_revision_disabled', caseId });
+        }
+        if (deps.proposeSurgicalEdit === undefined) throw new HttpError(503, 'internal_error', 'Surgical-AI is not configured (no proposer wired).', { reason: 'surgical_ai_not_configured', caseId });
+        if (typeof body.instruction !== 'string' || body.instruction.trim() === '') throw new HttpError(400, 'bad_request', 'instruction (non-empty string) is required to propose', { caseId });
+        if (typeof body.passage !== 'string' || body.passage.trim() === '') throw new HttpError(400, 'bad_request', 'passage (the highlighted text, non-empty) is required for guided revision', { caseId, reason: 'passage_required' });
+        const passage = body.passage;
+        // The highlighted passage MUST be a verbatim substring of the current letter — otherwise the
+        // edit anchor cannot be the highlight and "edit only within the passage" is unenforceable.
+        if (!oldText.includes(passage)) {
+          throw new HttpError(422, 'conflict', 'The highlighted passage was not found verbatim in the current letter. Reload the letter and re-highlight.', { reason: 'passage_not_found', caseId });
+        }
+
+        const out = await deps.proposeSurgicalEdit({ instruction: body.instruction, letterText: oldText, mode: 'guided_revision', passage });
+        // The proposer pins anchor_text=passage + operation=replace; dry-run so we preview a
+        // deterministically-appliable edit and so all downstream guards see the EXACT revised letter.
+        const dry = applyStructuredEdit(oldText, out.proposal);
+
+        // CITATION-INTEGRITY GUARD (the key new safety): diff the cited facts of the highlighted
+        // passage (before) vs the model's revised passage (after = out.proposal.new_text). A NET-NEW
+        // citation/stat => REJECT (the model invented a fact to prop up a reworded argument). A
+        // DROPPED citation/stat => return WITH a warning the physician must see before accepting.
+        const citationDiff: CitationDiff = diffCitations(passage, out.proposal.new_text);
+
+        // §VII HOLDING LOCK: even if the highlighted passage overlaps Section VII, the legal holding
+        // ("at least as likely as not" / CFR cite) can NEVER change. Computed on the would-be letter.
+        const holdingWouldChange = dry.ok ? holdingChanged(oldText, dry.newText) : false;
+
+        // Log the propose (cost recorded here — the spend happens at propose, like surgical).
+        await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_guided_revision_proposed', caseId, veteranId: c.veteranId, detailsJson: { instruction: body.instruction.slice(0, 500), model: out.model, costUsd: out.costUsd, appliable: dry.ok, addedCitations: citationDiff.added.length, removedCitations: citationDiff.removed.length, holdingWouldChange } } });
+
+        // REJECTIONS (medico-legal, bias to BLOCK) — never return an applyable proposal:
+        //  1) the model invented a citation/stat;
+        //  2) the revision would change the §VII holding;
+        //  3) the edit does not deterministically apply.
+        if (citationDiff.added.length > 0) {
+          res.status(422).json({ error: { code: 'conflict', message: `Guided revision rejected: the revised passage introduces ${citationDiff.added.length} citation/statistic not present in the original (${citationDiff.added.map(describeToken).join(', ')}). A revision may reword prose around the cited facts but must never add a new citation or statistic.`, details: { reason: 'citation_invented', caseId, proposal: out.proposal, citationDiff, costUsd: out.costUsd } } });
+          return;
+        }
+        if (holdingWouldChange) {
+          res.status(422).json({ error: { code: 'conflict', message: 'Guided revision rejected: the revision would alter the Section VII opinion / legal holding. The holding is locked and cannot be changed by an edit.', details: { reason: 'holding_changed', caseId, proposal: out.proposal, costUsd: out.costUsd } } });
+          return;
+        }
+        if (!dry.ok) {
+          res.status(422).json({ error: { code: 'conflict', message: `Guided revision proposal does not apply: ${dry.error}`, details: { reason: 'edit_unappliable', caseId, proposal: out.proposal, costUsd: out.costUsd } } });
+          return;
+        }
+
+        // ACCEPTED (with possible WARNINGS the physician must see before accepting):
+        //  - dropped citation/stat (legitimate when de-emphasizing a marginal theory, but the
+        //    physician decides);
+        //  - letter-sanity findings on the would-be revised letter.
+        const warnings: string[] = [];
+        if (citationDiff.removed.length > 0) {
+          warnings.push(`This revision removes ${citationDiff.removed.length} citation/statistic from the passage (${citationDiff.removed.map(describeToken).join(', ')}). Confirm this is intended before accepting.`);
+        }
+        const sanity = sanityCheckLetterText(oldText, dry.newText);
+        res.json({ data: { mode: 'guided_revision', proposal: out.proposal, preview: dry.newText, warnings, sanity, citationDiff, costUsd: out.costUsd, model: out.model } });
         return;
       }
 

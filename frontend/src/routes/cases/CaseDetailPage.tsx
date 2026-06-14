@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
@@ -27,7 +27,7 @@ import { EmailLogPanel } from '../../components/EmailLogPanel';
 import { ChartNotesPanel } from '../veterans/ChartNotesPanel';
 import { ConditionsPanel, MedicationsPanel, ProblemsPanel } from '../../components/ClinicalChartPanels';
 import { listCaseEmails } from '../../api/emails';
-import { getArtifactPdfUrl, postDraft, cancelDraftJob, getDraftConcurrency, type DraftConcurrencyResult } from '../../api/drafter';
+import { getArtifactPdfUrl, postDraft, cancelDraftJob, getDraftConcurrency, uploadAndImportLetter, type DraftConcurrencyResult } from '../../api/drafter';
 import { getLetter } from '../../api/letter';
 import { getVeteran, listDocuments, reocrDocument } from '../../api/veterans';
 import { PdfViewerModal, type ViewableDoc } from '../../components/PdfViewerModal';
@@ -232,6 +232,20 @@ export function CaseDetailPage() {
     onError: (e: unknown) => window.alert(e instanceof ConflictError ? 'This case changed — reload and try sending again.' : `Could not send to the doctor — ${describeApiError(e)}.`),
   });
 
+  // Import final letter (2026-06-14): drop an already-finished letter PDF (rig-origin draft or
+  // externally-signed) onto the case so it lands in the RN review queue and flows RN -> physician
+  // -> delivery. No re-render — exact PDF bytes preserved. The hidden file input is triggered by
+  // the header button; on pick we presign -> PUT -> commit, then invalidate the case so the page
+  // reflects rn_review + the new letter.
+  const importFileRef = useRef<HTMLInputElement | null>(null);
+  const importLetter = useMutation({
+    mutationFn: (file: File) => uploadAndImportLetter(caseId, file),
+    onSuccess: async () => {
+      await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]);
+    },
+    onError: (e: unknown) => window.alert(`Could not import the letter — ${describeApiError(e)}. Please retry or flag to Dr. Ryan.`),
+  });
+
   if (caseQuery.isLoading) return <AppShell><div className="text-sm text-slate-500">Loading case…</div></AppShell>;
   if (!caseQuery.data) return <AppShell><EmptyState title="Case not found" message="The requested case could not be loaded." /></AppShell>;
   const c = caseQuery.data.data;
@@ -260,6 +274,14 @@ export function CaseDetailPage() {
   // queue (physician_review). Admin keeps it everywhere. See the redraft mutation comment above.
   const canRedraft = (role === 'admin' || (role === 'ops_staff' && c.status !== 'physician_review'))
     && (c.draftJobs ?? []).length > 0 && !draftInFlight;
+
+  // Import final letter (2026-06-14): admin/ops_staff can drop a finished PDF onto the case at any
+  // point before it's with the doctor or already delivered. Hidden while a draft is in flight (the
+  // import would collide with the running attempt) and while archived. NOT physician (they don't
+  // import) and NOT during physician_review/delivered/paid (the letter is past RN's hands).
+  const canImportLetter = (role === 'admin' || role === 'ops_staff')
+    && !draftInFlight
+    && c.status !== 'physician_review' && c.status !== 'delivered' && c.status !== 'paid';
 
   // The newest draft-job that produced (or should have produced) a letter PDF. draftJobs is
   // version-desc, so the first terminal-or-keyed job is the latest letter. Terminal (done OR a
@@ -394,6 +416,24 @@ export function CaseDetailPage() {
                   no duplicate view button (Ryan 2026-06-05). */}
               {viewableLetterJob && c.status !== 'rn_review' && c.status !== 'physician_review' ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}
               {canRedraft ? <Button variant="secondary" size="sm" loading={redraft.isPending} disabled={redraft.isPending} onClick={() => setRedraftGate1Open(true)}>Redraft</Button> : null}
+              {canImportLetter ? (
+                <>
+                  {/* Hidden picker for "Import final letter" — preserves exact PDF bytes (no re-render). */}
+                  <input
+                    ref={importFileRef}
+                    type="file"
+                    accept="application/pdf"
+                    className="hidden"
+                    aria-label="Import final letter PDF"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (file) importLetter.mutate(file);
+                    }}
+                  />
+                  <Button variant="secondary" size="sm" loading={importLetter.isPending} disabled={importLetter.isPending} onClick={() => importFileRef.current?.click()}>Import final letter</Button>
+                </>
+              ) : null}
               {canShowSignOff ? <Button variant="primary" size="sm" onClick={() => setSignOffOpen(true)}>Sign off</Button> : null}
               {nextStatuses.map((to) => <Button key={to} variant="secondary" size="sm" onClick={() => setPendingTo(to)}>{to === 'rejected' ? 'Reject claim' : `Move to ${CASE_STATUS_LABELS[to].toLowerCase()}`}</Button>)}
               {/* Archive (RN/admin): soft-delete a mis-filed/duplicate claim. Reversible via Reopen.

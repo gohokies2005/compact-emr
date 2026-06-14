@@ -476,6 +476,7 @@ enum LetterRevisionSource {
   editor_save     // RN/physician full-text WYSIWYG save
   surgical_ai     // physician surgical-AI limited-scope edit (Phase 2)
   approved_final  // physician approve -> final render (no DRAFT watermark)
+  external_import // operator-imported finished letter PDF (rig-origin or externally-signed) — import final letter, 2026-06-14
 
   @@map("letter_revision_source")
 }

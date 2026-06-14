@@ -1,3 +1,4 @@
+import axios from 'axios';
 import { apiGet, apiPost } from './client';
 import { createChartNote } from './chart-notes';
 import { transitionCaseStatus, type TransitionInput } from './cases';
@@ -123,4 +124,53 @@ export async function getArtifactPdfUrl(
   return apiGet(
     `/api/v1/cases/${encodeURIComponent(caseId)}/draft-jobs/${encodeURIComponent(jobId)}/artifact-pdf-url`,
   );
+}
+
+// ── Import final letter (2026-06-14) ────────────────────────────────────────
+// Drop an already-FINISHED letter PDF (a rig-origin draft or an externally-signed letter) onto a
+// case so it lands in the RN review queue and flows RN -> physician -> delivery. No re-render —
+// the exact PDF bytes are preserved. Three steps: presign -> S3 PUT -> commit (mirrors the avatar
+// upload pattern in api/users.ts).
+export interface PresignImportLetter {
+  readonly uploadUrl: string;
+  readonly s3Key: string;
+  readonly version: number;
+  readonly expiresInSeconds: number;
+  readonly requiredHeaders: Record<string, string>;
+}
+
+export interface ImportLetterResult {
+  readonly ok: boolean;
+  readonly version: number;
+  readonly draftJobId?: string;
+  readonly alreadyImported?: boolean;
+}
+
+export function validateImportLetterFile(file: File): string | null {
+  if (file.type !== 'application/pdf') return 'The imported letter must be a PDF.';
+  if (file.size <= 0) return 'The file is empty.';
+  if (file.size > 50 * 1024 * 1024) return 'The PDF must be 50 MB or smaller.';
+  return null;
+}
+
+// The presign route wraps under { data }; the commit route returns the result FLAT
+// ({ ok, version, ... }) — matching the backend res.json shapes exactly.
+export async function presignImportLetter(caseId: string): Promise<{ data: PresignImportLetter }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/letter/import-presign`, {});
+}
+
+export async function commitImportLetter(
+  caseId: string,
+  input: { s3Key: string; filename?: string },
+): Promise<ImportLetterResult> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/letter/import`, input);
+}
+
+// Presign -> PUT the exact bytes -> commit. Returns the import result (version + idempotency flag).
+export async function uploadAndImportLetter(caseId: string, file: File): Promise<ImportLetterResult> {
+  const problem = validateImportLetterFile(file);
+  if (problem !== null) throw new Error(problem);
+  const presign = await presignImportLetter(caseId);
+  await axios.put(presign.data.uploadUrl, file, { headers: presign.data.requiredHeaders });
+  return commitImportLetter(caseId, { s3Key: presign.data.s3Key, filename: file.name });
 }

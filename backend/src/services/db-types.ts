@@ -473,7 +473,7 @@ export interface LetterRevisionRecord {
   caseId: string;
   version: number;
   parentVersion: number;
-  source: 'drafter_run' | 'editor_save' | 'surgical_ai' | 'approved_final';
+  source: 'drafter_run' | 'editor_save' | 'surgical_ai' | 'approved_final' | 'external_import';
   artifactTxtS3Key: string;
   artifactPdfS3Key: string | null;
   artifactDocxS3Key: string | null;

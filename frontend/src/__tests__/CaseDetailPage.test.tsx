@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AxiosError, AxiosHeaders } from 'axios';
@@ -364,5 +364,57 @@ describe('CaseDetailPage — Archive / Reopen (C6 lifecycle, 2026-06-13)', () =>
     await screen.findByText('Hypertension');
     expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /reopen/i })).not.toBeInTheDocument();
+  });
+});
+
+// ── Import final letter (2026-06-14): drop a finished PDF onto a case so it lands in rn_review and
+// flows RN -> physician -> delivery. Button is admin/ops_staff only, hidden once the case is with
+// the doctor or already delivered, and hidden from physicians. ──
+describe('CaseDetailPage — Import final letter button (2026-06-14)', () => {
+  afterEach(() => { mockRole = 'admin'; vi.restoreAllMocks(); });
+
+  it('ops_staff sees "Import final letter" on an rn_review case (no draft in flight)', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ status: 'rn_review', draftJobs: [] });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.getByRole('button', { name: 'Import final letter' })).toBeInTheDocument();
+    // The hidden PDF picker is wired in.
+    expect(screen.getByLabelText('Import final letter PDF')).toBeInTheDocument();
+  });
+
+  it('admin sees it on an intake-stage case too', async () => {
+    mockRole = 'admin';
+    mockCase({ status: 'intake', draftJobs: [] });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.getByRole('button', { name: 'Import final letter' })).toBeInTheDocument();
+  });
+
+  it('is HIDDEN in physician_review, delivered, and paid (past the RN)', async () => {
+    for (const status of ['physician_review', 'delivered', 'paid']) {
+      mockRole = 'ops_staff';
+      mockCase({ status });
+      renderPage();
+      await screen.findByText('Hypertension');
+      expect(screen.queryByRole('button', { name: 'Import final letter' })).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  it('is HIDDEN for a physician', async () => {
+    mockRole = 'physician';
+    mockCase({ status: 'rn_review', assignedPhysician: { id: 'PHY-1', fullName: 'A B, MD', email: 'd@x.test' } });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.queryByRole('button', { name: 'Import final letter' })).not.toBeInTheDocument();
+  });
+
+  it('is HIDDEN while a draft is in flight (would collide with the running attempt)', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ status: 'drafting', draftJobs: [{ id: 'DJ-1', caseId: 'CASE-1', state: 'running', version: 1, createdAt: '2026-05-01T00:00:00Z', updatedAt: '2026-05-01T00:00:00Z' }] });
+    renderPage();
+    await screen.findByText('Hypertension');
+    expect(screen.queryByRole('button', { name: 'Import final letter' })).not.toBeInTheDocument();
   });
 });

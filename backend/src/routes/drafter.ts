@@ -22,7 +22,7 @@ import {
 } from '../services/drafter-bundle.js';
 import { isDrafterArtifactS3Key, buildLetterRevisionKey } from '../services/s3-key-safety.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
-import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { RenderInvoker } from './letter.js';
 
@@ -35,6 +35,8 @@ function getS3ForArtifacts(): S3Client {
   return cachedS3Client;
 }
 const ARTIFACT_PDF_TTL_SECONDS = 5 * 60;
+// Import final letter (2026-06-14): TTL for the presigned PUT of a finished letter PDF.
+const IMPORT_UPLOAD_TTL_SECONDS = 5 * 60;
 import type { AppDb } from '../services/db-types.js';
 
 /**
@@ -824,6 +826,223 @@ export function createDrafterClientRouter(db: AppDb): Router {
       });
       const result = await db.draftDecision.createMany({ data });
       res.status(201).json({ data: { written: result.count } });
+    }),
+  );
+
+  // ──────────────────────────────────────────────────────────────────────────────────────────
+  // Import final letter (2026-06-14). The EMR had no way to drop an already-FINISHED letter PDF
+  // (a rig-origin draft produced outside the cloud drafter, or an externally-signed letter) onto a
+  // case — so finished letters were stuck with nowhere to land. These two routes mirror the
+  // drafter /complete happy path EXACTLY (DraftJob state='done' + version N + artifactPdfS3Key,
+  // a LetterRevision at N, and Case currentVersion=N + status='rn_review' + version increment)
+  // so the imported letter surfaces in the RN review queue and flows RN -> physician -> delivery
+  // through the NORMAL sign-off. No re-render — the exact PDF bytes are preserved.
+  //
+  // DELIVERY SAFETY: this does NOT fabricate a SignOff and does NOT mark the case deliverable. The
+  // imported letter still goes through the EMR physician sign-off (the #17 delivery-eligibility
+  // gate); import only lands it in rn_review.
+  //
+  // KNOWN DOWNSTREAM GAP (flagged for the parent — see the report): the sign-off / approve /
+  // delivery paths are TXT-centric (sign-off byte-binds to the txt hash; approve RE-RENDERS the
+  // final letter from the txt and re-applies the assigned physician's signature; delivery builds
+  // the §VII excerpt from the txt). LetterRevision.artifactTxtS3Key is NON-NULL in the schema, so
+  // import writes a small PLACEHOLDER txt sidecar (canonical content is the PDF) to keep every txt
+  // reader schema-valid and 500-free. An EXTERNALLY-SIGNED import that is later run through
+  // approve would be re-rendered from that placeholder — so a "deliver the imported PDF as-is
+  // (skip re-render)" passthrough is the follow-up needed before externally-signed imports can be
+  // approved+delivered. A rig-origin draft is fine to re-render through approve. This route ships
+  // the blocker fix (get the letter INTO the queue) today; the passthrough is tracked separately.
+
+  // POST /api/v1/cases/:id/letter/import-presign  (admin / ops_staff)
+  // Compute the next version N and presign a PUT of the finished PDF to the canonical
+  // drafter-artifacts/<caseId>/vN/imported-letter.pdf key.
+  router.post(
+    '/cases/:id/letter/import-presign',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const bucket = process.env['PHI_BUCKET_NAME'];
+      if (typeof bucket !== 'string' || bucket.length === 0) {
+        throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured');
+      }
+      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, currentVersion: true } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+
+      // Next version = beyond BOTH the case pointer and the highest draft-job version, so an import
+      // can never collide with an in-flight/prior draft attempt's numbering (same rule POST /draft uses).
+      const maxVersionRow = await db.draftJob.findFirst({ where: { caseId }, orderBy: { version: 'desc' }, select: { version: true } });
+      const version = Math.max(maxVersionRow?.version ?? 0, c.currentVersion ?? 0) + 1;
+
+      const s3Key = `drafter-artifacts/${caseId}/v${version}/imported-letter.pdf`;
+      if (!isDrafterArtifactS3Key(s3Key)) {
+        // Only reachable if caseId carries characters the artifact-key pattern rejects.
+        throw new HttpError(400, 'bad_request', 'Case id cannot be used to build a safe artifact key.', { caseId });
+      }
+
+      const command = new PutObjectCommand({
+        Bucket: bucket,
+        Key: s3Key,
+        ContentType: 'application/pdf',
+        ServerSideEncryption: 'aws:kms',
+      });
+      const uploadUrl = await getSignedUrl(getS3ForArtifacts(), command, { expiresIn: IMPORT_UPLOAD_TTL_SECONDS });
+
+      res.json({
+        data: {
+          uploadUrl,
+          s3Key,
+          version,
+          expiresInSeconds: IMPORT_UPLOAD_TTL_SECONDS,
+          requiredHeaders: {
+            'content-type': 'application/pdf',
+            'x-amz-server-side-encryption': 'aws:kms',
+          },
+        },
+      });
+    }),
+  );
+
+  // POST /api/v1/cases/:id/letter/import  (admin / ops_staff)
+  // Commit the uploaded PDF: DraftJob (done) + LetterRevision (external_import) + Case (rn_review)
+  // in ONE transaction. Validates the s3Key pattern AND that it belongs to THIS case.
+  router.post(
+    '/cases/:id/letter/import',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const actor = currentActor(req);
+      const bucket = process.env['PHI_BUCKET_NAME'];
+      if (typeof bucket !== 'string' || bucket.length === 0) {
+        throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured');
+      }
+      if (!isRecord(req.body)) badRequest('Request body must be an object');
+      const body = req.body as Record<string, unknown>;
+      const s3Key = typeof body['s3Key'] === 'string' ? body['s3Key'] : '';
+
+      // (a) Pattern-safe (no traversal, drafter-artifacts/.../vN/<file>.pdf).
+      if (!isDrafterArtifactS3Key(s3Key)) {
+        throw new HttpError(400, 'bad_request', 's3Key is missing or not a valid drafter-artifacts key.', { caseId });
+      }
+      // (b) Belongs to THIS case AND is a PDF — the second path segment is the caseId. Reject a key
+      // for another case (or a non-pdf) even if it passes the generic pattern check.
+      if (!s3Key.startsWith(`drafter-artifacts/${caseId}/`) || !s3Key.endsWith('.pdf')) {
+        throw new HttpError(400, 'bad_request', 's3Key does not belong to this case or is not a PDF.', { caseId, s3Key });
+      }
+      // (c) Derive the version from the key path (drafter-artifacts/<caseId>/v<N>/...).
+      const versionMatch = /\/v(\d+)\//.exec(s3Key.slice(`drafter-artifacts/${caseId}/`.length - 1));
+      const version = versionMatch !== null ? Number(versionMatch[1]) : NaN;
+      if (!Number.isInteger(version) || version < 1) {
+        throw new HttpError(400, 'bad_request', 'Could not derive a version from the s3Key.', { caseId, s3Key });
+      }
+
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+
+      // Idempotency: a LetterRevision already at this version means the import already landed (a
+      // double-click / retry). No-op gracefully instead of a P2002 or a duplicate DraftJob.
+      const existingRev = await db.letterRevision.findFirst({ where: { caseId, version } });
+      if (existingRev !== null) {
+        res.json({ ok: true, version, alreadyImported: true });
+        return;
+      }
+
+      // Confirm the uploaded object actually exists before we wire a row to it — an import that
+      // references a missing key would 404 the moment the RN clicks "View letter".
+      try {
+        await getS3ForArtifacts().send(new HeadObjectCommand({ Bucket: bucket, Key: s3Key }));
+      } catch {
+        throw new HttpError(409, 'conflict', 'No uploaded PDF was found at the import key. Re-run the upload, then commit.', { caseId, s3Key });
+      }
+
+      // LetterRevision.artifactTxtS3Key is NON-NULL. The imported letter has no txt (we preserve the
+      // PDF bytes, no re-render). Write a small placeholder txt sidecar at the canonical key so every
+      // txt reader (editor load / sign-off byte-bind / approve re-render / delivery excerpt) stays
+      // schema-valid and 500-free. See the KNOWN DOWNSTREAM GAP note above.
+      const txtKey = `drafter-artifacts/${caseId}/v${version}/imported-letter.txt`;
+      if (!isDrafterArtifactS3Key(txtKey)) {
+        throw new HttpError(400, 'bad_request', 'Could not build a safe txt sidecar key.', { caseId });
+      }
+      const placeholderTxt = `[Imported final letter v${version}]\nThis letter was imported as a finished PDF. The canonical content is the PDF artifact at ${s3Key}. No text version was produced at import time.\n`;
+      await getS3ForArtifacts().send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: txtKey,
+        Body: placeholderTxt,
+        ContentType: 'text/plain; charset=utf-8',
+        ServerSideEncryption: 'aws:kms',
+      }));
+
+      const now = new Date();
+      const priorVersion = c.currentVersion;
+      const jobId = randomUUID();
+      const filename = typeof body['filename'] === 'string' ? (body['filename'] as string).slice(0, 200) : null;
+
+      let imported;
+      try {
+        imported = await db.$transaction(async (tx) => {
+          const job = await tx.draftJob.create({
+            data: {
+              id: jobId,
+              caseId,
+              version,
+              state: 'done',
+              artifactPdfS3Key: s3Key,
+              artifactTxtS3Key: txtKey,
+              failureClass: null,
+              enqueuedAt: now,
+              startedAt: now,
+              completedAt: now,
+              lastHeartbeatAt: now,
+              currentPhase: 'complete',
+            },
+          });
+          await tx.letterRevision.create({
+            data: {
+              caseId,
+              version,
+              parentVersion: priorVersion,
+              source: 'external_import',
+              artifactTxtS3Key: txtKey,
+              artifactPdfS3Key: s3Key,
+              artifactDocxS3Key: null,
+              editedBy: actor.sub,
+              editorRole: actor.role,
+              sanityJson: null,
+            },
+          });
+          const caseUpdated = await tx.case.update({
+            where: { id: caseId },
+            data: {
+              currentVersion: version,
+              status: 'rn_review',
+              version: { increment: 1 },
+            },
+          });
+          await tx.activityLog.create({
+            data: {
+              actorUserId: actor.sub,
+              caseId,
+              action: 'letter_imported',
+              detailsJson: {
+                jobId,
+                version,
+                parentVersion: priorVersion,
+                artifactPdfS3Key: s3Key,
+                ...(filename !== null ? { filename } : {}),
+              },
+            },
+          });
+          return { job, case: caseUpdated };
+        });
+      } catch (err) {
+        // Concurrent import for the same version → the LetterRevision unique [caseId,version] fires.
+        if (typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === 'P2002') {
+          res.json({ ok: true, version, alreadyImported: true });
+          return;
+        }
+        throw err;
+      }
+
+      res.json({ ok: true, version, draftJobId: imported.job.id });
     }),
   );
 

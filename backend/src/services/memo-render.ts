@@ -11,10 +11,18 @@
  *
  * DETERMINISTIC by construction: pdf-lib's only nondeterminism for a text-only document is the
  * creation/modification dates (it stamps "now"), so we pin both to a fixed epoch and pin
- * producer/creator strings. Same memo text in → byte-identical PDF out (memo-render.test.ts
- * asserts this), which keeps the artifact diffable and the route cache-friendly.
+ * producer/creator strings. Same memo text + same signature bytes in → byte-identical PDF out
+ * (memo-render.test.ts asserts this), which keeps the artifact diffable and the route cache-friendly.
+ *
+ * SIGNATURE (E4 bug fix 2026-06-14): the memo is NO LONGER text-only. The [SIGNATURE] placeholder
+ * line is replaced by the assigned physician's signature PNG (embedPng + drawImage), mirroring how
+ * the FRN coverMemo.js composites samples/R_Kasky_signature.png above the credential block. The
+ * signature is REQUIRED: if the memo text carries the [SIGNATURE] placeholder but no signature bytes
+ * are supplied, the render THROWS rather than shipping a memo with a literal "[SIGNATURE]" or a blank
+ * where the signature belongs. The caller (delivery.ts memo.pdf route) fetches the bytes from the
+ * physician's signatureImageS3Key in the PHI bucket.
  */
-import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from 'pdf-lib';
 
 // US Letter in PDF points.
 const PAGE_WIDTH = 612;
@@ -29,6 +37,13 @@ const MAX_WIDTH = PAGE_WIDTH - MARGIN * 2;
 // Pinned metadata epoch — the ONLY date pdf-lib would otherwise stamp with "now".
 const PINNED_DATE = new Date('2000-01-01T00:00:00.000Z');
 const PRODUCER = 'Aegis EMR memo-render';
+
+// The sentinel line in the memo text where the signature image goes (matches delivery-templates.ts
+// buildCoverMemoText closing block + coverMemo.js SIG_PLACEHOLDER).
+const SIG_PLACEHOLDER = '[SIGNATURE]';
+// Drawn signature size, mirroring coverMemo.js writePdfMinimal ({ width: 160, height: 56 }).
+const SIG_WIDTH = 160;
+const SIG_HEIGHT = 56;
 
 // Times-Roman is a WinAnsi-encoded standard font: characters outside the codepage make
 // pdf-lib throw mid-render. Normalize the common typographic characters and drop the rest
@@ -64,11 +79,26 @@ function wrapLine(line: string, font: PDFFont): string[] {
   return out;
 }
 
+export interface RenderMemoOptions {
+  /**
+   * The assigned physician's signature PNG bytes. REQUIRED whenever the memo text contains the
+   * [SIGNATURE] placeholder (which buildCoverMemoText always emits): if the placeholder is present
+   * and this is null/undefined, the render throws (no memo ships with a literal "[SIGNATURE]" or a
+   * blank where the signature belongs). Must be PNG (matches the physician signature upload + the
+   * FRN R_Kasky_signature.png).
+   */
+  readonly signaturePng?: Uint8Array | null;
+}
+
 /**
  * Render memo text to PDF bytes. Source line structure is preserved (the memo builder controls
  * paragraph breaks via blank lines); long lines word-wrap; pages break at the bottom margin.
+ *
+ * The [SIGNATURE] placeholder line is replaced by the physician's embedded signature PNG (drawn at
+ * SIG_WIDTH x SIG_HEIGHT). If the placeholder is present and no signaturePng is supplied, this
+ * throws — signature is REQUIRED on a cover memo.
  */
-export async function renderMemoPdf(memoText: string): Promise<Uint8Array> {
+export async function renderMemoPdf(memoText: string, options: RenderMemoOptions = {}): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   doc.setCreationDate(PINNED_DATE);
   doc.setModificationDate(PINNED_DATE);
@@ -78,17 +108,38 @@ export async function renderMemoPdf(memoText: string): Promise<Uint8Array> {
 
   const font = await doc.embedFont(StandardFonts.TimesRoman);
 
+  // Embed the signature once (reused if the placeholder ever appeared more than once). A present
+  // placeholder with no bytes is a hard error — see RenderMemoOptions.signaturePng.
+  const hasPlaceholder = toWinAnsi(memoText).split('\n').some((l) => l.trim() === SIG_PLACEHOLDER);
+  let signatureImage: PDFImage | null = null;
+  if (hasPlaceholder) {
+    if (options.signaturePng == null || options.signaturePng.length === 0) {
+      throw new Error(
+        'renderMemoPdf: the memo contains a [SIGNATURE] placeholder but no signature image was ' +
+        'supplied. A cover memo must carry the assigned physician\'s signature.',
+      );
+    }
+    signatureImage = await doc.embedPng(options.signaturePng);
+  }
+
   let page: PDFPage = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
   let y = PAGE_HEIGHT - MARGIN;
 
-  const newPageIfNeeded = (): void => {
-    if (y - LINE_HEIGHT < MARGIN) {
+  const newPageIfNeeded = (heightNeeded = LINE_HEIGHT): void => {
+    if (y - heightNeeded < MARGIN) {
       page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
       y = PAGE_HEIGHT - MARGIN;
     }
   };
 
   for (const sourceLine of toWinAnsi(memoText).split('\n')) {
+    if (sourceLine.trim() === SIG_PLACEHOLDER && signatureImage !== null) {
+      // Replace the placeholder line with the drawn signature image (above the credential block).
+      newPageIfNeeded(SIG_HEIGHT);
+      page.drawImage(signatureImage, { x: MARGIN, y: y - SIG_HEIGHT, width: SIG_WIDTH, height: SIG_HEIGHT });
+      y -= SIG_HEIGHT + PARAGRAPH_GAP;
+      continue;
+    }
     if (sourceLine.trim() === '') {
       // Blank source line = paragraph gap (no glyphs to draw, half a line of air).
       y -= PARAGRAPH_GAP;

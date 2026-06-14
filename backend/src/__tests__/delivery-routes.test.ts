@@ -79,7 +79,20 @@ interface MakeDbOpts {
   // PDF path instead of the placeholder TXT.
   revisionSource?: string;
   pdfBytes?: Uint8Array;
+  // E4 signature bug fix: the memo.pdf route resolves the ASSIGNED physician + fetches their
+  // signatureImageS3Key PNG. Default null = no assigned physician (memo.pdf 409s). Set to wire a
+  // signing physician; signatureKey '' models a physician with NO signature on file (also a 409).
+  assignedPhysicianId?: string | null;
+  physicianSignatureKey?: string | null;
 }
+
+// A valid 1x1 PNG (smallest real PNG pdf-lib.embedPng accepts) standing in for the physician's
+// signature image, returned by the fake S3 for signature-key GETs.
+const SIGNATURE_PNG = Uint8Array.from([
+  137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0,
+  0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 96, 96, 96, 0, 0, 0, 4, 0, 1,
+  246, 23, 56, 85, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+]);
 
 const AFFIRMATIVE_ANSWERS = { records_reviewed: true, dx_documented: true, nexus_supported: true };
 
@@ -88,11 +101,22 @@ const AFFIRMATIVE_ANSWERS = { records_reviewed: true, dx_documented: true, nexus
 // lets us prove the route converges on ONE row under a double / concurrent send.
 function makeDb(opts: MakeDbOpts = {}) {
   const status = opts.status ?? 'delivered';
+  const assignedPhysicianId = opts.assignedPhysicianId === undefined ? null : opts.assignedPhysicianId;
   const caseRow = {
     id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'knee', claimType: opts.claimType ?? 'initial',
     claimedConditions: ['knee'], previouslyDenied: opts.previouslyDenied ?? false, priorDenialReason: null,
-    priorDecisionDate: null, status, currentVersion: 1, assignedPhysicianId: null, assignedRnId: null,
+    priorDecisionDate: null, status, currentVersion: 1, assignedPhysicianId, assignedRnId: null,
     refundEligible: false, version: 1, createdAt: new Date(), updatedAt: new Date(),
+  };
+
+  // The assigned physician row the memo.pdf route resolves for the signature. signatureKey defaults
+  // to a real key (so the route fetches SIGNATURE_PNG from the fake S3); '' models "no signature".
+  const physicianRow = assignedPhysicianId === null ? null : {
+    id: assignedPhysicianId, fullName: 'Ryan J. Kasky, DO', active: true,
+    credentialBlockJson: null,
+    signatureImageS3Key: opts.physicianSignatureKey === undefined
+      ? 'physicians/PHYS-1/signature.png'
+      : opts.physicianSignatureKey,
   };
 
   const emails: EmailRecord[] = [];
@@ -154,7 +178,7 @@ function makeDb(opts: MakeDbOpts = {}) {
     veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Jane', lastName: 'Doe', email: opts.veteranEmail ?? 'jane@example.com' })) },
     letterRevision: { findFirst: vi.fn(async () => ({ id: 'REV-1', version: 1, source: opts.revisionSource ?? 'drafter', artifactTxtS3Key: 'letter-revisions/CASE-1/v1/letter.txt', artifactPdfS3Key: 'letter-revisions/CASE-1/v1/letter.pdf' })) },
     draftJob: { findFirst: vi.fn(async () => null) },
-    physician: { findFirst: vi.fn(async () => null) },
+    physician: { findFirst: vi.fn(async () => physicianRow) },
     email: emailDelegate,
     payment: paymentDelegate,
     // Byte-binding delivery gate (#9 Fix 3 → #17 SSOT): default = no sign-off rows → gate is a no-op
@@ -185,12 +209,18 @@ function fakeS3(opts: { txt?: string; pdfBytes?: Uint8Array } = {}) {
   const txt = opts.txt ?? LETTER_TXT;
   const pdfBytes = opts.pdfBytes ?? new Uint8Array([0x25, 0x50, 0x44, 0x46]); // "%PDF"
   return {
-    send: vi.fn(async () => ({
-      Body: {
-        transformToString: async () => txt,
-        transformToByteArray: async () => pdfBytes,
-      },
-    })),
+    // Route by Key: a signature-image GET returns the PNG bytes (memo.pdf signature fetch); every
+    // other read returns the TXT (for transformToString) / configured pdfBytes (import PDF gate).
+    send: vi.fn(async (cmd: { input?: { Key?: string } }) => {
+      const key = cmd?.input?.Key ?? '';
+      const isSignature = /signature/i.test(key);
+      return {
+        Body: {
+          transformToString: async () => txt,
+          transformToByteArray: async () => (isSignature ? SIGNATURE_PNG : pdfBytes),
+        },
+      };
+    }),
   } as unknown as import('@aws-sdk/client-s3').S3Client;
 }
 
@@ -531,7 +561,7 @@ describe('GET /cases/:id/delivery/memo.pdf — self-contained memo PDF (E4)', ()
     // Mirrors the working letter-verify path: streaming raw PDF bytes through the API Lambda is
     // corrupted by API Gateway (serverless-http binary:false), which produced the "Failed to load
     // PDF document" blob. The route now returns { data: { url } } pointing straight at S3.
-    const { db } = makeDb({ claimType: 'supplemental' });
+    const { db } = makeDb({ claimType: 'supplemental', assignedPhysicianId: 'PHYS-1' });
     const s3 = fakeS3();
     const app = express();
     app.use(express.json());
@@ -560,13 +590,32 @@ describe('GET /cases/:id/delivery/memo.pdf — self-contained memo PDF (E4)', ()
     const body = putCall?.input?.Body as Buffer;
     expect(body.length).toBeGreaterThan(500);
     expect(body.subarray(0, 5).toString('utf-8')).toBe('%PDF-');
+    // E4 signature bug fix: the rendered memo embeds the physician signature image (an image
+    // XObject), never a literal "[SIGNATURE]".
+    const raw = body.toString('latin1');
+    expect(raw).toContain('/Subtype /Image');
   });
 
   it('404s with a precise reason when no memo applies (original claim, no denial)', async () => {
-    const { db } = makeDb({ claimType: 'initial' });
+    const { db } = makeDb({ claimType: 'initial', assignedPhysicianId: 'PHYS-1' });
     const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/delivery/memo.pdf');
     expect(res.status).toBe(404);
     expect(res.body.error.details.reason).toBe('no_memo');
+  });
+
+  // ── E4 signature bug fix (2026-06-14): the memo MUST carry the assigned physician's signature ────
+  it('409s when no physician is assigned (cannot resolve a signature) with a precise reason', async () => {
+    const { db } = makeDb({ claimType: 'supplemental', assignedPhysicianId: null });
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/delivery/memo.pdf');
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('no_assigned_physician');
+  });
+
+  it('409s when the assigned physician has NO signature image on file (never ships a blank memo)', async () => {
+    const { db } = makeDb({ claimType: 'supplemental', assignedPhysicianId: 'PHYS-1', physicianSignatureKey: '' });
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/delivery/memo.pdf');
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('signer_signature_missing');
   });
 
   it('409s before the letter is finalized (same delivery gate as the panel)', async () => {

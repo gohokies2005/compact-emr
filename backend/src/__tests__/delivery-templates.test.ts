@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildDeliveryEmail,
+  buildCoverMemoText,
   DELIVERY_EMAIL_SUBJECT,
   DELIVERY_FROM_ADDRESS,
   FRN_FOOTER,
 } from '../services/delivery-templates.js';
+import { KASKY_CREDENTIALS } from '../services/credential-block.js';
 
 // Chunk E2 (work-order 5a-bis2): the delivery email body order is greeting → intro → payment
 // instruction + Stripe link (paragraph-2 zone) → wording rationale → §VII excerpt LAST → questions
@@ -107,5 +109,76 @@ describe('buildDeliveryEmail (E2 body order)', () => {
   it('greets "there" when no first name is on file', () => {
     const { body } = buildDeliveryEmail({ veteranFirstName: null, excerptBlock: null, stripeLink: null });
     expect(body.startsWith('Hi there,')).toBe(true);
+  });
+});
+
+// ── E4 cover-memo bug fixes (2026-06-14): subject casing + prior-decision date placeholder ────────
+describe('buildCoverMemoText (E4 bug fixes)', () => {
+  const base = {
+    pathway: 'supplemental' as const,
+    veteranFullName: 'Armand Frank',
+    veteranLastName: 'Frank',
+    claimedCondition: 'osa',
+    signer: KASKY_CREDENTIALS,
+    letterDate: '2026-06-11',
+  };
+
+  it('SUBJECT CASING: the header subject is the properly-cased condition label, never the raw lowercase slug', () => {
+    const memo = buildCoverMemoText({ ...base, priorDecisionDate: '2026-01-15' });
+    // "osa" must render "Obstructive Sleep Apnea (OSA)" in the header, never "regarding osa".
+    expect(memo).toContain('Independent Medical Opinion regarding Obstructive Sleep Apnea (OSA)');
+    expect(memo).toContain('OSA');
+    expect(memo).not.toMatch(/regarding osa\b/);
+    // The mid-sentence BODY use is the LOWERCASE form (coverMemo.js formatConditionLowercase): it
+    // preserves an already-uppercase acronym but does NOT uppercase a lowercase slug — so the body
+    // reads "...claim for osa". The header-vs-body split is the canonical FRN convention; only the
+    // header was buggy (raw slug). This asserts the body is untouched by the header fix.
+    expect(memo).toMatch(/supplemental claim for osa\b/);
+  });
+
+  it('SUBJECT CASING: a properly-cased input acronym is preserved in BOTH header and body', () => {
+    const memo = buildCoverMemoText({ ...base, claimedCondition: 'OSA', priorDecisionDate: '2026-01-15' });
+    expect(memo).toContain('Independent Medical Opinion regarding Obstructive Sleep Apnea (OSA)');
+    // formatConditionLowercase preserves the all-caps acronym in the body too.
+    expect(memo).toMatch(/supplemental claim for OSA\b/);
+  });
+
+  it('NO unfilled [BRACKET] tokens ever appear (only the [SIGNATURE] render sentinel)', () => {
+    const memo = buildCoverMemoText({ ...base, priorDecisionDate: null });
+    expect(memo).not.toContain('[PRIOR_DECISION_DATE]');
+    const brackets = memo.match(/\[[A-Z0-9_]+\]/g) ?? [];
+    expect(brackets).toEqual(['[SIGNATURE]']);
+  });
+
+  it('PRIOR DATE present + valid: prints it nicely ("January 15, 2026")', () => {
+    const memo = buildCoverMemoText({ ...base, priorDecisionDate: '2026-01-15' });
+    expect(memo).toContain('the prior decision dated January 15, 2026');
+  });
+
+  it('PRIOR DATE missing (null): DROPS the date, references the prior decision vaguely, NO placeholder', () => {
+    const memo = buildCoverMemoText({ ...base, priorDecisionDate: null });
+    expect(memo).not.toContain('[PRIOR_DECISION_DATE]');
+    expect(memo).not.toMatch(/prior decision dated/);
+    // The supplemental block still references the prior decision, just without a date.
+    expect(memo).toContain('not of record at the time of the prior decision and reflects');
+  });
+
+  it('PRIOR DATE unreliable (non-ISO free text): treated as missing → vague phrasing, never printed', () => {
+    const memo = buildCoverMemoText({ ...base, priorDecisionDate: 'sometime last year' });
+    expect(memo).not.toContain('sometime last year');
+    expect(memo).not.toMatch(/prior decision dated/);
+    expect(memo).toContain('not of record at the time of the prior decision and reflects');
+  });
+
+  it('HLR pathway with no date references "the prior decision" plainly (no dangling "dated")', () => {
+    const memo = buildCoverMemoText({ ...base, pathway: 'hlr_request', priorDecisionDate: null });
+    expect(memo).not.toContain('[PRIOR_DECISION_DATE]');
+    expect(memo).toContain('Higher-Level Review of the prior decision.');
+    expect(memo).not.toMatch(/prior decision dated/);
+  });
+
+  it('HLR pathway with a valid date prints it', () => {
+    const memo = buildCoverMemoText({ ...base, pathway: 'hlr_request', priorDecisionDate: '2026-01-15' });
+    expect(memo).toContain('Higher-Level Review of the prior decision dated January 15, 2026.');
   });
 });

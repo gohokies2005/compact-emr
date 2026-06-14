@@ -521,7 +521,30 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       if (!memo.required || memo.text === null) {
         throw new HttpError(404, 'not_found', 'No cover memo applies to this case (original claim, no prior denial).', { reason: 'no_memo', caseId });
       }
-      const pdf = await renderMemoPdf(memo.text);
+
+      // SIGNATURE (E4 bug fix 2026-06-14): the memo embeds the ASSIGNED physician's signature PNG —
+      // never a literal "[SIGNATURE]". Resolve the assigned physician, require a signature key, fetch
+      // the PNG bytes from the PHI bucket, and hand them to renderMemoPdf (which embedPng's them where
+      // the placeholder sits). This mirrors the approve path's signature gate (letter.ts:614). If no
+      // signature is on file we 409 with a precise reason rather than shipping an unsigned memo.
+      if (c.assignedPhysicianId === null) {
+        throw new HttpError(409, 'conflict', 'Cannot render the cover memo: no physician is assigned to this case. Assign a signing physician, then retry.', { reason: 'no_assigned_physician', caseId });
+      }
+      const signer = await db.physician.findFirst({ where: { id: c.assignedPhysicianId } });
+      if (signer === null) {
+        throw new HttpError(409, 'conflict', 'Cannot render the cover memo: the assigned physician record was not found. Reassign the case to a current physician, then retry.', { reason: 'assigned_physician_not_found', caseId, physicianId: c.assignedPhysicianId });
+      }
+      const signatureKey = signer.signatureImageS3Key;
+      if (signatureKey === null || signatureKey.trim() === '') {
+        throw new HttpError(409, 'conflict', `Cannot render the cover memo: ${signer.fullName} has no signature image on file. An administrator must upload the physician's signature on the Physicians admin page, then retry.`, { reason: 'signer_signature_missing', caseId, physicianId: signer.id });
+      }
+      const sigObj = await s3().send(new GetObjectCommand({ Bucket: bucketName, Key: signatureKey }));
+      if (sigObj.Body === undefined) {
+        throw new HttpError(502, 'internal_error', 'The physician signature image could not be read.', { reason: 'signature_read_failed', caseId, key: signatureKey });
+      }
+      const signaturePng = await sigObj.Body.transformToByteArray();
+
+      const pdf = await renderMemoPdf(memo.text, { signaturePng });
       // Versioned key so the URL is scoped to the current letter version (matches the
       // letter-revisions/cover-memo naming convention) and never collides across cases.
       const current = await resolveCurrent(caseId, c.currentVersion);

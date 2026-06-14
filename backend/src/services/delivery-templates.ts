@@ -17,6 +17,7 @@
  */
 
 import type { SignerCredentials } from './credential-block.js';
+import { formatConditionLabel } from './condition-label.js';
 
 // ── Locked FRN footer (verbatim from app/services/gmail.js FOOTER) ──────────────────────────────
 export const FRN_FOOTER = [
@@ -183,21 +184,43 @@ function closingParagraphs(skipNieves = false): string[] {
   return lines;
 }
 
+/**
+ * A reliably-formatted long-format prior-decision date, or null. OWNER DIRECTIVE (2026-06-14): the
+ * memo must NEVER emit a literal "[PRIOR_DECISION_DATE]" token. When no reliable date is on file we
+ * DROP the date and reference the prior decision vaguely instead (see priorDecisionClause). A date
+ * is "reliable" only when it parses to an ISO yyyy-mm-dd (the shape Case.priorDecisionDate produces
+ * via toISOString().slice(0,10)); formatDateLong passes any other string through verbatim, which we
+ * deliberately do NOT trust as a date to print.
+ */
+function reliablePriorDate(input: BuildCoverMemoInput): string | null {
+  const raw = input.priorDecisionDate;
+  if (raw === null || raw === undefined || String(raw).trim() === '') return null;
+  if (!/^\d{4}-\d{2}-\d{2}/.test(String(raw))) return null;
+  const formatted = formatDateLong(raw);
+  return formatted.trim() === '' ? null : formatted;
+}
+
 function bodyForPathway(input: BuildCoverMemoInput): string[] {
   const v = honorificLast(input);
   const cond = conditionLowercase(input.claimedCondition);
-  const priorDate = formatDateLong(input.priorDecisionDate) || '[PRIOR_DECISION_DATE]';
+  const priorDate = reliablePriorDate(input);
   const p = PRONOUNS[input.salutation ?? 'Mr.'] ?? PRONOUNS['Mr.'];
 
   switch (input.pathway) {
-    case 'supplemental':
+    case 'supplemental': {
+      // With a reliable date: "...at the time of the prior decision dated June 14, 2026 and...".
+      // Without: drop the date, reference the prior decision vaguely (no bracket, no placeholder).
+      const supplementalDecisionClause = priorDate !== null
+        ? `It was not of record at the time of the prior decision dated ${priorDate} and reflects an independent medical analysis based on full record review.`
+        : 'It was not of record at the time of the prior decision and reflects an independent medical analysis based on full record review.';
       return [
-        `The attached Independent Medical Opinion is submitted in support of ${v}'s supplemental claim for ${cond}. The opinion is offered as new and relevant evidence under 38 CFR 3.2501 and 38 USC 5108. It was not of record at the time of the prior decision dated ${priorDate} and reflects an independent medical analysis based on full record review.`,
+        `The attached Independent Medical Opinion is submitted in support of ${v}'s supplemental claim for ${cond}. The opinion is offered as new and relevant evidence under 38 CFR 3.2501 and 38 USC 5108. ${supplementalDecisionClause}`,
         '',
         'I respectfully request that the rater review the attached opinion as new evidence on the merits of the medical analysis it contains.',
         '',
         ...closingParagraphs(),
       ];
+    }
     case 'tdiu':
       return [
         `The attached Independent Medical Opinion is submitted in support of ${v}'s claim for Total Disability based on Individual Unemployability under 38 CFR 4.16. The opinion describes the functional effects of ${p.subject} service-connected disabilities on ${p.subject} capacity for substantially gainful employment.`,
@@ -208,14 +231,18 @@ function bodyForPathway(input: BuildCoverMemoInput): string[] {
         '',
         ...closingParagraphs(),
       ];
-    case 'hlr_request':
+    case 'hlr_request': {
+      const hlrDecisionRef = priorDate !== null
+        ? `the prior decision dated ${priorDate}`
+        : 'the prior decision';
       return [
-        `The attached Independent Medical Opinion is part of the record for ${v}'s request for Higher-Level Review of the prior decision dated ${priorDate}.`,
+        `The attached Independent Medical Opinion is part of the record for ${v}'s request for Higher-Level Review of ${hlrDecisionRef}.`,
         '',
         'I respectfully request that the senior reviewer consider the attached opinion as evidence on the merits of the medical analysis it contains, consistent with the duty-to-assist provisions of 38 CFR 3.159.',
         '',
         ...closingParagraphs(),
       ];
+    }
     case 'board_appeal':
       return [
         `The attached Independent Medical Opinion is submitted for ${v}'s appeal regarding ${cond}. The opinion is offered under the probative-value standards described in Nieves-Rodriguez v. Peake, 22 Vet. App. 295 (2008): factual accuracy, full articulation, and sound reasoning.`,
@@ -249,7 +276,10 @@ export function buildCoverMemoText(input: BuildCoverMemoInput): string {
   const letterDateLong = input.letterDate
     ? formatDateLong(input.letterDate)
     : formatDateLong(new Date().toISOString().slice(0, 10));
-  const conditionTitle = input.claimedCondition.trim();
+  // Subject line is HEADER context → properly-cased label ("OSA", "Obstructive Sleep Apnea (OSA)"),
+  // never the raw lowercased slug ("osa"). Mirrors coverMemo.js formatConditionTitleCase + the EMR
+  // UI's formatConditionLabel. (E4 bug fix 2026-06-14: header was emitting the raw lowercased value.)
+  const conditionTitle = formatConditionLabel(input.claimedCondition) || input.claimedCondition.trim();
   const header = [
     'PHYSICIAN COVER MEMORANDUM',
     '',

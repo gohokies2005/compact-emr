@@ -171,6 +171,9 @@ export class ApiStack extends Stack {
         // rebuild). LIVE SMOKE owed: regenerate a Blue-Button case's pack + confirm the grant/AHI/med pages
         // + cover why-lines appear; physician review is the backstop, revert is one context flip.
         DOCTOR_PACK_GROUNDED_PAGES: (this.node.tryGetContext('doctor_pack_grounded_pages') as string | undefined) ?? 'on',
+        // Guided Revision (physician highlight-the-passage broader letter edit, Opus 4.8) — ON (Ryan
+        // 2026-06-14: "guided revision looks good, but not available"). Context-overridable to disable.
+        GUIDED_REVISION_ENABLED: (this.node.tryGetContext('guided_revision_enabled') as string | undefined) ?? 'true',
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue

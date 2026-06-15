@@ -142,7 +142,9 @@ export function makeSurgicalProposer(apiKey: string): SurgicalProposer {
     const resp = await anthropic.messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      temperature: 0, // low temperature — deterministic, medico-legal edits
+      // NOTE: Opus 4.8 (claude-opus-4-8) DEPRECATED the `temperature` param — sending it returns a
+      // 400 invalid_request_error and the edit fails ("could not be done"). Determinism here comes
+      // from forced tool_choice + the strict system prompt, not sampling temperature. Do NOT re-add.
       system: isGuided ? GUIDED_REVISION_SYSTEM_PROMPT : SYSTEM_PROMPT,
       tools: [PROPOSE_TOOL],
       tool_choice: { type: 'tool', name: 'propose_edit' },

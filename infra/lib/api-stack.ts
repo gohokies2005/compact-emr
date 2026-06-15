@@ -170,11 +170,13 @@ export class ApiStack extends Stack {
         // LLM, no per-case cost. The chart-extract event CLASSIFIER (workers-stack) reads the SAME flag
         // but stays 'false' there (it's log-only / not yet fed into viability — no point paying for it).
         // Revert = default→'false' + deploy (read at request time; no image rebuild).
-        // TEMPORARILY 'false' 2026-06-15 (Ryan, Pichette): the direct fold manufactured a TERA->OSA
-        // "directly supports" read + a FALSE burn-pit presumptive redirect (OSA isn't a burn-pit
-        // presumptive — only the condition-keyed _PRESUMPTIVE map is authoritative). Back on after the
-        // one-brain fix (exposure events abstain; presumptive gated on the condition, not the exposure class).
-        DIRECT_SC_VIABILITY_ENABLED: (this.node.tryGetContext('direct_sc_viability_enabled') as string | undefined) ?? 'false',
+        // Was TEMPORARILY 'false' 2026-06-15 (Ryan, Pichette): the direct fold manufactured a TERA->OSA
+        // "directly supports" read + a FALSE burn-pit presumptive redirect. BACK ON 2026-06-15 after the
+        // one-brain fix shipped (re-vendor FRN 4acf1e9: exposure events ABSTAIN on an unknown pair +
+        // killed the event-class presumptive redirect — presumptive is gated on the condition-keyed
+        // _PRESUMPTIVE map, not the exposure class). Verified through the EMR vendored copy: Pichette
+        // (OSA + Tinnitus SC + burn-pit + TERA) = weak, no anchor, no presumptive redirect.
+        DIRECT_SC_VIABILITY_ENABLED: (this.node.tryGetContext('direct_sc_viability_enabled') as string | undefined) ?? 'true',
         // Doctor-pack grounded source pages (PR-1..PR-4, 2026-06-13): map every extracted chart fact
         // back to the EXACT source page that grounded it and pull those pages into the physician pack
         // (the rating-grant page, the sleep-study AHI, the med list) — protected in the page budget

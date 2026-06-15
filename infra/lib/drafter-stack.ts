@@ -191,6 +191,13 @@ export class DrafterStack extends Stack {
         // case parks for the RN, never mis-drafts. Activated 2026-06-06 per the drafter33 bundle.
         // Revert: set to 'false' + redeploy.
         DRAFTER_GATE2_ENABLED: 'true',
+        // ANCHOR_MECHANISM_GATE (Ryan 2026-06-15): mechanism-table-driven anchor ranking for LIVE
+        // letters — drops M0 sympathetic anchors (tinnitus→OSA …), mechanism dominates the ranking,
+        // and ACTIVATES the framingGate tier-floor guardrail (never reach to a lower secondary tier;
+        // the LLM may still choose within the top tier). Complements the DOMINANT-THEORY DISCIPLINE
+        // (claude.js) prompt rule. Validated: Flynn-guard 9/9 + tier-floor 8/8 (incl. denied-set F1).
+        // Reverts to byte-identical pre-gate ranking by removing this line + redeploy (drafter idle).
+        ANCHOR_MECHANISM_GATE: 'true',
       },
       secrets: {
         // The wrapper reads these from env at startup; AWS injects the actual secret values

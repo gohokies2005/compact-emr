@@ -163,12 +163,14 @@ export class ApiStack extends Stack {
         // deploy (the backend reads it at request time; no image rebuild).
         EMR_CASE_VIABILITY_ENABLED: (this.node.tryGetContext('case_viability_enabled') as string | undefined) ?? 'true',
         // DIRECT-SC viability axis (2026-06-14): folds the direct (in-service-event) axis into the
-        // caseViability resolve+rank, emitting caseViability v2 (two-table provenance). Ships DARK
-        // (cdk.json context `direct_sc_viability_enabled`, default 'false'); ORTHOGONAL to
+        // caseViability resolve+rank, emitting caseViability v2 (two-table provenance). ORTHOGONAL to
         // EMR_CASE_VIABILITY_ENABLED (which gates the whole stamp). When off, deriveCaseViability is
-        // byte-identical v1. SAME flag the chart-extract event classifier reads. Revert = context→
-        // 'false' + deploy (read at request time; no image rebuild).
-        DIRECT_SC_VIABILITY_ENABLED: (this.node.tryGetContext('direct_sc_viability_enabled') as string | undefined) ?? 'false',
+        // byte-identical v1. LIVE 2026-06-14 (Ryan, eyeball): default graduated 'false'→'true' on the
+        // API ONLY — the panel's direct read is DETERMINISTIC (eventCanon over Case intake fields), no
+        // LLM, no per-case cost. The chart-extract event CLASSIFIER (workers-stack) reads the SAME flag
+        // but stays 'false' there (it's log-only / not yet fed into viability — no point paying for it).
+        // Revert = default→'false' + deploy (read at request time; no image rebuild).
+        DIRECT_SC_VIABILITY_ENABLED: (this.node.tryGetContext('direct_sc_viability_enabled') as string | undefined) ?? 'true',
         // Doctor-pack grounded source pages (PR-1..PR-4, 2026-06-13): map every extracted chart fact
         // back to the EXACT source page that grounded it and pull those pages into the physician pack
         // (the rating-grant page, the sleep-study AHI, the med list) — protected in the page budget

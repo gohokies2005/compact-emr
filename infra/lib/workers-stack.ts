@@ -241,12 +241,13 @@ export class WorkersStack extends Stack {
         // write-hardening that closed the transaction-abort class. 'on' = the complete-read path that
         // reads every page; revert to 'off' only to fall back to the legacy header-windower.
         CHART_EXTRACT_FULLREAD: 'on',
-        // DIRECT-SC in-service EVENT classifier (2026-06-14): same flag the EMR direct-SC viability
-        // axis reads. Ships DARK (cdk.json `direct_sc_viability_enabled`, default 'false'). When off,
-        // event-classifier.eventClassifierEnabled() is false → the classifier block in handler.ts is a
-        // no-op and chart-extract is byte-identical to today. When on, one extra Sonnet call LOGS the
-        // grounded events (no write endpoint yet). Revert = context→'false' + deploy.
-        DIRECT_SC_VIABILITY_ENABLED: (this.node.tryGetContext('direct_sc_viability_enabled') as string | undefined) ?? 'false',
+        // DIRECT-SC in-service EVENT classifier. LIVE 2026-06-15 (Ryan, monitor-on-real-cases): default
+        // graduated 'false'→'true' so the AI event classifier RUNS on real chart extractions and LOGS its
+        // grounded events. It is still LOG-ONLY (no write endpoint yet) — it does NOT feed the viability
+        // panel or any letter, so it cannot change output; it's on for MONITORING its detection quality on
+        // real charts before we wire it into the panel. Cost: one extra Sonnet 4.6 call per chart extract.
+        // Revert = default→'false' (or context override) + deploy.
+        DIRECT_SC_VIABILITY_ENABLED: (this.node.tryGetContext('direct_sc_viability_enabled') as string | undefined) ?? 'true',
       },
       bundling: {
         // The event classifier loads the vendored eventCanon.cjs at RUNTIME by __dirname-relative path

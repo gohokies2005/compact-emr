@@ -157,10 +157,11 @@ export class ApiStack extends Stack {
         // The draft-readiness DOOR (DRAFT_READINESS_GATE) stays separate + off until the popup ships.
         CHART_AUTOFILL: (this.node.tryGetContext('chart_autofill') as string | undefined) ?? 'on',
         // P4 anchor-viability surface (caseViability v1) — bundle stamp + RN CaseViabilityCard.
-        // Ships DARK: cdk.json context `case_viability_enabled` (default 'false'). Activation
-        // sequence (build plan §3.5): staging ON → smoke + Playwright green → flip prod. Revert =
-        // context→'false' + deploy (the backend reads it at request time; no image rebuild).
-        EMR_CASE_VIABILITY_ENABLED: (this.node.tryGetContext('case_viability_enabled') as string | undefined) ?? 'false',
+        // LIVE 2026-06-14 (Ryan): default graduated 'false'→'true' so the RN-facing viability panel
+        // is durably ON (a --context flip would silently revert on the next `cdk deploy --all`). The
+        // panel is READ-ONLY advisory; revert = set default back to 'false' (or context override) +
+        // deploy (the backend reads it at request time; no image rebuild).
+        EMR_CASE_VIABILITY_ENABLED: (this.node.tryGetContext('case_viability_enabled') as string | undefined) ?? 'true',
         // DIRECT-SC viability axis (2026-06-14): folds the direct (in-service-event) axis into the
         // caseViability resolve+rank, emitting caseViability v2 (two-table provenance). Ships DARK
         // (cdk.json context `direct_sc_viability_enabled`, default 'false'); ORTHOGONAL to

@@ -123,11 +123,17 @@ async function buildInServiceEvents(db: AppDb, caseId: string): Promise<InServic
   }
 }
 
-/** The persisted anchor value for a band: redirect/abstain never commit an anchor. */
+/** The persisted anchor value for a band: redirect/abstain never commit an anchor.
+ *  QA F2: for a DIRECT anchor, persist the canonical event token (event_canonical), NOT the
+ *  humanized prose label (e.g. "in-service hazardous noise exposure") — the column is keyed off a
+ *  machine value, and a direct anchor is an in-service EVENT, not an SC condition. Secondary anchors
+ *  keep upstream_canonical (the SC condition). */
 function anchorForBand(cv: CaseViability): string | null {
-  return cv.viability === 'redirect' || cv.viability === 'abstain'
-    ? null
-    : cv.best_anchor?.upstream_canonical ?? null;
+  if (cv.viability === 'redirect' || cv.viability === 'abstain') return null;
+  const a = cv.best_anchor;
+  if (!a) return null;
+  if (a.anchor_axis === 'direct') return a.event_canonical ?? null;
+  return a.upstream_canonical ?? null;
 }
 
 /**

@@ -231,7 +231,9 @@ export function eventClassifierEnabled(): boolean {
 }
 
 const EVENT_CLASSIFIER_MODEL = process.env.EVENT_CLASSIFIER_MODEL ?? 'claude-sonnet-4-6';
-const EVENT_CLASSIFIER_MAX_TOKENS = 1024;
+// QA AI-SME: 1024 could silently truncate the tool-call array on a multi-event chart (stop_reason
+// max_tokens → ABSTAIN, events lost). 2048 gives ample headroom for ≤16 short {event, span} entries.
+const EVENT_CLASSIFIER_MAX_TOKENS = 2048;
 
 /**
  * Run the conceded-first / LLM-residual flow over residual STR text (text NOT already covered by the

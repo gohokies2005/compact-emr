@@ -161,6 +161,13 @@ export class ApiStack extends Stack {
         // sequence (build plan §3.5): staging ON → smoke + Playwright green → flip prod. Revert =
         // context→'false' + deploy (the backend reads it at request time; no image rebuild).
         EMR_CASE_VIABILITY_ENABLED: (this.node.tryGetContext('case_viability_enabled') as string | undefined) ?? 'false',
+        // DIRECT-SC viability axis (2026-06-14): folds the direct (in-service-event) axis into the
+        // caseViability resolve+rank, emitting caseViability v2 (two-table provenance). Ships DARK
+        // (cdk.json context `direct_sc_viability_enabled`, default 'false'); ORTHOGONAL to
+        // EMR_CASE_VIABILITY_ENABLED (which gates the whole stamp). When off, deriveCaseViability is
+        // byte-identical v1. SAME flag the chart-extract event classifier reads. Revert = context→
+        // 'false' + deploy (read at request time; no image rebuild).
+        DIRECT_SC_VIABILITY_ENABLED: (this.node.tryGetContext('direct_sc_viability_enabled') as string | undefined) ?? 'false',
         // Doctor-pack grounded source pages (PR-1..PR-4, 2026-06-13): map every extracted chart fact
         // back to the EXACT source page that grounded it and pull those pages into the physician pack
         // (the rating-grant page, the sleep-study AHI, the med list) — protected in the page budget
@@ -239,6 +246,10 @@ export class ApiStack extends Stack {
               // P4 anchor-viability: the vendored CJS resolver + table are NOT bundled (the
               // resolver reads its table by __dirname-relative path) — copy them next to the
               // handler; case-viability.ts loads <task>/anchor-vendor at runtime (advisory pattern).
+              // The whole vendor tree is copied, so the DIRECT-SC additions (directSc.cjs +
+              // sc_direct_pairs.json) AND eventCanon.cjs (the event floor) ride along automatically —
+              // anchorMechanism.cjs lazy-requires ./directSc.cjs and case-viability.ts loads
+              // ./eventCanon.cjs from this same dir on the gated direct-SC path.
               `node ${q(helper)} ${q(inputDir + '/backend/src/vendor')} ${q(outputDir + '/anchor-vendor')}`,
             ];
           },

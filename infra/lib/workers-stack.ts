@@ -241,6 +241,29 @@ export class WorkersStack extends Stack {
         // write-hardening that closed the transaction-abort class. 'on' = the complete-read path that
         // reads every page; revert to 'off' only to fall back to the legacy header-windower.
         CHART_EXTRACT_FULLREAD: 'on',
+        // DIRECT-SC in-service EVENT classifier (2026-06-14): same flag the EMR direct-SC viability
+        // axis reads. Ships DARK (cdk.json `direct_sc_viability_enabled`, default 'false'). When off,
+        // event-classifier.eventClassifierEnabled() is false → the classifier block in handler.ts is a
+        // no-op and chart-extract is byte-identical to today. When on, one extra Sonnet call LOGS the
+        // grounded events (no write endpoint yet). Revert = context→'false' + deploy.
+        DIRECT_SC_VIABILITY_ENABLED: (this.node.tryGetContext('direct_sc_viability_enabled') as string | undefined) ?? 'false',
+      },
+      bundling: {
+        // The event classifier loads the vendored eventCanon.cjs at RUNTIME by __dirname-relative path
+        // (event-classifier.ts loadEventCanon → event-canon-vendor), so it is NOT esbuild-bundled —
+        // copy the vendor tree next to the handler, mirroring the api-stack anchor-vendor copy. Only
+        // exercised on the dark path, but the copy must exist before the flag can flip.
+        commandHooks: {
+          beforeBundling: () => [],
+          beforeInstall: () => [],
+          afterBundling: (inputDir: string, outputDir: string) => {
+            const helper = path.join(__dirname, '..', 'scripts', 'bundle-copy.cjs');
+            const q = (s: string) => `"${s}"`;
+            return [
+              `node ${q(helper)} ${q(inputDir + '/backend/src/vendor')} ${q(outputDir + '/event-canon-vendor')}`,
+            ];
+          },
+        },
       },
       logRetention: logs.RetentionDays.ONE_MONTH,
     });

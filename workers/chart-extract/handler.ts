@@ -13,6 +13,8 @@
 
 import { makeChartExtractor } from '../../backend/src/services/chart-extract-llm.js';
 import type { BundleDocument } from '../../backend/src/services/chart-extractor.js';
+import { classifyEvents, eventClassifierEnabled } from '../../backend/src/services/event-classifier.js';
+import Anthropic from '@anthropic-ai/sdk';
 
 interface SqsRecord { body: string; attributes?: { ApproximateReceiveCount?: string } }
 interface SqsEvent { Records?: SqsRecord[] }
@@ -126,6 +128,24 @@ export async function handler(event: SqsEvent): Promise<void> {
       if (result.truncatedWindows > 0) {
         console.warn(JSON.stringify({ msg: 'chart_extract_INCOMPLETE_truncation', caseId: msg.caseId, runId: msg.runId, truncatedWindows: result.truncatedWindows }));
       }
+      // ── DARK: LLM in-service EVENT classifier (additive recall layer) ──────────────────────────
+      // Present-but-dark behind DIRECT_SC_VIABILITY_ENABLED (same flag that gates the EMR direct-SC
+      // path; default OFF). When off this block is a no-op and NOTHING about chart-extract changes.
+      // When on, it runs ONE extra Sonnet call over the chart text and LOGS the grounded events — there
+      // is no write endpoint for events yet, so it cannot alter chart output. Best-effort: any failure
+      // is swallowed (the chart rows already committed above must never be put at risk by this layer).
+      if (eventClassifierEnabled()) {
+        try {
+          const chartText = documents
+            .flatMap((d) => d.pages.map((p) => `[p.${p.pageNumber}] ${p.text}`))
+            .join('\n');
+          const events = await classifyEvents({ chartText, anthropic: new Anthropic({ apiKey: key }) });
+          console.log(JSON.stringify({ msg: 'event_classifier_done', caseId: msg.caseId, runId: msg.runId, events: events.length, eventTypes: events.map((e) => e.event_canonical) }));
+        } catch (err) {
+          console.warn(JSON.stringify({ msg: 'event_classifier_failed', caseId: msg.caseId, runId: msg.runId, error: err instanceof Error ? err.message : String(err) }));
+        }
+      }
+
       // Consolidated screening-summary Documents file (best-effort, log-only — the chart rows already
       // committed above, so a summary failure must never fail this callback).
       if (result.screenings && result.screenings.length > 0) {

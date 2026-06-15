@@ -4,12 +4,14 @@
 // (2) the §5 band table verified live against the canonical resolver during planning; (3) the
 // Hatfield golden (the false-halt class cannot recur); (4) determinism; (5) fail-open shapes.
 // PINNED_TABLE_HASH is pin-literal site 4 of 4 (see scripts/vendor-anchor-table.mjs header).
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { deriveCaseViability, type CaseViability } from '../services/case-viability.js';
+import { deriveCaseViability, type CaseViability, type InServiceEvent } from '../services/case-viability.js';
 
-const PINNED_TABLE_HASH = '1f095fb66e851ec10f9babe6e7fa0a5956c4b6eb11dadc3733bc8fcf25a868e3';
+// Rotated 2026-06-14 (DIRECT-SC re-vendor): secondary table re-curated to 1032 rows; bands unchanged
+// with the direct axis OFF (the default this v1 producer runs under). See anchor-table-pin.test.ts.
+const PINNED_TABLE_HASH = 'c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb';
 
 const schemaUrl = new URL('../config/caseViability.v1.schema.json', import.meta.url);
 const schemaBytes = readFileSync(schemaUrl);
@@ -109,7 +111,10 @@ describe('deriveCaseViability — §5 golden bands (schema-validated)', () => {
     expect(out.best_anchor?.M_eff).toBe(4);
     expect(out.best_anchor?.tier).toBe('blessed');
     expect(out.best_anchor?.basis).toBe('3.310a'); // NO parens (G4)
-    expect(out.best_anchor?.E).toBeNull(); // null = not-yet-scored, never 0
+    // E (evidence score) is no longer emitted by the resolver (DIRECT-SC re-vendor 2026-06-14): the
+    // FRN engine dropped the always-null E field. The EMR v1 schema makes E OPTIONAL (removed from
+    // best_anchor.required) so both an old object (E:null) and the current shape (E absent) validate.
+    expect(out.best_anchor?.E).toBeUndefined();
     expect(out.confidence).toBe('high');
     expect(out.mode).toBe('info_light');
     expect(out.table_content_hash).toBe(PINNED_TABLE_HASH);
@@ -218,5 +223,71 @@ describe('deriveCaseViability — §5 golden bands (schema-validated)', () => {
   it('derivedAt is OPTIONAL in the contract: the route-stamped shape ALSO validates (G3 — website omits, EMR adds)', () => {
     const out = deriveCaseViability('Obstructive sleep apnea', anchors('PTSD'));
     expectSchemaValid({ ...out, derivedAt: '2026-06-10T00:00:00.000Z' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DIRECT-SC AXIS (gated, DARK). The flag toggles the v1 secondary-only engine ↔ the v2 two-axis
+// fold. OFF must be byte-identical to v1; ON must emit v2 (axis + two-table provenance) and validate
+// against the vendored v2 schema. Reuses the generic walker against the v2 schema.
+// ---------------------------------------------------------------------------
+const v2SchemaUrl = new URL('../config/caseViability.v2.schema.json', import.meta.url);
+const v2Schema = JSON.parse(readFileSync(v2SchemaUrl).toString('utf8'));
+function expectV2SchemaValid(obj: CaseViability): void {
+  expect(validate(v2Schema, JSON.parse(JSON.stringify(obj)), '$', [])).toEqual([]);
+}
+
+describe('deriveCaseViability — DIRECT-SC axis flag (ships DARK)', () => {
+  afterEach(() => { delete process.env['DIRECT_SC_VIABILITY_ENABLED']; });
+
+  it('OFF (unset): byte-identical to v1 — version 1, no axis/tables, deep-equal to the no-3rd-arg call', () => {
+    delete process.env['DIRECT_SC_VIABILITY_ENABLED'];
+    const out = deriveCaseViability('Obstructive sleep apnea', anchors('PTSD'));
+    expect(out.version).toBe(1);
+    expect(out).not.toHaveProperty('axis');
+    expect(out).not.toHaveProperty('tables');
+    // A passed event array is IGNORED on the dark path (no setter call, no chartFacts).
+    const events: InServiceEvent[] = [{ event_canonical: 'criterion_a_trauma', evidence_span: 'IED blast' }];
+    expect(deriveCaseViability('Obstructive sleep apnea', anchors('PTSD'), events)).toEqual(out);
+  });
+
+  it("only the literal 'true' enables (any other value = dark v1)", () => {
+    process.env['DIRECT_SC_VIABILITY_ENABLED'] = 'on';
+    expect(deriveCaseViability('Obstructive sleep apnea', anchors('PTSD')).version).toBe(1);
+    process.env['DIRECT_SC_VIABILITY_ENABLED'] = 'true';
+    expect(deriveCaseViability('Obstructive sleep apnea', anchors('PTSD')).version).toBe(2);
+  });
+
+  it('ON: emits v2 (axis + two-table provenance) and validates against the v2 schema; secondary anchor still wins for OSA+PTSD', () => {
+    process.env['DIRECT_SC_VIABILITY_ENABLED'] = 'true';
+    const events: InServiceEvent[] = [{ event_canonical: 'criterion_a_trauma', evidence_span: 'IED blast in Iraq' }];
+    const out = deriveCaseViability('Obstructive sleep apnea', anchors('PTSD'), events);
+    expect(out.version).toBe(2);
+    expect(out.axis).toBe('secondary'); // the granted-PTSD secondary blessed anchor outranks the direct event
+    expect(out.best_anchor?.anchor_axis).toBe('secondary');
+    expect(out.tables?.secondary.content_hash).toBe(PINNED_TABLE_HASH);
+    expect(out.tables?.direct.content_hash).toBe('fc828fe33ed370beecaa00875117b62acd1bc2ae07ac304579bbf4db072b2bd9');
+    expectV2SchemaValid(out);
+  });
+
+  it('ON with NO granted SC but a direct event: the DIRECT axis carries (anchor_axis direct, event_canonical present), v2-valid', () => {
+    process.env['DIRECT_SC_VIABILITY_ENABLED'] = 'true';
+    // Tinnitus is a classic direct claim off in-service acoustic noise; no granted secondary anchor.
+    const events: InServiceEvent[] = [{ event_canonical: 'mos_acoustic_noise', evidence_span: 'no hearing protection on the flight line' }];
+    const out = deriveCaseViability('Tinnitus', [], events);
+    expect(out.version).toBe(2);
+    if (out.best_anchor) {
+      // When a direct anchor wins, it carries the direct discriminators.
+      expect(out.best_anchor.anchor_axis).toBe('direct');
+      expect(typeof out.best_anchor.event_canonical).toBe('string');
+    }
+    expectV2SchemaValid(out);
+  });
+
+  it('ON with empty events: still v2, no throw, v2-valid (fold runs with zero direct candidates)', () => {
+    process.env['DIRECT_SC_VIABILITY_ENABLED'] = 'true';
+    const out = deriveCaseViability('Obstructive sleep apnea', anchors('PTSD'), []);
+    expect(out.version).toBe(2);
+    expectV2SchemaValid(out);
   });
 });

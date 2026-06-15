@@ -2,10 +2,16 @@
 // persist guard, the fail-open paths, derivedAt route-stamping, and the EMR_CASE_VIABILITY_ENABLED
 // flag helper. Mirrors case-framing-stamp.test.ts — a bug here silently overwrites an RN override
 // or kills a draft on a vanished row.
-import { afterEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import { caseViabilityEnabled, deriveCaseViabilityForCase, refreshDerivedViability, stampCaseViability } from '../services/case-viability-stamp.js';
 import type { DrafterBundle } from '../services/drafter-bundle.js';
 import type { AppDb } from '../services/db-types.js';
+
+// File-scoped guard: the DIRECT-SC flag is process-global; a leak from one block would flip another
+// block's expected v1 output to v2. Reset it BEFORE and AFTER every test so every block starts clean
+// regardless of registration/run order (the legacy v1 blocks must never see a stale 'true').
+beforeEach(() => { delete process.env['DIRECT_SC_VIABILITY_ENABLED']; });
+afterEach(() => { delete process.env['DIRECT_SC_VIABILITY_ENABLED']; });
 
 interface UpdateCall { where: { id: string }; data: Record<string, unknown> }
 
@@ -16,10 +22,12 @@ interface CaseRowFixture {
   framingChoice: string | null;
   upstreamScCondition: string | null;
   veteranStatement: string | null;
+  // DIRECT-SC axis event-floor fields (only read on the gated path).
+  inServiceEvent?: string | null;
   caseViabilityBand: string | null;
   caseViabilityAnchor: string | null;
   viabilityStampSource: string | null;
-  veteran: { scConditions: Array<{ condition: string; ratingPct: number | null; status: string }> } | null;
+  veteran: { scConditions: Array<{ condition: string; ratingPct: number | null; status: string }>; teraConceded?: string | null } | null;
 }
 
 function fakeDb(row: CaseRowFixture | null): { db: AppDb; updates: UpdateCall[] } {
@@ -97,6 +105,33 @@ describe('deriveCaseViabilityForCase (the shared live derivation, G10)', () => {
     const cv = await deriveCaseViabilityForCase(db, 'case-1');
     expect(cv?.viability).toBe('weak'); // no granted anchor — pending PTSD never ranks
     expect(cv?.best_anchor).toBeNull();
+  });
+});
+
+describe('deriveCaseViabilityForCase — DIRECT-SC axis (gated, builds the event floor from the row)', () => {
+  afterEach(() => { delete process.env['DIRECT_SC_VIABILITY_ENABLED']; });
+
+  it('flag OFF: version 1, no events query consulted (byte-identical to today)', async () => {
+    delete process.env['DIRECT_SC_VIABILITY_ENABLED'];
+    const { db } = fakeDb(osaRow({ inServiceEvent: 'IED blast, watched my friend die' }));
+    const cv = await deriveCaseViabilityForCase(db, 'case-1');
+    expect(cv?.version).toBe(1);
+    expect(cv).not.toHaveProperty('axis');
+  });
+
+  it('flag ON: builds in-service events from inServiceEvent free text + teraConceded → v2 two-axis output', async () => {
+    process.env['DIRECT_SC_VIABILITY_ENABLED'] = 'true';
+    const { db } = fakeDb(osaRow({
+      // Direct claim shape: a lay in-service event + a TERA concession, NO granted secondary anchor.
+      claimedCondition: 'Tinnitus',
+      inServiceEvent: 'ears rang for days after the range, no hearing protection on the flight line',
+      veteran: { scConditions: [], teraConceded: 'yes' },
+    }));
+    const cv = await deriveCaseViabilityForCase(db, 'case-1');
+    expect(cv?.version).toBe(2);
+    expect(cv?.tables?.direct.content_hash).toBe('fc828fe33ed370beecaa00875117b62acd1bc2ae07ac304579bbf4db072b2bd9');
+    // The acoustic-noise event is the direct floor for a tinnitus claim → a direct anchor carries.
+    if (cv?.best_anchor) expect(cv.best_anchor.anchor_axis).toBe('direct');
   });
 });
 

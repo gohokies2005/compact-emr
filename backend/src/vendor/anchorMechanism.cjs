@@ -26,14 +26,58 @@ const fs = require('fs');
 const path = require('path');
 
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
-const ARTIFACT_PATH = path.join(__dirname, 'anchor_mechanism_pairs.json'); // VENDORED REWRITE 1/2 (scripts/vendor-anchor-table.mjs): table sits beside the resolver
+const ARTIFACT_PATH = path.join(__dirname, 'anchor_mechanism_pairs.json'); // VENDORED REWRITE 1/3 (scripts/vendor-anchor-table.mjs): table sits beside the resolver
 
 // Canonicalize via the PURE conditionCanon module (NOT framingGate) so this
 // module's require-graph stays free of better-sqlite3 / llm-client / the DB —
 // the Ask-Aegis Lambda vendors anchorMechanism + conditionCanon + the table
 // only. conditionCanon re-exports the SAME canonicalizeCondition / isCanonicalLabel
 // the generator used, so table keys still line up. (Task f keystone, 2026-06-10.)
-const conditionCanon = require('./conditionCanon.cjs'); // VENDORED REWRITE 2/2 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend
+const conditionCanon = require('./conditionCanon.cjs'); // VENDORED REWRITE 2/3 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend
+
+// ── DIRECT-SC axis fold (gated; dark by default) ─────────────────────────────
+// When DIRECT_SC_AXIS_ENABLED==='true', assessClaimViability ALSO folds the direct
+// axis (directSc, keyed on eventCanon in-service events passed via
+// chartFactsPresent.in_service_events) into the SAME ranked list, and emits the
+// caseViability v2 shape (axis + two-table provenance + best_anchor.anchor_axis).
+// When unset/false, the function is byte-identical to the v1 secondary-only engine
+// — zero direct require, zero v2 fields. Read at call-time so tests/flips toggle it.
+// Enablement: Node (drafter/EMR Lambda) reads process.env; the Cloudflare Worker has NO process.env,
+// so it calls setDirectAxisEnabled(env.<flag>==='true') per request — the override wins when set.
+// process access is guarded so the vendored worker copy never ReferenceErrors on `process`.
+let _directAxisOverride = null;
+function setDirectAxisEnabled(on) { _directAxisOverride = (on === null || on === undefined) ? null : !!on; }
+function _directAxisOn() {
+  if (_directAxisOverride !== null) return _directAxisOverride;
+  return (typeof process !== 'undefined' && process.env && process.env.DIRECT_SC_AXIS_ENABLED === 'true');
+}
+let _directSc = null;
+function _direct() {
+  if (_directSc) return _directSc;
+  try { _directSc = require('./directSc.cjs'); } catch (_) { _directSc = null; } // VENDORED REWRITE 3/3 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend
+  return _directSc;
+}
+function _directTableHash() { const d = _direct(); try { return d ? d.tableContentHash() : null; } catch (_) { return null; } }
+// Humanize an eventCanon canonical token into a readable upstream label for prose/UI.
+const _EVENT_LABELS = {
+  mos_acoustic_noise: 'in-service hazardous noise exposure',
+  blast_tbi: 'in-service blast / head injury',
+  repetitive_msk_load: 'in-service repetitive musculoskeletal load',
+  acute_in_service_injury: 'documented in-service injury',
+  criterion_a_trauma: 'in-service traumatic stressor',
+  mst: 'military sexual trauma',
+  chronic_operational_stress: 'chronic in-service operational stress',
+  chemical_solvent_fuel_tera: 'in-service chemical / solvent / fuel exposure',
+  burn_pit_airborne: 'burn-pit / airborne-hazard exposure',
+  herbicide_agent_orange: 'herbicide (Agent Orange) exposure',
+  gulf_war_environmental: 'Gulf War environmental exposure',
+  camp_lejeune_water: 'Camp Lejeune water exposure',
+  ionizing_radiation: 'ionizing-radiation exposure',
+  cold_injury: 'in-service cold injury',
+  asbestos: 'in-service asbestos exposure',
+  chronic_disease_1yr: 'chronic disease manifest within one year of separation',
+};
+function _eventLabel(evt) { return _EVENT_LABELS[evt] || String(evt || '').replace(/_/g, ' '); }
 
 // ── artifact load + cache (version-gated) ────────────────────────────────────
 let _cache = null;       // { version, content_hash, byKey, byClaimed, preference_rank }
@@ -160,7 +204,6 @@ function resolveAnchorEligibility(upstreamText, claimedText) {
           eligibility: derivedTier,
           in_table: false,
           M_static: derivedM,
-          E: typeof donorRow.e === 'number' ? donorRow.e : null,
           tier: derivedTier,
           basis: donorAgg ? '3.310b' : (donorRow.basis != null ? donorRow.basis : null),
           aggravation_only: donorAgg || undefined,
@@ -202,7 +245,6 @@ function resolveAnchorEligibility(upstreamText, claimedText) {
     // ── rubric fields surfaced for assessClaimViability (additive; existing
     //    callers ignore them) ──
     M_static: typeof row.m_static === 'number' ? row.m_static : null,
-    E: typeof row.e === 'number' ? row.e : null,
     tier: row.tier != null ? row.tier : row.eligibility,
     basis: aggOnly ? '3.310b' : (row.basis != null ? row.basis : null),
     aggravation_only: aggOnly || undefined,
@@ -231,7 +273,6 @@ function _plausibleDefault(upC, clC, art, reason) {
     eligibility: 'plausible',
     in_table: false,
     M_static: 2,            // rubric §1.2 plausible floor (provisional)
-    E: null,
     tier: 'plausible',
     basis: null,
     requires: null,
@@ -392,6 +433,10 @@ const _AGGRAVATION_ONLY = {
   // the causation prong intentionally rather than by row-order accident.)
   'Asthma|PTSD': { rationale: 'PTSD/chronic stress aggravates and triggers asthma (sympathetic/HPA-driven bronchial hyperreactivity, worse control) but does not cause it de novo. Argue 3.310(b) aggravation; direct causation invites denial.' },
   'Psoriasis|PTSD': { rationale: 'PTSD/chronic stress is a recognized psoriasis flare trigger and aggravator, but psoriasis is immune-mediated/genetic and not caused de novo by PTSD. Argue 3.310(b) aggravation; direct causation invites denial.' },
+  // Ryan 2026-06-12: PTSD associates with RLS via sleep disruption / CNS arousal,
+  // but the mechanism is not strong enough for de novo causation — frame as
+  // 3.310(b) aggravation, not direct cause.
+  'Restless legs syndrome|PTSD': { rationale: 'PTSD-related sleep disruption / CNS arousal aggravates restless legs syndrome, but does not cause it de novo. Argue 3.310(b) aggravation; direct causation invites denial.' },
 };
 function isAggravationOnly(claimedText, upstreamText) {
   const clC = _canon(claimedText);
@@ -461,6 +506,94 @@ function _band(tier, mEff, isGranted, mode, factConfirmed) {
   return 'weak';
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// SSOT RANKING + INTRINSIC-STRENGTH LABEL — the ONE brain every surface uses.
+// Before 2026-06-12 the anchor comparator and the strength label were
+// re-implemented in FOUR places that silently drifted: assessClaimViability's
+// resolved.sort, the RN reference-manual generator (whose sort had DROPPED the
+// E / aggravation-only / preference keys, and which read aggravation from
+// `special_flag` while everyone else uses isAggravationOnly), and the quickref
+// generator's hand-mirrored engineCmp. These exports are the single source;
+// the parity test (anchor-surface-parity.test.js) fails CI if a surface diverges.
+// ════════════════════════════════════════════════════════════════════════════
+
+// The one M_eff normalization (info-light): numeric m_static as-is, else
+// plausible→2, else 0. Matches the historical assessClaimViability line ~581 and
+// both generators' mEff/mEffInfoLight.
+function mEffInfoLight(mStatic, eligibility) {
+  return typeof mStatic === 'number' ? mStatic : (eligibility === 'plausible' ? 2 : 0);
+}
+
+// The SINGLE anchor comparator, over a normalized shape
+//   { M_eff, tier, aggravation_only, upstream_canonical }.
+// prefOrder = preferenceRankFor(claimed) (panel-ratified tiebreak; [] if none).
+// Order: M_eff desc → eligibility-strength desc → causation-first (aggravation-only
+// sorts after) → preference_rank → alpha (total order). (The E axis was REMOVED
+// 2026-06-12 — it was a dead biostat factor; M_eff + tier + preference_rank carry
+// the ranking.)
+function _anchorComparator(prefOrder) {
+  const pref = Array.isArray(prefOrder) ? prefOrder : [];
+  const prefIdx = (u) => { const i = pref.indexOf(u); return i < 0 ? Infinity : i; };
+  return (a, b) =>
+    (b.M_eff - a.M_eff)
+    || ((_ELIGIBILITY_STRENGTH[b.tier] || 0) - (_ELIGIBILITY_STRENGTH[a.tier] || 0))
+    // Axis tiebreak (direct-SC fold): at EQUAL (M_eff, eligibility-strength), a DIRECT
+    // anchor (in-service event, 3.303 — no intermediate SC to defend) outranks a SECONDARY
+    // one. No-op for secondary-only ranking (anchor_axis undefined on both → 0), so the RN
+    // manual/quickref generators (secondary rows only) are unaffected — parity preserved.
+    || ((a.anchor_axis === 'direct' ? 0 : 1) - (b.anchor_axis === 'direct' ? 0 : 1))
+    || ((a.aggravation_only ? 1 : 0) - (b.aggravation_only ? 1 : 0))
+    || (prefIdx(a.upstream_canonical) - prefIdx(b.upstream_canonical))
+    || a.upstream_canonical.localeCompare(b.upstream_canonical);
+}
+
+// Normalize a RAW table row to the comparator shape (info-light, case-free).
+// aggravation_only comes from isAggravationOnly() — the ONE canonical source —
+// so the docs agree with the engine + each other (kills the special_flag drift).
+function _rowToComparable(row) {
+  return {
+    M_eff: mEffInfoLight(row.m_static, row.eligibility),
+    tier: row.eligibility,
+    aggravation_only: isAggravationOnly(row.claimed_canonical, row.upstream_canonical),
+    upstream_canonical: row.upstream_canonical,
+    _row: row,
+  };
+}
+
+// rankAnchorRowsForClaimed(claimed, rowsForClaimed) -> the raw rows for `claimed`,
+// excluded removed, ordered by the ONE comparator. The RN manual + quickref call
+// THIS instead of their own .sort(). `rowsForClaimed` = rows already filtered to
+// this claimed condition (the generators group by claimed first).
+function rankAnchorRowsForClaimed(claimed, rowsForClaimed) {
+  const cmp = _anchorComparator(preferenceRankFor(claimed));
+  return (rowsForClaimed || [])
+    .filter((r) => r.eligibility !== 'excluded')
+    .map(_rowToComparable).sort(cmp).map((c) => c._row);
+}
+
+// Intrinsic strength TOKEN + LABEL for one row (case-free; the reference-doc
+// "how strong is this pair", NOT _band which is the case-contextual viability
+// band given granted+confirmed). The RN manual's "Strong/Solid/Weaker/Indirect
+// pathway" prose is sourced from HERE — one place decides it for every surface.
+const _STRENGTH_LABEL = {
+  strong: 'Strong — a dominant, well-recognized cause',
+  solid: 'Solid — a well-established contributing cause',
+  weaker: 'Weaker — a recognized but secondary pathway',
+  chain: 'Indirect pathway (works through an intermediate condition)',
+  limited: 'Limited',
+};
+function strengthLabelForRow(row) {
+  const elig = row.eligibility || row.tier;
+  const m = mEffInfoLight(row.m_static != null ? row.m_static : row.M_static, elig);
+  let token;
+  if (elig === 'chain') token = 'chain';
+  else if (elig === 'blessed' || m === 4) token = 'strong';
+  else if (m === 3) token = 'solid';
+  else if (elig === 'plausible' || m === 2) token = 'weaker';
+  else token = 'limited';
+  return { token, label: _STRENGTH_LABEL[token], mEff: m };
+}
+
 function _excludedTrapsFor(art, clC) {
   const rows = art.byClaimed.get(clC) || [];
   const seen = new Set();
@@ -497,8 +630,9 @@ function _whyLine(band, best, claimedC, presumptive, graveyard) {
 }
 
 function _viabilityShell(claimedC, mode, art) {
-  return {
-    version: 1,
+  const v2 = _directAxisOn();
+  const shell = {
+    version: v2 ? 2 : 1,
     claimed_canonical: claimedC,
     viability: 'abstain',
     best_anchor: null,
@@ -513,6 +647,16 @@ function _viabilityShell(claimedC, mode, art) {
     table_version: art ? art.version : null,
     table_content_hash: art ? art.content_hash : null,
   };
+  if (v2) {
+    // v2: axis discriminator (defaults 'none'; set when a best anchor is chosen) + two-table
+    // provenance. The flat table_content_hash above is RETAINED as the deprecated secondary mirror.
+    shell.axis = 'none';
+    shell.tables = {
+      secondary: { version: art ? art.version : null, content_hash: art ? art.content_hash : null },
+      direct: { version: null, content_hash: _directTableHash() },
+    };
+  }
+  return shell;
 }
 
 function assessClaimViability(claimedText, grantedScConditions, chartFactsPresent) {
@@ -564,6 +708,7 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
     if (presumptiveHard) {
       shell.viability = 'redirect';
       shell.confidence = 'high';
+      if (shell.tables !== undefined) shell.axis = 'presumptive_redirect';
       shell.why = _whyLine('redirect', null, clC, { hard: true, note: presRule.note }, null);
       return shell;   // hard pre-empt: secondary held as fallback, not ranked
     }
@@ -596,7 +741,6 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
       upstream_verbatim: String(g),
       M_static: mStatic,
       M_eff: mEff,
-      E: typeof r.E === 'number' ? r.E : null,   // null = not-yet-scored (NOT 0/"no evidence")
       tier: r.tier || r.eligibility,
       basis: r.basis || null,
       is_granted_sc: true,
@@ -629,7 +773,7 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
   // psych member is kept over an equal-M aggravation-only one — architect QA 2026-06-11).
   const psych = resolved.filter(a => _PSYCH_4130.has(a.upstream_canonical));
   if (psych.length > 1) {
-    psych.sort((a, b) => (b.M_eff - a.M_eff) || ((b.E || 0) - (a.E || 0)) || ((a.aggravation_only ? 1 : 0) - (b.aggravation_only ? 1 : 0)) || a.upstream_canonical.localeCompare(b.upstream_canonical));
+    psych.sort(_anchorComparator(preferenceRankFor(clC)));   // SSOT: same comparator as the main rank (so the keep-decision matches the rank-decision)
     const keep = psych[0];
     keep.mechanism_member = keep.upstream_canonical;   // bind drafter prose to this member
     const drop = new Set(psych.slice(1).map(a => a.upstream_canonical));
@@ -638,7 +782,61 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
     }
   }
 
+  // ── DIRECT axis fold (gated; dark by default) ──────────────────────────────
+  // Fold direct in-service-event anchors into the SAME ranked list so ONE comparator
+  // picks the cross-axis winner (Tier-1 direct suppresses Tier-2 secondary via the axis
+  // tiebreak). Events arrive pre-resolved (producer ran eventCanon / the LLM classifier)
+  // through chartFactsPresent.in_service_events. Presumptive events route to the existing
+  // presumptive_redirect, never to a drafting anchor. Entirely skipped when the flag is off.
+  let _directPresumptive = null;
+  if (_directAxisOn()) {
+    for (const a of resolved) a.anchor_axis = 'secondary';   // tag existing secondary candidates for v2
+    const events = (chartFactsPresent && Array.isArray(chartFactsPresent.in_service_events)) ? chartFactsPresent.in_service_events : [];
+    if (events.length) {
+      const d = _direct();
+      if (d) {
+        const dres = d.assessDirectViability(clC, { in_service_events: events });
+        for (const dc of (dres.candidates || [])) {
+          if (!dc || dc.eligibility === 'excluded') continue;
+          const mEff = typeof dc.m_static === 'number' ? dc.m_static : 0;
+          resolved.push({
+            upstream_canonical: _eventLabel(dc.event_canonical),
+            upstream_verbatim: dc.evidence || '',
+            M_static: mEff,
+            M_eff: mEff,
+            tier: dc.tier || dc.eligibility,
+            basis: dc.basis || '3.303',
+            is_granted_sc: false,                 // an in-service event is not a granted SC condition
+            mechanism_class: null,
+            requires: dc.requires || null,
+            factConfirmed: true,                  // the event itself is the evidenced anchor
+            anchor_axis: 'direct',
+            event_canonical: dc.event_canonical,
+            evidence_span: dc.evidence || '',
+            physician_reviewed: dc.physician_reviewed === true,
+            aggravation_only: false,
+          });
+        }
+        // Direct presumptive events held as a redirect fallback when nothing else anchors.
+        if (Array.isArray(dres.presumptive_events) && dres.presumptive_events.length) {
+          _directPresumptive = dres.presumptive_events;
+        }
+      }
+    }
+  }
+
   if (!resolved.length) {
+    // No secondary AND no direct anchor. If a direct presumptive event exists, surface the
+    // redirect; otherwise weak.
+    if (_directPresumptive && _directPresumptive.length) {
+      const ev = _directPresumptive[0];
+      shell.viability = 'redirect';
+      shell.confidence = 'high';
+      if (shell.tables !== undefined) shell.axis = 'presumptive_redirect';
+      shell.presumptive_redirect = { path: 'presumptive', note: `An in-service ${_eventLabel(ev.event_canonical)} may support a presumptive claim (file presumptive; a nexus letter may not be needed).`, advisory: true };
+      shell.why = `Redirect: a presumptive path may apply (${_eventLabel(ev.event_canonical)}).`;
+      return shell;
+    }
     shell.viability = 'weak';
     shell.confidence = 'low';
     shell.why = _whyLine('weak', null, clC, null, null);
@@ -651,18 +849,11 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
   // preference_rank is a TIEBREAK among equally-strong anchors, never an
   // override of M_eff/E/tier: a higher-M anchor still wins on merit. An anchor
   // absent from the list sorts after every ranked one (index = Infinity).
-  const _prefOrder = preferenceRankFor(clC);
-  const _prefIdx = (u) => { const i = _prefOrder.indexOf(u); return i < 0 ? Infinity : i; };
-  resolved.sort((a, b) =>
-    (b.M_eff - a.M_eff)
-    || ((b.E || 0) - (a.E || 0))
-    || ((_ELIGIBILITY_STRENGTH[b.tier] || 0) - (_ELIGIBILITY_STRENGTH[a.tier] || 0))
-    // §3.3 causation-first: an aggravation-only anchor is a SECONDARY argument —
-    // at equal merit a causation-capable anchor leads it (TIEBREAK, not an
-    // override; a higher-M aggravation-only pair still wins on M above).
-    || ((a.aggravation_only ? 1 : 0) - (b.aggravation_only ? 1 : 0))
-    || (_prefIdx(a.upstream_canonical) - _prefIdx(b.upstream_canonical))
-    || a.upstream_canonical.localeCompare(b.upstream_canonical));
+  // Rank with the ONE shared comparator (_anchorComparator) — the SAME function
+  // the RN manual + quickref call via rankAnchorRowsForClaimed, so the docs can
+  // never disagree with the engine on order. M_eff → eligibility-strength →
+  // causation-first (aggravation-only sorts after) → preference_rank → alpha.
+  resolved.sort(_anchorComparator(preferenceRankFor(clC)));
 
   const best = resolved[0];
 
@@ -676,38 +867,53 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
     if (targetGranted) {
       // re-rank against the redirect target as the surviving anchor
       const rt = resolved.find(a => a.upstream_canonical === gv.redirect_to);
-      if (rt) { shell.viability = 'redirect'; shell.best_anchor = _publicAnchor(rt); shell.why = _whyLine('redirect', rt, clC, null, gv); return shell; }
+      if (rt) { shell.viability = 'redirect'; if (shell.tables !== undefined) shell.axis = rt.anchor_axis || 'secondary'; shell.best_anchor = _publicAnchor(rt); shell.why = _whyLine('redirect', rt, clC, null, gv); return shell; }
     }
     shell.viability = 'abstain';   // dead anchor + no granted redirect target → park for RN
     shell.why = _whyLine('redirect', null, clC, null, gv);
     return shell;
   }
 
-  const band = _band(best.tier, best.M_eff, best.is_granted_sc, mode, best.factConfirmed);
+  // A DIRECT anchor is a valid anchoring FACT (the evidenced in-service event), not a granted SC
+  // condition — pass isGranted=true so _band derives the band from the direct tier/M (else the
+  // !isGranted guard would force 'weak'). The is_granted_sc:false provenance flag is preserved on
+  // the output. Secondary path: anchor_axis undefined → unchanged.
+  const _bandIsGranted = best.anchor_axis === 'direct' ? true : best.is_granted_sc;
+  const band = _band(best.tier, best.M_eff, _bandIsGranted, mode, best.factConfirmed);
   shell.viability = band;
+  if (shell.tables !== undefined) shell.axis = best.anchor_axis || 'secondary';
   shell.best_anchor = _publicAnchor(best);
   if (best.mechanism_member) shell.best_anchor.mechanism_member = best.mechanism_member;
-  shell.alternatives = resolved.slice(1).map(a => ({
-    upstream_canonical: a.upstream_canonical, M_eff: a.M_eff, tier: a.tier, is_granted_sc: a.is_granted_sc,
-    aggravation_only: a.aggravation_only === true ? true : undefined,
-  }));
+  shell.alternatives = resolved.slice(1).map(a => {
+    const alt = {
+      upstream_canonical: a.upstream_canonical, M_eff: a.M_eff, tier: a.tier, is_granted_sc: a.is_granted_sc,
+      aggravation_only: a.aggravation_only === true ? true : undefined,
+    };
+    if (a.anchor_axis) { alt.anchor_axis = a.anchor_axis; if (a.event_canonical) alt.event_canonical = a.event_canonical; }
+    return alt;
+  });
   // missing_fact: the pair-keyed record that would RAISE the band.
   if ((band === 'conditional') && best.requires) shell.missing_fact = best.requires;
   // confidence: low on an assumed/unreviewed/plausible anchor or info-light contingency.
   shell.confidence = (best.physician_reviewed && best.tier === 'blessed' && (mode === 'chart_refined' || band === 'strong' || band === 'moderate'))
     ? 'high'
     : ((band === 'strong' && mode === 'info_light' && best.tier === 'blessed') ? 'high' : 'low');
-  shell.why = _whyLine(band, best, clC, shell.presumptive_redirect, null);
+  // Direct anchors get a 3.303 direct-connection why; secondary keeps the shared _whyLine.
+  if (best.anchor_axis === 'direct') {
+    const cap = band.charAt(0).toUpperCase() + band.slice(1);
+    shell.why = `${cap}: a documented ${best.upstream_canonical} directly supports service connection for ${clC} under ${best.basis || '3.303'}.`;
+  } else {
+    shell.why = _whyLine(band, best, clC, shell.presumptive_redirect, null);
+  }
   return shell;
 }
 
 function _publicAnchor(a) {
-  return {
+  const out = {
     upstream_canonical: a.upstream_canonical,
     upstream_verbatim: a.upstream_verbatim,
     M_static: a.M_static,
     M_eff: a.M_eff,
-    E: a.E,
     tier: a.tier,
     basis: a.basis,
     aggravation_only: a.aggravation_only === true ? true : undefined,
@@ -717,6 +923,15 @@ function _publicAnchor(a) {
     requires: a.requires,
     inherited_from: a.inherited_from || undefined,
   };
+  // v2 direct-axis discriminator + fields — set ONLY when the fold tagged the anchor (flag on).
+  // The flag-off path never sets anchor_axis, so v1 output is byte-identical.
+  if (a.anchor_axis) {
+    out.anchor_axis = a.anchor_axis;
+    if (a.event_canonical) out.event_canonical = a.event_canonical;
+    if (a.evidence_span) out.evidence_span = a.evidence_span;
+    if (a.anchor_axis === 'direct' && a.presumptive === true) out.presumptive = true;
+  }
+  return out;
 }
 
 // Best-effort check that a row's required fact is present in the normalized
@@ -850,12 +1065,17 @@ module.exports = {
   intermediateOnlyFor,
   preferenceRankFor,
   eligibleUpstreamsFor,
+  // SSOT ranking + label (the ONE brain the RN manual + quickref must call) —
+  rankAnchorRowsForClaimed,
+  strengthLabelForRow,
+  mEffInfoLight,
   isAggravationOnly,
   aggravationOnlyUpstreamsFor,
   graveyardUpstreamsFor,
   tableVersion,
   tableContentHash,
   setArtifact,        // inject a table object (Worker vendor / tests) — bypasses fs
+  setDirectAxisEnabled, // enable the direct-SC fold without process.env (Cloudflare Worker / tests)
   _clearCache,
   _canon,
   _UMBRELLA_RE,       // umbrella/phenotype-unresolved claim labels (read by pipelineLinter.lintClaimedConditionSpecific)

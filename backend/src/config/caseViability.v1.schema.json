@@ -17,7 +17,7 @@
     "best_anchor": {
       "type": ["object", "null"],
       "additionalProperties": false,
-      "required": ["upstream_canonical","upstream_verbatim","M_static","M_eff","E","tier","basis","is_granted_sc","mechanism_class","requires"],
+      "required": ["upstream_canonical","upstream_verbatim","M_static","M_eff","tier","basis","is_granted_sc","mechanism_class","requires"],
       "properties": {
         "upstream_canonical": { "type": "string", "minLength": 1 },
         "upstream_verbatim":  { "type": "string" },
@@ -87,7 +87,7 @@
     "confidence": { "type": "string", "enum": ["high", "low"] },
     "mode": { "type": "string", "enum": ["info_light", "chart_refined"] },
     "table_version": { "type": ["string", "null"] },
-    "table_content_hash": { "type": ["string", "null"], "const": "1f095fb66e851ec10f9babe6e7fa0a5956c4b6eb11dadc3733bc8fcf25a868e3" },
+    "table_content_hash": { "type": ["string", "null"], "const": "c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb" },
     "derivedAt": { "type": "string", "format": "date-time" }
   }
 }

@@ -18,7 +18,14 @@
 // the bundle is returned UNSTAMPED / the live read returns null. Absence = consumers use their
 // legacy behavior; a viability problem can never break a draft (design §5.3).
 
-import { deriveCaseViability, type CaseViability } from './case-viability.js';
+import {
+  deriveCaseViability,
+  directScViabilityEnabled,
+  resolveInServiceEvents,
+  type CaseViability,
+  type InServiceEvent,
+  type VaConcessionsLike,
+} from './case-viability.js';
 import { deriveCaseFramingForCase } from './case-framing-stamp.js';
 import type { DrafterBundle } from './drafter-bundle.js';
 import type { AppDb } from './db-types.js';
@@ -46,8 +53,13 @@ export async function deriveCaseViabilityForCase(db: AppDb, caseId: string): Pro
       select: { claimedCondition: true },
     })) as { claimedCondition: string } | null;
     if (c === null) return null;
-    // chartFacts omitted (G9: no EMR chart-fact normalization yet) → info_light, conservative.
-    return deriveCaseViability(c.claimedCondition, cf.grantedScAnchors);
+    // DIRECT-SC axis (gated, DARK): only when DIRECT_SC_VIABILITY_ENABLED build the in-service event
+    // floor. When OFF, no extra query, no events → deriveCaseViability is byte-identical v1 (G9
+    // info_light). The flag check fences the extra read so the dark path's cost is exactly today's.
+    const directEvents = directScViabilityEnabled()
+      ? await buildInServiceEvents(db, caseId)
+      : undefined;
+    return deriveCaseViability(c.claimedCondition, cf.grantedScAnchors, directEvents);
   } catch (err) {
     // Loud in logs, silent to the caller — a vendor-load or DB hiccup must never break a draft.
     console.warn(JSON.stringify({
@@ -56,6 +68,58 @@ export async function deriveCaseViabilityForCase(db: AppDb, caseId: string): Pro
       error: err instanceof Error ? err.message : String(err),
     }));
     return null;
+  }
+}
+
+/** YesNoUnknown 'yes' → conceded:true; anything else → not conceded (conservative). */
+function concededFlag(v: string | null | undefined): boolean {
+  return v === 'yes';
+}
+
+/**
+ * DIRECT-SC axis: build the deterministic in-service-event floor from the Case/Veteran row's
+ * conceded fields, UNIONed with the classifier residue. ONLY called on the gated path.
+ *
+ * Source mapping (the EMR has no structured va_concessions object yet — this synthesizes the shape
+ * eventCanon reads from the columns that DO exist):
+ *   - Case.inServiceEvent      → in_service_event_conceded (free-text conceded event)
+ *   - Case.veteranStatement    → lay free text (scanned for oblique phrasing)
+ *   - Veteran.combatVeteran    → (advisory only; not a direct eventCanon flag — folded via free text)
+ *   - Veteran.teraConceded='yes'→ tera_concession.conceded=true
+ *
+ * CLASSIFIER RESIDUE: the LLM event classifier currently only LOGS (no write endpoint), so there is
+ * no persisted classifier-event column to union yet. When that lands, fetch it here and pass it as
+ * the 3rd arg — resolveInServiceEvents already dedupes it behind the deterministic floor. Until then
+ * this is the deterministic floor alone. Fail-open: any error → [] (the secondary axis still stands).
+ */
+async function buildInServiceEvents(db: AppDb, caseId: string): Promise<InServiceEvent[]> {
+  try {
+    const row = (await db.case.findFirst({
+      where: { id: caseId },
+      select: {
+        inServiceEvent: true,
+        veteranStatement: true,
+        veteran: { select: { teraConceded: true } },
+      } as never,
+    })) as unknown as {
+      inServiceEvent: string | null;
+      veteranStatement: string | null;
+      veteran: { teraConceded: string | null } | null;
+    } | null;
+    if (row === null) return [];
+    const concessions: VaConcessionsLike = {
+      in_service_event_conceded: row.inServiceEvent,
+      tera_concession: concededFlag(row.veteran?.teraConceded) ? { conceded: true } : null,
+    };
+    // No persisted classifier events yet (log-only) — deterministic floor + lay free text only.
+    return resolveInServiceEvents(concessions, row.veteranStatement, undefined);
+  } catch (err) {
+    console.warn(JSON.stringify({
+      msg: 'case-viability: in-service event floor failed open',
+      caseId,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    return [];
   }
 }
 

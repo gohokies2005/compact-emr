@@ -1,11 +1,14 @@
 // CI hash pin for the vendored anchor-mechanism table + caseViability schema (build plan §2).
-// RED BUILD ON DRIFT — this is the intended alarm. The 58f9c315… pin lives at FOUR literal sites
-// that must all move in the SAME commit when the table is re-curated (build plan R4):
+// RED BUILD ON DRIFT — this is the intended alarm. The SECONDARY pin lives at FOUR literal sites
+// that must all move in the SAME commit when the secondary table is re-curated (build plan R4):
 //   1. scripts/vendor-anchor-table.mjs            → PINNED_TABLE_HASH
 //   2. backend/src/config/caseViability.v1.schema.json → properties.table_content_hash.const
 //   3. THIS FILE                                  → PINNED_TABLE_HASH + PINNED_SCHEMA_SHA256
 //   4. backend/src/__tests__/case-viability.test.ts → PINNED_TABLE_HASH
-// The Ask-Aegis + website windows pin the SAME hash (coordinate via shared/outbox).
+// The DIRECT-SC pin (PINNED_DIRECT_TABLE_HASH) is a SECOND independent pin — it rotates only on a
+// sc_direct_pairs.json re-curation, and lives at: vendor-anchor-table.mjs (PINNED_DIRECT_TABLE_HASH),
+// caseViability.v2.schema.json (tables.direct.const), and THIS FILE.
+// The Ask-Aegis + website windows pin the SAME hashes (coordinate via shared/outbox).
 // NEVER hand-edit backend/src/vendor/* — scripts/vendor-anchor-table.mjs is the only writer.
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -14,15 +17,25 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const PINNED_TABLE_HASH = '1f095fb66e851ec10f9babe6e7fa0a5956c4b6eb11dadc3733bc8fcf25a868e3';
-// Rotated 2026-06-11 (P1a re-vendor at FRN HEAD ≥73095d9): the schema gained the optional
-// aggravation_only/causation_denied props (engine 5d04b62/0ebb73e emits them on best_anchor;
-// aggravation_only on alternatives). The TABLE hash did NOT rotate (58f9c315… unchanged).
-const PINNED_SCHEMA_SHA256 = 'd70aa6cede4b920794b591ced17c9a21425ba77a1598184a71fd966fe0133247';
+// Rotated 2026-06-14 (DIRECT-SC re-vendor at FRN HEAD): the canonical anchor_mechanism_pairs.json was
+// re-curated (1032 rows) and the resolver gained the DIRECT-SC fold + setDirectAxisEnabled. Bands are
+// byte-identical with the direct axis OFF (the default); only the secondary table hash rotated
+// 1f095fb6… → c0f6ba36….
+const PINNED_TABLE_HASH = 'c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb';
+// DIRECT-SC table content_hash (sc_direct_pairs.json `content_hash` field; directSc.tableContentHash()
+// returns it verbatim). Independent pin — rotates only on a direct-table re-curation.
+const PINNED_DIRECT_TABLE_HASH = 'fc828fe33ed370beecaa00875117b62acd1bc2ae07ac304579bbf4db072b2bd9';
+// v1 schema byte-pin. Rotated 2026-06-14: (1) the EMR-authored v1 schema's table_content_hash.const
+// moved to the new secondary pin; (2) `E` was removed from best_anchor.required (it stays an OPTIONAL
+// property) because the re-vendored resolver no longer emits the always-null E field. The file is NOT
+// overwritten from FRN — it keeps its EMR-authored shape; only these two edits changed its bytes.
+const PINNED_SCHEMA_SHA256 = 'e36a1b62b3f3681b7c72d0961297748bfcc2bfa3ca84c5964b1b56e779569fa3';
 
 const vendorDir = path.dirname(fileURLToPath(new URL('../vendor/anchor_mechanism_pairs.json', import.meta.url)));
 const tableUrl = new URL('../vendor/anchor_mechanism_pairs.json', import.meta.url);
+const directTableUrl = new URL('../vendor/sc_direct_pairs.json', import.meta.url);
 const schemaUrl = new URL('../config/caseViability.v1.schema.json', import.meta.url);
+const v2SchemaUrl = new URL('../config/caseViability.v2.schema.json', import.meta.url);
 
 interface VendoredTable {
   readonly version: string;
@@ -69,6 +82,62 @@ describe('anchor table pin (red build on drift)', () => {
     const out = am.assessClaimViability('Obstructive sleep apnea', ['PTSD']);
     expect(out.viability).toBe('strong');
     expect(out.table_content_hash).toBe(PINNED_TABLE_HASH);
+  });
+
+  it('5. DIRECT table field pin: vendored sc_direct_pairs.json.content_hash === direct pin', () => {
+    const directTable = JSON.parse(readFileSync(directTableUrl).toString('utf8')) as {
+      content_hash: string;
+      rows: readonly unknown[];
+    };
+    expect(directTable.content_hash).toBe(PINNED_DIRECT_TABLE_HASH);
+    expect(directTable.rows.length).toBeGreaterThanOrEqual(8); // mirrors directSc.MIN_ROWS stub guard
+  });
+
+  it('5b. DIRECT resolver smoke: the vendored directSc loads the VENDORED direct table (tableContentHash === direct pin)', () => {
+    const req = createRequire(import.meta.url);
+    const ds = req('../vendor/directSc.cjs') as { tableContentHash(): string | null };
+    expect(ds.tableContentHash()).toBe(PINNED_DIRECT_TABLE_HASH);
+  });
+
+  it('6. v2 schema two-table provenance: the nested const hashes match the secondary + direct pins (second drift tripwire)', () => {
+    const v2 = JSON.parse(readFileSync(v2SchemaUrl).toString('utf8')) as {
+      properties: {
+        tables: {
+          properties: {
+            secondary: { properties: { content_hash: { const: string } } };
+            direct: { properties: { content_hash: { const: string } } };
+          };
+        };
+        table_content_hash: { const: string };
+      };
+    };
+    expect(v2.properties.tables.properties.secondary.properties.content_hash.const).toBe(PINNED_TABLE_HASH);
+    expect(v2.properties.tables.properties.direct.properties.content_hash.const).toBe(PINNED_DIRECT_TABLE_HASH);
+    // The deprecated flat mirror still equals the secondary hash (graceful v1-reader degrade).
+    expect(v2.properties.table_content_hash.const).toBe(PINNED_TABLE_HASH);
+  });
+
+  it('6b. axis-fold smoke: with the direct axis ON (setter), the vendored resolver emits v2 + both table hashes', () => {
+    const req = createRequire(import.meta.url);
+    const am = req('../vendor/anchorMechanism.cjs') as {
+      setDirectAxisEnabled(on: boolean | null): void;
+      assessClaimViability(
+        claimed: string,
+        granted: readonly string[],
+        chartFacts?: unknown,
+      ): { version: number; axis?: string; tables?: { secondary: { content_hash: string }; direct: { content_hash: string } } };
+    };
+    am.setDirectAxisEnabled(true);
+    try {
+      const out = am.assessClaimViability('Obstructive sleep apnea', ['PTSD'], {
+        in_service_events: [{ event_canonical: 'criterion_a_trauma', evidence_span: 'IED blast' }],
+      });
+      expect(out.version).toBe(2);
+      expect(out.tables?.secondary.content_hash).toBe(PINNED_TABLE_HASH);
+      expect(out.tables?.direct.content_hash).toBe(PINNED_DIRECT_TABLE_HASH);
+    } finally {
+      am.setDirectAxisEnabled(null); // restore default so axis-OFF tests below/elsewhere are unaffected
+    }
   });
 
   it('R5 grep-guard: no impure-module leak — vendored files never require better-sqlite3 / an LLM client', () => {

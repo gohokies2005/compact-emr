@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://flatratenexus.local/schemas/caseViability.v2.schema.json",
+  "title": "bundle.caseViability (SSOT v2 — two-axis: secondary + direct)",
+  "description": "v2 extends v1 with the DIRECT-SC axis. The single secondary engine (anchorMechanism) and the direct engine (directSc, keyed on eventCanon in-service events) are folded into ONE assessClaimViability resolve+rank; this block carries whichever axis won. TWO-TABLE PROVENANCE: `tables.secondary.content_hash` + `tables.direct.content_hash` are each pinned (replaces v1's single `table_content_hash` const). The flat `table_content_hash` is RETAINED as a DEPRECATED mirror of the secondary hash so a lagging v1 reader degrades gracefully during the readers-before-writer migration window (removed in a later cleanup once all surfaces are v2). `axis` names the winning axis; `best_anchor.anchor_axis` discriminates the anchor shape. Direct anchors carry `event_canonical` (eventCanon enum) + verbatim `evidence_span`, `is_granted_sc:false`, `basis:'3.303'`. ABSENCE/unknown-version = fail-open. NEVER carries a BVA %, IMO rate, or pair-atlas tier in any vet/RN-facing string (CLAUDE.md #17). See docs/ANCHOR_VIABILITY_INTEGRATION_DESIGN_2026-06-10.md + the direct-SC wiring design.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version", "axis", "claimed_canonical", "viability", "best_anchor", "alternatives",
+    "why", "missing_fact", "presumptive_redirect", "graveyard_redirect",
+    "excluded_traps", "confidence", "mode", "tables", "table_content_hash"
+  ],
+  "properties": {
+    "version": { "type": "integer", "const": 2 },
+    "axis": { "type": "string", "enum": ["secondary", "direct", "presumptive_redirect", "none"] },
+    "claimed_canonical": { "type": ["string", "null"] },
+    "viability": { "type": "string", "enum": ["strong", "moderate", "conditional", "weak", "abstain", "redirect"] },
+    "best_anchor": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["anchor_axis","upstream_canonical","upstream_verbatim","M_static","M_eff","tier","basis","is_granted_sc","mechanism_class","requires"],
+      "properties": {
+        "anchor_axis": { "type": "string", "enum": ["secondary", "direct"] },
+        "upstream_canonical": { "type": "string", "minLength": 1 },
+        "upstream_verbatim":  { "type": "string" },
+        "M_static": { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "M_eff":    { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "tier": { "type": "string", "enum": ["blessed","conditional","chain","plausible","excluded"] },
+        "basis": { "type": ["string", "null"] },
+        "is_granted_sc": { "type": "boolean" },
+        "mechanism_class": { "type": ["string", "null"] },
+        "requires": { "type": ["string", "null"] },
+        "mechanism_member": { "type": "string" },
+        "inherited_from": { "type": "string" },
+        "aggravation_only": { "type": "boolean" },
+        "causation_denied": { "type": "boolean" },
+        "event_canonical": { "type": "string", "minLength": 1, "description": "DIRECT axis only: the eventCanon canonical in-service event type (member of eventCanon.EVENT_ENUM)." },
+        "evidence_span": { "type": "string", "description": "DIRECT axis only: a verbatim substring of the chart/lay text evidencing the event (code-verified at emission)." },
+        "presumptive": { "type": "boolean", "description": "DIRECT axis only: the event is a presumptive pathway (routes to presumptive_redirect)." }
+      }
+    },
+    "alternatives": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["anchor_axis","upstream_canonical","M_eff","tier","is_granted_sc"],
+        "properties": {
+          "anchor_axis": { "type": "string", "enum": ["secondary", "direct"] },
+          "upstream_canonical": { "type": "string", "minLength": 1 },
+          "M_eff": { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+          "tier": { "type": "string", "enum": ["blessed","conditional","chain","plausible","excluded"] },
+          "is_granted_sc": { "type": "boolean" },
+          "event_canonical": { "type": "string", "minLength": 1 },
+          "aggravation_only": { "type": "boolean" }
+        }
+      }
+    },
+    "why": { "type": "string" },
+    "missing_fact": { "type": ["string", "null"] },
+    "presumptive_redirect": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["path","note","advisory"],
+      "properties": {
+        "path": { "type": "string" },
+        "note": { "type": "string" },
+        "advisory": { "type": "boolean" }
+      }
+    },
+    "graveyard_redirect": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["dead_anchor","redirect_to","rationale","redirect_blocked"],
+      "properties": {
+        "dead_anchor": { "type": "string" },
+        "redirect_to": { "type": "string" },
+        "rationale": { "type": "string" },
+        "redirect_blocked": { "type": "boolean" }
+      }
+    },
+    "excluded_traps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["upstream_canonical","reason"],
+        "properties": {
+          "upstream_canonical": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "confidence": { "type": "string", "enum": ["high", "low"] },
+    "mode": { "type": "string", "enum": ["info_light", "chart_refined"] },
+    "tables": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secondary", "direct"],
+      "properties": {
+        "secondary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "content_hash"],
+          "properties": {
+            "version": { "type": ["string", "null"] },
+            "content_hash": { "type": "string", "const": "c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb" }
+          }
+        },
+        "direct": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "content_hash"],
+          "properties": {
+            "version": { "type": ["string", "null"] },
+            "content_hash": { "type": "string", "const": "fc828fe33ed370beecaa00875117b62acd1bc2ae07ac304579bbf4db072b2bd9" }
+          }
+        }
+      }
+    },
+    "table_content_hash": {
+      "type": ["string", "null"],
+      "const": "c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb",
+      "description": "DEPRECATED in v2 — flat mirror of tables.secondary.content_hash, retained ONLY so a lagging v1 reader degrades gracefully during the migration window. Remove once all surfaces read v2."
+    },
+    "table_version": { "type": ["string", "null"] },
+    "derivedAt": { "type": "string", "format": "date-time" }
+  }
+}

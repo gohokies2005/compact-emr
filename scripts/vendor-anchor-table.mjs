@@ -7,29 +7,39 @@
 // Vendor set (canonical → vendored):
 //   flatratenexus-project/app/services/anchorMechanism.js      → backend/src/vendor/anchorMechanism.cjs
 //   flatratenexus-project/app/services/conditionCanon.js       → backend/src/vendor/conditionCanon.cjs
+//   flatratenexus-project/app/services/directSc.js             → backend/src/vendor/directSc.cjs   (DIRECT-SC axis, 2026-06-14)
 //   flatratenexus-project/references/anchor_mechanism_pairs.json → backend/src/vendor/anchor_mechanism_pairs.json
+//   flatratenexus-project/references/sc_direct_pairs.json        → backend/src/vendor/sc_direct_pairs.json   (DIRECT-SC table, 2026-06-14)
 //   flatratenexus-project/app/config/caseViability.v1.schema.json → backend/src/config/caseViability.v1.schema.json
+//   flatratenexus-project/app/config/caseViability.v2.schema.json → backend/src/config/caseViability.v2.schema.json   (two-axis, 2026-06-14)
 //
 // NOT vendored: framingGate.js (build plan G8 — it requires better-sqlite3 + llm/client; vendoring it
 // would drag the DB + LLM client into the Lambda. Only the DRAFTER consumes framingGate, in-repo).
+// NOT re-vendored here: eventCanon.cjs (vendored by the chart-extract classifier build; directSc.cjs
+// requires it via the .cjs rewrite below — it stays the single eventCanon copy in the vendor dir).
 //
-// anchorMechanism.cjs carries EXACTLY TWO pinned, asserted rewrites (everything else byte-identical):
+// anchorMechanism.cjs carries EXACTLY THREE pinned, asserted rewrites (everything else byte-identical):
 //   1. ARTIFACT_PATH — the vendored table sits BESIDE the resolver, not at ../../references/.
 //   2. require('./conditionCanon') → require('./conditionCanon.cjs') — the EMR backend is ESM
 //      ("type":"module"), so the vendored CJS files use the .cjs extension; Node's extensionless
 //      require() does NOT resolve .cjs, so the intra-vendor require must name it. (This second
 //      rewrite is a necessary addition to the build plan's "exactly one rewrite" — without it the
 //      vendored resolver cannot load its canonicalizer at all.)
-// Both pre-image lines are asserted VERBATIM before replacing — if the canonical resolver changed
+//   3. require('./directSc') → require('./directSc.cjs') — same ESM-extension reason; the DIRECT-SC
+//      fold (gated, dark) lazy-requires directSc, which must resolve to the vendored .cjs.
+// All pre-image lines are asserted VERBATIM before replacing — if the canonical resolver changed
 // shape, this script aborts loudly ("re-author the vendor rewrite") instead of silently drifting.
 //
-// PIN-LITERAL SITES (build plan R4 — a table re-curation rotates the 58f9c315… pin; ALL of these
+// PIN-LITERAL SITES (build plan R4 — a table re-curation rotates the secondary pin; ALL of these
 // must move in the SAME commit or the build goes red. That red is the INTENDED drift alarm):
-//   1. PINNED_TABLE_HASH below (this script)
+//   1. PINNED_TABLE_HASH below (this script)  — SECONDARY table content hash
 //   2. backend/src/config/caseViability.v1.schema.json → properties.table_content_hash.const
-//   3. backend/src/__tests__/anchor-table-pin.test.ts  → PINNED_TABLE_HASH + PINNED_SCHEMA_SHA256
+//   3. backend/src/__tests__/anchor-table-pin.test.ts  → PINNED_TABLE_HASH + PINNED_SCHEMA_SHA256 + PINNED_DIRECT_TABLE_HASH
 //   4. backend/src/__tests__/case-viability.test.ts    → PINNED_TABLE_HASH
-// The Ask-Aegis + website windows pin the SAME hash — post the vendor commit SHA to
+// The DIRECT table hash (PINNED_DIRECT_TABLE_HASH below) is a SECOND independent pin — it rotates
+// only when sc_direct_pairs.json is re-curated, and lives in the v2 schema's tables.direct.const +
+// anchor-table-pin.test.ts.
+// The Ask-Aegis + website windows pin the SAME hashes — post the vendor commit SHA to
 // flatratenexus-project/shared/outbox so all three lanes pull the identical copy.
 //
 // Usage: node scripts/vendor-anchor-table.mjs [--from <flatratenexus-project path>]
@@ -39,7 +49,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const PINNED_TABLE_HASH = '1f095fb66e851ec10f9babe6e7fa0a5956c4b6eb11dadc3733bc8fcf25a868e3';
+// SECONDARY table content hash. Rotated 2026-06-14 from 1f095fb6… → c0f6ba36… on the P-direct
+// re-vendor at FRN HEAD: the canonical anchor_mechanism_pairs.json was re-curated (1032 rows) and
+// the resolver gained the DIRECT-SC fold + setDirectAxisEnabled. Bands are byte-identical with the
+// direct axis OFF (the default); only the table hash rotated.
+const PINNED_TABLE_HASH = 'c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb';
+// DIRECT-SC table content hash (sc_direct_pairs.json `content_hash` field — directSc.tableContentHash()
+// returns this verbatim). Independent of the secondary pin; rotates only on a direct-table re-curation.
+const PINNED_DIRECT_TABLE_HASH = 'fc828fe33ed370beecaa00875117b62acd1bc2ae07ac304579bbf4db072b2bd9';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fromIdx = process.argv.indexOf('--from');
@@ -68,9 +85,13 @@ if (!existsSync(srcResolverPath)) abort(`missing canonical ${srcResolverPath}`);
 let resolverSrc = readFileSync(srcResolverPath, 'utf8');
 
 const ARTIFACT_PRE = "const ARTIFACT_PATH = path.join(PROJECT_ROOT, 'references', 'anchor_mechanism_pairs.json');";
-const ARTIFACT_POST = "const ARTIFACT_PATH = path.join(__dirname, 'anchor_mechanism_pairs.json'); // VENDORED REWRITE 1/2 (scripts/vendor-anchor-table.mjs): table sits beside the resolver";
+const ARTIFACT_POST = "const ARTIFACT_PATH = path.join(__dirname, 'anchor_mechanism_pairs.json'); // VENDORED REWRITE 1/3 (scripts/vendor-anchor-table.mjs): table sits beside the resolver";
 const REQUIRE_PRE = "const conditionCanon = require('./conditionCanon');";
-const REQUIRE_POST = "const conditionCanon = require('./conditionCanon.cjs'); // VENDORED REWRITE 2/2 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend";
+const REQUIRE_POST = "const conditionCanon = require('./conditionCanon.cjs'); // VENDORED REWRITE 2/3 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend";
+// The DIRECT-SC fold lazy-requires directSc inside _direct(); the .cjs extension is mandatory under
+// the ESM backend. Asserted verbatim — the pre-image is the exact try/catch line in the canonical.
+const DIRECT_REQUIRE_PRE = "try { _directSc = require('./directSc'); } catch (_) { _directSc = null; }";
+const DIRECT_REQUIRE_POST = "try { _directSc = require('./directSc.cjs'); } catch (_) { _directSc = null; } // VENDORED REWRITE 3/3 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend";
 
 if (!resolverSrc.includes(ARTIFACT_PRE)) {
   abort('source resolver changed shape — ARTIFACT_PATH pre-image line not found verbatim; re-author the vendor rewrite');
@@ -78,7 +99,13 @@ if (!resolverSrc.includes(ARTIFACT_PRE)) {
 if (!resolverSrc.includes(REQUIRE_PRE)) {
   abort("source resolver changed shape — require('./conditionCanon') pre-image line not found verbatim; re-author the vendor rewrite");
 }
-resolverSrc = resolverSrc.replace(ARTIFACT_PRE, ARTIFACT_POST).replace(REQUIRE_PRE, REQUIRE_POST);
+if (!resolverSrc.includes(DIRECT_REQUIRE_PRE)) {
+  abort("source resolver changed shape — require('./directSc') pre-image line not found verbatim; re-author the vendor rewrite");
+}
+resolverSrc = resolverSrc
+  .replace(ARTIFACT_PRE, ARTIFACT_POST)
+  .replace(REQUIRE_PRE, REQUIRE_POST)
+  .replace(DIRECT_REQUIRE_PRE, DIRECT_REQUIRE_POST);
 // R5 guard at vendor time too: the vendored set must stay DB-free + LLM-free. Match actual
 // require() calls (the resolver's header COMMENT legitimately mentions both names).
 if (/require\(['"][^'"]*(better-sqlite3|llm\/client|anthropic)[^'"]*['"]\)/.test(resolverSrc)) {
@@ -119,29 +146,87 @@ if (typeof table.row_count !== 'number' || table.row_count < 500) {
   abort(`table.row_count ${table.row_count} < 500 — stub-table guard (§6 risk 1)`);
 }
 
-// ── 4. caseViability.v1.schema.json (byte-identical when the canonical exists) ───────────────
-const srcSchemaPath = path.join(FROM, 'app', 'config', 'caseViability.v1.schema.json');
-const destSchema = path.join(CONFIG_DIR, 'caseViability.v1.schema.json');
-if (existsSync(srcSchemaPath)) {
-  writeFileSync(destSchema, readFileSync(srcSchemaPath));
-} else if (existsSync(destSchema)) {
-  // The EMR window authored the schema first (from the verified resolver bytes, plan §1); the
-  // canonical app/config/ copy lands via the drafter window. Until then the EMR copy is the
-  // authored original — flag it so the next vendor run after the canonical lands re-verifies.
-  console.warn(`WARN: canonical schema not found at ${srcSchemaPath}; keeping the EMR-authored copy. ` +
-    'Land the byte-identical canonical in the drafter repo (see shared/outbox coordination note).');
-} else {
-  abort(`schema missing on BOTH sides (${srcSchemaPath} and ${destSchema})`);
+// ── 2c. directSc.js → directSc.cjs (DIRECT-SC axis) with the require-extension rewrites ───────
+// Two intra-vendor requires (conditionCanon, eventCanon) must name the .cjs extension under the ESM
+// backend. Both are asserted verbatim. directSc reads its table by __dirname-relative path; the
+// table sits in references/ canonically but BESIDE the resolver in the vendor dir, so the TABLE_PATH
+// is rewritten too (it points at ../../references/sc_direct_pairs.json canonically).
+const srcDirectPath = path.join(FROM, 'app', 'services', 'directSc.js');
+if (!existsSync(srcDirectPath)) abort(`missing canonical ${srcDirectPath}`);
+let directSrc = readFileSync(srcDirectPath, 'utf8');
+const D_CANON_PRE = "try { conditionCanon = require('./conditionCanon'); } catch (_) { conditionCanon = null; }";
+const D_CANON_POST = "try { conditionCanon = require('./conditionCanon.cjs'); } catch (_) { conditionCanon = null; } // VENDORED REWRITE 1/3 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend";
+const D_EVENT_PRE = "const eventCanon = require('./eventCanon');";
+const D_EVENT_POST = "const eventCanon = require('./eventCanon.cjs'); // VENDORED REWRITE 2/3 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend";
+const D_TABLE_PRE = "const TABLE_PATH = path.join(__dirname, '..', '..', 'references', 'sc_direct_pairs.json');";
+const D_TABLE_POST = "const TABLE_PATH = path.join(__dirname, 'sc_direct_pairs.json'); // VENDORED REWRITE 3/3 (scripts/vendor-anchor-table.mjs): table sits beside the resolver";
+for (const [pre, label] of [[D_CANON_PRE, "require('./conditionCanon')"], [D_EVENT_PRE, "require('./eventCanon')"], [D_TABLE_PRE, 'TABLE_PATH']]) {
+  if (!directSrc.includes(pre)) abort(`directSc.js changed shape — ${label} pre-image line not found verbatim; re-author the vendor rewrite`);
+}
+directSrc = directSrc.replace(D_CANON_PRE, D_CANON_POST).replace(D_EVENT_PRE, D_EVENT_POST).replace(D_TABLE_PRE, D_TABLE_POST);
+if (/require\(['"][^'"]*(better-sqlite3|llm\/client|anthropic)[^'"]*['"]\)/.test(directSrc)) {
+  abort('vendored directSc require()s better-sqlite3 / llm client — impure module leak (R5)');
+}
+const destDirect = path.join(VENDOR_DIR, 'directSc.cjs');
+writeFileSync(destDirect, directSrc);
+
+// ── 2d. sc_direct_pairs.json (byte-identical) + DIRECT pin assert ─────────────────────────────
+const srcDirectTablePath = path.join(FROM, 'references', 'sc_direct_pairs.json');
+if (!existsSync(srcDirectTablePath)) abort(`missing canonical ${srcDirectTablePath}`);
+const directTableBytes = readFileSync(srcDirectTablePath);
+const destDirectTable = path.join(VENDOR_DIR, 'sc_direct_pairs.json');
+writeFileSync(destDirectTable, directTableBytes);
+const directTable = JSON.parse(directTableBytes.toString('utf8'));
+// directSc.tableContentHash() returns the `content_hash` FIELD verbatim (it is not recomputed from
+// rows by the engine), so the pin is the field. Assert it matches.
+if (directTable.content_hash !== PINNED_DIRECT_TABLE_HASH) {
+  abort(`sc_direct_pairs.content_hash FIELD (${directTable.content_hash}) !== pinned ${PINNED_DIRECT_TABLE_HASH}\nIf the direct table was re-curated, rotate PINNED_DIRECT_TABLE_HASH + the v2 schema tables.direct.const + anchor-table-pin.test.ts in ONE commit.`);
+}
+const MIN_DIRECT_ROWS = 8; // mirrors directSc.MIN_ROWS — below this the engine treats the table as a stub
+if (!Array.isArray(directTable.rows) || directTable.rows.length < MIN_DIRECT_ROWS) {
+  abort(`sc_direct_pairs.rows ${directTable.rows ? directTable.rows.length : 'missing'} < ${MIN_DIRECT_ROWS} — stub-table guard`);
 }
 
+// ── 4a. caseViability.v1.schema.json — EMR-AUTHORED, NOT overwritten from FRN ──────────────────
+// The EMR window authored v1 independently (it carries the optional best_anchor.E field the FRN
+// canonical lacks, and the v1 byte-pin d70aa6ce… is the EMR contract). DO NOT overwrite it from the
+// FRN canonical — the two diverged on purpose. The v1 hash const (table_content_hash.const) is
+// rotated in-place by a separate maintenance step, kept in sync with PINNED_TABLE_HASH. Vendoring
+// only verifies the const matches the secondary pin (red on drift), never rewrites the file.
+const destSchema = path.join(CONFIG_DIR, 'caseViability.v1.schema.json');
+if (!existsSync(destSchema)) abort(`EMR-authored v1 schema missing at ${destSchema}`);
+const v1Schema = JSON.parse(readFileSync(destSchema).toString('utf8'));
+if (v1Schema?.properties?.table_content_hash?.const !== PINNED_TABLE_HASH) {
+  abort(`v1 schema table_content_hash.const (${v1Schema?.properties?.table_content_hash?.const}) !== secondary pin ${PINNED_TABLE_HASH}\nRotate the const in backend/src/config/caseViability.v1.schema.json + the byte-pin in anchor-table-pin.test.ts in this commit.`);
+}
 const schemaBytes = readFileSync(destSchema);
 
-console.log('vendored 4 files:');
+// ── 4b. caseViability.v2.schema.json (two-axis) — vendored verbatim from FRN ───────────────────
+// v2 is the EMR-side contract for the direct-axis fold. Verbatim copy; its two nested const hashes
+// (tables.secondary.const + tables.direct.const) are asserted against the pins so a stale v2 can't
+// ship. Unlike v1, v2 is authored canonically in FRN and copied straight across.
+const srcV2Path = path.join(FROM, 'app', 'config', 'caseViability.v2.schema.json');
+const destV2 = path.join(CONFIG_DIR, 'caseViability.v2.schema.json');
+if (!existsSync(srcV2Path)) abort(`missing canonical ${srcV2Path}`);
+const v2Bytes = readFileSync(srcV2Path);
+writeFileSync(destV2, v2Bytes);
+const v2Schema = JSON.parse(v2Bytes.toString('utf8'));
+const v2Sec = v2Schema?.properties?.tables?.properties?.secondary?.properties?.content_hash?.const;
+const v2Dir = v2Schema?.properties?.tables?.properties?.direct?.properties?.content_hash?.const;
+if (v2Sec !== PINNED_TABLE_HASH) abort(`v2 schema tables.secondary.const (${v2Sec}) !== secondary pin ${PINNED_TABLE_HASH}`);
+if (v2Dir !== PINNED_DIRECT_TABLE_HASH) abort(`v2 schema tables.direct.const (${v2Dir}) !== direct pin ${PINNED_DIRECT_TABLE_HASH}`);
+
+console.log('vendored 7 files:');
+console.log(`  ${destDirect}`);
+console.log(`  ${destDirectTable}`);
+console.log(`  ${destV2}`);
 console.log(`  ${destResolver}`);
 console.log(`  ${destCanon}`);
 console.log(`  ${destTable}`);
 console.log(`  ${destSchema}`);
-console.log(`table content_hash (field + recomputed): ${recomputed}`);
-console.log(`table version: ${table.version}  row_count: ${table.row_count}`);
-console.log(`schema sha256: ${sha256(schemaBytes)}  (pin this in anchor-table-pin.test.ts)`);
-console.log('REMINDER: post the vendor commit SHA to flatratenexus-project/shared/outbox so the Ask-Aegis + website windows pull the identical copy (all three lanes pin the SAME table hash).');
+console.log(`secondary table content_hash (field + recomputed): ${recomputed}`);
+console.log(`secondary table version: ${table.version}  row_count: ${table.row_count}`);
+console.log(`direct table content_hash (field): ${directTable.content_hash}  rows: ${directTable.rows.length}`);
+console.log(`v1 schema sha256 (EMR-authored, NOT overwritten): ${sha256(schemaBytes)}  (pin in anchor-table-pin.test.ts PINNED_SCHEMA_SHA256)`);
+console.log(`v2 schema sha256: ${sha256(v2Bytes)}`);
+console.log('REMINDER: post the vendor commit SHA to flatratenexus-project/shared/outbox so the Ask-Aegis + website windows pull the identical copies (all lanes pin the SAME secondary + direct hashes).');

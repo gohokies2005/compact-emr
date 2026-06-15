@@ -9,13 +9,56 @@
 // ONLY-WHEN-NULL — an RN-set value (case-validation.ts PATCH path) is never clobbered. The export GET
 // stamps without persisting so a debug export never mutates the case (GET stays side-effect-free).
 
+import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import {
   deriveCaseFraming,
+  type AnchorMechanismFilter,
   type CaseFraming,
   type ProducerClaimType,
 } from './case-framing.js';
 import type { DrafterBundle } from './drafter-bundle.js';
 import type { AppDb } from './db-types.js';
+
+// Bug C (Pichette, 2026-06-15): load the VENDORED anchor-mechanism resolver and hand it to the pure
+// producer as an AnchorMechanismFilter, so the framing pick is mechanism-gated (drops EXCLUDED pairs
+// like Tinnitus→OSA). Same runtime-load pattern as case-viability.ts loadResolver (createRequire with
+// an absolute entry; candidate paths cover Lambda anchor-vendor copy, backend/ cwd, repo-root cwd).
+// FAIL-OPEN: any load/resolve error ⇒ undefined filter ⇒ the producer keeps its legacy behavior, so a
+// vendor problem can never break framing derivation.
+const VENDOR_DIR = process.env['ANCHOR_VENDOR_DIR'] ?? 'anchor-vendor';
+interface AnchorResolverModule {
+  resolveAnchorEligibility(upstream: string, claimed: string): { eligibility: string };
+  presumptiveFor(claimed: string): unknown | null;
+}
+let _mechFilter: AnchorMechanismFilter | null | undefined; // undefined = not tried; null = unavailable
+function loadMechanismFilter(): AnchorMechanismFilter | undefined {
+  if (_mechFilter !== undefined) return _mechFilter ?? undefined;
+  try {
+    const candidates = [
+      path.join(process.cwd(), VENDOR_DIR, 'anchorMechanism.cjs'), // Lambda runtime (anchor-vendor copy)
+      path.join(process.cwd(), 'src', 'vendor', 'anchorMechanism.cjs'), // backend/ cwd (vitest, tsx dev)
+      path.join(process.cwd(), 'backend', 'src', 'vendor', 'anchorMechanism.cjs'), // repo-root cwd
+    ];
+    const entry = candidates.find((c) => existsSync(c));
+    if (entry === undefined) { _mechFilter = null; return undefined; }
+    const req = createRequire(path.join(process.cwd(), '_anchor_require_base.cjs'));
+    const m = req(entry) as AnchorResolverModule;
+    _mechFilter = {
+      isEligibleAnchor: (u: string, c: string): boolean => {
+        try { return m.resolveAnchorEligibility(u, c).eligibility !== 'excluded'; } catch { return true; }
+      },
+      isPresumptive: (c: string): boolean => {
+        try { return m.presumptiveFor(c) !== null; } catch { return false; }
+      },
+    };
+    return _mechFilter;
+  } catch {
+    _mechFilter = null; // remember the failure; never retry-throw on a hot path
+    return undefined;
+  }
+}
 
 interface CaseRowForFraming {
   readonly id: string;
@@ -153,6 +196,8 @@ function deriveForRow(c: CaseRowForFraming): CaseFraming {
       ratingPct: s.ratingPct,
       status: String(s.status),
     })),
+    new Date(),
+    loadMechanismFilter(), // Bug C: mechanism-gate the anchor pick (fail-open to undefined)
   );
 }
 

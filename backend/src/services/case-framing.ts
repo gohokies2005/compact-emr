@@ -104,6 +104,23 @@ export function buildGrantedScAnchors(
   });
 }
 
+/**
+ * Bug C (Pichette, 2026-06-15): the BVA-pair recommender (bestGrantedScPair → findPair) ranks
+ * anchors by Board WIN-RATE with NO mechanism gate, so a co-occurrence artifact (Tinnitus→OSA, tier
+ * "high", but mechanistically EXCLUDED) won the "Argument" anchor. This injectable filter lets the
+ * IMPURE adapter (case-framing-stamp.ts) hand in the vendored anchor-mechanism resolver so the
+ * producer drops mechanism-EXCLUDED granted-SC anchors before scoring, and emits 'undetermined'
+ * rather than a bogus secondary theory when every candidate anchor is excluded and the claim is not
+ * a presumptive direct path. ABSENT (undefined) ⇒ legacy behavior (no mechanism gate) — the producer
+ * stays pure + fail-open (a missing/erroring resolver in the adapter passes undefined).
+ */
+export interface AnchorMechanismFilter {
+  /** false ⇒ the (upstream→claimed) pair is mechanism-EXCLUDED — drop it as a secondary anchor. */
+  isEligibleAnchor(upstream: string, claimed: string): boolean;
+  /** true ⇒ the claimed condition has a VA presumptive pathway (suppresses the undetermined escape). */
+  isPresumptive(claimed: string): boolean;
+}
+
 export interface EvidenceFramingInput {
   readonly claimedCondition: string;
   readonly upstreamScCondition: string | null;
@@ -116,10 +133,12 @@ export interface EvidenceFramingInput {
    * Same rung, different text source — the ladder logic itself is shared.
    */
   readonly textParseHint?: { readonly upstream: string; readonly framing: string } | undefined;
+  /** Bug C: injected by the impure adapter; undefined ⇒ no mechanism gate (legacy / fail-open). */
+  readonly mechanismFilter?: AnchorMechanismFilter | undefined;
 }
 
 export interface EvidenceFramingResult {
-  readonly framing: 'secondary' | 'aggravation' | 'direct';
+  readonly framing: 'secondary' | 'aggravation' | 'direct' | 'undetermined';
   readonly upstreamScCondition: string | null;
   readonly source: 'derived' | 'text_parse_fallback' | 'default_direct';
 }
@@ -133,16 +152,26 @@ export interface EvidenceFramingResult {
  * normalizable RN value as authoritative and never reaches this ladder.
  */
 export function deriveFramingFromEvidence(input: EvidenceFramingInput): EvidenceFramingResult {
+  const filter = input.mechanismFilter;
+  // Bug C: an anchor is eligible unless the mechanism resolver hard-EXCLUDES it. No filter ⇒ legacy
+  // (everything eligible). Only `excluded` is dropped — the blessed/conditional/chain/plausible long
+  // tail is preserved exactly as before.
+  const eligible = (upstream: string): boolean =>
+    filter === undefined || filter.isEligibleAnchor(upstream, input.claimedCondition);
+
   const stored = input.upstreamScCondition;
-  const storedScoreable = stored !== null && findPair(stored, input.claimedCondition) !== null;
-  if (storedScoreable) {
-    // Keep a scoreable stored anchor (internal-worker.ts:757 — the backfill writes nothing here).
+  const storedHasPair = stored !== null && findPair(stored, input.claimedCondition) !== null;
+  if (storedHasPair && eligible(stored as string)) {
+    // Keep a scoreable, mechanism-eligible stored anchor (internal-worker.ts:757 — backfill writes nothing here).
     return {
       framing: input.aggravationWording ? 'aggravation' : 'secondary',
       upstreamScCondition: stored,
       source: 'derived',
     };
   }
+  // Bug C: mechanism-gate the granted-SC candidate list BEFORE BVA scoring, so a co-occurrence
+  // artifact (Tinnitus→OSA, tier "high" but mechanistically excluded) can never win the anchor.
+  const eligibleGrantedNames = input.grantedScConditionNames.filter(eligible);
   // AUTHORITATIVE anchor: the granted-SC condition with the best Board pair to the claimed condition.
   // claimType:'secondary' is a deliberate literal (internal-worker.ts:760) — it forces the secondary
   // pair scan regardless of the case's procedural claimType. Do NOT pass the case's real claimType.
@@ -151,7 +180,7 @@ export function deriveFramingFromEvidence(input: EvidenceFramingInput): Evidence
     claimType: 'secondary',
     framingChoice: null,
     upstreamScCondition: null,
-    serviceConnectedConditions: input.grantedScConditionNames,
+    serviceConnectedConditions: eligibleGrantedNames,
     activeProblems: [],
   });
   if (authoritative !== null) {
@@ -161,12 +190,26 @@ export function deriveFramingFromEvidence(input: EvidenceFramingInput): Evidence
       source: 'derived',
     };
   }
-  if (input.textParseHint !== undefined) {
+  // Bug C: don't let a lay-text parse resurrect a mechanism-EXCLUDED upstream either.
+  if (input.textParseHint !== undefined && eligible(input.textParseHint.upstream)) {
     return {
       framing: input.textParseHint.framing === 'aggravation' ? 'aggravation' : 'secondary',
       upstreamScCondition: input.textParseHint.upstream,
       source: 'text_parse_fallback',
     };
+  }
+  // Bug C — the undetermined escape: a candidate anchor (granted, stored, or lay-text) EXISTED but was
+  // mechanism-EXCLUDED, nothing eligible remains, and the claim is not a presumptive direct path. The
+  // honest answer is "no recognized secondary pathway" — emit 'undetermined' rather than silently
+  // defaulting to 'direct' (which would imply a viable direct theory the engine hasn't established).
+  // A genuine direct claim (a granted SC with NO atlas relation, never dropped) does NOT trip this.
+  if (filter !== undefined && !filter.isPresumptive(input.claimedCondition)) {
+    const droppedGranted = eligibleGrantedNames.length < input.grantedScConditionNames.length;
+    const droppedStored = storedHasPair && !eligible(stored as string);
+    const droppedText = input.textParseHint !== undefined && !eligible(input.textParseHint.upstream);
+    if (droppedGranted || droppedStored || droppedText) {
+      return { framing: 'undetermined', upstreamScCondition: null, source: 'derived' };
+    }
   }
   if (stored !== null && !isRecognizedSecondaryAnchor(stored)) {
     // Garbage stored anchor ("service I wake up with headaches") — clear it (internal-worker.ts:770-772).
@@ -184,6 +227,7 @@ export function deriveCaseFraming(
   caseInput: CaseFramingCaseInput,
   scConditions: readonly ScConditionInput[],
   now: Date = new Date(),
+  mechanismFilter?: AnchorMechanismFilter,
 ): CaseFraming {
   const grantedScAnchors = buildGrantedScAnchors(scConditions, caseInput.claimedCondition);
   const grantedNames = grantedScAnchors.map((a) => a.condition);
@@ -205,6 +249,12 @@ export function deriveCaseFraming(
     // granted upstream (pending primary) also stays 'secondary' — consumers see the empty anchor list.
     const upstreamUsable =
       caseInput.upstreamScCondition !== null && isRecognizedSecondaryAnchor(caseInput.upstreamScCondition);
+    // Bug C: mechanism-gate the contradiction probe too — an RN-set 'secondary' whose only granted
+    // anchor is mechanism-EXCLUDED has no viable primary, so it is still a contradiction → undetermined.
+    const contradictionGrantedNames =
+      mechanismFilter === undefined
+        ? grantedNames
+        : grantedNames.filter((n) => mechanismFilter.isEligibleAnchor(n, caseInput.claimedCondition));
     const contradiction =
       rnChoice === 'secondary'
       && grantedScAnchors.length === 0
@@ -214,7 +264,7 @@ export function deriveCaseFraming(
         claimType: 'secondary',
         framingChoice: null,
         upstreamScCondition: null,
-        serviceConnectedConditions: grantedNames,
+        serviceConnectedConditions: contradictionGrantedNames,
         activeProblems: [],
       }) === null;
     return {
@@ -233,6 +283,7 @@ export function deriveCaseFraming(
     textParseHint: caseInput.veteranStatement !== null && caseInput.veteranStatement.length > 0
       ? parseSecondaryFraming(caseInput.veteranStatement)
       : undefined,
+    mechanismFilter,
   });
   return {
     ...base,

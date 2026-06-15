@@ -74,6 +74,22 @@ function _canonClaimed(s) {
 
 const _M0 = { eligible: false, eligibility: 'excluded', tier: 'excluded', m_static: 0 };
 function _plausibleDefault() { return { eligible: true, eligibility: 'plausible', tier: 'plausible', m_static: 2, default: true }; }
+function _abstainNoRow() { return { eligible: false, eligibility: 'abstain', tier: 'abstain', m_static: 0, reason: 'no_row_exposure_abstain' }; }
+
+// TOXIC/EXPOSURE events (Ryan 2026-06-15, Pichette): a toxic exposure does NOT support an arbitrary
+// claimed condition under 3.303 "by default" — that's a presumptive/FILING matter (the veteran must
+// file to get it conceded), not a manufactured nexus. So for these events an UNKNOWN (no curated row)
+// pair ABSTAINS instead of falling to the long-tail plausible default. The plausible default stays for
+// INJURY/ACTIVITY events (acute injury, repetitive load, blast/TBI, acoustic noise, criterion-A
+// trauma, MST, chronic operational stress, COLD INJURY) where an undocumented direct nexus is medically
+// reasonable. (Presumptive events — burn-pit/AO/Gulf-War/Lejeune/radiation/1yr — are filtered upstream
+// in assessDirectViability and route to the condition-keyed presumptive logic, never here.)
+const _ABSTAIN_ON_UNKNOWN = new Set([
+  'chemical_solvent_fuel_tera', 'asbestos',
+  // presumptive set (already filtered before lookup; listed for intent/defense-in-depth)
+  'burn_pit_airborne', 'herbicide_agent_orange', 'gulf_war_environmental',
+  'camp_lejeune_water', 'ionizing_radiation', 'chronic_disease_1yr',
+]);
 
 // resolveDirectEligibility(eventCanonical, claimedText) — table lookup for ONE pair.
 // Returns {eligibility, tier, m_static, basis, requires, mechanism, presumptive, physician_reviewed, row}.
@@ -91,7 +107,9 @@ function resolveDirectEligibility(eventCanonical, claimedText) {
     row = tbl.byEventClaimed.get(eventCanonical + '>' + k);
     if (row) break;
   }
-  if (!row) return { ..._plausibleDefault(), reason: 'no_row' };
+  // Unknown pair: toxic/exposure events ABSTAIN (file-the-claim, not a manufactured nexus); all
+  // other (injury/activity) events keep the long-tail plausible default.
+  if (!row) return _ABSTAIN_ON_UNKNOWN.has(eventCanonical) ? _abstainNoRow() : { ..._plausibleDefault(), reason: 'no_row' };
   return {
     eligible: row.eligibility !== 'excluded',
     eligibility: row.eligibility,
@@ -193,7 +211,7 @@ function assessDirectViability(claimedText, eventsInput) {
       if (!_detectRegions(textBlob).includes(claimedRegion)) continue;
     }
     const r = resolveDirectEligibility(d.event_canonical, claimedText);
-    if (r.eligibility === 'excluded') continue;
+    if (r.eligibility === 'excluded' || r.eligibility === 'abstain') continue; // exposure-no-row abstains (Pichette)
     candidates.push({ event_canonical: d.event_canonical, evidence: d.evidence, ...r });
   }
   // rank: blessed > conditional > plausible, then by m_static

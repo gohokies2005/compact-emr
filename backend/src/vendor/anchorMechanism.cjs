@@ -786,9 +786,9 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
   // Fold direct in-service-event anchors into the SAME ranked list so ONE comparator
   // picks the cross-axis winner (Tier-1 direct suppresses Tier-2 secondary via the axis
   // tiebreak). Events arrive pre-resolved (producer ran eventCanon / the LLM classifier)
-  // through chartFactsPresent.in_service_events. Presumptive events route to the existing
-  // presumptive_redirect, never to a drafting anchor. Entirely skipped when the flag is off.
-  let _directPresumptive = null;
+  // through chartFactsPresent.in_service_events. Presumptive in-service EVENTS are NOT a drafting
+  // anchor AND do NOT trigger a presumptive redirect here (that's the condition-keyed _PRESUMPTIVE
+  // map's job, §3.0). Entirely skipped when the flag is off.
   if (_directAxisOn()) {
     for (const a of resolved) a.anchor_axis = 'secondary';   // tag existing secondary candidates for v2
     const events = (chartFactsPresent && Array.isArray(chartFactsPresent.in_service_events)) ? chartFactsPresent.in_service_events : [];
@@ -817,26 +817,16 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
             aggravation_only: false,
           });
         }
-        // Direct presumptive events held as a redirect fallback when nothing else anchors.
-        if (Array.isArray(dres.presumptive_events) && dres.presumptive_events.length) {
-          _directPresumptive = dres.presumptive_events;
-        }
       }
     }
   }
 
   if (!resolved.length) {
-    // No secondary AND no direct anchor. If a direct presumptive event exists, surface the
-    // redirect; otherwise weak.
-    if (_directPresumptive && _directPresumptive.length) {
-      const ev = _directPresumptive[0];
-      shell.viability = 'redirect';
-      shell.confidence = 'high';
-      if (shell.tables !== undefined) shell.axis = 'presumptive_redirect';
-      shell.presumptive_redirect = { path: 'presumptive', note: `An in-service ${_eventLabel(ev.event_canonical)} may support a presumptive claim (file presumptive; a nexus letter may not be needed).`, advisory: true };
-      shell.why = `Redirect: a presumptive path may apply (${_eventLabel(ev.event_canonical)}).`;
-      return shell;
-    }
+    // No secondary AND no direct anchor → honest weak. A presumptive in-service EVENT (burn-pit, AO,
+    // …) does NOT make the CLAIMED condition presumptive (Ryan/Pichette 2026-06-15): "presumptive" is
+    // decided ONLY by the condition-keyed _PRESUMPTIVE map (consulted earlier at the §3.0 pre-emption),
+    // never by the exposure class. OSA is not a burn-pit presumptive, so this must say weak, not
+    // "file the presumptive."
     shell.viability = 'weak';
     shell.confidence = 'low';
     shell.why = _whyLine('weak', null, clC, null, null);

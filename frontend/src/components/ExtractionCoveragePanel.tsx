@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { SectionCard } from './ui/SectionCard';
 import { PdfViewerModal, type ViewableDoc } from './PdfViewerModal';
-import { getExtractionCoverage, type CoverageGap } from '../api/extraction-coverage';
+import { getExtractionCoverage, type CoverageGap, type PageReviewRef } from '../api/extraction-coverage';
 
 /**
  * Chart Extraction Coverage — per-case TRANSPARENCY report (Ryan 2026-06-14).
@@ -34,6 +34,13 @@ const REASON_TEXT: Record<CoverageGap['reason'], string> = {
   extraction_gap: 'Some pages weren’t folded into the chart',
 };
 
+// Per-page review-row copy (vision rebuild). Calm + honest: a handwriting page usually DID capture the
+// printed text — we're unsure about the cursive/margins, so "may not have read in full," never "failed."
+const REVIEW_REASON_TEXT: Record<PageReviewRef['reason'], string> = {
+  handwriting_uncertain: 'Handwriting — read with low confidence',
+  unreadable: 'Couldn’t be read — needs a look',
+};
+
 export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps) {
   const [expanded, setExpanded] = useState(false);
   const [viewDoc, setViewDoc] = useState<ViewableDoc | null>(null);
@@ -55,10 +62,27 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
     return <SectionCard title="Chart extraction"><p className="text-sm text-slate-500">Extraction coverage is unavailable right now.</p></SectionCard>;
   }
 
-  const isComplete = cov.coveragePct >= 100 && cov.gaps.length === 0 && cov.unknownPageFiles === 0;
+  // Per-page vision breakdown (null for non-vision charts → behaves exactly as before).
+  const pb = cov.pageBreakdown;
+  const reviewPages = pb?.reviewPages ?? [];
+  // Complete requires BOTH: no file-level gaps AND no per-page review items (a file can read "100%" at
+  // file level while individual pages are handwriting-uncertain — that must NOT show as Complete).
+  const isComplete = cov.coveragePct >= 100 && cov.gaps.length === 0 && cov.unknownPageFiles === 0 && reviewPages.length === 0;
   // CALM/NEUTRAL (Ryan 2026-06-16): the container is a quiet neutral SectionCard; status is conveyed by a
-  // SMALL chip only (green = complete, amber = partial), never a filled green/amber banner. Advisory, never red.
+  // SMALL chip only, never a filled banner. Advisory, never red.
+  // 3-STATE chip (RN UX 2026-06-16): Complete (green) / "N unread" (amber, real content missing) /
+  // "Review N pages" (amber, handwriting low-confidence) / "Partial" (amber, file-level gaps only).
+  const unreadable = pb?.unreadable ?? 0;
+  const handwritingUncertain = pb?.handwritingUncertain ?? 0;
+  const chip: { label: string; complete: boolean } = isComplete
+    ? { label: 'Complete', complete: true }
+    : unreadable > 0
+      ? { label: `${unreadable} unread`, complete: false }
+      : handwritingUncertain > 0
+        ? { label: `Review ${handwritingUncertain} ${handwritingUncertain === 1 ? 'page' : 'pages'}`, complete: false }
+        : { label: 'Partial', complete: false };
   const tone = { sub: 'text-slate-500' };
+  const totalItems = cov.gaps.length + reviewPages.length;
 
   const approximate = cov.unknownPageFiles > 0;
   const headline = cov.status === 'in_progress'
@@ -79,8 +103,8 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
     <SectionCard
       title="Chart extraction"
       status={
-        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${isComplete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
-          {isComplete ? 'Complete' : 'Partial'}
+        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${chip.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
+          {chip.label}
         </span>
       }
     >
@@ -93,23 +117,60 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
           ) : (
             <p className={`mt-1 ${tone.sub}`}>
               {approximate ? 'Some page counts are unavailable, so this is approximate. ' : ''}
-              {cov.gaps.length > 0
-                ? `${cov.gaps.length} ${cov.gaps.length === 1 ? 'item was' : 'items were'} not fully extracted — listed below so you can check ${cov.gaps.length === 1 ? 'it' : 'them'}. This does not block drafting.`
-                : 'This does not block drafting.'}
+              {unreadable > 0
+                ? `${unreadable} ${unreadable === 1 ? 'page' : 'pages'} couldn’t be read and ${unreadable === 1 ? 'needs' : 'need'} a quick look before this chart is relied on. `
+                : handwritingUncertain > 0
+                  ? `${handwritingUncertain} ${handwritingUncertain === 1 ? 'page contains' : 'pages contain'} handwriting we may not have read in full — open ${handwritingUncertain === 1 ? 'it' : 'them'} below to confirm we captured what matters. `
+                  : cov.gaps.length > 0
+                    ? `${cov.gaps.length} ${cov.gaps.length === 1 ? 'item was' : 'items were'} not fully extracted — listed below so you can check ${cov.gaps.length === 1 ? 'it' : 'them'}. `
+                    : ''}
+              This does not block drafting.
             </p>
           )}
+          {/* Capture breakdown — only when the vision path stamped per-page signals. Blanks shown as a
+              calm reassurance, never as items to chase. */}
+          {pb !== null && pb.pagesWithSignal > 0 ? (
+            <p className="mt-1 text-xs text-slate-500">
+              Scanned pages read by vision: {pb.clean} clear
+              {handwritingUncertain > 0 ? `, ${handwritingUncertain} handwriting to confirm` : ''}
+              {unreadable > 0 ? `, ${unreadable} couldn’t read` : ''}
+              {pb.blank > 0 ? `, ${pb.blank} blank` : ''}.
+            </p>
+          ) : null}
         </div>
-        {cov.gaps.length > 0 ? (
+        {totalItems > 0 ? (
           <div className="flex flex-none items-center gap-2">
             <Button type="button" variant="secondary" size="sm" onClick={() => setExpanded((v) => !v)}>
-              {expanded ? 'Hide details' : `Show ${cov.gaps.length} ${cov.gaps.length === 1 ? 'item' : 'items'}`}
+              {expanded ? 'Hide details' : `Show ${totalItems} ${totalItems === 1 ? 'item' : 'items'}`}
             </Button>
           </div>
         ) : null}
       </div>
 
-      {expanded && cov.gaps.length > 0 ? (
-        <ul className="mt-3 space-y-2">
+      {expanded && totalItems > 0 ? (
+        <div className="mt-3 space-y-2">
+          {/* Per-page review rows (handwriting-uncertain + unreadable). Blanks are never here. "View
+              file" opens the document inline; per-page navigation + re-run-vision/accept are the noted
+              follow-on (need new endpoints). */}
+          {reviewPages.length > 0 ? (
+            <ul className="space-y-2">
+              {reviewPages.map((rp, i) => (
+                <li key={`rp-${rp.documentId}-${rp.pageNumber}-${i}`} className="rounded-lg border border-amber-200 bg-white p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="truncate font-medium text-slate-800">{rp.fileName}</p>
+                      <p className="text-xs text-slate-600">p.{rp.pageNumber} · {REVIEW_REASON_TEXT[rp.reason]}</p>
+                    </div>
+                    <Button type="button" variant="secondary" size="sm" onClick={() => openFile(rp.documentId, rp.fileName, false)}>
+                      View file
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {cov.gaps.length > 0 ? (
+          <ul className="space-y-2">
           {cov.gaps.map((g, i) => {
             const key = `${g.documentId ?? 'run'}-${g.reason}-${i}`;
             return (
@@ -143,7 +204,9 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
               </li>
             );
           })}
-        </ul>
+          </ul>
+          ) : null}
+        </div>
       ) : null}
 
       <PdfViewerModal doc={viewDoc} onClose={() => setViewDoc(null)} />

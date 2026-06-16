@@ -21,6 +21,7 @@ function cov(over: Partial<ExtractionCoverage> = {}): ExtractionCoverage {
     status: 'complete',
     unknownPageFiles: 0,
     totalFiles: 10,
+    pageBreakdown: null,
     ...over,
   };
 }
@@ -85,6 +86,60 @@ describe('ExtractionCoveragePanel', () => {
     });
     renderPanel();
     expect(await screen.findByText(/3 files, page counts unavailable/)).toBeInTheDocument();
+  });
+
+  // ===== Per-page vision breakdown (vision rebuild 2026-06-16) =====
+  it('handwriting-uncertain pages → amber "Review N pages" chip + breakdown line, NOT Complete', async () => {
+    coverageMock.mockResolvedValue({
+      data: cov({
+        coveragePct: 100, // file-level reads 100% — but per-page review must override the chip
+        pageBreakdown: {
+          pagesWithSignal: 4, clean: 2, handwritingUncertain: 2, blank: 0, unreadable: 0,
+          reviewPages: [
+            { documentId: 'D1', fileName: 'STD_worksheet.pdf', pageNumber: 1, reason: 'handwriting_uncertain' },
+            { documentId: 'D1', fileName: 'STD_worksheet.pdf', pageNumber: 2, reason: 'handwriting_uncertain' },
+          ],
+        },
+      }),
+    });
+    renderPanel();
+    expect(await screen.findByText('Review 2 pages')).toBeInTheDocument();
+    expect(screen.queryByText('Complete')).not.toBeInTheDocument();
+    expect(screen.getByText(/handwriting we may not have read in full/)).toBeInTheDocument();
+    expect(screen.getByText(/2 clear, 2 handwriting to confirm/)).toBeInTheDocument();
+    // expand → the two review rows with plain reason + View file
+    fireEvent.click(screen.getByRole('button', { name: /Show 2 items/ }));
+    expect(await screen.findAllByText('STD_worksheet.pdf')).toHaveLength(2);
+    expect(screen.getAllByText(/Handwriting — read with low confidence/)).toHaveLength(2);
+  });
+
+  it('unreadable pages → amber "N unread" chip, blanks stay silent (not listed, shown only in the breakdown)', async () => {
+    coverageMock.mockResolvedValue({
+      data: cov({
+        pageBreakdown: {
+          pagesWithSignal: 5, clean: 3, handwritingUncertain: 0, blank: 1, unreadable: 1,
+          reviewPages: [{ documentId: 'D2', fileName: 'faded.pdf', pageNumber: 4, reason: 'unreadable' }],
+        },
+      }),
+    });
+    renderPanel();
+    expect(await screen.findByText('1 unread')).toBeInTheDocument();
+    expect(screen.getByText(/3 clear, 1 couldn’t read, 1 blank/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Show 1 item/ }));
+    expect(await screen.findByText('faded.pdf')).toBeInTheDocument();
+    // blank page is NOT a review row (no cry-wolf)
+    expect(screen.queryByText(/blank/i)).toBeInTheDocument(); // appears in breakdown line only
+  });
+
+  it('all-clean vision chart → Complete chip (full pages with handwriting are captured, not flagged)', async () => {
+    coverageMock.mockResolvedValue({
+      data: cov({
+        pageBreakdown: { pagesWithSignal: 3, clean: 3, handwritingUncertain: 0, blank: 0, unreadable: 0, reviewPages: [] },
+      }),
+    });
+    renderPanel();
+    expect(await screen.findByText('Complete')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Show/ })).not.toBeInTheDocument();
   });
 
   it('a non-image gap shows no describe affordance', async () => {

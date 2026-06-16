@@ -26,6 +26,24 @@ export interface CoverageGap {
   readonly terminalStatus: string | null;
 }
 
+// Per-page vision breakdown (vision rebuild 2026-06-16). null for non-vision charts (Textract/native/
+// legacy) → the panel shows only the file-level numbers, exactly as before.
+export interface PageReviewRef {
+  readonly documentId: string;
+  readonly fileName: string;
+  readonly pageNumber: number;
+  readonly reason: 'handwriting_uncertain' | 'unreadable';
+}
+
+export interface PageCoverageBreakdown {
+  readonly pagesWithSignal: number;
+  readonly clean: number; // captured with confidence
+  readonly handwritingUncertain: number; // content present, low-confidence regions — confirm
+  readonly blank: number; // verified empty — silent, not a gap to chase
+  readonly unreadable: number; // almost nothing read — needs a look
+  readonly reviewPages: readonly PageReviewRef[];
+}
+
 export interface ExtractionCoverage {
   readonly totalPages: number;
   readonly extractedPages: number;
@@ -35,6 +53,7 @@ export interface ExtractionCoverage {
   // > 0 → some files had no page count (counted as 1 unit each); the headline must say "approximate".
   readonly unknownPageFiles: number;
   readonly totalFiles: number;
+  readonly pageBreakdown: PageCoverageBreakdown | null;
 }
 
 export async function getExtractionCoverage(caseId: string): Promise<{ data: ExtractionCoverage }> {

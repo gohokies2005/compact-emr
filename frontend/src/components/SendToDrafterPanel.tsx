@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { Spinner } from './ui/Spinner';
-import { getChartReadiness, type ChartReadinessBlockingFile } from '../api/chart-readiness';
+import { type ChartReadinessBlockingFile } from '../api/chart-readiness';
+import { useChartReadiness } from '../hooks/useChartReadiness';
 import { viewDocument } from '../api/veterans';
 import { postDraft, type DraftRequestInput, type DraftConcurrencyResult } from '../api/drafter';
 import { ConflictError, describeApiError } from '../api/client';
@@ -29,17 +30,11 @@ interface SendToDrafterPanelProps {
 export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftAttempt, physicianAssigned, rnAssigned }: SendToDrafterPanelProps) {
   const queryClient = useQueryClient();
 
-  const readinessQuery = useQuery({
-    queryKey: ['case', caseId, 'chart-readiness'],
-    queryFn: () => getChartReadiness(caseId),
-    enabled: caseId.length > 0,
-    // While the chart is still building (OCR or the full-read extraction), poll so the draft button
-    // unlocks ITSELF the moment it finishes — no manual refresh. Stops polling once it settles.
-    refetchInterval: (q) => {
-      const st = q.state.data?.data?.extractionState;
-      return st === 'extracting' || st === 'ocr_in_progress' ? 8000 : false;
-    },
-  });
+  // Chart-readiness now lives in the shared useChartReadiness hook (Phase 2, 2026-06-16): the page
+  // also calls it (a guaranteed always-mounted observer) so the 8s poll survives THIS panel unmounting
+  // when a draft goes in-flight. RQ dedupes by queryKey → still one fetch + one poll. The hook returns
+  // RAW query truth; `stillBuilding` (which folds in awaitingAutoResume) stays LOCAL below.
+  const rd = useChartReadiness(caseId);
 
   // AUTO-RECOVERY (document auto-recovery loop, 2026-06-14): when a draft click on a not-ready chart
   // gets a 202 "preparing" (the backend auto-fired a re-read/re-extract), we set this so the readiness
@@ -108,21 +103,22 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
     else draftMutation.mutate(ov);
   }
 
-  const readiness = readinessQuery.data?.data;
-  const ready = readiness?.ready === true;
+  const readiness = rd.readiness;
+  const ready = rd.ready;
   // The chart is still building: OCR running, or the full-read extraction (minutes) hasn't finished.
-  // Drafting must wait — the pre-draft gates (Gate-2 dx / framing / viability) read the EXTRACTED
-  // chart, so a draft started mid-extraction sees a half-populated chart. (Ryan 2026-06-13.)
-  const buildingFromExtraction = readiness?.extractionState === 'extracting' || readiness?.extractionState === 'ocr_in_progress';
+  // RAW query truth from the hook — drafting must wait because the pre-draft gates read the EXTRACTED
+  // chart. THIS is the auto-resume gate; never fold awaitingAutoResume into it (the dead-spot bug).
+  const buildingFromExtraction = rd.buildingFromExtraction;
   // "Still building" for UI purposes = the extraction is running OR we just fired an auto-remediation and
   // are awaiting auto-resume (covers the brief window after the 202 before the readiness poll catches up,
   // so the RN immediately sees "Reading the documents…" and the Send button stays disabled — no flicker
-  // to the amber not-ready panel, no premature manual click). (document auto-recovery loop, 2026-06-14.)
+  // to the amber not-ready panel, no premature manual click). LOCAL only (folds in the mutation-armed
+  // flag) — kept out of the hook so the auto-resume effect below can gate on the RAW buildingFromExtraction.
   const stillBuilding = buildingFromExtraction || awaitingAutoResume !== null;
   // The extraction RUN failed (worker error, or the stuck-run watcher reaped a killed run). The OCR-only
   // `ready` flag can still be true here, so WITHOUT this the panel showed a green "ready" + enabled Send on
   // a failed/empty chart → a hollow $500 letter (audit 2026-06-13 HEADLINE 1 P0). Gate the button on it.
-  const extractFailed = readiness?.extractionState === 'extract_failed';
+  const extractFailed = rd.extractFailed;
 
   // AUTO-RESUME (document auto-recovery loop, 2026-06-14; dead-spot fixed 2026-06-14): after an
   // auto-remediation (202 "preparing"), the readiness poll watches the chart rebuild. The moment it
@@ -155,21 +151,16 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   }, [awaitingAutoResume, ready, buildingFromExtraction, extractFailed, draftMutation]);
   // The run finished but left pages unread/truncated (complete_with_gaps → extractionState stays
   // 'chart_ready'). Door still opens; we surface HOW MUCH is missing so the RN can reprocess if it matters.
-  const gaps = readiness?.extractionGaps ?? null;
-  const hasGaps = gaps != null && (gaps.truncatedWindows > 0 || gaps.uncoveredPages > 0);
-  const blockingFiles = readiness?.blockingFiles ?? readiness?.blockers ?? [];
+  const gaps = rd.gaps;
+  const hasGaps = rd.hasGaps;
+  const blockingFiles = rd.blockingFiles;
   const blockingFileCount = blockingFiles.length;
   // E5 (2026-06-13): the completeness state threaded to the verdict cards — OCR-blocked files (the
-  // Woodley 1,119pp-unread class) + extraction gaps (truncated/uncovered pages). Null while the chart
-  // is still building (the cards stay quiet until the verdict is real). The cards render a caveat when
-  // any part of the record went unparsed so a thin-parse verdict can't masquerade as confident.
-  const completeness = stillBuilding
-    ? null
-    : {
-        unreadFileCount: blockingFileCount,
-        uncoveredPages: gaps?.uncoveredPages ?? 0,
-        truncatedWindows: gaps?.truncatedWindows ?? 0,
-      };
+  // Woodley 1,119pp-unread class) + extraction gaps (truncated/uncovered pages). Now the hook's
+  // QUERY-ONLY completeness (null while buildingFromExtraction) — NOT folding awaitingAutoResume, so
+  // the cards quiet on the real extraction signal, not the panel's brief mutation-armed window
+  // (architect QA 2026-06-16: a deliberate, ratified behavior tweak vs the prior stillBuilding-gated one).
+  const completeness = rd.completeness;
   // The original filename (basename of the S3 key) so the RN knows EXACTLY which file to re-upload or
   // re-OCR — a bare "1 file(s) could not be read" with no name is useless (Ryan 2026-06-06, Yorde).
   // The basename+uuid-strip lives in lib/documentFileName (shared with the RN queue — Package 1 (J)).
@@ -283,9 +274,9 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
       ) : null}
 
       <div className="mt-5">
-        {readinessQuery.isLoading ? (
+        {rd.isLoading ? (
           <Spinner label="Checking chart readiness" />
-        ) : readinessQuery.isError ? (
+        ) : rd.isError ? (
           <div className="rounded-lg border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-4 text-sm text-amber-800">
             Could not check chart readiness. Please retry.
           </div>

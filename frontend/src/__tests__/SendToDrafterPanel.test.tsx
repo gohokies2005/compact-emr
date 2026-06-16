@@ -4,7 +4,7 @@ import type { ComponentProps, ReactNode } from 'react';
 import { AxiosError, AxiosHeaders } from 'axios';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SendToDrafterPanel } from '../components/SendToDrafterPanel';
-import { getChartReadiness } from '../api/chart-readiness';
+import { getChartReadiness, type ChartReadinessResult } from '../api/chart-readiness';
 import { postDraft } from '../api/drafter';
 import { viewDocument } from '../api/veterans';
 import { postManualSummary, type FileReadStatus } from '../api/cases';
@@ -326,5 +326,47 @@ describe('SendToDrafterPanel', () => {
     // The POST failed — the typed reason MUST still be there (window.prompt lost it; state doesn't).
     expect(await screen.findByText(/server returned 400: Assign a physician and an RN liaison/)).toBeInTheDocument();
     expect(screen.getByPlaceholderText('What does the file show?')).toHaveValue(reason);
+  });
+});
+
+// ── CHARACTERIZATION: the draft-gating contract (Phase 2 readiness-lift safety net, 2026-06-16) ──
+// Pins the Send-button disabled state + the banner for every readiness state BEFORE the chart-readiness
+// query is lifted into a shared hook. Must stay GREEN through the lift — RED only if the refactor
+// changes gating. Row "extract_failed" is the P0 anti-hollow-letter cell (ready:true but the extraction
+// FAILED must keep the button disabled) — do NOT simplify it away.
+describe('SendToDrafterPanel — draft-gating characterization matrix', () => {
+  const rows: Array<{ name: string; fixture: ChartReadinessResult; disabled: boolean; banner: string }> = [
+    { name: 'ready', fixture: { ready: true }, disabled: false, banner: 'Chart is ready for drafting.' },
+    { name: 'ready + chart_ready', fixture: { ready: true, extractionState: 'chart_ready' }, disabled: false, banner: 'Chart is ready for drafting.' },
+    { name: 'extracting (full-read running)', fixture: { ready: true, extractionState: 'extracting' }, disabled: true, banner: 'Reading & extracting the full chart…' },
+    { name: 'ocr_in_progress', fixture: { ready: false, extractionState: 'ocr_in_progress' }, disabled: true, banner: 'Reading the documents…' },
+    { name: 'P0: extract_failed (ready:true but FAILED → disabled)', fixture: { ready: true, extractionState: 'extract_failed' }, disabled: true, banner: 'Chart extraction failed' },
+    { name: 'not ready (blocking file)', fixture: { ready: false, blockingFiles: [{ filePath: 'records/x.pdf', terminalStatus: 'manual_summary_required' }] }, disabled: true, banner: 'Chart is not ready for drafting' },
+    { name: 'not ready (reason, no blocker)', fixture: { ready: false, reason: 'pending records' }, disabled: true, banner: 'Chart is not ready for drafting' },
+    { name: 'ready with gaps', fixture: { ready: true, extractionGaps: { uncoveredPages: 3, truncatedWindows: 1 } }, disabled: false, banner: 'Chart is ready — but part of the record went unread' },
+  ];
+
+  it.each(rows)('$name → banner shown + Send disabled=$disabled', async ({ fixture, disabled, banner }) => {
+    readinessMock.mockResolvedValue({ data: fixture });
+    renderPanel();
+    expect(await screen.findByText(banner)).toBeInTheDocument();
+    const button = screen.getByRole('button', { name: 'Send to Drafter' });
+    if (disabled) await waitFor(() => expect(button).toBeDisabled());
+    else await waitFor(() => expect(button).not.toBeDisabled());
+  });
+
+  it('P0: extract_failed still offers the override (never a dead-end)', async () => {
+    readinessMock.mockResolvedValue({ data: { ready: true, extractionState: 'extract_failed' } });
+    renderPanel();
+    expect(await screen.findByText('Chart extraction failed')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Override/ })).toBeInTheDocument();
+  });
+
+  it('ready + unassigned → Send disabled + assignment hint', async () => {
+    readinessMock.mockResolvedValue({ data: { ready: true } });
+    renderPanel({ physicianAssigned: false, rnAssigned: false });
+    const button = await screen.findByRole('button', { name: 'Send to Drafter' });
+    await waitFor(() => expect(button).toBeDisabled());
+    expect(screen.getAllByText(/Assign a physician and an RN liaison before drafting/).length).toBeGreaterThanOrEqual(1);
   });
 });

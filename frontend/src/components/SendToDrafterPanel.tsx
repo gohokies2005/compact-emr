@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
-import { Card } from './ui/Card';
+import { SectionCard } from './ui/SectionCard';
 import { Spinner } from './ui/Spinner';
 import { type ChartReadinessBlockingFile } from '../api/chart-readiness';
 import { useChartReadiness } from '../hooks/useChartReadiness';
@@ -237,14 +237,13 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   );
 
   return (
-    <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
+    <SectionCard title="Send to Drafter">
       {/* Phase 2 (2026-06-16): the Argument (StrategyPreviewCard) + Anchor-viability (CaseViabilityCard)
           cards moved OUT to standalone Overview sections (rendered by CaseDetailPage, fed by the
           page-owned useChartReadiness hook). This panel is now just the Send-to-Drafter button + gating. */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold text-navyDeep">Send to Drafter</h2>
-          <p className="mt-1 text-sm text-steel">
+          <p className="text-sm text-steel">
             Start the drafting pipeline once the chart is ready.
           </p>
         </div>
@@ -404,6 +403,6 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
           onConfirmed={(guidance) => { setGate1Open(false); draftMutation.mutate({ ...(pendingOverride ?? {}), ...(guidance ? { strategyOverride: guidance } : {}) }); setPendingOverride(null); }}
         />
       ) : null}
-    </Card>
+    </SectionCard>
   );
 }

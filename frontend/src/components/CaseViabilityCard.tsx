@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getCaseViability } from '../api/case-viability';
 import { StatusChip } from './ui/StatusChip';
+import { SectionCard } from './ui/SectionCard';
 import { BAND_CHIP } from '../lib/viabilityChip';
 import { CompletenessSignal, type CompletenessState } from './ViabilityInputSet';
 
@@ -42,48 +43,47 @@ export function CaseViabilityCard({
   const best = v.best_anchor;
 
   return (
-    <div className="mb-5 border-b border-aegis pb-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-sm font-medium text-navyDeep">Anchor viability</div>
-          {best ? (
-            <div className="mt-1 text-sm text-slate-800">
-              <span className="font-medium">{best.upstream_verbatim}</span>
-              {' → '}
-              {v.claimed_canonical ?? '—'}
-              <span className="ml-1 text-slate-500">
-                (M{best.M_eff ?? '–'} {best.tier}{best.E === null ? ', E: not yet scored' : `, E: ${best.E}`})
-              </span>
-            </div>
-          ) : null}
-          <div className="mt-1 text-sm text-slate-600">{v.why}</div>
-          {v.missing_fact ? (
-            <div className="mt-1 text-sm text-amber-700">
-              <span className="font-medium">To strengthen:</span> {v.missing_fact}
-            </div>
-          ) : null}
-          {v.presumptive_redirect ? (
-            <div className="mt-1 text-sm text-slate-600">
-              <span className="font-medium">Consider presumptive:</span> {v.presumptive_redirect.note}
-            </div>
-          ) : null}
-          {v.graveyard_redirect ? (
-            <div className="mt-1 text-sm text-slate-600">
-              <span className="font-medium">Redirect:</span> argue {v.graveyard_redirect.redirect_to} instead of {v.graveyard_redirect.dead_anchor}.
-            </div>
-          ) : null}
-          {v.alternatives.length > 0 ? (
-            <div className="mt-1 text-xs text-slate-500">
-              Other eligible anchors: {v.alternatives.map((a) => `${a.upstream_canonical} (M${a.M_eff ?? '–'})`).join(', ')}
-            </div>
-          ) : null}
-          {/* E5 COMPLETENESS SIGNAL — a thin parse must never masquerade as a confident anchor verdict. */}
-          <CompletenessSignal state={completeness ?? null} />
-        </div>
+    <SectionCard
+      title="Anchor viability"
+      status={
         <StatusChip tone={chip.tone} className="shrink-0">
           <span title="Advisory only — does not block drafting; Gate-2 supersedes on any contradiction">{chip.label}</span>
         </StatusChip>
-      </div>
+      }
+    >
+      {best ? (
+        <div className="text-sm text-slate-800">
+          <span className="font-medium">{best.upstream_verbatim}</span>
+          {' → '}
+          {v.claimed_canonical ?? '—'}
+          <span className="ml-1 text-slate-500">
+            (M{best.M_eff ?? '–'} {best.tier}{best.E === null ? ', E: not yet scored' : `, E: ${best.E}`})
+          </span>
+        </div>
+      ) : null}
+      <div className="mt-1 text-sm text-slate-600">{v.why}</div>
+      {v.missing_fact ? (
+        <div className="mt-1 text-sm text-amber-700">
+          <span className="font-medium">To strengthen:</span> {v.missing_fact}
+        </div>
+      ) : null}
+      {v.presumptive_redirect ? (
+        <div className="mt-1 text-sm text-slate-600">
+          <span className="font-medium">Consider presumptive:</span> {v.presumptive_redirect.note}
+        </div>
+      ) : null}
+      {v.graveyard_redirect ? (
+        <div className="mt-1 text-sm text-slate-600">
+          <span className="font-medium">Redirect:</span> argue {v.graveyard_redirect.redirect_to} instead of {v.graveyard_redirect.dead_anchor}.
+        </div>
+      ) : null}
+      {v.alternatives.length > 0 ? (
+        <div className="mt-1 text-xs text-slate-500">
+          Other eligible anchors: {v.alternatives.map((a) => `${a.upstream_canonical} (M${a.M_eff ?? '–'})`).join(', ')}
+        </div>
+      ) : null}
+      {/* E5 COMPLETENESS SIGNAL — a thin parse must never masquerade as a confident anchor verdict. */}
+      <CompletenessSignal state={completeness ?? null} />
 
       {v.excluded_traps.length > 0 ? (
         <>
@@ -142,6 +142,6 @@ export function CaseViabilityCard({
           })}
         </div>
       ) : null}
-    </div>
+    </SectionCard>
   );
 }

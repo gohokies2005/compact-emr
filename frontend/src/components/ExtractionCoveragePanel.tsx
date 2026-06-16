@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from './ui/Button';
+import { SectionCard } from './ui/SectionCard';
 import { PdfViewerModal, type ViewableDoc } from './PdfViewerModal';
 import { getExtractionCoverage, type CoverageGap } from '../api/extraction-coverage';
 
@@ -51,13 +52,13 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
   // is only meaningful once extraction has SETTLED, so render nothing until then.
   if (q.isLoading || (cov !== undefined && cov.status === 'in_progress')) return null;
   if (q.isError || cov === undefined) {
-    return <div className="rounded-lg border border-slate-200 bg-white px-5 py-4 text-sm text-slate-500">Extraction coverage is unavailable right now.</div>;
+    return <SectionCard title="Chart extraction"><p className="text-sm text-slate-500">Extraction coverage is unavailable right now.</p></SectionCard>;
   }
 
   const isComplete = cov.coveragePct >= 100 && cov.gaps.length === 0 && cov.unknownPageFiles === 0;
-  // CALM/NEUTRAL (Ryan 2026-06-16): the container is a quiet neutral card; status is conveyed by a SMALL
-  // chip only (green = complete, amber = partial), never a filled green/amber banner. Advisory, never red.
-  const tone = { border: 'border-slate-200', bg: 'bg-white', text: 'text-slate-800', sub: 'text-slate-500' };
+  // CALM/NEUTRAL (Ryan 2026-06-16): the container is a quiet neutral SectionCard; status is conveyed by a
+  // SMALL chip only (green = complete, amber = partial), never a filled green/amber banner. Advisory, never red.
+  const tone = { sub: 'text-slate-500' };
 
   const approximate = cov.unknownPageFiles > 0;
   const headline = cov.status === 'in_progress'
@@ -75,9 +76,17 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
   }
 
   return (
-    <div className={`rounded-lg border ${tone.border} ${tone.bg} px-5 py-4 text-sm ${tone.text}`}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <SectionCard
+      title="Chart extraction"
+      status={
+        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${isComplete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
+          {isComplete ? 'Complete' : 'Partial'}
+        </span>
+      }
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3 text-sm text-slate-800">
         <div className="max-w-2xl">
+          {/* headline carries the % + page count (e.g. "100% of pages extracted (40 of 40)") */}
           <p className="font-semibold">{headline}</p>
           {isComplete ? (
             <p className={`mt-1 ${tone.sub}`}>Every uploaded chart page was successfully read and extracted.</p>
@@ -90,16 +99,13 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
             </p>
           )}
         </div>
-        <div className="flex flex-none items-center gap-2">
-          <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${isComplete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
-            {isComplete ? 'Complete' : 'Partial'}
-          </span>
-          {cov.gaps.length > 0 ? (
+        {cov.gaps.length > 0 ? (
+          <div className="flex flex-none items-center gap-2">
             <Button type="button" variant="secondary" size="sm" onClick={() => setExpanded((v) => !v)}>
               {expanded ? 'Hide details' : `Show ${cov.gaps.length} ${cov.gaps.length === 1 ? 'item' : 'items'}`}
             </Button>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
       </div>
 
       {expanded && cov.gaps.length > 0 ? (
@@ -141,6 +147,6 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
       ) : null}
 
       <PdfViewerModal doc={viewDoc} onClose={() => setViewDoc(null)} />
-    </div>
+    </SectionCard>
   );
 }

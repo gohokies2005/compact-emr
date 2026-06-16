@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
-import { Card } from './ui/Card';
+import { SectionCard } from './ui/SectionCard';
 import { Spinner } from './ui/Spinner';
 import { ConflictError } from '../api/client';
 import { assignCasePhysician, assignCaseRn } from '../api/cases';
@@ -55,11 +55,8 @@ export function CaseAssignmentPanel({ caseId, version, assignedPhysician, assign
   const canAssignRn = selectedRnId.length > 0 && selectedRnId !== assignedRn?.id && !assignRnMutation.isPending;
 
   return (
-    <Card>
-      <div>
-        <h2 className="text-base font-semibold text-navyDeep">Assignments</h2>
-        <p className="mt-1 text-sm text-steel">Assign the physician reviewer and the RN liaison for this case.</p>
-      </div>
+    <SectionCard title="Assignments">
+      <p className="text-sm text-steel">Assign the physician reviewer and the RN liaison for this case.</p>
 
       {message ? <div className="mt-4 rounded-xl border border-aegis bg-mistSoft p-3 text-sm text-steel">{message}</div> : null}
 
@@ -100,6 +97,6 @@ export function CaseAssignmentPanel({ caseId, version, assignedPhysician, assign
           </div>
         </div>
       </div>
-    </Card>
+    </SectionCard>
   );
 }

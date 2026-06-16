@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getStrategyPreview, type StrategyTier } from '../api/strategy-preview';
 import { StatusChip, type ChipTone } from './ui/StatusChip';
+import { SectionCard } from './ui/SectionCard';
 import { BAND_CHIP } from '../lib/viabilityChip';
 import { InputVisibility, ChainPathwayNote, CompletenessSignal, type CompletenessState } from './ViabilityInputSet';
 
@@ -64,8 +65,15 @@ export function StrategyPreviewCard({
   const whyFirstSentence = v !== null && v.why.includes('. ') ? v.why.slice(0, v.why.indexOf('. ') + 1) : v?.why ?? '';
 
   return (
-    <div className="mb-5 border-b border-aegis pb-4">
-      <div className="flex items-start justify-between gap-3">
+    <SectionCard
+      title="Background & argument"
+      status={
+        <StatusChip tone={chip.tone} className="shrink-0">
+          <span title="Advisory only — does not block drafting">{chip.label}</span>
+        </StatusChip>
+      }
+    >
+      <div>
         <div className="min-w-0">
           <div className="text-sm text-slate-800"><span className="font-medium">Argument:</span> {p.primaryArgument}</div>
           {rec.kind === 'secondary' && rec.differsFromCurrent && rec.anchor !== p.anchor ? (
@@ -96,9 +104,6 @@ export function StrategyPreviewCard({
           {/* E5 INPUT VISIBILITY — the exact fact set the verdict was computed from. */}
           {p.inputSet ? <InputVisibility inputSet={p.inputSet} /> : null}
         </div>
-        <StatusChip tone={chip.tone} className="shrink-0">
-          <span title="Advisory only — does not block drafting">{chip.label}</span>
-        </StatusChip>
       </div>
 
       <button type="button" onClick={() => setShowDetail((s) => !s)} className="mt-2 text-xs text-slate-400 hover:text-slate-600">
@@ -127,6 +132,6 @@ export function StrategyPreviewCard({
           })}
         </ul>
       ) : null}
-    </div>
+    </SectionCard>
   );
 }

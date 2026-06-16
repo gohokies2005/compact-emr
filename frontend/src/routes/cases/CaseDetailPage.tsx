@@ -45,7 +45,6 @@ import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopP
 import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 import { CaseViabilityCard } from '../../components/CaseViabilityCard';
 import { RecommendedPlanCard } from '../../components/RecommendedPlanCard';
-import { SectionCard } from '../../components/ui/SectionCard';
 import { useChartReadiness } from '../../hooks/useChartReadiness';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
@@ -572,12 +571,10 @@ export function CaseDetailPage() {
                       float up when the pre-draft slots are absent). Keys ride the outermost element so a
                       poll-driven visibility flip never remounts siblings (the L525 stability discipline). */}
 
-                  {/* 1. Background & argument + the veteran's theory (subjective). The only bare card →
-                      framed in a titled SectionCard so it reads as the lead section. */}
+                  {/* 1. Background & argument + the veteran's theory (subjective). The card now
+                      self-wraps in SectionCard (Phase 2 uniform-frame refactor) — no page-side wrap. */}
                   {p.canSendFirstDraft ? (
-                    <SectionCard key="strategy" title="Background & argument">
-                      <StrategyPreviewCard caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
-                    </SectionCard>
+                    <StrategyPreviewCard key="strategy" caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
                   ) : null}
 
                   {/* 2. Chart extraction (objective — "what we actually read"). Wider gate (the whole

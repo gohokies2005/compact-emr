@@ -100,10 +100,19 @@ function coerceScreeningPayload(raw: readonly unknown[]): ScreeningResult[] {
 
 const VALID_DOCTOR_PACK_TARGET_STATES: readonly DoctorPackState[] = ['generating', 'ready', 'failed'];
 
+// Optional per-page extraction provenance the vision path stamps (2026-06-16). Older callers
+// (Textract/native, and any pre-deploy worker) omit these → null, which is valid and means
+// "no per-page signal" downstream. The coverage enum is allow-listed so a bad value can't poison
+// the honest-coverage layer.
+const VALID_PAGE_COVERAGE = new Set(['full', 'partial', 'illegible', 'blank']);
+
 interface PageUpsertEntry {
   readonly pageNumber: number;
   readonly text: string;
   readonly confidence: number | null;
+  readonly extractionMethod: string | null;
+  readonly extractionCoverage: string | null;
+  readonly handwritingPresent: boolean | null;
 }
 
 function parsePageUpsertBody(body: unknown): { pages: readonly PageUpsertEntry[]; documentPageCount: number | null } {
@@ -127,10 +136,24 @@ function parsePageUpsertBody(body: unknown): { pages: readonly PageUpsertEntry[]
     if (confidence !== null && confidence !== undefined && typeof confidence !== 'number') {
       badRequest('confidence must be number or null', { field: 'pages[].confidence' });
     }
+    // Provenance (all optional, all nullable). method/coverage capped + enum-checked; unknown coverage
+    // values are dropped to null rather than rejected (forward-compatible with a new model verdict).
+    const methodRaw = item['extractionMethod'];
+    const coverageRaw = item['extractionCoverage'];
+    const hwRaw = item['handwritingPresent'];
+    if (methodRaw !== null && methodRaw !== undefined && typeof methodRaw !== 'string') {
+      badRequest('extractionMethod must be a string or null', { field: 'pages[].extractionMethod' });
+    }
+    if (hwRaw !== null && hwRaw !== undefined && typeof hwRaw !== 'boolean') {
+      badRequest('handwritingPresent must be a boolean or null', { field: 'pages[].handwritingPresent' });
+    }
     pages.push({
       pageNumber,
       text: text as string,
       confidence: typeof confidence === 'number' ? confidence : null,
+      extractionMethod: typeof methodRaw === 'string' ? methodRaw.slice(0, 40) : null,
+      extractionCoverage: typeof coverageRaw === 'string' && VALID_PAGE_COVERAGE.has(coverageRaw) ? coverageRaw : null,
+      handwritingPresent: typeof hwRaw === 'boolean' ? hwRaw : null,
     });
   }
 

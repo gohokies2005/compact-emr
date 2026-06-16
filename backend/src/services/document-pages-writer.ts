@@ -7,6 +7,12 @@ export interface DocumentPageInput {
   readonly pageNumber: number;
   readonly text: string;
   readonly confidence: number | null;
+  // Per-page extraction provenance (vision rebuild 2026-06-16). Optional: callers that don't supply
+  // them (Textract/native paths, legacy) leave them null. The vision path stamps coverage/handwriting
+  // so the honest-coverage layer can count per-page truthfully.
+  readonly extractionMethod?: string | null;
+  readonly extractionCoverage?: string | null;
+  readonly handwritingPresent?: boolean | null;
 }
 
 export interface WriteDocumentPagesResult {
@@ -36,10 +42,17 @@ export async function writeDocumentPages(
 
   const result = await db.$transaction(async (tx) => {
     for (const page of pages) {
+      // Provenance is optional; coalesce undefined → null so it persists explicitly (and a re-OCR
+      // through a path that DOES supply it overwrites a prior null).
+      const prov = {
+        extractionMethod: page.extractionMethod ?? null,
+        extractionCoverage: page.extractionCoverage ?? null,
+        handwritingPresent: page.handwritingPresent ?? null,
+      };
       await tx.documentPage.upsert({
         where: { documentId_pageNumber: { documentId, pageNumber: page.pageNumber } },
-        create: { documentId, pageNumber: page.pageNumber, text: page.text, confidence: page.confidence },
-        update: { text: page.text, confidence: page.confidence, extractedAt: new Date() },
+        create: { documentId, pageNumber: page.pageNumber, text: page.text, confidence: page.confidence, ...prov },
+        update: { text: page.text, confidence: page.confidence, extractedAt: new Date(), ...prov },
       });
     }
 

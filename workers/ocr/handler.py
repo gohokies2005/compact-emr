@@ -201,6 +201,17 @@ def start_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         if pdf_result is not _PDF_TEXTRACT_FALLTHROUGH:
             return pdf_result
 
+    # Per-page VISION path (dark default; CLAUDE_VISION_SCANNED_PAGES=on). A SCANNED pdf (born-digital
+    # already returned above via the pypdf probe) or an image goes page-by-page to Claude vision with the
+    # two-tier Haiku→Sonnet strategy, posting per-page provenance — closing the combo-page handwriting
+    # loss + the per-file false-100% at the source. _vision_read returns _VISION_FALLTHROUGH when vision
+    # is not applicable (too large / encrypted / over the page cap / not pdf-or-image), and we start
+    # Textract exactly as before. Off by default → zero live behavior change until flipped + validated.
+    if _vision_scanned_enabled() and (ext == "pdf" or _media_type(key, None) in ("image/png", "image/jpeg")):
+        vision_result = _vision_read(bucket, key, document_id, ext)
+        if vision_result is not _VISION_FALLTHROUGH:
+            return vision_result
+
     sns_topic = os.environ["COMPLETION_SNS_TOPIC_ARN"]
     sns_role_arn = os.environ["TEXTRACT_SNS_ROLE_ARN"]
 
@@ -743,6 +754,292 @@ def _native_pdf_read(bucket: str, key: str, document_id: str) -> dict[str, Any] 
         "emptyPages": empty, "chars": total_chars, "probeMeanChars": round(mean, 1),
     }))
     return {"started": [], "native": "pdf", "method": "native_pdf_text", "via": "pypdf", "pages": len(pages), "pdfPages": page_count, "emptyPages": empty}
+
+
+# ===== Per-page vision transcription (CLAUDE_VISION_SCANNED_PAGES, dark default off) =====
+# Definitive fix for silent content loss on SCANNED pages (Ryan 2026-06-16). Today Textract reads a
+# combo page's PRINTED boilerplate, clears the char floor, and the page is marked read while the
+# HANDWRITING is silently dropped — and coverage was counted per-FILE, so a multi-page scan with
+# blank/partial pages read "100%" (the Stephens incident: 9/37 pages blank + combo handwriting lost).
+# This routes every SCANNED page (born-digital PDFs still take the pypdf Layer-1 path above) to Claude
+# vision PER PAGE, with a TWO-TIER model strategy (Ryan, validated on Stephens): a cheap Haiku first
+# pass, escalate that page to Sonnet on ANY doubt — coverage != "full", handwriting present, near-empty
+# text, or malformed output. (On the Stephens A/B this routed every cursive/combo page — including the
+# one Haiku confabulated — to Sonnet, and kept Haiku only on the clean printed pages it nailed.) Each
+# page self-reports coverage + handwriting via a FORCED record_page tool, and we POST per-page
+# provenance so coverage is honest PER PAGE instead of per file.
+#
+# NO RASTERIZER DEPENDENCY: a scanned PDF is split into single-page PDFs with pypdf (already vendored)
+# and each is sent as a Claude `document` block — Claude renders the page image itself (same mechanism
+# the existing _claude_ocr whole-PDF fallback already relies on), so no binary image lib is added.
+#
+# DEPLOY NOTE (infra, ocr-start Lambda): the per-file vision read runs INLINE in start_handler like the
+# native-pdf read. Each page is ~1 (Haiku) + maybe 1 (Sonnet) API call; VISION_CONCURRENCY runs them in
+# parallel so a typical small enclosure finishes in seconds. A single uploaded file is capped at
+# VISION_MAX_PAGES pages (larger files fall through to Textract, which streams + handles huge async).
+# When CLAUDE_VISION_SCANNED_PAGES=on, raise ocr-start to ~2048MB / 900s (15min) to cover the worst
+# single oversized scanned upload under the cap.
+
+
+def _int_env(name: str, default: int) -> int:
+    """Positive-int env read with a fallback on missing / NaN / non-positive."""
+    try:
+        v = int(os.environ.get(name, ""))
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _vision_scanned_enabled() -> bool:
+    return os.environ.get("CLAUDE_VISION_SCANNED_PAGES", "off").lower() == "on"
+
+
+VISION_TIER1_MODEL = os.environ.get("CLAUDE_VISION_MODEL", "claude-haiku-4-5-20251001")
+VISION_ESCALATE_MODEL = os.environ.get("CLAUDE_VISION_ESCALATE_MODEL", "claude-sonnet-4-6")
+VISION_ESCALATE_CHAR_FLOOR = _int_env("VISION_ESCALATE_CHAR_FLOOR", 10)  # tier-1 text shorter than this → escalate
+VISION_CONCURRENCY = _int_env("VISION_CONCURRENCY", 8)
+VISION_MAX_PAGES = _int_env("VISION_MAX_PAGES", 280)  # per-file cap; larger → defer to Textract
+VISION_PAGE_MAX_TOKENS = 4000  # one page never needs more; near-zero truncation risk per-page
+_VISION_FALLTHROUGH = None  # sentinel: vision not applicable for this file → caller starts Textract
+_VISION_COVERAGE = {"full", "partial", "illegible", "blank"}
+
+_RECORD_PAGE_TOOL = {
+    "name": "record_page",
+    "description": "Record the verbatim transcription and an honest coverage assessment of this single scanned medical-record page.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "transcription": {
+                "type": "string",
+                "description": "Verbatim text of the page — printed text AND handwriting together, in reading order. Transcribe exactly what is written. Mark any unreadable span inline as [illegible]. Do NOT guess, normalize, expand abbreviations, or correct apparent errors. If the page is blank, use an empty string.",
+            },
+            "handwriting_present": {
+                "type": "boolean",
+                "description": "True if the page contains ANY handwritten content (cursive or print), including handwritten entries on a printed form.",
+            },
+            "coverage": {
+                "type": "string",
+                "enum": ["full", "partial", "illegible", "blank"],
+                "description": "full = every legible mark transcribed with high confidence. partial = transcribed what is legible but one or more regions were too faint/cut-off/overlapping to read confidently (those marked [illegible] inline). illegible = the page has content but almost none could be read. blank = no content on the page.",
+            },
+            "uncertain_regions": {
+                "type": "string",
+                "description": "Brief plain-language note of WHAT was hard to read and where (e.g. 'handwritten provider note in bottom-right margin, faded'). Empty string if coverage is full or blank.",
+            },
+        },
+        "required": ["transcription", "handwriting_present", "coverage", "uncertain_regions"],
+        "additionalProperties": False,
+    },
+}
+
+# NOTE: NO SSN redaction instruction (Ryan 2026-06-16 — under the Anthropic BAA, PHI may flow through
+# the API; the chart extraction must be FAITHFUL verbatim like Textract/native readers. SSN omission is
+# enforced at the LETTER layer, not extraction). Anti-confabulation is the load-bearing rule here.
+_VISION_SYSTEM = (
+    "You are a meticulous medical-record transcriptionist working on VA disability claims. "
+    "Accuracy is a legal and clinical requirement: a fabricated date, lab value, diagnosis, "
+    "or medication can corrupt a veteran's disability claim. Transcribe ONLY what is actually "
+    "on the page.\n"
+    "Rules:\n"
+    "- Transcribe printed text and handwriting together, in natural reading order. Handwritten "
+    "entries on a printed form are part of the record — never skip them.\n"
+    "- Read cursive and faded ('BEST COPY') scans as carefully as you can.\n"
+    "- If a word, number, or region is genuinely unreadable, write [illegible] in place of it. "
+    "NEVER guess a clinical value, date, name, or dosage. An honest [illegible] is correct; a "
+    "plausible guess is a serious error.\n"
+    "- Do not summarize, diagnose, interpret, expand abbreviations, or add commentary. Verbatim only.\n"
+    "- Report coverage honestly via the tool. If you had to mark anything [illegible], coverage "
+    "is 'partial', not 'full'."
+)
+
+
+def _model_short(model_id: str) -> str:
+    """Short provenance tag for the extraction_method column: 'vision_haiku' / 'vision_sonnet' / raw."""
+    low = model_id.lower()
+    if "haiku" in low:
+        return "vision_haiku"
+    if "sonnet" in low:
+        return "vision_sonnet"
+    if "opus" in low:
+        return "vision_opus"
+    return "vision_" + low[:24]
+
+
+def _split_pdf_pages(data: bytes) -> list[bytes] | None:
+    """Split a PDF into one single-page PDF blob per page (pypdf — already vendored; no rasterizer).
+    Returns None for an encrypted/corrupt PDF (caller falls through to Textract). Each blob is sent to
+    Claude as a `document` block; Claude renders the page image itself."""
+    from pypdf import PdfReader, PdfWriter
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if getattr(reader, "is_encrypted", False):
+            return None
+        blobs: list[bytes] = []
+        for page in reader.pages:
+            writer = PdfWriter()
+            writer.add_page(page)
+            buf = io.BytesIO()
+            writer.write(buf)
+            blobs.append(buf.getvalue())
+        return blobs
+    except Exception as exc:  # noqa: BLE001 — corrupt PDF → Textract owns it, never crash start_handler
+        print(json.dumps({"msg": "ocr: pypdf could not split pdf for vision; deferring to textract", "error": f"{type(exc).__name__}: {exc}"}))
+        return None
+
+
+def _claude_vision_page(page_bytes: bytes, media: str, api_key: str, model: str) -> dict[str, Any]:
+    """One page → Claude vision with the forced record_page tool. Returns a normalized dict
+    {text, coverage, handwriting, stop_reason, ok}. ok=False on truncation / missing tool block / a
+    coverage outside the enum (caller treats !ok as a reason to escalate or flag — never posts blindly)."""
+    b64 = base64.b64encode(page_bytes).decode("ascii")
+    block = (
+        {"type": "document", "source": {"type": "base64", "media_type": media, "data": b64}}
+        if media == "application/pdf"
+        else {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}}
+    )
+    body = json.dumps({
+        "model": model,
+        "max_tokens": VISION_PAGE_MAX_TOKENS,
+        "system": _VISION_SYSTEM,
+        "tools": [_RECORD_PAGE_TOOL],
+        "tool_choice": {"type": "tool", "name": "record_page"},
+        "messages": [{"role": "user", "content": [
+            block,
+            {"type": "text", "text": "Transcribe this single page and record it with the record_page tool."},
+        ]}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=body, method="POST",
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=120) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    tool_input: dict[str, Any] = {}
+    for blk in payload.get("content") or []:
+        if blk.get("type") == "tool_use" and blk.get("name") == "record_page":
+            tool_input = blk.get("input") or {}
+            break
+    coverage = tool_input.get("coverage")
+    text = tool_input.get("transcription") or ""
+    stop = payload.get("stop_reason")
+    ok = stop == "tool_use" and bool(tool_input) and coverage in _VISION_COVERAGE
+    return {
+        "text": text if isinstance(text, str) else "",
+        "coverage": coverage if coverage in _VISION_COVERAGE else None,
+        "handwriting": tool_input.get("handwriting_present") if isinstance(tool_input.get("handwriting_present"), bool) else None,
+        "stop_reason": stop,
+        "ok": ok,
+    }
+
+
+def _vision_page_with_retry(page_bytes: bytes, media: str, api_key: str, model: str) -> dict[str, Any]:
+    """One page, one retry on transient failure (network / 429 / 5xx / malformed). Never raises:
+    returns ok=False on final failure so the two-tier logic can escalate or the page is flagged."""
+    for attempt in range(2):
+        try:
+            r = _claude_vision_page(page_bytes, media, api_key, model)
+            if r["ok"] or attempt == 1:
+                return r
+        except Exception as exc:  # noqa: BLE001 — transient; retry once then give a non-ok result
+            if attempt == 1:
+                print(json.dumps({"msg": "ocr: vision page error (final)", "model": model, "error": f"{type(exc).__name__}: {exc}"}))
+                return {"text": "", "coverage": None, "handwriting": None, "stop_reason": "error", "ok": False}
+    return {"text": "", "coverage": None, "handwriting": None, "stop_reason": "error", "ok": False}
+
+
+def _vision_transcribe_page(page_bytes: bytes, media: str, api_key: str) -> dict[str, Any]:
+    """TWO-TIER per-page transcription: cheap tier-1 (Haiku) first, escalate to tier-2 (Sonnet) on ANY
+    doubt. Returns {text, coverage, handwriting, method}. A page that BOTH tiers fail is returned
+    coverage='illegible' (never silently dropped — the readiness gate / RN queue then owns it)."""
+    t1 = _vision_page_with_retry(page_bytes, media, api_key, VISION_TIER1_MODEL)
+    escalate = (
+        (not t1["ok"])
+        or t1["coverage"] != "full"
+        or t1["handwriting"] is True
+        or _nonws_len(t1["text"]) < VISION_ESCALATE_CHAR_FLOOR
+    )
+    if escalate and VISION_ESCALATE_MODEL and VISION_ESCALATE_MODEL != VISION_TIER1_MODEL:
+        t2 = _vision_page_with_retry(page_bytes, media, api_key, VISION_ESCALATE_MODEL)
+        if t2["ok"]:
+            return {"text": t2["text"], "coverage": t2["coverage"], "handwriting": t2["handwriting"], "method": _model_short(VISION_ESCALATE_MODEL), "escalated": True}
+        # escalation failed — fall back to tier-1 if IT was usable, else flag illegible below.
+    if t1["ok"]:
+        return {"text": t1["text"], "coverage": t1["coverage"], "handwriting": t1["handwriting"], "method": _model_short(VISION_TIER1_MODEL), "escalated": False}
+    return {"text": "", "coverage": "illegible", "handwriting": None, "method": _model_short(VISION_TIER1_MODEL), "escalated": escalate}
+
+
+def _vision_read(bucket: str, key: str, document_id: str, ext: str) -> dict[str, Any] | None:
+    """Per-page vision transcription for a SCANNED file. Returns a result dict on success, or
+    _VISION_FALLTHROUGH (None) when vision is not applicable for this file (no key/too large/encrypted/
+    non-pdf-non-image/over the page cap) — the caller then starts Textract exactly as before. Never
+    raises: any unexpected error returns FALLTHROUGH so a scanned file degrades to Textract, never
+    crashes start_handler."""
+    api_key = _anthropic_key()
+    if not api_key:
+        return _VISION_FALLTHROUGH
+    try:
+        data = s3.get_object(Bucket=bucket, Key=key)["Body"].read(MAX_OCR_BYTES + 1)
+    except Exception as exc:  # noqa: BLE001
+        print(json.dumps({"msg": "ocr: vision s3 read failed; deferring to textract", "documentId": document_id, "error": f"{type(exc).__name__}: {exc}"}))
+        return _VISION_FALLTHROUGH
+    if len(data) > MAX_OCR_BYTES:
+        print(json.dumps({"msg": "ocr: file over vision size cap; deferring to textract", "documentId": document_id, "bytes": len(data)}))
+        return _VISION_FALLTHROUGH
+
+    media = _media_type(key, None)
+    if ext == "pdf":
+        page_blobs = _split_pdf_pages(data)
+        if not page_blobs:
+            return _VISION_FALLTHROUGH  # encrypted/corrupt/empty → Textract
+        page_media = "application/pdf"
+    elif media in ("image/png", "image/jpeg"):
+        page_blobs = [data]
+        page_media = media
+    else:
+        return _VISION_FALLTHROUGH  # not a vision input (e.g. unexpected ext)
+
+    n = len(page_blobs)
+    if n > VISION_MAX_PAGES:
+        print(json.dumps({"msg": "ocr: scanned file over vision page cap; deferring to textract", "documentId": document_id, "pages": n, "cap": VISION_MAX_PAGES}))
+        return _VISION_FALLTHROUGH
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    results: list[dict[str, Any] | None] = [None] * n
+
+    def _work(idx: int) -> tuple[int, dict[str, Any]]:
+        return idx, _vision_transcribe_page(page_blobs[idx], page_media, api_key)
+
+    with ThreadPoolExecutor(max_workers=min(VISION_CONCURRENCY, n)) as pool:
+        for idx, res in pool.map(_work, range(n)):
+            results[idx] = res
+
+    pages: list[dict[str, Any]] = []
+    cov_counts: dict[str, int] = defaultdict(int)
+    escalations = 0
+    for i, res in enumerate(results):
+        r = res or {"text": "", "coverage": "illegible", "handwriting": None, "method": _model_short(VISION_TIER1_MODEL), "escalated": True}
+        cov_counts[r.get("coverage") or "unknown"] += 1
+        if r.get("escalated"):
+            escalations += 1
+        pages.append({
+            "pageNumber": i + 1,
+            "text": r["text"],
+            "confidence": None,
+            "extractionMethod": r["method"],
+            "extractionCoverage": r["coverage"],
+            "handwritingPresent": r["handwriting"],
+        })
+
+    _post_pages_batched(document_id, pages, n)
+    total_chars = sum(len(p["text"]) for p in pages)
+    print(json.dumps({
+        "msg": "ocr: vision per-page read posted", "documentId": document_id, "path": "vision-scanned",
+        "pages": n, "chars": total_chars, "escalations": escalations, "coverage": dict(cov_counts),
+        "tier1": VISION_TIER1_MODEL, "escalateModel": VISION_ESCALATE_MODEL,
+    }))
+    return {"started": [], "vision": True, "pages": n, "escalations": escalations, "coverage": dict(cov_counts)}
 
 
 def _claude_enabled() -> bool:

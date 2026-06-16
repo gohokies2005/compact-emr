@@ -1023,6 +1023,16 @@ model DocumentPage {
   pageNumber  Int      @map("page_number")
   text        String
   confidence  Float?
+  // Per-page extraction provenance (added 2026-06-16, vision rebuild). NULLABLE: legacy rows + the
+  // native/Textract paths leave these null = "no per-page signal" (the honest-coverage layer treats a
+  // null coverage on a non-empty page as ocr_text, on an empty page as blank_unverified). The vision
+  // path STAMPS them so coverage is counted per-page truthfully instead of per-file (the false-100% fix).
+  //   extractionMethod   — "textract" | "native_pdf" | "native_text" | "vision_haiku" | "vision_sonnet" | "image_describe"
+  //   extractionCoverage — the model's honest per-page self-report: "full" | "partial" | "illegible" | "blank"
+  //   handwritingPresent — true when the page carries ANY handwriting (combo printed+handwritten forms included)
+  extractionMethod   String?  @map("extraction_method")
+  extractionCoverage String?  @map("extraction_coverage")
+  handwritingPresent Boolean? @map("handwriting_present")
   extractedAt DateTime @default(now()) @map("extracted_at") @db.Timestamptz(6)
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)

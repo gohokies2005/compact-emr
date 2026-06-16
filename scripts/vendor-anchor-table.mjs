@@ -57,6 +57,10 @@ const PINNED_TABLE_HASH = 'c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d
 // DIRECT-SC table content hash (sc_direct_pairs.json `content_hash` field — directSc.tableContentHash()
 // returns this verbatim). Independent of the secondary pin; rotates only on a direct-table re-curation.
 const PINNED_DIRECT_TABLE_HASH = 'fc828fe33ed370beecaa00875117b62acd1bc2ae07ac304579bbf4db072b2bd9';
+// PACT presumptive-map content hash (pact_presumptive_conditions.json `content_hash` field —
+// pactPresumptive.tableContentHash() returns it verbatim). Bridge-anchor pathway (2026-06-16, FRN
+// 859d2eb). Independent of the secondary + direct pins; rotates only on a PACT-map re-curation.
+const PINNED_PACT_MAP_HASH = '2098c133b6767038e0e66b905fe942a5adaff667506e3254dd6994a44e9758cf';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fromIdx = process.argv.indexOf('--from');
@@ -91,7 +95,11 @@ const REQUIRE_POST = "const conditionCanon = require('./conditionCanon.cjs'); //
 // The DIRECT-SC fold lazy-requires directSc inside _direct(); the .cjs extension is mandatory under
 // the ESM backend. Asserted verbatim — the pre-image is the exact try/catch line in the canonical.
 const DIRECT_REQUIRE_PRE = "try { _directSc = require('./directSc'); } catch (_) { _directSc = null; }";
-const DIRECT_REQUIRE_POST = "try { _directSc = require('./directSc.cjs'); } catch (_) { _directSc = null; } // VENDORED REWRITE 3/3 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend";
+const DIRECT_REQUIRE_POST = "try { _directSc = require('./directSc.cjs'); } catch (_) { _directSc = null; } // VENDORED REWRITE 3/4 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend";
+// The BRIDGE-ANCHOR branch lazy-requires pactPresumptive inside _pact(); same ESM-extension reason.
+// Asserted verbatim — the pre-image is the exact try/catch line in the canonical (anchorMechanism.js:690).
+const PACT_REQUIRE_PRE = "try { _pactPresumptive = require('./pactPresumptive'); } catch (_) { _pactPresumptive = null; }";
+const PACT_REQUIRE_POST = "try { _pactPresumptive = require('./pactPresumptive.cjs'); } catch (_) { _pactPresumptive = null; } // VENDORED REWRITE 4/4 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend";
 
 if (!resolverSrc.includes(ARTIFACT_PRE)) {
   abort('source resolver changed shape — ARTIFACT_PATH pre-image line not found verbatim; re-author the vendor rewrite');
@@ -102,10 +110,14 @@ if (!resolverSrc.includes(REQUIRE_PRE)) {
 if (!resolverSrc.includes(DIRECT_REQUIRE_PRE)) {
   abort("source resolver changed shape — require('./directSc') pre-image line not found verbatim; re-author the vendor rewrite");
 }
+if (!resolverSrc.includes(PACT_REQUIRE_PRE)) {
+  abort("source resolver changed shape — require('./pactPresumptive') pre-image line not found verbatim; re-author the vendor rewrite");
+}
 resolverSrc = resolverSrc
   .replace(ARTIFACT_PRE, ARTIFACT_POST)
   .replace(REQUIRE_PRE, REQUIRE_POST)
-  .replace(DIRECT_REQUIRE_PRE, DIRECT_REQUIRE_POST);
+  .replace(DIRECT_REQUIRE_PRE, DIRECT_REQUIRE_POST)
+  .replace(PACT_REQUIRE_PRE, PACT_REQUIRE_POST);
 // R5 guard at vendor time too: the vendored set must stay DB-free + LLM-free. Match actual
 // require() calls (the resolver's header COMMENT legitimately mentions both names).
 if (/require\(['"][^'"]*(better-sqlite3|llm\/client|anthropic)[^'"]*['"]\)/.test(resolverSrc)) {
@@ -187,6 +199,46 @@ if (!Array.isArray(directTable.rows) || directTable.rows.length < MIN_DIRECT_ROW
   abort(`sc_direct_pairs.rows ${directTable.rows ? directTable.rows.length : 'missing'} < ${MIN_DIRECT_ROWS} — stub-table guard`);
 }
 
+// ── 2e. pactPresumptive.js → pactPresumptive.cjs (BRIDGE-ANCHOR) with require-extension rewrites ──
+// Two rewrites under the ESM backend: the conditionCanon require names .cjs, and TABLE_PATH points at
+// the table BESIDE the resolver in the vendor dir (canonically ../../references/). Both asserted
+// verbatim. anchorMechanism._pact() lazy-requires this (the 4th anchorMechanism rewrite above resolves
+// it to .cjs); without it the resolver throws the moment BRIDGE_ANCHOR_ENABLED is on. The EMR Lambda
+// loads the .cjs from disk (createRequire), so the table is read fs-side beside it — the setPactMap
+// inject seam is the fs-less Cloudflare-Worker (website) lane, NOT needed for the EMR runtime.
+const srcPactPath = path.join(FROM, 'app', 'services', 'pactPresumptive.js');
+if (!existsSync(srcPactPath)) abort(`missing canonical ${srcPactPath}`);
+let pactSrc = readFileSync(srcPactPath, 'utf8');
+const P_CANON_PRE = "try { conditionCanon = require('./conditionCanon'); } catch (_) { conditionCanon = null; }";
+const P_CANON_POST = "try { conditionCanon = require('./conditionCanon.cjs'); } catch (_) { conditionCanon = null; } // VENDORED REWRITE 1/2 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend";
+const P_TABLE_PRE = "const TABLE_PATH = path.join(__dirname, '..', '..', 'references', 'pact_presumptive_conditions.json');";
+const P_TABLE_POST = "const TABLE_PATH = path.join(__dirname, 'pact_presumptive_conditions.json'); // VENDORED REWRITE 2/2 (scripts/vendor-anchor-table.mjs): table sits beside the resolver";
+for (const [pre, label] of [[P_CANON_PRE, "require('./conditionCanon')"], [P_TABLE_PRE, 'TABLE_PATH']]) {
+  if (!pactSrc.includes(pre)) abort(`pactPresumptive.js changed shape — ${label} pre-image line not found verbatim; re-author the vendor rewrite`);
+}
+pactSrc = pactSrc.replace(P_CANON_PRE, P_CANON_POST).replace(P_TABLE_PRE, P_TABLE_POST);
+if (/require\(['"][^'"]*(better-sqlite3|llm\/client|anthropic)[^'"]*['"]\)/.test(pactSrc)) {
+  abort('vendored pactPresumptive require()s better-sqlite3 / llm client — impure module leak (R5)');
+}
+const destPact = path.join(VENDOR_DIR, 'pactPresumptive.cjs');
+writeFileSync(destPact, pactSrc);
+
+// ── 2f. pact_presumptive_conditions.json (byte-identical) + PACT pin assert ────────────────────
+const srcPactTablePath = path.join(FROM, 'references', 'pact_presumptive_conditions.json');
+if (!existsSync(srcPactTablePath)) abort(`missing canonical ${srcPactTablePath}`);
+const pactTableBytes = readFileSync(srcPactTablePath);
+const destPactTable = path.join(VENDOR_DIR, 'pact_presumptive_conditions.json');
+writeFileSync(destPactTable, pactTableBytes);
+const pactTable = JSON.parse(pactTableBytes.toString('utf8'));
+// pactPresumptive.tableContentHash() returns the `content_hash` FIELD verbatim. Assert it matches.
+if (pactTable.content_hash !== PINNED_PACT_MAP_HASH) {
+  abort(`pact_presumptive_conditions.content_hash FIELD (${pactTable.content_hash}) !== pinned ${PINNED_PACT_MAP_HASH}\nIf the PACT map was re-curated, rotate PINNED_PACT_MAP_HASH + the v2.1 schema + anchor-table-pin.test.ts in ONE commit.`);
+}
+const MIN_PACT_ROWS = 4; // mirrors pactPresumptive.MIN_ROWS — below this the engine treats the map as a stub
+if (!Array.isArray(pactTable.rows) || pactTable.rows.length < MIN_PACT_ROWS) {
+  abort(`pact_presumptive_conditions.rows ${pactTable.rows ? pactTable.rows.length : 'missing'} < ${MIN_PACT_ROWS} — stub-map guard`);
+}
+
 // ── 4a. caseViability.v1.schema.json — EMR-AUTHORED, NOT overwritten from FRN ──────────────────
 // The EMR window authored v1 independently (it carries the optional best_anchor.E field the FRN
 // canonical lacks, and the v1 byte-pin d70aa6ce… is the EMR contract). DO NOT overwrite it from the
@@ -216,10 +268,29 @@ const v2Dir = v2Schema?.properties?.tables?.properties?.direct?.properties?.cont
 if (v2Sec !== PINNED_TABLE_HASH) abort(`v2 schema tables.secondary.const (${v2Sec}) !== secondary pin ${PINNED_TABLE_HASH}`);
 if (v2Dir !== PINNED_DIRECT_TABLE_HASH) abort(`v2 schema tables.direct.const (${v2Dir}) !== direct pin ${PINNED_DIRECT_TABLE_HASH}`);
 
-console.log('vendored 7 files:');
+// ── 4c. caseViability.v2.1.schema.json (v2 + optional bridge_pathways[]) — BRIDGE-ANCHOR ─────────
+// v2.1 is the validation target for a bridge-bearing viability object (v2 shape + the optional
+// bridge_pathways key; a plain v2 object validates against BOTH v2.0 and v2.1). `tables` are FROZEN
+// (the PACT hash rides inside each pathway's provenance, not in tables), so the two nested consts
+// mirror the v2 pins. Verbatim copy from FRN.
+const srcV21Path = path.join(FROM, 'app', 'config', 'caseViability.v2.1.schema.json');
+const destV21 = path.join(CONFIG_DIR, 'caseViability.v2.1.schema.json');
+if (!existsSync(srcV21Path)) abort(`missing canonical ${srcV21Path}`);
+const v21Bytes = readFileSync(srcV21Path);
+writeFileSync(destV21, v21Bytes);
+const v21Schema = JSON.parse(v21Bytes.toString('utf8'));
+const v21Sec = v21Schema?.properties?.tables?.properties?.secondary?.properties?.content_hash?.const;
+const v21Dir = v21Schema?.properties?.tables?.properties?.direct?.properties?.content_hash?.const;
+if (v21Sec !== PINNED_TABLE_HASH) abort(`v2.1 schema tables.secondary.const (${v21Sec}) !== secondary pin ${PINNED_TABLE_HASH}`);
+if (v21Dir !== PINNED_DIRECT_TABLE_HASH) abort(`v2.1 schema tables.direct.const (${v21Dir}) !== direct pin ${PINNED_DIRECT_TABLE_HASH}`);
+
+console.log('vendored 10 files:');
 console.log(`  ${destDirect}`);
 console.log(`  ${destDirectTable}`);
+console.log(`  ${destPact}`);
+console.log(`  ${destPactTable}`);
 console.log(`  ${destV2}`);
+console.log(`  ${destV21}`);
 console.log(`  ${destResolver}`);
 console.log(`  ${destCanon}`);
 console.log(`  ${destTable}`);
@@ -227,6 +298,8 @@ console.log(`  ${destSchema}`);
 console.log(`secondary table content_hash (field + recomputed): ${recomputed}`);
 console.log(`secondary table version: ${table.version}  row_count: ${table.row_count}`);
 console.log(`direct table content_hash (field): ${directTable.content_hash}  rows: ${directTable.rows.length}`);
+console.log(`PACT map content_hash (field): ${pactTable.content_hash}  rows: ${pactTable.rows.length}`);
 console.log(`v1 schema sha256 (EMR-authored, NOT overwritten): ${sha256(schemaBytes)}  (pin in anchor-table-pin.test.ts PINNED_SCHEMA_SHA256)`);
 console.log(`v2 schema sha256: ${sha256(v2Bytes)}`);
-console.log('REMINDER: post the vendor commit SHA to flatratenexus-project/shared/outbox so the Ask-Aegis + website windows pull the identical copies (all lanes pin the SAME secondary + direct hashes).');
+console.log(`v2.1 schema sha256: ${sha256(v21Bytes)}`);
+console.log('REMINDER: post the vendor commit SHA to flatratenexus-project/shared/outbox so the Ask-Aegis + website windows pull the identical copies (all lanes pin the SAME secondary + direct + PACT hashes).');

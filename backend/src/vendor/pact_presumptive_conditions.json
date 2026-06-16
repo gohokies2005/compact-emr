@@ -1,0 +1,86 @@
+{
+  "_metadata": {
+    "purpose": "PACT Act burn-pit / airborne-hazard PRESUMPTIVE conditions, RESPIRATORY-only (v1). Consumed by the presumptive 'bridge anchor' viability pathway: an exposure-conceded veteran with one of these as a CURRENT diagnosis can establish it as service-connected presumptively, then claim a downstream condition (e.g. OSA) secondary to it. This map answers ONLY 'is condition X presumptive under exposure Y' — it is NOT a mechanism table and it does NOT decide the second hop (that is the curated secondary pair lookup, G3).",
+    "scope_v1": "RESPIRATORY intermediates only (Ryan 2026-06-15). exposure_key = burn_pit_airborne. Expandable to gulf_war_environmental / other PACT classes + non-respiratory presumptives later.",
+    "source": "PACT Act of 2022 (38 CFR 3.320) burn-pit / airborne-hazard presumptive respiratory conditions. Sourced, not invented.",
+    "labels": "condition_canonical values are conditionCanon OUTPUT labels (isCanonicalLabel===true). Lookups canonicalize the query and match against these. Note conditionCanon collapses: chronic sinusitis->'Chronic rhinosinusitis'; sinusitis/rhinitis/chronic rhinitis->'Sinusitis / rhinitis'; emphysema/COPD->'COPD'; pulmonary fibrosis/ILD->'Interstitial lung disease'.",
+    "bridge_note": "Presence here makes a condition a valid bridge INTERMEDIATE. Whether it actually bridges to a given claimed condition is decided downstream by the secondary-pair tier gate (G3): e.g. Sinusitis/rhinitis & Asthma & Chronic rhinosinusitis resolve in-table to OSA (bridge fires), while COPD/Chronic bronchitis resolve plausible-default to OSA (G3 rejects -> no bridge), which matches the VA-rater's ADD/SKIP call.",
+    "stamper": "app/scripts/build-pact-presumptive.js (--check verifies pin)"
+  },
+  "content_hash": "2098c133b6767038e0e66b905fe942a5adaff667506e3254dd6994a44e9758cf",
+  "row_count": 8,
+  "rows": [
+    {
+      "condition_canonical": "Asthma",
+      "exposure_keys": [
+        "burn_pit_airborne"
+      ],
+      "presumptive_class": "burn_pit_respiratory",
+      "basis_cfr": "38 CFR 3.320",
+      "note": "Asthma diagnosed after service. PACT Act burn-pit / airborne-hazard presumptive."
+    },
+    {
+      "condition_canonical": "Sinusitis / rhinitis",
+      "exposure_keys": [
+        "burn_pit_airborne"
+      ],
+      "presumptive_class": "burn_pit_respiratory",
+      "basis_cfr": "38 CFR 3.320",
+      "note": "Chronic rhinitis / chronic sinusitis. PACT Act burn-pit / airborne-hazard presumptive."
+    },
+    {
+      "condition_canonical": "Chronic rhinosinusitis",
+      "exposure_keys": [
+        "burn_pit_airborne"
+      ],
+      "presumptive_class": "burn_pit_respiratory",
+      "basis_cfr": "38 CFR 3.320",
+      "note": "Chronic rhinosinusitis (canon of 'chronic sinusitis'). PACT Act burn-pit / airborne-hazard presumptive."
+    },
+    {
+      "condition_canonical": "COPD",
+      "exposure_keys": [
+        "burn_pit_airborne"
+      ],
+      "presumptive_class": "burn_pit_respiratory",
+      "basis_cfr": "38 CFR 3.320",
+      "note": "Chronic obstructive pulmonary disease / emphysema. PACT presumptive AS AN INTERMEDIATE; COPD->OSA is NOT a curated bridge pair (rater SKIP: lower-airway mechanism, 23% flat-deny) so it will not bridge to OSA via G3."
+    },
+    {
+      "condition_canonical": "Chronic bronchitis",
+      "exposure_keys": [
+        "burn_pit_airborne"
+      ],
+      "presumptive_class": "burn_pit_respiratory",
+      "basis_cfr": "38 CFR 3.320",
+      "note": "PACT presumptive; chronic bronchitis->OSA is NOT a curated bridge pair (rater SKIP: thin N) so it will not bridge to OSA via G3."
+    },
+    {
+      "condition_canonical": "Constrictive bronchiolitis",
+      "exposure_keys": [
+        "burn_pit_airborne"
+      ],
+      "presumptive_class": "burn_pit_respiratory",
+      "basis_cfr": "38 CFR 3.320",
+      "note": "Constrictive / obliterative bronchiolitis. PACT presumptive intermediate."
+    },
+    {
+      "condition_canonical": "Interstitial lung disease",
+      "exposure_keys": [
+        "burn_pit_airborne"
+      ],
+      "presumptive_class": "burn_pit_respiratory",
+      "basis_cfr": "38 CFR 3.320",
+      "note": "Interstitial lung disease / pulmonary fibrosis. PACT presumptive intermediate."
+    },
+    {
+      "condition_canonical": "Sarcoidosis",
+      "exposure_keys": [
+        "burn_pit_airborne"
+      ],
+      "presumptive_class": "burn_pit_respiratory",
+      "basis_cfr": "38 CFR 3.320",
+      "note": "Sarcoidosis. PACT Act burn-pit / airborne-hazard presumptive."
+    }
+  ]
+}

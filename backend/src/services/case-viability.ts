@@ -150,6 +150,8 @@ interface AnchorMechanismModule {
   ): CaseViability;
   /** Folds the direct axis into the resolve+rank and emits v2. Idempotent; null restores env default. */
   setDirectAxisEnabled(on: boolean | null): void;
+  /** Enables the presumptive bridge-anchor branch (fires only on the v2 shape). null restores env default. */
+  setBridgeEnabled(on: boolean | null): void;
 }
 
 // The vendored resolver is CommonJS and reads its table by __dirname-relative path, so it is NOT
@@ -257,6 +259,16 @@ export function directScViabilityEnabled(): boolean {
 }
 
 /**
+ * BRIDGE-ANCHOR gate (ships DARK, 2026-06-16). The presumptive two-hop suggestion (exposure →
+ * PACT-presumptive intermediate dx → claimed secondary). SEPARATE from DIRECT_SC_VIABILITY_ENABLED:
+ * the bridge only attaches on the v2 (direct-axis) shape, so it is meaningful ONLY when the direct
+ * axis is also on. Additive — flag OFF leaves the v2 object byte-identical (no bridge_pathways key).
+ */
+export function bridgeAnchorViabilityEnabled(): boolean {
+  return process.env['BRIDGE_ANCHOR_ENABLED'] === 'true';
+}
+
+/**
  * Reuses the grantedScAnchors the framing producer already built (one derivation feeds both —
  * design §3d): the SAME strict-filtered, deduped, granted-only list. No second SC re-filter (the
  * bug class the SSOT eliminates). derivedAt is NOT added here (kept out for determinism, exactly
@@ -285,6 +297,7 @@ export function deriveCaseViability(
     // sticky override and emit v2 here. EMR never sets DIRECT_SC_AXIS_ENABLED, so null = OFF. This is
     // determinism insurance for the long-lived Lambda/worker — not just the test harness.
     resolver.setDirectAxisEnabled(null);
+    resolver.setBridgeEnabled(null); // bridge can't fire on the v1 shape; reset for determinism insurance
     return resolver.assessClaimViability(claimedCondition, grantedNames);
   }
   // Direct axis ON: flip the resolver to v2 and fold the pre-resolved events. The setter is an
@@ -296,6 +309,10 @@ export function deriveCaseViability(
   // an EMR vendored copy WITHOUT the bridge simply ignores the extra key, so this is inert until the
   // bridge is re-vendored. Defaults to [] when none — the bridge stays dark on an empty constellation.
   resolver.setDirectAxisEnabled(true);
+  // BRIDGE-ANCHOR (DARK): explicit per-derivation set (not the resolver's own env read) for determinism
+  // in the long-lived Lambda — the override wins and is reset on the v1 path above, so a prior on-
+  // derivation can never leak a sticky bridge into a later one.
+  resolver.setBridgeEnabled(bridgeAnchorViabilityEnabled());
   const chartFactsPresent = {
     in_service_events: directInServiceEvents ?? [],
     dx_constellation: dxConstellation ?? [],

@@ -1,0 +1,159 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://flatratenexus.local/schemas/caseViability.v2.1.schema.json",
+  "title": "bundle.caseViability (SSOT v2.1 — adds optional presumptive bridge_pathways)",
+  "description": "v2.1 is v2 plus ONE additive, OPTIONAL key: `bridge_pathways[]`. It carries presumptive two-hop SUGGESTIONS (exposure -> a PACT-presumptive intermediate dx -> the claimed condition secondary to it) surfaced by anchorMechanism.assessBridgePathways when BRIDGE_ANCHOR_ENABLED. It is a SIDECAR, never part of the band/anchor decision. The `version` integer STAYS 2 (consumers branch on version===2; do NOT break them) — v2.1 is discriminated by the optional bridge_pathways key, which is ABSENT whenever the flag is off or no bridge fires, so a lagging v2 reader validates clean on every non-bridge object. The two-table `tables` provenance block is UNCHANGED and still const-pinned (the band still depends only on the secondary+direct tables); the PACT-map hash rides INSIDE each bridge pathway's `provenance`, NOT in `tables`. Each bridge_pathways element is provisional + physician_review_required by construction (G4). ABSENCE/unknown-version = fail-open. NEVER carries a BVA %, IMO rate, or pair-atlas tier in any vet/RN-facing string (CLAUDE.md #17). See docs/PRESUMPTIVE_BRIDGE_ANCHOR_SPEC_2026-06-15.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version", "axis", "claimed_canonical", "viability", "best_anchor", "alternatives",
+    "why", "missing_fact", "presumptive_redirect", "graveyard_redirect",
+    "excluded_traps", "confidence", "mode", "tables", "table_content_hash"
+  ],
+  "properties": {
+    "version": { "type": "integer", "const": 2 },
+    "axis": { "type": "string", "enum": ["secondary", "direct", "presumptive_redirect", "none"] },
+    "claimed_canonical": { "type": ["string", "null"] },
+    "viability": { "type": "string", "enum": ["strong", "moderate", "conditional", "weak", "abstain", "redirect"] },
+    "best_anchor": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["anchor_axis","upstream_canonical","upstream_verbatim","M_static","M_eff","tier","basis","is_granted_sc","mechanism_class","requires"],
+      "properties": {
+        "anchor_axis": { "type": "string", "enum": ["secondary", "direct"] },
+        "upstream_canonical": { "type": "string", "minLength": 1 },
+        "upstream_verbatim":  { "type": "string" },
+        "M_static": { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "M_eff":    { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "tier": { "type": "string", "enum": ["blessed","conditional","chain","plausible","excluded"] },
+        "basis": { "type": ["string", "null"] },
+        "is_granted_sc": { "type": "boolean" },
+        "mechanism_class": { "type": ["string", "null"] },
+        "requires": { "type": ["string", "null"] },
+        "mechanism_member": { "type": "string" },
+        "inherited_from": { "type": "string" },
+        "aggravation_only": { "type": "boolean" },
+        "causation_denied": { "type": "boolean" },
+        "event_canonical": { "type": "string", "minLength": 1, "description": "DIRECT axis only: the eventCanon canonical in-service event type (member of eventCanon.EVENT_ENUM)." },
+        "evidence_span": { "type": "string", "description": "DIRECT axis only: a verbatim substring of the chart/lay text evidencing the event (code-verified at emission)." },
+        "presumptive": { "type": "boolean", "description": "DIRECT axis only: the event is a presumptive pathway (routes to presumptive_redirect)." }
+      }
+    },
+    "alternatives": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["anchor_axis","upstream_canonical","M_eff","tier","is_granted_sc"],
+        "properties": {
+          "anchor_axis": { "type": "string", "enum": ["secondary", "direct"] },
+          "upstream_canonical": { "type": "string", "minLength": 1 },
+          "M_eff": { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+          "tier": { "type": "string", "enum": ["blessed","conditional","chain","plausible","excluded"] },
+          "is_granted_sc": { "type": "boolean" },
+          "event_canonical": { "type": "string", "minLength": 1 },
+          "aggravation_only": { "type": "boolean" }
+        }
+      }
+    },
+    "why": { "type": "string" },
+    "missing_fact": { "type": ["string", "null"] },
+    "presumptive_redirect": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["path","note","advisory"],
+      "properties": {
+        "path": { "type": "string" },
+        "note": { "type": "string" },
+        "advisory": { "type": "boolean" }
+      }
+    },
+    "graveyard_redirect": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["dead_anchor","redirect_to","rationale","redirect_blocked"],
+      "properties": {
+        "dead_anchor": { "type": "string" },
+        "redirect_to": { "type": "string" },
+        "rationale": { "type": "string" },
+        "redirect_blocked": { "type": "boolean" }
+      }
+    },
+    "excluded_traps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["upstream_canonical","reason"],
+        "properties": {
+          "upstream_canonical": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "confidence": { "type": "string", "enum": ["high", "low"] },
+    "mode": { "type": "string", "enum": ["info_light", "chart_refined"] },
+    "tables": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secondary", "direct"],
+      "properties": {
+        "secondary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "content_hash"],
+          "properties": {
+            "version": { "type": ["string", "null"] },
+            "content_hash": { "type": "string", "const": "c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb" }
+          }
+        },
+        "direct": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "content_hash"],
+          "properties": {
+            "version": { "type": ["string", "null"] },
+            "content_hash": { "type": "string", "const": "fc828fe33ed370beecaa00875117b62acd1bc2ae07ac304579bbf4db072b2bd9" }
+          }
+        }
+      }
+    },
+    "table_content_hash": {
+      "type": ["string", "null"],
+      "const": "c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb",
+      "description": "DEPRECATED — flat mirror of tables.secondary.content_hash, retained for lagging v1 readers."
+    },
+    "table_version": { "type": ["string", "null"] },
+    "derivedAt": { "type": "string", "format": "date-time" },
+    "bridge_pathways": {
+      "type": "array",
+      "description": "OPTIONAL (v2.1). Presumptive two-hop SUGGESTIONS, sidecar only — never affects viability/best_anchor. Absent when BRIDGE_ANCHOR_ENABLED is off or no bridge fires.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["bridge_provisional","physician_review_required","exposure","intermediate_dx","intermediate_presumptive_basis","claimed","pair_tier","suggestion","provenance"],
+        "properties": {
+          "bridge_provisional": { "type": "boolean", "const": true },
+          "physician_review_required": { "type": "boolean", "const": true },
+          "exposure": { "type": "string", "minLength": 1, "description": "eventCanon canonical exposure key (v1: burn_pit_airborne)." },
+          "exposure_evidence": { "type": "string", "description": "verbatim evidence span of the exposure event, when present." },
+          "intermediate_dx": { "type": "string", "minLength": 1, "description": "the PACT-presumptive intermediate (conditionCanon label)." },
+          "intermediate_presumptive_basis": { "type": "string", "description": "CFR basis the intermediate is presumptive under (e.g. 38 CFR 3.320)." },
+          "claimed": { "type": "string", "minLength": 1 },
+          "pair_tier": { "type": "string", "enum": ["blessed", "conditional", "chain"], "description": "tier of the curated intermediate->claimed secondary pair (G3 excludes plausible/excluded)." },
+          "pair_M": { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+          "suggestion": { "type": "string", "minLength": 1 },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pact_map_hash", "pair_table_hash"],
+            "properties": {
+              "pact_map_hash": { "type": ["string", "null"], "const": "2098c133b6767038e0e66b905fe942a5adaff667506e3254dd6994a44e9758cf" },
+              "pair_table_hash": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -25,6 +25,11 @@ const PINNED_TABLE_HASH = 'c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d
 // DIRECT-SC table content_hash (sc_direct_pairs.json `content_hash` field; directSc.tableContentHash()
 // returns it verbatim). Independent pin — rotates only on a direct-table re-curation.
 const PINNED_DIRECT_TABLE_HASH = 'fc828fe33ed370beecaa00875117b62acd1bc2ae07ac304579bbf4db072b2bd9';
+// PACT presumptive-map content_hash (pact_presumptive_conditions.json field; pactPresumptive
+// .tableContentHash() returns it verbatim). Bridge-anchor pathway (2026-06-16, FRN 859d2eb). THIRD
+// independent pin — rotates only on a PACT-map re-curation; lives at: vendor-anchor-table.mjs
+// (PINNED_PACT_MAP_HASH) + THIS FILE. (Not a schema const — it rides each bridge_pathway's provenance.)
+const PINNED_PACT_MAP_HASH = '2098c133b6767038e0e66b905fe942a5adaff667506e3254dd6994a44e9758cf';
 // v1 schema byte-pin. Rotated 2026-06-14: (1) the EMR-authored v1 schema's table_content_hash.const
 // moved to the new secondary pin; (2) `E` was removed from best_anchor.required (it stays an OPTIONAL
 // property) because the re-vendored resolver no longer emits the always-null E field. The file is NOT
@@ -36,6 +41,8 @@ const tableUrl = new URL('../vendor/anchor_mechanism_pairs.json', import.meta.ur
 const directTableUrl = new URL('../vendor/sc_direct_pairs.json', import.meta.url);
 const schemaUrl = new URL('../config/caseViability.v1.schema.json', import.meta.url);
 const v2SchemaUrl = new URL('../config/caseViability.v2.schema.json', import.meta.url);
+const v21SchemaUrl = new URL('../config/caseViability.v2.1.schema.json', import.meta.url);
+const pactTableUrl = new URL('../vendor/pact_presumptive_conditions.json', import.meta.url);
 
 interface VendoredTable {
   readonly version: string;
@@ -137,6 +144,63 @@ describe('anchor table pin (red build on drift)', () => {
       expect(out.tables?.direct.content_hash).toBe(PINNED_DIRECT_TABLE_HASH);
     } finally {
       am.setDirectAxisEnabled(null); // restore default so axis-OFF tests below/elsewhere are unaffected
+    }
+  });
+
+  it('7. PACT map field pin: vendored pact_presumptive_conditions.json.content_hash === PACT pin', () => {
+    const pact = JSON.parse(readFileSync(pactTableUrl).toString('utf8')) as { content_hash: string; rows: readonly unknown[] };
+    expect(pact.content_hash).toBe(PINNED_PACT_MAP_HASH);
+    expect(pact.rows.length).toBeGreaterThanOrEqual(4); // mirrors pactPresumptive.MIN_ROWS stub guard
+  });
+
+  it('7b. PACT resolver smoke: the vendored pactPresumptive loads the VENDORED map (tableContentHash === PACT pin)', () => {
+    const req = createRequire(import.meta.url);
+    const pp = req('../vendor/pactPresumptive.cjs') as { tableContentHash(): string | null };
+    expect(pp.tableContentHash()).toBe(PINNED_PACT_MAP_HASH);
+  });
+
+  it('8. v2.1 schema: tables consts mirror the secondary + direct pins AND it carries the optional bridge_pathways key', () => {
+    const v21 = JSON.parse(readFileSync(v21SchemaUrl).toString('utf8')) as {
+      properties: {
+        tables: { properties: { secondary: { properties: { content_hash: { const: string } } }; direct: { properties: { content_hash: { const: string } } } } };
+        bridge_pathways?: unknown;
+      };
+    };
+    expect(v21.properties.tables.properties.secondary.properties.content_hash.const).toBe(PINNED_TABLE_HASH);
+    expect(v21.properties.tables.properties.direct.properties.content_hash.const).toBe(PINNED_DIRECT_TABLE_HASH);
+    expect(v21.properties.bridge_pathways).toBeDefined();
+  });
+
+  it('9. BRIDGE-ANCHOR smoke: flag OFF → no bridge (byte-identity); flag ON → a Pichette-class bridge with the pinned provenance', () => {
+    const req = createRequire(import.meta.url);
+    const am = req('../vendor/anchorMechanism.cjs') as {
+      setDirectAxisEnabled(on: boolean | null): void;
+      setBridgeEnabled(on: boolean | null): void;
+      assessClaimViability(claimed: string, granted: readonly string[], chartFacts?: unknown): {
+        viability: string; bridge_pathways?: Array<{ intermediate_dx: string; claimed: string; physician_review_required: boolean; bridge_provisional: boolean; provenance: { pact_map_hash: string } }>;
+      };
+    };
+    const chart = {
+      in_service_events: [{ event_canonical: 'burn_pit_airborne', evidence_span: 'burn pits Kuwait 1995' }],
+      dx_constellation: ['Chronic rhinosinusitis'],
+    };
+    am.setDirectAxisEnabled(true);
+    try {
+      am.setBridgeEnabled(null); // OFF (no env in test) → bridge must not fire
+      const off = am.assessClaimViability('Obstructive sleep apnea', ['Tinnitus'], chart);
+      expect(off.bridge_pathways).toBeUndefined();
+
+      am.setBridgeEnabled(true); // ON
+      const on = am.assessClaimViability('Obstructive sleep apnea', ['Tinnitus'], chart);
+      expect(on.viability).toBe('weak'); // bridge is additive — never upgrades the claimed band
+      expect(on.bridge_pathways?.length).toBe(1);
+      expect(on.bridge_pathways?.[0]?.intermediate_dx).toBe('Chronic rhinosinusitis');
+      expect(on.bridge_pathways?.[0]?.physician_review_required).toBe(true);
+      expect(on.bridge_pathways?.[0]?.bridge_provisional).toBe(true);
+      expect(on.bridge_pathways?.[0]?.provenance.pact_map_hash).toBe(PINNED_PACT_MAP_HASH);
+    } finally {
+      am.setBridgeEnabled(null);
+      am.setDirectAxisEnabled(null);
     }
   });
 

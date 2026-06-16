@@ -54,7 +54,7 @@ function _directAxisOn() {
 let _directSc = null;
 function _direct() {
   if (_directSc) return _directSc;
-  try { _directSc = require('./directSc.cjs'); } catch (_) { _directSc = null; } // VENDORED REWRITE 3/3 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend
+  try { _directSc = require('./directSc.cjs'); } catch (_) { _directSc = null; } // VENDORED REWRITE 3/4 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend
   return _directSc;
 }
 function _directTableHash() { const d = _direct(); try { return d ? d.tableContentHash() : null; } catch (_) { return null; } }
@@ -659,6 +659,131 @@ function _viabilityShell(claimedC, mode, art) {
   return shell;
 }
 
+// ── PRESUMPTIVE BRIDGE-ANCHOR pathway (gated; dark by default) ────────────────
+// A TWO-HOP suggestion: exposure → a PRESUMPTIVE intermediate dx (PACT-presumptive,
+// not-yet-SC) → the claimed condition argued SECONDARY to that intermediate. Motivating
+// case: burn-pit/TERA → chronic sinusitis/rhinitis/asthma (38 CFR 3.320) → OSA secondary.
+// The one-hop ranker above cannot see this (it anchors only on GRANTED SCs). This branch
+// is ADDITIVE ONLY: it attaches an optional `bridge_pathways[]` sidecar and NEVER mutates
+// viability/best_anchor/alternatives. Byte-identical when the flag is off or no bridge fires
+// (the key is only ever ADDED). Mirrors the _directAxisOn flag discipline for the Worker.
+//
+// Gated on ALL of (the load-bearing guardrail):
+//   G1 — a conceded EXPOSURE fact in chartFactsPresent.in_service_events (the same channel
+//        the EMR already emits); each event's eventCanon canonical is the exposure key.
+//   G2 — the intermediate dx is PRESENT in chartFactsPresent.dx_constellation AND is NOT
+//        already a granted SC (a granted intermediate is a normal one-hop anchor).
+//   G3 — the (intermediate → claimed) secondary pair is CURATED: resolveAnchorEligibility
+//        returns in_table===true && eligibility not 'plausible'/'excluded'. This AUTO-encodes
+//        the VA-rater ADD/SKIP (sinusitis/rhinitis/asthma→OSA in-table ⇒ fire; COPD/
+//        bronchitis→OSA plausible-default ⇒ no bridge), with NO separate allowlist.
+//   G4 — output is a provisional, physician_review_required SUGGESTION, never a band.
+let _bridgeOverride = null;
+function setBridgeEnabled(on) { _bridgeOverride = (on === null || on === undefined) ? null : !!on; }
+function _bridgeOn() {
+  if (_bridgeOverride !== null) return _bridgeOverride;
+  return (typeof process !== 'undefined' && process.env && process.env.BRIDGE_ANCHOR_ENABLED === 'true');
+}
+let _pactPresumptive = null;
+function _pact() {
+  if (_pactPresumptive) return _pactPresumptive;
+  try { _pactPresumptive = require('./pactPresumptive.cjs'); } catch (_) { _pactPresumptive = null; } // VENDORED REWRITE 4/4 (scripts/vendor-anchor-table.mjs): .cjs extension under the ESM backend
+  return _pactPresumptive;
+}
+function _pactMapHash() { const p = _pact(); try { return p ? p.tableContentHash() : null; } catch (_) { return null; } }
+
+// Interim RN-facing suggestion copy (anthropic-ai-sme polishes in step 5). Bakes the
+// VA-rater's HARD caveats: the presumption buys ONLY hop 1 (the intermediate); hop 2 needs
+// an independent positive nexus opinion; both conditions need a confirmed CURRENT diagnosis;
+// these chains frequently remand before granting (so "supportable" ≠ "first-pass grant").
+function _bridgeSuggestion(intermediate, claimed, basisCfr) {
+  return `The engine flagged a two-hop pathway worth a look, not a directly viable claim. The veteran has a conceded burn-pit / airborne-hazard exposure and a current ${intermediate} diagnosis, which may be presumptively service-connectable under ${basisCfr}. Exposure does NOT support ${claimed} directly; the lead is to first establish ${intermediate} as service-connected, then claim ${claimed} as secondary to it. Three things make or break this chain: (1) the presumption only reaches the first hop and does nothing to connect ${intermediate} to ${claimed}; (2) that second hop needs an independent positive nexus opinion and is not automatic; and (3) BOTH ${intermediate} and ${claimed} need a confirmed current diagnosis on the chart (missing one is a common avoidable denial). Physician review required before relying on this.`;
+}
+
+// assessBridgePathways(clC, chartFactsPresent, granted, art, bestUpstreamCanon) → bridge[].
+// Pure, never throws. Returns [] unless a FULLY fact-gated bridge fires (G1–G4 all pass).
+function assessBridgePathways(clC, chartFactsPresent, granted, art, bestUpstreamCanon) {
+  if (!_bridgeOn() || !chartFactsPresent) return [];
+  const events = Array.isArray(chartFactsPresent.in_service_events) ? chartFactsPresent.in_service_events : [];
+  const dxList = Array.isArray(chartFactsPresent.dx_constellation) ? chartFactsPresent.dx_constellation : [];
+  if (!events.length || !dxList.length) return [];   // G1/G2 transport absent → stays dark
+  const pact = _pact();
+  if (!pact) return [];
+
+  // G1 — exposure FACTS: each in-service event's canonical is a candidate exposure key;
+  // only those the PACT map recognizes (v1: burn_pit_airborne) will match downstream.
+  const exposureEvidence = {};
+  for (const e of events) {
+    const ek = e && e.event_canonical;
+    if (!ek || Object.prototype.hasOwnProperty.call(exposureEvidence, ek)) continue;
+    exposureEvidence[ek] = (e.evidence_span || e.evidence || '');
+  }
+  const exposureKeys = Object.keys(exposureEvidence);
+  if (!exposureKeys.length) return [];
+
+  const grantedCanon = new Set(granted.map(g => _canon(g)).filter(Boolean));
+  const seen = new Set();
+  const out = [];
+  for (const dx of dxList) {
+    const dxCanon = _canon(dx);
+    if (!dxCanon || dxCanon === clC) continue;             // the claimed condition is not its own intermediate
+    // G2 — present (it is, it's in the constellation) AND not already a granted SC
+    // (a granted intermediate is a normal one-hop anchor; computed vs the RAW granted set).
+    if (grantedCanon.has(dxCanon)) continue;
+    // architect guard — never suggest claiming X secondary to the very anchor it already has.
+    if (bestUpstreamCanon && dxCanon === bestUpstreamCanon) continue;
+    for (const ek of exposureKeys) {
+      // G1 — is this present dx a PACT presumptive under this exposure?
+      const pres = pact.isPresumptiveFor(dxCanon, ek);
+      if (!pres) continue;
+      // G3 — is the (intermediate → claimed) secondary pair CURATED (not plausible-default)?
+      let pair = null;
+      try { pair = resolveAnchorEligibility(pres.condition_canonical, clC); } catch (_) { pair = null; }
+      // tier WHITELIST (not just a plausible/excluded blocklist) — guarantees the emitted
+      // pair_tier is always one of the schema enum {blessed,conditional,chain}, so a future
+      // table tier (e.g. 'low') can never leak a schema-invalid bridge. Defense-in-depth.
+      const pairTier = pair && (pair.tier || pair.eligibility);
+      if (!pair || pair.in_table !== true || !['blessed', 'conditional', 'chain'].includes(pairTier)) continue;
+      const dedup = pres.condition_canonical + '>' + ek;
+      if (seen.has(dedup)) continue;
+      seen.add(dedup);
+      // G4 — a provisional SUGGESTION, never a band.
+      out.push({
+        bridge_provisional: true,
+        physician_review_required: true,
+        exposure: ek,
+        exposure_evidence: exposureEvidence[ek] || undefined,
+        intermediate_dx: pres.condition_canonical,
+        intermediate_presumptive_basis: pres.basis_cfr,
+        claimed: clC,
+        pair_tier: pair.tier || pair.eligibility,
+        pair_M: typeof pair.M_static === 'number' ? pair.M_static : null,
+        suggestion: _bridgeSuggestion(pres.condition_canonical, clC, pres.basis_cfr),
+        provenance: { pact_map_hash: _pactMapHash(), pair_table_hash: art ? art.content_hash : null },
+      });
+    }
+  }
+  const RANK = { blessed: 3, chain: 2, conditional: 2, low: 1 };
+  out.sort((a, b) => (RANK[b.pair_tier] || 0) - (RANK[a.pair_tier] || 0) || (b.pair_M || 0) - (a.pair_M || 0) || a.intermediate_dx.localeCompare(b.intermediate_dx));
+  return out;
+}
+
+// Attach bridge_pathways additively, ONLY when the primary path is not already strong/
+// moderate (a strong direct claim doesn't need a bridge suggestion). Byte-identical when
+// the flag is off or no bridge fires — `bridge_pathways` is the only key ever added.
+function _maybeAttachBridge(shell, clC, chartFactsPresent, granted, art, band, bestUpstreamCanon) {
+  if (!_bridgeOn()) return shell;
+  // Bridge rides ONLY on the v2 (direct-axis) shape — a bridge_pathways key on a v1-shaped
+  // object would validate against NEITHER schema (v1 forbids the key; v2.1 requires tables).
+  // Mirrors every other shape-gated write in this function (if (shell.tables !== undefined)).
+  if (shell.tables === undefined) return shell;
+  const v = shell.viability;
+  if (!(band === 'weak' || band === 'conditional' || v === 'weak' || v === 'abstain')) return shell;
+  const bridges = assessBridgePathways(clC, chartFactsPresent, granted, art, bestUpstreamCanon);
+  if (bridges.length) shell.bridge_pathways = bridges;
+  return shell;
+}
+
 function assessClaimViability(claimedText, grantedScConditions, chartFactsPresent) {
   const mode = chartFactsPresent ? 'chart_refined' : 'info_light';
   const granted = Array.isArray(grantedScConditions) ? grantedScConditions.filter(Boolean) : [];
@@ -830,7 +955,9 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
     shell.viability = 'weak';
     shell.confidence = 'low';
     shell.why = _whyLine('weak', null, clC, null, null);
-    return shell;
+    // No one-hop anchor → the bridge branch may surface a presumptive two-hop pathway
+    // (e.g. burn-pit veteran, OSA claimed, no granted SC, but a sinusitis dx present).
+    return _maybeAttachBridge(shell, clC, chartFactsPresent, granted, art, 'weak', null);
   }
 
   // Rank: M_eff desc, then E desc, then tier-strength desc, then the curated
@@ -895,7 +1022,9 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
   } else {
     shell.why = _whyLine(band, best, clC, shell.presumptive_redirect, null);
   }
-  return shell;
+  // A weak/conditional one-hop anchor does not suppress a presumptive two-hop suggestion;
+  // a strong/moderate one does (gated inside _maybeAttachBridge). Deduped vs the chosen anchor.
+  return _maybeAttachBridge(shell, clC, chartFactsPresent, granted, art, band, best.upstream_canonical);
 }
 
 function _publicAnchor(a) {
@@ -1066,6 +1195,8 @@ module.exports = {
   tableContentHash,
   setArtifact,        // inject a table object (Worker vendor / tests) — bypasses fs
   setDirectAxisEnabled, // enable the direct-SC fold without process.env (Cloudflare Worker / tests)
+  setBridgeEnabled,     // enable the presumptive bridge-anchor pathway without process.env (Worker / tests)
+  assessBridgePathways, // exported for the guard tests + vendor selfVerify
   _clearCache,
   _canon,
   _UMBRELLA_RE,       // umbrella/phenotype-unresolved claim labels (read by pipelineLinter.lintClaimedConditionSpecific)

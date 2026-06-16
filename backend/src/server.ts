@@ -3,6 +3,7 @@ import express from 'express';
 import { authenticateJwt } from './middleware/auth.js';
 import { requireRole } from './auth/roles.js';
 import { HttpError, isHttpError, sendError } from './http/errors.js';
+import { providerErrorToHttp } from './http/provider-error.js';
 import { prisma } from './db/client.js';
 import { createVeteransRouter } from './routes/veterans.js';
 import { createDocumentsRouter } from './routes/documents.js';
@@ -208,7 +209,12 @@ export function createApp(options: CreateAppOptions = {}) {
   });
 
   app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    if (isHttpError(error)) {
+    // Provider-down mapping (#50): a thrown Anthropic/Bedrock error (not an HttpError) that is a genuine
+    // outage (5xx/529/overloaded) or rate-limit becomes a calm 503/429 with the plain-language message,
+    // so any user-facing AI route shows "retry in ~30 min" instead of a generic 500. Our-own errors
+    // (4xx) and transient blips return null → fall through to the normal handling below (never masked).
+    const httpError = isHttpError(error) ? error : providerErrorToHttp(error);
+    if (httpError) {
       // Sign-off incident 2026-06-09: HttpErrors were returned with NO log line, so the approve
       // 409s (signer-name gate) were invisible in CloudWatch — the swallowed frontend alert was
       // the only trace, and an hour was lost. Log one structured line for 4xx/5xx HttpErrors on
@@ -216,18 +222,18 @@ export function createApp(options: CreateAppOptions = {}) {
       // `reason` from details when present. NO PHI: no bodies, and deliberately NOT the human
       // message/details (those can carry veteran/physician names). GETs and 2xx stay quiet.
       if (MUTATING_METHODS.has(req.method)) {
-        const details = error.details;
+        const details = httpError.details;
         const reason = typeof details === 'object' && details !== null ? (details as { reason?: unknown }).reason : undefined;
         console.warn(JSON.stringify({
           msg: 'http_error',
           method: req.method,
           path: req.originalUrl,
-          status: error.status,
-          code: error.code,
+          status: httpError.status,
+          code: httpError.code,
           ...(typeof reason === 'string' ? { reason } : {}),
         }));
       }
-      return sendError(res, error.status, error.code, error.message, error.details);
+      return sendError(res, httpError.status, httpError.code, httpError.message, httpError.details);
     }
     // P0-2 (live-path sweep): non-HttpError 500s were mapped silently — every live 500 (CORS,
     // the BigInt serialize, the orderBy bug) was invisible in CloudWatch, forcing hand-diagnosis

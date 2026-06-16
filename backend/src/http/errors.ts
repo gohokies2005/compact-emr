@@ -10,6 +10,8 @@ export type ErrorCode =
   | 'chart_not_ready'
   | 'essential_docs_missing'
   | 'signed_bytes_changed'
+  | 'provider_unavailable' // AI provider genuinely down (5xx/overloaded) → calm "retry in ~30 min"
+  | 'provider_busy' // AI provider rate-limited us (429) → "busy, retrying"
   | 'internal_error';
 
 export interface ErrorEnvelope {

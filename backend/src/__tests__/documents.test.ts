@@ -118,6 +118,8 @@ describe('POST /cases/:id/reprocess', () => {
           { filePath: 'cases/CASE-1/a.pdf', terminalStatus: 'read' },
           // b.pdf has NO terminal row — the orphan-race victim
         ]),
+        // FORCE mode resets the selected docs' read status so chart-readiness honestly shows "re-reading".
+        deleteMany: vi.fn(async () => ({ count: 1 })),
       },
       // FORCE mode (documentIds) clears the selected docs' pages so ocr-start re-reads an already-'read' doc.
       documentPage: { deleteMany: vi.fn(async () => ({ count: 3 })) },
@@ -156,6 +158,9 @@ describe('POST /cases/:id/reprocess', () => {
 
     // The already-read doc's pages are deleted (hasPages→false → ocr-start re-OCRs it with vision)...
     expect(prisma.documentPage.deleteMany).toHaveBeenCalledWith({ where: { documentId: 'doc-terminal' } });
+    // ...and its read status is reset so chart-readiness shows "re-reading" (the processing note + grayed
+    // button derive from that — leaving it 'read' is what made a reprocess look like nothing happened).
+    expect(prisma.fileReadStatus.deleteMany).toHaveBeenCalledWith({ where: { caseId: 'CASE-1', filePath: 'cases/CASE-1/a.pdf' } });
     // ...and ONLY that doc is nudged; the non-selected doc-stuck is left alone.
     expect(prisma.documentPage.deleteMany).not.toHaveBeenCalledWith({ where: { documentId: 'doc-stuck' } });
     expect(s3Send).toHaveBeenCalledTimes(1); // one CopyObject nudge, for the picked doc
@@ -167,6 +172,7 @@ describe('POST /cases/:id/reprocess', () => {
     const { app } = appWithS3(prisma);
     await request(app).post('/api/v1/cases/CASE-1/reprocess').expect(200);
     expect(prisma.documentPage.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.fileReadStatus.deleteMany).not.toHaveBeenCalled(); // a good read is left untouched
   });
 
   it('all-terminal wedge: re-OCRs nothing but FORCE-enqueues a fresh salted run', async () => {

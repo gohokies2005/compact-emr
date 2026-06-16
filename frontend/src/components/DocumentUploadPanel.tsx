@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { presignDocument, recordDocument, uploadToPresignedUrl } from '../api/veterans';
+import { presignDocument, recordDocument, uploadToPresignedUrl, listDocuments } from '../api/veterans';
 import { reprocessCase } from '../api/cases';
 import { getChartReadiness } from '../api/chart-readiness';
 import { ACCEPT_ATTR, classifyEntry, isZip, uploadErrorReason, type CandidateResult } from '../routes/veterans/documentUpload';
@@ -51,6 +51,37 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
     setWatchReprocess(true);
   }
   const targetCaseId = caseId ?? selectedCaseId;
+
+  // Reprocess document-picker (Ryan 2026-06-16): the Reprocess button opens a modal listing every chart
+  // file. All selected by DEFAULT (re-read the whole record); deselect-all/select-all toggle + per-file
+  // checkboxes so a single just-uploaded file can be re-read alone (saves time + tokens). Selected docs
+  // are FORCE re-read — the backend clears their pages so even an already-'read' doc re-runs through the
+  // (now vision) pipeline. Covers Jotform-ingested AND manually-uploaded docs alike (all are Documents).
+  const docPicker = useQuery({
+    queryKey: ['veteran', veteranId, 'documents'],
+    queryFn: () => listDocuments(veteranId),
+    enabled: confirming && veteranId.length > 0,
+  });
+  const caseDocs = (docPicker.data?.data ?? []).filter(
+    (d) => d.caseId === targetCaseId && !d.s3Key.endsWith('00000000-screening-summary.txt'),
+  );
+  const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
+  const [pickerInit, setPickerInit] = useState(false);
+  // Default to ALL selected once the list loads for this opening; reset when the modal closes.
+  useEffect(() => {
+    if (confirming && !pickerInit && caseDocs.length > 0) {
+      setSelectedDocIds(new Set(caseDocs.map((d) => d.id)));
+      setPickerInit(true);
+    }
+    if (!confirming && pickerInit) setPickerInit(false);
+  }, [confirming, caseDocs, pickerInit]);
+  const allSelected = caseDocs.length > 0 && selectedDocIds.size >= caseDocs.length;
+  function toggleDoc(id: string) {
+    setSelectedDocIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  }
+  function toggleAll() {
+    setSelectedDocIds(allSelected ? new Set() : new Set(caseDocs.map((d) => d.id)));
+  }
 
   // Live extraction status after a reprocess (shared queryKey with SendToDrafterPanel, so its draft
   // button grays/un-grays in lockstep). Polls while building, AND keeps polling through the stale
@@ -125,29 +156,24 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
   // status + force a chart re-extract (salted triggerHash). Lives here so the SAME button surfaces
   // in BOTH Documents tabs (the chart's dropdown variant and the case page's pinned variant).
   // Errors are NEVER silent — the real reason lands in the status line (standing rule).
-  async function onReprocess() {
+  async function onReprocess(documentIds?: readonly string[]) {
     if (!targetCaseId) { setStatus('Create or select a case before reprocessing.'); return; }
     setBusy(true);
+    setConfirming(false);
     try {
       setStatus('Reprocessing documents…');
-      const { data } = await reprocessCase(targetCaseId);
-      // Plain-language message. The old "re-OCR queued for 0 files" read like nothing happened — but 0
-      // re-OCR just means every file already read fine; the chart RE-EXTRACT is the part that matters
-      // (it re-reads the full record, e.g. to pick up a rating % an earlier windowed pass missed).
+      const { data } = await reprocessCase(targetCaseId, documentIds);
+      // Plain-language. reocrQueued = how many files are being re-read; the chart re-extract then re-runs.
+      const n = data.reocrQueued;
       let msg: string;
-      if (data.extractEnqueued) {
-        msg = data.reocrQueued === 0
-          ? 'All files already read OK — a fresh full chart re-extraction is now running (~5–10 min). SC Conditions update when it finishes.'
-          : `Re-OCR started for ${data.reocrQueued} file${data.reocrQueued === 1 ? '' : 's'} and a full chart re-extraction is now running (~5–10 min).`;
-        beginWatch(); // turn on the live "done" poll (gated on observing the new run build)
-      } else if (data.extractReason === 'ocr_in_progress') {
-        msg = 'Re-OCR started — the chart re-extraction will run automatically when OCR finishes.';
-        beginWatch();
+      if (data.extractEnqueued || data.extractReason === 'ocr_in_progress') {
+        msg = `Re-reading ${n} file${n === 1 ? '' : 's'} with full vision and re-running the chart extraction (~5–10 min). SC Conditions update when it finishes.`;
+        beginWatch(); // live "done" poll (gated on observing the new run build)
       } else {
         msg = `Chart re-extract did not start (${data.extractReason ?? 'unknown'}).`;
       }
       if (data.reocrFailed && data.reocrFailed.length > 0) {
-        msg += ` ${data.reocrFailed.length} re-OCR failed — ${data.reocrFailed.map((f) => `${f.documentId}: ${f.reason}`).join('; ')}.`;
+        msg += ` ${data.reocrFailed.length} could not be re-read — ${data.reocrFailed.map((f) => `${f.documentId}: ${f.reason}`).join('; ')}.`;
       }
       setStatus(msg);
       await onUploaded();
@@ -201,37 +227,70 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
         ) : null}
         <select aria-label="Document tag" className="input" value={docTag} onChange={(e) => setDocTag(e.target.value)}>{DOC_TAGS.map((t) => <option key={t}>{t}</option>)}</select>
         <input aria-label="Upload documents" className="text-sm" type="file" multiple accept={ACCEPT_ATTR} disabled={busy} onChange={(e) => { void onFiles(e.target.files); e.target.value = ''; }} />
-        {/* Reprocess is behind a confirm step + a time/cost note so it isn't clicked out of habit — it
-            re-reads the WHOLE record (real Anthropic spend, ~5–10 min). Kept always available (not hidden
-            on "no file changes") because re-extracting unchanged files is exactly the Dorsey case: the
-            files were fine, the earlier windowed extraction missed a rating %. (Ryan 2026-06-13.) */}
-        {!confirming ? (
-          <button
-            type="button"
-            className="self-start rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-            title="Re-OCR any stuck files on this claim and re-run the full chart extraction (~5 minutes, uses API time)"
-            disabled={busy}
-            onClick={() => setConfirming(true)}
-          >
-            Reprocess documents
-          </button>
-        ) : (
-          <div className="flex flex-col gap-1.5 self-start rounded-md border border-amber-300 bg-amber-50 p-2">
-            <span className="text-xs text-amber-800">
-              This re-reads the <strong>entire</strong> record and re-runs extraction — <strong>~5 minutes</strong> and uses API time.
-              Only needed if files changed or a detail was missed. Continue?
-            </span>
-            <div className="flex gap-2">
-              <button type="button" className="rounded-md border border-amber-400 bg-white px-3 py-1.5 text-sm font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50" disabled={busy} onClick={() => { setConfirming(false); void onReprocess(); }}>
-                Confirm reprocess
-              </button>
-              <button type="button" className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50" disabled={busy} onClick={() => setConfirming(false)}>
+        {/* Reprocess opens a document picker (re-reads the selected files with vision + re-extracts).
+            Always available — re-reading unchanged files is exactly the Dorsey/Stephens case (the files
+            were fine, the earlier read missed content). (Ryan 2026-06-13/16.) */}
+        <button
+          type="button"
+          className="self-start rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+          title="Re-read selected documents with full vision and re-run the chart extraction"
+          disabled={busy}
+          onClick={() => setConfirming(true)}
+        >
+          Reprocess documents
+        </button>
+      </div>
+
+      {/* Reprocess picker — all files selected by default; uncheck to re-read only what changed. Calm
+          neutral modal, bold for the count, no red. */}
+      {confirming ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4" role="dialog" aria-modal="true" aria-label="Reprocess documents">
+          <div className="w-full max-w-lg rounded-lg border border-slate-200 bg-white p-5 shadow-lg">
+            <h3 className="text-base font-semibold text-slate-800">Reprocess documents</h3>
+            <p className="mt-1 text-sm text-slate-500">
+              Re-reads the selected files with full vision and re-runs the chart extraction. All files are
+              selected by default — uncheck any you don’t need to re-read to save time. Takes about 5–10 minutes.
+            </p>
+            {docPicker.isLoading ? (
+              <p className="mt-4 text-sm text-slate-500">Loading documents…</p>
+            ) : caseDocs.length === 0 ? (
+              <p className="mt-4 text-sm text-slate-500">No documents on this claim yet.</p>
+            ) : (
+              <>
+                <div className="mt-4 flex items-center justify-between">
+                  <span className="text-sm font-medium text-slate-700">{selectedDocIds.size} of {caseDocs.length} selected</span>
+                  <button type="button" className="text-sm text-sky-700 hover:underline" onClick={toggleAll}>
+                    {allSelected ? 'Deselect all' : 'Select all'}
+                  </button>
+                </div>
+                <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto rounded-md border border-slate-200 p-2">
+                  {caseDocs.map((d) => (
+                    <li key={d.id}>
+                      <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm text-slate-700 hover:bg-slate-50">
+                        <input type="checkbox" checked={selectedDocIds.has(d.id)} onChange={() => toggleDoc(d.id)} />
+                        <span className="truncate">{d.filename}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50" disabled={busy} onClick={() => setConfirming(false)}>
                 Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-slate-800 bg-slate-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+                disabled={busy || selectedDocIds.size === 0}
+                onClick={() => void onReprocess([...selectedDocIds])}
+              >
+                Reprocess {selectedDocIds.size} {selectedDocIds.size === 1 ? 'file' : 'files'}
               </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      ) : null}
       {status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}
       {/* Live "where is it" + completion notice after a reprocess — shares the readiness query with the
           draft panel, so this flips to "Done" the moment extraction settles, no refresh needed. */}

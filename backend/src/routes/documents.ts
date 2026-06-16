@@ -235,17 +235,35 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
       readStatuses.filter((r) => TERMINAL_READ_STATUSES.has(r.terminalStatus)).map((r) => r.filePath),
     );
 
-    // Action 1 — nudge every doc with no terminal read outcome. Per-file failures are collected,
-    // never silent (a doc whose nudge failed would otherwise look "reprocessed" and stay stuck).
+    // Optional explicit selection (the "Reprocess documents" modal — Ryan 2026-06-16). When the caller
+    // names documentIds, this is a FORCE re-read of exactly those docs: clear each one's prior OCR pages
+    // first so ocr-start's hasPages guard can't skip a doc that was previously marked 'read' (Textract
+    // may have read the printed text but DROPPED the handwriting — the Stephens class). That re-runs the
+    // doc through the now-vision pipeline. NO selection = the legacy auto/unstick behavior, untouched:
+    // nudge only docs that never reached a terminal read outcome, never disturbing a good read.
+    const body = (req.body ?? {}) as { documentIds?: unknown };
+    const selectedIds = Array.isArray(body.documentIds)
+      ? new Set(body.documentIds.filter((x): x is string => typeof x === 'string'))
+      : null;
+    const forced = selectedIds !== null;
+
+    // Action 1 — re-OCR the target docs. Per-file failures are collected, never silent (a doc whose
+    // nudge failed would otherwise look "reprocessed" and stay stuck).
     let reocrQueued = 0;
     const reocrFailed: { documentId: string; reason: string }[] = [];
     for (const doc of documents) {
-      if (terminalKeys.has(doc.s3Key)) continue;
-      // The screening-summary OUTPUT file never has a terminal read-status (ocr-start skips it), so it
-      // would be futilely re-OCR'd every reprocess + then never reach terminal — inflating reocrQueued
-      // and never un-wedging anything. It is not an OCR input; skip it (matches the trigger's exclusion).
+      // The screening-summary OUTPUT file is not an OCR input (ocr-start skips it) — never re-OCR it.
       if (isScreeningSummaryKey(doc.s3Key)) continue;
+      if (forced) {
+        if (!selectedIds.has(doc.id)) continue; // only the picked docs
+      } else if (terminalKeys.has(doc.s3Key)) {
+        continue; // legacy: leave a good read alone
+      }
       try {
+        if (forced) {
+          // hasPages → false so ocr-start re-reads this doc fresh (vision), even if it was already 'read'.
+          await prisma.documentPage.deleteMany({ where: { documentId: doc.id } });
+        }
         await nudgeDocumentReocr(s3, bucketName, doc);
         reocrQueued += 1;
       } catch (err) {

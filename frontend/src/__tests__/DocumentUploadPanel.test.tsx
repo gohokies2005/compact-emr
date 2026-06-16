@@ -22,6 +22,12 @@ vi.mock('../api/veterans', () => ({
   presignDocument: vi.fn(async () => { calls.push('presign'); return { data: { uploadUrl: 'https://s3.test/upload', requiredHeaders: { 'Content-Type': 'application/pdf' }, s3Key: 'cases/CASE-9/uuid-a.pdf' } }; }),
   uploadToPresignedUrl: vi.fn(async () => { calls.push('put'); }),
   recordDocument: vi.fn(async () => { calls.push('record'); return { data: { id: 'DOC-1' } }; }),
+  // The Reprocess modal lists the case's docs (all selected by default). CASE-9 → 2 docs, C-2 → 1.
+  listDocuments: vi.fn(async () => ({ data: [
+    { id: 'D1', filename: 'enc1.pdf', caseId: 'CASE-9', s3Key: 'cases/CASE-9/uuid-enc1.pdf' },
+    { id: 'D2', filename: 'enc2.pdf', caseId: 'CASE-9', s3Key: 'cases/CASE-9/uuid-enc2.pdf' },
+    { id: 'D3', filename: 'knee.pdf', caseId: 'C-2', s3Key: 'cases/C-2/uuid-knee.pdf' },
+  ] })),
 }));
 
 // Keystone 4b — the case-level reprocess action (re-OCR stuck files + force chart re-extract).
@@ -67,10 +73,11 @@ function renderPanel(ui: ReactElement) {
   return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
 }
 
-// Reprocess is now a two-step confirm (Ryan 2026-06-13: no habitual one-click bill). This drives both clicks.
+// Reprocess opens a document-picker modal (Ryan 2026-06-16): all files selected by default → click the
+// "Reprocess N files" button. This opens the modal, waits for the docs to load, then confirms.
 async function clickReprocess() {
   await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
-  await userEvent.click(screen.getByRole('button', { name: 'Confirm reprocess' }));
+  await userEvent.click(await screen.findByRole('button', { name: /Reprocess \d+ file/ }));
 }
 
 beforeEach(() => { vi.clearAllMocks(); calls.length = 0; });
@@ -168,40 +175,45 @@ describe('DocumentUploadPanel — dropdown variant (veteran chart)', () => {
 describe('DocumentUploadPanel — Reprocess documents (keystone 4b)', () => {
   const reprocess = vi.mocked(reprocessCase);
 
-  it('pinned variant: calls reprocessCase with the pinned caseId and surfaces the structured summary', async () => {
+  it('pinned variant: FORCE-reprocesses the selected docs with the pinned caseId', async () => {
     const onUploaded = vi.fn();
     renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={onUploaded} />);
     await clickReprocess();
 
-    expect(reprocess).toHaveBeenCalledWith('CASE-9');
-    expect(await screen.findByText(/Re-OCR started — the chart re-extraction will run automatically when OCR finishes\./)).toBeInTheDocument();
-    expect(onUploaded).toHaveBeenCalledTimes(1); // refresh the doc list after the nudge
+    // CASE-9 has 2 docs, both selected by default → reprocessCase called WITH those documentIds.
+    await waitFor(() => expect(reprocess).toHaveBeenCalledWith('CASE-9', expect.arrayContaining(['D1', 'D2'])));
+    expect(await screen.findByText(/Re-reading 2 files with full vision and re-running the chart extraction/)).toBeInTheDocument();
+    expect(onUploaded).toHaveBeenCalledTimes(1);
   });
 
-  it('requires a confirm step before spending (no one-click bill)', async () => {
+  it('opens a picker (no one-click spend); Cancel backs out without calling reprocess', async () => {
     renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
-    // First click only opens the confirm — it must NOT call reprocessCase.
+    // First click only opens the modal — it must NOT call reprocessCase.
     await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
     expect(reprocess).not.toHaveBeenCalled();
-    expect(screen.getByText(/uses API time/)).toBeInTheDocument();
-    // Cancelling backs out without spending.
+    expect(await screen.findByText(/2 of 2 selected/)).toBeInTheDocument();
+    // Cancel backs out without spending.
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(reprocess).not.toHaveBeenCalled();
+  });
+
+  it('per-file selection: deselect all then pick one → reprocess only that doc (saves tokens)', async () => {
+    renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
+    await screen.findByText(/2 of 2 selected/);
+    await userEvent.click(screen.getByRole('button', { name: 'Deselect all' }));
+    expect(await screen.findByText(/0 of 2 selected/)).toBeInTheDocument();
+    // pick just enc1.pdf
+    await userEvent.click(screen.getByRole('checkbox', { name: /enc1\.pdf/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Reprocess 1 file' }));
+    await waitFor(() => expect(reprocess).toHaveBeenCalledWith('CASE-9', ['D1']));
   });
 
   it('dropdown variant: reprocesses the SELECTED claim', async () => {
     renderPanel(<DocumentUploadPanel veteranId="VET-1" cases={TWO_CASES} onUploaded={vi.fn()} />);
     await userEvent.selectOptions(screen.getByLabelText('Assign to claim'), 'C-2');
     await clickReprocess();
-    await waitFor(() => expect(reprocess).toHaveBeenCalledWith('C-2'));
-  });
-
-  it('reports a queued extract when the force enqueued immediately (all-terminal wedge case)', async () => {
-    reprocess.mockResolvedValueOnce({ data: { reocrQueued: 0, extractEnqueued: true, requestId: 'req-2' } });
-    renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
-    await clickReprocess();
-    // The "0 files" no longer reads like nothing happened — the re-extract is the headline.
-    expect(await screen.findByText(/All files already read OK — a fresh full chart re-extraction is now running/)).toBeInTheDocument();
+    await waitFor(() => expect(reprocess).toHaveBeenCalledWith('C-2', ['D3']));
   });
 
   it('surfaces the API failure reason loudly (NO-SILENT-ERRORS)', async () => {
@@ -211,10 +223,12 @@ describe('DocumentUploadPanel — Reprocess documents (keystone 4b)', () => {
     expect(await screen.findByText(/Reprocess failed: Case was not found\./)).toBeInTheDocument();
   });
 
-  it('refuses with no case selected and says so', async () => {
+  it('no case → modal shows no docs and reprocess can’t be triggered (no spend)', async () => {
     renderPanel(<DocumentUploadPanel veteranId="VET-1" cases={[]} onUploaded={vi.fn()} />);
-    await clickReprocess();
-    expect(await screen.findByText('Create or select a case before reprocessing.')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
+    expect(await screen.findByText('No documents on this claim yet.')).toBeInTheDocument();
+    // The confirm button renders but is DISABLED (0 selectable) → no spend possible.
+    expect(screen.getByRole('button', { name: /Reprocess \d+ file/ })).toBeDisabled();
     expect(reprocess).not.toHaveBeenCalled();
   });
 

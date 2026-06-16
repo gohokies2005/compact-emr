@@ -405,6 +405,9 @@ export interface ReprocessSummary {
   readonly requestId: string;
 }
 
-export async function reprocessCase(caseId: string): Promise<{ data: ReprocessSummary }> {
-  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/reprocess`, {});
+// documentIds (optional) — the "Reprocess documents" modal selection. When provided, those exact docs
+// are FORCE re-read (their prior OCR pages are cleared so even an already-'read' doc re-runs through the
+// vision pipeline — the Stephens fix). Omit = legacy behavior (only re-OCR docs without a terminal read).
+export async function reprocessCase(caseId: string, documentIds?: readonly string[]): Promise<{ data: ReprocessSummary }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/reprocess`, documentIds ? { documentIds } : {});
 }

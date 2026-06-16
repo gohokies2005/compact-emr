@@ -100,6 +100,36 @@ export function CaseViabilityCard({
           ) : null}
         </>
       ) : null}
+
+      {/* BRIDGE-ANCHOR (2026-06-16): a provisional two-hop SUGGESTION (exposure → PACT-presumptive
+          intermediate dx → claimed secondary), NOT a viability band — rendered as a visually distinct
+          "suggested next step" block. The `suggestion` string is FINAL FRN-engine copy: rendered
+          VERBATIM (no re-templating, no BVA %/odds). RN-only surface; physician_review_required is
+          surfaced as a badge. Present only when the engine fires a fully fact-gated bridge. */}
+      {(v.bridge_pathways?.length ?? 0) > 0 ? (
+        <div className="mt-3 space-y-3">
+          {v.bridge_pathways!.map((b, i) => (
+            <div key={`${b.intermediate_dx}-${b.claimed}-${i}`} className="rounded-md border border-sky-200 bg-sky-50 p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 text-sm font-medium text-sky-900">
+                  Possible bridge pathway: <span className="font-semibold">{b.intermediate_dx}</span> → {b.claimed}
+                </div>
+                {b.physician_review_required ? (
+                  <span className="shrink-0 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                    Physician review required
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-1 text-xs text-sky-800">
+                Presumptive basis: {b.intermediate_presumptive_basis}
+                {b.pair_tier ? <span className="ml-2 text-sky-700">· second-hop pairing: {b.pair_tier}</span> : null}
+              </div>
+              {/* Verbatim engine copy — whitespace-pre-line preserves any intentional structure. */}
+              <p className="mt-2 whitespace-pre-line text-sm text-slate-700">{b.suggestion}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

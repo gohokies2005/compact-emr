@@ -81,6 +81,40 @@ export interface CoverageGap {
 
 export type CoverageStatus = 'complete' | 'complete_with_gaps' | 'in_progress' | 'failed';
 
+// ===== Per-page provenance layer (vision rebuild 2026-06-16) =====
+// SEPARATE from the file-level accounting above (which counts a file as read via the SHARED
+// isEffectivelyRead predicate — untouched, four gates depend on it). This layer reads the per-page
+// provenance the vision path stamps (document_pages.extraction_coverage / handwriting_present) so the
+// RN can see, per page, what was captured cleanly vs read with low confidence vs couldn't be read —
+// the honest answer the false-"100%" couldn't give. Pages with NO signal (Textract/native/legacy,
+// coverage=null) are NOT counted here; they keep the file-level accounting. Advisory; blocks nothing.
+
+export interface PageProvenanceInput {
+  readonly documentId: string;
+  readonly pageNumber: number;
+  readonly extractionCoverage: string | null; // 'full' | 'partial' | 'illegible' | 'blank' | null
+  readonly handwritingPresent: boolean | null;
+}
+
+export interface PageReviewRef {
+  readonly documentId: string;
+  readonly fileName: string;
+  readonly pageNumber: number;
+  // 'handwriting_uncertain' = vision read it but flagged faint/illegible regions (content present,
+  // confirm it). 'unreadable' = almost nothing could be read (real content likely missing).
+  readonly reason: 'handwriting_uncertain' | 'unreadable';
+}
+
+export interface PageCoverageBreakdown {
+  readonly pagesWithSignal: number; // pages carrying a per-page vision signal (the denominator here)
+  readonly clean: number; // coverage 'full' — captured with confidence
+  readonly handwritingUncertain: number; // coverage 'partial' — content present, low-confidence regions
+  readonly blank: number; // coverage 'blank' — verified empty (silent; not a gap to chase)
+  readonly unreadable: number; // coverage 'illegible' — almost nothing read (needs a look)
+  // The pages a human should glance at, in document order, capped (UI list). Blanks are NEVER here.
+  readonly reviewPages: readonly PageReviewRef[];
+}
+
 export interface ExtractionCoverage {
   readonly totalPages: number;
   readonly extractedPages: number;
@@ -92,6 +126,62 @@ export interface ExtractionCoverage {
   // page totals are approximate and the UI must say so ("N files, page counts unavailable").
   readonly unknownPageFiles: number;
   readonly totalFiles: number;
+  // Per-page vision breakdown. null when NO page carries a vision signal (pure Textract/native/legacy
+  // case) — the UI then shows only the file-level numbers, exactly as before the vision rebuild.
+  readonly pageBreakdown: PageCoverageBreakdown | null;
+}
+
+const REVIEW_PAGES_CAP = 200; // never enumerate more than this in the UI list (a 2000-page chart)
+
+/**
+ * Build the per-page breakdown from document_pages provenance. Returns null when no page has a vision
+ * signal (so the response's pageBreakdown stays null and the UI is unchanged for non-vision charts).
+ * PURE. Counts only pages belonging to chart-INPUT documents (drops screening-summary/_rendered).
+ */
+export function computePageCoverageBreakdown(
+  docs: readonly CoverageDocInput[],
+  pages: readonly PageProvenanceInput[],
+): PageCoverageBreakdown | null {
+  const inputs = docs.filter((d) => isChartInputKey(d.s3Key));
+  const nameById = new Map(inputs.map((d) => [d.id, displayName(d)] as const));
+  // only pages of chart-input docs that actually carry a per-page signal
+  const signal = pages.filter((p) => nameById.has(p.documentId) && p.extractionCoverage !== null);
+  if (signal.length === 0) return null;
+
+  let clean = 0;
+  let handwritingUncertain = 0;
+  let blank = 0;
+  let unreadable = 0;
+  const reviewPages: PageReviewRef[] = [];
+  // stable document order then page order, so the review list reads top-to-bottom like the chart
+  const ordered = [...signal].sort((a, b) =>
+    a.documentId === b.documentId ? a.pageNumber - b.pageNumber : a.documentId < b.documentId ? -1 : 1,
+  );
+  for (const p of ordered) {
+    switch (p.extractionCoverage) {
+      case 'full':
+        clean += 1;
+        break;
+      case 'blank':
+        blank += 1;
+        break;
+      case 'illegible':
+        unreadable += 1;
+        if (reviewPages.length < REVIEW_PAGES_CAP) {
+          reviewPages.push({ documentId: p.documentId, fileName: nameById.get(p.documentId) ?? 'Document', pageNumber: p.pageNumber, reason: 'unreadable' });
+        }
+        break;
+      case 'partial':
+        handwritingUncertain += 1;
+        if (reviewPages.length < REVIEW_PAGES_CAP) {
+          reviewPages.push({ documentId: p.documentId, fileName: nameById.get(p.documentId) ?? 'Document', pageNumber: p.pageNumber, reason: 'handwriting_uncertain' });
+        }
+        break;
+      default:
+        break; // unknown value — already filtered to the 4 enums upstream, but be defensive
+    }
+  }
+  return { pagesWithSignal: signal.length, clean, handwritingUncertain, blank, unreadable, reviewPages };
 }
 
 // Image content-type / extension recognition for the "request AI description" affordance.
@@ -149,6 +239,9 @@ export function computeExtractionCoverage(
   docs: readonly CoverageDocInput[],
   fileReadStatuses: readonly FileReadStatusRecord[],
   latestRun: Pick<ExtractionRunRef, 'status'> & { resultJson?: unknown } | null,
+  // Per-page provenance rows (document_pages). Optional + defaults to [] so every existing caller/test
+  // is unchanged and pageBreakdown is null until the vision path stamps pages.
+  pages: readonly PageProvenanceInput[] = [],
 ): ExtractionCoverage {
   const inputs = docs.filter((d) => isChartInputKey(d.s3Key));
   const statusByPath = new Map(fileReadStatuses.map((r) => [r.filePath, r] as const));
@@ -246,6 +339,7 @@ export function computeExtractionCoverage(
     status,
     unknownPageFiles,
     totalFiles: inputs.length,
+    pageBreakdown: computePageCoverageBreakdown(docs, pages),
   };
 }
 

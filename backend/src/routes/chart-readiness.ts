@@ -15,7 +15,7 @@ import {
   parseReadAttempt,
 } from '../services/file-read-validation.js';
 import { computeTriggerHash, deriveChartBuildState, isScreeningSummaryKey, runMatchesHash } from '../services/chart-build-state.js';
-import { computeExtractionCoverage, type CoverageDocInput } from '../services/extraction-coverage.js';
+import { computeExtractionCoverage, type CoverageDocInput, type PageProvenanceInput } from '../services/extraction-coverage.js';
 import { AUTO_REMEDIATE_ACTION } from '../services/chart-auto-remediate.js';
 import type { AppDb, FileReadAttempt, FileReadStatusRecord } from '../services/db-types.js';
 
@@ -308,7 +308,15 @@ export function createChartReadinessRouter(db: AppDb): Router {
         chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { status: true; resultJson: true } }) => Promise<{ status: string; resultJson: unknown } | null> };
       }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true } });
 
-      const coverage = computeExtractionCoverage(docs, rows, latestRun);
+      // Per-page provenance for the honest per-page breakdown (vision rebuild). Tiny select (no text);
+      // null coverage rows (Textract/native/legacy) contribute nothing — the breakdown stays null for
+      // non-vision charts, preserving the prior file-level-only response.
+      const pageRows = (await db.documentPage.findMany({
+        where: { document: { caseId } },
+        select: { documentId: true, pageNumber: true, extractionCoverage: true, handwritingPresent: true },
+      })) as unknown as readonly PageProvenanceInput[];
+
+      const coverage = computeExtractionCoverage(docs, rows, latestRun, pageRows);
       res.json({ data: coverage });
     }),
   );

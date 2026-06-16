@@ -1,7 +1,24 @@
 import { useQuery } from '@tanstack/react-query';
 import { getSanityImpression, type SanityContextInput } from '../api/sanity-impression';
 import { getStrategyPreview } from '../api/strategy-preview';
-import { getExtractionCoverage } from '../api/extraction-coverage';
+import { getExtractionCoverage, type ExtractionCoverage } from '../api/extraction-coverage';
+import { getLetter } from '../api/letter';
+
+// Honest one-line coverage note from the per-page breakdown — drives the "were the records really all
+// checked?" axis. Shared by the pre- and post-draft wrappers.
+function coverageNoteFrom(cov: ExtractionCoverage | undefined): string | null {
+  if (!cov) return null;
+  const pb = cov.pageBreakdown ?? null;
+  if (pb && (pb.unreadable > 0 || pb.handwritingUncertain > 0)) {
+    const bits: string[] = [];
+    if (pb.unreadable > 0) bits.push(`${pb.unreadable} page(s) could not be read`);
+    if (pb.handwritingUncertain > 0) bits.push(`${pb.handwritingUncertain} page(s) have handwriting read with low confidence`);
+    return `${bits.join('; ')}.`;
+  }
+  if (cov.coveragePct >= 100 && cov.gaps.length === 0) return 'All pages read.';
+  if (cov.gaps.length > 0) return `${cov.gaps.length} item(s) not fully extracted.`;
+  return null;
+}
 
 /**
  * The auto-fired "overall impression" line (Ryan 2026-06-16) — the last line of a SOAP note, recreated:
@@ -63,28 +80,44 @@ export function PreDraftSanityImpression({ caseId, claimedCondition }: {
   const coverage = useQuery({ queryKey: ['case', caseId, 'extraction-coverage'], queryFn: () => getExtractionCoverage(caseId), enabled: caseId.length > 0 });
 
   const p = strategy.data?.data;
-  const cov = coverage.data?.data;
   if (!p || !p.evaluable || claimedCondition.trim().length === 0) return null;
-
-  // Honest one-line coverage note (drives the "were the records really all checked?" axis).
-  let coverageNote: string | null = null;
-  const pb = cov?.pageBreakdown ?? null;
-  if (pb && (pb.unreadable > 0 || pb.handwritingUncertain > 0)) {
-    const bits: string[] = [];
-    if (pb.unreadable > 0) bits.push(`${pb.unreadable} page(s) could not be read`);
-    if (pb.handwritingUncertain > 0) bits.push(`${pb.handwritingUncertain} page(s) have handwriting read with low confidence`);
-    coverageNote = `${bits.join('; ')}.`;
-  } else if (cov && cov.coveragePct >= 100 && cov.gaps.length === 0) {
-    coverageNote = 'All pages read.';
-  } else if (cov && cov.gaps.length > 0) {
-    coverageNote = `${cov.gaps.length} item(s) not fully extracted.`;
-  }
 
   const context: SanityContextInput = {
     stage: 'pre_draft',
     claimedCondition,
     theory: p.primaryArgument ?? null,
-    coverageNote,
+    coverageNote: coverageNoteFrom(coverage.data?.data),
+  };
+  return (
+    <div className="border-t border-slate-100 pt-3">
+      <SanityImpressionLine caseId={caseId} context={context} />
+    </div>
+  );
+}
+
+/**
+ * Post-draft wrapper — reads the drafted letter (getLetter.txt) and assembles the post_draft context
+ * (the impression EXPANDS on the read of the letter; grade can be threaded later when a clean frontend
+ * source exists). Renders the quiet impression line beneath the letter-ready panel. Hidden until there's
+ * a real drafted letter (>=200 chars).
+ */
+export function PostDraftSanityImpression({ caseId, claimedCondition }: {
+  readonly caseId: string;
+  readonly claimedCondition: string;
+}) {
+  const letter = useQuery({ queryKey: ['case', caseId, 'letter'], queryFn: () => getLetter(caseId), enabled: caseId.length > 0, retry: false });
+  const strategy = useQuery({ queryKey: ['case', caseId, 'strategy-preview'], queryFn: () => getStrategyPreview(caseId), enabled: caseId.length > 0 });
+  const coverage = useQuery({ queryKey: ['case', caseId, 'extraction-coverage'], queryFn: () => getExtractionCoverage(caseId), enabled: caseId.length > 0 });
+
+  const txt = letter.data?.data?.txt;
+  if (!txt || txt.trim().length < 200 || claimedCondition.trim().length === 0) return null;
+
+  const context: SanityContextInput = {
+    stage: 'post_draft',
+    claimedCondition,
+    theory: strategy.data?.data?.primaryArgument ?? null,
+    coverageNote: coverageNoteFrom(coverage.data?.data),
+    draftText: txt,
   };
   return (
     <div className="border-t border-slate-100 pt-3">

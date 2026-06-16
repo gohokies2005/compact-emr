@@ -45,7 +45,7 @@ import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopP
 import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 import { CaseViabilityCard } from '../../components/CaseViabilityCard';
 import { RecommendedPlanCard } from '../../components/RecommendedPlanCard';
-import { PreDraftSanityImpression } from '../../components/SanityImpressionLine';
+import { PreDraftSanityImpression, PostDraftSanityImpression } from '../../components/SanityImpressionLine';
 import { useChartReadiness } from '../../hooks/useChartReadiness';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
@@ -639,6 +639,12 @@ export function CaseDetailPage() {
                         await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]);
                       }}
                     />
+                  ) : null}
+
+                  {/* Post-draft sanity impression — the auto-fired Opus gut-check on the FINISHED letter,
+                      a quiet "Overall impression" line beneath whichever letter-ready panel is showing. */}
+                  {!p.inFlightDraft && latestDraftJob && (p.canSeePhysicianReadyPanel || p.canSeeRnReviewPanel) ? (
+                    <PostDraftSanityImpression key="sanity-post" caseId={caseId} claimedCondition={c.claimedCondition} />
                   ) : null}
 
                   {!p.inFlightDraft && p.canSeeOpsHeldPanel ? (

@@ -99,8 +99,9 @@ const POST_DRAFT_SYSTEM =
   'Ask yourself: Does the letter make sense and actually support its own opinion? Did it miss anything ' +
   'big? Does it overreach or rely on facts not in the record? Your impression should EXPAND on the grade ' +
   'in plain language — what a thoughtful colleague would say in passing.\n' +
-  'HIGH BAR: most letters are Clear — only Caution/Concern when something is genuinely off. Keep it to 1–3 ' +
-  'sentences. Record it with the record_impression tool.';
+  'HIGH BAR: most letters are Clear — only Caution/Concern when something is genuinely off. If the letter ' +
+  'is sound, the correct impression is Clear with an EMPTY missed field — do NOT manufacture a concern to ' +
+  'fill the field. Keep it to 1–3 sentences. Record it with the record_impression tool.';
 
 function renderContext(ctx: SanityContext): string {
   const lines: string[] = [];
@@ -147,7 +148,10 @@ export async function buildSanityImpression(ctx: SanityContext): Promise<SanityI
   try {
     const resp = await anthropic.messages.create({
       model: MODEL,
-      max_tokens: 500, // a few lines + the tool envelope; Opus 4.8 deprecated temperature, so omit it
+      // 500 = a few lines + the tool envelope. NOTE: extended `thinking` is intentionally OMITTED (off)
+      // — turning it on would spend this budget on thinking tokens → truncation → discarded impressions.
+      // Opus 4.8 also deprecated temperature/top_p, so no sampling params.
+      max_tokens: 500,
       system: ctx.stage === 'pre_draft' ? PRE_DRAFT_SYSTEM : POST_DRAFT_SYSTEM,
       tools: [IMPRESSION_TOOL],
       tool_choice: { type: 'tool', name: 'record_impression' },

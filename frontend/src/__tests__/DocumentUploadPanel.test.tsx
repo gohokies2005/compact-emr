@@ -35,10 +35,11 @@ vi.mock('../api/cases', () => ({
   reprocessCase: vi.fn(async () => ({ data: { reocrQueued: 2, extractEnqueued: false, extractReason: 'ocr_in_progress', requestId: 'req-1' } })),
 }));
 
-// The post-reprocess live-status poll (audit 2026-06-13) reads chart-readiness once watchReprocess turns
-// on — mock it so the panel's status messages (set synchronously on reprocess) are what these tests assert.
+// The processing note + button-disable are now derived from chart-readiness (SERVER state) so they
+// survive a navigate-away/remount. Default mock = chart_ready (idle) so the Reprocess button is enabled
+// in most tests; individual tests override to 'extracting' to exercise the in-progress behavior.
 vi.mock('../api/chart-readiness', () => ({
-  getChartReadiness: vi.fn(async () => ({ data: { ready: false, extractionState: 'extracting' } })),
+  getChartReadiness: vi.fn(async () => ({ data: { ready: true, extractionState: 'chart_ready' } })),
 }));
 
 // expandSelection imports JSZip dynamically; vitest intercepts the dynamic import too. The mock zip
@@ -232,16 +233,22 @@ describe('DocumentUploadPanel — Reprocess documents (keystone 4b)', () => {
     expect(reprocess).not.toHaveBeenCalled();
   });
 
-  // Regression (Jamarious, 2026-06-13): the chart is ALREADY chart_ready before a reprocess, so the
-  // first (stale) readiness read must NOT flash a FALSE "Done" — it shows "Starting…" until the new
-  // run is actually observed building.
-  it('does NOT false-"Done" on the stale pre-reprocess chart_ready — shows Starting until building seen', async () => {
-    vi.mocked(getChartReadiness).mockResolvedValue({ data: { ready: true, extractionState: 'chart_ready' } } as never);
-    reprocess.mockResolvedValueOnce({ data: { reocrQueued: 0, extractEnqueued: true, requestId: 'req-stale' } });
-    renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
-    await clickReprocess();
-    expect(await screen.findByText(/Starting re-extraction/)).toBeInTheDocument();
-    expect(screen.queryByText(/✅ Done/)).not.toBeInTheDocument(); // never the stale-chart_ready false done
+  // FIX (Ryan 2026-06-16): the processing note + button-disable are SERVER-derived, so they survive a
+  // navigate-away/remount. A FRESH mount (no prior local state) showing the in-progress note + a grayed
+  // button purely because the SERVER says 'extracting' is exactly the remount case.
+  it('server says extracting → shows the processing note AND grays the button (survives remount, no local state)', async () => {
     vi.mocked(getChartReadiness).mockResolvedValue({ data: { ready: false, extractionState: 'extracting' } } as never);
+    renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    // No click — the note appears from server state alone (the remount scenario).
+    expect(await screen.findByText(/Reading and extracting the chart/)).toBeInTheDocument();
+    const btn = screen.getByRole('button', { name: /Reprocessing/ });
+    expect(btn).toBeDisabled();
+    vi.mocked(getChartReadiness).mockResolvedValue({ data: { ready: true, extractionState: 'chart_ready' } } as never);
+  });
+
+  it('idle (chart_ready) → no processing note and the button is enabled', async () => {
+    renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    expect(await screen.findByRole('button', { name: 'Reprocess documents' })).toBeEnabled();
+    expect(screen.queryByText(/Reading and extracting the chart/)).not.toBeInTheDocument();
   });
 });

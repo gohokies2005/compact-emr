@@ -31,25 +31,15 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
   const [docTag, setDocTag] = useState('Other');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
-  // Reprocess is a real Anthropic SPEND (re-reads the whole record) — guard it behind a confirm so
-  // nobody clicks it out of habit and runs up a bill (Ryan 2026-06-13). `watchReprocess` turns on a
-  // live readiness poll AFTER a reprocess fires, so the panel can show a "done" notice when it finishes.
   const [confirming, setConfirming] = useState(false);
-  const [watchReprocess, setWatchReprocess] = useState(false);
-  // The chart is ALREADY chart_ready before a reprocess; the new run takes minutes to flip the state.
-  // Without this gate the first (cached/stale) readiness read shows chart_ready and the panel flashed a
-  // FALSE "Done" in ~1s (Ryan, Jamarious 2026-06-13). We only call it Done once we've actually OBSERVED
-  // the re-extraction building (extracting/ocr_in_progress), bounded by a 3-min fallback so a sub-poll
-  // instant completion can't hang on "Starting". sawBuildingRef mirrors the state for refetchInterval.
-  const [sawBuilding, setSawBuilding] = useState(false);
-  const sawBuildingRef = useRef(false);
-  const reprocessStartRef = useRef(0);
-  function beginWatch() {
-    sawBuildingRef.current = false;
-    reprocessStartRef.current = Date.now();
-    setSawBuilding(false);
-    setWatchReprocess(true);
-  }
+  // FIX (Ryan 2026-06-16): the "processing" note + the button-disable are derived from SERVER state
+  // (chart-readiness.extractionState), NOT local React state — so navigating away and back (which
+  // unmounts + remounts this panel) no longer loses the note, and a reprocess that's still running is
+  // correctly shown + the button stays grayed. `justFiredRef` ONLY nudges the poll to start quickly
+  // after a click (to catch the chart_ready→extracting flip in the same mount); it is not load-bearing
+  // for correctness — on remount the server state already reflects the in-flight run.
+  const justFiredRef = useRef(0);
+  const [, forcePoll] = useState(0); // bump to re-evaluate refetchInterval right after a click
   const targetCaseId = caseId ?? selectedCaseId;
 
   // Reprocess document-picker (Ryan 2026-06-16): the Reprocess button opens a modal listing every chart
@@ -83,33 +73,25 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
     setSelectedDocIds(allSelected ? new Set() : new Set(caseDocs.map((d) => d.id)));
   }
 
-  // Live extraction status after a reprocess (shared queryKey with SendToDrafterPanel, so its draft
-  // button grays/un-grays in lockstep). Polls while building, AND keeps polling through the stale
-  // pre-reprocess chart_ready window until building is observed (or the 3-min fallback) so it doesn't
-  // false-"Done" on the prior state.
-  const reprocessReadiness = useQuery({
+  // Live extraction state from the SERVER (shared queryKey with SendToDrafterPanel, so the draft button
+  // grays in lockstep). ALWAYS enabled when there's a case + refetchOnMount → on a remount during an
+  // in-flight run it immediately reflects "still processing" (the navigate-away-and-back fix). Polls
+  // while a run is active, and briefly after a reprocess click to catch the chart_ready→extracting flip.
+  const readiness = useQuery({
     queryKey: ['case', targetCaseId, 'chart-readiness'],
     queryFn: () => getChartReadiness(targetCaseId),
-    enabled: watchReprocess && targetCaseId.length > 0,
+    enabled: targetCaseId.length > 0,
+    refetchOnMount: true,
     refetchInterval: (q) => {
       const st = q.state.data?.data?.extractionState;
-      if (st === 'extracting' || st === 'ocr_in_progress') return 8000; // building → keep polling
-      // chart_ready / extract_failed / no-data: keep polling until we've actually seen building (so a
-      // stale prior chart_ready can't end the watch), bounded by a 3-min fallback.
-      const settled = sawBuildingRef.current || Date.now() - reprocessStartRef.current > 180000;
-      return settled ? false : 8000;
+      if (st === 'extracting' || st === 'ocr_in_progress') return 8000; // actively processing → poll
+      if (Date.now() - justFiredRef.current < 60_000) return 5000; // just clicked → catch the flip
+      return false; // idle → stop polling
     },
   });
-
-  // Latch "we saw the new run building" the moment the poll observes a building state — this is what
-  // distinguishes a genuine post-reprocess completion from the stale prior chart_ready (see beginWatch).
-  useEffect(() => {
-    const st = reprocessReadiness.data?.data?.extractionState;
-    if (st === 'extracting' || st === 'ocr_in_progress') {
-      sawBuildingRef.current = true;
-      setSawBuilding(true);
-    }
-  }, [reprocessReadiness.data]);
+  const extractionState = readiness.data?.data?.extractionState;
+  // SERVER-derived → survives unmount/remount. Drives BOTH the note and the button-disable.
+  const extractionInProgress = extractionState === 'extracting' || extractionState === 'ocr_in_progress';
 
   // Upload one already-classified item via the existing presign -> upload -> record flow.
   // Throws on failure so the batch driver can record a per-file error without aborting the batch.
@@ -168,7 +150,8 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
       let msg: string;
       if (data.extractEnqueued || data.extractReason === 'ocr_in_progress') {
         msg = `Re-reading ${n} file${n === 1 ? '' : 's'} with full vision and re-running the chart extraction (~5–10 min). SC Conditions update when it finishes.`;
-        beginWatch(); // live "done" poll (gated on observing the new run build)
+        justFiredRef.current = Date.now(); // nudge the poll to catch the chart_ready→extracting flip
+        forcePoll((n) => n + 1);
       } else {
         msg = `Chart re-extract did not start (${data.extractReason ?? 'unknown'}).`;
       }
@@ -233,11 +216,11 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
         <button
           type="button"
           className="self-start rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-          title="Re-read selected documents with full vision and re-run the chart extraction"
-          disabled={busy}
+          title={extractionInProgress ? 'A read/extraction is already running — wait for it to finish' : 'Re-read selected documents with full vision and re-run the chart extraction'}
+          disabled={busy || extractionInProgress}
           onClick={() => setConfirming(true)}
         >
-          Reprocess documents
+          {extractionInProgress ? 'Reprocessing…' : 'Reprocess documents'}
         </button>
       </div>
 
@@ -282,7 +265,7 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
               <button
                 type="button"
                 className="rounded-md border border-slate-800 bg-slate-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
-                disabled={busy || selectedDocIds.size === 0}
+                disabled={busy || selectedDocIds.size === 0 || extractionInProgress}
                 onClick={() => void onReprocess([...selectedDocIds])}
               >
                 Reprocess {selectedDocIds.size} {selectedDocIds.size === 1 ? 'file' : 'files'}
@@ -292,29 +275,17 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
         </div>
       ) : null}
       {status ? <p className="mt-2 text-sm text-slate-500">{status}</p> : null}
-      {/* Live "where is it" + completion notice after a reprocess — shares the readiness query with the
-          draft panel, so this flips to "Done" the moment extraction settles, no refresh needed. */}
-      {watchReprocess ? (() => {
-        const st = reprocessReadiness.data?.data?.extractionState;
-        const g = reprocessReadiness.data?.data?.extractionGaps ?? null;
-        const gapped = g != null && (g.uncoveredPages > 0 || g.truncatedWindows > 0);
-        // "Done"/"failed" only AFTER we've observed the new run building (sawBuilding) or the 3-min
-        // fallback — otherwise a stale pre-reprocess chart_ready/extract_failed read would false-report.
-        const settled = sawBuilding || Date.now() - reprocessStartRef.current > 180000;
-        if (st === 'extracting' || st === 'ocr_in_progress') {
-          return <p className="mt-2 text-sm text-sky-700">⏳ Re-extracting the chart… (~5–10 min). You can leave this page — it keeps running.</p>;
-        }
-        if (!settled) {
-          return <p className="mt-2 text-sm text-sky-700">⏳ Starting re-extraction… (~5–10 min). You can leave this page — it keeps running.</p>;
-        }
-        if (st === 'chart_ready') {
-          return <p className="mt-2 text-sm font-medium text-emerald-700">✅ Done — the chart was re-extracted and is ready to draft.{gapped ? ' (Some pages went unread — reprocess again only if a key detail might be on a missing page.)' : ''}</p>;
-        }
-        if (st === 'extract_failed') {
-          return <p className="mt-2 text-sm font-medium text-rose-700">⚠️ Extraction failed. Click Reprocess to try again, or override on the draft panel.</p>;
-        }
-        return null;
-      })() : null}
+      {/* Live processing note — SERVER-derived (extractionInProgress), so it SURVIVES navigating away and
+          back (the bug: it used to live in local state and vanished on remount). The button above is
+          grayed whenever this is showing. No persistent "Done" banner — the note simply clears and the
+          SC Conditions update; calm by design. */}
+      {extractionInProgress ? (
+        <p className="mt-2 text-sm text-sky-700">Reading and extracting the chart… (about 5&ndash;10 minutes). You can leave this page &mdash; it keeps running.</p>
+      ) : Date.now() - justFiredRef.current < 60_000 && extractionState !== 'extract_failed' ? (
+        <p className="mt-2 text-sm text-sky-700">Starting&hellip; (about 5&ndash;10 minutes). You can leave this page &mdash; it keeps running.</p>
+      ) : extractionState === 'extract_failed' ? (
+        <p className="mt-2 text-sm font-medium text-amber-700">Extraction didn&rsquo;t finish. Reprocess to try again, or override on the draft panel.</p>
+      ) : null}
     </>
   );
 }

@@ -33,6 +33,8 @@ vi.mock('../api/veterans', () => ({
   presignDocument: vi.fn(), uploadToPresignedUrl: vi.fn(), recordDocument: vi.fn(), viewDocument: vi.fn(),
 }));
 vi.mock('../api/chart-notes', () => ({ listChartNotes: vi.fn(async () => ({ data: [] })), createChartNote: vi.fn(), deleteChartNote: vi.fn(), patchChartNote: vi.fn() }));
+// The auto-fired sanity line fires this; mock it (null = no impression) so the test makes no network call.
+vi.mock('../api/sanity-impression', () => ({ getSanityImpression: vi.fn(async () => ({ data: null })) }));
 vi.mock('../api/letter', () => ({ getLetter: vi.fn() }));
 vi.mock('../api/lookup', () => ({ getConditions: vi.fn(async () => ({ groups: [] })) }));
 vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div> }));

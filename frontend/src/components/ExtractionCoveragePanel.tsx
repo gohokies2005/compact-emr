@@ -129,7 +129,7 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
           )}
           {/* Capture breakdown — only when the vision path stamped per-page signals. Blanks shown as a
               calm reassurance, never as items to chase. */}
-          {pb !== null && pb.pagesWithSignal > 0 ? (
+          {pb && pb.pagesWithSignal > 0 ? (
             <p className="mt-1 text-xs text-slate-500">
               Scanned pages read by vision: {pb.clean} clear
               {handwritingUncertain > 0 ? `, ${handwritingUncertain} handwriting to confirm` : ''}

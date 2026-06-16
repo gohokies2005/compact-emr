@@ -16,6 +16,7 @@ import {
 } from '../services/file-read-validation.js';
 import { computeTriggerHash, deriveChartBuildState, isScreeningSummaryKey, runMatchesHash } from '../services/chart-build-state.js';
 import { computeExtractionCoverage, type CoverageDocInput, type PageProvenanceInput } from '../services/extraction-coverage.js';
+import { buildSanityImpression, type SanityContext } from '../services/sanity-impression.js';
 import { AUTO_REMEDIATE_ACTION } from '../services/chart-auto-remediate.js';
 import type { AppDb, FileReadAttempt, FileReadStatusRecord } from '../services/db-types.js';
 
@@ -318,6 +319,49 @@ export function createChartReadinessRouter(db: AppDb): Router {
 
       const coverage = computeExtractionCoverage(docs, rows, latestRun, pageRows);
       res.json({ data: coverage });
+    }),
+  );
+
+  /**
+   * POST /api/v1/cases/:id/sanity-impression
+   *
+   * The auto-fired "overall impression" gut-check (Ryan 2026-06-16) — recreates the holistic
+   * "does this make sense, did we miss anything, were the records really checked?" review. The client
+   * passes the context it ALREADY assembled for the Overview (claimed condition, chosen theory, SC
+   * conditions, a one-line coverage note, and POST-DRAFT the draft text + grade); the server runs the
+   * Opus check and returns the impression, or null (fail-open — never blocks). admin/ops_staff/physician.
+   *
+   * Accepting client-assembled context is intentional: this is an internal staff tool with no security
+   * boundary on these fields (the same data the client already renders), and it avoids re-plumbing five
+   * data sources server-side. The server CAPS every field so a runaway input can't blow the token cost.
+   */
+  router.post(
+    '/cases/:id/sanity-impression',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const str = (v: unknown, cap: number): string | null => (typeof v === 'string' && v.trim().length > 0 ? v.trim().slice(0, cap) : null);
+      const claimedCondition = str(b['claimedCondition'], 200);
+      if (claimedCondition === null) { res.json({ data: null }); return; } // nothing to judge → no spend
+      const arr = (v: unknown, n: number, cap: number): string[] =>
+        Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, n).map((s) => s.slice(0, cap)) : [];
+
+      const ctx: SanityContext = {
+        stage: b['stage'] === 'post_draft' ? 'post_draft' : 'pre_draft',
+        claimedCondition,
+        theory: str(b['theory'], 400),
+        scConditions: arr(b['scConditions'], 30, 120),
+        keyFacts: arr(b['keyFacts'], 20, 240),
+        coverageNote: str(b['coverageNote'], 300),
+        draftText: str(b['draftText'], 20_000),
+        grade: str(b['grade'], 200),
+      };
+      const impression = await buildSanityImpression(ctx);
+      res.json({ data: impression });
     }),
   );
 

@@ -45,6 +45,7 @@ import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopP
 import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 import { CaseViabilityCard } from '../../components/CaseViabilityCard';
 import { RecommendedPlanCard } from '../../components/RecommendedPlanCard';
+import { PreDraftSanityImpression } from '../../components/SanityImpressionLine';
 import { useChartReadiness } from '../../hooks/useChartReadiness';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
@@ -587,6 +588,10 @@ export function CaseDetailPage() {
                   {/* 4. Recommended plan — the one-brain readout of the engine (draft / draft-with-changes /
                       contact). hasUnreadPages softens "contact for records" → "needs review". */}
                   {p.canSendFirstDraft ? <RecommendedPlanCard key="recommended-plan" caseId={caseId} hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0} /> : null}
+
+                  {/* Final sanity check (auto-fired Opus gut-check) — a quiet SOAP "Overall impression"
+                      line under the plan; assembles from the strategy + coverage queries already loaded. */}
+                  {p.canSendFirstDraft ? <PreDraftSanityImpression key="sanity" caseId={caseId} claimedCondition={c.claimedCondition} /> : null}
 
                   {/* 5. Assignments — moved INTO the story (was below the region). Staff only; floats in
                       review/halt states too (a physician must be assigned before send-to-doctor). */}

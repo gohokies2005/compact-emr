@@ -88,15 +88,27 @@ function OutreachEmail({ caseId, plan }: { readonly caseId: string; readonly pla
     );
   }
 
-  const reviewFlags = (result?.flags ?? []).filter((f) => f.severity === 'review').map((f) => f.type);
+  // Humanize the engine flag codes — never show raw `type` tokens to staff.
+  const FLAG_LABEL: Record<string, string> = {
+    overpromise: 'an outcome promise',
+    scheduling: 'scheduling language',
+    voice: 'first-person voice (use "we")',
+  };
+  const reviewLabels = (result?.flags ?? [])
+    .filter((f) => f.severity === 'review')
+    .map((f) => FLAG_LABEL[f.type] ?? f.type);
+  const hasBlockFlag = (result?.flags ?? []).some((f) => f.severity === 'block');
   return (
     <div className="mt-3 space-y-2" data-testid="recommended-plan-email">
       <div className="text-xs font-medium text-slate-500">Outreach email (edit before copying)</div>
       {result?.source === 'template' ? (
         <p className="text-xs text-amber-700">Drafted from a safe template (the AI draft was unavailable or withheld). Please personalize before sending.</p>
       ) : null}
-      {reviewFlags.length > 0 ? (
-        <p className="text-xs text-amber-700">Heads up, please review for {reviewFlags.join(', ')} before sending.</p>
+      {hasBlockFlag ? (
+        <p className="text-xs text-rose-700">A draft was withheld because it referenced fees or money; this is a safe template instead.</p>
+      ) : null}
+      {reviewLabels.length > 0 ? (
+        <p className="text-xs text-amber-700">Heads up, please review for {reviewLabels.join(', ')} before sending.</p>
       ) : null}
       <textarea
         aria-label="Outreach email"

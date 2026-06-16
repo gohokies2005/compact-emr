@@ -586,7 +586,7 @@ export function CaseDetailPage() {
 
                   {/* 4. Recommended plan — the one-brain readout of the engine (draft / draft-with-changes /
                       contact). hasUnreadPages softens "contact for records" → "needs review". */}
-                  {p.canSendFirstDraft ? <RecommendedPlanCard key="recommended-plan" caseId={caseId} hasUnreadPages={chartReadiness.blockingFiles.length > 0} /> : null}
+                  {p.canSendFirstDraft ? <RecommendedPlanCard key="recommended-plan" caseId={caseId} hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0} /> : null}
 
                   {/* 5. Assignments — moved INTO the story (was below the region). Staff only; floats in
                       review/halt states too (a physician must be assigned before send-to-doctor). */}

@@ -85,7 +85,7 @@ Here is the tone and shape we want (do not reuse its specifics, only its voice):
 
 Hi James,
 
-Thanks for trusting our team with your claim. We've gone through your records, and to give your case the strongest footing we need one more document: your 2019 sleep study report. It confirms the diagnosis the VA will be looking for, and once we have it our team and a board-certified physician can move forward.
+Thanks for trusting our team with your claim. We've gone through your records, and to give your case a strong footing we need one more document: your 2019 sleep study report. It documents the diagnosis the VA needs to see, and once we have it our team and a board-certified physician can move forward.
 
 Whenever you get a chance, you can upload it through your case page. If it's harder to track down than expected, just let us know and we'll help however we can.
 
@@ -134,12 +134,12 @@ export function outreachTemplate(input: OutreachInput): string {
   const hi = input.firstName && input.firstName.trim().length > 0 ? `Hi ${input.firstName.trim()},` : 'Hello,';
   if (input.kind === 'contact_records') {
     const item = (input.missingFact ?? 'one more medical record').trim();
-    return `${hi}\n\nThanks for trusting our team with your claim. We've reviewed your case, and to give it the strongest footing we need one more item: ${item}. Once we have it, our team and a board-certified physician can move forward.\n\nWhenever you get a chance, you can upload it through your case page. If you have any trouble finding it, just let us know and we'll help.\n\nWarm regards,\nThe Flat Rate Nexus team`;
+    return `${hi}\n\nThanks for trusting our team with your claim. We've reviewed your case, and to give it a strong footing we need one more item: ${item}. Once we have it, our team and a board-certified physician can move forward.\n\nWhenever you get a chance, you can upload it through your case page. If you have any trouble finding it, just let us know and we'll help.\n\nWarm regards,\nThe Flat Rate Nexus team`;
   }
   const b = input.bridge;
   const intermediate = b?.intermediate_dx ?? 'a related condition';
   const claimed = b?.claimed ?? input.claimedCondition;
-  return `${hi}\n\nThanks for trusting our team with your claim. We've reviewed your records, and we think there's a stronger path forward for your ${claimed}. The most supportable route is to first establish your ${intermediate} as service-connected, and then claim your ${claimed} as secondary to it.\n\nIf that sounds right to you, we can walk you through the next step. Just reply here and our team will help you line it up.\n\nWarm regards,\nThe Flat Rate Nexus team`;
+  return `${hi}\n\nThanks for trusting our team with your claim. We've reviewed your records, and we think there's a strong path forward for your ${claimed}. The route we'd recommend is to first establish your ${intermediate} as service-connected, and then claim your ${claimed} as secondary to it. This is a two-step path, so establishing ${intermediate} is its own VA decision, but it's the route that best supports your ${claimed} claim.\n\nIf that sounds right to you, we can walk you through the next step. Just reply here and our team will help you line it up.\n\nWarm regards,\nThe Flat Rate Nexus team`;
 }
 
 /** True when the input lacks the fields its kind needs — caller falls back without spending tokens. */

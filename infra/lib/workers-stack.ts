@@ -299,18 +299,30 @@ export class WorkersStack extends Stack {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'handler.start_handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'workers', 'ocr')),
-      // Layer 1 native-PDF read (2026-06-14): ocr-start now extracts a PDF's embedded text layer inline
+      // Layer 1 native-PDF read (2026-06-14): ocr-start extracts a PDF's embedded text layer inline
       // (pypdf) instead of always firing Textract. A digital VA Blue Button dump (Lozano: 2,294 pages /
-      // ~3M chars) extracts in ~22s AT A FULL vCPU — but at 256MB (~0.15 vCPU) that's >120s → timeout →
-      // DLQ. RAM is a non-issue (peak ~55MB); 1769MB buys the FULL vCPU (6×+ timeout headroom). Tiny
-      // .txt/.docx/normal-PDF invocations still finish sub-second, so the bigger memory costs ~nothing.
-      timeout: Duration.minutes(5),
-      memorySize: 1769,
+      // ~3M chars) extracts in ~22s AT A FULL vCPU — RAM is a non-issue (peak ~55MB).
+      // Per-page VISION (2026-06-16): when CLAUDE_VISION_SCANNED_PAGES=on, a SCANNED file is read page-by-
+      // page by Claude Sonnet INLINE here (no async). Up to VISION_MAX_PAGES pages/file at
+      // VISION_CONCURRENCY parallelism — so the budget is raised to 2048MB / 15min to cover the worst
+      // single oversized scanned upload (larger files fall through to Textract). Tiny .txt/.docx/normal
+      // invocations still finish sub-second, so the bigger budget costs ~nothing.
+      timeout: Duration.minutes(15),
+      memorySize: 2048,
       environment: {
         COMPACT_EMR_API_URL: apiBaseUrl,
         INTERNAL_WORKER_TOKEN: workerTokenSecret.secretValue.unsafeUnwrap(),
         COMPLETION_SNS_TOPIC_ARN: textractCompletionTopic.topicArn,
         TEXTRACT_SNS_ROLE_ARN: textractSnsRole.roleArn,
+        // Per-page Claude VISION for scanned pages (the silent-content-loss fix). Runs INLINE in
+        // start_handler → ocr-start needs the Anthropic key + the PHI bucket (granted below). SONNET for
+        // every scanned page (Ryan 2026-06-16: reliability > cost; ~$2/100 scanned pp, ~$0 born-digital).
+        // tier1==escalate==Sonnet → one Sonnet call/page, no Haiku tier. DARK until the flag flips to 'on'.
+        RECORDS_BUCKET: phiBucket.bucketName,
+        ANTHROPIC_SECRET_ARN: anthropicKeySecret.secretArn,
+        CLAUDE_VISION_SCANNED_PAGES: 'off',
+        CLAUDE_VISION_MODEL: 'claude-sonnet-4-6',
+        CLAUDE_VISION_ESCALATE_MODEL: 'claude-sonnet-4-6',
       },
       logRetention: logs.RetentionDays.ONE_MONTH,
     });
@@ -324,6 +336,14 @@ export class WorkersStack extends Stack {
     }));
     phiBucket.grantRead(ocrStart);
     documentsKey.grantDecrypt(ocrStart);
+    // Per-page vision (2026-06-16) reads the file bytes (granted above) + the Anthropic key at runtime.
+    // Mirror the ocr-completion Claude grants: suffix-independent `*` GetSecretValue so the bare-ARN read
+    // can't silently lose access (same defect class noted on ocr-completion / chart-extract).
+    anthropicKeySecret.grantRead(ocrStart);
+    ocrStart.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
+      resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:compact-emr-${config.envName}/drafter-anthropic-api-key*`],
+    }));
 
     // ===== Package 4a orphan-race fix: ocr-start async-failure DLQ + depth alarm =====
     // ocr-start now RAISES on an unresolvable cases/ key (the Document row lands a beat after

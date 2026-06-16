@@ -155,7 +155,7 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
           {reviewPages.length > 0 ? (
             <ul className="space-y-2">
               {reviewPages.map((rp, i) => (
-                <li key={`rp-${rp.documentId}-${rp.pageNumber}-${i}`} className="rounded-lg border border-amber-200 bg-white p-3">
+                <li key={`rp-${rp.documentId}-${rp.pageNumber}-${i}`} className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="truncate font-medium text-slate-800">{rp.fileName}</p>
@@ -174,7 +174,7 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
           {cov.gaps.map((g, i) => {
             const key = `${g.documentId ?? 'run'}-${g.reason}-${i}`;
             return (
-              <li key={key} className="rounded-lg border border-amber-200 bg-white p-3">
+              <li key={key} className="rounded-lg border border-slate-200 bg-white p-3">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="truncate font-medium text-slate-800">{g.fileName}</p>

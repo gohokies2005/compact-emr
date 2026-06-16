@@ -55,10 +55,9 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
   }
 
   const isComplete = cov.coveragePct >= 100 && cov.gaps.length === 0 && cov.unknownPageFiles === 0;
-  // GREEN when truly complete; AMBER otherwise. NEVER red — advisory, not a failure.
-  const tone = isComplete
-    ? { border: 'border-emerald-300 border-l-4 border-l-emerald-500', bg: 'bg-emerald-50', text: 'text-emerald-900', sub: 'text-emerald-800' }
-    : { border: 'border-amber-300 border-l-4 border-l-amber-500', bg: 'bg-amber-50', text: 'text-amber-900', sub: 'text-amber-800' };
+  // CALM/NEUTRAL (Ryan 2026-06-16): the container is a quiet neutral card; status is conveyed by a SMALL
+  // chip only (green = complete, amber = partial), never a filled green/amber banner. Advisory, never red.
+  const tone = { border: 'border-slate-200', bg: 'bg-white', text: 'text-slate-800', sub: 'text-slate-500' };
 
   const approximate = cov.unknownPageFiles > 0;
   const headline = cov.status === 'in_progress'
@@ -91,11 +90,16 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
             </p>
           )}
         </div>
-        {cov.gaps.length > 0 ? (
-          <Button type="button" variant="secondary" size="sm" onClick={() => setExpanded((v) => !v)}>
-            {expanded ? 'Hide details' : `Show ${cov.gaps.length} ${cov.gaps.length === 1 ? 'item' : 'items'}`}
-          </Button>
-        ) : null}
+        <div className="flex flex-none items-center gap-2">
+          <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${isComplete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
+            {isComplete ? 'Complete' : 'Partial'}
+          </span>
+          {cov.gaps.length > 0 ? (
+            <Button type="button" variant="secondary" size="sm" onClick={() => setExpanded((v) => !v)}>
+              {expanded ? 'Hide details' : `Show ${cov.gaps.length} ${cov.gaps.length === 1 ? 'item' : 'items'}`}
+            </Button>
+          ) : null}
+        </div>
       </div>
 
       {expanded && cov.gaps.length > 0 ? (

@@ -33,6 +33,7 @@ export function CaseViabilityCard({
     enabled: caseId.length > 0,
   });
   const [showTraps, setShowTraps] = useState(false);
+  const [openBridges, setOpenBridges] = useState<ReadonlySet<number>>(new Set());
 
   const v = q.data?.data;
   if (!v) return null; // dark flag / fail-open / loading — the flag controls the whole surface
@@ -107,27 +108,38 @@ export function CaseViabilityCard({
           VERBATIM (no re-templating, no BVA %/odds). RN-only surface; physician_review_required is
           surfaced as a badge. Present only when the engine fires a fully fact-gated bridge. */}
       {(v.bridge_pathways?.length ?? 0) > 0 ? (
-        <div className="mt-3 space-y-3">
-          {v.bridge_pathways!.map((b, i) => (
-            <div key={`${b.intermediate_dx}-${b.claimed}-${i}`} className="rounded-md border border-sky-200 bg-sky-50 p-3">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0 text-sm font-medium text-sky-900">
-                  Possible bridge pathway: <span className="font-semibold">{b.intermediate_dx}</span> → {b.claimed}
+        <div className="mt-3 space-y-2">
+          {v.bridge_pathways!.map((b, i) => {
+            const open = openBridges.has(i);
+            const toggle = () => setOpenBridges((prev) => {
+              const next = new Set(prev);
+              if (next.has(i)) next.delete(i); else next.add(i);
+              return next;
+            });
+            return (
+              <div key={`${b.intermediate_dx}-${b.claimed}-${i}`} className="rounded-md border border-slate-200 bg-white p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 text-sm text-slate-800">
+                    <span className="font-medium">Possible bridge:</span> {b.intermediate_dx} → {b.claimed}
+                  </div>
+                  {b.physician_review_required ? (
+                    <span className="shrink-0 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+                      Physician review
+                    </span>
+                  ) : null}
                 </div>
-                {b.physician_review_required ? (
-                  <span className="shrink-0 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800">
-                    Physician review required
-                  </span>
-                ) : null}
+                <div className="mt-1 text-xs text-slate-500">
+                  Presumptive basis: {b.intermediate_presumptive_basis}
+                  {b.pair_tier ? ` · pairing: ${b.pair_tier}` : ''}
+                </div>
+                <button type="button" onClick={toggle} className="mt-1 text-xs text-slate-400 hover:text-slate-600">
+                  {open ? 'Hide details ▲' : 'Details ▾'}
+                </button>
+                {/* Verbatim engine copy (collapsed by default — calm/neutral). whitespace-pre-line preserves structure. */}
+                {open ? <p className="mt-2 whitespace-pre-line text-sm text-slate-600">{b.suggestion}</p> : null}
               </div>
-              <div className="mt-1 text-xs text-sky-800">
-                Presumptive basis: {b.intermediate_presumptive_basis}
-                {b.pair_tier ? <span className="ml-2 text-sky-700">· second-hop pairing: {b.pair_tier}</span> : null}
-              </div>
-              {/* Verbatim engine copy — whitespace-pre-line preserves any intentional structure. */}
-              <p className="mt-2 whitespace-pre-line text-sm text-slate-700">{b.suggestion}</p>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : null}
     </div>

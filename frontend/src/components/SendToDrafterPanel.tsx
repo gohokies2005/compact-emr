@@ -322,7 +322,10 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
           </div>
         ) : ready ? (
           <>
-            <div className="rounded-lg border border-emerald-300 border-l-4 border-l-emerald-500 bg-emerald-50 p-4 text-sm text-emerald-800">
+            {/* CALM/NEUTRAL (Ryan 2026-06-16): the all-good "ready" state is a quiet line with a small
+                green check, not a filled green banner. Color is reserved for the small status chips. */}
+            <div className="flex items-center gap-2 text-sm text-slate-600">
+              <svg className="h-4 w-4 flex-none text-emerald-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.061l3.894 3.893 7.48-9.817a.75.75 0 011.052-.143z" clipRule="evenodd" /></svg>
               Chart is ready for drafting.
             </div>
             {hasGaps ? (

@@ -2,7 +2,7 @@
 // as a distinct block: the suggestion string VERBATIM, the intermediate dx, the presumptive basis,
 // and a physician-review-required badge. Absent bridge_pathways → no bridge block (dark / no fire).
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { CaseViabilityCard } from '../components/CaseViabilityCard';
@@ -43,7 +43,7 @@ function viability(over: Partial<CaseViability>): CaseViability {
 const SUGGESTION = 'Two-hop pathway flagged. Establish the presumptive intermediate first, then claim secondary. Physician review required before relying on this.';
 
 describe('CaseViabilityCard bridge-anchor render', () => {
-  it('renders the suggestion VERBATIM + intermediate dx + basis + physician-review badge when a bridge fires', async () => {
+  it('calm/collapsed: headline + basis + badge by default, suggestion hidden; Details reveals it VERBATIM', async () => {
     mock.mockResolvedValue({
       data: viability({
         bridge_pathways: [{
@@ -61,11 +61,14 @@ describe('CaseViabilityCard bridge-anchor render', () => {
       }),
     });
     render(<CaseViabilityCard caseId="c1" />, { wrapper });
-    expect(await screen.findByText(SUGGESTION)).toBeInTheDocument(); // verbatim
-    expect(screen.getByText('Chronic rhinosinusitis')).toBeInTheDocument();
+    // Collapsed by default (calm): the headline, basis, and physician-review chip show; the verbose copy does NOT.
+    expect(await screen.findByText(/Chronic rhinosinusitis/)).toBeInTheDocument();
     expect(screen.getByText(/38 CFR 3\.320/)).toBeInTheDocument();
-    // EXACT match → the badge element only (the suggestion <p> trailing phrase has longer text content).
-    expect(screen.getByText('Physician review required')).toBeInTheDocument();
+    expect(screen.getByText('Physician review')).toBeInTheDocument();
+    expect(screen.queryByText(SUGGESTION)).not.toBeInTheDocument();
+    // Details ▾ reveals the engine copy verbatim.
+    fireEvent.click(screen.getByText('Details ▾'));
+    expect(screen.getByText(SUGGESTION)).toBeInTheDocument();
   });
 
   it('renders NO bridge block when bridge_pathways is absent (dark / no fire)', async () => {

@@ -119,6 +119,8 @@ describe('POST /cases/:id/reprocess', () => {
           // b.pdf has NO terminal row — the orphan-race victim
         ]),
       },
+      // FORCE mode (documentIds) clears the selected docs' pages so ocr-start re-reads an already-'read' doc.
+      documentPage: { deleteMany: vi.fn(async () => ({ count: 3 })) },
       chartExtractionRun: {
         create: vi.fn(async (args: { data: Record<string, unknown> }) => {
           if (over.runCreateThrowsP2002) { const err = new Error('unique'); (err as Error & { code?: string }).code = 'P2002'; throw err; }
@@ -144,6 +146,27 @@ describe('POST /cases/:id/reprocess', () => {
     expect(res.body.data.extractReason).toBe('ocr_in_progress');
     expect(typeof res.body.data.requestId).toBe('string');
     expect(activityCreates[0]).toMatchObject({ action: 'case_reprocessed', caseId: 'CASE-1', veteranId: 'VET-1' });
+  });
+
+  it('FORCE (documentIds): re-reads an already-"read" doc — clears its pages + nudges ONLY the picked doc (the Stephens fix)', async () => {
+    const { prisma } = reprocessPrisma();
+    const { app, s3Send } = appWithS3(prisma);
+    // Pick doc-terminal — the one with terminalStatus 'read' that legacy reprocess would SKIP.
+    const res = await request(app).post('/api/v1/cases/CASE-1/reprocess').send({ documentIds: ['doc-terminal'] }).expect(200);
+
+    // The already-read doc's pages are deleted (hasPages→false → ocr-start re-OCRs it with vision)...
+    expect(prisma.documentPage.deleteMany).toHaveBeenCalledWith({ where: { documentId: 'doc-terminal' } });
+    // ...and ONLY that doc is nudged; the non-selected doc-stuck is left alone.
+    expect(prisma.documentPage.deleteMany).not.toHaveBeenCalledWith({ where: { documentId: 'doc-stuck' } });
+    expect(s3Send).toHaveBeenCalledTimes(1); // one CopyObject nudge, for the picked doc
+    expect(res.body.data.reocrQueued).toBe(1);
+  });
+
+  it('legacy (no documentIds): never deletes pages — a good read is left untouched', async () => {
+    const { prisma } = reprocessPrisma();
+    const { app } = appWithS3(prisma);
+    await request(app).post('/api/v1/cases/CASE-1/reprocess').expect(200);
+    expect(prisma.documentPage.deleteMany).not.toHaveBeenCalled();
   });
 
   it('all-terminal wedge: re-OCRs nothing but FORCE-enqueues a fresh salted run', async () => {

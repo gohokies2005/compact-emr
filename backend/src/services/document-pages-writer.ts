@@ -136,7 +136,10 @@ export async function writeDocumentPages(
         msg: 'read_classified',
         caseId: doc.caseId,
         filePath: doc.s3Key,
-        method: 'textract',
+        // Honest provenance for the tripwire: label the read by where it came from (QA nice-to-have) —
+        // a vision-stamped page set is 'claude_vision', not 'textract'. (classifyReadAttempt ignores
+        // method, so this is observability-only.)
+        method: pages.some((p) => typeof p.extractionMethod === 'string' && p.extractionMethod.startsWith('vision')) ? 'claude_vision' : 'textract',
         terminalStatus,
         reason: outcome.reason,
         ratio: outcome.corruptedTokenRatio,

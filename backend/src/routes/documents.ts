@@ -262,6 +262,11 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
       try {
         if (forced) {
           // hasPages → false so ocr-start re-reads this doc fresh (vision), even if it was already 'read'.
+          // file_read_status is left as-is (stale-but-optimistic 'read'); the re-OCR's writeDocumentPages
+          // re-classifies + updates it, so the end state self-heals. KNOWN small race (QA F4, acceptable
+          // for an RN-triggered action): a chart-extract worker reading document_pages concurrently with
+          // this deleteMany could see a partial set — but Action 2 below re-salts a fresh extract run
+          // afterward, so the final extraction always runs against the re-OCR'd pages.
           await prisma.documentPage.deleteMany({ where: { documentId: doc.id } });
         }
         await nudgeDocumentReocr(s3, bucketName, doc);

@@ -692,12 +692,14 @@ function _pact() {
 }
 function _pactMapHash() { const p = _pact(); try { return p ? p.tableContentHash() : null; } catch (_) { return null; } }
 
-// Interim RN-facing suggestion copy (anthropic-ai-sme polishes in step 5). Bakes the
-// VA-rater's HARD caveats: the presumption buys ONLY hop 1 (the intermediate); hop 2 needs
-// an independent positive nexus opinion; both conditions need a confirmed CURRENT diagnosis;
-// these chains frequently remand before granting (so "supportable" ≠ "first-pass grant").
+// RN/physician-facing suggestion copy (plain clinical voice — Ryan 2026-06-16: no "hop"
+// framing, no CFR/PACT in the prose; the basis rides the structured intermediate_presumptive_basis
+// field the panel shows separately). Keeps the anti-overpromise guardrail in human words: it's a
+// lead not a viable claim; the second connection still needs an independent nexus opinion; both
+// conditions need a confirmed current diagnosis; physician confirms. basisCfr stays in the signature
+// (callers pass it) but is intentionally NOT interpolated — the citation lives on its own panel line.
 function _bridgeSuggestion(intermediate, claimed, basisCfr) {
-  return `The engine flagged a two-hop pathway worth a look, not a directly viable claim. The veteran has a conceded burn-pit / airborne-hazard exposure and a current ${intermediate} diagnosis, which may be presumptively service-connectable under ${basisCfr}. Exposure does NOT support ${claimed} directly; the lead is to first establish ${intermediate} as service-connected, then claim ${claimed} as secondary to it. Three things make or break this chain: (1) the presumption only reaches the first hop and does nothing to connect ${intermediate} to ${claimed}; (2) that second hop needs an independent positive nexus opinion and is not automatic; and (3) BOTH ${intermediate} and ${claimed} need a confirmed current diagnosis on the chart (missing one is a common avoidable denial). Physician review required before relying on this.`;
+  return `This is a lead worth a look, not a claim that stands on its own yet. The veteran's documented exposure makes ${intermediate} presumptively service-connectable. Once ${intermediate} is service-connected, ${claimed} can be claimed as secondary to it. Two things still need to hold: a confirmed current diagnosis of both ${intermediate} and ${claimed}, and an independent positive nexus opinion tying ${intermediate} to ${claimed} (that connection is not automatic). Physician to confirm.`;
 }
 
 // assessBridgePathways(clC, chartFactsPresent, granted, art, bestUpstreamCanon) → bridge[].

@@ -44,6 +44,8 @@ import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
 import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopPanels';
 import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 import { CaseViabilityCard } from '../../components/CaseViabilityCard';
+import { RecommendedPlanCard } from '../../components/RecommendedPlanCard';
+import { SectionCard } from '../../components/ui/SectionCard';
 import { useChartReadiness } from '../../hooks/useChartReadiness';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
@@ -562,22 +564,43 @@ export function CaseDetailPage() {
                     <InFlightDrafterPanel key="inflight" job={latestDraftJob} onCancel={() => cancelDraft.mutate(latestDraftJob.id)} cancelling={cancelDraft.isPending} concurrency={liveConcurrency} />
                   ) : null}
 
-                  {/* Phase 2: the Argument + Anchor-viability cards are now STANDALONE sections (lifted
-                      out of SendToDrafterPanel), fed by the page-owned readiness hook. Same gate as the
-                      panel for now; the story-order reorder + SectionCard wrapping is phase 3. */}
+                  {/* PHASE 3 (2026-06-16, Ryan) — the pre-draft case "story", read top-to-bottom like a
+                      SOAP note: Background/argument → what we extracted → assessment → recommended plan →
+                      assignments → send. Each is an INDEPENDENT, stably-keyed slot (NOT a shared fragment):
+                      React renders in source order, gated-out slots collapse, so the pre-draft view reads
+                      1→6 and other states degrade sensibly (Extraction + Assignments have wider gates and
+                      float up when the pre-draft slots are absent). Keys ride the outermost element so a
+                      poll-driven visibility flip never remounts siblings (the L525 stability discipline). */}
+
+                  {/* 1. Background & argument + the veteran's theory (subjective). The only bare card →
+                      framed in a titled SectionCard so it reads as the lead section. */}
                   {p.canSendFirstDraft ? (
-                    <>
-                      <StrategyPreviewCard key="strategy" caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
-                      <CaseViabilityCard key="viability" caseId={caseId} completeness={chartReadiness.completeness} />
-                      <SendToDrafterPanel key="send-first" caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} />
-                    </>
+                    <SectionCard key="strategy" title="Background & argument">
+                      <StrategyPreviewCard caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
+                    </SectionCard>
                   ) : null}
 
-                  {/* Chart Extraction Coverage transparency report (Ryan 2026-06-14): advisory "N% of
-                      pages extracted" + a specific, hyperlinked list of what was not. Shown across the
-                      whole staff working window (pre-draft, drafting, Gate-2 halt, rn_review) so the RN
-                      can ALWAYS see how much of the chart was read — not just at Send-to-Drafter. Never blocks. */}
+                  {/* 2. Chart extraction (objective — "what we actually read"). Wider gate (the whole
+                      working window) so it stays visible during drafting / a Gate-2 halt / rn_review. */}
                   {p.canSeeExtractionCoverage ? <ExtractionCoveragePanel key="extraction-coverage" caseId={caseId} /> : null}
+
+                  {/* 3. Assessment — the anchor viability we calculate (+ the presumptive bridge, inside). */}
+                  {p.canSendFirstDraft ? <CaseViabilityCard key="viability" caseId={caseId} completeness={chartReadiness.completeness} /> : null}
+
+                  {/* 4. Recommended plan — the one-brain readout of the engine (draft / draft-with-changes /
+                      contact). hasUnreadPages softens "contact for records" → "needs review". */}
+                  {p.canSendFirstDraft ? <RecommendedPlanCard key="recommended-plan" caseId={caseId} hasUnreadPages={chartReadiness.blockingFiles.length > 0} /> : null}
+
+                  {/* 5. Assignments — moved INTO the story (was below the region). Staff only; floats in
+                      review/halt states too (a physician must be assigned before send-to-doctor). */}
+                  {role === 'admin' || role === 'ops_staff' ? (
+                    <CaseAssignmentPanel key="assignments" caseId={c.id} version={c.version} assignedPhysician={c.assignedPhysician ?? null} assignedRn={c.assignedRn ?? null} />
+                  ) : null}
+
+                  {/* 6. Send to Drafter — last. */}
+                  {p.canSendFirstDraft ? (
+                    <SendToDrafterPanel key="send-first" caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} />
+                  ) : null}
 
                   {!p.inFlightDraft && p.canSeePhysicianReadyPanel && latestDraftJob ? (
                     <PhysicianLetterReadyPanel
@@ -684,11 +707,7 @@ export function CaseDetailPage() {
               <DeliveryPanel caseId={caseId} onVerifyLetter={openLetterPdf} hasLetterPdf={!!viewableLetterJob} />
             ) : null}
 
-            {/* Assignments — admin/ops_staff only. (P2 restructure 2026-06-14: relocated into the
-                Overview tab — gate unchanged.) */}
-            {role === 'admin' || role === 'ops_staff' ? (
-              <CaseAssignmentPanel caseId={c.id} version={c.version} assignedPhysician={c.assignedPhysician ?? null} assignedRn={c.assignedRn ?? null} />
-            ) : null}
+            {/* Assignments moved INTO the case-top-panels story region (slot 5, 2026-06-16). */}
 
             {/* The Overview summary fields (Framing / Upstream SC / Veteran statement / In-service
                 event / Drafting cost) — the tail of the Overview tab. */}

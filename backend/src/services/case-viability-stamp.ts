@@ -59,7 +59,13 @@ export async function deriveCaseViabilityForCase(db: AppDb, caseId: string): Pro
     const directEvents = directScViabilityEnabled()
       ? await buildInServiceEvents(db, caseId)
       : undefined;
-    return deriveCaseViability(c.claimedCondition, cf.grantedScAnchors, directEvents);
+    // BRIDGE-ANCHOR PREREQ (2026-06-16): the present-diagnosis constellation (bridge G2). Built on the
+    // SAME gated direct-axis fence as the event floor — the bridge only fires on the v2 shape. Inert
+    // until the bridge is re-vendored (the current vendored resolver ignores the extra chartFacts key).
+    const dxConstellation = directScViabilityEnabled()
+      ? await buildDxConstellation(db, caseId)
+      : undefined;
+    return deriveCaseViability(c.claimedCondition, cf.grantedScAnchors, directEvents, dxConstellation);
   } catch (err) {
     // Loud in logs, silent to the caller — a vendor-load or DB hiccup must never break a draft.
     console.warn(JSON.stringify({
@@ -116,6 +122,42 @@ async function buildInServiceEvents(db: AppDb, caseId: string): Promise<InServic
   } catch (err) {
     console.warn(JSON.stringify({
       msg: 'case-viability: in-service event floor failed open',
+      caseId,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    return [];
+  }
+}
+
+/**
+ * BRIDGE-ANCHOR PREREQ (2026-06-16): build `chartFactsPresent.dx_constellation` — the veteran's
+ * PRESENT diagnoses (the problem list), which the bridge's G2 reads to find a PACT-presumptive
+ * intermediate dx. RAW labels: the vendored `assessBridgePathways` canonicalizes each via
+ * conditionCanon and drops already-granted ones, so no EMR-side canonicalization is needed (and a
+ * granted SC in the list is harmless — the bridge skips it). Deduped (case-insensitive), non-empty.
+ * ONLY called on the gated direct-axis path. Fail-open: any error → [] (the secondary axis stands).
+ */
+export async function buildDxConstellation(db: AppDb, caseId: string): Promise<string[]> {
+  try {
+    const row = (await db.case.findFirst({
+      where: { id: caseId },
+      select: { veteran: { select: { activeProblems: { select: { problem: true } } } } } as never,
+    })) as unknown as { veteran: { activeProblems: Array<{ problem: string }> } | null } | null;
+    if (row === null) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const p of row.veteran?.activeProblems ?? []) {
+      const label = (p.problem ?? '').trim();
+      if (label.length === 0) continue;
+      const key = label.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(label);
+    }
+    return out;
+  } catch (err) {
+    console.warn(JSON.stringify({
+      msg: 'case-viability: dx_constellation build failed open',
       caseId,
       error: err instanceof Error ? err.message : String(err),
     }));

@@ -275,6 +275,7 @@ export function deriveCaseViability(
   claimedCondition: string,
   grantedScAnchors: ReadonlyArray<{ readonly condition: string }>,
   directInServiceEvents?: readonly InServiceEvent[],
+  dxConstellation?: readonly string[],
 ): CaseViability {
   const grantedNames = grantedScAnchors.map((a) => a.condition);
   const resolver = loadResolver();
@@ -289,7 +290,15 @@ export function deriveCaseViability(
   // Direct axis ON: flip the resolver to v2 and fold the pre-resolved events. The setter is an
   // explicit per-derivation flip (NOT relying on the resolver's own env read) for determinism — the
   // Lambda has process.env but the override wins and is unambiguous. Events default to [] when none.
+  //
+  // BRIDGE-ANCHOR PREREQ (2026-06-16): dx_constellation rides in the SAME chartFactsPresent object.
+  // The vendored assessBridgePathways (gated on BRIDGE_ANCHOR_ENABLED + the v2 shape) reads it for G2;
+  // an EMR vendored copy WITHOUT the bridge simply ignores the extra key, so this is inert until the
+  // bridge is re-vendored. Defaults to [] when none — the bridge stays dark on an empty constellation.
   resolver.setDirectAxisEnabled(true);
-  const chartFactsPresent = { in_service_events: directInServiceEvents ?? [] };
+  const chartFactsPresent = {
+    in_service_events: directInServiceEvents ?? [],
+    dx_constellation: dxConstellation ?? [],
+  };
   return resolver.assessClaimViability(claimedCondition, grantedNames, chartFactsPresent);
 }

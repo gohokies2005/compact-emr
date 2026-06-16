@@ -177,13 +177,14 @@ export class ApiStack extends Stack {
         // _PRESUMPTIVE map, not the exposure class). Verified through the EMR vendored copy: Pichette
         // (OSA + Tinnitus SC + burn-pit + TERA) = weak, no anchor, no presumptive redirect.
         DIRECT_SC_VIABILITY_ENABLED: (this.node.tryGetContext('direct_sc_viability_enabled') as string | undefined) ?? 'true',
-        // BRIDGE-ANCHOR pathway (2026-06-16, FRN 859d2eb) — ships DARK. The presumptive two-hop
-        // suggestion (exposure → PACT-presumptive intermediate dx → claimed secondary; burn-pit →
-        // chronic sinusitis/rhinitis/asthma → OSA). ADDITIVE: only attaches on the v2 (direct-axis)
-        // shape, so it's meaningful only alongside DIRECT_SC_VIABILITY_ENABLED; OFF leaves the v2 object
-        // byte-identical (no bridge_pathways key). Flip to 'true' ONLY after a flag-ON Pichette-class
-        // validation. Read at request time — revert = default→'false' + deploy, no image rebuild.
-        BRIDGE_ANCHOR_ENABLED: (this.node.tryGetContext('bridge_anchor_enabled') as string | undefined) ?? 'false',
+        // BRIDGE-ANCHOR pathway (2026-06-16, FRN 859d2eb). The presumptive two-hop suggestion (exposure
+        // → PACT-presumptive intermediate dx → claimed secondary; burn-pit → chronic sinusitis/rhinitis/
+        // asthma → OSA). ADDITIVE: only attaches on the v2 (direct-axis) shape, so it's meaningful only
+        // alongside DIRECT_SC_VIABILITY_ENABLED; OFF leaves the v2 object byte-identical. LIVE 2026-06-16
+        // (default 'false'→'true', Ryan) after the engine was verified through the EMR vendored copy
+        // (flag-ON Pichette-class → 1 bridge: Chronic rhinosinusitis→OSA, 38 CFR 3.320, physician-review).
+        // Read at request time — revert = default→'false' + deploy, no image rebuild.
+        BRIDGE_ANCHOR_ENABLED: (this.node.tryGetContext('bridge_anchor_enabled') as string | undefined) ?? 'true',
         // Doctor-pack grounded source pages (PR-1..PR-4, 2026-06-13): map every extracted chart fact
         // back to the EXACT source page that grounded it and pull those pages into the physician pack
         // (the rating-grant page, the sleep-study AHI, the med list) — protected in the page budget

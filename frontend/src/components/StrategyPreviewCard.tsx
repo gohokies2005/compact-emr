@@ -58,6 +58,13 @@ export function StrategyPreviewCard({
     ? { tone: 'neutral', label: 'Analyzing chart…' }
     : bandChip ?? TIER_CHIP[p.tier];
   const concerning = !unconfirmed && (p.tier === 'Stop' || p.tier === 'Thin');
+  // Chip-reconciliation (RN QA 2026-06-16): the Background section shows a chip ONLY when there's
+  // something to FLAG — chart still analyzing, or a concerning tier (Stop/Thin → "Review needed"). A
+  // positive band ("Strong"/"Moderate") shows NO chip here: it's redundant with the adjacent "Anchor
+  // viability" section (the strength's home) and, sitting next to the "Recommended plan" action chip,
+  // a "Strong" up top + "Contact veteran" below reads like the page is contradicting itself. The
+  // Recommended-plan chip is the bottom-line verdict; the upper sections are inputs.
+  const showChip = unconfirmed || concerning;
   const rec = p.recommendedPathway;
   // Aggravation-only re-characterization (FRN engine 5d04b62): surface the 3.310(b)-only framing as a
   // single sentence sourced from the engine's why (Ryan ratified the framing 2026-06-11).
@@ -67,11 +74,11 @@ export function StrategyPreviewCard({
   return (
     <SectionCard
       title="Background & argument"
-      status={
+      status={showChip ? (
         <StatusChip tone={chip.tone} className="shrink-0">
           <span title="Advisory only — does not block drafting">{chip.label}</span>
         </StatusChip>
-      }
+      ) : undefined}
     >
       <div>
         <div className="min-w-0">

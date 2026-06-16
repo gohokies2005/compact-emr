@@ -82,10 +82,13 @@ beforeEach(() => {
 });
 
 describe('StrategyPreviewCard — viability re-source', () => {
-  it('(i) band-drives the chip on a secondary claim (band beats tier) and renders NO BVA % / n=', async () => {
-    // tier says Plausible; the band says strong — the chip must read the BAND word.
+  it('(i) chip-reconciliation: a positive band shows NO redundant chip on Background (strength lives in Anchor viability), and renders NO BVA % / n=', async () => {
+    // Chip-reconciliation (RN QA 2026-06-16): a non-concerning positive band ("Strong") must NOT render
+    // a Background chip — it would duplicate the Anchor-viability chip and look like it contradicts the
+    // Recommended-plan action. The argument body still renders; only the redundant chip is gone.
     mount(preview({ tier: 'Plausible', viability: viability({ viability: 'strong' }) }));
-    expect(await screen.findByText('Strong')).toBeInTheDocument();
+    expect(await screen.findByText(/Argument:/)).toBeInTheDocument();
+    expect(screen.queryByText('Strong')).not.toBeInTheDocument(); // no redundant band chip
     expect(screen.queryByText('Plausible')).not.toBeInTheDocument();
     const body = document.body.textContent ?? '';
     expect(body).not.toMatch(/\d+(\.\d+)?%/);
@@ -109,8 +112,10 @@ describe('StrategyPreviewCard — viability re-source', () => {
         },
       }),
     }));
-    expect(await screen.findByText('Conditional')).toBeInTheDocument();
-    expect(screen.getByText(/Argue aggravation \(3\.310\(b\)\)/)).toBeInTheDocument();
+    // (chip-reconciliation) the positive "Conditional" band no longer shows as a redundant Background
+    // chip; the aggravation framing + reasoning still render in the body.
+    expect(await screen.findByText(/Argue aggravation \(3\.310\(b\)\)/)).toBeInTheDocument();
+    expect(screen.queryByText('Conditional')).not.toBeInTheDocument();
     expect(screen.getByText(/AGGRAVATED Hypertension/)).toBeInTheDocument();
     const body = document.body.textContent ?? '';
     expect(body).not.toMatch(/\d+(\.\d+)?%/);
@@ -118,9 +123,10 @@ describe('StrategyPreviewCard — viability re-source', () => {
     expect(body).not.toMatch(/tier (high|moderate|low)/i);
   });
 
-  it('(iii) viability null falls back to the legacy tier chip + criteria copy without crashing', async () => {
+  it('(iii) viability null falls back to the criteria copy without crashing (positive tier shows no Background chip)', async () => {
     mount(preview({ tier: 'Plausible', viability: null }));
-    expect(await screen.findByText('Plausible')).toBeInTheDocument();
+    expect(await screen.findByText(/Argument:/)).toBeInTheDocument();
+    expect(screen.queryByText('Plausible')).not.toBeInTheDocument(); // non-concerning tier → no redundant chip
     expect(screen.queryByText(/Argue aggravation/)).not.toBeInTheDocument();
   });
 

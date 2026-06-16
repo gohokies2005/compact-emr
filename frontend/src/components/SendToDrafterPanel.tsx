@@ -9,8 +9,6 @@ import { viewDocument } from '../api/veterans';
 import { postDraft, type DraftRequestInput, type DraftConcurrencyResult } from '../api/drafter';
 import { ConflictError, describeApiError } from '../api/client';
 import { Gate1ChecklistModal } from './Gate1ChecklistModal';
-import { StrategyPreviewCard } from './StrategyPreviewCard';
-import { CaseViabilityCard } from './CaseViabilityCard';
 import { ManualSummaryForm } from './ManualSummaryForm';
 import { documentFileName } from '../lib/documentFileName';
 
@@ -155,12 +153,6 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
   const hasGaps = rd.hasGaps;
   const blockingFiles = rd.blockingFiles;
   const blockingFileCount = blockingFiles.length;
-  // E5 (2026-06-13): the completeness state threaded to the verdict cards — OCR-blocked files (the
-  // Woodley 1,119pp-unread class) + extraction gaps (truncated/uncovered pages). Now the hook's
-  // QUERY-ONLY completeness (null while buildingFromExtraction) — NOT folding awaitingAutoResume, so
-  // the cards quiet on the real extraction signal, not the panel's brief mutation-armed window
-  // (architect QA 2026-06-16: a deliberate, ratified behavior tweak vs the prior stillBuilding-gated one).
-  const completeness = rd.completeness;
   // The original filename (basename of the S3 key) so the RN knows EXACTLY which file to re-upload or
   // re-OCR — a bare "1 file(s) could not be read" with no name is useless (Ryan 2026-06-06, Yorde).
   // The basename+uuid-strip lives in lib/documentFileName (shared with the RN queue — Package 1 (J)).
@@ -246,12 +238,9 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
 
   return (
     <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
-      {/* Pre-draft strategy preview — catch a crazy pathway before spending on a draft. While the chart is
-          still scanning, the card neutralizes its checks (no premature "no dx" ✗) — chart-readiness drives it. */}
-      <StrategyPreviewCard caseId={caseId} chartReady={ready} completeness={completeness} />
-      {/* P4 anchor-viability pre-screen (info-light) — DARK behind EMR_CASE_VIABILITY_ENABLED
-          (the GET returns null while off → renders nothing). Advisory; never gates the button. */}
-      <CaseViabilityCard caseId={caseId} completeness={completeness} />
+      {/* Phase 2 (2026-06-16): the Argument (StrategyPreviewCard) + Anchor-viability (CaseViabilityCard)
+          cards moved OUT to standalone Overview sections (rendered by CaseDetailPage, fed by the
+          page-owned useChartReadiness hook). This panel is now just the Send-to-Drafter button + gating. */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-base font-semibold text-navyDeep">Send to Drafter</h2>

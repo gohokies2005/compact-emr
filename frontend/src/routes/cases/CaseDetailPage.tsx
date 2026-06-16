@@ -41,7 +41,10 @@ import { ConflictError, describeApiError } from '../../api/client';
 import { letterFilename } from '../../lib/letterFilename';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
-import { resolveCaseTopPanels } from '../../lib/caseTopPanels';
+import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopPanels';
+import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
+import { CaseViabilityCard } from '../../components/CaseViabilityCard';
+import { useChartReadiness } from '../../hooks/useChartReadiness';
 import { formatRelativeTime } from '../../lib/date';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
 import {
@@ -130,6 +133,16 @@ export function CaseDetailPage() {
     refetchIntervalInBackground: false,
   });
   const liveConcurrency = concurrencyQuery.data?.data.concurrency ?? null;
+
+  // Phase 2 readiness lift (2026-06-16): the PAGE owns the chart-readiness query (the guaranteed
+  // always-mounted observer) so the 8s build-poll survives SendToDrafterPanel unmounting when a draft
+  // goes in-flight. Enabled across the staff working window; idle on terminal statuses. The standalone
+  // Argument + viability sections read `ready`/`completeness` from here; SendToDrafterPanel calls the
+  // SAME hook (RQ dedupes → one fetch) for its gating + auto-resume.
+  const readinessStatus = caseQuery.data?.data?.status;
+  const chartReadiness = useChartReadiness(caseId, {
+    enabled: readinessStatus !== undefined && CHART_WORKING_STATUSES.includes(readinessStatus),
+  });
 
   const refetch = () => qc.invalidateQueries({ queryKey: ['case', caseId] });
 
@@ -549,7 +562,16 @@ export function CaseDetailPage() {
                     <InFlightDrafterPanel key="inflight" job={latestDraftJob} onCancel={() => cancelDraft.mutate(latestDraftJob.id)} cancelling={cancelDraft.isPending} concurrency={liveConcurrency} />
                   ) : null}
 
-                  {p.canSendFirstDraft ? <SendToDrafterPanel key="send-first" caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} /> : null}
+                  {/* Phase 2: the Argument + Anchor-viability cards are now STANDALONE sections (lifted
+                      out of SendToDrafterPanel), fed by the page-owned readiness hook. Same gate as the
+                      panel for now; the story-order reorder + SectionCard wrapping is phase 3. */}
+                  {p.canSendFirstDraft ? (
+                    <>
+                      <StrategyPreviewCard key="strategy" caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
+                      <CaseViabilityCard key="viability" caseId={caseId} completeness={chartReadiness.completeness} />
+                      <SendToDrafterPanel key="send-first" caseId={caseId} claimType={c.claimType} claimedCondition={c.claimedCondition} draftAttempt={(c.currentVersion ?? 0) + 1} physicianAssigned={!!c.assignedPhysician} rnAssigned={!!c.assignedRn} />
+                    </>
+                  ) : null}
 
                   {/* Chart Extraction Coverage transparency report (Ryan 2026-06-14): advisory "N% of
                       pages extracted" + a specific, hyperlinked list of what was not. Shown across the

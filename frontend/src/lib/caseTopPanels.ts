@@ -60,7 +60,7 @@ export interface CaseTopPanels {
 
 // The staff working window where the chart matters + the extraction-coverage score is relevant. NOT
 // physician_review / delivered / paid / rejected (the chart's read job is done by then).
-const CHART_WORKING_STATUSES: readonly CaseStatus[] = [
+export const CHART_WORKING_STATUSES: readonly CaseStatus[] = [
   'intake', 'records', 'viability', 'drafting', 'needs_rn_decision', 'needs_records', 'rn_review',
 ];
 

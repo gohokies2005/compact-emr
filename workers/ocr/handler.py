@@ -41,6 +41,7 @@ import io
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -934,18 +935,33 @@ def _claude_vision_page(page_bytes: bytes, media: str, api_key: str, model: str)
 
 
 def _vision_page_with_retry(page_bytes: bytes, media: str, api_key: str, model: str) -> dict[str, Any]:
-    """One page, one retry on transient failure (network / 429 / 5xx / malformed). Never raises:
-    returns ok=False on final failure so the two-tier logic can escalate or the page is flagged."""
+    """One page, one retry on a TRANSIENT failure (429 / 5xx / 529 / network), HONORING Retry-After; a
+    4xx client error (bad request) is terminal — no retry. Never raises: returns ok=False on final
+    failure so the two-tier logic can escalate or the page is flagged. (QA F3: the raw urllib path
+    doesn't get the SDK's backoff, so under the 8-way fan-out an instant 429 retry self-throttles.)"""
+    fail = {"text": "", "coverage": None, "handwriting": None, "stop_reason": "error", "ok": False}
     for attempt in range(2):
         try:
             r = _claude_vision_page(page_bytes, media, api_key, model)
             if r["ok"] or attempt == 1:
                 return r
-        except Exception as exc:  # noqa: BLE001 — transient; retry once then give a non-ok result
+        except urllib.error.HTTPError as http_err:
+            transient = http_err.code in (429, 500, 502, 503, 529)
+            if attempt == 0 and transient:
+                try:
+                    delay = min(int(http_err.headers.get("Retry-After", "2")), 10)
+                except (TypeError, ValueError):
+                    delay = 2
+                time.sleep(delay)  # backed-off single retry (Lambda: time.sleep is fine)
+                continue
+            # a non-transient 4xx, or the second attempt → terminal, never raise
+            print(json.dumps({"msg": "ocr: vision page http error (final)", "model": model, "code": http_err.code}))
+            return fail
+        except Exception as exc:  # noqa: BLE001 — network/parse; retry once then give a non-ok result
             if attempt == 1:
                 print(json.dumps({"msg": "ocr: vision page error (final)", "model": model, "error": f"{type(exc).__name__}: {exc}"}))
-                return {"text": "", "coverage": None, "handwriting": None, "stop_reason": "error", "ok": False}
-    return {"text": "", "coverage": None, "handwriting": None, "stop_reason": "error", "ok": False}
+                return fail
+    return fail
 
 
 def _vision_transcribe_page(page_bytes: bytes, media: str, api_key: str) -> dict[str, Any]:
@@ -961,6 +977,18 @@ def _vision_transcribe_page(page_bytes: bytes, media: str, api_key: str) -> dict
     )
     if escalate and VISION_ESCALATE_MODEL and VISION_ESCALATE_MODEL != VISION_TIER1_MODEL:
         t2 = _vision_page_with_retry(page_bytes, media, api_key, VISION_ESCALATE_MODEL)
+        if t2["ok"] and t1["ok"]:
+            # Both tiers usable → KEEP THE READ THAT CAPTURED MORE (text length is the proxy that caught
+            # the Stephens handwriting loss in the first place), breaking ties toward higher coverage.
+            # Never blindly discard a COMPLETE tier-1 read for a tier-2 pass that may have read LESS — a
+            # tier-1 'partial' is often just an honest [illegible] on a smudge, not a worse read. (QA F1.)
+            cov_rank = {"full": 3, "partial": 2, "illegible": 1, "blank": 0}
+            t2_better = (
+                _nonws_len(t2["text"]) >= _nonws_len(t1["text"])
+                or cov_rank.get(t2["coverage"] or "", 0) > cov_rank.get(t1["coverage"] or "", 0)
+            )
+            chosen, used = (t2, VISION_ESCALATE_MODEL) if t2_better else (t1, VISION_TIER1_MODEL)
+            return {"text": chosen["text"], "coverage": chosen["coverage"], "handwriting": chosen["handwriting"], "method": _model_short(used), "escalated": True}
         if t2["ok"]:
             return {"text": t2["text"], "coverage": t2["coverage"], "handwriting": t2["handwriting"], "method": _model_short(VISION_ESCALATE_MODEL), "escalated": True}
         # escalation failed — fall back to tier-1 if IT was usable, else flag illegible below.

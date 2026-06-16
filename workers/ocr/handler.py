@@ -853,7 +853,9 @@ _VISION_SYSTEM = (
     "record content. If the only handwriting you could not fully read is one of those, coverage is 'full' "
     "and handwriting_present is false — do not flag a fully-readable typed page for review just because it "
     "is signed. BUT a handwritten clinical value, finding, note, or a standalone date in the record IS "
-    "content: keep handwriting_present=true + 'partial' if you could not fully read it.\n"
+    "content: keep handwriting_present=true + 'partial' if you could not fully read it. Initials count as "
+    "a signature ONLY when they merely attest authorship; initials or a checkmark placed in a CLINICAL "
+    "field (marking a finding present/absent, confirming a value, selecting an option) ARE content.\n"
     "- Report coverage honestly via the tool. If you had to mark real CONTENT [illegible], coverage "
     "is 'partial', not 'full'."
 )

@@ -94,8 +94,11 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
   const extractionInProgress = extractionState === 'extracting' || extractionState === 'ocr_in_progress';
   // "Nothing new to process" (Ryan 2026-06-16, cost): every file is already read (ready=true) and no run
   // is active → a reprocess would just re-read already-read docs = wasted API spend. Gray the button +
-  // say so. A FAILED/unread file makes ready=false → the button stays enabled (reprocess is useful then).
-  const nothingToProcess = readiness.data?.data?.ready === true && !extractionInProgress;
+  // say so. An unread file makes ready=false → button stays enabled. CRITICAL (QA C2): `ready` is
+  // OCR-read status ONLY and stays true even when the extraction RUN failed — so EXCLUDE extract_failed,
+  // for which reprocess is exactly the recovery (else the button greys while the panel says "reprocess").
+  const nothingToProcess =
+    readiness.data?.data?.ready === true && !extractionInProgress && extractionState !== 'extract_failed';
 
   // Upload one already-classified item via the existing presign -> upload -> record flow.
   // Throws on failure so the batch driver can record a per-file error without aborting the batch.

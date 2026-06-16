@@ -1,3 +1,4 @@
+import Anthropic from '@anthropic-ai/sdk';
 import { HttpError } from './errors.js';
 import { classifyProviderError, PROVIDER_DOWN_MESSAGE, PROVIDER_BUSY_MESSAGE } from '../services/provider-status.js';
 
@@ -14,6 +15,11 @@ import { classifyProviderError, PROVIDER_DOWN_MESSAGE, PROVIDER_BUSY_MESSAGE } f
  * use the classifier without pulling in the HTTP layer).
  */
 export function providerErrorToHttp(err: unknown): HttpError | null {
+  // CRITICAL (QA C1): classify ONLY actual Anthropic SDK errors. The classifier keys on .status/.name,
+  // which AWS SDK errors (S3/Cognito/SES/Bedrock) ALSO carry — so classifying blind would mis-tag a
+  // presign/auth/storage 5xx or 429 as "AI service unavailable" and misdirect on-call. instanceof
+  // APIError cleanly excludes every AWS error (and the drafter's Bedrock path is a separate surface).
+  if (!(err instanceof Anthropic.APIError)) return null;
   switch (classifyProviderError(err)) {
     case 'down':
       return new HttpError(503, 'provider_unavailable', PROVIDER_DOWN_MESSAGE, { retryAfterMinutes: 30 });

@@ -262,4 +262,13 @@ describe('DocumentUploadPanel — Reprocess documents (keystone 4b)', () => {
     expect(await screen.findByRole('button', { name: 'Reprocess documents' })).toBeEnabled();
     expect(screen.queryByText('No new files to process.')).not.toBeInTheDocument();
   });
+
+  it('QA C2: extract_failed (ready=true but the RUN failed) → button stays ENABLED, no "nothing new"', async () => {
+    // ready is OCR-read-only and stays true when the extraction RUN failed; reprocess IS the recovery.
+    vi.mocked(getChartReadiness).mockResolvedValue({ data: { ready: true, extractionState: 'extract_failed' } } as never);
+    renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    expect(await screen.findByRole('button', { name: 'Reprocess documents' })).toBeEnabled();
+    expect(screen.queryByText('No new files to process.')).not.toBeInTheDocument();
+    vi.mocked(getChartReadiness).mockResolvedValue({ data: { ready: false, extractionState: 'extract_failed' } } as never);
+  });
 });

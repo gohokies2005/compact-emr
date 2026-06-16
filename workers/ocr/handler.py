@@ -816,7 +816,7 @@ _RECORD_PAGE_TOOL = {
             },
             "handwriting_present": {
                 "type": "boolean",
-                "description": "True ONLY if the page has SUBSTANTIVE handwritten content — clinical notes, handwritten form entries, marginal annotations. A bare signature, initials, a handwritten date, a stamp, or stray scanner marks do NOT count: set false when those are the only handwriting.",
+                "description": "True ONLY if the page has SUBSTANTIVE handwritten content — clinical notes, handwritten form entries, marginal annotations, or ANY handwritten clinical value/date/finding. A bare signature, initials, a date written beside a signature, a stamp, or stray scanner marks do NOT count: set false when those are the only handwriting.",
             },
             "coverage": {
                 "type": "string",
@@ -849,10 +849,11 @@ _VISION_SYSTEM = (
     "NEVER guess a clinical value, date, name, or dosage. An honest [illegible] is correct; a "
     "plausible guess is a serious error.\n"
     "- Do not summarize, diagnose, interpret, expand abbreviations, or add commentary. Verbatim only.\n"
-    "- A signature, initials, a handwritten date, a stamp, or stray scanner marks are NOT record "
-    "content. If the only handwriting you could not fully read is one of those, coverage is 'full' and "
-    "handwriting_present is false — do not flag a fully-readable typed page for review just because it "
-    "is signed. Reserve handwriting_present=true + 'partial' for SUBSTANTIVE handwritten content.\n"
+    "- A signature, initials, a date written beside a signature, a stamp, or stray scanner marks are NOT "
+    "record content. If the only handwriting you could not fully read is one of those, coverage is 'full' "
+    "and handwriting_present is false — do not flag a fully-readable typed page for review just because it "
+    "is signed. BUT a handwritten clinical value, finding, note, or a standalone date in the record IS "
+    "content: keep handwriting_present=true + 'partial' if you could not fully read it.\n"
     "- Report coverage honestly via the tool. If you had to mark real CONTENT [illegible], coverage "
     "is 'partial', not 'full'."
 )

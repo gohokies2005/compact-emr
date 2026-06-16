@@ -1,8 +1,22 @@
 import { useQuery } from '@tanstack/react-query';
 import { getSanityImpression, type SanityContextInput } from '../api/sanity-impression';
-import { getStrategyPreview } from '../api/strategy-preview';
+import { getStrategyPreview, type StrategyPreview } from '../api/strategy-preview';
 import { getExtractionCoverage, type ExtractionCoverage } from '../api/extraction-coverage';
 import { getLetter } from '../api/letter';
+
+// The structured chart the sanity check needs for a real gut-check (Ryan 2026-06-16: "the whole chart
+// should be — all meds, SC, active problems even if not SC"). Pulled from the strategy-preview inputSet
+// that the wrappers ALREADY fetch — so it's the chart distilled into facts (cheap: small lists, no new
+// call, no raw 200-page notes). Service caps these, so over-supplying is safe.
+function chartContextFrom(p: StrategyPreview | undefined): { scConditions: string[]; keyFacts: string[] } {
+  const inp = p?.inputSet;
+  if (!inp) return { scConditions: [], keyFacts: [] };
+  const keyFacts: string[] = [];
+  for (const pr of inp.activeProblems) keyFacts.push(`Active problem: ${pr}`);
+  for (const m of inp.medications) keyFacts.push(`Medication: ${m.drugName}${m.indication ? ` (for ${m.indication})` : ''}`);
+  for (const f of inp.keyFacts) keyFacts.push(`${f.label}: ${f.value}`);
+  return { scConditions: [...inp.scConditions], keyFacts: keyFacts.slice(0, 30) };
+}
 
 // Honest one-line coverage note from the per-page breakdown — drives the "were the records really all
 // checked?" axis. Shared by the pre- and post-draft wrappers.
@@ -82,10 +96,13 @@ export function PreDraftSanityImpression({ caseId, claimedCondition }: {
   const p = strategy.data?.data;
   if (!p || !p.evaluable || claimedCondition.trim().length === 0) return null;
 
+  const chart = chartContextFrom(p);
   const context: SanityContextInput = {
     stage: 'pre_draft',
     claimedCondition,
     theory: p.primaryArgument ?? null,
+    scConditions: chart.scConditions,
+    keyFacts: chart.keyFacts,
     coverageNote: coverageNoteFrom(coverage.data?.data),
   };
   return (
@@ -112,10 +129,13 @@ export function PostDraftSanityImpression({ caseId, claimedCondition }: {
   const txt = letter.data?.data?.txt;
   if (!txt || txt.trim().length < 200 || claimedCondition.trim().length === 0) return null;
 
+  const chart = chartContextFrom(strategy.data?.data);
   const context: SanityContextInput = {
     stage: 'post_draft',
     claimedCondition,
     theory: strategy.data?.data?.primaryArgument ?? null,
+    scConditions: chart.scConditions,
+    keyFacts: chart.keyFacts,
     coverageNote: coverageNoteFrom(coverage.data?.data),
     draftText: txt,
   };

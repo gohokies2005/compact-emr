@@ -13,6 +13,7 @@ import { createChartNotesRouter } from './routes/chart-notes.js';
 import { createAdvisoryRouter } from './routes/advisory.js';
 import { createStrategyPreviewRouter } from './routes/strategy-preview.js';
 import { createCaseViabilityRouter } from './routes/case-viability.js';
+import { createRecommendationEmailRouter } from './routes/recommendation-email.js';
 import { createCdsRouter } from './routes/cds.js';
 import { createLookupRouter } from './routes/lookup.js';
 import { createSignOffsRouter } from './routes/sign-offs.js';
@@ -152,6 +153,8 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createStrategyPreviewRouter(db));
   // P4 anchor-viability card (caseViability v1) — DARK behind EMR_CASE_VIABILITY_ENABLED.
   app.use('/api/v1', authenticateJwt(), createCaseViabilityRouter(db));
+  // Recommended-plan outreach email (Sonnet 4.6 draft for the RN to copy; never auto-sent).
+  app.use('/api/v1', authenticateJwt(), createRecommendationEmailRouter(db));
   app.use('/api/v1', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), createCaseMessagesRouter(db));
   // Internal staff messaging (Inbox + chart Messages tab). Same role gate; S3 for attachments.
   app.use('/api/v1', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), createStaffMessagesRouter(db, { s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) as unknown as { send: (cmd: unknown) => Promise<unknown> }, bucketName: process.env.PHI_BUCKET_NAME }));

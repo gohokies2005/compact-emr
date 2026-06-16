@@ -1,8 +1,11 @@
-import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { getStrategyPreview } from '../api/strategy-preview';
 import { getCaseViability } from '../api/case-viability';
-import { recommendedPlan, type RecommendationKind } from '../lib/recommendedPlan';
+import { postRecommendationEmail } from '../api/recommendation-email';
+import { recommendedPlan, type RecommendationKind, type RecommendedPlan } from '../lib/recommendedPlan';
 import { SectionCard } from './ui/SectionCard';
+import { Button } from './ui/Button';
 
 // Recommended plan (2026-06-16) — the "here's what to do" section of the Overview story. Pure
 // PRESENTATION of the recommendedPlan selector (one-brain readout of the engine; no new decisions).
@@ -53,12 +56,61 @@ export function RecommendedPlanCard({
         </p>
       ) : null}
 
-      {/* Copy-paste customer outreach email (Phase 4: Sonnet-drafted, FRN voice, Copy button). */}
-      {plan.emailEligible ? (
-        <p className="mt-2 text-xs text-slate-400" data-testid="recommended-plan-email-slot">
-          A short outreach email you can copy will appear here.
-        </p>
-      ) : null}
+      {/* Copy-paste customer outreach email (Sonnet-drafted, FRN voice + mechanical guards, on-demand). */}
+      {plan.emailEligible ? <OutreachEmail caseId={caseId} plan={plan} /> : null}
     </SectionCard>
+  );
+}
+
+/** On-demand Sonnet-drafted outreach email: button → draft → editable textarea + Copy. Never auto-sent. */
+function OutreachEmail({ caseId, plan }: { readonly caseId: string; readonly plan: RecommendedPlan }) {
+  const [text, setText] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const kind = plan.kind === 'contact_alternative' ? 'contact_alternative' : 'contact_records';
+  const m = useMutation({
+    mutationFn: () => postRecommendationEmail(caseId, {
+      kind,
+      ...(plan.missingFact ? { missingFact: plan.missingFact } : {}),
+      ...(plan.bridge ? { bridge: { intermediate_dx: plan.bridge.intermediate_dx, claimed: plan.bridge.claimed, intermediate_presumptive_basis: plan.bridge.intermediate_presumptive_basis } } : {}),
+    }),
+    onSuccess: (r) => { setText(r.data.text); setCopied(false); },
+  });
+  const result = m.data?.data;
+
+  if (text === null) {
+    return (
+      <div className="mt-3" data-testid="recommended-plan-email-slot">
+        <Button type="button" variant="secondary" size="sm" loading={m.isPending} onClick={() => m.mutate()}>
+          Draft outreach email
+        </Button>
+        {m.isError ? <p className="mt-1 text-xs text-rose-600">Couldn’t draft the email. Try again.</p> : null}
+      </div>
+    );
+  }
+
+  const reviewFlags = (result?.flags ?? []).filter((f) => f.severity === 'review').map((f) => f.type);
+  return (
+    <div className="mt-3 space-y-2" data-testid="recommended-plan-email">
+      <div className="text-xs font-medium text-slate-500">Outreach email (edit before copying)</div>
+      {result?.source === 'template' ? (
+        <p className="text-xs text-amber-700">Drafted from a safe template (the AI draft was unavailable or withheld). Please personalize before sending.</p>
+      ) : null}
+      {reviewFlags.length > 0 ? (
+        <p className="text-xs text-amber-700">Heads up, please review for {reviewFlags.join(', ')} before sending.</p>
+      ) : null}
+      <textarea
+        aria-label="Outreach email"
+        className="w-full rounded-md border border-slate-300 p-2 text-sm text-slate-700"
+        rows={9}
+        value={text}
+        onChange={(e) => { setText(e.target.value); setCopied(false); }}
+      />
+      <div className="flex items-center gap-2">
+        <Button type="button" variant="secondary" size="sm" onClick={async () => { await navigator.clipboard.writeText(text); setCopied(true); }}>
+          {copied ? 'Copied' : 'Copy'}
+        </Button>
+        <Button type="button" variant="secondary" size="sm" loading={m.isPending} onClick={() => m.mutate()}>Redraft</Button>
+      </div>
+    </div>
   );
 }

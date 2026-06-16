@@ -320,7 +320,9 @@ export class WorkersStack extends Stack {
         // tier1==escalate==Sonnet → one Sonnet call/page, no Haiku tier. DARK until the flag flips to 'on'.
         RECORDS_BUCKET: phiBucket.bucketName,
         ANTHROPIC_SECRET_ARN: anthropicKeySecret.secretArn,
-        CLAUDE_VISION_SCANNED_PAGES: 'off',
+        // FLIPPED ON 2026-06-16 after the dark deploy + migration confirmed live. Revert to 'off' to
+        // fall back to Textract-only ("if it breaks we go back") — no image rebuild needed.
+        CLAUDE_VISION_SCANNED_PAGES: 'on',
         CLAUDE_VISION_MODEL: 'claude-sonnet-4-6',
         CLAUDE_VISION_ESCALATE_MODEL: 'claude-sonnet-4-6',
       },

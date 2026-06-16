@@ -149,21 +149,17 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
 
       {expanded && totalItems > 0 ? (
         <div className="mt-3 space-y-2">
-          {/* Per-page review rows (handwriting-uncertain + unreadable). Blanks are never here. "View
-              file" opens the document inline; per-page navigation + re-run-vision/accept are the noted
-              follow-on (need new endpoints). */}
+          {/* Per-page review rows (handwriting-uncertain + unreadable). Blanks are never here. The FILE
+              NAME itself opens the document inline (Ryan 2026-06-16 — no separate button to hunt for). */}
           {reviewPages.length > 0 ? (
             <ul className="space-y-2">
               {reviewPages.map((rp, i) => (
                 <li key={`rp-${rp.documentId}-${rp.pageNumber}-${i}`} className="rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="truncate font-medium text-slate-800">{rp.fileName}</p>
-                      <p className="text-xs text-slate-600">p.{rp.pageNumber} · {REVIEW_REASON_TEXT[rp.reason]}</p>
-                    </div>
-                    <Button type="button" variant="secondary" size="sm" onClick={() => openFile(rp.documentId, rp.fileName, false)}>
-                      View file
-                    </Button>
+                  <div className="min-w-0">
+                    <button type="button" onClick={() => openFile(rp.documentId, rp.fileName, false)} className="block max-w-full truncate text-left font-medium text-slate-800 hover:text-sky-700 hover:underline">
+                      {rp.fileName}
+                    </button>
+                    <p className="text-xs text-slate-600">p.{rp.pageNumber} · {REVIEW_REASON_TEXT[rp.reason]}</p>
                   </div>
                 </li>
               ))}
@@ -177,23 +173,26 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
               <li key={key} className="rounded-lg border border-slate-200 bg-white p-3">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="truncate font-medium text-slate-800">{g.fileName}</p>
+                    {/* File name opens the document inline (no separate button). Run-level gaps
+                        (documentId null) are not a file, so they render as plain text. */}
+                    {g.documentId != null ? (
+                      <button type="button" onClick={() => openFile(g.documentId, g.fileName, g.isImage)} className="block max-w-full truncate text-left font-medium text-slate-800 hover:text-sky-700 hover:underline">
+                        {g.fileName}
+                      </button>
+                    ) : (
+                      <p className="truncate font-medium text-slate-800">{g.fileName}</p>
+                    )}
                     <p className="text-xs text-slate-600">
                       {g.pageLabel} · {REASON_TEXT[g.reason]}
                     </p>
                   </div>
-                  <div className="flex flex-none items-center gap-2">
-                    {g.documentId != null ? (
-                      <Button type="button" variant="secondary" size="sm" onClick={() => openFile(g.documentId, g.fileName, g.isImage)}>
-                        View file
-                      </Button>
-                    ) : null}
-                    {g.isImage ? (
+                  {g.isImage ? (
+                    <div className="flex flex-none items-center gap-2">
                       <Button type="button" variant="secondary" size="sm" onClick={() => setDescribeKey((k) => (k === key ? null : key))}>
                         Request AI description
                       </Button>
-                    ) : null}
-                  </div>
+                    </div>
+                  ) : null}
                 </div>
                 {describeKey === key ? (
                   <p className="mt-2 rounded border border-slate-200 bg-slate-50 p-2 text-xs text-slate-600">

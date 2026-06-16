@@ -816,12 +816,12 @@ _RECORD_PAGE_TOOL = {
             },
             "handwriting_present": {
                 "type": "boolean",
-                "description": "True if the page contains ANY handwritten content (cursive or print), including handwritten entries on a printed form.",
+                "description": "True ONLY if the page has SUBSTANTIVE handwritten content — clinical notes, handwritten form entries, marginal annotations. A bare signature, initials, a handwritten date, a stamp, or stray scanner marks do NOT count: set false when those are the only handwriting.",
             },
             "coverage": {
                 "type": "string",
                 "enum": ["full", "partial", "illegible", "blank"],
-                "description": "full = every legible mark transcribed with high confidence. partial = transcribed what is legible but one or more regions were too faint/cut-off/overlapping to read confidently (those marked [illegible] inline). illegible = the page has content but almost none could be read. blank = no content on the page.",
+                "description": "full = all the actual CONTENT was transcribed with high confidence. A signature, initials, a stamp, or stray marks are NOT content — if you captured the real text and the only thing you couldn't read is a signature/stamp/marks, coverage is 'full'. partial = a region of real content was too faint/cut-off/overlapping to read confidently (marked [illegible] inline). illegible = the page has content but almost none could be read. blank = no content on the page.",
             },
             "uncertain_regions": {
                 "type": "string",
@@ -849,7 +849,11 @@ _VISION_SYSTEM = (
     "NEVER guess a clinical value, date, name, or dosage. An honest [illegible] is correct; a "
     "plausible guess is a serious error.\n"
     "- Do not summarize, diagnose, interpret, expand abbreviations, or add commentary. Verbatim only.\n"
-    "- Report coverage honestly via the tool. If you had to mark anything [illegible], coverage "
+    "- A signature, initials, a handwritten date, a stamp, or stray scanner marks are NOT record "
+    "content. If the only handwriting you could not fully read is one of those, coverage is 'full' and "
+    "handwriting_present is false — do not flag a fully-readable typed page for review just because it "
+    "is signed. Reserve handwriting_present=true + 'partial' for SUBSTANTIVE handwritten content.\n"
+    "- Report coverage honestly via the tool. If you had to mark real CONTENT [illegible], coverage "
     "is 'partial', not 'full'."
 )
 

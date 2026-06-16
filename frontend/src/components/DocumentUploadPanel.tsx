@@ -92,6 +92,10 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
   const extractionState = readiness.data?.data?.extractionState;
   // SERVER-derived → survives unmount/remount. Drives BOTH the note and the button-disable.
   const extractionInProgress = extractionState === 'extracting' || extractionState === 'ocr_in_progress';
+  // "Nothing new to process" (Ryan 2026-06-16, cost): every file is already read (ready=true) and no run
+  // is active → a reprocess would just re-read already-read docs = wasted API spend. Gray the button +
+  // say so. A FAILED/unread file makes ready=false → the button stays enabled (reprocess is useful then).
+  const nothingToProcess = readiness.data?.data?.ready === true && !extractionInProgress;
 
   // Upload one already-classified item via the existing presign -> upload -> record flow.
   // Throws on failure so the batch driver can record a per-file error without aborting the batch.
@@ -216,13 +220,25 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
         <button
           type="button"
           className="self-start rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-          title={extractionInProgress ? 'A read/extraction is already running — wait for it to finish' : 'Re-read selected documents with full vision and re-run the chart extraction'}
-          disabled={busy || extractionInProgress}
+          title={
+            extractionInProgress ? 'A read/extraction is already running — wait for it to finish'
+              : nothingToProcess ? 'Every file is already read — nothing new to process'
+                : 'Re-read selected documents with full vision and re-run the chart extraction'
+          }
+          disabled={busy || extractionInProgress || nothingToProcess}
           onClick={() => setConfirming(true)}
         >
           {extractionInProgress ? 'Reprocessing…' : 'Reprocess documents'}
         </button>
       </div>
+      {/* Cost guard (Ryan 2026-06-16): when everything's already read, the button is grayed + we say so,
+          so nobody re-spends re-reading unchanged files. A subtle escape stays for the rare force re-read. */}
+      {nothingToProcess && !busy ? (
+        <p className="mt-2 text-sm text-slate-500">
+          No new files to process.{' '}
+          <button type="button" onClick={() => setConfirming(true)} className="text-slate-400 hover:text-sky-700 hover:underline">Re-read anyway</button>
+        </p>
+      ) : null}
 
       {/* Reprocess picker — all files selected by default; uncheck to re-read only what changed. Calm
           neutral modal, bold for the count, no red. */}

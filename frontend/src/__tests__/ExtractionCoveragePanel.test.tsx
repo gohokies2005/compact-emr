@@ -67,11 +67,10 @@ describe('ExtractionCoveragePanel', () => {
 
     // Expand the details.
     fireEvent.click(screen.getByRole('button', { name: /Show 1 item/ }));
-    expect(await screen.findByText('scan.jpg')).toBeInTheDocument();
     expect(screen.getByText(/Image couldn’t be read as text/)).toBeInTheDocument();
 
-    // View file → opens the inline viewer (presigned).
-    fireEvent.click(screen.getByRole('button', { name: 'View file' }));
+    // Clicking the FILE NAME opens the inline viewer (presigned) — no separate "View file" button.
+    fireEvent.click(screen.getByRole('button', { name: 'scan.jpg' }));
     await waitFor(() => expect(viewDocumentMock).toHaveBeenCalledWith('DOC-IMG'));
 
     // Image gap exposes the "Request AI description" affordance + its plain-English note.
@@ -154,8 +153,9 @@ describe('ExtractionCoveragePanel', () => {
     });
     renderPanel();
     fireEvent.click(await screen.findByRole('button', { name: /Show 1 item/ }));
-    expect(await screen.findByText('record.pdf')).toBeInTheDocument();
+    // A non-image gap: no "Request AI description"; the file name itself is the clickable opener.
     expect(screen.queryByRole('button', { name: 'Request AI description' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'View file' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'record.pdf' }));
+    await waitFor(() => expect(viewDocumentMock).toHaveBeenCalledWith('DOC-PDF'));
   });
 });

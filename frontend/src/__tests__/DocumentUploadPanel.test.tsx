@@ -35,11 +35,12 @@ vi.mock('../api/cases', () => ({
   reprocessCase: vi.fn(async () => ({ data: { reocrQueued: 2, extractEnqueued: false, extractReason: 'ocr_in_progress', requestId: 'req-1' } })),
 }));
 
-// The processing note + button-disable are now derived from chart-readiness (SERVER state) so they
-// survive a navigate-away/remount. Default mock = chart_ready (idle) so the Reprocess button is enabled
-// in most tests; individual tests override to 'extracting' to exercise the in-progress behavior.
+// The processing note + button state derive from chart-readiness (SERVER state) so they survive a
+// navigate-away/remount. Default mock = NOT ready (something to process) so the Reprocess button is
+// enabled in the action tests; individual tests override to 'extracting' (in-progress) or ready:true
+// (nothing-new) to exercise those behaviors.
 vi.mock('../api/chart-readiness', () => ({
-  getChartReadiness: vi.fn(async () => ({ data: { ready: true, extractionState: 'chart_ready' } })),
+  getChartReadiness: vi.fn(async () => ({ data: { ready: false, extractionState: 'extract_failed' } })),
 }));
 
 // expandSelection imports JSZip dynamically; vitest intercepts the dynamic import too. The mock zip
@@ -246,9 +247,19 @@ describe('DocumentUploadPanel — Reprocess documents (keystone 4b)', () => {
     vi.mocked(getChartReadiness).mockResolvedValue({ data: { ready: true, extractionState: 'chart_ready' } } as never);
   });
 
-  it('idle (chart_ready) → no processing note and the button is enabled', async () => {
+  it('all files already read (ready) → button grayed + "No new files to process" (cost guard)', async () => {
+    vi.mocked(getChartReadiness).mockResolvedValue({ data: { ready: true, extractionState: 'chart_ready' } } as never);
+    renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
+    expect(await screen.findByText('No new files to process.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reprocess documents' })).toBeDisabled();
+    // the subtle force escape stays reachable
+    expect(screen.getByRole('button', { name: 'Re-read anyway' })).toBeInTheDocument();
+    vi.mocked(getChartReadiness).mockResolvedValue({ data: { ready: false, extractionState: 'extract_failed' } } as never);
+  });
+
+  it('something to process (not ready) → button enabled, no "nothing new" caption', async () => {
     renderPanel(<DocumentUploadPanel veteranId="VET-1" caseId="CASE-9" onUploaded={vi.fn()} />);
     expect(await screen.findByRole('button', { name: 'Reprocess documents' })).toBeEnabled();
-    expect(screen.queryByText(/Reading and extracting the chart/)).not.toBeInTheDocument();
+    expect(screen.queryByText('No new files to process.')).not.toBeInTheDocument();
   });
 });

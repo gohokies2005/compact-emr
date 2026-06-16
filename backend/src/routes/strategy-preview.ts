@@ -8,7 +8,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb } from '../services/db-types.js';
 import { computeStrategyPreviewWithAi } from '../services/strategy-preview.js';
-import { deriveCaseFramingForCase } from '../services/case-framing-stamp.js';
+import { deriveCaseFramingForCase, loadMechanismFilter } from '../services/case-framing-stamp.js';
 import { deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
 
 interface CaseForPreview {
@@ -129,6 +129,9 @@ export function createStrategyPreviewRouter(db: AppDb): Router {
         inServiceEvent: c.inServiceEvent ?? null,
         veteranStatement: c.veteranStatement ?? null,
         viability: viability === null ? null : { band: viability.viability, why: viability.why },
+        // BVA-RETIREMENT (Pichette, 2026-06-15): mechanism-gate the anchor pick so a co-occurrence
+        // artifact (Tinnitus→OSA) can't win the Argument/Anticipated lines. Fail-open undefined ⇒ legacy.
+        mechanismFilter: loadMechanismFilter(),
         // E5 (2026-06-13): the active meds — bridge candidates for the intermediary chain + the
         // input-visibility list.
         medications: (c.veteran?.activeMedications ?? []).map((m) => ({ drugName: m.drugName, indication: m.indication })),

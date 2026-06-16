@@ -9,6 +9,7 @@
 
 import { evaluateCds, findPair, type PairMatch } from './cdsEngine.js';
 import { runStrategyAiChecks, type StrategyAiChecks } from './strategy-ai-checks.js';
+import type { AnchorMechanismFilter } from './case-framing.js';
 
 export interface PathwaySuggestion {
   readonly kind: 'direct' | 'secondary';
@@ -98,7 +99,12 @@ export function findChainPathway(
 export function bestGrantedScPair(input: StrategyPreviewInput): PairMatch | null {
   let best: PairMatch | null = null;
   const score = (s: PairMatch): number => (TIER_RANK[s.tier] ?? 0) * 1e6 + (s.imoWinPct ?? s.winPct) * 1e3 + s.n;
+  const filter = input.mechanismFilter;
   for (const sc of input.serviceConnectedConditions) {
+    // BVA-RETIREMENT (Pichette, 2026-06-15): a mechanism-EXCLUDED anchor (e.g. Tinnitus→OSA, a BVA
+    // co-occurrence artifact at tier "high") must never win the pick. Mechanism gates which anchors are
+    // eligible; BVA only ranks the survivors (BVA tiebreaker-only). Filter absent ⇒ legacy (fail-open).
+    if (filter !== undefined && !filter.isEligibleAnchor(sc, input.claimedCondition)) continue;
     const m = findPair(sc, input.claimedCondition);
     if (m === null) continue;
     if (best === null || score(m) > score(best)) best = m;
@@ -224,6 +230,15 @@ export interface StrategyPreviewInput {
    * these from the chart; DISPLAY ONLY, never feeds a check.
    */
   readonly keyFacts?: ReadonlyArray<{ readonly label: string; readonly value: string }>;
+  /**
+   * BVA-RETIREMENT (Pichette, 2026-06-15): the vendored anchor-mechanism resolver, injected by the
+   * route (fail-open undefined). When present, the anchor pick drops mechanism-EXCLUDED granted-SC
+   * conditions before BVA scoring, the stored-anchor recovery won't leak an excluded anchor, and a
+   * granted SC that exists but is excluded (the only "anchor" is not a recognized cause) reads as a
+   * Stop / no-recognized-anchor instead of a BVA-driven "Strong secondary". Same predicate the
+   * caseFraming producer uses, so the strategy card, the Anticipated line, and the drafter agree.
+   */
+  readonly mechanismFilter?: AnchorMechanismFilter | undefined;
 }
 
 function framingLabel(framingChoice: string | null): string {
@@ -258,9 +273,35 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   // condition with a high/moderate pair is authoritative (verified SC + Board data). We do NOT override a
   // stored anchor that IS scoreable — that would clobber a deliberate RN/aggravation framing (the
   // "Anticipated" line handles "stronger elsewhere"). framingChoice is left as stored. (architect QA 2026-06-07)
-  const storedPair = input.upstreamScCondition ? findPair(input.upstreamScCondition, input.claimedCondition) : null;
-  const recovered = storedPair === null ? bestGrantedScPair(input) : null;
-  const effectiveAnchor = recovered !== null ? recovered.upstream : input.upstreamScCondition;
+  const filter = input.mechanismFilter;
+  // BVA-RETIREMENT (Pichette, 2026-06-15): a stored anchor that is mechanism-EXCLUDED must NOT
+  // short-circuit recovery AND must not be kept as the effective anchor (the leak: an excluded stored
+  // anchor that still resolves to a BVA pair would otherwise pass straight through).
+  const storedExcluded =
+    input.upstreamScCondition != null
+    && filter !== undefined
+    && !filter.isEligibleAnchor(input.upstreamScCondition, input.claimedCondition);
+  const storedPair = input.upstreamScCondition && !storedExcluded
+    ? findPair(input.upstreamScCondition, input.claimedCondition)
+    : null;
+  const recovered = storedPair === null ? bestGrantedScPair(input) : null; // bestGrantedScPair is mechanism-gated
+  const effectiveAnchor = recovered !== null
+    ? recovered.upstream
+    : (storedExcluded ? null : input.upstreamScCondition);
+
+  // BVA-RETIREMENT — the Stop condition: a granted-SC condition (or the stored anchor) EXISTS but is
+  // mechanism-EXCLUDED as a cause of the claimed condition, no eligible anchor remains, and the claim
+  // is not presumptive. Pichette: the only SC, Tinnitus, is not a recognized cause of OSA → the card
+  // must read "no recognized service-connected anchor / Stop", NOT a BVA "Strong secondary", and NOT a
+  // clean direct claim. Mirrors the caseFraming producer's 'undetermined' escape (one brain).
+  const excludedAnchorNames = filter === undefined
+    ? []
+    : input.serviceConnectedConditions.filter((sc) => !filter.isEligibleAnchor(sc, input.claimedCondition));
+  const claimIsPresumptive = filter !== undefined && filter.isPresumptive(input.claimedCondition);
+  const excludedAnchorStop =
+    (excludedAnchorNames.length > 0 || storedExcluded) && effectiveAnchor == null && !claimIsPresumptive;
+  const excludedAnchorName: string | null =
+    excludedAnchorNames[0] ?? (storedExcluded ? input.upstreamScCondition : null);
 
   const cds = evaluateCds({
     claimedCondition: input.claimedCondition,
@@ -280,6 +321,7 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   // NEVER a blocker (architect + physician review 2026-06-07: don't false-Stop every direct claim).
   const isSecondary = input.claimType.toLowerCase().includes('secondary')
     || effectiveAnchor != null
+    || excludedAnchorStop // a granted SC was TRIED as an anchor but excluded — render in secondary mode (failed anchor)
     || /secondary|aggravat/.test((input.framingChoice ?? '').toLowerCase());
   // A direct claim's whole case is the in-service event/onset + the veteran's account of it. 3-STATE
   // (P1e, the Porter fix 2026-06-11): "documented" keys ONLY on the extraction-corroborated
@@ -324,11 +366,13 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     {
       key: 'anchor',
       label: isSecondary ? 'Service-connected anchor present' : 'In-service event documented',
-      pass: isSecondary ? !noAnchor : inServiceState === 'documented',
+      pass: isSecondary ? (!noAnchor && !excludedAnchorStop) : inServiceState === 'documented',
       // AMBER (3rd state): stated-but-uncorroborated — displayed distinctly, never a pass (P1e).
       ...(!isSecondary && inServiceState === 'stated_only' ? { tone: 'amber' as const } : {}),
       detail: isSecondary
-        ? (noAnchor ? (gate.detail ?? 'No service-connected anchor') : `Anchored on ${effectiveAnchor}`)
+        ? (excludedAnchorStop
+            ? `Service-connected ${excludedAnchorName ?? 'condition'} is present but is not a recognized cause of ${input.claimedCondition} — no viable secondary anchor.`
+            : noAnchor ? (gate.detail ?? 'No service-connected anchor') : `Anchored on ${effectiveAnchor}`)
         : inServiceState === 'documented'
           ? 'In-service event documented in the record'
           : inServiceState === 'stated_only'
@@ -347,9 +391,11 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
       pass: isSecondary ? cds.bva.matched : true, // N/A for direct claims — never a ✗ for absent secondary data
       detail: !isSecondary
         ? 'Direct claim — a secondary pathway does not apply'
-        : cds.bva.matched
-          ? `Recognized secondary pathway: ${cds.bva.upstream} → ${cds.bva.claimed}`
-          : 'No recognized pathway on record — would rely on medical literature; confirm the theory is sound',
+        : excludedAnchorStop
+          ? `No recognized secondary pathway — ${excludedAnchorName ?? 'the service-connected condition'} is not an established cause of ${input.claimedCondition}.`
+          : cds.bva.matched
+            ? `Recognized secondary pathway: ${cds.bva.upstream} → ${cds.bva.claimed}`
+            : 'No recognized pathway on record — would rely on medical literature; confirm the theory is sound',
     },
     {
       key: 'strength',
@@ -369,7 +415,8 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   ];
 
   let tier: StrategyTier;
-  if (gate.triggered) tier = 'Stop';
+  // BVA-RETIREMENT: an excluded-only anchor is a hard "no recognized anchor" → Stop (mirrors a hard gate).
+  if (gate.triggered || excludedAnchorStop) tier = 'Stop';
   else if (cds.verdict === 'accept') tier = 'Strong';
   // A verdict-reject pair is normally Thin — UNLESS it's a thin-sample near-miss, which we rescue to
   // Plausible (lean on mechanism; the Board record is thin, not adverse). See thinSampleRescue above.
@@ -413,7 +460,9 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
   // list + each med's indication (the med-treating-the-primary bridge). Advisory: the recovered chain
   // never moves the deterministic tier — it just gives the RN the pathway the flat "no" was hiding.
   let chainAttempt: ChainAttempt | undefined;
-  const directPathwayMissing = isSecondary && !cds.bva.matched && !gate.triggered;
+  // Skip the chain rescue for an excluded-only anchor — there's no eligible anchor to bridge FROM, and a
+  // chain hung off the excluded condition would undercut the honest Stop.
+  const directPathwayMissing = isSecondary && !cds.bva.matched && !gate.triggered && !excludedAnchorStop;
   if (directPathwayMissing) {
     const bridges: Array<{ label: string; source: 'comorbid_dx' | 'medication_indication' }> = [
       ...input.activeProblems.map((p) => ({ label: p, source: 'comorbid_dx' as const })),
@@ -426,15 +475,24 @@ export function computeStrategyPreview(input: StrategyPreviewInput): StrategyPre
     chainAttempt = { searched: true, pathway };
   }
 
+  // BVA-RETIREMENT: an excluded-only anchor gets an honest argument + summary — never a BVA "secondary"
+  // string, never a clean "direct" claim. The viability panel + the drafter agree (one brain).
+  const primaryArgument = excludedAnchorStop
+    ? `${input.claimedCondition} — no recognized service-connected anchor${excludedAnchorName ? ` (service-connected ${excludedAnchorName} is not an established cause)` : ''}`
+    : buildPrimaryArgument(input, effectiveAnchor);
+  const summary = excludedAnchorStop
+    ? `No recognized service-connected cause of ${input.claimedCondition} among the granted conditions — needs a different theory (direct in-service onset, a presumptive filing, or another service-connected condition) before drafting.`
+    : plainSummary;
+
   return {
     evaluable: input.claimedCondition.trim().length > 0,
-    primaryArgument: buildPrimaryArgument(input, effectiveAnchor),
+    primaryArgument,
     proposedMechanism: mech.length > 0 ? mech : null,
     anchor: effectiveAnchor,
     tier,
     recommendedPathway: suggestPathway(input),
     criteria,
-    summary: plainSummary,
+    summary,
     inputSet,
     ...(chainAttempt ? { chainAttempt } : {}),
   };

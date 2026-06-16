@@ -33,7 +33,7 @@ interface AnchorResolverModule {
   presumptiveFor(claimed: string): unknown | null;
 }
 let _mechFilter: AnchorMechanismFilter | null | undefined; // undefined = not tried; null = unavailable
-function loadMechanismFilter(): AnchorMechanismFilter | undefined {
+export function loadMechanismFilter(): AnchorMechanismFilter | undefined {
   if (_mechFilter !== undefined) return _mechFilter ?? undefined;
   try {
     const candidates = [

@@ -3,6 +3,7 @@ import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
 import type { AppDb, CaseStatus } from '../services/db-types.js';
 import { pacificDayStartUtc, DASHBOARD_TIMEZONE } from '../services/pacific-day.js';
+import { isStage1 } from '../services/intake-kind.js';
 
 /**
  * D1 — dashboard metrics backend (2026-06-13).
@@ -141,8 +142,10 @@ export function createDashboardRouter(db: AppDb): Router {
         totalVeterans,
         stage1Turnaround,
       ] = await Promise.all([
-        // 1. new intakes today (since Pacific midnight)
-        db.intake.count({ where: { createdAt: { gte: pacificMidnight } } }),
+        // 1. NEW intakes today (since Pacific midnight) — STAGE-1 ONLY. A returning veteran files both a
+        // stage-1 AND a stage-2 form, so a raw row count double-counted them (Ryan 2026-06-16). We
+        // classify with the same intakeKind the pool UI uses and count only stage-1 (new veteran/claim).
+        countNewStage1IntakesToday(db, pacificMidnight),
         // 3. RN queue (RN-review display group)
         db.case.count({ where: { status: { in: RN_REVIEW_GROUP_STATUSES }, archivedAt: null } }),
         // 4. pre-draft group
@@ -251,6 +254,24 @@ export function createDashboardRouter(db: AppDb): Router {
   );
 
   return router;
+}
+
+/**
+ * Tile 1 — NEW intakes today (stage-1 only). Fetches today's intake rows (cheap: bounded to one
+ * Pacific day, two small columns) and counts only the STAGE-1 submissions via the shared intakeKind
+ * classifier, so a returning veteran's stage-2/records follow-up doesn't inflate the "new intakes"
+ * number. Fail-soft: a DB hiccup returns 0 rather than 502-ing the whole dashboard.
+ */
+async function countNewStage1IntakesToday(db: AppDb, pacificMidnight: Date): Promise<number> {
+  try {
+    const rows = (await db.intake.findMany({
+      where: { createdAt: { gte: pacificMidnight } },
+      select: { jotformFormId: true, submittedFormTitle: true },
+    })) as unknown as Array<{ jotformFormId: string | null; submittedFormTitle: string | null }>;
+    return rows.filter((r) => isStage1(r.jotformFormId, r.submittedFormTitle)).length;
+  } catch {
+    return 0;
+  }
 }
 
 /**

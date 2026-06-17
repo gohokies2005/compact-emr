@@ -47,6 +47,7 @@ interface DbHandles {
 
 function makeDb(opts?: {
   assignedIntakes?: Array<{ webhookReceivedAt: Date | null; assignedAt: Date | null }>;
+  todaysIntakes?: Array<{ jotformFormId: string | null; submittedFormTitle: string | null }>;
 }): { db: AppDb; h: DbHandles } {
   // Distinct sentinel values so a tile that reads the wrong query is caught.
   const intakeCount = countByWhere([
@@ -73,7 +74,22 @@ function makeDb(opts?: {
   const veteranCount = countByWhere([
     { match: (w) => w.inactive === false, value: 100 }, // tile 10
   ]);
-  const intakeFindMany = vi.fn(async () => opts?.assignedIntakes ?? []);
+  // intake.findMany is now issued by TWO tiles: tile 1 (today's intakes, where createdAt.gte → classified
+  // stage-1) and tile 2 (turnaround, where status='assigned'). Branch so one mock answers both distinctly.
+  const DEFAULT_TODAYS_INTAKES = [
+    { jotformFormId: '261180463266153', submittedFormTitle: 'First-time intake' }, // stage1 (by known id)
+    { jotformFormId: '261495407772061', submittedFormTitle: 'Returning client' },  // stage1 (by title)
+    { jotformFormId: '261178428720156', submittedFormTitle: 'Stage 2' },           // stage2 — excluded
+    { jotformFormId: '260804641700146', submittedFormTitle: 'Additional records' },// additional_docs — excluded
+  ];
+  const intakeFindMany = vi.fn(async (args: unknown) => {
+    const where = ((args as { where?: Record<string, unknown> })?.where ?? {}) as Record<string, unknown>;
+    if (where.status === 'assigned') return opts?.assignedIntakes ?? [];
+    if (typeof where.createdAt === 'object' && where.createdAt !== null && 'gte' in (where.createdAt as object)) {
+      return opts?.todaysIntakes ?? DEFAULT_TODAYS_INTAKES;
+    }
+    return [];
+  });
 
   const db = {
     intake: { count: intakeCount.fn, findMany: intakeFindMany },
@@ -120,7 +136,7 @@ describe('GET /api/v1/reports/dashboard', () => {
     expect(body.tiles).toHaveLength(10);
 
     expect(tileByKey(body, 'new_intakes_today')).toMatchObject({
-      count: 11,
+      count: 2, // 4 intakes today, but only the 2 stage-1 forms count (stage-2 + additional-docs excluded)
       clickable: true,
       filter: { kind: 'intakes', createdSince: body.pacificMidnightUtc },
     });
@@ -142,6 +158,20 @@ describe('GET /api/v1/reports/dashboard', () => {
     expect(tileByKey(body, 'total_veterans')).toMatchObject({ count: 100, clickable: true, filter: { kind: 'veterans' } });
   });
 
+  it('tile 1 counts only STAGE-1 intakes — a returning vet who files stage-1 + stage-2 counts once', async () => {
+    const { db } = makeDb({
+      todaysIntakes: [
+        { jotformFormId: '261180463266153', submittedFormTitle: 'First-time intake' }, // stage1
+        { jotformFormId: '261178428720156', submittedFormTitle: 'Stage 2 — OSA' },      // same vet's stage-2
+        { jotformFormId: '260804641700146', submittedFormTitle: 'Additional records' }, // additional docs
+      ],
+    });
+    const res = await request(buildApp(db)).get('/api/v1/reports/dashboard');
+    expect(res.status).toBe(200);
+    const body = res.body as { tiles: Array<{ key: string }> };
+    expect(tileByKey(body, 'new_intakes_today')).toMatchObject({ count: 1 }); // not 3
+  });
+
   it('computes the today boundary via the Pacific-midnight TZ helper, not a hardcoded UTC offset', async () => {
     const { db, h } = makeDb();
     const before = Date.now();
@@ -157,9 +187,11 @@ describe('GET /api/v1/reports/dashboard', () => {
     // before/after bracket the request; same Pacific day in all realistic cases → identical instants.
     expect([expectedLo.getTime(), expectedHi.getTime()]).toContain(reported.getTime());
 
-    // The intake "today" count must have been issued with createdAt.gte === that Pacific midnight,
-    // proving the boundary flowed into the query (not a separate hardcoded value).
-    const todayCall = h.intakeCount.calls.find((w) => 'createdAt' in w && (w.createdAt as { gte?: unknown }).gte !== undefined);
+    // The intake "today" query (now a findMany for stage-1 classification) must have been issued with
+    // createdAt.gte === that Pacific midnight, proving the boundary flowed into the query.
+    const todayCall = h.intakeFindMany.mock.calls
+      .map((c) => ((c[0] as { where?: Record<string, unknown> })?.where ?? {}))
+      .find((w) => 'createdAt' in w && (w.createdAt as { gte?: unknown }).gte !== undefined);
     expect(todayCall).toBeDefined();
     const gte = (todayCall!.createdAt as { gte: Date }).gte;
     expect(new Date(gte).getTime()).toBe(reported.getTime());

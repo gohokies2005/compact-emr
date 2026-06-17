@@ -3,6 +3,7 @@ import { getSanityImpression, type SanityContextInput } from '../api/sanity-impr
 import { getStrategyPreview, type StrategyPreview } from '../api/strategy-preview';
 import { getExtractionCoverage, type ExtractionCoverage } from '../api/extraction-coverage';
 import { getLetter } from '../api/letter';
+import { SectionCard } from './ui/SectionCard';
 
 // The structured chart the sanity check needs for a real gut-check (Ryan 2026-06-16: "the whole chart
 // should be — all meds, SC, active problems even if not SC"). Pulled from the strategy-preview inputSet
@@ -62,21 +63,26 @@ export function SanityImpressionLine({ caseId, context }: {
   });
 
   if (context === null) return null;
-  if (q.isLoading) return <p className="text-xs text-slate-400">Running a final sanity check…</p>;
   const imp = q.data?.data;
-  if (!imp) return null; // fail-open: no impression → say nothing
+  // Render nothing while loading or when the check returns nothing (fail-open + no empty-card flash) — the
+  // card simply appears once the impression is ready.
+  if (!imp) return null;
   const L = LABEL[imp.impression] ?? LABEL['clear']!;
 
+  // Same frame as the other Overview cards (SectionCard + a small status chip), titled "AI Sanity Check"
+  // so it reads as a distinct AI gut-check, not a second "Recommended plan". (Ryan 2026-06-16.)
   return (
-    <div className="flex items-start gap-2 text-sm">
-      <span className={`mt-0.5 shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${L.chip}`} title="Advisory — an AI gut-check, does not block">
-        {L.text}
-      </span>
-      <div className="min-w-0 text-slate-700">
-        <span className="font-medium">Overall impression:</span> {imp.summary}
-        {imp.missed ? <span className="mt-0.5 block text-slate-500">Worth a look: {imp.missed}</span> : null}
-      </div>
-    </div>
+    <SectionCard
+      title="AI Sanity Check"
+      status={
+        <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${L.chip}`} title="Advisory — an AI gut-check, does not block drafting">
+          {L.text}
+        </span>
+      }
+    >
+      <p className="text-sm text-slate-700">{imp.summary}</p>
+      {imp.missed ? <p className="mt-1 text-sm text-slate-500">Worth a look: {imp.missed}</p> : null}
+    </SectionCard>
   );
 }
 
@@ -106,11 +112,7 @@ export function PreDraftSanityImpression({ caseId, claimedCondition }: {
     keyFacts: chart.keyFacts,
     coverageNote: coverageNoteFrom(coverage.data?.data),
   };
-  return (
-    <div className="border-t border-slate-100 pt-3">
-      <SanityImpressionLine caseId={caseId} context={context} />
-    </div>
-  );
+  return <SanityImpressionLine caseId={caseId} context={context} />;
 }
 
 /**
@@ -141,9 +143,5 @@ export function PostDraftSanityImpression({ caseId, claimedCondition }: {
     coverageNote: coverageNoteFrom(coverage.data?.data),
     draftText: txt,
   };
-  return (
-    <div className="border-t border-slate-100 pt-3">
-      <SanityImpressionLine caseId={caseId} context={context} />
-    </div>
-  );
+  return <SanityImpressionLine caseId={caseId} context={context} />;
 }

@@ -263,12 +263,16 @@ export class DrafterStack extends Stack {
       // maxCapacity did nothing and a batch serialized (2026-06-06). Set tasks = min(depth, 6) so N
       // independent queued drafts get N tasks and run concurrently (each pulls a distinct FIFO group).
       adjustmentType: appscaling.AdjustmentType.EXACT_CAPACITY,
-      // DERIVED from DRAFTER_MAX_CONCURRENCY so the step table can NEVER again top out below the cap
-      // (the old hand-listed table stopped at 6, so bumping the const alone was a silent no-op past 6 —
-      // audit 2026-06-17). tasks = min(depth, cap): depth d in [d, d+1) -> d tasks; depth >= cap -> cap.
+      // DERIVED from DRAFTER_MAX_CONCURRENCY so the step table can NEVER again silently top out below the
+      // cap (the old hand-listed table stopped at 6 → bumping the const alone was a no-op past 6).
+      // CONSTRAINT: AWS Application Auto Scaling allows at most 20 step adjustments PER POLICY, so one
+      // step per depth overflows at cap=25 (this deploy rolled back on exactly that, 2026-06-17). So:
+      // 1:1 for the first 17 depth bands, then ONE band that jumps to the full cap (≤18 scale-out steps).
+      // depth d in [1,17] -> d tasks; depth >= 18 -> DRAFTER_MAX_CONCURRENCY.
       scalingSteps: [
         { upper: 0, change: 0 }, // no messages -> 0 tasks (scale-to-zero)
-        ...Array.from({ length: DRAFTER_MAX_CONCURRENCY }, (_, i) => ({ lower: i + 1, change: i + 1 })),
+        ...Array.from({ length: Math.min(DRAFTER_MAX_CONCURRENCY, 17) }, (_, i) => ({ lower: i + 1, change: i + 1 })),
+        ...(DRAFTER_MAX_CONCURRENCY > 17 ? [{ lower: 18, change: DRAFTER_MAX_CONCURRENCY }] : []),
       ],
       evaluationPeriods: 1,
       datapointsToAlarm: 1,

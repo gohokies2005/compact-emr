@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { describeApiError } from '../api/client';
-import { getDelivery, openMemoPdf, sendDelivery, type DeliveryPreview } from '../api/delivery';
+import { getDelivery, openMemoPdf, resetDeliveryLock, sendDelivery, type DeliveryPreview } from '../api/delivery';
 
 interface DeliveryPanelProps {
   readonly caseId: string;
@@ -30,6 +30,7 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
   // The send outcome: ok=true → green; ok=false → the route returned 200 but the transport
   // failed (the message carries the REAL error verbatim) → red.
   const [sentMessage, setSentMessage] = useState<{ text: string; ok: boolean } | null>(null);
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
 
   // E4: "Verify the cover memo" opens a true PDF in a new tab (like the letter verify), rendered
   // server-side by GET /delivery/memo.pdf. Failures surface the REAL reason (standing rule).
@@ -74,6 +75,18 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
         qc.invalidateQueries({ queryKey: ['case', caseId, 'delivery'] }),
         qc.invalidateQueries({ queryKey: ['case', caseId] }),
       ]);
+    },
+  });
+
+  const resetLock = useMutation({
+    mutationFn: () => resetDeliveryLock(caseId),
+    onSuccess: async (res) => {
+      setResetMessage(
+        res.data.tokensReset > 0
+          ? `Delivery lock cleared (${res.data.tokensReset} link${res.data.tokensReset === 1 ? '' : 's'} reset). The veteran can use the same link again.`
+          : 'No locked delivery link found for this case.',
+      );
+      await qc.invalidateQueries({ queryKey: ['case', caseId, 'delivery'] });
     },
   });
 
@@ -226,6 +239,25 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
             </Button>
           </>
         )}
+      </div>
+
+      {/* Veteran can't open the secure download (5 failed identity attempts → "this link is now
+          locked"). Staff (admin or RN/ops) verifies the veteran out-of-band, fixes phone/DOB on the
+          chart if needed, then clears the lock — the SAME emailed link works again, no re-send.
+          (Ryan 2026-06-17: no admin/RN UI existed for this.) */}
+      <div className="mt-5 border-t border-slate-200 pt-4">
+        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Veteran can’t open the download?</p>
+        <p className="mt-1 text-sm text-slate-600">
+          If the secure link shows “this link is now locked,” verify the veteran, correct their phone or
+          date of birth on the chart if needed, then reset the lock. The same link starts working again.
+        </p>
+        <div className="mt-2">
+          <Button type="button" variant="secondary" size="sm" loading={resetLock.isPending} onClick={() => resetLock.mutate()}>
+            Reset delivery lock
+          </Button>
+        </div>
+        {resetMessage ? <p className="mt-2 text-sm text-emerald-700">{resetMessage}</p> : null}
+        {resetLock.isError ? <p className="mt-2 text-sm text-rose-600">Could not reset: {describeApiError(resetLock.error)}</p> : null}
       </div>
     </Card>
   );

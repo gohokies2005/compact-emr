@@ -110,3 +110,10 @@ export async function openMemoPdf(caseId: string): Promise<void> {
   const { data } = await apiGet<{ data: { url: string } }>(deliveryPath(caseId, '/memo.pdf'));
   window.open(data.url, '_blank', 'noopener,noreferrer');
 }
+
+// Staff reset of a locked delivery link (5 failed identity attempts → lockedAt set). Clears
+// lockedAt + failedAttempts on the case's delivery token(s); the SAME emailed link works again,
+// no re-issue. Admin/ops only (backend role-gates it). (Ryan 2026-06-17: no admin UI existed.)
+export function resetDeliveryLock(caseId: string): Promise<{ data: { tokensReset: number } }> {
+  return apiPost<{ data: { tokensReset: number } }, Record<string, never>>(deliveryPath(caseId, '/unlock-reset'), {});
+}

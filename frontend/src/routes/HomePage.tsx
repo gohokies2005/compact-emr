@@ -79,7 +79,7 @@ function TileCard({ tile }: { readonly tile: DashboardTile }) {
     : (tile.count ?? 0);
 
   const description = isDuration
-    ? (tile.reason ?? 'Average over the last 7 days')
+    ? (tile.reason ?? 'From intake received to RN starting the case (not letter turnaround)')
     : tile.key === 'delinquent_payments'
       ? 'Delivered, letter unpaid > 3 days'
       : tile.key === 'delinquent_intakes'

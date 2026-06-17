@@ -36,7 +36,7 @@ const TILES: DashboardResponse = {
   pacificMidnightUtc: '2026-06-13T07:00:00.000Z',
   tiles: [
     { key: 'new_intakes_today', label: 'New intakes today', count: 4, clickable: true, filter: { kind: 'intakes', createdSince: '2026-06-13T07:00:00.000Z' } },
-    { key: 'stage1_turnaround_7d', label: '7-day avg Stage-1 turnaround', value: 18.4, unit: 'hours', clickable: false },
+    { key: 'stage1_turnaround_7d', label: 'Avg intake-to-pickup (7d)', value: 18.4, unit: 'hours', clickable: false },
     { key: 'rn_queue', label: 'RN queue', count: 7, clickable: true, filter: { kind: 'cases', statuses: ['rn_review', 'needs_rn_decision', 'correction_requested', 'correction_review'] } },
     { key: 'pre_draft', label: 'Pre-draft', count: 3, clickable: true, filter: { kind: 'cases', statuses: ['intake', 'viability'] } },
     { key: 'rn_review', label: 'RN review', count: 2, clickable: true, filter: { kind: 'cases', status: 'rn_review' } },
@@ -99,7 +99,7 @@ describe('HomePage', () => {
 
   it('the 7-day turnaround tile is NOT a link and shows value + unit', async () => {
     renderHome();
-    const label = await screen.findByText('7-day avg Stage-1 turnaround');
+    const label = await screen.findByText('Avg intake-to-pickup (7d)');
     expect(label.closest('a')).toBeNull();
     // Card renders a <section>; scope to it so we read THIS tile's value, not another's.
     const card = label.closest('section');

@@ -173,7 +173,10 @@ export function createDashboardRouter(db: AppDb): Router {
         },
         {
           key: 'stage1_turnaround_7d',
-          label: '7-day avg Stage-1 turnaround',
+          // Measures intake-received → RN-picked-up-the-case, NOT letter delivery turnaround. The old
+          // "Stage-1 turnaround" label read as a sub-24h LETTER TAT, which is wrong (letter TAT is ~14
+          // days) — Ryan 2026-06-16. Label it for what it actually is: how fast we pick up new intakes.
+          label: 'Avg intake-to-pickup (7d)',
           value: stage1Turnaround.value,
           unit: 'hours',
           ...(stage1Turnaround.reason !== undefined ? { reason: stage1Turnaround.reason } : {}),

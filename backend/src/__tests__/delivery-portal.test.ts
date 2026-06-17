@@ -26,12 +26,17 @@ describe('delivery-token identity helpers', () => {
     expect(normalizeInputDob(undefined)).toBeNull();
   });
 
-  it('phoneLast4 is STRICT: clean 10/11-digit US numbers only — extensions/fragments are null', () => {
+  it('phoneLast4 takes the last 4 of WHATEVER number is on file — incl. international (Ryan 2026-06-17)', () => {
     expect(phoneLast4('(702) 555-1234')).toBe('1234');
     expect(phoneLast4('+1 702 555 1234')).toBe('1234');
-    // An extension would yield the WRONG last-4 ('2349') and brick the real veteran — must be null
-    // so the mint path falls to the needs-phone breadcrumb instead (adversarial-audit #4).
-    expect(phoneLast4('702-555-1234 ext 9')).toBeNull();
+    // International / country-code numbers MUST work — the old US-only rule returned null and silently
+    // locked out every veteran with a foreign number (Stanley Ewell, +49, could never unlock his letter).
+    expect(phoneLast4('(49) 17641659397')).toBe('9397');
+    expect(phoneLast4('+49 176 41659397')).toBe('9397');
+    // Extension edge: last-4 of the full digit string. Rare in a phone field; accepted tradeoff for the
+    // international fix — the veteran enters the last 4 of the number they actually gave us.
+    expect(phoneLast4('702-555-1234 ext 9')).toBe('2349');
+    // Fewer than 4 digits is genuinely unusable.
     expect(phoneLast4('123')).toBeNull();
     expect(phoneLast4(null)).toBeNull();
     expect(phoneLast4('')).toBeNull();

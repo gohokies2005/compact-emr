@@ -52,17 +52,19 @@ export function normalizeInputDob(s: unknown): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
 }
 
-/** Last 4 digits of a STORED phone number — STRICT: the digit string must be a clean US number
- * (exactly 10 digits, or 11 with a leading 1). Anything else — extensions ("…1234 ext 9" → last-4
- * "2349", NOT the line number), double numbers, fragments — returns null so identity mode is
- * never minted against a value the veteran could not possibly match (adversarial-audit #4: a
- * corrupt-but-"usable" phone silently marches the real veteran into lockout). */
+/** Last 4 digits of a STORED phone number. POLICY (Ryan 2026-06-17): take the last 4 of WHATEVER
+ * number is on file — US, international (+49…), or oddly formatted — because the veteran enters the
+ * last 4 of the number THEY gave us. The old "clean US only (10, or 11 with leading 1)" rule returned
+ * null for any country-code/foreign number, which silently LOCKED OUT every veteran with a non-US
+ * phone from their paid letter (Stanley Ewell, +49 13-digit number, could never unlock — identity
+ * verification failed closed on the null stored last-4 no matter what he typed). Only a number with
+ * fewer than 4 digits (genuinely unusable) returns null. (Tradeoff: a stored "…1234 ext 9" now yields
+ * "2349" — but extensions are vanishingly rare in a phone field, and the international lockout is real
+ * and recurring.) */
 export function phoneLast4(s: unknown): string | null {
   if (typeof s !== 'string') return null;
   const digits = s.replace(/\D/g, '');
-  if (digits.length === 10) return digits.slice(-4);
-  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(-4);
-  return null;
+  return digits.length >= 4 ? digits.slice(-4) : null;
 }
 
 function ctEqual(a: string, b: string): boolean {

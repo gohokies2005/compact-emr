@@ -95,8 +95,8 @@ describe('SendToDrafterPanel', () => {
     readinessMock.mockResolvedValue({ data: { ready: true, extractionState: 'extracting' } });
     renderPanel();
 
-    expect(await screen.findByText('Reading & extracting the full chart…')).toBeInTheDocument();
-    expect(screen.getByText(/Wait to draft until the chart finishes building/)).toBeInTheDocument();
+    expect(await screen.findByText('Preparing the chart for drafting…')).toBeInTheDocument();
+    expect(screen.getByText(/building the structured chart/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send to Drafter' })).toBeDisabled();
     // It is NOT shown as "ready" while extracting.
     expect(screen.queryByText('Chart is ready for drafting.')).not.toBeInTheDocument();
@@ -286,7 +286,7 @@ describe('SendToDrafterPanel', () => {
 
     // 202 preparing → arms auto-resume + invalidates readiness (refetch #2 → extracting).
     await waitFor(() => expect(postDraftMock).toHaveBeenCalledTimes(1));
-    await screen.findByText('Reading & extracting the full chart…');
+    await screen.findByText('Preparing the chart for drafting…');
 
     // The next poll/refetch flips readiness to chart_ready → the effect auto-submits with no human click.
     await queryClient.invalidateQueries({ queryKey: ['case', 'CASE-1', 'chart-readiness'] });
@@ -338,7 +338,7 @@ describe('SendToDrafterPanel — draft-gating characterization matrix', () => {
   const rows: Array<{ name: string; fixture: ChartReadinessResult; disabled: boolean; banner: string }> = [
     { name: 'ready', fixture: { ready: true }, disabled: false, banner: 'Chart is ready for drafting.' },
     { name: 'ready + chart_ready', fixture: { ready: true, extractionState: 'chart_ready' }, disabled: false, banner: 'Chart is ready for drafting.' },
-    { name: 'extracting (full-read running)', fixture: { ready: true, extractionState: 'extracting' }, disabled: true, banner: 'Reading & extracting the full chart…' },
+    { name: 'extracting (full-read running)', fixture: { ready: true, extractionState: 'extracting' }, disabled: true, banner: 'Preparing the chart for drafting…' },
     { name: 'ocr_in_progress', fixture: { ready: false, extractionState: 'ocr_in_progress' }, disabled: true, banner: 'Reading the documents…' },
     { name: 'P0: extract_failed (ready:true but FAILED → disabled)', fixture: { ready: true, extractionState: 'extract_failed' }, disabled: true, banner: 'Chart extraction failed' },
     { name: 'not ready (blocking file)', fixture: { ready: false, blockingFiles: [{ filePath: 'records/x.pdf', terminalStatus: 'manual_summary_required' }] }, disabled: true, banner: 'Chart is not ready for drafting' },

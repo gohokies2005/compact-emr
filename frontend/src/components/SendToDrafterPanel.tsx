@@ -275,12 +275,16 @@ export function SendToDrafterPanel({ caseId, claimType, claimedCondition, draftA
             <Spinner />
             <div>
               <h3 className="text-sm font-semibold text-sky-900">
-                {readiness?.extractionState === 'extracting' ? 'Reading & extracting the full chart…' : 'Reading the documents…'}
+                {/* Distinct wording from the "Chart extraction: 100%" coverage panel (that's page OCR,
+                    which IS done here). THIS stage is the full-chart semantic build that runs AFTER OCR
+                    — calling it "extracting" too made the two panels look contradictory (Ryan 2026-06-16:
+                    "says both 100% AND still processing"). */}
+                {readiness?.extractionState === 'extracting' ? 'Preparing the chart for drafting…' : 'Reading the documents…'}
               </h3>
               <p className="mt-1 text-sm text-sky-800">
-                Wait to draft until the chart finishes building (usually ~5 minutes). The drafter reads the
-                whole record and the pre-draft checks rely on the extracted chart, so the button unlocks
-                automatically the moment it&rsquo;s done — no need to refresh.
+                The pages are read; we&rsquo;re now building the structured chart the drafter and pre-draft
+                checks rely on (usually ~5 minutes). The button unlocks automatically the moment it&rsquo;s
+                done — no need to refresh.
               </p>
             </div>
           </div>

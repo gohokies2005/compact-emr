@@ -14,6 +14,9 @@ const base: ChartSliceData = {
   inServiceEvent: null,
   caseFraming: null,
   documentDigest: null,
+  emailThread: null,
+  staffNotes: null,
+  staffMessages: null,
 };
 
 describe('formatChartSlice', () => {
@@ -93,5 +96,27 @@ describe('formatChartSlice', () => {
     const { text } = formatChartSlice({ ...base, documentDigest: digest });
     expect(text).toContain('Documents on file: 2 (1 extracted)');
     expect(text).toContain('- rating.pdf · — · extracted · 3pp');
+  });
+
+  it('renders the email / staff-notes / staff-messages sections when present (Ask Aegis sees the whole chart)', () => {
+    const { text } = formatChartSlice({
+      ...base,
+      emailThread: '  [2026-06-15] Our team: Records request\n    Please upload your sleep study.',
+      staffNotes: '  [2026-06-14] Awaiting records from veteran.',
+      staffMessages: '  [2026-06-15] physician: confirmed PTSD already SC',
+    });
+    expect(text).toContain('Email correspondence');
+    expect(text).toContain('Please upload your sleep study.');
+    expect(text).toContain('Staff notes (internal');
+    expect(text).toContain('Awaiting records from veteran.');
+    expect(text).toContain('Internal staff messages on this case:');
+    expect(text).toContain('confirmed PTSD already SC');
+  });
+
+  it('omits the new sections entirely when null (no empty headers)', () => {
+    const { text } = formatChartSlice(base); // all three null
+    expect(text).not.toContain('Email correspondence');
+    expect(text).not.toContain('Staff notes (internal');
+    expect(text).not.toContain('Internal staff messages');
   });
 });

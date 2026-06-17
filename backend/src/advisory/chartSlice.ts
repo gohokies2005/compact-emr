@@ -32,6 +32,14 @@ export interface ChartSliceData {
   inServiceEvent: string | null;
   caseFraming: CaseFraming | null;
   documentDigest: string | null;
+  // The case/veteran email thread (our team ↔ veteran), most-recent window, already in the EMR (the
+  // Email tab — synced in, NOT a live Gmail connection). Lets Ask Aegis answer "what did I email him?".
+  // Rendered inside the same untrusted-data fence + PHI-redacted with the rest of the slice. (Ryan 2026-06-16.)
+  emailThread: string | null;
+  // Staff Notes (ChartNote, veteran-scoped) + internal staff Messages on this case (CaseMessage). Ask
+  // Aegis should see EVERYTHING in the chart (Ryan 2026-06-16) — the drafter does NOT get these.
+  staffNotes: string | null;
+  staffMessages: string | null;
 }
 
 export interface ChartSlice {
@@ -102,6 +110,22 @@ export function formatChartSlice(d: ChartSliceData): { text: string; conditions:
     lines.push('');
     lines.push(d.documentDigest);
   }
+  // Communication + internal record (Ask Aegis sees the whole chart; the drafter never gets these).
+  if (d.emailThread && d.emailThread.trim().length > 0) {
+    lines.push('');
+    lines.push('Email correspondence (our team ↔ veteran, most recent first window):');
+    lines.push(d.emailThread);
+  }
+  if (d.staffNotes && d.staffNotes.trim().length > 0) {
+    lines.push('');
+    lines.push('Staff notes (internal, chart-level):');
+    lines.push(d.staffNotes);
+  }
+  if (d.staffMessages && d.staffMessages.trim().length > 0) {
+    lines.push('');
+    lines.push('Internal staff messages on this case:');
+    lines.push(d.staffMessages);
+  }
 
   const conditions = Array.from(
     new Set(
@@ -123,6 +147,7 @@ interface ChartSliceRaw {
   claimedCondition: string;
   claimedConditions: string[] | null;
   upstreamScCondition: string | null;
+  veteranId: string | null;
   veteranStatement: string | null;
   inServiceEvent: string | null;
   veteran: {
@@ -165,6 +190,54 @@ async function buildDigestForCase(db: AppDb, caseId: string): Promise<string | n
   }
 }
 
+// Email thread: this case's rows + the veteran's chart-level (caseId-null) rows, most-recent window,
+// rendered oldest→newest. Already in the EMR (synced in) — no Gmail access. Fail-open to null.
+async function buildEmailThreadForCase(db: AppDb, caseId: string, veteranId: string | null): Promise<string | null> {
+  try {
+    const where = veteranId ? { OR: [{ caseId }, { veteranId }] } : { caseId };
+    const rows = await (db as unknown as {
+      email: { findMany: (a: { where: unknown; orderBy: { createdAt: 'desc' }; take: number; select: Record<string, true> }) => Promise<Array<{ direction: string; subject: string; body: string; receivedAt: Date | null; sentAt: Date | null; createdAt: Date }>> };
+    }).email.findMany({
+      where, orderBy: { createdAt: 'desc' }, take: 25,
+      select: { direction: true, subject: true, body: true, receivedAt: true, sentAt: true, createdAt: true },
+    });
+    if (!rows || rows.length === 0) return null;
+    return [...rows].reverse().map((e) => {
+      const who = String(e.direction).toLowerCase().startsWith('in') ? 'Veteran' : 'Our team';
+      const when = e.sentAt ?? e.receivedAt ?? e.createdAt;
+      const date = when ? new Date(when).toISOString().slice(0, 10) : '';
+      return `  [${date}] ${who}: ${oneLine(e.subject, 120)}\n    ${oneLine(e.body, 500)}`;
+    }).join('\n');
+  } catch { return null; }
+}
+
+// Staff notes (ChartNote, veteran-scoped), most-recent window. Fail-open.
+async function buildStaffNotesForCase(db: AppDb, veteranId: string | null): Promise<string | null> {
+  if (!veteranId) return null;
+  try {
+    const rows = await (db as unknown as {
+      chartNote: { findMany: (a: { where: { veteranId: string }; orderBy: { createdAt: 'desc' }; take: number; select: Record<string, true> }) => Promise<Array<{ body: string; createdAt: Date }>> };
+    }).chartNote.findMany({
+      where: { veteranId }, orderBy: { createdAt: 'desc' }, take: 30, select: { body: true, createdAt: true },
+    });
+    if (!rows || rows.length === 0) return null;
+    return [...rows].reverse().map((n) => `  [${n.createdAt ? new Date(n.createdAt).toISOString().slice(0, 10) : ''}] ${oneLine(n.body, 500)}`).join('\n');
+  } catch { return null; }
+}
+
+// Internal staff messages on this case (CaseMessage) — the customer-tagged thread. Fail-open.
+async function buildStaffMessagesForCase(db: AppDb, caseId: string): Promise<string | null> {
+  try {
+    const rows = await (db as unknown as {
+      caseMessage: { findMany: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; take: number; select: Record<string, true> }) => Promise<Array<{ body: string; senderRole: string; createdAt: Date }>> };
+    }).caseMessage.findMany({
+      where: { caseId }, orderBy: { createdAt: 'desc' }, take: 30, select: { body: true, senderRole: true, createdAt: true },
+    });
+    if (!rows || rows.length === 0) return null;
+    return [...rows].reverse().map((m) => `  [${m.createdAt ? new Date(m.createdAt).toISOString().slice(0, 10) : ''}] ${m.senderRole || 'staff'}: ${oneLine(m.body, 400)}`).join('\n');
+  } catch { return null; }
+}
+
 export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartSlice | null> {
   const c = (await db.case.findFirst({
     where: { id: caseId },
@@ -173,6 +246,7 @@ export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartS
       claimedCondition: true,
       claimedConditions: true,
       upstreamScCondition: true,
+      veteranId: true,
       veteranStatement: true,
       inServiceEvent: true,
       veteran: {
@@ -186,10 +260,15 @@ export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartS
   })) as ChartSliceRaw | null;
   if (c === null) return null;
 
-  // caseFraming (derived SSOT) + the document digest are best-effort enrichments — both fail-open to
-  // null so a hiccup in either path never blocks the answer.
-  const caseFraming = await deriveCaseFramingForCase(db, caseId).catch(() => null);
-  const documentDigest = await buildDigestForCase(db, caseId);
+  // All enrichments are best-effort + fail-open to null so a hiccup in any never blocks the answer.
+  // Run in parallel (each owns its own try/catch). emails/notes/messages are Ask-Aegis-only chart context.
+  const [caseFraming, documentDigest, emailThread, staffNotes, staffMessages] = await Promise.all([
+    deriveCaseFramingForCase(db, caseId).catch(() => null),
+    buildDigestForCase(db, caseId),
+    buildEmailThreadForCase(db, caseId, c.veteranId),
+    buildStaffNotesForCase(db, c.veteranId),
+    buildStaffMessagesForCase(db, caseId),
+  ]);
 
   const data: ChartSliceData = {
     claimType: c.claimType,
@@ -203,6 +282,9 @@ export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartS
     inServiceEvent: c.inServiceEvent,
     caseFraming,
     documentDigest,
+    emailThread,
+    staffNotes,
+    staffMessages,
   };
   const { text, conditions } = formatChartSlice(data);
   return { found: true, text: redactPhi(text), claimedCondition: c.claimedCondition, conditions };

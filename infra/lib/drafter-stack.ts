@@ -237,12 +237,12 @@ export class DrafterStack extends Stack {
     // message (in-flight / NotVisible) the depth stays >= 1, keeping the task alive until it
     // deletes the message on /complete. Cold start adds ~2-4 min before a queued job is picked up
     // (alarm period + image pull) — fine for the 15-20 min async drafting run.
-    // maxCapacity DRAFTER_MAX_CONCURRENCY (=6): lets a batch of independent drafts (distinct caseId =
-    // distinct FIFO group) fan out instead of serializing (2026-06-06). Hard ceiling is the Fargate
-    // On-Demand vCPU quota (30) ÷ 4 vCPU/task = 7 tasks; 6 leaves headroom. For >7, request an AWS
-    // quota increase (L-3032A538). The SAME const is injected as DRAFTER_MAX_CONCURRENCY on the API
-    // Lambda (api-stack.ts) so the queue-position UI's "drafter is full" threshold can never drift
-    // from this ceiling. NEVER hardcode the number in a second place.
+    // maxCapacity = DRAFTER_MAX_CONCURRENCY: lets a batch of independent drafts (distinct caseId =
+    // distinct FIFO group) fan out instead of serializing (2026-06-06). The real-world ceiling is the
+    // Fargate On-Demand vCPU quota (L-3032A538) ÷ 4 vCPU/task — at 100 vCPU that's 25 tasks (raised
+    // 2026-06-17). The SAME const is injected as DRAFTER_MAX_CONCURRENCY on the API Lambda
+    // (api-stack.ts) so the queue-position UI's "drafter is full" threshold can never drift from this
+    // ceiling. NEVER hardcode the number in a second place.
     const scaling = service.autoScaleTaskCount({ minCapacity: 0, maxCapacity: DRAFTER_MAX_CONCURRENCY });
     const queueDepth = new cloudwatch.MathExpression({
       expression: 'visible + inflight',
@@ -263,14 +263,12 @@ export class DrafterStack extends Stack {
       // maxCapacity did nothing and a batch serialized (2026-06-06). Set tasks = min(depth, 6) so N
       // independent queued drafts get N tasks and run concurrently (each pulls a distinct FIFO group).
       adjustmentType: appscaling.AdjustmentType.EXACT_CAPACITY,
+      // DERIVED from DRAFTER_MAX_CONCURRENCY so the step table can NEVER again top out below the cap
+      // (the old hand-listed table stopped at 6, so bumping the const alone was a silent no-op past 6 —
+      // audit 2026-06-17). tasks = min(depth, cap): depth d in [d, d+1) -> d tasks; depth >= cap -> cap.
       scalingSteps: [
         { upper: 0, change: 0 }, // no messages -> 0 tasks (scale-to-zero)
-        { lower: 1, change: 1 },
-        { lower: 2, change: 2 },
-        { lower: 3, change: 3 },
-        { lower: 4, change: 4 },
-        { lower: 5, change: 5 },
-        { lower: 6, change: 6 }, // depth >= 6 -> 6 tasks (maxCapacity ceiling)
+        ...Array.from({ length: DRAFTER_MAX_CONCURRENCY }, (_, i) => ({ lower: i + 1, change: i + 1 })),
       ],
       evaluationPeriods: 1,
       datapointsToAlarm: 1,

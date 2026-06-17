@@ -10,6 +10,8 @@ const CANONICAL_PATTERNS: Record<string, string> = {
   ssn_no_sep: '(?:SSN|SSAN|social security)\\D{0,12}\\d{9}\\b',
   va_file_number: '(?:VA\\s*File\\s*(?:Number|No\\.?|#)|C-?file(?:\\s*(?:Number|No\\.?|#))?)\\s*:?\\s*\\d{6,9}\\b',
   dob_labeled: '(?:DOB|date of birth|born(?:\\s+on)?)\\b\\s*:?\\s*\\d{1,2}[/-]\\d{1,2}[/-](?:19|20)\\d\\d',
+  phone: '(?:\\+?1[-.\\s]?)?\\(?\\d{3}\\)?[-.\\s]\\d{3}[-.\\s]\\d{4}\\b',
+  email_addr: '\\b[\\w.+-]+@[\\w-]+\\.[\\w.-]+\\b',
 };
 const CANONICAL_FLAGS = 'i';
 
@@ -34,8 +36,20 @@ describe('redactPhi', () => {
   it('redacts ALL occurrences, not just the first', () => {
     expect(redactPhi('123-45-6789 and 987-65-4321')).toBe('[REDACTED:ssn] and [REDACTED:ssn]');
   });
+  it('redacts a phone number (the email/note free-text leak)', () => {
+    expect(redactPhi('call him at (804) 555-0173 tomorrow')).toBe('call him at [REDACTED:phone] tomorrow');
+    expect(redactPhi('reached at 804-555-0173')).toContain('[REDACTED:phone]');
+  });
+  it('redacts an email address', () => {
+    expect(redactPhi('emailed edward.pichette@hotmail.com yesterday')).toBe('emailed [REDACTED:email_addr] yesterday');
+  });
   it('leaves clean text unchanged', () => {
     expect(redactPhi('chronic low back pain, no identifiers here')).toBe('chronic low back pain, no identifiers here');
+  });
+  it('does not mistake a citation/SSN/DOB for a phone number', () => {
+    expect(redactPhi('per Smith 2012;201(2):33')).toBe('per Smith 2012;201(2):33');
+    expect(redactPhi('SSN 123-45-6789')).toBe('SSN [REDACTED:ssn]'); // 3-2-4, not a 3-3-4 phone
+    expect(redactPhi('DOB: 03/15/1985')).toBe('[REDACTED:dob_labeled]'); // label is part of the match, not a phone
   });
 });
 

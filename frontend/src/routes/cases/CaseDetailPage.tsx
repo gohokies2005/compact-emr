@@ -413,11 +413,19 @@ export function CaseDetailPage() {
               </a>
             ) : null;
             return emailLink || bits.length ? (
-              <p className="mt-2 text-sm text-steel">
-                {emailLink}
-                {emailLink && bits.length ? '  ·  ' : ''}
-                {bits.join('  ·  ')}
-              </p>
+              <>
+                <p className="mt-2 text-sm text-steel">
+                  {emailLink}
+                  {emailLink && bits.length ? '  ·  ' : ''}
+                  {bits.join('  ·  ')}
+                </p>
+                {/* Gmail's compact compose hides the From row (no URL param controls it), so name the
+                    sending account here — the link is pinned to info@ via authuser (Ryan 2026-06-16:
+                    "I cannot even see what account this is sending from"). */}
+                {emailLink ? (
+                  <p className="mt-0.5 text-xs italic text-steel">Opens a Gmail compose sending from info@flatratenexus.com</p>
+                ) : null}
+              </>
             ) : null;
           })()}
           <p className="mt-1 text-xs text-harbor">Case {c.id} · {c.claimType} · <Link className="text-navy" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>chart</Link> · updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>

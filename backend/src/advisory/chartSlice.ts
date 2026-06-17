@@ -8,6 +8,7 @@
 
 import type { AppDb } from '../services/db-types.js';
 import { redactPhi } from './phiRedactor.js';
+import { listVeteranCorrespondence } from '../services/gmail-readonly.js';
 import { deriveCaseFramingForCase } from '../services/case-framing-stamp.js';
 import type { CaseFraming } from '../services/case-framing.js';
 import {
@@ -32,9 +33,10 @@ export interface ChartSliceData {
   inServiceEvent: string | null;
   caseFraming: CaseFraming | null;
   documentDigest: string | null;
-  // The case/veteran email thread (our team ↔ veteran), most-recent window, already in the EMR (the
-  // Email tab — synced in, NOT a live Gmail connection). Lets Ask Aegis answer "what did I email him?".
-  // Rendered inside the same untrusted-data fence + PHI-redacted with the rest of the slice. (Ryan 2026-06-16.)
+  // The case/veteran email thread (our team ↔ veteran), most-recent window, pulled from LIVE Gmail —
+  // the SAME source the EMR Email tab renders (gmail-readonly), so Ask Aegis sees what staff see. Lets
+  // it answer "what did I email him?". Rendered inside the same untrusted-data fence + PHI-redacted with
+  // the rest of the slice. (Ryan 2026-06-16: was reading the Email table, which the tab does NOT show.)
   emailThread: string | null;
   // Staff Notes (ChartNote, veteran-scoped) + internal staff Messages on this case (CaseMessage). Ask
   // Aegis should see EVERYTHING in the chart (Ryan 2026-06-16) — the drafter does NOT get these.
@@ -151,6 +153,7 @@ interface ChartSliceRaw {
   veteranStatement: string | null;
   inServiceEvent: string | null;
   veteran: {
+    email: string | null;
     scConditions: Array<{ condition: string; status: string; ratingPct: number | null; dcCode: string | null }>;
     activeProblems: Array<{ problem: string; icd10: string | null; notes: string | null }>;
     activeMedications: Array<{ drugName: string; indication: string | null }>;
@@ -190,23 +193,32 @@ async function buildDigestForCase(db: AppDb, caseId: string): Promise<string | n
   }
 }
 
-// Email thread: this case's rows + the veteran's chart-level (caseId-null) rows, most-recent window,
-// rendered oldest→newest. Already in the EMR (synced in) — no Gmail access. Fail-open to null.
-async function buildEmailThreadForCase(db: AppDb, caseId: string, veteranId: string | null): Promise<string | null> {
+// Parse an RFC-2822 / ISO date header to YYYY-MM-DD; fall back to a short trim of the raw value if
+// it won't parse (the Gmail Date header is occasionally non-standard).
+function isoDate(raw: string): string {
+  const t = Date.parse(raw);
+  return Number.isNaN(t) ? oneLine(raw, 24) : new Date(t).toISOString().slice(0, 10);
+}
+
+// Email thread: the LIVE Gmail correspondence with the veteran — the SAME source the EMR Email tab
+// renders (gmail-readonly listVeteranCorrespondence), so Ask Aegis sees exactly what staff see in the
+// chart. The EMR `Email` TABLE (email_log) is NOT what the Email tab shows (the tab calls
+// /cases/:id/gmail-thread, i.e. live Gmail), so reading the table here MISSED the live thread — e.g.
+// outbound staff notes that never sync into the table (Ryan 2026-06-16: "can you see that email in his
+// chart?" → it was an outbound note visible only in live Gmail). Metadata + Gmail snippet only (no body
+// fetch — cheap, cached 60s in the service, PHI-safe), rendered oldest→newest, redacted with the slice.
+// Fail-open to null: degrades silently when the gmail.readonly scope isn't granted or Gmail hiccups.
+async function buildEmailThreadForCase(vetEmail: string | null): Promise<string | null> {
+  if (!vetEmail || vetEmail.trim().length === 0) return null;
   try {
-    const where = veteranId ? { OR: [{ caseId }, { veteranId }] } : { caseId };
-    const rows = await (db as unknown as {
-      email: { findMany: (a: { where: unknown; orderBy: { createdAt: 'desc' }; take: number; select: Record<string, true> }) => Promise<Array<{ direction: string; subject: string; body: string; receivedAt: Date | null; sentAt: Date | null; createdAt: Date }>> };
-    }).email.findMany({
-      where, orderBy: { createdAt: 'desc' }, take: 25,
-      select: { direction: true, subject: true, body: true, receivedAt: true, sentAt: true, createdAt: true },
-    });
-    if (!rows || rows.length === 0) return null;
-    return [...rows].reverse().map((e) => {
-      const who = String(e.direction).toLowerCase().startsWith('in') ? 'Veteran' : 'Our team';
-      const when = e.sentAt ?? e.receivedAt ?? e.createdAt;
-      const date = when ? new Date(when).toISOString().slice(0, 10) : '';
-      return `  [${date}] ${who}: ${oneLine(e.subject, 120)}\n    ${oneLine(e.body, 500)}`;
+    const corr = await listVeteranCorrespondence(vetEmail);
+    if (!corr.available || corr.messages.length === 0) return null;
+    // The service returns newest-first; take the recent window and render oldest→newest.
+    const recent = corr.messages.slice(0, 25).reverse();
+    return recent.map((m) => {
+      const who = m.direction === 'inbound' ? 'Veteran' : 'Our team';
+      const date = m.date ? isoDate(m.date) : '';
+      return `  [${date}] ${who}: ${oneLine(m.subject, 120)}\n    ${oneLine(m.snippet, 400)}`;
     }).join('\n');
   } catch { return null; }
 }
@@ -251,6 +263,7 @@ export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartS
       inServiceEvent: true,
       veteran: {
         select: {
+          email: true,
           scConditions: { select: { condition: true, status: true, ratingPct: true, dcCode: true } },
           activeProblems: { select: { problem: true, icd10: true, notes: true } },
           activeMedications: { select: { drugName: true, indication: true } },
@@ -265,7 +278,7 @@ export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartS
   const [caseFraming, documentDigest, emailThread, staffNotes, staffMessages] = await Promise.all([
     deriveCaseFramingForCase(db, caseId).catch(() => null),
     buildDigestForCase(db, caseId),
-    buildEmailThreadForCase(db, caseId, c.veteranId),
+    buildEmailThreadForCase(c.veteran?.email ?? null),
     buildStaffNotesForCase(db, c.veteranId),
     buildStaffMessagesForCase(db, caseId),
   ]);

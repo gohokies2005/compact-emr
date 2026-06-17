@@ -353,6 +353,7 @@ export function createChartReadinessRouter(db: AppDb): Router {
       const ctx: SanityContext = {
         stage: b['stage'] === 'post_draft' ? 'post_draft' : 'pre_draft',
         claimedCondition,
+        veteranTheory: str(b['veteranTheory'], 2_000), // the veteran's own goal — paragraph allowed
         theory: str(b['theory'], 400),
         scConditions: arr(b['scConditions'], 30, 120),
         keyFacts: arr(b['keyFacts'], 20, 240),

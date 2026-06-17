@@ -16,6 +16,9 @@ export interface SanityImpression {
 export interface SanityContextInput {
   readonly stage: 'pre_draft' | 'post_draft';
   readonly claimedCondition: string;
+  // The veteran's OWN stated goal (their words) — lets the check recognize a non-standard but legitimate
+  // request (a Character-of-Discharge §3.354 insanity IMO, etc.) the rigid engine framing mislabels.
+  readonly veteranTheory?: string | null;
   readonly theory?: string | null;
   readonly scConditions?: readonly string[];
   readonly keyFacts?: readonly string[];

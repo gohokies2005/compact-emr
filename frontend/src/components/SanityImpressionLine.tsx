@@ -100,6 +100,7 @@ export function PreDraftSanityImpression({ caseId, claimedCondition }: {
   const context: SanityContextInput = {
     stage: 'pre_draft',
     claimedCondition,
+    veteranTheory: p.proposedMechanism ?? null, // the veteran's own words — weighed over the engine label
     theory: p.primaryArgument ?? null,
     scConditions: chart.scConditions,
     keyFacts: chart.keyFacts,
@@ -133,6 +134,7 @@ export function PostDraftSanityImpression({ caseId, claimedCondition }: {
   const context: SanityContextInput = {
     stage: 'post_draft',
     claimedCondition,
+    veteranTheory: strategy.data?.data?.proposedMechanism ?? null,
     theory: strategy.data?.data?.primaryArgument ?? null,
     scConditions: chart.scConditions,
     keyFacts: chart.keyFacts,

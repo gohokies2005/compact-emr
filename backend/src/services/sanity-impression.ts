@@ -41,7 +41,13 @@ export interface SanityImpression {
 export interface SanityContext {
   readonly stage: 'pre_draft' | 'post_draft';
   readonly claimedCondition: string;
-  // The chosen theory / framing / anchor in plain words (e.g. "OSA secondary to service-connected PTSD").
+  // The VETERAN'S OWN stated goal/request, in their words — the highest-signal input for "what do they
+  // actually want". Often reveals a NON-standard but legitimate opinion (a Character-of-Discharge
+  // §3.354 insanity IMO, a competency or aid-and-attendance opinion) that the rigid SC-anchor engine
+  // mislabels as "not supportable" / "redundant". The reviewer should weigh this over the engine's label.
+  readonly veteranTheory?: string | null;
+  // The ENGINE'S chosen theory / framing / anchor in plain words (e.g. "OSA secondary to SC PTSD").
+  // This can be WRONG or too narrow for an unusual case — it is the engine's guess, not ground truth.
   readonly theory?: string | null;
   // Service-connected conditions on file (anchors available to the argument).
   readonly scConditions?: readonly string[];
@@ -89,6 +95,15 @@ const PRE_DRAFT_SYSTEM =
   'missed condition? Is the plan leaning on something from records that were NOT fully read? Is the ' +
   'mechanism plausible in its established physiologic direction (a nonsensical chain like "wrist pain ' +
   'causing PTSD" is a Concern)?\n' +
+  'IMPORTANT — read the VETERAN\'S OWN stated goal first, and judge against THAT, not the engine\'s ' +
+  'auto-framing. The engine assumes a standard nexus/service-connection claim and can mislabel an ' +
+  'unusual but LEGITIMATE request as "not supportable" or "redundant". Many real cases are not standard ' +
+  'SC claims at all — e.g. a Character-of-Discharge opinion under 38 CFR 3.354(a) (was mental illness ' +
+  'severe enough at the time of misconduct to meet the insanity exception), a competency opinion, an ' +
+  'aid-and-attendance opinion, an opinion on severity/increase, or a secondary/aggravation pathway. If ' +
+  'the veteran is clearly asking for one of these and the engine forced it into the wrong box, SAY SO ' +
+  'plainly and put it in context (what the opinion actually needs to address) — do not just echo the ' +
+  'engine\'s "not supportable". A genuinely confused or contradictory request is still a Concern.\n' +
   'HIGH BAR: most cases are Clear — only raise Caution or Concern when something is genuinely off. Be ' +
   'brief; this is a one-line gut-check, not a review. Record it with the record_impression tool.';
 
@@ -96,9 +111,12 @@ const POST_DRAFT_SYSTEM =
   'You are a careful reviewer — a primary-care physician, a VA rater, and a VA-claims lawyer in one — ' +
   'reading a finished VA nexus letter cold, AFTER it was drafted and graded. You are given the draft and ' +
   'its grade.\n' +
-  'Ask yourself: Does the letter make sense and actually support its own opinion? Did it miss anything ' +
-  'big? Does it overreach or rely on facts not in the record? Your impression should EXPAND on the grade ' +
-  'in plain language — what a thoughtful colleague would say in passing.\n' +
+  'Ask yourself: Does the letter make sense and actually support its own opinion? Did it ANSWER what the ' +
+  'veteran actually asked for (read their stated goal — an unusual but legitimate request like a ' +
+  'Character-of-Discharge 38 CFR 3.354(a) insanity opinion or a competency/aid-and-attendance opinion is ' +
+  'valid; flag if the letter wrote a standard nexus instead)? Did it miss anything big or overreach or ' +
+  'rely on facts not in the record? Your impression should EXPAND on the grade in plain language — what ' +
+  'a thoughtful colleague would say in passing.\n' +
   'HIGH BAR: most letters are Clear — only Caution/Concern when something is genuinely off. If the letter ' +
   'is sound, the correct impression is Clear with an EMPTY missed field — do NOT manufacture a concern to ' +
   'fill the field. Keep it to 1–3 sentences. Record it with the record_impression tool.';
@@ -106,7 +124,8 @@ const POST_DRAFT_SYSTEM =
 function renderContext(ctx: SanityContext): string {
   const lines: string[] = [];
   lines.push(`Claimed condition: ${ctx.claimedCondition}`);
-  if (ctx.theory) lines.push(`Chosen theory/anchor: ${ctx.theory}`);
+  if (ctx.veteranTheory) lines.push(`Veteran's OWN stated goal (their words — weigh this heavily): ${ctx.veteranTheory}`);
+  if (ctx.theory) lines.push(`Engine's auto-framing (a guess — may be wrong/too narrow): ${ctx.theory}`);
   if (ctx.scConditions && ctx.scConditions.length > 0) lines.push(`Service-connected on file: ${ctx.scConditions.join('; ')}`);
   if (ctx.keyFacts && ctx.keyFacts.length > 0) lines.push(`Key facts:\n- ${ctx.keyFacts.join('\n- ')}`);
   if (ctx.coverageNote) lines.push(`Records capture: ${ctx.coverageNote}`);

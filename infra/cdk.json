@@ -1,7 +1,7 @@
 {
   "app": "npx tsx bin/compact-emr.ts",
   "context": {
-    "drafter_image_tag": "d0e5ea8-drafter50",
+    "drafter_image_tag": "fcbe92f",
     "email_redirect_all_to": "",
     "render_image_tag": "81c0046-render-lambda",
     "chart_autofill": "on",

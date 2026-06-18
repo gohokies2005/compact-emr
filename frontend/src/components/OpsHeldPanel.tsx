@@ -118,18 +118,19 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
         </div>
 
         <div className="flex flex-wrap gap-2">
-          {/* Single recovery action (Ryan 2026-06-18): "Resume draft" — NO "re-draft from scratch" option.
-              NOTE: until the drafter checkpoint/resume build lands, Resume RE-RUNS the draft (it does not
-              yet pick up from the last completed phase); the RN UX is one clean Resume button either way,
-              and the resume becomes token-saving once checkpointing ships. */}
+          {/* Single recovery action (Ryan 2026-06-18). INTERIM HONESTY (2026-06-18): until the drafter
+              checkpoint/resume build lands, this RE-RUNS THE WHOLE DRAFT from the start (~$15) — it does
+              NOT yet pick up from the last completed phase. The confirm says so plainly so nobody burns a
+              full draft expecting a cheap continue. For a small change, the surgical / guided edit on the
+              letter page is the cheap path — this button is only for a genuine full restart. */}
           <Button
             type="button"
             variant="primary"
             loading={rerunMutation.isPending}
             disabled={rerunMutation.isPending}
-            onClick={() => { if (window.confirm('Resume this draft? It runs the draft to finish the letter (about a 20-minute run).')) rerunMutation.mutate(); }}
+            onClick={() => { if (window.confirm('This re-runs the ENTIRE draft from the start — a full ~$15 run (about 20 minutes). It does NOT yet resume from where it stopped. For a small fix, use the surgical or guided edit on the letter instead. Re-run the full draft?')) rerunMutation.mutate(); }}
           >
-            Resume draft
+            Re-run full draft
           </Button>
 
           {hasLetter && onViewLetter ? (

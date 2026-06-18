@@ -113,7 +113,7 @@ describe('OpsHeldPanel', () => {
     expect(screen.getByText('Drafting was interrupted')).toBeInTheDocument();
     // hasLetter is not passed → the no-letter copy variant; single "Resume draft" action, no "from scratch".
     expect(screen.getByText(/This draft was interrupted before it finished/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Resume draft' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Re-run full draft' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /from scratch/i })).not.toBeInTheDocument();
     // The case-specific operator message still renders beneath the plain-language summary.
     expect(
@@ -127,7 +127,7 @@ describe('OpsHeldPanel', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     renderPanel();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Resume draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Re-run full draft' }));
 
     await waitFor(() => {
       expect(postDraftMock).toHaveBeenCalledWith('CASE-2');
@@ -139,7 +139,7 @@ describe('OpsHeldPanel', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     renderPanel();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Resume draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Re-run full draft' }));
 
     expect(postDraftMock).not.toHaveBeenCalled();
     confirmSpy.mockRestore();

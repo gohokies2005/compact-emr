@@ -936,7 +936,21 @@ function DocumentsTab({ veteranId, caseId, role }: { readonly veteranId: string;
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ['documents', veteranId], queryFn: () => listDocuments(veteranId), enabled: veteranId.length > 0 });
   const [viewDoc, setViewDoc] = useState<ViewableDoc | null>(null);
-  const reocr = useMutation({ mutationFn: reocrDocument, onSuccess: () => window.alert('Re-running OCR on this file (Textract → Claude fallback). Refresh in a minute to see it read.') });
+  // Per-doc Re-OCR cooldown (Ryan 2026-06-18 cost-safety, RN red-team #1): the bare per-row "Re-run OCR"
+  // had NO confirm and re-enabled the instant the POST returned, so a confused RN who clicked, saw the
+  // row not visibly change, and clicked again sprayed PAID vision re-reads — the "$45" pattern per-file.
+  // Fix: a cost confirm + a 90s per-doc cooldown that keeps the button disabled + labeled "Re-reading…"
+  // after a fire, so a rapid re-click can't re-spend on the same file.
+  const [reocrCoolingDoc, setReocrCoolingDoc] = useState<Set<string>>(new Set());
+  const reocr = useMutation({
+    mutationFn: reocrDocument,
+    onSuccess: (_data, docId) => {
+      setReocrCoolingDoc((prev) => new Set(prev).add(docId));
+      setTimeout(() => setReocrCoolingDoc((prev) => { const next = new Set(prev); next.delete(docId); return next; }), 90_000);
+      window.alert('Re-reading this file now (about a minute). The row stays marked "Re-reading…" so you don’t need to click again.');
+    },
+    onError: () => window.alert('Could not start re-reading this file. Please retry.'),
+  });
   // Delete a misuploaded/junk file from RIGHT HERE on the case page (Ryan 2026-06-14: "I DON'T HAVE A
   // DELETE BUTTON" — the only delete lived on the veteran chart, not where he works). Same deleteDocument
   // API + same explicit confirm as the chart (removes the file AND its parsed text from the veteran's
@@ -989,7 +1003,21 @@ function DocumentsTab({ veteranId, caseId, role }: { readonly veteranId: string;
               meta={[d.autoTitle ? d.filename : (d.docTag ?? 'Other'), formatFileSize(d.sizeBytes), formatPageCount(d.pageCount), formatRelativeTime(d.uploadedAt)].filter(Boolean).join(' · ')}
               trailing={
                 <span className="flex items-center gap-3">
-                  <RowAction disabled={reocr.isPending} title="Re-run OCR (Textract → Claude fallback) — use if this file shows as unreadable" onClick={(e) => { e.stopPropagation(); reocr.mutate(d.id); }}>Re-run OCR</RowAction>
+                  {(() => {
+                    const cooling = reocrCoolingDoc.has(d.id) || (reocr.isPending && reocr.variables === d.id);
+                    return (
+                      <RowAction
+                        disabled={reocr.isPending || cooling}
+                        title="Re-read this file with AI (only if it shows as unreadable) — costs money"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (window.confirm(`Re-read "${d.filename}" with AI? This costs money — only do it if the file shows as unreadable.`)) reocr.mutate(d.id);
+                        }}
+                      >
+                        {cooling ? 'Re-reading…' : 'Re-run OCR'}
+                      </RowAction>
+                    );
+                  })()}
                   {canDelete ? (
                     <RowAction kind="danger" disabled={del.isPending} title="Delete this file (use for a misuploaded or junk file)" onClick={(e) => { e.stopPropagation(); if (window.confirm(`Delete "${d.filename}"? This removes the file and its parsed text from this veteran's chart for ALL of their claims. Use this only for a file uploaded to the wrong place.`)) del.mutate(d.id); }}>Delete</RowAction>
                   ) : null}

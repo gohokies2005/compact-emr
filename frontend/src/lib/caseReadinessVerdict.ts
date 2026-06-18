@@ -1,0 +1,314 @@
+// Case Readiness Verdict — THE one brain for the Overview's single go/no-go (2026-06-18, Cluster 3).
+//
+// Ryan: the Overview showed 4+ chips from independent engines that contradict each other, so an RN
+// couldn't tell go/no-go. This module reconciles them into ONE top-line verdict + next action +
+// explicit disagreements. It is a PURE function over signals the Overview ALREADY fetches — it makes
+// NO new model call and introduces NO new clinical threshold. recommendedPlan() (the existing plan
+// selector) is re-exported from here and delegates to this, so there is exactly ONE implementation
+// (no frontend/backend divergence; RecommendedPlanCard is untouched).
+//
+// Design rules baked in (dual-expert QA 2026-06-18):
+//  • DETERMINISTIC CORE first: the theory plan keys on the strategy tier (Stop → anchor-switch →
+//    strength), exactly as before — the deterministic engine sees a missing dx / barred theory the
+//    info-light viability band cannot.
+//  • OVER-CALL GUARD: an unreviewed mechanism (the resolver's recommended_action → escalate/physician)
+//    never reads as a clean "draft" — it becomes "draft, confirm the mechanism with the physician".
+//  • EXTRACTION = add-caution-only, CONSERVATIVE (Ryan 2026-06-18): an incomplete parse LOWERS
+//    confidence + adds a "read the chart first" note; it does NOT by itself flip a supportable theory
+//    to not-supportable (a thin parse that still caught the rating decision is fine). It DOES soften a
+//    "request records" into "read the chart first" — never chase a record that may be in the unread chart.
+//  • AI SANITY = add-caution-only, ASYMMETRIC: a 'concern' raises an explicit disagreement + lowers
+//    confidence, but NEVER silently moves the deterministic verdict; a 'clear' has ZERO authority to
+//    relax any deterministic caution; 'unavailable' (null) is NOT 'clear'. The LLM may ADD caution,
+//    never REMOVE it.
+//  • Every signal has an explicit UNAVAILABLE (null) state distinct from its negative; a missing input
+//    degrades confidence toward 'low' / the verdict toward needs_review, never toward a confident draft.
+
+import type { StrategyPreview } from '../api/strategy-preview';
+import type { CaseViability, BridgePathway } from '../api/case-viability';
+import type { ExtractionCoverage } from '../api/extraction-coverage';
+import type { ImpressionLevel } from '../api/sanity-impression';
+
+// ── The detailed plan (unchanged shape — RecommendedPlanCard consumes this) ──────────────────────
+export type RecommendationKind =
+  | 'draft'
+  | 'draft_with_changes'
+  | 'contact_records'
+  | 'contact_alternative'
+  | 'not_draftable'
+  | 'needs_review';
+
+export interface RecommendedPlan {
+  readonly kind: RecommendationKind;
+  readonly title: string;
+  readonly detail: string;
+  readonly switchToAnchor?: string;
+  readonly bridge?: BridgePathway;
+  readonly missingFact?: string;
+  readonly emailEligible: boolean;
+}
+
+export interface RecommendedPlanInputs {
+  readonly strategy: StrategyPreview | null;
+  readonly viability: CaseViability | null;
+  /** Part of the record is still unread — softens "request records" into "read the chart first". */
+  readonly hasUnreadPages?: boolean;
+}
+
+function contactAlternative(bridge: BridgePathway): RecommendedPlan {
+  return {
+    kind: 'contact_alternative',
+    title: 'Contact the veteran — alternative route',
+    detail: `No direct service-connected anchor, but a presumptive route may work: establish ${bridge.intermediate_dx} first, then claim ${bridge.claimed} secondary to it.`,
+    bridge,
+    emailEligible: true,
+  };
+}
+function contactRecords(missingFact: string): RecommendedPlan {
+  return { kind: 'contact_records', title: 'Contact the veteran — records needed', detail: missingFact, missingFact, emailEligible: true };
+}
+function needsReview(detail: string): RecommendedPlan {
+  return { kind: 'needs_review', title: 'Needs review', detail, emailEligible: false };
+}
+function notDraftable(detail: string): RecommendedPlan {
+  return { kind: 'not_draftable', title: 'Not supportable as filed', detail, emailEligible: false };
+}
+
+/**
+ * The DETERMINISTIC theory plan (unchanged precedence: Stop → anchor-switch → strength). Pure;
+ * null only when no engine read exists yet. This is the deterministic CORE the verdict builds on.
+ */
+export function recommendedPlan({ strategy, viability, hasUnreadPages = false }: RecommendedPlanInputs): RecommendedPlan | null {
+  if (strategy === null && viability === null) return null;
+  const bridge = viability?.bridge_pathways?.[0];
+  const missingFact = (viability?.missing_fact ?? '').trim() || null;
+
+  const contactFallback = (): RecommendedPlan => {
+    if (bridge) return contactAlternative(bridge);
+    if (hasUnreadPages) return needsReview('Part of the record is still unread — finish extraction before deciding the plan.');
+    if (missingFact) return contactRecords(missingFact);
+    return notDraftable('No recognized service-connected anchor and no presumptive route on the current record.');
+  };
+
+  if (strategy?.tier === 'Stop') return contactFallback();
+
+  if (strategy?.recommendedPathway?.differsFromCurrent && strategy.recommendedPathway.anchor) {
+    const anchor = strategy.recommendedPathway.anchor;
+    return {
+      kind: 'draft_with_changes',
+      title: 'Draft — with a stronger anchor',
+      detail: `The record better supports anchoring on ${anchor} than the current framing. Draft anchored on ${anchor}.`,
+      switchToAnchor: anchor,
+      emailEligible: false,
+    };
+  }
+
+  if (strategy?.tier === 'Strong' || strategy?.tier === 'Plausible') {
+    return { kind: 'draft', title: 'Draft the letter', detail: 'A recognized, supportable theory is on the record.', emailEligible: false };
+  }
+  if (strategy?.tier === 'Thin') return contactFallback();
+
+  const band = viability?.viability;
+  if (band === 'strong' || band === 'moderate' || band === 'conditional') {
+    return { kind: 'draft', title: 'Draft the letter', detail: 'A recognized, supportable anchor is on the record.', emailEligible: false };
+  }
+  return contactFallback();
+}
+
+// ── The reconciled top-line verdict ──────────────────────────────────────────────────────────────
+export type ReadinessVerdict =
+  | 'draft' // clean go
+  | 'draft_confirm_mechanism' // go, but the anchor mechanism is not physician-reviewed
+  | 'draft_with_changes' // go, with a stronger anchor than the current framing
+  | 'read_chart_first' // the chart isn't fully read — finish before deciding
+  | 'contact_records' // a specific record is needed from the veteran
+  | 'contact_alternative' // a presumptive/bridge route to pursue
+  | 'not_supportable' // no anchor and no route on the current record
+  | 'needs_review'; // signals conflict / too little to decide → a human looks
+
+export type Confidence = 'high' | 'medium' | 'low';
+export type DisagreementSource = 'ai_sanity' | 'extraction' | 'viability_vs_strategy';
+export interface Disagreement {
+  readonly source: DisagreementSource;
+  readonly note: string;
+}
+
+export interface ReadinessResult {
+  readonly verdict: ReadinessVerdict;
+  readonly title: string;
+  /** One-line plain-language summary of the verdict (no fabricated rationale). */
+  readonly detail: string;
+  /** The single concrete next action for the RN. */
+  readonly nextAction: string;
+  readonly confidence: Confidence;
+  /** Explicit, structured engine-vs-engine / engine-vs-AI disagreements (first-class, not an error). */
+  readonly disagreements: readonly Disagreement[];
+  /** The detailed plan (RecommendedPlanCard renders this) — same brain, fuller view. */
+  readonly plan: RecommendedPlan;
+}
+
+export interface ReadinessSignals {
+  readonly strategy: StrategyPreview | null; // null = unavailable
+  readonly viability: CaseViability | null; // null = unavailable
+  /**
+   * The DECISION input for "is the chart fully read" — sourced ONCE by the parent (the same
+   * useChartReadiness value RecommendedPlanCard receives) so the headline and the detail card can't
+   * disagree. true = unread pages exist; false = fully read; null = unknown (not asserted unread).
+   */
+  readonly hasUnreadPages: boolean | null;
+  /** DISPLAY-ONLY: the coverage report, for the % in the disagreement note. Never the decision input. */
+  readonly extraction: ExtractionCoverage | null; // null = report unavailable
+  readonly sanity: ImpressionLevel | null; // null = unavailable (NOT 'clear')
+}
+
+const VERDICT_TITLE: Record<ReadinessVerdict, string> = {
+  draft: 'Ready to draft',
+  draft_confirm_mechanism: 'Draftable — confirm the mechanism',
+  draft_with_changes: 'Draftable — with a stronger anchor',
+  read_chart_first: 'Read the chart first',
+  contact_records: 'Contact the veteran — records needed',
+  contact_alternative: 'Contact the veteran — alternative route',
+  not_supportable: 'Not supportable as filed',
+  needs_review: 'Needs review',
+};
+
+function lower(c: Confidence): Confidence {
+  return c === 'high' ? 'medium' : 'low';
+}
+
+/** The deterministic over-call signal: the resolver routed an UNREVIEWED green-band anchor to a
+ *  physician (consumed, never re-derived — same predicate the viability card uses). */
+function isUnreviewedOvercall(v: CaseViability | null): boolean {
+  if (!v) return false;
+  const green = v.viability === 'strong' || v.viability === 'moderate' || v.viability === 'conditional';
+  const ra = v.recommended_action;
+  return green && v.best_anchor?.physician_reviewed === false && ra?.action === 'escalate' && ra?.route === 'physician';
+}
+
+/**
+ * Reconcile the four signals into ONE verdict. Pure. Returns null only when nothing is computed yet
+ * (the same hide condition as recommendedPlan). Builds on the deterministic plan, then layers the
+ * over-call guard, the conservative extraction overlay, and the asymmetric add-caution-only sanity
+ * overlay — each surfaced as an explicit disagreement, never a silent band change.
+ */
+export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessResult | null {
+  const { strategy, viability, extraction, sanity } = signals;
+  const hasUnreadPages = signals.hasUnreadPages === true; // single-sourced by the parent; null ≠ unread
+
+  const plan = recommendedPlan({ strategy, viability, hasUnreadPages });
+  if (plan === null) return null; // nothing computed yet → hide the surface
+
+  const disagreements: Disagreement[] = [];
+  // Base confidence from the deterministic strength signal.
+  let confidence: Confidence =
+    strategy?.tier === 'Strong' ? 'high'
+    : strategy?.tier === 'Plausible' ? 'medium'
+    : strategy?.tier === 'Thin' || strategy?.tier === 'Stop' ? 'low'
+    : viability?.viability === 'strong' || viability?.viability === 'moderate' ? 'medium'
+    : 'low';
+
+  // A go-plan with only a viability fallback (no strategy read) is inherently less certain.
+  if (strategy === null && (plan.kind === 'draft')) confidence = lower(confidence);
+
+  // ── viability-vs-strategy disagreement (explicit, not silent) ──
+  const goPlan = plan.kind === 'draft' || plan.kind === 'draft_with_changes';
+  const bandWeak = viability?.viability === 'weak' || viability?.viability === 'abstain';
+  if (goPlan && bandWeak) {
+    disagreements.push({
+      source: 'viability_vs_strategy',
+      note: 'The strategy engine reads this as supportable but the anchor-viability engine is weak/abstaining — reconcile the anchor before drafting.',
+    });
+    confidence = lower(confidence);
+  }
+
+  // ── OVER-CALL guard: applies to BOTH go-plans (draft AND draft_with_changes) — an unreviewed winning
+  //    mechanism must never ship as a clean green "go". For a plain draft the verdict itself downgrades
+  //    to draft_confirm_mechanism; an anchor-switch stays draft_with_changes (already a non-clean go) but
+  //    gets the same confirm-the-mechanism disagreement + confidence hit. ──
+  const overcall = (plan.kind === 'draft' || plan.kind === 'draft_with_changes') && isUnreviewedOvercall(viability);
+  if (overcall) {
+    confidence = lower(confidence);
+    disagreements.push({
+      source: 'viability_vs_strategy',
+      note: viability?.recommended_action?.reason
+        ?? 'The anchor mechanism is not physician-reviewed — confirm the medicine with the physician before drafting.',
+    });
+  }
+
+  // ── map the plan kind → the top-line verdict ──
+  let verdict: ReadinessVerdict;
+  if (plan.kind === 'draft') {
+    verdict = overcall ? 'draft_confirm_mechanism' : 'draft';
+  } else if (plan.kind === 'draft_with_changes') {
+    verdict = 'draft_with_changes';
+  } else if (plan.kind === 'contact_records') {
+    verdict = 'contact_records';
+  } else if (plan.kind === 'contact_alternative') {
+    verdict = 'contact_alternative';
+  } else if (plan.kind === 'not_draftable') {
+    verdict = 'not_supportable';
+  } else {
+    verdict = 'needs_review';
+  }
+
+  // Conservative extraction overlay (Ryan 2026-06-18): a NEGATIVE verdict reached on a chart that is
+  // not fully read becomes "read the chart first" — never conclude "not supportable" / "request a
+  // record" / "needs review" on an incomplete parse (the record may be in the unread pages). A GO
+  // verdict is NOT downgraded (it only loses confidence, handled below); a found bridge route stands.
+  if (hasUnreadPages && (verdict === 'contact_records' || verdict === 'not_supportable' || verdict === 'needs_review')) {
+    verdict = 'read_chart_first';
+  }
+
+  // ── extraction overlay: incomplete parse lowers confidence + is surfaced (never flips supportable).
+  //    Decision input (hasUnreadPages) is single-sourced; extraction is DISPLAY-ONLY for the % detail. ──
+  if (hasUnreadPages) {
+    confidence = lower(confidence);
+    const pct = extraction?.coveragePct;
+    disagreements.push({
+      source: 'extraction',
+      note: typeof pct === 'number'
+        ? `Only ${pct}% of the record is read — finish extraction before finalizing the plan.`
+        : 'Part of the record is still unread — finish extraction before finalizing the plan.',
+    });
+  } else if (signals.hasUnreadPages === null) {
+    // Read-state unknown is NOT "fully read" — note it and stay cautious, but don't block.
+    disagreements.push({ source: 'extraction', note: 'Chart read-state unavailable — confirm the record is fully read.' });
+    confidence = lower(confidence);
+  }
+
+  // ── AI sanity overlay: ADD-CAUTION-ONLY, asymmetric. concern/caution flag + lower; clear/unavailable do nothing. ──
+  if (sanity === 'concern') {
+    confidence = lower(confidence);
+    disagreements.push({ source: 'ai_sanity', note: 'The AI sanity check flagged a CONCERN about this case — review it before proceeding.' });
+  } else if (sanity === 'caution') {
+    confidence = lower(confidence);
+    disagreements.push({ source: 'ai_sanity', note: 'The AI sanity check flagged a CAUTION — give the case a closer look.' });
+  }
+  // sanity === 'clear' → no effect (it may never RELAX a deterministic caution).
+  // sanity === null (unavailable) → no effect (absence is not all-clear).
+
+  const nextAction = nextActionFor(verdict, plan, disagreements);
+  return { verdict, title: VERDICT_TITLE[verdict], detail: plan.detail, nextAction, confidence, disagreements, plan };
+}
+
+function nextActionFor(verdict: ReadinessVerdict, plan: RecommendedPlan, disagreements: readonly Disagreement[]): string {
+  switch (verdict) {
+    case 'draft':
+      return 'Send to the drafter.';
+    case 'draft_confirm_mechanism':
+      return 'Confirm the mechanism with the physician, then send to the drafter.';
+    case 'draft_with_changes':
+      return plan.switchToAnchor ? `Draft anchored on ${plan.switchToAnchor}.` : 'Draft with the stronger anchor.';
+    case 'read_chart_first':
+      return 'Finish reading the chart, then re-check the plan.';
+    case 'contact_records':
+      return plan.missingFact ? `Request from the veteran: ${plan.missingFact}` : 'Request the missing record from the veteran.';
+    case 'contact_alternative':
+      return 'Contact the veteran about the alternative (presumptive) route.';
+    case 'not_supportable':
+      return 'Discuss other conditions to consider before declining.';
+    case 'needs_review':
+    default:
+      return disagreements.length > 0 ? 'Resolve the flagged disagreement before proceeding.' : 'A reviewer should take a look.';
+  }
+}

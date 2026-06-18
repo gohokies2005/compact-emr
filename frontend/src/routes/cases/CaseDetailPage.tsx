@@ -45,6 +45,7 @@ import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopP
 import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 import { CaseViabilityCard } from '../../components/CaseViabilityCard';
 import { RecommendedPlanCard } from '../../components/RecommendedPlanCard';
+import { CaseReadinessVerdictCard } from '../../components/CaseReadinessVerdictCard';
 import { PreDraftSanityImpression, PostDraftSanityImpression } from '../../components/SanityImpressionLine';
 import { useChartReadiness } from '../../hooks/useChartReadiness';
 import { formatRelativeTime } from '../../lib/date';
@@ -583,6 +584,18 @@ export function CaseDetailPage() {
 
                   {/* 1. Background & argument + the veteran's theory (subjective). The card now
                       self-wraps in SectionCard (Phase 2 uniform-frame refactor) — no page-side wrap. */}
+                  {/* 0. THE reconciled top-line go/no-go (2026-06-18) — one verdict over the four engines
+                      below, with explicit disagreements, so an RN isn't left reading contradictory chips.
+                      Pure readout of computeReadinessVerdict; advisory, Gate-2 supersedes. */}
+                  {p.canSendFirstDraft ? (
+                    <CaseReadinessVerdictCard
+                      key="readiness-verdict"
+                      caseId={caseId}
+                      claimedCondition={c.claimedCondition}
+                      hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}
+                    />
+                  ) : null}
+
                   {p.canSendFirstDraft ? (
                     <StrategyPreviewCard key="strategy" caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
                   ) : null}

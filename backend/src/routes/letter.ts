@@ -6,6 +6,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
+import { letterFilename } from '../services/letterFilename.js';
 import { isSignOffAffirmative } from '../services/sign-off-validation.js';
 import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { buildLetterRevisionKey } from '../services/s3-key-safety.js';
@@ -210,11 +211,22 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
 
       const txt = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
       const client = s3();
+      // Canonical download name (Ryan 2026-06-18): Ewell_S_OSA_v7.pdf, set via ResponseContentDisposition
+      // so a saved letter isn't a bare "letter.pdf". The S3 KEY is unchanged — only the served name.
+      // PDF stays `inline` (the "Open PDF" button views it in-browser; it saves under this name); the
+      // DOCX is an `attachment` (a download). Filename is RFC-quoted-string-safe (helper strips punctuation).
+      // Separate veteran lookup (the db wrapper's CaseRecord type doesn't carry the relation); fail-open
+      // to the helper's 'Veteran' default if the row is somehow absent.
+      const vet = (await db.veteran.findFirst({
+        where: { id: c.veteranId },
+        select: { firstName: true, lastName: true },
+      })) as { firstName: string | null; lastName: string | null } | null;
+      const baseName = letterFilename(vet?.lastName, vet?.firstName, c.claimedCondition, cur.version);
       const pdfUrl = cur.pdfKey !== null
-        ? await getSignedUrl(client, new GetObjectCommand({ Bucket: bucketName, Key: cur.pdfKey }), { expiresIn: PRESIGN_TTL_SECONDS })
+        ? await getSignedUrl(client, new GetObjectCommand({ Bucket: bucketName, Key: cur.pdfKey, ResponseContentDisposition: `inline; filename="${baseName}.pdf"` }), { expiresIn: PRESIGN_TTL_SECONDS })
         : null;
       const docxUrl = cur.docxKey !== null
-        ? await getSignedUrl(client, new GetObjectCommand({ Bucket: bucketName, Key: cur.docxKey }), { expiresIn: PRESIGN_TTL_SECONDS })
+        ? await getSignedUrl(client, new GetObjectCommand({ Bucket: bucketName, Key: cur.docxKey, ResponseContentDisposition: `attachment; filename="${baseName}.docx"` }), { expiresIn: PRESIGN_TTL_SECONDS })
         : null;
 
       // source drives the editor's finalize affordance (import deliver-as-is, 2026-06-14): an

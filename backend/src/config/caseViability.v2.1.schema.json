@@ -104,7 +104,7 @@
           "required": ["version", "content_hash"],
           "properties": {
             "version": { "type": ["string", "null"] },
-            "content_hash": { "type": "string", "const": "c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb" }
+            "content_hash": { "type": "string", "const": "7c072e3b9cafa893c048a0c76287a056c0f6676bb1ad3e120984e46143a2bbf1" }
           }
         },
         "direct": {
@@ -120,7 +120,7 @@
     },
     "table_content_hash": {
       "type": ["string", "null"],
-      "const": "c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb",
+      "const": "7c072e3b9cafa893c048a0c76287a056c0f6676bb1ad3e120984e46143a2bbf1",
       "description": "DEPRECATED — flat mirror of tables.secondary.content_hash, retained for lagging v1 readers."
     },
     "table_version": { "type": ["string", "null"] },

@@ -32,7 +32,8 @@
         "mechanism_member": { "type": "string" },
         "inherited_from": { "type": "string" },
         "aggravation_only": { "type": "boolean" },
-        "causation_denied": { "type": "boolean" }
+        "causation_denied": { "type": "boolean" },
+        "physician_reviewed": { "type": "boolean" }
       }
     },
     "alternatives": {
@@ -87,7 +88,7 @@
     "confidence": { "type": "string", "enum": ["high", "low"] },
     "mode": { "type": "string", "enum": ["info_light", "chart_refined"] },
     "table_version": { "type": ["string", "null"] },
-    "table_content_hash": { "type": ["string", "null"], "const": "c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb" },
+    "table_content_hash": { "type": ["string", "null"], "const": "7c072e3b9cafa893c048a0c76287a056c0f6676bb1ad3e120984e46143a2bbf1" },
     "derivedAt": { "type": "string", "format": "date-time" }
   }
 }

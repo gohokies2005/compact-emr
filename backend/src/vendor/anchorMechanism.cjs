@@ -96,6 +96,29 @@ function _canon(s) {
   return conditionCanon.canonicalizeCondition(str) || null;
 }
 
+// Like _canon, but returns ALL canonical labels in a possibly multi-condition string
+// ("HTN, HLD, T2DM, OSA" -> 3 labels). Used for dx_constellation entries so a comma-joined
+// problem-list LINE does not silently drop every dx after the first match — the producer-shape
+// assumption the board flagged 2026-06-18 (the extractor may chunk the problem list as one line).
+// Negation/hypothetical prefixes — a problem-list entry like "no neuropathy" / "rule out OSA" /
+// "denies chest pain" must NOT register the negated dx as PRESENT (a false-confirm that would
+// over-promise an anchor). Defense-in-depth: the EMR producer SHOULD emit affirmative problem-list
+// dx, but guard the raw-text case (board re-audit 2026-06-18). Conservative — only a clear LEADING
+// negation drops the entry; a trailing "X negative" is left to the producer to resolve.
+const _NEGATION_PREFIX_RE = /^\s*(?:no\b|without\b|r\/?o\b|rule[- ]out\b|denies\b|negative for\b|absence of\b|ruled out\b|h\/o no\b)/i;
+function _canonAll(s) {
+  if (!s) return [];
+  const str = String(s).trim();
+  if (_NEGATION_PREFIX_RE.test(str)) return [];   // explicitly-negated dx is NOT present
+  if (conditionCanon.isCanonicalLabel(str)) return [str];
+  try {
+    const multi = conditionCanon.canonicalizeConditionMulti(str);
+    if (Array.isArray(multi) && multi.length) return multi.filter(Boolean);
+  } catch (_) { /* fall through to single */ }
+  const one = conditionCanon.canonicalizeCondition(str);
+  return one ? [one] : [];
+}
+
 // Index key uses (upstream, claimed) only — basis is NOT part of the lookup key
 // because a caller asks "is this pairing eligible?" not "under which CFR prong?".
 // When the table carries separate 3.310(a)/(b) rows for a pair, the STRONGER
@@ -437,6 +460,17 @@ const _AGGRAVATION_ONLY = {
   // but the mechanism is not strong enough for de novo causation — frame as
   // 3.310(b) aggravation, not direct cause.
   'Restless legs syndrome|PTSD': { rationale: 'PTSD-related sleep disruption / CNS arousal aggravates restless legs syndrome, but does not cause it de novo. Argue 3.310(b) aggravation; direct causation invites denial.' },
+  // Ryan physician curation 2026-06-18 (over-call board sign-off): psych->autoimmune/
+  // neurodegenerative. Chronic stress is a recognized FLARE trigger/aggravator, but it does
+  // NOT cause these (autoimmune/genetic/demyelinating) de novo. Argue 3.310(b) aggravation,
+  // capped low; direct causation is denied on sight by a C&P examiner.
+  'Multiple sclerosis|PTSD': { rationale: 'PTSD/chronic stress can aggravate MS flare frequency, but does not cause demyelination (MS is autoimmune/genetic). Argue 3.310(b) aggravation only; direct causation invites denial.' },
+  'Alopecia areata|PTSD': { rationale: 'Stress is a recognized alopecia-areata flare trigger but does not cause the autoimmune disease de novo. Argue 3.310(b) aggravation only.' },
+  'Vitiligo|PTSD': { rationale: 'Stress can aggravate vitiligo but does not cause autoimmune melanocyte destruction de novo. Argue 3.310(b) aggravation only.' },
+  'SLE / lupus|PTSD': { rationale: 'Stress can aggravate lupus flares but does not cause SLE de novo. Argue 3.310(b) aggravation only, capped low.' },
+  'Rheumatoid arthritis|PTSD': { rationale: 'Chronic stress may aggravate RA disease activity but does not cause the autoimmune arthritis de novo. Argue 3.310(b) aggravation only.' },
+  'Psoriatic arthritis|PTSD': { rationale: 'Stress can aggravate psoriatic-arthritis flares but does not cause it de novo. Argue 3.310(b) aggravation only.' },
+  'Psoriasis|MDD / Depression': { rationale: 'Depression/stress can aggravate psoriasis flares but does not cause the immune-mediated disease de novo. Argue 3.310(b) aggravation only.' },
 };
 function isAggravationOnly(claimedText, upstreamText) {
   const clC = _canon(claimedText);
@@ -619,6 +653,14 @@ function _whyLine(band, best, claimedC, presumptive, graveyard) {
   // aggravation (3.310(b)) — a secondary argument, never "caused by".
   if (best.aggravation_only) {
     return `Aggravation only: argue that service-connected ${up} AGGRAVATED ${claimedC} under 38 CFR 3.310(b) (a secondary argument); do NOT argue direct causation — the VA reliably denies it. Lead with a causation anchor if one is service-connected.`;
+  }
+  // OVER-CALL GUARD (2026-06-18): the anchor table is 94.5% physician-UNREVIEWED, and an
+  // unreviewed mechanism must NOT be asserted as a "recognized cause" (PTSD→Multiple sclerosis
+  // was rendering "Moderate: ...recognized cause"). Frame it honestly as a candidate pathway
+  // pending physician review. Aggravation framing (above) takes precedence. Direct in-service-
+  // event anchors are evidenced facts (the caller writes their own why) and never reach here.
+  if (best.physician_reviewed !== true && best.anchor_axis !== 'direct') {
+    return `Potential pathway: service-connected ${up} may support ${claimedC} secondarily, but this mechanism has not been physician-reviewed — confirm the medicine before drafting.`;
   }
   switch (band) {
     case 'strong': return `Strong: service-connected ${up} is a dominant recognized cause of ${claimedC}.`;
@@ -1045,6 +1087,7 @@ function _publicAnchor(a) {
     aggravation_only: a.aggravation_only === true ? true : undefined,
     causation_denied: a.aggravation_only === true ? true : undefined,
     is_granted_sc: a.is_granted_sc,
+    physician_reviewed: a.physician_reviewed === true,   // over-call guard: surfaced so recommendedAction can gate
     mechanism_class: a.mechanism_class,
     requires: a.requires,
     inherited_from: a.inherited_from || undefined,
@@ -1140,6 +1183,23 @@ function _classifyRequirement(requiresText) {
   return { kind, severityTags, requiredDx, framing };
 }
 
+// Curated documented-FINDING terms — clinical events/findings a `requires` demands as chart proof
+// that are NOT a canonical dx (so dx-membership can't check them) and have no severity fact-tag yet.
+const _FINDING_TERM_RE = /\baspiration\b|renal crisis|reflux.?(?:nephropathy|cough|associated)|obstructive uropathy|post.?void residual|\bretention\b|renal amyloid|nephrotic.?range|stress.?correlated flare|vascular cognitive/i;
+
+// True when a requires asserts a documented FINDING (a curated term) we cannot verify by
+// dx-membership or a fact-tag. A 'dx'-classified requires that ALSO carries one ("Documented
+// dysphagia WITH aspiration", "Documented scleroderma renal crisis episode") would otherwise
+// confirm on the dx alone and silently IGNORE the finding — an over-confirm. Used to FLOOR those
+// pending an EMR finding tag (Phase 2). DELIBERATELY a CURATED term list, not a general residual
+// scan — a general "clause didn't canonicalize → floor" over-floored ~90 legit dx rows (split
+// artifacts / descriptive phrases), so it is intentionally precise over comprehensive. The
+// over-call-guard + the floor coverage assert remain the broad safety nets; a missed mixed row
+// over-confirms a single advisory band, caught by physician review (acceptable residual).
+function _hasUnverifiableFinding(requiresText) {
+  return _FINDING_TERM_RE.test(String(requiresText || ''));
+}
+
 // ctx = { upstreamCanonical, claimedCanonical, dxConstellation } — supplies the membership
 // universe for the DX-PRESENCE kind. Optional (older/bridge call sites omit it → dx checks
 // fall back to upstream/claimed only, conservative).
@@ -1161,13 +1221,16 @@ function _requiredFactPresent(requiresText, mechanismClass, documentedFacts, ctx
   if (cls.requiredDx.length) {
     const present = new Set([
       _canon(ctx.upstreamCanonical), _canon(ctx.claimedCanonical),
-      ...((Array.isArray(ctx.dxConstellation) ? ctx.dxConstellation : []).map(_canon)),
+      // _canonAll (not _canon) so a comma-joined problem-list line yields ALL its dx, not just the first.
+      ...((Array.isArray(ctx.dxConstellation) ? ctx.dxConstellation : []).flatMap(_canonAll)),
     ].filter(Boolean));
     for (const dx of cls.requiredDx) if (!present.has(dx)) return false;
   }
-  // FRAMING-only → not a chart-fact gate → confirm. UNKNOWN shape → conservative floor
-  // (and the coverage assert flags it RED in CI so it never ships silently).
-  if (cls.kind === 'unknown') return false;
+  // FRAMING-only → not a chart-fact gate → confirm. UNKNOWN or pure-FINDING → floor. A 'dx' row
+  // that ALSO carries an unverifiable residual finding floors too (don't confirm on the dx alone
+  // and ignore the finding — the over-confirm the board caught 2026-06-18).
+  if (cls.kind === 'unknown' || cls.kind === 'finding') return false;
+  if (_hasUnverifiableFinding(requiresText)) return false;
   return true;
 }
 
@@ -1221,6 +1284,18 @@ function aggravationOnlyUpstreamsFor(claimedText) {
 //   (unknown band)       -> escalate route 'physician' (fail safe to a human)
 function recommendedAction(viabilityResult) {
   const band = viabilityResult && viabilityResult.viability;
+  // OVER-CALL GUARD (2026-06-18): 94.5% of the table is physician_reviewed:false, and conditional
+  // rows confirm to moderate/strong on bare dx-presence. An UNREVIEWED anchor must never auto-run
+  // or "proceed" — it routes to physician review regardless of band (the band stays honest; the
+  // guard is on the ACTION). Direct in-service-event anchors (anchor_axis==='direct') are evidenced
+  // facts, not table mechanisms — NOT gated. Reuses the EXISTING 'escalate'/'physician' token so the
+  // live EMR panel (which already handles escalate) does not break on a new action it can't render.
+  const best = (viabilityResult && viabilityResult.best_anchor) || null;
+  if (best && best.physician_reviewed !== true && best.anchor_axis !== 'direct'
+      && (band === 'strong' || band === 'moderate' || band === 'conditional')) {
+    return { action: 'escalate', route: 'physician', band,
+      reason: 'Mechanism not yet physician-reviewed — a candidate pathway that needs physician confirmation before drafting.' };
+  }
   switch (band) {
     case 'strong':
       return { action: 'auto_run', route: null, band, reason: 'Dominant recognized pathway — proceed.' };

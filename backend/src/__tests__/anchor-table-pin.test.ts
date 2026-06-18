@@ -21,7 +21,7 @@ import path from 'node:path';
 // re-curated (1032 rows) and the resolver gained the DIRECT-SC fold + setDirectAxisEnabled. Bands are
 // byte-identical with the direct axis OFF (the default); only the secondary table hash rotated
 // 1f095fb6… → c0f6ba36….
-const PINNED_TABLE_HASH = 'c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb';
+const PINNED_TABLE_HASH = '7c072e3b9cafa893c048a0c76287a056c0f6676bb1ad3e120984e46143a2bbf1';
 // DIRECT-SC table content_hash (sc_direct_pairs.json `content_hash` field; directSc.tableContentHash()
 // returns it verbatim). Independent pin — rotates only on a direct-table re-curation.
 const PINNED_DIRECT_TABLE_HASH = 'fc828fe33ed370beecaa00875117b62acd1bc2ae07ac304579bbf4db072b2bd9';
@@ -34,7 +34,14 @@ const PINNED_PACT_MAP_HASH = '2098c133b6767038e0e66b905fe942a5adaff667506e3254dd
 // moved to the new secondary pin; (2) `E` was removed from best_anchor.required (it stays an OPTIONAL
 // property) because the re-vendored resolver no longer emits the always-null E field. The file is NOT
 // overwritten from FRN — it keeps its EMR-authored shape; only these two edits changed its bytes.
-const PINNED_SCHEMA_SHA256 = 'e36a1b62b3f3681b7c72d0961297748bfcc2bfa3ca84c5964b1b56e779569fa3';
+const PINNED_SCHEMA_SHA256 = '4f409bb5136a9ea9c72ee0115bc47d9aa671d174eaf8586514934fc6e1c602cc';
+// RESOLVER CODE byte-pins (2026-06-18). The table sha-pin does NOT catch a LOGIC-only re-vendor — that
+// is exactly how the EMR vendor silently lagged FRN at 947d51e (fix #1) while the drafter shipped fixes
+// #2/#3/#4 (over-call guard + data-contract hardening). These pin the vendored RESOLVER bytes so any
+// re-vendor (or a forbidden hand-edit) of anchorMechanism.cjs / conditionCanon.cjs trips the red build
+// and forces a same-commit pin rotation. Rotated to the FRN 3d09819 re-vendor (over-call guard live).
+const PINNED_RESOLVER_SHA256 = '924a47831816da0ed6ca236f4ab26fedeca6afe1fa3cbe94420025f518016a80';
+const PINNED_CONDITIONCANON_SHA256 = 'bdf068fa00f84875947626ef7889297aa4ca581f47d4d04217f813127e43eab8';
 
 const vendorDir = path.dirname(fileURLToPath(new URL('../vendor/anchor_mechanism_pairs.json', import.meta.url)));
 const tableUrl = new URL('../vendor/anchor_mechanism_pairs.json', import.meta.url);
@@ -202,6 +209,29 @@ describe('anchor table pin (red build on drift)', () => {
       am.setBridgeEnabled(null);
       am.setDirectAxisEnabled(null);
     }
+  });
+
+  it('10. RESOLVER code byte-pin: vendored anchorMechanism.cjs + conditionCanon.cjs sha256 === pins (catches a LOGIC-only re-vendor the table pin misses)', () => {
+    const amHash = createHash('sha256').update(readFileSync(new URL('../vendor/anchorMechanism.cjs', import.meta.url))).digest('hex');
+    const ccHash = createHash('sha256').update(readFileSync(new URL('../vendor/conditionCanon.cjs', import.meta.url))).digest('hex');
+    expect(amHash).toBe(PINNED_RESOLVER_SHA256);
+    expect(ccHash).toBe(PINNED_CONDITIONCANON_SHA256);
+  });
+
+  it('11. over-call guard live: an UNREVIEWED psych→neuro pair pleads aggravation (3.310b), never "cause"; a reviewed classic secondary proceeds (3.310a)', () => {
+    const req = createRequire(import.meta.url);
+    const am = req('../vendor/anchorMechanism.cjs') as {
+      assessClaimViability(claimed: string, granted: readonly string[], chartFacts?: unknown): {
+        best_anchor?: { physician_reviewed?: boolean; basis?: string };
+      };
+    };
+    // chart-refined (dx present) so the over-call scenario is exercised, not info-light abstain.
+    const ms = am.assessClaimViability('Multiple sclerosis', ['PTSD'], { in_service_events: [], dx_constellation: ['Multiple sclerosis'] });
+    expect(ms.best_anchor?.physician_reviewed).toBe(false);
+    expect(ms.best_anchor?.basis).toBe('3.310b'); // aggravation, NOT a "recognized cause"
+    const dn = am.assessClaimViability('Peripheral neuropathy', ['Diabetes mellitus type 2'], { in_service_events: [], dx_constellation: ['Peripheral neuropathy'] });
+    expect(dn.best_anchor?.physician_reviewed).toBe(true);
+    expect(dn.best_anchor?.basis).toBe('3.310a'); // classic reviewed secondary proceeds as causation
   });
 
   it('R5 grep-guard: no impure-module leak — vendored files never require better-sqlite3 / an LLM client', () => {

@@ -53,7 +53,7 @@ import { fileURLToPath } from 'node:url';
 // re-vendor at FRN HEAD: the canonical anchor_mechanism_pairs.json was re-curated (1032 rows) and
 // the resolver gained the DIRECT-SC fold + setDirectAxisEnabled. Bands are byte-identical with the
 // direct axis OFF (the default); only the table hash rotated.
-const PINNED_TABLE_HASH = 'c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb';
+const PINNED_TABLE_HASH = '7c072e3b9cafa893c048a0c76287a056c0f6676bb1ad3e120984e46143a2bbf1';
 // DIRECT-SC table content hash (sc_direct_pairs.json `content_hash` field — directSc.tableContentHash()
 // returns this verbatim). Independent of the secondary pin; rotates only on a direct-table re-curation.
 const PINNED_DIRECT_TABLE_HASH = 'fc828fe33ed370beecaa00875117b62acd1bc2ae07ac304579bbf4db072b2bd9';

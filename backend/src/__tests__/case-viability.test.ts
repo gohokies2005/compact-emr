@@ -11,7 +11,7 @@ import { deriveCaseViability, type CaseViability, type InServiceEvent } from '..
 
 // Rotated 2026-06-14 (DIRECT-SC re-vendor): secondary table re-curated to 1032 rows; bands unchanged
 // with the direct axis OFF (the default this v1 producer runs under). See anchor-table-pin.test.ts.
-const PINNED_TABLE_HASH = 'c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb';
+const PINNED_TABLE_HASH = '7c072e3b9cafa893c048a0c76287a056c0f6676bb1ad3e120984e46143a2bbf1';
 
 const schemaUrl = new URL('../config/caseViability.v1.schema.json', import.meta.url);
 const schemaBytes = readFileSync(schemaUrl);

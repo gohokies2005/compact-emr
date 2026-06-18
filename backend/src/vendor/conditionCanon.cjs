@@ -78,7 +78,7 @@ const CANONICAL_CONDITIONS = [
   // optic-neuropathy and autonomic-neuropathy are not swallowed. "diabetic
   // neuropathy" / "diabetic PN" INTENTIONALLY still maps here (diabetes→diabetic-PN
   // downstream IS peripheral neuropathy).
-  ['Peripheral neuropathy',             [/peripheral neuropathy/i, /(?<!optic )(?<!autonomic )\bneuropathy\b/i]],
+  ['Peripheral neuropathy',             [/peripheral neuropathy/i, /\bDPN\b/i, /(?<!optic )(?<!autonomic )\bneuropathy\b/i]],
   ['Fibromyalgia',                      [/fibromyalgia/i]],
   ['Chronic pain syndrome',             [/chronic pain syndrome/i, /\bchronic pain\b/i]],
   ['Lumbar / back',                     [/lumbar (?:spine|strain|disc|degenerative)/i, /\blow.?back\b/i, /\bback (?:pain|strain|disability|condition|injury)\b/i, /lumbosacral/i]],
@@ -139,14 +139,14 @@ const CANONICAL_CONDITIONS = [
   ['Lupus nephritis',                   [/lupus nephritis/i]],
   ['Nephrotic syndrome',                [/nephrotic syndrome/i, /nephrotic/i]],
   ['Glomerulonephritis',                [/glomerulonephritis/i, /\bGN\b/i, /\bMPGN\b/i, /\bIgA nephropathy\b/i]],
-  ['Nephrolithiasis',                   [/nephrolithiasis/i, /kidney stone/i, /renal stone/i, /urolithiasis/i, /struvite stone/i, /uric.?acid stone/i]],
+  ['Nephrolithiasis',                   [/nephrolithiasis/i, /kidney stone/i, /renal stone/i, /renal calcul/i, /urolithiasis/i, /struvite stone/i, /uric.?acid stone/i]],
   ['Renal tubular acidosis',            [/renal tubular acidosis/i, /\bRTA\b/i]],
   ['Renal anemia',                      [/renal anemia/i, /anemia of (?:chronic )?(?:kidney|renal)/i, /anemia of CKD/i]],
   ['Secondary hyperparathyroidism',     [/secondary hyperparathyroidism/i, /secondary hyperPTH/i, /renal osteodystrophy/i, /CKD.?MBD/i]],
   ['Proteinuria',                       [/proteinuria/i, /albuminuria/i]],
   ['ESRD',                              [/\bESRD\b/i, /end.?stage renal/i, /end.?stage kidney/i, /dialysis.?dependent/i]],
   // CKD declared AFTER its specific variants so "diabetic nephropathy" etc. win.
-  ['CKD / chronic kidney disease',      [/chronic kidney disease/i, /\bCKD\b/i, /chronic renal (?:failure|insufficiency|disease)/i, /\bnephropathy\b/i]],
+  ['CKD / chronic kidney disease',      [/chronic kidney disease/i, /\bCKD\b/i, /chronic renal (?:failure|insufficiency|disease)/i, /\brenal insufficiency\b/i, /\bnephropathy\b/i]],
 
   // ── 2. ONCOLOGY (most are presumptive-preempt; canon needed for routing) ─────
   ['Esophageal cancer',                 [/esophageal (?:cancer|carcinoma|adenocarcinoma)/i, /cancer of the esophagus/i]],
@@ -223,7 +223,7 @@ const CANONICAL_CONDITIONS = [
   ['Retrograde ejaculation',            [/retrograde ejaculation/i]],
   ['Female infertility',                [/female infertility/i, /anovulatory infertility/i]],
   ['Male infertility',                  [/\bmale infertility/i, /\boligospermia\b/i, /\bazoospermia\b/i]],
-  ['Hypogonadism',                      [/hypogonadism/i, /\bOPIAD\b/i, /low testosterone/i, /testosterone deficiency/i, /\bTRT\b(?=.*deficien)/i]],
+  ['Hypogonadism',                      [/hypogonadism/i, /\bOPIAD\b/i, /low testosterone/i, /\blow[- ]?t\b/i, /testosterone deficiency/i, /\bTRT\b(?=.*deficien)/i]],
   ['Female sexual dysfunction',         [/female sexual dysfunction/i, /\bFSD\b/i, /dyspareunia/i, /vaginismus/i]],
   ['Chronic pelvic pain',               [/chronic pelvic pain/i, /\bCPP\b/i]],
 
@@ -264,7 +264,7 @@ const CANONICAL_CONDITIONS = [
   ['Polycythemia',                      [/polycythemia/i, /erythrocytosis/i]],
   ['Iron overload',                     [/iron overload/i, /hemochromatosis/i, /\bHFE\b/i]],
   // Generic 'Anemia' last so specific phenotypes win.
-  ['Anemia',                            [/\banemia\b/i]],
+  ['Anemia',                            [/\banemia\b/i, /\banaemia\b/i]],
 
   // ── 10. HEPATOLOGY / lower-GI ───────────────────────────────────────────────
   ['NAFLD / NASH',                      [/\bNAFLD\b/i, /\bNASH\b/i, /non.?alcoholic (?:fatty liver|steatohepatitis)/i, /fatty liver/i, /hepatic steatosis/i]],
@@ -358,7 +358,7 @@ const CANONICAL_CONDITIONS = [
   ['Hyperparathyroidism',               [/hyperparathyroidism/i, /parathyroid adenoma/i]],
   ['Essential tremor',                  [/essential tremor/i]],
   ['Parkinsonism',                      [/parkinsonism/i, /vascular parkinson/i, /atypical parkinson/i, /secondary parkinson/i, /drug.?induced parkinson/i]],
-  ['Parkinson disease',                 [/parkinson'?s? disease/i, /idiopathic parkinson/i]],
+  ['Parkinson disease',                 [/parkinson'?s? disease/i, /idiopathic parkinson/i, /\bparkinson'?s\b/i]],
   ['Hyperhidrosis',                     [/hyperhidrosis/i]],
   ['Vestibular hypofunction',           [/vestibular hypofunction/i, /vestibular neuritis/i, /labyrinthitis/i]],
   ['Malabsorption syndrome',            [/malabsorption/i, /short bowel syndrome/i]],
@@ -370,7 +370,7 @@ const CANONICAL_CONDITIONS = [
   ['Antiphospholipid syndrome',         [/antiphospholipid/i, /lupus anticoagulant/i]],
   ['Pituitary disease',                 [/pituitary (?:adenoma|disease|tumor|insufficiency)/i, /acromegaly/i, /prolactinoma/i, /cushing disease/i]],
   ['Celiac disease',                    [/celiac/i, /coeliac/i]],
-  ['Inherited thrombophilia',           [/inherited thrombophilia/i, /factor v leiden/i, /prothrombin (?:gene )?mutation/i, /antithrombin deficiency/i, /protein [cs] deficiency/i, /hypercoagulable/i]],
+  ['Inherited thrombophilia',           [/inherited thrombophilia/i, /factor v leiden/i, /prothrombin (?:gene )?mutation/i, /antithrombin deficiency/i, /protein [cs] deficiency/i]],
   ['Spinal cord injury',                [/spinal cord injury/i, /\bSCI\b/i, /paraplegia/i, /quadriplegia/i, /tetraplegia/i]],
   // ── 2026-06-12 PHASE B CURATION — new ANCHOR labels (PCP+Doximity verified). Placed last. ──
   ['Amputation',                        [/amputation/i, /amputee/i, /limb loss/i]],
@@ -387,7 +387,7 @@ const CANONICAL_CONDITIONS = [
   ['SIBO / blind-loop syndrome',        [/\bSIBO\b/i, /small (?:intestinal|bowel) bacterial overgrowth/i, /blind.?loop/i]],
   ['Tropical sprue / enteric infection',[/tropical sprue/i, /giardiasis/i, /chronic enteric infection/i]],
   ['Silicosis',                         [/silicosis/i, /silica dust/i]],
-  ['Chronic venous insufficiency',      [/venous insufficiency/i, /venous stasis/i, /chronic venous/i]],
+  ['Chronic venous insufficiency',      [/venous insufficiency/i, /venous stasis/i, /chronic venous/i, /\bCVI\b/i]],
   ['Blast injury',                      [/blast injury/i, /barotrauma/i, /labyrinthine concussion/i, /blast exposure/i]],
   ['Schistosomiasis',                   [/schistosomiasis/i, /bilharzia/i]],
   ['Prior joint injury / fracture',     [/intra.?articular fracture/i, /prior joint (?:injury|trauma|fracture|surgery)/i, /post.?traumatic joint/i]],

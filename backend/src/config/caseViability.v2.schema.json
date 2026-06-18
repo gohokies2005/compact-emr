@@ -36,7 +36,8 @@
         "causation_denied": { "type": "boolean" },
         "event_canonical": { "type": "string", "minLength": 1, "description": "DIRECT axis only: the eventCanon canonical in-service event type (member of eventCanon.EVENT_ENUM)." },
         "evidence_span": { "type": "string", "description": "DIRECT axis only: a verbatim substring of the chart/lay text evidencing the event (code-verified at emission)." },
-        "presumptive": { "type": "boolean", "description": "DIRECT axis only: the event is a presumptive pathway (routes to presumptive_redirect)." }
+        "presumptive": { "type": "boolean", "description": "DIRECT axis only: the event is a presumptive pathway (routes to presumptive_redirect)." },
+        "physician_reviewed": { "type": "boolean" }
       }
     },
     "alternatives": {
@@ -104,7 +105,7 @@
           "required": ["version", "content_hash"],
           "properties": {
             "version": { "type": ["string", "null"] },
-            "content_hash": { "type": "string", "const": "c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb" }
+            "content_hash": { "type": "string", "const": "7c072e3b9cafa893c048a0c76287a056c0f6676bb1ad3e120984e46143a2bbf1" }
           }
         },
         "direct": {
@@ -120,7 +121,7 @@
     },
     "table_content_hash": {
       "type": ["string", "null"],
-      "const": "c0f6ba363245b312dd7f696242b62c2447adb82ae5fb08966079d5b1c096fbfb",
+      "const": "7c072e3b9cafa893c048a0c76287a056c0f6676bb1ad3e120984e46143a2bbf1",
       "description": "DEPRECATED in v2 — flat mirror of tables.secondary.content_hash, retained ONLY so a lagging v1 reader degrades gracefully during the migration window. Remove once all surfaces read v2."
     },
     "table_version": { "type": ["string", "null"] },

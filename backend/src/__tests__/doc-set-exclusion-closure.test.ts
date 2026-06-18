@@ -88,7 +88,7 @@ const ALLOW_LIST: ReadonlyArray<{ readonly relPath: string; readonly fnHint: str
   },
   {
     relPath: 'routes/chart-readiness.ts',
-    fnHint: 'computeExtractionCoverage(docs, rows, latestRun)',
+    fnHint: 'computeExtractionCoverage(docs, rows, latestRun',
     reason:
       'GET /cases/:id/extraction-coverage (transparency report, 2026-06-14). The route loads the full ' +
       'per-case doc set ONLY to pass it to computeExtractionCoverage, which EXCLUDES the synthetic ' +

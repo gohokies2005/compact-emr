@@ -102,6 +102,12 @@ function makeDb(c: CaseRecord = baseCase()) {
     // findMany = the sticky-completion run list GET /chart-readiness reads (Ewell 2026-06-14); findFirst
     // = the single-run load GET /extraction-coverage still uses. Both default to "no runs".
     chartExtractionRun: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
+    // GET /extraction-coverage gained a per-page provenance query in the vision rebuild (#46,
+    // chart-readiness.ts ~line 328): db.documentPage.findMany({ where: { document: { caseId } } }).
+    // The mock predated that query, so the route hit `undefined.findMany` → 500 (4 red tests, 2026-06-17,
+    // NOT a production bug — real Prisma has documentPage). Default to no per-page rows → the coverage
+    // service falls back to file-level accounting, exactly what these assertions expect.
+    documentPage: { findMany: vi.fn(async () => []) },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
   return { db, fileRows, orphanedPaths, tx };

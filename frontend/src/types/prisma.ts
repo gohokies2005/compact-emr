@@ -97,7 +97,7 @@ export interface Case extends VersionedRecord { readonly id: string; readonly ve
   // G8: RN-friendly message accompanying operatorState (populated by /complete + by stuck-job watcher on sweep).
   readonly operatorMessage?: string | null;
 }
-export interface Document extends VersionedRecord { readonly id: string; readonly caseId: string; readonly filename: string; readonly sizeBytes: string; readonly contentType: string; readonly docTag?: string; readonly pageCount?: number | null; readonly autoTitle?: string | null; readonly docType?: string; readonly s3Key: string; readonly uploadedAt: string; readonly uploadedBy: string; }
+export interface Document extends VersionedRecord { readonly id: string; readonly caseId: string; readonly filename: string; readonly sizeBytes: string; readonly contentType: string; readonly docTag?: string; readonly pageCount?: number | null; readonly autoTitle?: string | null; readonly docType?: string; readonly duplicateOfId?: string | null; readonly s3Key: string; readonly uploadedAt: string; readonly uploadedBy: string; }
 export interface Gate2SwitchProposal { readonly dx: string; readonly scAnchor?: string; readonly whyMoreViable?: string; readonly plainEnglish?: string }
 export interface Gate2HaltPayload {
   readonly haltGate?: string;

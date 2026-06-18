@@ -1013,7 +1013,12 @@ function DocumentsTab({ veteranId, caseId, role }: { readonly veteranId: string;
             <DataRow
               key={d.id}
               onClick={() => setViewDoc({ id: d.id, filename: d.filename, contentType: d.contentType })}
-              lead={documentDisplayName(d)}
+              lead={
+                <span className="inline-flex items-center gap-2">
+                  {documentDisplayName(d)}
+                  {d.duplicateOfId ? <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700" title="Byte-identical to an earlier file on this case — likely a duplicate upload">Duplicate</span> : null}
+                </span>
+              }
               meta={[d.filename, formatFileSize(d.sizeBytes), formatPageCount(d.pageCount), formatRelativeTime(d.uploadedAt)].filter(Boolean).join(' · ')}
               trailing={
                 <span className="flex items-center gap-3">

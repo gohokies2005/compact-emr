@@ -10,6 +10,7 @@ import { nudgeDocumentReocr } from '../services/document-reocr.js';
 import { TERMINAL_READ_STATUSES, isScreeningSummaryKey, computeTriggerHash, runMatchesHash } from '../services/chart-build-state.js';
 import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { classifyDocument } from '../services/documentClassifier.js';
+import { computeDuplicateOf } from '../services/documentDedupe.js';
 import type { AppDb } from '../services/db-types.js';
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -87,13 +88,18 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
         pages: { orderBy: { pageNumber: 'asc' }, take: 12, select: { text: true } },
       },
     });
+    // DEDUPE BADGE (Ryan 2026-06-18, "asked 3×": flag byte-identical duplicates like Woodley Misc_2==Misc_3).
+    // computeDuplicateOf keys on exact byte size + a sha256 of the leading text (the first 12 pages already
+    // fetched above) — the RN sees a "Duplicate" badge on a re-uploaded file. See documentDedupe.ts.
+    const enriched = documents.map((doc) => {
+      const { pages, ...rest } = doc;
+      const text = (pages ?? []).map((p) => p.text).join('\n');
+      const c = classifyDocument({ filename: doc.filename, text });
+      return { rest, sizeBytes: doc.sizeBytes.toString(), title: c.title, docType: c.docType, id: doc.id, leadingText: text, sizeBytesPositive: doc.sizeBytes > 0n, uploadedAt: doc.uploadedAt };
+    });
+    const duplicateOf = computeDuplicateOf(enriched.map((d) => ({ id: d.id, sizeBytesStr: d.sizeBytes, sizeBytesPositive: d.sizeBytesPositive, leadingText: d.leadingText, uploadedAt: d.uploadedAt })));
     res.json({
-      data: documents.map((doc) => {
-        const { pages, ...rest } = doc;
-        const text = (pages ?? []).map((p) => p.text).join('\n');
-        const c = classifyDocument({ filename: doc.filename, text });
-        return { ...rest, sizeBytes: doc.sizeBytes.toString(), autoTitle: c.title, docType: c.docType };
-      }),
+      data: enriched.map((d) => ({ ...d.rest, sizeBytes: d.sizeBytes, autoTitle: d.title, docType: d.docType, duplicateOfId: duplicateOf.get(d.id) ?? null })),
     });
   });
 

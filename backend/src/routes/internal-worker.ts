@@ -981,5 +981,64 @@ export function createInternalWorkerRouter(db: AppDb): Router {
     res.json({ data: { scanned, updated: changes.length, changes } });
   }));
 
+  /**
+   * GET /api/v1/internal/cases/:caseId/debug
+   *
+   * READ-ONLY agent/ops visibility endpoint (Ryan 2026-06-17, "how can you fix what you cannot see?").
+   * Returns exactly what the viability engine + drafter SEE for a case: the claimed condition + framing,
+   * the extracted problem list / SC conditions / meds, each document's extracted-page count + char count,
+   * the file_read_status terminal states, and recent chart-extraction runs (status + errorMessage). Lets
+   * an agent diagnose viability mismatches (claimed condition vs on-file diagnosis) and extraction
+   * failures WITHOUT staff-Cognito or direct RDS access. Service-principal token gated (whole router).
+   * NO writes. Every sub-read is fail-open so one missing accessor never 500s the debug view.
+   */
+  router.get(
+    '/internal/cases/:caseId/debug',
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.caseId);
+      const safe = async <T>(p: Promise<T>, fallback: T): Promise<T> => { try { return await p; } catch { return fallback; } };
+
+      const c = await safe((db as unknown as {
+        case: { findFirst: (a: { where: { id: string }; select: Record<string, unknown> }) => Promise<Record<string, unknown> | null> };
+      }).case.findFirst({
+        where: { id: caseId },
+        select: {
+          id: true, claimedCondition: true, claimedConditions: true, claimType: true,
+          framingChoice: true, upstreamScCondition: true, veteranStatement: true,
+          inServiceEvent: true, status: true, veteranId: true,
+          veteran: { select: {
+            scConditions: { select: { condition: true, status: true, ratingPct: true, dcCode: true } },
+            activeProblems: { select: { problem: true, icd10: true, notes: true } },
+            activeMedications: { select: { drugName: true, indication: true, medStatus: true } },
+          } },
+        },
+      }), null);
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+
+      // Documents + extracted text via the SAME loader the chart-extract worker consumes.
+      const documents = await safe(loadBundleDocuments(db, caseId), [] as unknown[]);
+      const docSummary = (documents as Array<Record<string, unknown>>).map((d) => {
+        const pages = Array.isArray(d['pages']) ? (d['pages'] as Array<Record<string, unknown>>) : [];
+        const chars = pages.reduce((a, p) => a + (typeof p['text'] === 'string' ? (p['text'] as string).length : 0), 0);
+        return {
+          documentId: d['documentId'] ?? d['id'] ?? null,
+          filename: d['filename'] ?? d['fileName'] ?? null,
+          pagesExtracted: pages.length,
+          extractedChars: chars,
+        };
+      });
+
+      const fileReadStatus = await safe((db as unknown as {
+        fileReadStatus: { findMany: (a: { where: { caseId: string }; select: Record<string, true> }) => Promise<Array<Record<string, unknown>>> };
+      }).fileReadStatus.findMany({ where: { caseId }, select: { filePath: true, terminalStatus: true } }), [] as Array<Record<string, unknown>>);
+
+      const recentExtractRuns = await safe((db as unknown as {
+        chartExtractionRun: { findMany: (a: { where: { caseId: string }; select: Record<string, true>; orderBy: Record<string, 'desc'>; take: number }) => Promise<Array<Record<string, unknown>>> };
+      }).chartExtractionRun.findMany({ where: { caseId }, select: { id: true, status: true, errorMessage: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: 3 }), [] as Array<Record<string, unknown>>);
+
+      res.json({ data: { case: c, documents: docSummary, fileReadStatus, recentExtractRuns } });
+    }),
+  );
+
   return router;
 }

@@ -386,7 +386,7 @@ export function createChartReadinessRouter(db: AppDb): Router {
           upsert: (a: { where: { caseId_stage: { caseId: string; stage: string } }; create: Record<string, unknown>; update: Record<string, unknown> }) => Promise<unknown>;
         };
       };
-      let cached: { inputHash: string; resultJson: unknown } | null = null;
+      let cached: { inputHash: string; resultJson: unknown } | null;
       try { cached = await sanityDb.sanityImpression.findUnique({ where: { caseId_stage: { caseId, stage: ctx.stage } } }); } catch { cached = null; /* fail-open: a cache miss/error must never block */ }
       if (cached !== null && cached.inputHash === inputHash && cached.resultJson !== null && cached.resultJson !== undefined) {
         res.json({ data: cached.resultJson });

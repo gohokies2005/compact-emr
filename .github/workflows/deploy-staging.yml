@@ -73,7 +73,10 @@ jobs:
       - name: Smoke test - Lambda cold start
         run: |
           set -e
-          FN_NAME=$(aws cloudformation describe-stack-resources --stack-name compact-emr-staging-api --query "StackResources[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" --output text)
+          # Scope to the API Lambda ONLY — the api stack now also has a letter-render Lambda, and the
+          # unscoped query returned BOTH names (tab-separated) → `lambda invoke` rejected it → false
+          # "Deploy staging" failure on a healthy deploy (2026-06-18). Filter by the API construct's logical id.
+          FN_NAME=$(aws cloudformation describe-stack-resources --stack-name compact-emr-staging-api --query "StackResources[?ResourceType=='AWS::Lambda::Function' && starts_with(LogicalResourceId, 'PlaceholderApiLambda')].PhysicalResourceId" --output text)
           echo "Lambda function: $FN_NAME"
           PAYLOAD='{"version":"2.0","routeKey":"GET /api/v1/health","rawPath":"/api/v1/health","headers":{},"requestContext":{"http":{"method":"GET","path":"/api/v1/health"}},"isBase64Encoded":false}'
           aws lambda invoke --function-name "$FN_NAME" --payload "$PAYLOAD" --cli-binary-format raw-in-base64-out /tmp/lambda-out.json > /tmp/lambda-invoke-meta.json

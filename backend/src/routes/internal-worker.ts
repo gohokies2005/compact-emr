@@ -705,7 +705,7 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       // own status precheck prevents the double LLM-SPEND; this is the DB-write half of the same guard).
       // FAIL-OPEN: a status-read failure (or a db shape without the accessor) must NOT block a legitimate
       // first merge — fall through and let applyExtractionMerge run (idempotent on its own writes).
-      let priorStatus: string | null = null;
+      let priorStatus: string | null;
       try {
         const priorRun = await (db as unknown as {
           chartExtractionRun?: { findFirst: (a: { where: { id: string }; select: { status: true } }) => Promise<{ status: string } | null> };

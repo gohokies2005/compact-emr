@@ -1,5 +1,5 @@
 import { isScreeningSummaryKey, type ExtractionRunRef } from './chart-build-state.js';
-import { isEffectivelyRead, isIntakeSummaryPath, originalFileName } from './chart-readiness.js';
+import { isEffectivelyRead, originalFileName } from './chart-readiness.js';
 import type { FileReadStatusRecord } from './db-types.js';
 
 /**

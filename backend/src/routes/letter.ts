@@ -19,7 +19,6 @@ import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../serv
 import { findChartReadinessOverride, resolveOverrideReason } from '../services/chart-readiness-override.js';
 import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash } from '../services/letter-current.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
-import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
 import {
   parseCredentialBlock,
   substituteSignerSentinels,

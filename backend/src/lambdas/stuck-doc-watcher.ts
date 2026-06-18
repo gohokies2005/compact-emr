@@ -269,7 +269,7 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
   // DIAGNOSTIC (2026-06-14): the first deploy healed 0 — instrument WHY each parked row is skipped so we
   // can see (rows found / no matching Document / no stored pages / still-fails-corrected-heuristic) instead
   // of a silent 0. Remove once the self-heal is confirmed clearing the backlog.
-  let dxFound = stuckGarbleRows.length;
+  const dxFound = stuckGarbleRows.length;
   let dxNoDoc = 0, dxNoPages = 0, dxStillFails = 0;
   for (const frs of stuckGarbleRows) {
     try {
@@ -287,8 +287,11 @@ export async function handler(injected?: unknown): Promise<StuckDocWatcherResult
         // control chars, or genuine OCR soup — so we fix the real root (encoding break vs OCR garble vs
         // heuristic). Sample the first 220 chars + char-class counts. (2026-06-14)
         const replacementChars = (text.match(/�/g) ?? []).length;
+        // eslint-disable-next-line no-control-regex -- intentional: detect control/non-ASCII bytes in stored OCR text (encoding-break diagnostics)
         const mojibakeMarks = (text.match(/â€|Ã‚|Â[^\x00-\x7F]?|Ã.|â€™|â€œ/g) ?? []).length;
+        // eslint-disable-next-line no-control-regex -- intentional control-char class for OCR-garble diagnostics
         const controlChars = (text.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) ?? []).length;
+        // eslint-disable-next-line no-control-regex -- intentional non-ASCII detection
         const nonAscii = (text.match(/[^\x00-\x7F]/g) ?? []).length;
         // NOTE: do NOT log a text sample here — page text is PHI. Char-class counts (non-PHI) are enough
         // to tell mojibake/replacement/control from a clean false-positive.

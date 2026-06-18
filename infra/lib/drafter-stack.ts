@@ -11,6 +11,8 @@ import {
   aws_secretsmanager as secretsmanager,
   aws_sqs as sqs,
   aws_cloudwatch as cloudwatch,
+  aws_cloudwatch_actions as cloudwatchActions,
+  aws_sns as sns,
   aws_applicationautoscaling as appscaling,
   aws_events as events,
   aws_events_targets as targets,
@@ -313,6 +315,35 @@ export class DrafterStack extends Stack {
       // log-group resource policy granting events.amazonaws.com PutLogEvents.
       targets: [new targets.CloudWatchLogGroup(taskStopLogGroup)],
     });
+
+    // ===== Drafter SPEND-PROXY alarm (cost audit 2026-06-18) =====
+    // The drafter is the priciest lane (~$15/run, Sonnet+Opus). Per-case loops are bounded (FIFO
+    // MessageGroupId=caseId → 1 in-flight/group; stuck-job rerun cap=1), but there was NO notification
+    // when MANY drafts run concurrently across cases (the autoscaler can go to DRAFTER_MAX_CONCURRENCY).
+    // ApproximateNumberOfMessagesNotVisible on the FIFO queue ≈ drafts currently being processed ≈ $15
+    // each. Alarm when that stays HIGH (sustained 15 min) so Ryan is PAGED on abnormal concurrent spend
+    // — wired to the cost-runaway topic he just confirmed. Threshold set well above normal RN use so it
+    // flags a runaway/storm, not an intentional batch. (Does NOT cap capacity — that's his scaling goal.)
+    const costRunawayTopic = sns.Topic.fromTopicArn(this, 'CostRunawayTopicRef', `arn:aws:sns:${this.region}:${this.account}:compact-emr-${config.envName}-cost-runaway-alerts`);
+    const draftsInFlight = new cloudwatch.Metric({
+      namespace: 'AWS/SQS',
+      metricName: 'ApproximateNumberOfMessagesNotVisible',
+      dimensionsMap: { QueueName: `compact-emr-${config.envName}-draft-job.fifo` },
+      period: Duration.minutes(5),
+      statistic: 'Maximum',
+    });
+    const drafterSpendAlarm = new cloudwatch.Alarm(this, 'DrafterConcurrentSpendAlarm', {
+      alarmName: `compact-emr-${config.envName}-drafter-concurrent-spend`,
+      alarmDescription:
+        'Drafts in-flight (FIFO NotVisible) stayed high for 15 min — many ~$15 drafter runs are processing at once. Expected during a deliberate batch; if you did NOT start a batch, a re-enqueue storm across cases is burning budget. Check the draft-job.fifo queue + recent DraftJob rows.',
+      metric: draftsInFlight,
+      threshold: 12, // ~$180 of concurrent drafting sustained — well above normal RN use
+      evaluationPeriods: 3, // 3 × 5min = 15 min sustained
+      datapointsToAlarm: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    drafterSpendAlarm.addAlarmAction(new cloudwatchActions.SnsAction(costRunawayTopic));
 
     // ===== Outputs the drafter window needs =====
     // ECR repo URI — drafter window runs `docker push <uri>:<git-sha>` against this.

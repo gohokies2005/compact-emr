@@ -120,10 +120,22 @@ describe('computeReadinessVerdict — reconciliation contract', () => {
     expect(noSanity.disagreements.some((d) => d.source === 'ai_sanity')).toBe(false);
   });
 
-  it('viability-vs-strategy disagreement: Strong tier but weak/abstain band → explicit disagreement + lower confidence', () => {
-    const r = computeReadinessVerdict(SIGNALS({ viability: viability('weak') }))!;
+  it('HARD disagreement (Strong tier but weak/abstain band) → amber draft_reconcile, draftable, explicit disagreement + lower confidence', () => {
+    const r = computeReadinessVerdict(SIGNALS({ viability: viability('weak') }))!; // SIGNALS sanity defaults to 'clear'
+    expect(r.verdict).toBe('draft_reconcile'); // NOT a confident green draft, NOT flipped to not_supportable
     expect(r.disagreements.some((d) => d.source === 'viability_vs_strategy')).toBe(true);
     expect(r.confidence).not.toBe('high');
+    // A 'clear' sanity must NOT relax the steer — plain reconcile copy, no AI strengthening.
+    expect(r.nextAction).toMatch(/reconcile the anchor/i);
+    expect(r.nextAction).not.toMatch(/AI check also flags/i);
+  });
+
+  it('AI sanity corroborates a hard disagreement (concern) → steers to get-more-records/physician (caution-only, one-way)', () => {
+    const r = computeReadinessVerdict(SIGNALS({ viability: viability('weak'), sanity: 'concern' }))!;
+    expect(r.verdict).toBe('draft_reconcile');
+    expect(r.nextAction).toMatch(/more records|physician/i);
+    expect(r.nextAction).toMatch(/AI check also flags/i);
+    expect(r.disagreements.some((d) => d.source === 'ai_sanity')).toBe(true);
   });
 
   it('unknown read-state is NOT treated as fully read — adds a cautious coverage note', () => {

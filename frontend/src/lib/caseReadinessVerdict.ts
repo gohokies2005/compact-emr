@@ -119,6 +119,7 @@ export function recommendedPlan({ strategy, viability, hasUnreadPages = false }:
 export type ReadinessVerdict =
   | 'draft' // clean go
   | 'draft_confirm_mechanism' // go, but the anchor mechanism is not physician-reviewed
+  | 'draft_reconcile' // draftable, but the strategy + viability engines disagree on the anchor — reconcile first
   | 'draft_with_changes' // go, with a stronger anchor than the current framing
   | 'read_chart_first' // the chart isn't fully read — finish before deciding
   | 'contact_records' // a specific record is needed from the veteran
@@ -164,6 +165,7 @@ export interface ReadinessSignals {
 const VERDICT_TITLE: Record<ReadinessVerdict, string> = {
   draft: 'Ready to draft',
   draft_confirm_mechanism: 'Draftable — confirm the mechanism',
+  draft_reconcile: 'Draftable — reconcile the anchor',
   draft_with_changes: 'Draftable — with a stronger anchor',
   read_chart_first: 'Read the chart first',
   contact_records: 'Contact the veteran — records needed',
@@ -210,13 +212,17 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
   // A go-plan with only a viability fallback (no strategy read) is inherently less certain.
   if (strategy === null && (plan.kind === 'draft')) confidence = lower(confidence);
 
-  // ── viability-vs-strategy disagreement (explicit, not silent) ──
+  // ── viability-vs-strategy HARD disagreement (explicit, not silent): strategy says supportable but
+  //    the viability band is weak/abstaining. The verdict stays DRAFTABLE (strategy tier is authoritative
+  //    for the theory — the band is info-light) but the HEADLINE goes amber (draft_reconcile, below) so
+  //    the RN doesn't read a confident green over an unresolved engine conflict. ──
   const goPlan = plan.kind === 'draft' || plan.kind === 'draft_with_changes';
   const bandWeak = viability?.viability === 'weak' || viability?.viability === 'abstain';
-  if (goPlan && bandWeak) {
+  const hardDisagreement = goPlan && bandWeak;
+  if (hardDisagreement) {
     disagreements.push({
       source: 'viability_vs_strategy',
-      note: 'The strategy engine reads this as supportable but the anchor-viability engine is weak/abstaining — reconcile the anchor before drafting.',
+      note: 'The strategy engine reads this as supportable but the anchor-viability engine is weak/abstaining — reconcile the anchor (or get more records) before drafting.',
     });
     confidence = lower(confidence);
   }
@@ -235,10 +241,12 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
     });
   }
 
-  // ── map the plan kind → the top-line verdict ──
+  // ── map the plan kind → the top-line verdict. Caution states take precedence over a clean "draft":
+  //    an unreviewed mechanism (over-call) → confirm-mechanism; otherwise a hard engine disagreement →
+  //    reconcile (amber). Neither flips the case to not-supportable. ──
   let verdict: ReadinessVerdict;
   if (plan.kind === 'draft') {
-    verdict = overcall ? 'draft_confirm_mechanism' : 'draft';
+    verdict = overcall ? 'draft_confirm_mechanism' : hardDisagreement ? 'draft_reconcile' : 'draft';
   } else if (plan.kind === 'draft_with_changes') {
     verdict = 'draft_with_changes';
   } else if (plan.kind === 'contact_records') {
@@ -287,16 +295,24 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
   // sanity === 'clear' → no effect (it may never RELAX a deterministic caution).
   // sanity === null (unavailable) → no effect (absence is not all-clear).
 
-  const nextAction = nextActionFor(verdict, plan, disagreements);
+  const nextAction = nextActionFor(verdict, plan, disagreements, sanity);
   return { verdict, title: VERDICT_TITLE[verdict], detail: plan.detail, nextAction, confidence, disagreements, plan };
 }
 
-function nextActionFor(verdict: ReadinessVerdict, plan: RecommendedPlan, disagreements: readonly Disagreement[]): string {
+function nextActionFor(verdict: ReadinessVerdict, plan: RecommendedPlan, disagreements: readonly Disagreement[], sanity: ImpressionLevel | null): string {
+  // The AI sanity signal nudges the next action ONE WAY ONLY — toward more diligence. A 'concern' that
+  // CORROBORATES an unresolved engine disagreement strengthens the steer to "get more records / a
+  // physician review" (never toward "just draft"). A 'clear' has no say here — it cannot relax the steer.
+  const aiCorroboratesCaution = sanity === 'concern';
   switch (verdict) {
     case 'draft':
       return 'Send to the drafter.';
     case 'draft_confirm_mechanism':
       return 'Confirm the mechanism with the physician, then send to the drafter.';
+    case 'draft_reconcile':
+      return aiCorroboratesCaution
+        ? 'The engines disagree and the AI check also flags a concern — get more records or a physician review before drafting.'
+        : 'Reconcile the anchor — get more records or a physician review before drafting.';
     case 'draft_with_changes':
       return plan.switchToAnchor ? `Draft anchored on ${plan.switchToAnchor}.` : 'Draft with the stronger anchor.';
     case 'read_chart_first':

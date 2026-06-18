@@ -19,6 +19,7 @@ import { SectionCard } from './ui/SectionCard';
 const VERDICT_TONE: Record<ReadinessVerdict, string> = {
   draft: 'border-emerald-200 bg-emerald-50 text-emerald-700',
   draft_confirm_mechanism: 'border-amber-300 bg-amber-50 text-amber-800',
+  draft_reconcile: 'border-amber-300 bg-amber-50 text-amber-800',
   draft_with_changes: 'border-sky-200 bg-sky-50 text-sky-700',
   read_chart_first: 'border-amber-200 bg-amber-50 text-amber-700',
   contact_records: 'border-amber-200 bg-amber-50 text-amber-700',

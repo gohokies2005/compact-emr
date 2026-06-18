@@ -72,6 +72,7 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
         sizeBytes: true,
         contentType: true,
         docTag: true,
+        pageCount: true, // surface page count in the Documents list (Ryan 2026-06-17, asked 3×)
         s3Key: true,
         uploadedAt: true,
         uploadedBy: true,

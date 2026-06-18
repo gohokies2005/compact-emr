@@ -48,6 +48,7 @@ import { RecommendedPlanCard } from '../../components/RecommendedPlanCard';
 import { PreDraftSanityImpression, PostDraftSanityImpression } from '../../components/SanityImpressionLine';
 import { useChartReadiness } from '../../hooks/useChartReadiness';
 import { formatRelativeTime } from '../../lib/date';
+import { formatFileSize, formatPageCount } from '../../lib/fileMeta';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
 import {
   archiveCase, deleteCase, getCase, listDraftJobs, patchCase, restoreCase, transitionCaseStatus, updateQuickNote,
@@ -985,7 +986,7 @@ function DocumentsTab({ veteranId, caseId, role }: { readonly veteranId: string;
               key={d.id}
               onClick={() => setViewDoc({ id: d.id, filename: d.filename, contentType: d.contentType })}
               lead={d.filename}
-              meta={`${d.docTag ?? 'Other'} · ${formatRelativeTime(d.uploadedAt)}`}
+              meta={[d.docTag ?? 'Other', formatFileSize(d.sizeBytes), formatPageCount(d.pageCount), formatRelativeTime(d.uploadedAt)].filter(Boolean).join(' · ')}
               trailing={
                 <span className="flex items-center gap-3">
                   <RowAction disabled={reocr.isPending} title="Re-run OCR (Textract → Claude fallback) — use if this file shows as unreadable" onClick={(e) => { e.stopPropagation(); reocr.mutate(d.id); }}>Re-run OCR</RowAction>

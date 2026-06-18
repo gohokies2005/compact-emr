@@ -128,6 +128,16 @@ export class DrafterStack extends Stack {
     documentsKey.grantEncryptDecrypt(taskRole);
     drafterInvokeTokenSecret.grantRead(taskRole);
     anthropicKeySecret.grantRead(taskRole);
+    // Task scale-in PROTECTION (2026-06-18): the worker self-protects via the agent endpoint
+    // ($ECS_AGENT_URI/task-protection/v1/state) so the autoscaler can't reap a still-drafting task (the
+    // ">1 draft dies" root cause). The agent endpoint authorizes with the TASK ROLE — without these
+    // grants it returns AccessDenied and the worker's fail-open helper SILENTLY no-ops (the fix would
+    // look deployed but do nothing — AWS ECS docs: "IAM permissions required for task scale-in
+    // protection"). Scoped to this drafter cluster's tasks.
+    taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['ecs:UpdateTaskProtection', 'ecs:GetTaskProtection'],
+      resources: [`arn:aws:ecs:${this.region}:${this.account}:task/compact-emr-${config.envName}-drafter/*`],
+    }));
 
     // ===== Security group: outbound 443 only =====
     const securityGroup = new ec2.SecurityGroup(this, 'DrafterSecurityGroup', {
@@ -344,6 +354,36 @@ export class DrafterStack extends Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     drafterSpendAlarm.addAlarmAction(new cloudwatchActions.SnsAction(costRunawayTopic));
+
+    // FAIL-LOUD: a draft killed mid-flight by the scheduler (2026-06-18 root cause — autoscaler scale-in
+    // reaping a still-drafting task). Task scale-in PROTECTION (worker-side) now prevents this, but if it
+    // ever recurs (a drafter-stack deploy WHILE a draft runs, a protection-endpoint failure, etc.) it was
+    // SILENT — the EMR just showed a stuck/partial job. The worker logs `{"msg":"SIGTERM received",
+    // ...,"hasJob":true}` exactly when a busy task is being torn down; alarm on it so it's never silent
+    // again. (A normal scale-in of an IDLE task logs hasJob:false → not matched.)
+    const reapedMidDraftMetric = new logs.MetricFilter(this, 'DrafterReapedMidDraftFilter', {
+      logGroup,
+      metricNamespace: `compact-emr-${config.envName}/drafter`,
+      metricName: 'ReapedMidDraft',
+      filterPattern: logs.FilterPattern.all(
+        logs.FilterPattern.stringValue('$.msg', '=', 'SIGTERM received'),
+        logs.FilterPattern.booleanValue('$.hasJob', true),
+      ),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const reapedMidDraftAlarm = new cloudwatch.Alarm(this, 'DrafterReapedMidDraftAlarm', {
+      alarmName: `compact-emr-${config.envName}-drafter-reaped-mid-draft`,
+      alarmDescription:
+        'A drafter task received SIGTERM while it still held a job (hasJob:true) — a draft was killed mid-flight. Task scale-in protection should prevent this; if it fired, either the drafter stack was deployed mid-draft or the protection endpoint failed. Check drafter-task-stops + the worker logs.',
+      metric: reapedMidDraftMetric.metric({ period: Duration.minutes(5), statistic: 'Sum' }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    reapedMidDraftAlarm.addAlarmAction(new cloudwatchActions.SnsAction(costRunawayTopic));
 
     // ===== Outputs the drafter window needs =====
     // ECR repo URI — drafter window runs `docker push <uri>:<git-sha>` against this.

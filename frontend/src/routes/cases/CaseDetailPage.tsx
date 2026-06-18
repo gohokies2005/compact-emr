@@ -985,8 +985,8 @@ function DocumentsTab({ veteranId, caseId, role }: { readonly veteranId: string;
             <DataRow
               key={d.id}
               onClick={() => setViewDoc({ id: d.id, filename: d.filename, contentType: d.contentType })}
-              lead={d.filename}
-              meta={[d.docTag ?? 'Other', formatFileSize(d.sizeBytes), formatPageCount(d.pageCount), formatRelativeTime(d.uploadedAt)].filter(Boolean).join(' · ')}
+              lead={d.autoTitle ?? d.filename}
+              meta={[d.autoTitle ? d.filename : (d.docTag ?? 'Other'), formatFileSize(d.sizeBytes), formatPageCount(d.pageCount), formatRelativeTime(d.uploadedAt)].filter(Boolean).join(' · ')}
               trailing={
                 <span className="flex items-center gap-3">
                   <RowAction disabled={reocr.isPending} title="Re-run OCR (Textract → Claude fallback) — use if this file shows as unreadable" onClick={(e) => { e.stopPropagation(); reocr.mutate(d.id); }}>Re-run OCR</RowAction>

@@ -51,6 +51,24 @@ describe('document routes', () => {
     expect(prisma.document.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { case: { veteranId: 'VET-1' } } }));
   });
 
+  it('surfaces a content-based autoTitle from the document text (Ryan 2026-06-18: no more "Misc")', async () => {
+    const prisma = {
+      document: { findMany: vi.fn(async () => [{
+        id: 'doc-9', caseId: 'CASE-1', filename: 'Woodley_GERD_Misc.pdf', sizeBytes: BigInt(900000), contentType: 'application/pdf',
+        docTag: 'Other', pageCount: 17, s3Key: 'cases/CASE-1/x.pdf', uploadedAt: new Date(), uploadedBy: 'u', updatedAt: new Date(), version: 1,
+        pages: [{ text: 'We made a decision on your VA benefits. Rating Decision. Service connection for gastritis, GERD is denied.' }],
+      }]) },
+    };
+    const res = await request(appFor(prisma)).get('/api/v1/veterans/VET-1/documents').expect(200);
+    expect(res.body.data[0].autoTitle).toBe('VA Rating Decision — GERD denied');
+    expect(res.body.data[0].docType).toBe('va_rating_decision');
+    expect(res.body.data[0].filename).toBe('Woodley_GERD_Misc.pdf'); // original filename still available
+    // the leading-pages select is bounded (never load a 1,100-page dump just to title it)
+    expect(prisma.document.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      select: expect.objectContaining({ pages: expect.objectContaining({ take: 12 }) }),
+    }));
+  });
+
   it('creates a 5-minute KMS-enforced presigned PUT URL', async () => {
     const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1' })) } };
     const res = await request(appFor(prisma)).post('/api/v1/veterans/VET-1/documents/presign').send({ caseId: 'CASE-1', filename: 'record.pdf', contentType: 'application/pdf', sizeBytes: 1024 }).expect(200);

@@ -9,6 +9,7 @@ import { isCaseDocumentS3Key } from '../services/s3-key-safety.js';
 import { nudgeDocumentReocr } from '../services/document-reocr.js';
 import { TERMINAL_READ_STATUSES, isScreeningSummaryKey, computeTriggerHash, runMatchesHash } from '../services/chart-build-state.js';
 import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
+import { classifyDocument } from '../services/documentClassifier.js';
 import type { AppDb } from '../services/db-types.js';
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -78,9 +79,22 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
         uploadedBy: true,
         updatedAt: true,
         version: true,
+        // Content-based NAMING (Ryan 2026-06-18: "it should NOT be hard to see a file named 'VA OSA
+        // denial'"). The deterministic classifier reads a doc's leading pages — every VA signature it
+        // keys on appears early (a decision letter opens "We made a decision on your VA benefits"; a
+        // Blue Button stamps "My HealtheVet" on every page footer), so the first 12 pages are plenty
+        // and a 1,100-page dump is NOT fully loaded. $0, no LLM. Title computed per-read (no migration).
+        pages: { orderBy: { pageNumber: 'asc' }, take: 12, select: { text: true } },
       },
     });
-    res.json({ data: documents.map((doc) => ({ ...doc, sizeBytes: doc.sizeBytes.toString() })) });
+    res.json({
+      data: documents.map((doc) => {
+        const { pages, ...rest } = doc;
+        const text = (pages ?? []).map((p) => p.text).join('\n');
+        const c = classifyDocument({ filename: doc.filename, text });
+        return { ...rest, sizeBytes: doc.sizeBytes.toString(), autoTitle: c.title, docType: c.docType };
+      }),
+    });
   });
 
   router.post('/veterans/:id/documents/presign', requireRole(['admin', 'ops_staff']), async (req: Request, res: Response) => {

@@ -43,7 +43,9 @@
     "rule": "Quote specifics, never 'soon'. Never promise a date the doctor has not committed to."
   },
   "records": {
-    "upload_link": "hipaa.jotform.com/260804641700146",
+    "intake_link": "flatratenexus.com/intake",
+    "upload_link": "flatratenexus.com/intake",
+    "link_rule": "ALWAYS route veterans to the WEBSITE at flatratenexus.com/intake to start a case or send records. NEVER paste a raw jotform.com / hipaa.jotform.com URL or any Jotform form-ID number into a veteran-facing email. Jotform IDs change, and pointing a veteran at the wrong form means we cannot tell how their case came in. The website always routes them to the correct current form.",
     "we_need": ["current diagnosis", "in-service event/exposure"],
     "we_supply": "the medical literature (occasionally one specific number)",
     "do_not_re_ask": "Anything the VA already conceded (current dx already conceded, TERA/noise exposure already conceded)."
@@ -54,6 +56,10 @@
     "public_physician_name": "Dr. Ryan or Dr. Ryan K.",
     "never_use_in_vet_facing": "Kasky",
     "sayable_truth": "A board-certified physician reviews and signs every letter.",
+    "who_reviews": "A board-certified physician reviews and signs every letter, but NOT always Dr. Ryan personally - FRN has more than one board-certified physician. Frame it as 'our team and a board-certified physician' or 'one of our board-certified physicians'. NEVER say or imply that Dr. Ryan personally reviews the records, personally writes every letter, or does everything himself. He is not a one-man show.",
+    "dpt_model": "Some musculoskeletal (MSK) letters are authored with the assistance of a Doctor of Physical Therapy (DPT). A DPT-authored letter is ALWAYS co-signed by a board-certified MD or DO.",
+    "no_midlevels": "We do not use, and do not intend to hire, nurse practitioners (NPs) or physician assistants (PAs). State this affirmatively (board-certified physicians, with DPT assistance on MSK letters always co-signed by an MD/DO). Never disparage other services for using mid-levels.",
+    "never_say": ["Dr. Ryan personally reviews", "Dr. Ryan personally", "Dr. Ryan reviews the full records himself", "Dr. Ryan does everything", "one-man show", "Dr. Ryan writes every letter"],
     "photos_ok": true,
     "never_publish": ["NPI", "medical license number", "physical address"]
   },

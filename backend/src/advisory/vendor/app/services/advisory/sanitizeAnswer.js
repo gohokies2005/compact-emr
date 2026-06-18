@@ -90,6 +90,14 @@ function sanitizeAnswer(s, retrieval) {
   t = t.replace(/\b(coverage_gap|letter_citable|relative_signal_only|directionality_reliable)\b/g, '');
   t = t.replace(/[^.\n]*\$50[^.\n]*\brefund[^.\n]*\.?/gi, ''); // drop any sentence mentioning a $50 refund
   t = t.replace(/[^.\n]*\brefund[^.\n]*\$50[^.\n]*\.?/gi, '');
+  // Route any Jotform link to the website (Ryan 2026-06-18). Jotform IDs change and
+  // the WRONG form means we cannot tell how a case came in — always send to the site.
+  t = t.replace(/(?:https?:\/\/)?(?:www\.)?(?:hipaa\.)?jotform\.com(?:\/[^\s.,;:)"']*)?/gi, 'flatratenexus.com/intake');
+  // Physician review is TEAM/board-certified, NOT "Dr. Ryan personally" — he is not a
+  // one-man show; not always him (Ryan 2026-06-18). Backstop the prompt grounding.
+  t = t.replace(/Dr\.?\s*Ryan\s+personally\b/gi, 'a board-certified physician on our team');
+  t = t.replace(/\b(reviewed and signed|reviewed|signed|written|authored)\s+by\s+Dr\.?\s*Ryan(?:,?\s*a board-certified physician)?/gi, '$1 by a board-certified physician');
+  t = t.replace(/\bone[- ]man show\b/gi, 'team of board-certified physicians');
   t = t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   // Phase 3b: if the caller passed the retrieval result and the pipeline was in REASON mode,
   // mechanically guarantee the "grounded reasoning, not a validated pathway — physician confirm"

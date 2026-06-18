@@ -857,7 +857,12 @@ function assessClaimViability(claimedText, grantedScConditions, chartFactsPresen
     if (r.requires && (r.eligibility === 'conditional' || r.eligibility === 'chain')) {
       if (mode === 'chart_refined') {
         const facts = (chartFactsPresent && Array.isArray(chartFactsPresent.documented_facts)) ? chartFactsPresent.documented_facts : [];
-        factConfirmed = _requiredFactPresent(r.requires, r.mechanism_class, facts);
+        const dxConstellation = (chartFactsPresent && Array.isArray(chartFactsPresent.dx_constellation)) ? chartFactsPresent.dx_constellation : [];
+        factConfirmed = _requiredFactPresent(r.requires, r.mechanism_class, facts, {
+          upstreamCanonical: r.upstream_canonical,   // granted by construction (resolved candidate)
+          claimedCanonical: clC,
+          dxConstellation,                           // veteran present-dx problem list (raw labels)
+        });
         if (!factConfirmed) mEff = Math.min(mStatic, 1);
       } else {
         factConfirmed = false;   // info-light: unconfirmed (drives the conditional band)
@@ -1055,39 +1060,115 @@ function _publicAnchor(a) {
   return out;
 }
 
-// Best-effort check that a row's required fact is present in the normalized
-// chart fact tags. Conservative: a required fact with no recognizable tag match
-// is treated as ABSENT (floors M_eff) so we never over-promise on a missing
-// record. Tag vocabulary grows as chartFactsPresent normalization matures.
-function _requiredFactPresent(requiresText, mechanismClass, documentedFacts) {
-  if (!requiresText) return true;
-  const facts = (documentedFacts || []).map(s => String(s).toLowerCase());
-  const req = String(requiresText).toLowerCase();
-  // Pair-keyed fact tags. A required fact is PRESENT only when the chart carries
-  // the exact normalized tag (or a fact tag the SPECIFIC pattern matches) — the
-  // patterns are matched against the FACT TAGS, never against arbitrary chart
-  // prose. (The prior version tested a broad /document|confirm/ against free
-  // notes, so any note containing "document" over-promised a conditional pair to
-  // strong — BLOCKER-1.) Tags grow as chartFactsPresent normalization matures.
-  const TAG_HINTS = [
-    ['gait', /\bgait\b|varus|antalgic|thrust/],
-    ['ahi', /\bahi\b|sleep study|polysomn/],
-    ['bmi_trajectory', /\bbmi\b|weight trajector|obes/],
-    ['spine_level', /spine[_ ]?level|dermatom|concordan/],
-    ['atopic_phenotype', /atopic[_ ]?(?:phenotype|march)/],
-    ['mst_stressor', /\bmst\b|personal[_ ]?assault|3\.304/],
-    ['tbi_severity', /tbi[_ ]?severity|penetrat|moderate.severe/],
-    ['h_pylori', /pylori/],
-  ];
-  for (const [tag, re] of TAG_HINTS) {
-    if (re.test(req)) return facts.includes(tag) || facts.some(f => re.test(f));
+// ── Required-fact confirmation (chart-refined gate) ──────────────────────────
+// A conditional/chain anchor's `requires` clause names what must hold for the anchor
+// to carry its full M. In chart-refined mode we CONFIRM it from the chart or FLOOR
+// M_eff to 1. Every requirement is exactly ONE of three KINDS (enforced by the
+// build-time coverage assert in anchorViability.test.js — a future table row can NEVER
+// silently fall through to a hidden floor again; that silent-floor on ~90% of
+// conditional anchors WAS the bug, 2026-06-18):
+//   • SEVERITY    — a measurable finding (AHI, BMI/weight trajectory, documented nasal
+//                   obstruction, gait, …). Confirmed ONLY by an exact normalized fact-TAG
+//                   (matched against TAGS, NEVER the requires prose — BLOCKER-1 guard).
+//                   Floors when the tag is absent (the EMR producer emits these tags,
+//                   Phase 2, additive).
+//   • DX-PRESENCE — "<X> service-connected / documented". Satisfied by SET-MEMBERSHIP:
+//                   the named condition is the granted upstream, the claimed condition, or
+//                   a present diagnosis in chartFactsPresent.dx_constellation. Pure
+//                   canonical-label membership — never a prose scan, so BLOCKER-1 (a broad
+//                   /document/ over free notes) stays structurally closed.
+//   • FRAMING     — a drafter framing note ("aggravation framing", "Budapest-criteria",
+//                   "temporal precedence"). NOT a chart-fact gate; never floors.
+// CLOSED severity-fact enum — the producer/consumer contract (mirror eventCanon.EVENT_ENUM
+// discipline). "obesity" is intentionally NOT here: as a word it is the named SC condition
+// (a DX, checked against the constellation), distinct from the BMI/weight MEASUREMENT.
+const _MECH_FACT_ENUM = [
+  ['gait', /\bgait\b|varus|antalgic|\bthrust\b/],
+  ['ahi', /\bahi\b|sleep study|polysomn|apnea.?hypopnea index/],
+  ['bmi_trajectory', /\bbmi\b|weight (?:gain|trajector|history)/],
+  ['nasal_obstruction', /nasal obstruction|nasal congest|turbinate|septal deviat|deviated septum/],
+  ['spine_level', /spine[_ ]?level|dermatom|concordan|sacral[- ]level|radiculopathy (?:level|at the)/],
+  ['atopic_phenotype', /atopic[_ ]?(?:phenotype|march)/],
+  ['mst_stressor', /\bmst\b|personal[_ ]?assault|3\.304/],
+  ['tbi_severity', /tbi[_ ]?severity|penetrat|moderate.severe/],
+  ['h_pylori', /pylori/],
+];
+const _FRAMING_NOTE_RE = /budapest|aggravation framing|temporal precedence|bidirectional|natural progression|pre-?existing|prefer the|longer-established|framing\b/;
+
+// Extract the canonical condition labels a `requires` clause names as required diagnoses.
+// Only labels the canonicalizer RECOGNIZES are returned (unrecognized text → ignored, so
+// severity/framing noise never becomes a false dx requirement). Set-membership, not prose.
+function _extractRequiredDx(requiresText) {
+  const out = new Set();
+  const clauses = String(requiresText || '').split(/[;+,/]|\bwith\b|\band\b|\bplus\b/i);
+  // Strip ONLY the requirement VERBS, never clinical adjectives ("chronic", "acute",
+  // "pre-existing") — those are part of canonical labels ("Chronic rhinosinusitis").
+  const STRIP = /\b(documented|service[- ]?connected|\bsc\b|confirmed|presence of|history of|onset of|evidence of|showing)\b/gi;
+  for (let raw of clauses) {
+    raw = raw.replace(/[^a-z0-9/ -]/gi, ' ').trim();
+    if (raw.length < 3) continue;
+    const stripped = raw.replace(STRIP, ' ').trim();
+    for (const cand of [raw, stripped]) {   // try the RAW clause first (keeps "Chronic ...")
+      if (cand.length < 3) continue;
+      let canon = null; try { canon = _canon(cand); } catch (_) { canon = null; }
+      if (canon) { out.add(canon); break; }
+    }
   }
-  // "documented diagnosis"-class requirement: confirmed ONLY by the EXACT
-  // normalized tag, never by a substring of free chart prose (conservative).
-  if (/\bdocument|\bconfirm/.test(req)) return facts.includes('documented_diagnosis');
-  // Unknown required-fact shape ⇒ treat as ABSENT (conservative — never
-  // over-promise on a record we can't positively recognize).
-  return false;
+  return [...out];
+}
+
+// Classify a requirement into exactly one handling kind. MUST NOT return 'unknown' for any
+// table row (the coverage assert fails CI otherwise). Exported for that assert + tests.
+//   severity → gated by a fact tag · dx → set-membership · framing → never floors
+//   finding  → documentation/requirement language we can't map to a canonical dx OR a fact
+//              tag (e.g. "Documented aspiration events"). Floors CONSERVATIVELY pending an
+//              EMR fact tag, but is CLASSIFIED — so the coverage assert still catches a NEW
+//              row that genuinely falls through to 'unknown'.
+function _classifyRequirement(requiresText) {
+  if (!requiresText) return { kind: 'none', severityTags: [], requiredDx: [] };
+  const req = String(requiresText).toLowerCase();
+  const severityTags = _MECH_FACT_ENUM.filter(([, re]) => re.test(req)).map(([t]) => t);
+  const requiredDx = _extractRequiredDx(requiresText);
+  const framing = _FRAMING_NOTE_RE.test(req);
+  const hasReqLanguage = /document|confirm|showing|presence of|evidence of|therapy|\buse\b|recurrent|criteria|severity|deficiency|stricture|reflux|aspiration/.test(req);
+  let kind;
+  if (severityTags.length) kind = 'severity';
+  else if (requiredDx.length) kind = 'dx';
+  else if (framing) kind = 'framing';
+  else if (hasReqLanguage) kind = 'finding';
+  else kind = 'unknown';
+  return { kind, severityTags, requiredDx, framing };
+}
+
+// ctx = { upstreamCanonical, claimedCanonical, dxConstellation } — supplies the membership
+// universe for the DX-PRESENCE kind. Optional (older/bridge call sites omit it → dx checks
+// fall back to upstream/claimed only, conservative).
+function _requiredFactPresent(requiresText, mechanismClass, documentedFacts, ctx) {
+  if (!requiresText) return true;
+  ctx = ctx || {};
+  const facts = (documentedFacts || []).map(s => String(s).toLowerCase());
+  const cls = _classifyRequirement(requiresText);
+
+  // SEVERITY — each named measurable finding must be present as an exact tag (or a tag the
+  // pattern matches). Matched against FACT TAGS only, never the requires prose (BLOCKER-1).
+  for (const tag of cls.severityTags) {
+    const entry = _MECH_FACT_ENUM.find(([t]) => t === tag);
+    const re = entry && entry[1];
+    if (!(facts.includes(tag) || (re && facts.some(f => re.test(f))))) return false;
+  }
+  // DX-PRESENCE — every required dx must be the granted upstream, the claimed condition,
+  // or a present diagnosis in dx_constellation. Pure set-membership over canonical labels.
+  if (cls.requiredDx.length) {
+    const present = new Set([
+      _canon(ctx.upstreamCanonical), _canon(ctx.claimedCanonical),
+      ...((Array.isArray(ctx.dxConstellation) ? ctx.dxConstellation : []).map(_canon)),
+    ].filter(Boolean));
+    for (const dx of cls.requiredDx) if (!present.has(dx)) return false;
+  }
+  // FRAMING-only → not a chart-fact gate → confirm. UNKNOWN shape → conservative floor
+  // (and the coverage assert flags it RED in CI so it never ships silently).
+  if (cls.kind === 'unknown') return false;
+  return true;
 }
 
 // §3.2 companion for consumer-side suggestion surfaces (the website blank-state
@@ -1199,6 +1280,8 @@ module.exports = {
   setDirectAxisEnabled, // enable the direct-SC fold without process.env (Cloudflare Worker / tests)
   setBridgeEnabled,     // enable the presumptive bridge-anchor pathway without process.env (Worker / tests)
   assessBridgePathways, // exported for the guard tests + vendor selfVerify
+  _classifyRequirement, // exported for the requires coverage assert (anti-silent-floor tripwire)
+  _requiredFactPresent, // exported for the chart-refined floor tests
   _clearCache,
   _canon,
   _UMBRELLA_RE,       // umbrella/phenotype-unresolved claim labels (read by pipelineLinter.lintClaimedConditionSpecific)

@@ -107,16 +107,14 @@ describe('OpsHeldPanel', () => {
     });
   });
 
-  it('renders the interrupted-draft panel and re-run button in plain language', () => {
+  it('renders the interrupted-draft panel with a single "Resume draft" action (Ryan 2026-06-18: no from-scratch)', () => {
     renderPanel();
 
     expect(screen.getByText('Drafting was interrupted')).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        /This draft stopped partway and saved a partial letter\. You can open the partial as-is, or re-draft from scratch/,
-      ),
-    ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Re-draft from scratch' })).toBeInTheDocument();
+    // hasLetter is not passed → the no-letter copy variant; single "Resume draft" action, no "from scratch".
+    expect(screen.getByText(/This draft was interrupted before it finished/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Resume draft' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /from scratch/i })).not.toBeInTheDocument();
     // The case-specific operator message still renders beneath the plain-language summary.
     expect(
       screen.getByText(
@@ -125,11 +123,11 @@ describe('OpsHeldPanel', () => {
     ).toBeInTheDocument();
   });
 
-  it('calls postDraft when re-running the drafter (after confirm)', async () => {
+  it('calls postDraft when resuming the draft (after confirm)', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     renderPanel();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Re-draft from scratch' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Resume draft' }));
 
     await waitFor(() => {
       expect(postDraftMock).toHaveBeenCalledWith('CASE-2');
@@ -137,11 +135,11 @@ describe('OpsHeldPanel', () => {
     confirmSpy.mockRestore();
   });
 
-  it('does NOT re-run when the confirm is dismissed (redraft-pileup guard)', () => {
+  it('does NOT resume when the confirm is dismissed (redraft-pileup guard)', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     renderPanel();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Re-draft from scratch' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Resume draft' }));
 
     expect(postDraftMock).not.toHaveBeenCalled();
     confirmSpy.mockRestore();

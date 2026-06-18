@@ -300,6 +300,11 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
                         Select files that need reading
                       </button>
                     ) : null}
+                    {selectedDocIds.size > 0 ? (
+                      <button type="button" className="text-sm text-slate-500 hover:underline" onClick={() => setSelectedDocIds(new Set())}>
+                        Deselect all
+                      </button>
+                    ) : null}
                     <button type="button" className="text-xs text-slate-400 hover:text-slate-600 hover:underline" onClick={selectEveryFile}>
                       Re-read every file
                     </button>

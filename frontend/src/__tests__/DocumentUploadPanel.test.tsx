@@ -79,7 +79,8 @@ function renderPanel(ui: ReactElement) {
 // "Reprocess N files" button. This opens the modal, waits for the docs to load, then confirms.
 async function clickReprocess() {
   await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
-  await userEvent.click(await screen.findByRole('button', { name: /Reprocess \d+ file/ }));
+  // Submit button renamed "Re-read N files" (cost-safety 1B, Ryan 2026-06-18).
+  await userEvent.click(await screen.findByRole('button', { name: /Re-read \d+ file/ }));
 }
 
 beforeEach(() => { vi.clearAllMocks(); calls.length = 0; });
@@ -207,7 +208,7 @@ describe('DocumentUploadPanel — Reprocess documents (keystone 4b)', () => {
     expect(await screen.findByText(/0 of 2 selected/)).toBeInTheDocument();
     // pick just enc1.pdf
     await userEvent.click(screen.getByRole('checkbox', { name: /enc1\.pdf/ }));
-    await userEvent.click(screen.getByRole('button', { name: 'Reprocess 1 file' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Re-read 1 file' }));
     await waitFor(() => expect(reprocess).toHaveBeenCalledWith('CASE-9', ['D1']));
   });
 
@@ -229,8 +230,8 @@ describe('DocumentUploadPanel — Reprocess documents (keystone 4b)', () => {
     renderPanel(<DocumentUploadPanel veteranId="VET-1" cases={[]} onUploaded={vi.fn()} />);
     await userEvent.click(screen.getByRole('button', { name: 'Reprocess documents' }));
     expect(await screen.findByText('No documents on this claim yet.')).toBeInTheDocument();
-    // The confirm button renders but is DISABLED (0 selectable) → no spend possible.
-    expect(screen.getByRole('button', { name: /Reprocess \d+ file/ })).toBeDisabled();
+    // The submit button renders but is DISABLED (0 selectable → "Select a file to re-read") → no spend.
+    expect(screen.getByRole('button', { name: /Select a file to re-read|Re-read \d+ file/ })).toBeDisabled();
     expect(reprocess).not.toHaveBeenCalled();
   });
 

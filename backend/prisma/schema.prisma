@@ -326,6 +326,25 @@ model ChartExtractionRun {
   @@map("chart_extraction_runs")
 }
 
+// Cache for the auto-fired "overall impression" Opus gut-check (cost-safety, 2026-06-18). The client
+// auto-fires POST /sanity-impression on every Overview mount; without a server cache that re-spent on
+// Opus on every navigation/reload (the auto-fire-no-cache class behind the original runaway). Keyed by
+// (caseId, stage) + an input hash → an identical re-fire returns the cached impression for $0; it only
+// recomputes when the hashed inputs actually change (a redraft, a pre→post stage transition).
+model SanityImpression {
+  id         String   @id @default(uuid())
+  caseId     String   @map("case_id")
+  stage      String   // pre_draft | post_draft
+  inputHash  String   @map("input_hash") @db.VarChar(64)
+  resultJson Json?    @map("result_json")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([caseId, stage], map: "sanity_impression_case_stage_uq")
+  @@index([caseId])
+  @@map("sanity_impressions")
+}
+
 model Case {
   id                  String     @id
   veteranId           String     @map("veteran_id")

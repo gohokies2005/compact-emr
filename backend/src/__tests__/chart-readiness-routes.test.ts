@@ -8,6 +8,12 @@ import type { AppDb, CaseRecord, FileReadAttempt, FileReadStatusRecord, FileTerm
 interface MockUser { readonly sub: string; readonly roles: Role[]; }
 let mockUser: MockUser | undefined;
 
+// Mock the Opus gut-check so the cache test never hits a real model and we can count fires.
+vi.mock('../services/sanity-impression.js', () => ({
+  buildSanityImpression: vi.fn(async () => ({ impression: 'looks coherent', summary: 's', missed: [] })),
+}));
+import { buildSanityImpression } from '../services/sanity-impression.js';
+
 vi.mock('../auth/roles', () => ({
   requireRole:
     (allowed: readonly string[]) =>
@@ -108,6 +114,19 @@ function makeDb(c: CaseRecord = baseCase()) {
     // NOT a production bug — real Prisma has documentPage). Default to no per-page rows → the coverage
     // service falls back to file-level accounting, exactly what these assertions expect.
     documentPage: { findMany: vi.fn(async () => []) },
+    // Stateful sanity-impression cache (cost-safety dedup test): an in-memory map keyed (caseId|stage).
+    sanityImpression: (() => {
+      const store = new Map<string, { inputHash: string; resultJson: unknown }>();
+      const key = (w: { caseId_stage: { caseId: string; stage: string } }) => `${w.caseId_stage.caseId}|${w.caseId_stage.stage}`;
+      return {
+        findUnique: vi.fn(async (a: { where: { caseId_stage: { caseId: string; stage: string } } }) => store.get(key(a.where)) ?? null),
+        upsert: vi.fn(async (a: { where: { caseId_stage: { caseId: string; stage: string } }; create: { inputHash: string; resultJson: unknown }; update: { inputHash: string; resultJson: unknown } }) => {
+          const existing = store.get(key(a.where));
+          store.set(key(a.where), { inputHash: a.update.inputHash, resultJson: a.update.resultJson });
+          return existing ?? a.create;
+        }),
+      };
+    })(),
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
   return { db, fileRows, orphanedPaths, tx };
@@ -159,6 +178,27 @@ const SHA = 'a'.repeat(64);
 
 describe('chart-readiness routes', () => {
   beforeEach(() => { mockUser = { sub: 'OPS-SUB', roles: ['ops_staff'] }; });
+
+  describe('POST /cases/:id/sanity-impression — Opus cache dedup (cost-safety 2026-06-18)', () => {
+    const body = { stage: 'pre_draft', claimedCondition: 'OSA', theory: 'secondary to PTSD', scConditions: ['PTSD 70%'], keyFacts: ['CPAP in chart'] };
+    it('an identical re-fire is served from cache — Opus runs ONCE, not on every page open', async () => {
+      vi.mocked(buildSanityImpression).mockClear();
+      const { db } = makeDb();
+      const app = appFor(db);
+      const r1 = await request(app).post('/api/v1/cases/CASE-1/sanity-impression').send(body).expect(200);
+      const r2 = await request(app).post('/api/v1/cases/CASE-1/sanity-impression').send(body).expect(200);
+      expect(buildSanityImpression).toHaveBeenCalledTimes(1); // 2nd call hit the cache → no Opus spend
+      expect(r2.body.data).toEqual(r1.body.data);
+    });
+    it('recomputes (Opus runs again) when the inputs actually change', async () => {
+      vi.mocked(buildSanityImpression).mockClear();
+      const { db } = makeDb();
+      const app = appFor(db);
+      await request(app).post('/api/v1/cases/CASE-1/sanity-impression').send(body).expect(200);
+      await request(app).post('/api/v1/cases/CASE-1/sanity-impression').send({ ...body, theory: 'DIFFERENT theory' }).expect(200);
+      expect(buildSanityImpression).toHaveBeenCalledTimes(2); // changed inputs → fresh Opus call (correct)
+    });
+  });
 
   it('POST read-attempt with clean native text marks file as read', async () => {
     const { db, fileRows } = makeDb();

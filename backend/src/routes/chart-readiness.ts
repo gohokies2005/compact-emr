@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
@@ -374,7 +375,33 @@ export function createChartReadinessRouter(db: AppDb): Router {
         draftText: str(b['draftText'], 20_000),
         grade: str(b['grade'], 200),
       };
+      // COST-SAFETY (2026-06-18 audit): cache the Opus result per (case, stage) keyed by an input hash.
+      // The client auto-fires this on every Overview mount; without this, an identical re-fire (same
+      // inputs, same stage — a reload/navigation/poll) re-spent on Opus every time. An exact-hash hit
+      // returns the cached impression for $0; the Opus call runs ONLY when the hashed inputs change.
+      const inputHash = createHash('sha256').update(JSON.stringify(ctx)).digest('hex');
+      const sanityDb = db as unknown as {
+        sanityImpression: {
+          findUnique: (a: { where: { caseId_stage: { caseId: string; stage: string } } }) => Promise<{ inputHash: string; resultJson: unknown } | null>;
+          upsert: (a: { where: { caseId_stage: { caseId: string; stage: string } }; create: Record<string, unknown>; update: Record<string, unknown> }) => Promise<unknown>;
+        };
+      };
+      let cached: { inputHash: string; resultJson: unknown } | null = null;
+      try { cached = await sanityDb.sanityImpression.findUnique({ where: { caseId_stage: { caseId, stage: ctx.stage } } }); } catch { cached = null; /* fail-open: a cache miss/error must never block */ }
+      if (cached !== null && cached.inputHash === inputHash && cached.resultJson !== null && cached.resultJson !== undefined) {
+        res.json({ data: cached.resultJson });
+        return;
+      }
+
       const impression = await buildSanityImpression(ctx);
+      // Best-effort cache write — NEVER block or fail the response on a cache error.
+      try {
+        await sanityDb.sanityImpression.upsert({
+          where: { caseId_stage: { caseId, stage: ctx.stage } },
+          create: { caseId, stage: ctx.stage, inputHash, resultJson: (impression ?? null) as object | null },
+          update: { inputHash, resultJson: (impression ?? null) as object | null },
+        });
+      } catch { /* best-effort */ }
       res.json({ data: impression });
     }),
   );

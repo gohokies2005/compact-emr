@@ -3,6 +3,7 @@ import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import { createDocumentsRouter } from '../routes/documents.js';
 import { authenticateJwt } from '../middleware/auth.js';
+import { computeTriggerHash } from '../services/chart-build-state.js';
 
 vi.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: vi.fn(async () => 'https://signed.example/upload'),
@@ -102,7 +103,7 @@ describe('POST /cases/:id/reprocess', () => {
     return { app, s3Send };
   }
 
-  function reprocessPrisma(over: { readStatuses?: { filePath: string; terminalStatus: string }[]; runCreateThrowsP2002?: boolean } = {}) {
+  function reprocessPrisma(over: { readStatuses?: { filePath: string; terminalStatus: string }[]; runCreateThrowsP2002?: boolean; recentRuns?: { triggerHash: string; status: string }[] } = {}) {
     const runCreates: Record<string, unknown>[] = [];
     const activityCreates: Record<string, unknown>[] = [];
     const prisma = {
@@ -124,6 +125,15 @@ describe('POST /cases/:id/reprocess', () => {
       // FORCE mode (documentIds) clears the selected docs' pages so ocr-start re-reads an already-'read' doc.
       documentPage: { deleteMany: vi.fn(async () => ({ count: 3 })) },
       chartExtractionRun: {
+        // Cost-safety gate (2026-06-17): the route reads SUCCESSFUL runs (status IN complete/…_gaps) to
+        // decide whether a re-extract is warranted (skip the salted re-spend when nothing was re-read AND
+        // the doc set already extracted). Honor the status filter so a 'failed' prior run does NOT count
+        // as already-extracted (the extract_failed recovery path).
+        findMany: vi.fn(async (args?: { where?: { status?: { in?: readonly string[] } } }) => {
+          const runs = over.recentRuns ?? [];
+          const inFilter = args?.where?.status?.in;
+          return inFilter ? runs.filter((r) => inFilter.includes(r.status)) : runs;
+        }),
         create: vi.fn(async (args: { data: Record<string, unknown> }) => {
           if (over.runCreateThrowsP2002) { const err = new Error('unique'); (err as Error & { code?: string }).code = 'P2002'; throw err; }
           runCreates.push(args.data);
@@ -189,6 +199,57 @@ describe('POST /cases/:id/reprocess', () => {
     expect(s3Send).not.toHaveBeenCalled();
     expect(res.body.data.extractEnqueued).toBe(true);
     // The salted hash carries the request id → `<sha256>:manual:<requestId>` (keystone 4b format).
+    expect(String(runCreates[0]?.['triggerHash'])).toMatch(new RegExp(`^[0-9a-f]{64}:manual:${res.body.data.requestId}$`));
+  });
+
+  it('COST GUARD: all docs read + a successful run already covers this doc set + nothing re-read → NO re-extract, NO spend (Ryan 2026-06-17)', async () => {
+    // The doc set is fully read AND a prior run already extracted THIS exact doc set. The OLD code passed
+    // a forceSalt unconditionally → defeated the idempotency mutex → minted a full chart-extract LLM run
+    // for zero change = pure Anthropic spend. Now it must SKIP: no run created, extractEnqueued=false.
+    const readStatuses = [
+      { filePath: 'cases/CASE-1/a.pdf', terminalStatus: 'read' },
+      { filePath: 'cases/CASE-1/b.pdf', terminalStatus: 'read' },
+    ];
+    const docs = [
+      { id: 'doc-terminal', s3Key: 'cases/CASE-1/a.pdf' },
+      { id: 'doc-stuck', s3Key: 'cases/CASE-1/b.pdf' },
+    ];
+    const currentHash = computeTriggerHash(docs, readStatuses);
+    const { prisma, runCreates } = reprocessPrisma({
+      readStatuses,
+      recentRuns: [{ triggerHash: currentHash, status: 'complete' }], // already extracted this doc set
+    });
+    const { app, s3Send } = appWithS3(prisma);
+    const res = await request(app).post('/api/v1/cases/CASE-1/reprocess').expect(200);
+
+    expect(res.body.data.reocrQueued).toBe(0);     // nothing re-read (all terminal)
+    expect(s3Send).not.toHaveBeenCalled();          // no re-OCR nudge
+    expect(res.body.data.extractEnqueued).toBe(false);
+    expect(res.body.data.extractReason).toBe('already_extracted_no_changes');
+    expect(runCreates).toHaveLength(0);             // CRITICAL: no chart-extract run minted → no LLM spend
+  });
+
+  it('COST GUARD recovery: all docs read but the prior run FAILED (no success for this set) → still force-extracts', async () => {
+    // The extract_failed recovery path the frontend deliberately keeps enabled: nothing to re-OCR, but the
+    // last run failed, so a re-extract IS warranted. Must still mint the salted run.
+    const readStatuses = [
+      { filePath: 'cases/CASE-1/a.pdf', terminalStatus: 'read' },
+      { filePath: 'cases/CASE-1/b.pdf', terminalStatus: 'read' },
+    ];
+    const docs = [
+      { id: 'doc-terminal', s3Key: 'cases/CASE-1/a.pdf' },
+      { id: 'doc-stuck', s3Key: 'cases/CASE-1/b.pdf' },
+    ];
+    const currentHash = computeTriggerHash(docs, readStatuses);
+    const { prisma, runCreates } = reprocessPrisma({
+      readStatuses,
+      recentRuns: [{ triggerHash: currentHash, status: 'failed' }], // failed → recovery warranted
+    });
+    const { app } = appWithS3(prisma);
+    const res = await request(app).post('/api/v1/cases/CASE-1/reprocess').expect(200);
+
+    expect(res.body.data.extractEnqueued).toBe(true);
+    expect(runCreates).toHaveLength(1);
     expect(String(runCreates[0]?.['triggerHash'])).toMatch(new RegExp(`^[0-9a-f]{64}:manual:${res.body.data.requestId}$`));
   });
 

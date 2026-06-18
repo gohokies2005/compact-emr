@@ -309,6 +309,13 @@ export class WorkersStack extends Stack {
       // invocations still finish sub-second, so the bigger budget costs ~nothing.
       timeout: Duration.minutes(15),
       memorySize: 2048,
+      // COST CIRCUIT-BREAKER (aws-cloud-sme audit 2026-06-17, RN go-live). Vision OCR is LIVE and runs
+      // INLINE here — each concurrent invoke can fan out into many Sonnet calls. With S3 EventBridge +
+      // the stuck-doc re-fire + the orphan-race retry, a trigger storm could otherwise run unbounded
+      // Sonnet spend (the failure mode behind the $231 incident). Reserve a hard concurrency cap so a
+      // storm QUEUES instead of fanning out — fail-CLOSED on cost. 10 is ample for real intake volume
+      // (most files finish in seconds; only big scanned files are slow) and well under the account pool.
+      reservedConcurrentExecutions: 10,
       environment: {
         COMPACT_EMR_API_URL: apiBaseUrl,
         INTERNAL_WORKER_TOKEN: workerTokenSecret.secretValue.unsafeUnwrap(),
@@ -366,7 +373,7 @@ export class WorkersStack extends Stack {
     // Loud, not silent (mirrors JotformSweepErrorsAlarm below): any message in the DLQ means a
     // cases/ upload was never OCR'd after all retries. No SNS action wired yet — console/
     // dashboard-visible like the other worker alarms; wire an ops topic when one exists.
-    new cloudwatch.Alarm(this, 'OcrStartDlqDepthAlarm', {
+    const ocrStartDlqAlarm = new cloudwatch.Alarm(this, 'OcrStartDlqDepthAlarm', {
       alarmName: `compact-emr-${config.envName}-ocr-start-dlq-depth`,
       alarmDescription: 'An ocr-start async invocation exhausted its retries and landed in the DLQ — a cases/ upload has no resolvable Document (deleted, or recordDocument never ran) and was NOT OCRd. Inspect compact-emr-' + config.envName + '-ocr-start-dlq messages for the S3 key, then re-fire OCR (CopyObject-onto-self) once the Document exists.',
       metric: ocrStartDlq.metricApproximateNumberOfMessagesVisible({
@@ -376,6 +383,33 @@ export class WorkersStack extends Stack {
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // ===== Vision SPEND-PROXY alarm (aws-cloud-sme audit 2026-06-17, RN go-live) =====
+    // There is no direct $ metric for Anthropic vision spend. ocr-start logs a structured line per
+    // vision read: {"msg":"ocr: vision per-page read posted","path":"vision-scanned","pages":N,...}
+    // (handler.py:1083). A JSON metric filter extracts N (pages read with Sonnet) as a CloudWatch
+    // metric; the alarm fires when vision-page volume per hour exceeds a sane ceiling — the early
+    // warning the $231 runaway lacked (it re-fired Sonnet forever with no rate alarm). Born-digital
+    // pages take the FREE native path and never log this line, so the metric tracks only PAID pages.
+    const ocrStartLogGroup = logs.LogGroup.fromLogGroupName(this, 'OcrStartLogGroupRef', `/aws/lambda/${ocrStart.functionName}`);
+    const visionPagesMetricFilter = new logs.MetricFilter(this, 'OcrVisionPagesMetricFilter', {
+      logGroup: ocrStartLogGroup,
+      metricNamespace: `compact-emr-${config.envName}`,
+      metricName: 'OcrVisionPagesRead',
+      filterPattern: logs.FilterPattern.stringValue('$.path', '=', 'vision-scanned'),
+      metricValue: '$.pages',
+      defaultValue: 0,
+    });
+    const ocrVisionSpendAlarm = new cloudwatch.Alarm(this, 'OcrVisionSpendRunawayAlarm', {
+      alarmName: `compact-emr-${config.envName}-ocr-vision-spend-runaway`,
+      alarmDescription:
+        'Paid Sonnet vision OCR pages/hour exceeded the ceiling — possible re-fire/reprocess runaway (the $231-incident class). Check ocr-start logs for repeated vision reads on the same documentId and the stuck-doc watcher re-fire rate. Reserved concurrency (10) caps the blast radius; this is the early warning.',
+      metric: visionPagesMetricFilter.metric({ statistic: 'Sum', period: Duration.hours(1) }),
+      threshold: 2000, // ~$40/hr of vision; a normal busy day stays well under, a runaway blows past it
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
@@ -496,6 +530,12 @@ export class WorkersStack extends Stack {
     // Default ops destination = the FRN inbox. AWS emails a confirmation link to info@ that must be clicked
     // before alarms deliver. Change/add destinations (SMS, a dedicated ops address) as desired.
     opsTopic.addSubscription(new subs.EmailSubscription('info@flatratenexus.com'));
+    // Wire the cost-safety alarms (2026-06-17) to the ops topic so they PAGE, not just sit on a dashboard:
+    // the vision spend-runaway (the $231-class early warning) and the ocr-start DLQ depth (the "a cases/
+    // upload was never OCR'd" signal the /delivery skip just un-jammed). These were defined earlier in the
+    // constructor; opsTopic exists now, so attach the action here. (Closes the "no SNS action wired yet" TODO.)
+    ocrVisionSpendAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+    ocrStartDlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
     const dlqDepthAlarm = (id: string, alarmName: string, queue: sqs.IQueue, what: string): void => {
       const a = new cloudwatch.Alarm(this, id, {
         alarmName,

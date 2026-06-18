@@ -512,6 +512,17 @@ def test_pdf_still_goes_to_textract_when_text_layer_thin(rig, monkeypatch):
     assert call["JobTag"] == "DOC-1"
 
 
+def test_delivery_output_is_skipped_before_resolve(rig):
+    # cases/<id>/delivery/<artifact>-v<n>.pdf is a GENERATED output (cover memo), not an uploaded
+    # record. It must skip BEFORE _resolve_document — otherwise it 404s, raises (key startswith
+    # cases/), exhausts retries, and floods the ocr-start DLQ, holding the runaway alarm RED.
+    # (aws-cloud-sme audit 2026-06-17; mirrors the /_rendered/ skip.)
+    result = handler.start_handler(_event("cases/C1/delivery/cover-memo-v7.pdf"), None)
+    assert result.get("skipped") == "delivery_output"
+    assert result["started"] == []
+    assert rig["pages"] == [] and rig["failed"] == []
+
+
 def test_has_pages_guard_runs_before_native_read(rig):
     rig["doc"]["hasPages"] = True
     s3 = rig["with_bytes"](b"already read")

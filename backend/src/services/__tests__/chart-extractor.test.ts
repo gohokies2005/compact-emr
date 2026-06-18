@@ -5,6 +5,7 @@ import {
   normalizeName,
   normalizeForQuoteMatch,
   dispositionForConfidence,
+  dedupeIdenticalDocuments,
   type BundleDocument,
 } from '../chart-extractor.js';
 
@@ -101,6 +102,37 @@ describe('locateExtractionInputs (deterministic section-targeting)', () => {
   it('tags every window with page markers so the model can return the source page', () => {
     const w = locateExtractionInputs([bluebutton()])[0]!;
     expect(w.text).toMatch(/\[p\.\d+\]/);
+  });
+});
+
+describe('dedupeIdenticalDocuments (cost-safety: never extract the same content twice)', () => {
+  const doc = (id: string, texts: string[]): BundleDocument => ({
+    id, filename: `${id}.pdf`, pages: texts.map((t, i) => ({ pageNumber: i + 1, text: t })),
+  });
+
+  it('drops a byte-identical-content duplicate, keeping the FIRST occurrence (Woodley Misc_2==Misc_3)', () => {
+    const a = doc('A', ['VA Rating Decision', 'Service connection for GERD is denied.']);
+    const b = doc('B', ['VA Rating Decision', 'Service connection for GERD is denied.']); // identical content
+    const c = doc('C', ['A genuinely different document.']);
+    const { kept, dropped } = dedupeIdenticalDocuments([a, b, c]);
+    expect(kept.map((d) => d.id)).toEqual(['A', 'C']);
+    expect(dropped).toEqual([{ id: 'B', filename: 'B.pdf', duplicateOfId: 'A' }]);
+  });
+
+  it('keeps documents with the SAME filename but DIFFERENT content (not a dup)', () => {
+    const a = doc('A', ['page one alpha']);
+    const b = doc('B', ['page one BETA — different']);
+    const { kept, dropped } = dedupeIdenticalDocuments([a, b]);
+    expect(kept.map((d) => d.id)).toEqual(['A', 'B']);
+    expect(dropped).toHaveLength(0);
+  });
+
+  it('NEVER collapses empty / no-readable-content docs (two unread files stay separate)', () => {
+    const a = doc('A', ['']);
+    const b: BundleDocument = { id: 'B', filename: 'B.pdf', pages: [] };
+    const { kept, dropped } = dedupeIdenticalDocuments([a, b]);
+    expect(kept.map((d) => d.id)).toEqual(['A', 'B']);
+    expect(dropped).toHaveLength(0);
   });
 });
 

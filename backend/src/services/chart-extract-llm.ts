@@ -18,6 +18,7 @@ import {
   locateExtractionInputs,
   chunkDocuments,
   uncoveredPages,
+  dedupeIdenticalDocuments,
   splitChunkText,
   groundExtractedItem,
   chartDedupKey,
@@ -752,8 +753,15 @@ export async function extractFullRead(
   documents: BundleDocument[],
   model: string = FULLREAD_MODEL,
 ): Promise<ExtractionResult> {
-  const chunks = chunkDocuments(documents);
-  const gaps = uncoveredPages(documents, chunks);
+  // COST-SAFETY (Ryan 2026-06-17): drop byte-identical-content duplicate documents BEFORE chunking so
+  // the same content is never sent to the model twice (Woodley Misc_2==Misc_3). Compute everything
+  // downstream over the KEPT set so coverage + grounding match what was actually fed. Logged, never silent.
+  const { kept, dropped } = dedupeIdenticalDocuments(documents);
+  if (dropped.length > 0) {
+    console.warn(JSON.stringify({ event: 'chart_extract_deduped_identical_documents', droppedCount: dropped.length, dropped }));
+  }
+  const chunks = chunkDocuments(kept);
+  const gaps = uncoveredPages(kept, chunks);
   const results: CallResult[] = new Array(chunks.length);
   const startedAt = Date.now();
   const budgetMs = selfBudgetMs();
@@ -790,8 +798,8 @@ export async function extractFullRead(
   if (uncoveredCount > 0) {
     console.warn(JSON.stringify({ event: 'chart_extract_coverage_gap', uncoveredPages: uncoveredCount, structuralGaps: gaps.length, unrunPages: unrunPages.size, sample: gaps.slice(0, 5) }));
   }
-  const { items, droppedUngrounded, droppedLowConfidence, droppedDuplicate } = groundAndDispose(documents, raw, { preferMoreComplete: true });
-  const screenings = groundScreenings(documents, rawScreenings);
+  const { items, droppedUngrounded, droppedLowConfidence, droppedDuplicate } = groundAndDispose(kept, raw, { preferMoreComplete: true });
+  const screenings = groundScreenings(kept, rawScreenings);
   return {
     items, windowsProcessed: 0, rawCount: raw.length, droppedUngrounded, droppedLowConfidence, droppedDuplicate,
     truncatedWindows, costUsd, model, fullRead: true, chunksProcessed: chunksRun, uncoveredPages: uncoveredCount, screenings,

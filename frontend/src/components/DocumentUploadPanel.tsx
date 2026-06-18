@@ -57,20 +57,12 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
   );
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [pickerInit, setPickerInit] = useState(false);
-  // Default to ALL selected once the list loads for this opening; reset when the modal closes.
-  useEffect(() => {
-    if (confirming && !pickerInit && caseDocs.length > 0) {
-      setSelectedDocIds(new Set(caseDocs.map((d) => d.id)));
-      setPickerInit(true);
-    }
-    if (!confirming && pickerInit) setPickerInit(false);
-  }, [confirming, caseDocs, pickerInit]);
-  const allSelected = caseDocs.length > 0 && selectedDocIds.size >= caseDocs.length;
+  const [confirmReadGood, setConfirmReadGood] = useState(false); // conditional confirm for re-reading an already-read file
+  const confirmCancelRef = useRef<HTMLButtonElement>(null);
+  // Accessibility (UX panel): the costly-action confirm defaults focus to Cancel, not the destructive button.
+  useEffect(() => { if (confirmReadGood) confirmCancelRef.current?.focus(); }, [confirmReadGood]);
   function toggleDoc(id: string) {
     setSelectedDocIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-  }
-  function toggleAll() {
-    setSelectedDocIds(allSelected ? new Set() : new Set(caseDocs.map((d) => d.id)));
   }
 
   // Live extraction state from the SERVER (shared queryKey with SendToDrafterPanel, so the draft button
@@ -99,6 +91,43 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
   // for which reprocess is exactly the recovery (else the button greys while the panel says "reprocess").
   const nothingToProcess =
     readiness.data?.data?.ready === true && !extractionInProgress && extractionState !== 'extract_failed';
+
+  // COST-SAFE reprocess defaults (Ryan 2026-06-17 + 2-RN/UX panel): the modal must NOT pre-select every
+  // file — re-reading a file that already read costs real money (vision OCR) and an RN who just clicks
+  // "Reprocess" could re-read a 1,000-page chart. The only files that NEED re-reading are the chart's
+  // blocking files (unread / read-failed); everything else already read fine. We derive that set from
+  // chart-readiness blockers (each carries the documentId). Files NOT in the set are "Read" and default
+  // UNCHECKED — re-reading one stays POSSIBLE (the Stephens "missed handwriting" case) but is a conscious,
+  // confirmed choice, never the default.
+  // A doc NEEDS reading unless it is PROVABLY read. We use the backend's positive readDocumentIds set
+  // (shared isEffectivelyRead predicate) as the source of truth — NOT the blocker list, which is row-
+  // sourced and blind to a mid-OCR / no-status doc (architect SB-1). Fail-safe: if readiness data is
+  // missing, readDocIds is empty → every doc is "needs reading" → default-checked, never silently
+  // skipped (the re-spend confirm still guards a deliberate re-read of an already-read file).
+  const readDocIds = new Set(readiness.data?.data?.readDocumentIds ?? []);
+  const docNeedsReading = (id: string) => !readDocIds.has(id);
+  // On EACH open, recompute the safe default (never persist a prior "all selected" set). Default-check
+  // only the files that still need reading; if none do, nothing is pre-checked.
+  useEffect(() => {
+    if (confirming && !pickerInit && !docPicker.isLoading) {
+      setSelectedDocIds(new Set(caseDocs.filter((d) => docNeedsReading(d.id)).map((d) => d.id)));
+      setPickerInit(true);
+    }
+    if (!confirming && pickerInit) { setPickerInit(false); setConfirmReadGood(false); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirming, docPicker.isLoading, caseDocs.length, pickerInit]);
+  const needsReadingCount = caseDocs.filter((d) => docNeedsReading(d.id)).length;
+  const allNeedsReadingSelected = needsReadingCount > 0 && caseDocs.every((d) => !docNeedsReading(d.id) || selectedDocIds.has(d.id));
+  // Is an ALREADY-READ (non-blocker) file in the submit set? That's the only path that re-spends against
+  // the owner's "never process the same file twice" rule → gate it behind a one-line confirm.
+  const reReadGoodCount = caseDocs.filter((d) => selectedDocIds.has(d.id) && !docNeedsReading(d.id)).length;
+  const reReadingGoodFile = reReadGoodCount > 0;
+  function selectNeedsReading() {
+    setSelectedDocIds(new Set(caseDocs.filter((d) => docNeedsReading(d.id)).map((d) => d.id)));
+  }
+  function selectEveryFile() {
+    setSelectedDocIds(new Set(caseDocs.map((d) => d.id)));
+  }
 
   // Upload one already-classified item via the existing presign -> upload -> record flow.
   // Throws on failure so the batch driver can record a per-file error without aborting the batch.
@@ -243,15 +272,19 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
         </p>
       ) : null}
 
-      {/* Reprocess picker — all files selected by default; uncheck to re-read only what changed. Calm
-          neutral modal, bold for the count, no red. */}
+      {/* Reprocess picker (2-RN/UX panel, Ryan 2026-06-17). SAFE DEFAULT: only files that still NEED
+          reading are pre-checked; already-read files default UNCHECKED (re-reading one is possible but a
+          conscious, confirmed choice). Status badges are text+icon (not color-only). No pre-firing
+          "select all". A separate cheap "Re-run extraction (no re-read)" path covers the extract-failed
+          case. Re-reading an already-read file triggers a one-line confirm. */}
       {confirming ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4" role="dialog" aria-modal="true" aria-label="Reprocess documents">
-          <div className="w-full max-w-lg rounded-lg border border-slate-200 bg-white p-5 shadow-lg">
+          <div className="relative w-full max-w-lg rounded-lg border border-slate-200 bg-white p-5 shadow-lg">
             <h3 className="text-base font-semibold text-slate-800">Reprocess documents</h3>
             <p className="mt-1 text-sm text-slate-500">
-              Re-reads the selected files with full vision and re-runs the chart extraction. All files are
-              selected by default — uncheck any you don’t need to re-read to save time. Takes about 5–10 minutes.
+              Only files that still need reading are selected. Re-reading a file that already read costs time
+              and money — check a file only if it missed something (for example, missed handwriting). Takes
+              about 5&ndash;10 minutes.
             </p>
             {docPicker.isLoading ? (
               <p className="mt-4 text-sm text-slate-500">Loading documents…</p>
@@ -261,35 +294,97 @@ export function DocumentUploadPanel({ veteranId, caseId, cases = [], onUploaded 
               <>
                 <div className="mt-4 flex items-center justify-between">
                   <span className="text-sm font-medium text-slate-700">{selectedDocIds.size} of {caseDocs.length} selected</span>
-                  <button type="button" className="text-sm text-sky-700 hover:underline" onClick={toggleAll}>
-                    {allSelected ? 'Deselect all' : 'Select all'}
-                  </button>
+                  <div className="flex items-center gap-3">
+                    {needsReadingCount > 0 ? (
+                      <button type="button" className="text-sm text-sky-700 hover:underline" onClick={selectNeedsReading} disabled={allNeedsReadingSelected}>
+                        Select files that need reading
+                      </button>
+                    ) : null}
+                    <button type="button" className="text-xs text-slate-400 hover:text-slate-600 hover:underline" onClick={selectEveryFile}>
+                      Re-read every file
+                    </button>
+                  </div>
                 </div>
                 <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto rounded-md border border-slate-200 p-2">
-                  {caseDocs.map((d) => (
-                    <li key={d.id}>
-                      <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm text-slate-700 hover:bg-slate-50">
-                        <input type="checkbox" checked={selectedDocIds.has(d.id)} onChange={() => toggleDoc(d.id)} />
-                        <span className="truncate">{d.filename}</span>
-                      </label>
-                    </li>
-                  ))}
+                  {caseDocs.map((d) => {
+                    const needs = docNeedsReading(d.id);
+                    return (
+                      <li key={d.id}>
+                        <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm text-slate-700 hover:bg-slate-50">
+                          <input type="checkbox" checked={selectedDocIds.has(d.id)} onChange={() => toggleDoc(d.id)} />
+                          <span className="flex-1 truncate">{d.filename}</span>
+                          {!needs ? (
+                            <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-500" title="This file already read successfully. Re-reading it costs time and money.">✓ Read</span>
+                          ) : extractionInProgress ? (
+                            <span className="shrink-0 rounded bg-sky-50 px-1.5 py-0.5 text-xs font-medium text-sky-700" title="This file is being read right now.">⟳ Reading…</span>
+                          ) : (
+                            <span className="shrink-0 rounded bg-amber-50 px-1.5 py-0.5 text-xs font-medium text-amber-700" title="This file has not been read yet (or its read failed).">⚠ Not read yet</span>
+                          )}
+                        </label>
+                      </li>
+                    );
+                  })}
                 </ul>
+                {/* Edge case: extraction failed but every file already read — nothing needs re-OCR. Steer
+                    the RN to the cheap re-extract instead of a pointless paid re-read. */}
+                {extractionState === 'extract_failed' && needsReadingCount === 0 ? (
+                  <p className="mt-3 rounded-md bg-sky-50 px-3 py-2 text-sm text-sky-800">
+                    All files have already been read successfully — nothing needs re-reading. If the chart
+                    summary looks wrong, use <span className="font-medium">Re-run extraction</span> below: it&rsquo;s quick and doesn&rsquo;t re-read any files.
+                  </p>
+                ) : null}
               </>
             )}
-            <div className="mt-5 flex justify-end gap-2">
+            <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
               <button type="button" className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50" disabled={busy} onClick={() => setConfirming(false)}>
                 Cancel
               </button>
+              {/* Cheap path: re-run extraction only when there's nothing to re-OCR (no paid vision read). */}
+              {caseDocs.length > 0 && needsReadingCount === 0 ? (
+                <button
+                  type="button"
+                  className={`rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${extractionState === 'extract_failed' ? 'border border-slate-800 bg-slate-800 text-white hover:bg-slate-700' : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}
+                  disabled={busy || extractionInProgress}
+                  title="Re-checks the data we pulled from your already-read files. No paid re-reading."
+                  onClick={() => void onReprocess()}
+                >
+                  Re-run extraction (no re-read)
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="rounded-md border border-slate-800 bg-slate-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
                 disabled={busy || selectedDocIds.size === 0 || extractionInProgress}
-                onClick={() => void onReprocess([...selectedDocIds])}
+                onClick={() => {
+                  if (selectedDocIds.size === 0) return;
+                  if (reReadingGoodFile && !confirmReadGood) { setConfirmReadGood(true); return; }
+                  void onReprocess([...selectedDocIds]);
+                }}
               >
-                Reprocess {selectedDocIds.size} {selectedDocIds.size === 1 ? 'file' : 'files'}
+                {selectedDocIds.size === 0 ? 'Select a file to re-read' : `Re-read ${selectedDocIds.size} ${selectedDocIds.size === 1 ? 'file' : 'files'}`}
               </button>
             </div>
+            {/* Conditional confirm — fires ONLY when an already-read file is in the submit set (the only
+                path that re-spends against "never process the same file twice"). Default focus = Cancel. */}
+            {confirmReadGood ? (
+              <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-white/95 p-5">
+                <div className="w-full max-w-sm rounded-md border border-slate-200 p-4 shadow">
+                  <h4 className="text-sm font-semibold text-slate-800">Re-read a file that already read?</h4>
+                  <p className="mt-1 text-sm text-slate-600">
+                    {reReadGoodCount === 1 ? '1 selected file' : `${reReadGoodCount} selected files`} already read successfully.
+                    Re-reading {reReadGoodCount === 1 ? 'it' : 'them'} costs time and money. Continue only if a file missed something.
+                  </p>
+                  <div className="mt-4 flex justify-end gap-2">
+                    <button type="button" ref={confirmCancelRef} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50" onClick={() => setConfirmReadGood(false)}>
+                      Cancel
+                    </button>
+                    <button type="button" className="rounded-md border border-amber-600 bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500" onClick={() => { setConfirmReadGood(false); void onReprocess([...selectedDocIds]); }}>
+                      Re-read anyway
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}

@@ -7,7 +7,7 @@ import { prisma as defaultPrisma } from '../db/client.js';
 import { requireRole } from '../auth/roles.js';
 import { isCaseDocumentS3Key } from '../services/s3-key-safety.js';
 import { nudgeDocumentReocr } from '../services/document-reocr.js';
-import { TERMINAL_READ_STATUSES, isScreeningSummaryKey } from '../services/chart-build-state.js';
+import { TERMINAL_READ_STATUSES, isScreeningSummaryKey, computeTriggerHash, runMatchesHash } from '../services/chart-build-state.js';
 import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -278,9 +278,33 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
       }
     }
 
-    // Action 2 — force the extract with a salted hash (see computeTriggerHash's salt contract).
+    // Action 2 — re-extract, but ONLY when it would actually change something. COST-SAFETY (Ryan
+    // 2026-06-17, architect-confirmed): the old code ALWAYS passed a forceSalt, which by design defeats
+    // the (caseId, triggerHash) idempotency mutex — so a reprocess that re-read NOTHING and whose doc set
+    // was ALREADY extracted still minted a full chart-extract LLM run = pure Anthropic spend for zero
+    // change (the "Re-read anyway" / redundant-reprocess bleed). Gate the force: it is warranted only if
+    //   (a) we actually re-read a doc (reocrQueued > 0 → the inputs will change), OR
+    //   (b) there is NO successful run for the CURRENT doc set yet — the extract_failed / never-extracted
+    //       recovery the frontend's nothingToProcess guard deliberately keeps enabled.
+    // When the chart is already extracted and nothing was re-read, SKIP entirely: no salt, no run, no spend.
     const requestId = randomUUID();
-    const extract = await maybeEnqueueChartExtract(prisma as unknown as AppDb, caseId, { forceSalt: `manual:${requestId}` });
+    let extract: { enqueued: boolean; reason?: string };
+    if (reocrQueued === 0) {
+      const currentHash = computeTriggerHash(documents, readStatuses);
+      // Filter to SUCCESSFUL runs at the DB level and DON'T cap the result (architect SF-2: a `take:10`
+      // could miss an older complete run on a case reprocessed many times → a redundant paid extract,
+      // the exact bleed this gate closes). A case has only a handful of runs; selecting just triggerHash
+      // for the completed ones is cheap. runMatchesHash handles the salted-prefix forced-run form.
+      const successfulRuns = await prisma.chartExtractionRun.findMany({
+        where: { caseId, status: { in: ['complete', 'complete_with_gaps'] } }, select: { triggerHash: true },
+      });
+      const alreadyExtracted = successfulRuns.some((r) => runMatchesHash(r.triggerHash, currentHash));
+      extract = alreadyExtracted
+        ? { enqueued: false, reason: 'already_extracted_no_changes' }
+        : await maybeEnqueueChartExtract(prisma as unknown as AppDb, caseId, { forceSalt: `manual:${requestId}` });
+    } else {
+      extract = await maybeEnqueueChartExtract(prisma as unknown as AppDb, caseId, { forceSalt: `manual:${requestId}` });
+    }
 
     await prisma.activityLog.create({
       data: {

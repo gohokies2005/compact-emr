@@ -20,6 +20,8 @@
  * rating-type docs whole and the worker flags "obtain rating decision" when none itemize grants.
  */
 
+import { createHash } from 'node:crypto';
+
 export type ExtractCategory = 'sc_condition' | 'active_problem' | 'active_medication';
 
 export interface BundleDocumentPage {
@@ -317,6 +319,38 @@ export interface DocumentChunk {
 export const CHUNK_CHARS = 48_000;
 /** Re-include the last N pages of the prior chunk so an item straddling a page boundary isn't lost. */
 export const CHUNK_OVERLAP_PAGES = 1;
+
+/**
+ * Dedupe BYTE-IDENTICAL-CONTENT documents before extraction (Ryan 2026-06-17 cost-safety: "there
+ * should never be a need to process the same file twice ... make a way to not process identical
+ * files"). The same file uploaded twice (Woodley CLM-B543F8D0BD: Misc_2.pdf == Misc_3.pdf, byte-
+ * identical) would otherwise each be chunked and sent to the model — doubling the EXPENSIVE extract
+ * leg AND double-counting items into the bundle. Key on a sha256 of the document's CONCATENATED PAGE
+ * TEXT (content, not filename), keep the FIRST occurrence (input order is deterministic), drop later
+ * identical ones. Empty/no-page docs are passed through untouched (the chunker skips them anyway and
+ * we never want to collapse two unread files into one). NEVER silent — the caller logs every drop.
+ * The survivor's pages fully cover the dropped twin's content, so chunking/coverage/grounding stay
+ * correct when computed over the KEPT set. Pure + unit-tested. (NOTE: this dedups the extract leg;
+ * the upstream OCR re-read of an identical UPLOAD is separately bounded by ocr-start reserved
+ * concurrency + the vision spend alarm — the full upload/OCR-side skip is a specced follow-up.)
+ */
+export function dedupeIdenticalDocuments(
+  documents: BundleDocument[],
+): { kept: BundleDocument[]; dropped: { id: string; filename: string; duplicateOfId: string }[] } {
+  const firstByContent = new Map<string, BundleDocument>();
+  const kept: BundleDocument[] = [];
+  const dropped: { id: string; filename: string; duplicateOfId: string }[] = [];
+  for (const doc of documents) {
+    const content = (doc.pages ?? []).map((p) => p.text).join('\n');
+    if (content.trim().length === 0) { kept.push(doc); continue; } // no readable content → never collapse
+    const hash = createHash('sha256').update(content).digest('hex');
+    const first = firstByContent.get(hash);
+    if (first) { dropped.push({ id: doc.id, filename: doc.filename, duplicateOfId: first.id }); continue; }
+    firstByContent.set(hash, doc);
+    kept.push(doc);
+  }
+  return { kept, dropped };
+}
 
 /**
  * Split every document into overlapping page-boundary chunks covering ALL pages. A single page

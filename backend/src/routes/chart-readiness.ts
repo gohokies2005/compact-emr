@@ -185,6 +185,19 @@ export function createChartReadinessRouter(db: AppDb): Router {
       const docIdByKey = new Map(docs.filter((d): d is { id: string; s3Key: string } => typeof d.id === 'string').map((d) => [d.s3Key, d.id]));
       const blockingFiles = result.blockingFiles.map((b) => ({ ...b, documentId: docIdByKey.get(b.filePath) ?? null }));
 
+      // POSITIVE "this document is provably read" set, for the reprocess modal's cost-safe default
+      // (Ryan 2026-06-17 + architect SB-1). Derived from the SAME isEffectivelyRead predicate the gates
+      // use, so the UI can't disagree. A doc with NO read-status row (mid-OCR, never read, cleared) is
+      // ABSENT here → the modal treats it as needs-reading and default-CHECKS it. Fail-safe direction:
+      // unknown ⇒ needs reading (never silently skip an unread file); the re-spend confirm still guards
+      // re-reading a doc that IS in this set. blockingFiles (row-sourced) is blind to no-row docs, so a
+      // positive read-set is the only safe basis for "already read".
+      const rowByKey = new Map(rows.map((r) => [r.filePath, r]));
+      const readDocumentIds = docs
+        .filter((d): d is { id: string; s3Key: string } => typeof d.id === 'string')
+        .filter((d) => { const r = rowByKey.get(d.s3Key); return r !== undefined && isEffectivelyRead(r); })
+        .map((d) => d.id);
+
       // Extraction phase (full-read chunker takes minutes). File-read `ready` flips true the moment
       // OCR finishes — but the chart's sc_conditions/meds aren't populated until EXTRACTION completes,
       // and the pre-draft gates (Gate-2 dx / framing / viability) read that extracted chart. So the
@@ -239,7 +252,7 @@ export function createChartReadinessRouter(db: AppDb): Router {
         });
       }
 
-      res.json({ data: { ...result, blockingFiles, extractionState: build.state, extractionGaps, autoRecoveryExhausted } });
+      res.json({ data: { ...result, blockingFiles, readDocumentIds, extractionState: build.state, extractionGaps, autoRecoveryExhausted } });
     }),
   );
 

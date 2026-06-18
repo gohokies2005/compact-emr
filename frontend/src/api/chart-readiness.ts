@@ -49,6 +49,10 @@ export interface ChartReadinessResult {
   // only when a human is genuinely the last resort — NOT during a normal preparing/extracting cycle.
   // Optional: an older backend omits it → the UI treats absence as "not exhausted" (fail-safe: no nag).
   readonly autoRecoveryExhausted?: boolean;
+  // POSITIVE set of document IDs that are PROVABLY read (shared isEffectivelyRead predicate). Used by
+  // the reprocess modal's cost-safe default: a doc NOT in this set (mid-OCR / never read / unknown)
+  // is treated as needs-reading and default-checked — never silently skipped. (Ryan 2026-06-17.)
+  readonly readDocumentIds?: readonly string[];
 }
 
 export async function getChartReadiness(caseId: string): Promise<{ data: ChartReadinessResult }> {

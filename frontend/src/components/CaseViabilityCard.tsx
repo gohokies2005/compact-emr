@@ -39,8 +39,20 @@ export function CaseViabilityCard({
   const v = q.data?.data;
   if (!v) return null; // dark flag / fail-open / loading — the flag controls the whole surface
 
-  const chip = BAND_CHIP[v.viability];
   const best = v.best_anchor;
+  const ra = v.recommended_action;
+  // BAND-LEAK / OVER-CALL GUARD (2026-06-18): the resolver's recommendedAction already routes an
+  // UNREVIEWED (physician_reviewed:false) mechanism to physician review regardless of band — 94.5% of
+  // the table is Doximity-sourced. We CONSUME that decision (we do not re-derive it): when the policy
+  // says escalate→physician AND the row is unreviewed AND the band would otherwise read green
+  // (strong/moderate/conditional), the headline must NOT say "Strong" — it is a CANDIDATE pathway that
+  // needs physician confirmation of the medicine. Fail-open: no recommended_action → legacy band chip.
+  const greenBand = v.viability === 'strong' || v.viability === 'moderate' || v.viability === 'conditional';
+  const unreviewedOvercall =
+    greenBand && best?.physician_reviewed === false && ra?.action === 'escalate' && ra?.route === 'physician';
+  const chip = unreviewedOvercall
+    ? { tone: 'warn' as const, label: 'Candidate — physician review' }
+    : BAND_CHIP[v.viability];
 
   return (
     <SectionCard
@@ -59,6 +71,14 @@ export function CaseViabilityCard({
           <span className="ml-1 text-slate-500">
             (M{best.M_eff ?? '–'} {best.tier}{best.E === null ? ', E: not yet scored' : `, E: ${best.E}`})
           </span>
+        </div>
+      ) : null}
+      {/* OVER-CALL GUARD badge — the mechanism is a candidate, not a physician-reviewed "recognized
+          cause". Renders the resolver's own reason verbatim so the panel and Ask Aegis say the same thing. */}
+      {unreviewedOvercall ? (
+        <div className="mt-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+          <span className="font-medium">Not yet physician-reviewed.</span>{' '}
+          {ra?.reason ?? 'Candidate pathway — confirm the medicine with the physician before drafting.'}
         </div>
       ) : null}
       <div className="mt-1 text-sm text-slate-600">{v.why}</div>

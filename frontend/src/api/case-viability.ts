@@ -31,6 +31,24 @@ export interface ViabilityBestAnchor {
   readonly aggravation_only?: boolean;
   /** Present (true) only alongside aggravation_only — direct causation is reliably denied (best_anchor only). */
   readonly causation_denied?: boolean;
+  /**
+   * Over-call guard provenance (FRN 3d09819): true only when the mechanism row was physician-curated.
+   * 94.5% of the table is false. When false, the card must NOT headline "Strong/Moderate" — it shows
+   * a CANDIDATE + a "not physician-reviewed" badge. Absent on direct-axis anchors (evidenced facts).
+   */
+  readonly physician_reviewed?: boolean;
+}
+
+/**
+ * The resolver's SSOT band→action policy (stamped by the EMR route adapter). The card consumes this
+ * rather than re-deriving — `action:'escalate'` + `route:'physician'` is what an unreviewed anchor
+ * returns regardless of band, and is the signal to refuse a green headline.
+ */
+export interface ViabilityRecommendedAction {
+  readonly action: 'auto_run' | 'proceed_with_guidance' | 'escalate';
+  readonly route: 'aegis' | 'physician' | null;
+  readonly band: ViabilityBand | null;
+  readonly reason: string;
 }
 
 export interface ViabilityAlternative {
@@ -81,6 +99,8 @@ export interface CaseViability {
   /** BRIDGE-ANCHOR (v2 only): provisional two-hop suggestions; present only when a bridge fires. */
   readonly bridge_pathways?: readonly BridgePathway[];
   readonly derivedAt?: string;
+  /** SSOT band→action policy (resolver.recommendedAction), route-adapter-stamped. Absent on fail-open. */
+  readonly recommended_action?: ViabilityRecommendedAction;
 }
 
 export function getCaseViability(caseId: string): Promise<{ data: CaseViability | null }> {

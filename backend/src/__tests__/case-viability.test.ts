@@ -7,7 +7,7 @@
 import { afterEach, describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { deriveCaseViability, type CaseViability, type InServiceEvent } from '../services/case-viability.js';
+import { deriveCaseViability, recommendedActionFor, type CaseViability, type InServiceEvent } from '../services/case-viability.js';
 
 // Rotated 2026-06-14 (DIRECT-SC re-vendor): secondary table re-curated to 1032 rows; bands unchanged
 // with the direct axis OFF (the default this v1 producer runs under). See anchor-table-pin.test.ts.
@@ -289,5 +289,37 @@ describe('deriveCaseViability — DIRECT-SC axis flag (ships DARK)', () => {
     const out = deriveCaseViability('Obstructive sleep apnea', anchors('PTSD'), []);
     expect(out.version).toBe(2);
     expectV2SchemaValid(out);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// recommendedActionFor — the SSOT band→action wrapper the RN viability card consumes (2026-06-18).
+// The card refuses a green "Strong" headline when this returns escalate→physician on an unreviewed
+// (physician_reviewed:false) anchor. We assert the wrapper surfaces the resolver's over-call guard so
+// the band-leak fix in CaseViabilityCard is exercised end-to-end (resolver → wrapper → consumed flag).
+// ---------------------------------------------------------------------------
+describe('recommendedActionFor (band→action SSOT, over-call guard)', () => {
+  // Chart-refined path (prod runs DIRECT_SC_VIABILITY_ENABLED) so the dx constellation flows and the
+  // resolver emits physician_reviewed; afterEach (above) restores the env between tests.
+  it('an UNREVIEWED psych→neuro pair (chart-refined) routes escalate→physician regardless of a green band', () => {
+    process.env['DIRECT_SC_VIABILITY_ENABLED'] = 'true';
+    const cv = deriveCaseViability('Multiple sclerosis', anchors('PTSD'), [], ['Multiple sclerosis']);
+    expect(cv.best_anchor?.physician_reviewed).toBe(false);
+    const ra = recommendedActionFor(cv);
+    expect(ra).not.toBeNull();
+    expect(ra!.action).toBe('escalate');
+    expect(ra!.route).toBe('physician');
+    // The card's unreviewed-overcall predicate (greenBand && physician_reviewed===false && escalate/physician).
+    expect(['strong', 'moderate', 'conditional']).toContain(cv.viability);
+  });
+
+  it('a REVIEWED classic secondary (DM2→neuropathy) proceeds — never escalate→physician', () => {
+    process.env['DIRECT_SC_VIABILITY_ENABLED'] = 'true';
+    const cv = deriveCaseViability('Peripheral neuropathy', anchors('Diabetes mellitus type 2'), [], ['Peripheral neuropathy']);
+    expect(cv.best_anchor?.physician_reviewed).toBe(true);
+    const ra = recommendedActionFor(cv);
+    expect(ra).not.toBeNull();
+    expect(['auto_run', 'proceed_with_guidance']).toContain(ra!.action);
+    expect(ra!.route).not.toBe('physician');
   });
 });

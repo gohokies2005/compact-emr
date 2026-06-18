@@ -21,6 +21,7 @@
 import {
   deriveCaseViability,
   directScViabilityEnabled,
+  recommendedActionFor,
   resolveInServiceEvents,
   type CaseViability,
   type InServiceEvent,
@@ -65,7 +66,11 @@ export async function deriveCaseViabilityForCase(db: AppDb, caseId: string): Pro
     const dxConstellation = directScViabilityEnabled()
       ? await buildDxConstellation(db, caseId)
       : undefined;
-    return deriveCaseViability(c.claimedCondition, cf.grantedScAnchors, directEvents, dxConstellation);
+    const cv = deriveCaseViability(c.claimedCondition, cf.grantedScAnchors, directEvents, dxConstellation);
+    // Stamp the SSOT band→action policy (incl. the physician_reviewed over-call guard) so the card +
+    // Ask Aegis consume ONE mapping. Fail-open: a null wrapper leaves recommended_action absent.
+    const action = recommendedActionFor(cv);
+    return action === null ? cv : { ...cv, recommended_action: action };
   } catch (err) {
     // Loud in logs, silent to the caller — a vendor-load or DB hiccup must never break a draft.
     console.warn(JSON.stringify({

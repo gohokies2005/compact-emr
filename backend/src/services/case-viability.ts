@@ -58,6 +58,14 @@ export interface ViabilityBestAnchor {
   readonly aggravation_only?: boolean;
   /** Present (true) only alongside aggravation_only — direct causation is reliably denied (best_anchor only). */
   readonly causation_denied?: boolean;
+  /**
+   * Over-call guard provenance (FRN 3d09819): true only when the underlying mechanism row was
+   * physician-curated. 94.5% of the table is false (Doximity-sourced). The RN panel MUST NOT
+   * headline a `false` anchor as "Strong/Moderate" — it is a CANDIDATE pathway needing physician
+   * confirmation. The resolver's `recommendedAction` already gates the ACTION on this; the panel
+   * gates the HEADLINE on it. Absent on direct-axis anchors (they are evidenced facts, not table rows).
+   */
+  readonly physician_reviewed?: boolean;
   // ── v2 (DIRECT-SC axis) — present ONLY when the direct axis is enabled and folded ──────────
   /** v2: which axis this anchor came from. Absent in v1 (secondary-only). */
   readonly anchor_axis?: AnchorAxis;
@@ -140,6 +148,26 @@ export interface CaseViability {
   readonly table_content_hash: string | null;
   /** OPTIONAL — added by the EMR route adapter only; the pure resolver/website omit it (G3). */
   readonly derivedAt?: string;
+  /**
+   * OPTIONAL — the SSOT band→action policy (resolver.recommendedAction), stamped by the EMR route
+   * adapter only (like derivedAt). The RN viability card + Ask Aegis consume THIS rather than
+   * re-deriving the band→action mapping, so "auto-run vs escalate" stays consistent and the
+   * physician_reviewed over-call guard is honored in ONE place. Absent on fail-open.
+   */
+  readonly recommended_action?: ViabilityRecommendedAction;
+}
+
+/**
+ * The resolver's SSOT band→action policy output (anchorMechanism.recommendedAction). Pure/
+ * deterministic. `action: 'escalate'` with `route: 'physician'` + the over-call reason is what an
+ * UNREVIEWED (physician_reviewed:false) anchor returns regardless of band — the signal the panel
+ * uses to refuse a green "Strong" headline.
+ */
+export interface ViabilityRecommendedAction {
+  readonly action: 'auto_run' | 'proceed_with_guidance' | 'escalate';
+  readonly route: 'aegis' | 'physician' | null;
+  readonly band: ViabilityBand | null;
+  readonly reason: string;
 }
 
 interface AnchorMechanismModule {
@@ -152,6 +180,21 @@ interface AnchorMechanismModule {
   setDirectAxisEnabled(on: boolean | null): void;
   /** Enables the presumptive bridge-anchor branch (fires only on the v2 shape). null restores env default. */
   setBridgeEnabled(on: boolean | null): void;
+  /** SSOT band→action policy (incl. the physician_reviewed over-call guard). Pure/deterministic. */
+  recommendedAction(viabilityResult: CaseViability): ViabilityRecommendedAction;
+}
+
+/**
+ * The SSOT band→action policy for a derived viability result — a thin, fail-open wrapper over the
+ * vendored resolver's `recommendedAction` (the ONE place the band→action mapping + over-call guard
+ * live). Returns null only if the vendor load fails, so consumers fail open to their legacy headline.
+ */
+export function recommendedActionFor(cv: CaseViability): ViabilityRecommendedAction | null {
+  try {
+    return loadResolver().recommendedAction(cv);
+  } catch {
+    return null;
+  }
 }
 
 // The vendored resolver is CommonJS and reads its table by __dirname-relative path, so it is NOT

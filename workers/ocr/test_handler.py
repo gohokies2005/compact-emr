@@ -425,6 +425,94 @@ def test_native_pdf_hybrid_doc_posts_empty_for_image_pages(rig):
     assert any("real text content" in p["text"] for p in pages)  # text pages kept their content
 
 
+def test_probe_is_text_layer_fraction_rule_tolerates_sparse_pages():
+    """The decision is FRACTION-based, not mean-based (the Woodley 1,119-pg Blue Button miss fix). A
+    born-digital sample with sparse pages whose MEAN is below the old 50-char floor is still read
+    natively when enough pages carry text; a true scan (all ~0) and a near-all-image scan defer."""
+    # Woodley shape: 9 of 24 sampled pages carry ~40 chars, the rest 0 → mean = 15 (< old floor 50, would
+    # have MISSED) but fraction = 0.375 (>= 0.34) → correctly read as a text layer.
+    counts = [40] * 9 + [0] * 15
+    is_text, diag = handler._probe_is_text_layer(counts)
+    assert is_text is True
+    assert diag["probeMeanChars"] < handler._PDF_PROBE_MIN_CHARS  # the old mean rule would have deferred
+    assert diag["textPageFraction"] >= handler._PDF_TEXT_PAGE_FRACTION
+    # A true image-only scan: no text layer on any page → defer to Textract.
+    assert handler._probe_is_text_layer([0] * 24)[0] is False
+    # A scan with a single typed cover page among many image pages → fraction too low → defer.
+    assert handler._probe_is_text_layer([300] + [0] * 23)[0] is False
+    # Empty probe (0-page edge) → defer.
+    assert handler._probe_is_text_layer([])[0] is False
+
+
+def test_probe_indices_samples_evenly_across_the_whole_doc():
+    """Even spacing (NOT head/middle/tail clusters) so a sparse-cover/divider/index cluster can't hide
+    the text body of a big born-digital doc. Always includes the first + last page."""
+    idxs = handler._probe_indices(1119)
+    assert idxs[0] == 0 and idxs[-1] == 1118              # first + last always sampled
+    assert len(idxs) <= handler._PDF_PROBE_SAMPLES
+    assert idxs == sorted(set(idxs))                       # sorted, deduped
+    # Coverage reaches the middle third (a clustered head/mid/tail probe of 12 could miss it).
+    assert any(373 <= i <= 746 for i in idxs)
+    # A small doc is fully probed.
+    assert handler._probe_indices(5) == [0, 1, 2, 3, 4]
+
+
+def test_native_pdf_reads_when_sparse_pages_cluster_at_head_and_tail(rig):
+    """The Woodley scenario end-to-end: a born-digital dump whose COVER pages (head) and INDEX/blank
+    pages (tail) are sparse, but the body is text-dense. The even probe lands on the dense body → the
+    file is read NATIVELY (free), NOT deferred to the capped vision/Textract path. rig's textract is the
+    _TextractBomb, so any fall-through would blow up the test."""
+    dense = [
+        f"Progress note page {i}. Veteran evaluated for service-connected conditions; vital signs, the "
+        f"active problem list, current medications, and assessment-and-plan are documented in full on "
+        f"this encounter dated for record page {i} of the consolidated health-record export."
+        for i in range(6, 26)
+    ]
+    page_texts = (["."] * 5) + dense + (["."] * 5)  # 30 pages: sparse head(5) + dense body(20) + sparse tail(5)
+    rig["with_bytes"](_make_text_pdf(page_texts))
+
+    result = handler.start_handler(_event("cases/C1/u34-bluebutton-sparse-edges.pdf"), None)
+
+    assert result["method"] == "native_pdf_text"   # read natively, NOT deferred
+    assert result["started"] == []                 # no Textract
+    [(_, pages, count)] = rig["pages"]
+    assert count == 30
+    assert any("active problem list" in p["text"] for p in pages)
+
+
+def test_native_pdf_mostly_image_pages_defers_to_textract_no_silent_loss(rig, monkeypatch):
+    """NO-SILENT-LOSS guard (QA 2026-06-18): a scan with a PARTIAL text layer can pass the sampled
+    probe, but if the FULL read shows most pages have no text, posting native would emit empty pages
+    for the image content (silently lost). Such a doc must DEFER to Textract instead. Here: 5 dense
+    text pages + 7 blank (image-only) pages → probe fraction 5/12=0.42 PASSES, but empty fraction
+    7/12=0.58 > 0.5 → whole doc deferred to Textract; NOTHING posted native."""
+    from pypdf import PdfWriter, PdfReader as _RR
+
+    stub = _TextractStub()
+    monkeypatch.setattr(handler, "textract", stub)
+    monkeypatch.setenv("COMPLETION_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:0:topic")
+    monkeypatch.setenv("TEXTRACT_SNS_ROLE_ARN", "arn:aws:iam::0:role/textract")
+
+    text_pdf = _make_text_pdf([
+        f"Dense clinical page {i} with a full encounter note, vital signs, active problem list, and "
+        f"current medications documented in real extractable text for record page {i}." for i in range(1, 6)
+    ])
+    w = PdfWriter()
+    for pg in _RR(io.BytesIO(text_pdf)).pages:
+        w.add_page(pg)
+    for _ in range(7):
+        w.add_blank_page(width=200, height=200)  # 7 image-only pages → empty fraction 7/12 > 0.5
+    buf = io.BytesIO()
+    w.write(buf)
+    rig["with_bytes"](buf.getvalue())
+
+    result = handler.start_handler(_event("cases/C1/u35-mostly-scan.pdf"), None)
+
+    assert result == {"started": [{"documentId": "DOC-1", "jobId": "JOB-1"}]}  # Textract owns it
+    assert rig["pages"] == []          # NOTHING posted native (no silent empty-page loss)
+    assert len(stub.calls) == 1
+
+
 def test_native_pdf_batches_posts_over_2000_pages(rig, monkeypatch):
     """A dump larger than the route's 2,000-entries-per-POST cap is split into batches of
     _PAGES_PER_POST, the TRUE page count sent on EVERY batch. Mock PdfReader so the test stays fast

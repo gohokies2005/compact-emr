@@ -429,8 +429,22 @@ _LEGACY_DOC_NOTE = "legacy .doc format — ask the veteran for PDF/docx, or summ
 # per-page char floor. A born-digital dump scores hundreds-to-thousands of chars/page on the sample; a
 # scan scores ~0. The probe is cheap (open + ~9 pages ≈ 0.3s) and runs inline in start_handler; the
 # full extraction is the only heavy part (see the DEPLOY NOTE in _native_pdf_read).
-_PDF_PROBE_PAGES = 4          # sample size from EACH of head / middle / tail (≤12 pages probed total)
-_PDF_PROBE_MIN_CHARS = 50     # mean non-whitespace chars/page across the probe to call it a text layer
+_PDF_PROBE_SAMPLES = 24       # pages sampled EVENLY across the whole doc (representative, not clustered)
+_PDF_PROBE_MIN_CHARS = 50     # (legacy mean signal — kept in diagnostics only; decision is fraction-based)
+# FRACTION-BASED text-layer test (2026-06-18, Woodley 1,119-pg Blue Button miss fix): a born-digital
+# dump carries text on MOST pages; a true scan carries a text layer on ~NONE. A MEAN over the sample is
+# fragile — a handful of sparse sampled pages (cover, section divider, index, a near-blank tail page)
+# drags the average below a flat floor and wrongly kicks an otherwise-digital file to the capped
+# vision/Textract path. So we trust the text layer when a FRACTION of probe pages carry real text.
+_PDF_PAGE_TEXT_MIN = 25       # a probe page "carries text" when its non-whitespace char count clears this
+_PDF_TEXT_PAGE_FRACTION = 0.34  # born-digital when >= this fraction of probe pages carry text (≈ a third)
+# NO-SILENT-LOSS guard (QA 2026-06-18): the probe samples; the FULL extraction reveals the true empty
+# (image-only) page fraction. If MORE THAN HALF the doc has no text layer, it's really a SCAN with a
+# partial text layer — posting it native would emit empty pages for the image content (silently lost,
+# invisible to the per-page coverage breakdown). Defer the WHOLE doc to vision/Textract instead so the
+# image pages are actually read. A genuine born-digital dump has ~0 empty pages and is unaffected; a
+# mostly-digital doc with a MINORITY of image pages still reads native (those few post empty, as before).
+_PDF_MAX_EMPTY_FRACTION = 0.5
 _PDF_TEXTRACT_FALLTHROUGH = None  # sentinel: probe was thin → caller starts Textract as before
 # Pages per /pages POST. The route caps a request at 2,000 entries (internal-worker.ts
 # parsePageUpsertBody); 1,000 keeps each batch well under that AND under the writer's 30s Prisma
@@ -643,18 +657,42 @@ def _nonws_len(text: str) -> int:
 
 
 def _probe_indices(n: int) -> list[int]:
-    """Sample page indices from the head, middle, and tail of an n-page PDF (deduped, in range).
-    A born-digital dump has text EVERYWHERE; a scan with a sparse cover page only wouldn't pass a
-    head-only probe, so we look at the middle and tail too before trusting the text layer."""
+    """Sample up to _PDF_PROBE_SAMPLES page indices spread EVENLY across the whole n-page PDF (always
+    including the first + last page). Even spacing — NOT three head/middle/tail clusters — is the fix
+    for the Woodley 1,119-page Blue Button miss: a born-digital dump carries text on most pages, but its
+    sparse pages (cover, section dividers, an index, near-blank tail) often CLUSTER exactly at the head/
+    middle/tail, so a clustered sample could land entirely on sparse pages of an otherwise-digital export
+    and wrongly defer it. An even sample lands on the text body wherever the sparse pages sit."""
     if n <= 0:
         return []
-    if n <= _PDF_PROBE_PAGES * 3:
+    if n <= _PDF_PROBE_SAMPLES:
         return list(range(n))
-    head = list(range(_PDF_PROBE_PAGES))
-    mid_start = max(0, n // 2 - _PDF_PROBE_PAGES // 2)
-    middle = list(range(mid_start, mid_start + _PDF_PROBE_PAGES))
-    tail = list(range(n - _PDF_PROBE_PAGES, n))
-    return sorted(set(head + middle + tail))
+    # Even stride across [0, n-1] inclusive (first + last always sampled; deduped).
+    return sorted({round(i * (n - 1) / (_PDF_PROBE_SAMPLES - 1)) for i in range(_PDF_PROBE_SAMPLES)})
+
+
+def _probe_is_text_layer(nonws_counts: list[int]) -> tuple[bool, dict[str, Any]]:
+    """Decide if a PDF has a usable EMBEDDED TEXT LAYER from the probe pages' non-whitespace char
+    counts. Pure + unit-tested (the decision must not require S3/pypdf to verify).
+
+    ROBUST to sparse sampled pages: a born-digital dump carries text on MOST pages even if a few
+    sampled ones are sparse (cover / section divider / index / near-blank tail) — those would drag a
+    MEAN below a flat floor and wrongly defer the whole file to the capped vision/Textract path (the
+    Woodley 1,119-page Blue Button miss). A TRUE image-only scan carries a text layer on ~NONE of its
+    pages. So we trust the text layer when a FRACTION of probe pages carry real text, not when the
+    average clears a bar. Failing toward Textract is the safe direction (no silent loss), but failing
+    toward NATIVE is the CHEAP direction (free + fast; an empty native read just flags for RN) — the
+    fraction rule leans native exactly when the file really is digital. Returns (is_text_layer, diag)."""
+    n = len(nonws_counts)
+    if n == 0:
+        return False, {"probePages": 0}
+    text_pages = sum(1 for c in nonws_counts if c >= _PDF_PAGE_TEXT_MIN)
+    fraction = text_pages / n
+    mean = sum(nonws_counts) / n
+    return fraction >= _PDF_TEXT_PAGE_FRACTION, {
+        "probePages": n, "textPages": text_pages,
+        "textPageFraction": round(fraction, 2), "probeMeanChars": round(mean, 1),
+    }
 
 
 def _build_pdf_native_pages(reader: Any, page_count: int) -> tuple[list[dict[str, Any]], int]:
@@ -712,14 +750,11 @@ def _native_pdf_read(bucket: str, key: str, document_id: str) -> dict[str, Any] 
     exactly as before. NEVER raises for a parse problem: a bad PDF must degrade to Textract, never
     crash start_handler (which would burn the orphan-race retry budget + hit the DLQ).
 
-    DEPLOY NOTE (infra, ocr-start Lambda — REQUIRED before this can read a big dump in production):
-    full extraction of Lozano's 2,294-page PDF is ~21s on a dev box → ~21-30s at a FULL Lambda vCPU
-    (1769MB) but >120s at the current 256MB (~0.15 vCPU). ocr-start is timeout=2min/memory=256MB
-    (workers-stack.ts:278). To run this inline, ocr-start MUST be raised to memorySize≈1769MB (full
-    vCPU; pypdf is single-threaded CPU-bound, RAM peak is only ~55MB) and timeout to ≈5min. Cost of the
-    bump is negligible (the tiny .txt/.docx/Textract-start invocations finish sub-second). A doc that
-    is too large for the bumped budget would time out → raise → DLQ; the size guard below caps the
-    bytes we even attempt so a pathological file flags rather than loops."""
+    INFRA (verified 2026-06-18, QA): ocr-start is already timeout=15min / memorySize=2048MB /
+    reservedConcurrency=10 (workers-stack.ts) — sufficient for the inline native extract (~21-30s for a
+    2,294-page dump at a full vCPU; pypdf is single-threaded CPU-bound, RAM peak ~55MB). The MAX_OCR_BYTES
+    size guard below caps the bytes we even buffer, so a pathological file defers to Textract (which
+    streams from S3) rather than OOMing or looping."""
     data = s3.get_object(Bucket=bucket, Key=key)["Body"].read(MAX_OCR_BYTES + 1)
     if len(data) > MAX_OCR_BYTES:
         # Too big to buffer for a native read — let Textract (which streams from S3) own it.
@@ -742,28 +777,35 @@ def _native_pdf_read(bucket: str, key: str, document_id: str) -> dict[str, Any] 
     if page_count == 0:
         return _PDF_TEXTRACT_FALLTHROUGH
 
-    # PROBE: sample head/middle/tail; mean non-whitespace chars/page must clear the floor to trust the
-    # text layer. A born-digital dump scores hundreds/page; a scan scores ~0 → fall through to Textract.
+    # PROBE: sample head/middle/tail; trust the text layer when a FRACTION of probe pages carry real
+    # text (robust to sparse cover/divider/index pages that would sink a mean — the Woodley BB miss).
     probe = _probe_indices(page_count)
-    probe_chars = 0
+    nonws_counts: list[int] = []
     for idx in probe:
         try:
-            probe_chars += _nonws_len(reader.pages[idx].extract_text() or "")
+            nonws_counts.append(_nonws_len(reader.pages[idx].extract_text() or ""))
         except Exception:  # noqa: BLE001 — a probe-page error just contributes 0 (conservative)
-            pass
-    mean = probe_chars / len(probe) if probe else 0
-    if mean < _PDF_PROBE_MIN_CHARS:
-        print(json.dumps({"msg": "ocr: pdf text-layer thin; deferring to textract", "documentId": document_id, "pages": page_count, "probeMeanChars": round(mean, 1)}))
+            nonws_counts.append(0)
+    is_text_layer, probe_diag = _probe_is_text_layer(nonws_counts)
+    if not is_text_layer:
+        print(json.dumps({"msg": "ocr: pdf text-layer thin; deferring to textract", "documentId": document_id, "pages": page_count, **probe_diag}))
         return _PDF_TEXTRACT_FALLTHROUGH
 
-    # Text layer confirmed → extract the WHOLE doc natively and POST through the same /pages pipeline.
+    # Text layer confirmed by the sample → extract the WHOLE doc natively.
     pages, empty = _build_pdf_native_pages(reader, page_count)
+    # NO-SILENT-LOSS guard: if the FULL extraction shows most pages have no text layer, the sampled
+    # text was the minority — this is a scan with a partial text layer. Posting native would drop the
+    # image-page content silently (empty pages carry no coverage signal). Defer the whole doc to vision.
+    empty_fraction = empty / page_count if page_count else 1.0
+    if empty_fraction > _PDF_MAX_EMPTY_FRACTION:
+        print(json.dumps({"msg": "ocr: pdf mostly image pages on full read; deferring to textract", "documentId": document_id, "pages": page_count, "emptyPages": empty, "emptyFraction": round(empty_fraction, 2), **probe_diag}))
+        return _PDF_TEXTRACT_FALLTHROUGH
     total_chars = sum(len(p["text"]) for p in pages)
     _post_pages_batched(document_id, pages, page_count)
     print(json.dumps({
         "msg": "ocr: native pdf text-layer read posted", "documentId": document_id,
         "path": "native-text-layer", "pdfPages": page_count, "postedPages": len(pages),
-        "emptyPages": empty, "chars": total_chars, "probeMeanChars": round(mean, 1),
+        "emptyPages": empty, "chars": total_chars, **probe_diag,
     }))
     return {"started": [], "native": "pdf", "method": "native_pdf_text", "via": "pypdf", "pages": len(pages), "pdfPages": page_count, "emptyPages": empty}
 

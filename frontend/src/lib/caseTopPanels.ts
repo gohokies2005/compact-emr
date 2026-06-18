@@ -71,24 +71,38 @@ export function resolveCaseTopPanels(input: CaseTopPanelInputs): CaseTopPanels {
 
   const inFlightDraft = latestDraftState === 'queued' || latestDraftState === 'running';
 
-  // Hide "Send to Drafter" while parked at a Gate-2 halt — the halt panel owns the decision there.
-  const isParkedAtHalt = status === 'needs_rn_decision' || status === 'needs_records';
-  const canSendFirstDraft = isStaff && !inFlightDraft && !input.hasCompletedDraft && !isParkedAtHalt;
-
-  const canSeePhysicianReadyPanel =
-    status === 'physician_review' && (role === 'admin' || role === 'physician');
-
-  const canSeeRnReviewPanel = status === 'rn_review' && isStaff;
-
+  // INTERRUPTED-DRAFT panel (Ryan 2026-06-18). Two ways a draft ends up needing recovery while the case
+  // is still status='drafting':
+  //   (a) operator-held — the run finished but was flagged (runComplete=false / revise / operatorState
+  //       not-ready). The original OpsHeld gate.
+  //   (b) ORPHANED/KILLED — the Fargate task was killed mid-run (ECS scale-in / deploy) and reaped to
+  //       'failed', so NO operator signals were ever posted. The old gate MISSED this → the case showed
+  //       a bare "Send to Drafter" (looked like a fresh start, no "it was interrupted" explanation) and
+  //       silently sat at 'drafting'. THIS is the orphaned-status bug. latestDraftState==='failed' with
+  //       no completed draft, in 'drafting' status, IS an interrupted draft.
   const canSeeOpsHeldPanel =
     isStaff &&
     status === 'drafting' &&
     (input.runComplete === false ||
       input.shipRecommendation === 'revise' ||
+      (latestDraftState === 'failed' && !input.hasCompletedDraft) ||
       (input.operatorState !== undefined &&
         input.operatorState !== null &&
         input.operatorState !== 'ready' &&
         input.operatorState !== 'ready_with_notes'));
+
+  // Hide "Send to Drafter" while parked at a Gate-2 halt — the halt panel owns the decision there.
+  // ALSO hide it when the interrupted panel is showing (Ryan 2026-06-18): an interrupted draft must offer
+  // ONE clear "Resume draft" action via the interrupted panel — NOT a confusing parallel fresh-start
+  // "Send to Drafter" button. (Reverses the prior deliberate co-render of the two.)
+  const isParkedAtHalt = status === 'needs_rn_decision' || status === 'needs_records';
+  const canSendFirstDraft =
+    isStaff && !inFlightDraft && !input.hasCompletedDraft && !isParkedAtHalt && !canSeeOpsHeldPanel;
+
+  const canSeePhysicianReadyPanel =
+    status === 'physician_review' && (role === 'admin' || role === 'physician');
+
+  const canSeeRnReviewPanel = status === 'rn_review' && isStaff;
 
   const isGate2Halt = status === 'needs_rn_decision' || status === 'needs_records';
 

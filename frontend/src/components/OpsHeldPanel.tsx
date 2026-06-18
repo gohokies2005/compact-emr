@@ -110,28 +110,33 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
         <div>
           <h2 className="text-base font-semibold text-navyDeep">Drafting was interrupted</h2>
           <p className="mt-1 text-sm text-steel">
-            This draft stopped partway and saved a partial letter. You can open the partial as-is, or
-            re-draft from scratch — the drafter can't resume a partial, so a re-run starts the whole letter over.
+            {hasLetter
+              ? 'This draft stopped before it finished. You can open what it produced so far, or resume the draft to finish the letter.'
+              : 'This draft was interrupted before it finished and did not produce a letter. Resume it to run the draft to completion.'}
           </p>
           <p className="mt-2 text-sm text-steel">{operatorMessage(c, job)}</p>
         </div>
 
         <div className="flex flex-wrap gap-2">
-          {hasLetter && onViewLetter ? (
-            <Button type="button" variant="primary" onClick={onViewLetter}>
-              Open partial as-is
-            </Button>
-          ) : null}
-
+          {/* Single recovery action (Ryan 2026-06-18): "Resume draft" — NO "re-draft from scratch" option.
+              NOTE: until the drafter checkpoint/resume build lands, Resume RE-RUNS the draft (it does not
+              yet pick up from the last completed phase); the RN UX is one clean Resume button either way,
+              and the resume becomes token-saving once checkpointing ships. */}
           <Button
             type="button"
-            variant="secondary"
+            variant="primary"
             loading={rerunMutation.isPending}
             disabled={rerunMutation.isPending}
-            onClick={() => { if (window.confirm('Start a FULL new draft from scratch? The drafter cannot resume the partial — this re-drafts the entire letter (new version, another ~20-min run).')) rerunMutation.mutate(); }}
+            onClick={() => { if (window.confirm('Resume this draft? It runs the draft to finish the letter (about a 20-minute run).')) rerunMutation.mutate(); }}
           >
-            Re-draft from scratch
+            Resume draft
           </Button>
+
+          {hasLetter && onViewLetter ? (
+            <Button type="button" variant="secondary" onClick={onViewLetter}>
+              Open what it produced
+            </Button>
+          ) : null}
 
           {isAdmin ? (
             <Button type="button" variant="ghost" onClick={() => setConfirmOpenAsIs(true)}>

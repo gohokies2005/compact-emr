@@ -95,17 +95,30 @@ describe('resolveCaseTopPanels', () => {
     expect(resolveCaseTopPanels(inputs({ status: 'drafting', role: 'admin', hasViewableLetterJob: true })).canShowRnEditorEntry).toBe(false);
   });
 
-  // ── INTENTIONAL co-render cells — a single-primary-slot collapse would regress these ──
-  it('OVERLAP: drafting + failed draft shows BOTH Send-to-Drafter AND the OpsHeld interrupted panel', () => {
-    // stuck-job-watcher / drafter /complete leave status='drafting', no done job, runComplete=false.
-    // The watcher copy literally says "click Send to Drafter again" — both affordances are intended.
+  // ── INTERRUPTED DRAFT: single "Resume" affordance, NO parallel fresh-start (Ryan 2026-06-18) ──
+  it('drafting + failed draft → OpsHeld (Resume) ONLY, NOT a parallel Send-to-Drafter', () => {
+    // An interrupted draft (status='drafting', latest job 'failed', no completed letter) must offer ONE
+    // clear "Resume draft" action via the OpsHeld panel — the bare fresh-start "Send to Drafter" is now
+    // SUPPRESSED (was: both shown). Reverses the prior deliberate co-render per Ryan's directive.
     const p = resolveCaseTopPanels(inputs({
       status: 'drafting', role: 'ops_staff', latestDraftState: 'failed', hasLatestDraftJob: true,
       hasCompletedDraft: false, runComplete: false,
     }));
     expect(p.inFlightDraft).toBe(false);
-    expect(p.canSendFirstDraft).toBe(true);
     expect(p.canSeeOpsHeldPanel).toBe(true);
+    expect(p.canSendFirstDraft).toBe(false); // suppressed — the interrupted panel owns the single action
+  });
+
+  it('ORPHANED draft: status=drafting + failed + NO operator signals still shows the interrupted panel (the scale-killed gap)', () => {
+    // The scale-killed case the old gate MISSED: a Fargate task killed mid-run reaped to 'failed' with
+    // NO runComplete/shipRecommendation/operatorState. Previously canSeeOpsHeldPanel was FALSE → the case
+    // sat at a bare "Send to Drafter" with no "interrupted" explanation. Now it shows the Resume panel.
+    const p = resolveCaseTopPanels(inputs({
+      status: 'drafting', role: 'ops_staff', latestDraftState: 'failed', hasLatestDraftJob: true,
+      hasCompletedDraft: false, runComplete: null, shipRecommendation: null, operatorState: null,
+    }));
+    expect(p.canSeeOpsHeldPanel).toBe(true);
+    expect(p.canSendFirstDraft).toBe(false);
   });
 
   it('OVERLAP: drafting + ops_staff + viewable letter shows BOTH OpsHeld AND the RN editor-entry card', () => {

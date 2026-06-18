@@ -57,4 +57,24 @@ describe('classifyDocument (content-based document naming)', () => {
     expect(classifyDocument({}).docType).toBe('other');
     expect(classifyDocument({ filename: null, text: null }).title).toBeNull();
   });
+
+  // Expanded coverage 2026-06-18 (Ryan: more content titles so fewer docs fall back to a filename).
+  it('identifies an EGD / endoscopy report (+ condition)', () => {
+    const r = classifyDocument({ text: 'ESOPHAGOGASTRODUODENOSCOPY (EGD). Findings: erosive esophagitis consistent with GERD.' });
+    expect(r.docType).toBe('endoscopy');
+    expect(r.title).toBe('Endoscopy report — GERD');
+  });
+  it('identifies a VA service-connected conditions list', () => {
+    const r = classifyDocument({ text: 'Your service-connected disabilities and combined rating are listed below.' });
+    expect(r.docType).toBe('sc_conditions_list');
+    expect(r.title).toBe('VA service-connected conditions');
+  });
+  it('identifies an operative / procedure note', () => {
+    const r = classifyDocument({ text: 'OPERATIVE REPORT. Preoperative diagnosis: ... Procedure performed: ...' });
+    expect(r.docType).toBe('operative_note');
+  });
+  it('identifies an audiology / hearing test', () => {
+    const r = classifyDocument({ text: 'Audiometry: pure tone average 35 dB. Speech recognition score 92%.' });
+    expect(r.docType).toBe('audiology');
+  });
 });

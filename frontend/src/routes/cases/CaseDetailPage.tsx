@@ -50,6 +50,7 @@ import { PreDraftSanityImpression, PostDraftSanityImpression } from '../../compo
 import { useChartReadiness } from '../../hooks/useChartReadiness';
 import { formatRelativeTime } from '../../lib/date';
 import { formatFileSize, formatPageCount } from '../../lib/fileMeta';
+import { documentDisplayName } from '../../lib/docName';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
 import {
   archiveCase, deleteCase, getCase, listDraftJobs, patchCase, restoreCase, transitionCaseStatus, updateQuickNote,
@@ -1012,8 +1013,8 @@ function DocumentsTab({ veteranId, caseId, role }: { readonly veteranId: string;
             <DataRow
               key={d.id}
               onClick={() => setViewDoc({ id: d.id, filename: d.filename, contentType: d.contentType })}
-              lead={d.autoTitle ?? d.filename}
-              meta={[d.autoTitle ? d.filename : (d.docTag ?? 'Other'), formatFileSize(d.sizeBytes), formatPageCount(d.pageCount), formatRelativeTime(d.uploadedAt)].filter(Boolean).join(' · ')}
+              lead={documentDisplayName(d)}
+              meta={[d.filename, formatFileSize(d.sizeBytes), formatPageCount(d.pageCount), formatRelativeTime(d.uploadedAt)].filter(Boolean).join(' · ')}
               trailing={
                 <span className="flex items-center gap-3">
                   {(() => {

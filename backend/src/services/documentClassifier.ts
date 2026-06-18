@@ -26,6 +26,11 @@ export type DocType =
   | 'cp_exam'
   | 'lay_statement'
   | 'pathology'
+  | 'endoscopy'
+  | 'operative_note'
+  | 'audiology'
+  | 'mental_health_note'
+  | 'sc_conditions_list'
   | 'imaging'
   | 'lab'
   | 'problem_list'
@@ -100,6 +105,12 @@ export function classifyDocument(input: { filename?: string | null; text?: strin
     return { docType: 'va_benefit_summary', title: 'VA Benefit Summary', confidence: 'high' };
   }
 
+  // VA service-connected conditions / rated-disabilities list (the codesheet-style enumeration) — the
+  // authoritative-anchor doc the SC list should come from. Named so the RN can find it at a glance.
+  if (/service.connected (conditions|disabilities)\b|list of (your )?service.connected|rated disabilities|your service.connected disabilities/i.test(w)) {
+    return { docType: 'sc_conditions_list', title: 'VA service-connected conditions', confidence: 'high' };
+  }
+
   // DD-214 — service / discharge.
   if (/dd form 214|certificate of release or discharge|character of service/i.test(w) || /dd.?214/.test(fname)) {
     return { docType: 'dd214', title: 'DD-214 (service record)', confidence: 'high' };
@@ -135,6 +146,27 @@ export function classifyDocument(input: { filename?: string | null; text?: strin
   // Pathology.
   if (/pathology report|surgical pathology|specimen.*(microscopic|gross description)|histolog/i.test(w)) {
     return { docType: 'pathology', title: 'Pathology report', confidence: 'high' };
+  }
+
+  // Endoscopy / EGD / colonoscopy (Ryan called out "EGD report" specifically).
+  if (/esophagogastroduodenoscopy|upper endoscopy|\begd\b|gastroscopy|colonoscopy/i.test(w)) {
+    const cond = detectCondition(w);
+    return { docType: 'endoscopy', title: cond ? `Endoscopy report — ${cond}` : 'Endoscopy report', confidence: 'high' };
+  }
+
+  // Operative / procedure note.
+  if (/operative report|operative note|postoperative diagnosis|procedure performed:|pre-?operative diagnosis/i.test(w)) {
+    return { docType: 'operative_note', title: 'Operative / procedure note', confidence: 'high' };
+  }
+
+  // Audiology / hearing test.
+  if (/audiogram|audiometry|pure ?tone average|speech recognition (threshold|score)|\bpta\b.*\bdb\b/i.test(w)) {
+    return { docType: 'audiology', title: 'Audiology / hearing test', confidence: 'high' };
+  }
+
+  // Mental-health / psychiatric note.
+  if (/psychiatr(y|ic)|psychotherapy|mental health (note|assessment|evaluation)|psychological evaluation|\bphq-9\b|\bpcl-5\b/i.test(w)) {
+    return { docType: 'mental_health_note', title: 'Mental health note', confidence: 'low' };
   }
 
   // Imaging / radiology.

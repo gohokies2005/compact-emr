@@ -198,7 +198,7 @@ describe('CaseDetailPage — Documents tab delete control', () => {
     await screen.findByText('Hypertension');
     await userEvent.click(screen.getByRole('tab', { name: 'Documents' }));
 
-    expect(await screen.findByText('Intake_Summary.pdf')).toBeInTheDocument();
+    expect(await screen.findByText('Intake Summary')).toBeInTheDocument(); // content-based display name (no raw "_" filename / "Misc/Other")
     const deleteBtn = screen.getByRole('button', { name: 'Delete' });
     await userEvent.click(deleteBtn);
 
@@ -253,7 +253,7 @@ describe('CaseDetailPage — Documents tab delete control', () => {
     renderPage();
     await screen.findByText('Hypertension');
     await userEvent.click(screen.getByRole('tab', { name: 'Documents' }));
-    expect(await screen.findByText('Intake_Summary.pdf')).toBeInTheDocument();
+    expect(await screen.findByText('Intake Summary')).toBeInTheDocument(); // content-based display name (no raw "_" filename / "Misc/Other")
     expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
   });
 });

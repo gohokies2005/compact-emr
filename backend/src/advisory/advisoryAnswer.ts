@@ -102,6 +102,10 @@ export interface AnswerArgs {
   // the same one-brain pick the drafter/card use, with NO second synchronous LLM call here (29s lesson).
   // null/absent → corpus-only answer (today's behavior).
   viabilityPlanBlock?: string | null;
+  // Excluded-anchor names from the picker plan → fed to the deterministic self-check so a "why not X"
+  // answer that REVIVES an excluded pathway is caught (block-class). Without this the self-check's
+  // excluded-pair guard is a dead wire (QA 2026-06-19, ai-sme #3).
+  viabilityExcludedHints?: readonly string[];
 }
 export type AnswerOutcome =
   | {
@@ -144,7 +148,7 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
   // Pre-send self fact-check (deterministic, $0): catch BVA-% leakage, a fabricated PMID, an excluded-pair
   // suggestion, or forbidden vet-facing content BEFORE the answer lands. Block-class → loud VERIFY banner;
   // soft → a caveat. Fail-open (never throws). Flags ride in notes for logging.
-  const check = runSelfCheck(clean, retrieval.chunks);
+  const check = runSelfCheck(clean, retrieval.chunks, args.viabilityExcludedHints ?? []);
   const finalAnswer = applySelfCheck(clean, check);
   if (check.flags.length > 0) {
     console.warn(JSON.stringify({ msg: 'advisory_self_check_flagged', caseId: args.caseId, blocked: check.blocked, flags: check.flags }));

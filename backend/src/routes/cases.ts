@@ -475,11 +475,19 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         // fields to null is ALSO a deliberate staff action — still 'manual'.)
         const touchesFraming = parsed.changedFields.includes('framingChoice') || parsed.changedFields.includes('upstreamScCondition');
 
+        // Invalidate the persisted AI route-picker plan when an input-affecting field is edited, so Ask
+        // Aegis never narrates a stale plan as the "anticipated drafter framing" (QA 2026-06-19 blocker).
+        // The Overview card re-computes + re-persists on next view; until then the advisory falls back to
+        // its corpus-only answer. (The reader also has a claimed-condition staleness guard as backstop.)
+        const PLAN_INPUT_FIELDS = ['claimedCondition', 'framingChoice', 'upstreamScCondition', 'inServiceEvent', 'veteranStatement'];
+        const invalidatesPlan = parsed.changedFields.some((f) => PLAN_INPUT_FIELDS.includes(f));
+
         const row = await tx.case.update({
           where: { id },
           data: {
             ...parsed.fields,
             ...(touchesFraming ? { framingStampSource: 'manual' } : {}),
+            ...(invalidatesPlan ? ({ aiViabilityPlanJson: null, aiViabilityPlanHash: null } as object) : {}),
             ...syncConditions,
             version: { increment: 1 },
           },

@@ -53,8 +53,17 @@ function loadPickerPrompt(): PickerPrompt | undefined {
   } catch { _pickerPrompt = null; return undefined; }
 }
 
+// Bump when the persisted plan SHAPE changes — readers gate on it so an old-shape blob is cleanly
+// ignored (degrade to corpus/static) instead of silently mis-rendering. (QA 2026-06-19, architect #6.)
+export const AI_VIABILITY_PLAN_SCHEMA_VERSION = 1;
+
 export interface AiViabilityCard {
   readonly source: 'ai_route_picker';
+  readonly schemaVersion: number;
+  // The case's claimedCondition AT COMPUTE TIME (the raw input, not the picker's reworded label). The
+  // advisory reader compares this to the live claimedCondition and REFUSES to narrate a plan whose claim
+  // no longer matches — the staleness/wrong-condition guard both QA agents flagged as the #1 blocker.
+  readonly inputClaimed: string;
   readonly viability: 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
   readonly lead: { upstream: string; claimed: string; framing: string; cfr_basis: string; mechanism: string; confidence: string; rationale: string; counterargument: string };
   readonly convergent: ReadonlyArray<{ upstream: string; note: string }>;
@@ -172,6 +181,8 @@ export async function deriveAiViability(db: AppDb, caseId: string): Promise<AiVi
 
     const card: AiViabilityCard = {
       source: 'ai_route_picker',
+      schemaVersion: AI_VIABILITY_PLAN_SCHEMA_VERSION,
+      inputClaimed: c.claimedCondition,
       viability: (plan['viability'] as AiViabilityCard['viability']) ?? 'needs_physician_review',
       lead: {
         upstream: String(pa['upstream'] ?? ''), claimed: String(pa['claimed'] ?? c.claimedCondition),

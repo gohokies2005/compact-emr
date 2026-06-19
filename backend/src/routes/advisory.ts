@@ -67,12 +67,13 @@ export function createAdvisoryRouter(db: AppDb, overrides: AdvisoryRouterDeps = 
 
       // One-brain alignment: for a viability-shaped question, ground the answer in the PERSISTED
       // route-picker plan (the same pick the drafter + Overview card use). Read-only DB lookup, no LLM
-      // call here (29s-safe). Fail-open: null → corpus-only answer (unchanged behavior).
-      const viabilityPlanBlock = await buildAiPlanGroundingBlock(db, caseId, question).catch(() => null);
+      // call here (29s-safe). Fail-open: empty → corpus-only answer (unchanged behavior). The plan's
+      // excluded anchors feed the deterministic self-check so a revived excluded pathway is caught.
+      const grounding = await buildAiPlanGroundingBlock(db, caseId, question).catch(() => ({ block: null, excludedHints: [] as string[] }));
 
       let outcome;
       try {
-        outcome = await answerQuestion(deps, { caseId, question, viabilityPlanBlock });
+        outcome = await answerQuestion(deps, { caseId, question, viabilityPlanBlock: grounding.block, viabilityExcludedHints: grounding.excludedHints });
       } catch (e) {
         // The model / retrieval threw — log it (oversight) and return a clean error, never a stack trace.
         const reason = e instanceof Error ? e.message : String(e);

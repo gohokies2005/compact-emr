@@ -22,6 +22,7 @@ Intake (Jotform → webhook Lambda + hourly jotform-sweep backstop)
   → OCR / vision read  (per-page Sonnet vision worker; legacy Textract)  [worker, async]
   → chart-extract      (Anthropic Sonnet → structured facts, SC list, problems)  [Lambda, async]
   → viability route-picker  (deriveAiViability → Sonnet)  ← ONE BRAIN (card + Ask-Aegis + drafter framing)
+                            computed OFF the request path (API Lambda async self-invoke) → persisted → card READS
   → drafter            (Fargate task, SQS FIFO draft-job, Opus)  [worker, async]
   → physician QA / sign-off  (review page, sign-off attestations)
   → render             (DOCX/PDF render Lambda)
@@ -105,6 +106,13 @@ failure (the SOAP "thinks for minutes then nothing" + the original double-call t
   inside the window (`deriveAiViability`).
 - Prefer **compute-once-persist-then-read**: `deriveAiViability` short-circuits to the persisted plan when
   inputs are unchanged (no LLM on a cold Lambda); Ask-Aegis reads the persisted plan rather than recompute.
+- **Async self-invoke pattern (the viability picker, 2026-06-19):** a compute that needs >~20s can't run on
+  the synchronous request. The API Lambda invokes ITSELF (`InvocationType:'Event'`, event
+  `{__recomputeViability,caseId}` handled in `placeholder-lambda.ts` before Express) — the fresh invocation
+  owns the whole 29s window alone, so the picker runs at timeout 26s (vs the 22s sync cap) and completes +
+  persists. The GET `/viability-card` is READ-ONLY (`deriveAiViability` `compute:false`): persisted plan or
+  null, and fires the async compute on a miss. The FE polls until the plan lands. Needs `SELF_FUNCTION_NAME`
+  env + `grantInvoke(self)` (api-stack). Reuse this pattern for any future >20s on-request compute.
 - **Gap:** no CloudWatch alarm on API Lambda Errors / Duration≥29000 yet (silent-fail backstop — TODO).
 
 ---
@@ -130,6 +138,7 @@ failure (the SOAP "thinks for minutes then nothing" + the original double-call t
 |---|---|---|---|
 | 2026-06-19 | **Static M/E (mechanism/evidence) anchor ratings on the Overview card** ("M=4,E=2") | brittle static table, didn't match drafter judgment | the **AI route-picker** (`deriveAiViability`) — one brain for card + drafter + Ask-Aegis |
 | 2026-06-19 | The `/cases/:id/soap-overview` 2nd-LLM-call endpoint | 29s timeout silent-fail | SOAP card renders deterministically from the shared `viability-card` query (one LLM call) |
+| 2026-06-19 | Synchronous picker compute on GET `/viability-card` | ~22-25s call can't fit the 29s cap → silent fail | async self-invoke compute off the request path + persisted-plan read (see §5) |
 | 2026-06-16 | Textract-only OCR as the primary scanned-page reader | dropped combo-page handwriting (false "100% read") | per-page Sonnet vision worker + honest per-page coverage |
 | (legacy) | Local Node/SQLite dashboard as production EMR | moved to AWS | this EMR (`compact-emr-work`); localhost retains only the inbound Gmail poller |
 

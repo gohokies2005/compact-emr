@@ -9,6 +9,25 @@ import type { AppDb } from './db-types.js';
 // classify path (flag for review) rather than silently dropping it. Mirrors the 10-char read floor.
 const MIN_CHARS_FOR_NON_MEDICAL_SKIP = 10;
 
+// Strip NUL bytes (U+0000) from extracted text. Postgres `text`/`varchar` columns CANNOT store 0x00
+// ("invalid byte sequence for encoding UTF8: 0x00", SQLSTATE 22021) — a single NUL anywhere in a page's
+// text rolls back the ENTIRE documentPage write, 500s the /pages callback, and (after SQS retries) dead-
+// letters the OCR job, freezing the whole case at 0 pages read. Born-digital PDFs routinely carry stray
+// NULs in their text layer (Apolito's 900-page Blue Button, 2026-06-18). Removing the control char loses
+// nothing clinical. Also scrub other C0 control chars except tab/newline/CR, which Postgres also dislikes
+// in some collations and which are never meaningful record content.
+export function stripPgUnsafeChars(s: string): string {
+  // Remove NUL and other C0 control chars EXCEPT tab/newline/CR. Postgres text columns cannot store
+  // 0x00 (SQLSTATE 22021); a single NUL rolls back the whole page write. charCodeAt avoids a literal
+  // control-char regex in source.
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code === 0x09 || code === 0x0a || code === 0x0d || code >= 0x20) out += s[i];
+  }
+  return out;
+}
+
 export interface DocumentPageInput {
   readonly pageNumber: number;
   readonly text: string;
@@ -54,17 +73,20 @@ export async function writeDocumentPages(
 
   const result = await db.$transaction(async (tx) => {
     for (const page of pages) {
+      // Strip NUL/control chars before the Postgres write — a 0x00 anywhere in the text rolls back the
+      // whole transaction (SQLSTATE 22021) and dead-letters the OCR job (Apolito Blue Button, 2026-06-18).
+      const safeText = stripPgUnsafeChars(page.text);
       // Provenance is optional; coalesce undefined → null so it persists explicitly (and a re-OCR
       // through a path that DOES supply it overwrites a prior null).
       const prov = {
         extractionMethod: page.extractionMethod ?? null,
-        extractionCoverage: page.extractionCoverage ?? null,
+        extractionCoverage: page.extractionCoverage != null ? stripPgUnsafeChars(page.extractionCoverage) : null,
         handwritingPresent: page.handwritingPresent ?? null,
       };
       await tx.documentPage.upsert({
         where: { documentId_pageNumber: { documentId, pageNumber: page.pageNumber } },
-        create: { documentId, pageNumber: page.pageNumber, text: page.text, confidence: page.confidence, ...prov },
-        update: { text: page.text, confidence: page.confidence, extractedAt: new Date(), ...prov },
+        create: { documentId, pageNumber: page.pageNumber, text: safeText, confidence: page.confidence, ...prov },
+        update: { text: safeText, confidence: page.confidence, extractedAt: new Date(), ...prov },
       });
     }
 
@@ -86,7 +108,7 @@ export async function writeDocumentPages(
 
     let readStatus: { terminalStatus: string; wordCount: number; corruptedTokenRatio: number } | null = null;
     if (doc !== null) {
-      const concatenatedText = pages.map((p) => p.text).join('\n');
+      const concatenatedText = pages.map((p) => stripPgUnsafeChars(p.text)).join('\n');
       // Size signal for the SIZE-AWARE word floor (classifyReadAttempt): prefer the reported page count,
       // fall back to the number of pages we actually wrote text for. A <=1-page file with any text is a
       // valid small file ("CPAP" note) and must not block. Persisted into the attempt so the retroactive

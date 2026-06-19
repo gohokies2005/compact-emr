@@ -123,3 +123,20 @@ export interface AiViabilityCard {
 export function getCaseViability(caseId: string): Promise<{ data: CaseViability | null; aiViability?: AiViabilityCard | null }> {
   return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/viability-card`);
 }
+
+/**
+ * Consolidated calm SOAP-note Overview (Ryan 2026-06-19) — one narrative + a traffic light, grounded
+ * on the AI picker plan. null when AI_ROUTE_PICKER_ENABLED is off / fail-open → the Overview shows the
+ * dense panels as before.
+ */
+export interface SoapOverview {
+  readonly light: 'green' | 'amber' | 'red';
+  readonly headline: string;
+  readonly soap: string;
+  readonly next_action: string;
+  readonly generated_at: string;
+}
+
+export function getSoapOverview(caseId: string): Promise<{ data: SoapOverview | null }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/soap-overview`);
+}

@@ -15,9 +15,22 @@ import { HttpError } from '../http/errors.js';
 import type { AppDb } from '../services/db-types.js';
 import { caseViabilityEnabled, deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
 import { deriveAiViability } from '../services/ai-viability.js';
+import { buildSoapOverview } from '../services/soap-overview.js';
 
 export function createCaseViabilityRouter(db: AppDb): Router {
   const router = Router();
+  // Consolidated calm SOAP-note Overview (Ryan 2026-06-19) — one narrative + a traffic light, grounded
+  // on the AI picker plan. null when the picker flag is off / fail-open (the UI then shows the panels).
+  router.get(
+    '/cases/:id/soap-overview',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      res.json({ data: await buildSoapOverview(db, caseId) });
+    }),
+  );
   router.get(
     '/cases/:id/viability-card',
     requireRole(['admin', 'ops_staff', 'physician']),

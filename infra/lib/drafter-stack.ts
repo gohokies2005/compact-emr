@@ -210,6 +210,16 @@ export class DrafterStack extends Stack {
         // (claude.js) prompt rule. Validated: Flynn-guard 9/9 + tier-floor 8/8 (incl. denied-set F1).
         // Reverts to byte-identical pre-gate ranking by removing this line + redeploy (drafter idle).
         ANCHOR_MECHANISM_GATE: 'true',
+        // AI_ROUTE_PICKER_ENABLED (Ryan 2026-06-19): the LLM route-picker brain selects the
+        // anchor/theory pathway in the drafter. Baked into CDK so a normal `cdk deploy --all`
+        // STOPS reverting it — previously this flag lived ONLY on a hand-registered task-def
+        // revision (rev 54, image 72cb144-routepicker) and the next CDK converge would have
+        // dropped it. The SAME flag is also baked into the API Lambda (api-stack.ts) so the
+        // Overview viability CARD's deriveAiViability runs the picker too. Revert (CDK-permanent):
+        // set to 'false' (or remove) + redeploy the drafter while the SQS queue is idle.
+        // Emergency revert without a deploy: register a task-def revision with the flag flipped
+        // and update the service — the next CDK deploy reconverges to this value.
+        AI_ROUTE_PICKER_ENABLED: 'true',
       },
       secrets: {
         // The wrapper reads these from env at startup; AWS injects the actual secret values

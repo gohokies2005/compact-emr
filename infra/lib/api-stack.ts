@@ -198,6 +198,16 @@ export class ApiStack extends Stack {
         // Guided Revision (physician highlight-the-passage broader letter edit, Opus 4.8) — ON (Ryan
         // 2026-06-14: "guided revision looks good, but not available"). Context-overridable to disable.
         GUIDED_REVISION_ENABLED: (this.node.tryGetContext('guided_revision_enabled') as string | undefined) ?? 'true',
+        // AI_ROUTE_PICKER_ENABLED (Ryan 2026-06-19): the Overview viability CARD's deriveAiViability
+        // (ai-viability.ts → GET /api/v1/cases/:id/viability-card) runs the SAME LLM route-picker brain
+        // as the drafter and surfaces the AI's anchor/theory pick alongside the static viability. This
+        // runs IN THE API LAMBDA, so the flag must live HERE — not just on the drafter task def. Baked
+        // as a graduated default ('true') with a context override so a normal `cdk deploy --all` keeps
+        // it ON (a bare --context flip would silently revert on the next converge). Read at request time
+        // (no image rebuild). TOGGLE OFF (CDK-permanent): set the default to 'false' (or pass
+        // --context ai_route_picker_enabled=off / set it in cdk.json) + deploy. The drafter carries the
+        // same flag in drafter-stack.ts; flip both to fully disable the route-picker brain.
+        AI_ROUTE_PICKER_ENABLED: (this.node.tryGetContext('ai_route_picker_enabled') as string | undefined) ?? 'true',
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue

@@ -16,6 +16,7 @@ import { stubRetrieve, type RetrieveFn } from '../advisory/retrieveContract.js';
 import { realRetrieve, realRetrieveAvailable } from '../advisory/realRetrieve.js';
 import { vendoredSanitize } from '../advisory/vendoredSanitize.js';
 import { answerQuestion, type AnswerDeps, type ChartSliceLike, type InvokeResultLike } from '../advisory/advisoryAnswer.js';
+import { buildAiPlanGroundingBlock } from '../advisory/aiViabilityPlanBlock.js';
 
 interface RequestActor { readonly sub: string; readonly role: Role; }
 function currentUser(req: Request): RequestActor {
@@ -64,9 +65,14 @@ export function createAdvisoryRouter(db: AppDb, overrides: AdvisoryRouterDeps = 
         sanitize,
       };
 
+      // One-brain alignment: for a viability-shaped question, ground the answer in the PERSISTED
+      // route-picker plan (the same pick the drafter + Overview card use). Read-only DB lookup, no LLM
+      // call here (29s-safe). Fail-open: null → corpus-only answer (unchanged behavior).
+      const viabilityPlanBlock = await buildAiPlanGroundingBlock(db, caseId, question).catch(() => null);
+
       let outcome;
       try {
-        outcome = await answerQuestion(deps, { caseId, question });
+        outcome = await answerQuestion(deps, { caseId, question, viabilityPlanBlock });
       } catch (e) {
         // The model / retrieval threw — log it (oversight) and return a clean error, never a stack trace.
         const reason = e instanceof Error ? e.message : String(e);

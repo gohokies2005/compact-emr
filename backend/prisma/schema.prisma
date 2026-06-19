@@ -371,6 +371,13 @@ model Case {
   // anchor = best_anchor.upstream_canonical (null for redirect/abstain — no anchor persisted).
   caseViabilityBand   String?    @map("case_viability_band") @db.VarChar(16)
   caseViabilityAnchor String?    @map("case_viability_anchor")
+  // AI route-picker plan snapshot (Ryan 2026-06-19): the picker's argument plan computed by the Overview
+  // card (deriveAiViability, the SAME brain the drafter uses) — PERSISTED so Ask Aegis narrates the same
+  // one-brain pick (drafter + card + advisory aligned) WITHOUT a second synchronous LLM call on the
+  // 29s-capped /ask path. Hash-guarded: re-written only when the picker inputs change. Both nullable +
+  // fail-open at every read/write, so a migration-ordering gap just degrades to the corpus-only answer.
+  aiViabilityPlanJson Json?      @map("ai_viability_plan_json")
+  aiViabilityPlanHash String?    @map("ai_viability_plan_hash")
   // Stamp provenance (keystone pkg 5): who last wrote each stamped field group — 'derived'
   // (machine derivation: only-when-null persist, intake derive, backfill, restamp hook) or
   // 'manual' (RN/staff set: case PATCH/create, CDS run). NULL = legacy/unknown provenance and is

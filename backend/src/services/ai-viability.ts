@@ -59,6 +59,9 @@ export interface AiViabilityCard {
   readonly lead: { upstream: string; claimed: string; framing: string; cfr_basis: string; mechanism: string; confidence: string; rationale: string; counterargument: string };
   readonly convergent: ReadonlyArray<{ upstream: string; note: string }>;
   readonly alternatives: ReadonlyArray<{ upstream: string; framing: string; why_not: string }>;
+  // Hard excludes (reverse-causation / pyramiding / wrong-direction) — the anchors the picker REFUSED.
+  // Carried so Ask Aegis can answer "why not X" from the same brain (never revive an excluded pathway).
+  readonly excluded: ReadonlyArray<{ upstream: string; reason: string }>;
   readonly missing: ReadonlyArray<{ fact: string; why: string }>;
   readonly nuance: string;
   readonly overall: string;
@@ -111,8 +114,8 @@ export async function deriveAiViability(db: AppDb, caseId: string): Promise<AiVi
   try {
     const c = (await db.case.findFirst({
       where: { id: caseId },
-      select: { claimedCondition: true, veteranStatement: true, inServiceEvent: true, framingChoice: true, upstreamScCondition: true } as never,
-    })) as unknown as { claimedCondition: string; veteranStatement: string | null; inServiceEvent: string | null; framingChoice: string | null; upstreamScCondition: string | null } | null;
+      select: { claimedCondition: true, veteranStatement: true, inServiceEvent: true, framingChoice: true, upstreamScCondition: true, aiViabilityPlanHash: true } as never,
+    })) as unknown as { claimedCondition: string; veteranStatement: string | null; inServiceEvent: string | null; framingChoice: string | null; upstreamScCondition: string | null; aiViabilityPlanHash: string | null } | null;
     if (c === null || !c.claimedCondition) return null;
 
     const cf = await deriveCaseFramingForCase(db, caseId);
@@ -178,11 +181,21 @@ export async function deriveAiViability(db: AppDb, caseId: string): Promise<AiVi
       },
       convergent: ((plan['convergent_anchors'] as Array<Record<string, unknown>>) ?? []).map((x) => ({ upstream: String(x['upstream'] ?? ''), note: String(x['shared_mechanism_note'] ?? '') })).filter((x) => x.upstream),
       alternatives: ((plan['alternative_theories'] as Array<Record<string, unknown>>) ?? []).map((x) => ({ upstream: String(x['upstream'] ?? ''), framing: String(x['framing'] ?? ''), why_not: String(x['why_not_primary'] ?? '') })).filter((x) => x.upstream),
+      excluded: ((plan['excluded_anchors'] as Array<Record<string, unknown>>) ?? []).map((x) => ({ upstream: String(x['upstream'] ?? ''), reason: String(x['reason'] ?? '') })).filter((x) => x.upstream),
       missing: ((plan['missing_facts'] as Array<Record<string, unknown>>) ?? []).map((x) => ({ fact: String(x['fact_needed'] ?? ''), why: String(x['why_it_matters'] ?? '') })).filter((x) => x.fact),
       nuance: String(plan['clinical_nuance'] ?? ''),
       overall: String(plan['overall_rationale'] ?? ''),
     };
     _cache.set(cacheKey, card);
+    // Persist the plan so Ask Aegis can NARRATE the same one-brain pick WITHOUT a second synchronous LLM
+    // call on the 29s-capped /ask path (one brain: drafter + card + advisory). Hash-guarded so an
+    // identical re-render is a no-op DB-side; fail-open (a write failure / missing column never breaks the
+    // card — the advisory just falls back to its corpus-only answer).
+    if (c.aiViabilityPlanHash !== inputHash) {
+      await db.case
+        .update({ where: { id: caseId }, data: { aiViabilityPlanJson: card as unknown as object, aiViabilityPlanHash: inputHash } as never })
+        .catch((e: unknown) => { console.warn(JSON.stringify({ msg: 'ai-viability: plan persist failed open', caseId, error: e instanceof Error ? e.message : String(e) })); });
+    }
     return card;
   } catch (err) {
     console.warn(JSON.stringify({ msg: 'ai-viability: failed open', caseId, error: err instanceof Error ? err.message : String(err) }));

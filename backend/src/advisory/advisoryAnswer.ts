@@ -97,6 +97,11 @@ export interface AnswerDeps {
 export interface AnswerArgs {
   caseId: string;
   question: string;
+  // Optional AI ROUTE-PICKER PLAN grounding block (from the persisted card plan, computed at the route
+  // where db+caseId live — see aiViabilityPlanBlock.ts). Prepended ABOVE the corpus so the model EXPLAINS
+  // the same one-brain pick the drafter/card use, with NO second synchronous LLM call here (29s lesson).
+  // null/absent → corpus-only answer (today's behavior).
+  viabilityPlanBlock?: string | null;
 }
 export type AnswerOutcome =
   | {
@@ -119,7 +124,11 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
   if (slice === null || slice.found === false) return { ok: false, reason: 'case_not_found' };
 
   const retrieval = await deps.retrieve({ question, caseConditions: slice.conditions });
-  const userContent = assembleUserContent(retrieval.chunks, slice.text, question);
+  const corpusContent = assembleUserContent(retrieval.chunks, slice.text, question);
+  // Prepend the route-picker plan block (if present) as the FIRST thing the model sees — it's the
+  // authoritative ground-truth framing for a viability question (the same brain the drafter/card use).
+  const planBlock = (args.viabilityPlanBlock ?? '').trim();
+  const userContent = planBlock ? `${planBlock}\n\n${corpusContent}` : corpusContent;
 
   if (estimateTokens(deps.systemPrompt) + estimateTokens(userContent) > MAX_INPUT_TOKENS) {
     return { ok: false, reason: 'over_budget' };

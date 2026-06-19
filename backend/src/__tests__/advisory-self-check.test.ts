@@ -24,10 +24,15 @@ describe('Ask Aegis self-check (Layer 1 deterministic)', () => {
     expect(r.blocked).toBe(true);
     expect(r.flags).toContain('refund_50');
   });
-  it('flags an excluded-pair suggestion when a hint matches', () => {
-    const r = runSelfCheck('You could argue OSA caused your asthma.', [], ['OSA caused your asthma']);
-    expect(r.blocked).toBe(true);
-    expect(r.flags).toContain('excluded_pair_suggested');
+  it('soft-flags (does NOT block) an excluded-pair mentioned as advocacy', () => {
+    const r = runSelfCheck('You could argue the knee strain is the cause here.', [], ['knee strain']);
+    expect(r.blocked).toBe(false);
+    expect(r.flags).toContain('excluded_pair_mentioned');
+  });
+  it('does NOT flag a compliant "why not X" answer that names the excluded anchor with negation', () => {
+    const r = runSelfCheck('The knee strain will not work here because the physiology runs the wrong direction.', [], ['knee strain']);
+    expect(r.flags).not.toContain('excluded_pair_mentioned');
+    expect(r.blocked).toBe(false);
   });
   it('passes a clean grounded answer with no flags', () => {
     const r = runSelfCheck('Asthma can aggravate OSA via airway inflammation; the record supports this.', [chunk('asthma OSA airway')]);

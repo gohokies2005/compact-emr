@@ -62,13 +62,22 @@ export function runSelfCheck(
       caveats.push(`A cited PMID (${fabricatedPmids.slice(0, 3).join(', ')}) is not in our retrieved library — verify it exists before relying on or quoting it.`);
     }
 
-    // 3. Excluded-pair suggestion → BLOCK (never argue a reverse-causation / pyramiding pair).
-    for (const hint of excludedPairHints) {
-      const h = norm(hint);
-      if (h.length >= 6 && an.includes(h)) {
-        blocked = true; flags.push('excluded_pair_suggested');
-        caveats.push(`This answer appears to suggest a pathway the engine excludes (${hint}) — do not argue it; pick a supported anchor.`);
-        break;
+    // 3. Excluded-pair mention → SOFT caveat (NOT block). The picker plan + prompt deliberately tell the
+    //    model to NAME an excluded anchor when answering "why not X" ("the knee won't work here because…"),
+    //    so a compliant, correct answer legitimately contains the excluded name. A bare substring match
+    //    would false-BLOCK exactly the answer we asked for (QA 2026-06-19, architect edge bug). So only
+    //    flag — and only when the name appears WITHOUT nearby exclusion/negation phrasing (i.e. it reads
+    //    like advocacy, not a "why not"). Block-class stays reserved for content that must not ship verbatim
+    //    (BVA-%, $50-refund, fabricated PMID). The human review gate is the backstop here.
+    const NEGATION_NEARBY = /\b(why not|won'?t work|does(?:n'?t| not) work|off the table|excluded?|rule[ds]? out|not (?:a )?(?:viable|supported|credible|good)|wrong (?:way|direction)|pyramid|reverse|avoid)\b/i;
+    if (!NEGATION_NEARBY.test(a)) {
+      for (const hint of excludedPairHints) {
+        const h = norm(hint);
+        if (h.length >= 6 && an.includes(h)) {
+          flags.push('excluded_pair_mentioned');
+          caveats.push(`This answer names ${hint}, which the engine excludes — double-check it is explaining WHY NOT to argue it, not suggesting it as a pathway.`);
+          break;
+        }
       }
     }
 

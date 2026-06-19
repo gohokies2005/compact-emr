@@ -123,8 +123,8 @@ export async function deriveAiViability(db: AppDb, caseId: string): Promise<AiVi
   try {
     const c = (await db.case.findFirst({
       where: { id: caseId },
-      select: { claimedCondition: true, veteranStatement: true, inServiceEvent: true, framingChoice: true, upstreamScCondition: true, aiViabilityPlanHash: true } as never,
-    })) as unknown as { claimedCondition: string; veteranStatement: string | null; inServiceEvent: string | null; framingChoice: string | null; upstreamScCondition: string | null; aiViabilityPlanHash: string | null } | null;
+      select: { claimedCondition: true, veteranStatement: true, inServiceEvent: true, framingChoice: true, upstreamScCondition: true, aiViabilityPlanHash: true, aiViabilityPlanJson: true } as never,
+    })) as unknown as { claimedCondition: string; veteranStatement: string | null; inServiceEvent: string | null; framingChoice: string | null; upstreamScCondition: string | null; aiViabilityPlanHash: string | null; aiViabilityPlanJson: AiViabilityCard | null } | null;
     if (c === null || !c.claimedCondition) return null;
 
     const cf = await deriveCaseFramingForCase(db, caseId);
@@ -157,11 +157,29 @@ export async function deriveAiViability(db: AppDb, caseId: string): Promise<AiVi
     const cacheKey = `${caseId}:${inputHash}`;
     if (_cache.has(cacheKey)) return _cache.get(cacheKey) ?? null;
 
+    // ── LOCK IT IN (Ryan 2026-06-19): DB-persisted short-circuit. A COLD Lambda instance has an empty
+    // in-process cache, so without this it would re-call the LLM on EVERY Overview open even though a valid
+    // plan is already persisted — the cost + the "thinks for minutes then nothing" 29s-timeout silent fail.
+    // If the persisted plan's hash matches the current inputs AND its shape is current, serve it for $0 /
+    // instant (no LLM). Recompute ONLY when inputs changed, no plan exists, or the persisted shape is stale.
+    const persisted = c.aiViabilityPlanJson;
+    if (c.aiViabilityPlanHash === inputHash && persisted && typeof persisted === 'object'
+        && persisted.schemaVersion === AI_VIABILITY_PLAN_SCHEMA_VERSION && persisted.source === 'ai_route_picker' && persisted.lead) {
+      _cache.set(cacheKey, persisted); // warm the in-process cache for the rest of this instance
+      return persisted;
+    }
+
     const pp = loadPickerPrompt();
     if (!pp) return null; // vendored prompt unavailable → fail-open (card shows static)
 
+    // Bound the picker call to the Lambda's 29s budget (aws-cloud-sme live finding 2026-06-19): the SDK
+    // default (120s timeout + 2 retries) lets a slow/overloaded Sonnet call run PAST the 29s API-Gateway/
+    // Lambda cap, which KILLS the function before our catch can fail-open — so the card silently renders
+    // nothing AND the plan never persists (a vicious cycle that never "locks in"). Cap at 22s, no retries:
+    // the single call either completes well inside the window (then persists + locks in) or fails-open
+    // LOUDLY (the catch + console.warn run, card falls back to static). One synchronous call only.
     let anthropic: Anthropic;
-    try { anthropic = new Anthropic({ apiKey: await resolveAnthropicApiKey(), timeout: 120_000, maxRetries: 2 }); }
+    try { anthropic = new Anthropic({ apiKey: await resolveAnthropicApiKey(), timeout: 22_000, maxRetries: 0 }); }
     catch { return null; }
 
     const resp = await anthropic.messages.create({

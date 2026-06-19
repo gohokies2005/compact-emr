@@ -14,6 +14,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb } from '../services/db-types.js';
 import { caseViabilityEnabled, deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
+import { deriveAiViability } from '../services/ai-viability.js';
 
 export function createCaseViabilityRouter(db: AppDb): Router {
   const router = Router();
@@ -28,8 +29,11 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       }
       const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
-      // Live, info-light. Null (raced delete / fail-open) → { data: null }; card renders nothing.
-      res.json({ data: await deriveCaseViabilityForCase(db, caseId) });
+      // The card prefers the AI route-picker plan (the SAME brain the drafter uses) when
+      // AI_ROUTE_PICKER_ENABLED is on; deriveAiViability returns null when off / fail-open, and the
+      // card falls back to the static M-tier engine. Both returned so the UI degrades gracefully.
+      const aiViability = await deriveAiViability(db, caseId);
+      res.json({ data: await deriveCaseViabilityForCase(db, caseId), aiViability });
     }),
   );
   return router;

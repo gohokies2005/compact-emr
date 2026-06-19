@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { getCaseViability } from '../api/case-viability';
+import { getCaseViability, type AiViabilityCard } from '../api/case-viability';
 import { StatusChip } from './ui/StatusChip';
 import { SectionCard } from './ui/SectionCard';
 import { BAND_CHIP } from '../lib/viabilityChip';
@@ -37,6 +37,11 @@ export function CaseViabilityCard({
   const [openBridges, setOpenBridges] = useState<ReadonlySet<number>>(new Set());
 
   const v = q.data?.data;
+  const ai = q.data?.aiViability;
+  // AI route-picker (the SAME brain the drafter uses) takes precedence — the card visualizes the
+  // anticipated drafter pick in plain language, replacing the static M-tier engine. Present only when
+  // AI_ROUTE_PICKER_ENABLED is on; else fall through to the static card below.
+  if (ai) return <AiViabilityBlock ai={ai} />;
   if (!v) return null; // dark flag / fail-open / loading — the flag controls the whole surface
 
   const best = v.best_anchor;
@@ -162,6 +167,60 @@ export function CaseViabilityCard({
           })}
         </div>
       ) : null}
+    </SectionCard>
+  );
+}
+
+// ── AI route-picker render (Ryan 2026-06-19) — the card visualizes the SAME pick the drafter will
+// make, in plain language. No M-tier / E / tier jargon, no plausible-default chart junk. ──
+const FRAMING_LABEL: Record<string, string> = {
+  aggravation: 'aggravation (worsened by)',
+  secondary_causation: 'secondary (caused by)',
+  dual_prong: 'secondary + aggravation (both prongs)',
+  direct: 'direct service connection',
+  presumptive: 'presumptive',
+};
+const VIAB_PILL: Record<AiViabilityCard['viability'], { cls: string; label: string }> = {
+  supportable: { cls: 'border-emerald-200 bg-emerald-50 text-emerald-700', label: 'Supported' },
+  marginal: { cls: 'border-amber-200 bg-amber-50 text-amber-700', label: 'Proceed with caution' },
+  needs_physician_review: { cls: 'border-amber-200 bg-amber-50 text-amber-700', label: 'Physician review' },
+  not_supportable: { cls: 'border-red-200 bg-red-50 text-red-700', label: 'Not supportable' },
+};
+
+function AiViabilityBlock({ ai }: { readonly ai: AiViabilityCard }) {
+  const pill = VIAB_PILL[ai.viability] ?? VIAB_PILL.needs_physician_review;
+  const framing = FRAMING_LABEL[ai.lead.framing] ?? ai.lead.framing;
+  return (
+    <SectionCard
+      title="Anchor viability"
+      status={<span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${pill.cls}`} title="The anticipated drafter pick (AI route-picker — same engine the letter uses)">{pill.label}</span>}
+    >
+      <div className="text-sm text-slate-800">
+        <span className="font-medium">{ai.lead.upstream}</span>
+        {' → '}
+        {ai.lead.claimed}
+        {framing ? <span className="ml-1 text-slate-500">({framing})</span> : null}
+      </div>
+      {ai.lead.mechanism ? <div className="mt-1 text-sm text-slate-600">{ai.lead.mechanism}</div> : null}
+      {ai.overall ? <div className="mt-1 text-sm text-slate-600">{ai.overall}</div> : null}
+      {ai.convergent.length > 0 ? (
+        <div className="mt-2 text-sm text-slate-700">
+          <span className="font-medium">Also supporting (same mechanism):</span>{' '}
+          {ai.convergent.map((c) => c.upstream).join(', ')}
+        </div>
+      ) : null}
+      {ai.missing.length > 0 ? (
+        <div className="mt-2 text-sm text-amber-700">
+          <span className="font-medium">To strengthen:</span> {ai.missing.map((m) => m.fact).join('; ')}
+        </div>
+      ) : null}
+      {ai.alternatives.length > 0 ? (
+        <div className="mt-1 text-xs text-slate-500">
+          Fallback theories: {ai.alternatives.map((a) => `${a.upstream}${a.framing ? ` (${FRAMING_LABEL[a.framing] ?? a.framing})` : ''}`).join(', ')}
+        </div>
+      ) : null}
+      {ai.nuance ? <div className="mt-2 text-xs text-slate-500 italic">{ai.nuance}</div> : null}
+      <div className="mt-2 text-[11px] text-slate-400">AI route-picker — the framing the drafter will use. A physician confirms before the letter is signed.</div>
     </SectionCard>
   );
 }

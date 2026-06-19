@@ -103,6 +103,23 @@ export interface CaseViability {
   readonly recommended_action?: ViabilityRecommendedAction;
 }
 
-export function getCaseViability(caseId: string): Promise<{ data: CaseViability | null }> {
+/**
+ * AI route-picker card (Ryan 2026-06-19) — the SAME brain the drafter uses, surfaced on the card so
+ * the RN sees the ANTICIPATED drafter pick instead of the static M-tier engine. Present only when
+ * AI_ROUTE_PICKER_ENABLED is on (else null → the card renders the static `data`). Plain language;
+ * no M-tier/E jargon, no plausible-default chart junk.
+ */
+export interface AiViabilityCard {
+  readonly source: 'ai_route_picker';
+  readonly viability: 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
+  readonly lead: { readonly upstream: string; readonly claimed: string; readonly framing: string; readonly cfr_basis: string; readonly mechanism: string; readonly confidence: string; readonly rationale: string; readonly counterargument: string };
+  readonly convergent: ReadonlyArray<{ readonly upstream: string; readonly note: string }>;
+  readonly alternatives: ReadonlyArray<{ readonly upstream: string; readonly framing: string; readonly why_not: string }>;
+  readonly missing: ReadonlyArray<{ readonly fact: string; readonly why: string }>;
+  readonly nuance: string;
+  readonly overall: string;
+}
+
+export function getCaseViability(caseId: string): Promise<{ data: CaseViability | null; aiViability?: AiViabilityCard | null }> {
   return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/viability-card`);
 }

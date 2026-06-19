@@ -40,9 +40,9 @@ const PINNED_SCHEMA_SHA256 = '4f409bb5136a9ea9c72ee0115bc47d9aa671d174eaf8586514
 // #2/#3/#4 (over-call guard + data-contract hardening). These pin the vendored RESOLVER bytes so any
 // re-vendor (or a forbidden hand-edit) of anchorMechanism.cjs / conditionCanon.cjs trips the red build
 // and forces a same-commit pin rotation. Rotated 2026-06-18 to the TIER-FIRST comparator re-vendor
-// (Apolito CLM-838DBEB112 fix: anchor ranking is tier→axis→physician_reviewed→M_eff, was M_eff-first;
+// (CLM-838DBEB112 fix: anchor ranking is tier→axis→physician_reviewed→M_eff, was M_eff-first;
 // a blessed/reviewed anchor now leads a conditional/unreviewed one regardless of raw m_static).
-const PINNED_RESOLVER_SHA256 = '76902ea802bd0b1c98b1cfae85f429e921dc3f7d14ba1912d5db4a77e06a0ba8';
+const PINNED_RESOLVER_SHA256 = 'a4e6c0711e33c0073e01dec1de7310ea87f57d20bf45138ec4f457c39e04ea61';
 const PINNED_CONDITIONCANON_SHA256 = 'bdf068fa00f84875947626ef7889297aa4ca581f47d4d04217f813127e43eab8';
 
 const vendorDir = path.dirname(fileURLToPath(new URL('../vendor/anchor_mechanism_pairs.json', import.meta.url)));

@@ -562,7 +562,7 @@ function mEffInfoLight(mStatic, eligibility) {
 //   { M_eff, tier, physician_reviewed, aggravation_only, anchor_axis, upstream_canonical }.
 // prefOrder = preferenceRankFor(claimed) (panel-ratified tiebreak; [] if none).
 //
-// ORDER (2026-06-18 Apolito fix — TIER-FIRST, was M_eff-first):
+// ORDER (2026-06-18 OSA-claim fix — TIER-FIRST, was M_eff-first):
 //   eligibility-strength desc → axis (direct-first) → physician_reviewed (true-first)
 //   → M_eff desc → causation-first (aggravation-only sorts after) → preference_rank → alpha.
 //
@@ -570,7 +570,7 @@ function mEffInfoLight(mStatic, eligibility) {
 // anchor than a CONDITIONAL, unreviewed one even when the unreviewed one carries a higher
 // raw m_static. The old M_eff-first order let Sinusitis/rhinitis (conditional, M4,
 // physician_reviewed=false) outrank Asthma (blessed, M3, physician_reviewed=true) for OSA —
-// the live Apolito card bug (CLM-838DBEB112). m_static now only breaks ties WITHIN a tier
+// the live OSA-claim card bug (CLM-838DBEB112). m_static now only breaks ties WITHIN a tier
 // (so PTSD M4 still leads Asthma M3 among two blessed anchors). physician_reviewed sits
 // just under tier+axis so a curated mechanism is never led by an unreviewed Doximity row of
 // the SAME tier (the over-call guard, applied to ORDER not just the headline). The E axis
@@ -603,7 +603,7 @@ function _rowToComparable(row) {
   return {
     M_eff: mEffInfoLight(row.m_static, row.eligibility),
     tier: row.eligibility,
-    // physician_reviewed feeds the tier-internal tiebreak (Apolito fix, 2026-06-18) so the
+    // physician_reviewed feeds the tier-internal tiebreak (OSA-claim fix, 2026-06-18) so the
     // RN manual + quickref order their raw rows IDENTICALLY to the live engine's resolved
     // candidates (which carry r.physician_reviewed). Parity is asserted by
     // anchor-surface-parity.test.js — drop this and the surfaces silently diverge.

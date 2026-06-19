@@ -39,8 +39,10 @@ const PINNED_SCHEMA_SHA256 = '4f409bb5136a9ea9c72ee0115bc47d9aa671d174eaf8586514
 // is exactly how the EMR vendor silently lagged FRN at 947d51e (fix #1) while the drafter shipped fixes
 // #2/#3/#4 (over-call guard + data-contract hardening). These pin the vendored RESOLVER bytes so any
 // re-vendor (or a forbidden hand-edit) of anchorMechanism.cjs / conditionCanon.cjs trips the red build
-// and forces a same-commit pin rotation. Rotated to the FRN 3d09819 re-vendor (over-call guard live).
-const PINNED_RESOLVER_SHA256 = '924a47831816da0ed6ca236f4ab26fedeca6afe1fa3cbe94420025f518016a80';
+// and forces a same-commit pin rotation. Rotated 2026-06-18 to the TIER-FIRST comparator re-vendor
+// (Apolito CLM-838DBEB112 fix: anchor ranking is tier→axis→physician_reviewed→M_eff, was M_eff-first;
+// a blessed/reviewed anchor now leads a conditional/unreviewed one regardless of raw m_static).
+const PINNED_RESOLVER_SHA256 = '76902ea802bd0b1c98b1cfae85f429e921dc3f7d14ba1912d5db4a77e06a0ba8';
 const PINNED_CONDITIONCANON_SHA256 = 'bdf068fa00f84875947626ef7889297aa4ca581f47d4d04217f813127e43eab8';
 
 const vendorDir = path.dirname(fileURLToPath(new URL('../vendor/anchor_mechanism_pairs.json', import.meta.url)));

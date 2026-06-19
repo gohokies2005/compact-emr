@@ -559,23 +559,38 @@ function mEffInfoLight(mStatic, eligibility) {
 }
 
 // The SINGLE anchor comparator, over a normalized shape
-//   { M_eff, tier, aggravation_only, upstream_canonical }.
+//   { M_eff, tier, physician_reviewed, aggravation_only, anchor_axis, upstream_canonical }.
 // prefOrder = preferenceRankFor(claimed) (panel-ratified tiebreak; [] if none).
-// Order: M_eff desc → eligibility-strength desc → causation-first (aggravation-only
-// sorts after) → preference_rank → alpha (total order). (The E axis was REMOVED
-// 2026-06-12 — it was a dead biostat factor; M_eff + tier + preference_rank carry
-// the ranking.)
+//
+// ORDER (2026-06-18 Apolito fix — TIER-FIRST, was M_eff-first):
+//   eligibility-strength desc → axis (direct-first) → physician_reviewed (true-first)
+//   → M_eff desc → causation-first (aggravation-only sorts after) → preference_rank → alpha.
+//
+// WHY tier leads M_eff: a BLESSED, physician-confirmed mechanism is a stronger LEGAL
+// anchor than a CONDITIONAL, unreviewed one even when the unreviewed one carries a higher
+// raw m_static. The old M_eff-first order let Sinusitis/rhinitis (conditional, M4,
+// physician_reviewed=false) outrank Asthma (blessed, M3, physician_reviewed=true) for OSA —
+// the live Apolito card bug (CLM-838DBEB112). m_static now only breaks ties WITHIN a tier
+// (so PTSD M4 still leads Asthma M3 among two blessed anchors). physician_reviewed sits
+// just under tier+axis so a curated mechanism is never led by an unreviewed Doximity row of
+// the SAME tier (the over-call guard, applied to ORDER not just the headline). The E axis
+// was REMOVED 2026-06-12 (dead biostat factor).
 function _anchorComparator(prefOrder) {
   const pref = Array.isArray(prefOrder) ? prefOrder : [];
   const prefIdx = (u) => { const i = pref.indexOf(u); return i < 0 ? Infinity : i; };
   return (a, b) =>
-    (b.M_eff - a.M_eff)
-    || ((_ELIGIBILITY_STRENGTH[b.tier] || 0) - (_ELIGIBILITY_STRENGTH[a.tier] || 0))
-    // Axis tiebreak (direct-SC fold): at EQUAL (M_eff, eligibility-strength), a DIRECT
-    // anchor (in-service event, 3.303 — no intermediate SC to defend) outranks a SECONDARY
-    // one. No-op for secondary-only ranking (anchor_axis undefined on both → 0), so the RN
+    ((_ELIGIBILITY_STRENGTH[b.tier] || 0) - (_ELIGIBILITY_STRENGTH[a.tier] || 0))
+    // Axis tiebreak (direct-SC fold): at EQUAL eligibility-strength, a DIRECT anchor
+    // (in-service event, 3.303 — no intermediate SC to defend) outranks a SECONDARY one.
+    // No-op for secondary-only ranking (anchor_axis undefined on both → 0), so the RN
     // manual/quickref generators (secondary rows only) are unaffected — parity preserved.
     || ((a.anchor_axis === 'direct' ? 0 : 1) - (b.anchor_axis === 'direct' ? 0 : 1))
+    // physician_reviewed (true-first) WITHIN a tier: a curated mechanism leads an
+    // unreviewed (94.5% Doximity-sourced) one of the same tier. Direct anchors are
+    // evidenced facts (not table rows) and already won the axis key above, so this only
+    // orders secondary anchors among themselves. undefined === undefined → 0 (no-op).
+    || ((b.physician_reviewed === true ? 1 : 0) - (a.physician_reviewed === true ? 1 : 0))
+    || (b.M_eff - a.M_eff)
     || ((a.aggravation_only ? 1 : 0) - (b.aggravation_only ? 1 : 0))
     || (prefIdx(a.upstream_canonical) - prefIdx(b.upstream_canonical))
     || a.upstream_canonical.localeCompare(b.upstream_canonical);
@@ -588,6 +603,11 @@ function _rowToComparable(row) {
   return {
     M_eff: mEffInfoLight(row.m_static, row.eligibility),
     tier: row.eligibility,
+    // physician_reviewed feeds the tier-internal tiebreak (Apolito fix, 2026-06-18) so the
+    // RN manual + quickref order their raw rows IDENTICALLY to the live engine's resolved
+    // candidates (which carry r.physician_reviewed). Parity is asserted by
+    // anchor-surface-parity.test.js — drop this and the surfaces silently diverge.
+    physician_reviewed: row.physician_reviewed === true,
     aggravation_only: isAggravationOnly(row.claimed_canonical, row.upstream_canonical),
     upstream_canonical: row.upstream_canonical,
     _row: row,

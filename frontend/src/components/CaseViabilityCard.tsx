@@ -69,7 +69,7 @@ export function CaseViabilityCard({
           {' → '}
           {v.claimed_canonical ?? '—'}
           <span className="ml-1 text-slate-500">
-            (M{best.M_eff ?? '–'} {best.tier}{best.E === null ? ', E: not yet scored' : `, E: ${best.E}`})
+            (M{best.M_eff ?? '–'} {best.tier})
           </span>
         </div>
       ) : null}

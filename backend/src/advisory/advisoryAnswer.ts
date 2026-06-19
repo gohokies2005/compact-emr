@@ -4,6 +4,7 @@
 
 import { estimateTokens } from './bedrockClient.js';
 import type { RetrievalChunk, RetrievalResult, RetrieveFn } from './retrieveContract.js';
+import { runSelfCheck, applySelfCheck } from './selfCheck.js';
 
 // Per-question input cost guard — refuse BEFORE the paid call if the assembled prompt is over budget
 // (architect gap #7). The output is capped separately by ADVISORY_MAX_TOKENS in the model caller.
@@ -131,14 +132,22 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
   const clean = res.stopReason === 'max_tokens'
     ? `${sanitized}\n\n(This answer was cut off at the length limit — ask me to continue for the rest.)`
     : sanitized;
+  // Pre-send self fact-check (deterministic, $0): catch BVA-% leakage, a fabricated PMID, an excluded-pair
+  // suggestion, or forbidden vet-facing content BEFORE the answer lands. Block-class → loud VERIFY banner;
+  // soft → a caveat. Fail-open (never throws). Flags ride in notes for logging.
+  const check = runSelfCheck(clean, retrieval.chunks);
+  const finalAnswer = applySelfCheck(clean, check);
+  if (check.flags.length > 0) {
+    console.warn(JSON.stringify({ msg: 'advisory_self_check_flagged', caseId: args.caseId, blocked: check.blocked, flags: check.flags }));
+  }
   return {
     ok: true,
-    answer: clean,
+    answer: finalAnswer,
     citations: extractCitations(retrieval.chunks),
     status: retrieval.status,
     guidance: statusGuidance(retrieval.status),
     costUsd: res.costUsd,
     modeRan: retrieval.mode_ran,
-    notes: retrieval.notes,
+    notes: [...retrieval.notes, ...check.flags.map((f) => `self_check:${f}`)],
   };
 }

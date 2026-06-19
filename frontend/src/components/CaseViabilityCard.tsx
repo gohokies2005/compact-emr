@@ -32,6 +32,8 @@ export function CaseViabilityCard({
     queryKey: ['case', caseId, 'viability-card'],
     queryFn: () => getCaseViability(caseId),
     enabled: caseId.length > 0,
+    retry: 1, // a rare AI-picker timeout fails fast to the static card, not a multi-minute retry storm
+    staleTime: 5 * 60 * 1000,
   });
   const [showTraps, setShowTraps] = useState(false);
   const [openBridges, setOpenBridges] = useState<ReadonlySet<number>>(new Set());

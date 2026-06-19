@@ -16,7 +16,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { createHash } from 'node:crypto';
 import { resolveAnthropicApiKey } from './letter-surgical-propose.js';
-import { deriveCaseFramingForCase } from './case-framing-stamp.js';
+import { deriveCaseFramingForCase, loadMechanismFilter } from './case-framing-stamp.js';
 import type { AppDb } from './db-types.js';
 
 const MODEL = process.env['AI_ROUTE_PICKER_MODEL'] || 'claude-sonnet-4-6';
@@ -153,7 +153,18 @@ export async function deriveAiViability(db: AppDb, caseId: string): Promise<AiVi
     if (c === null || !c.claimedCondition) return null;
 
     const cf = await deriveCaseFramingForCase(db, caseId);
-    const sc = (cf?.grantedScAnchors ?? []).map((a: { condition?: string; upstream_canonical?: string }) => a.condition ?? a.upstream_canonical ?? '').filter(Boolean) as string[];
+    let sc = (cf?.grantedScAnchors ?? []).map((a: { condition?: string; upstream_canonical?: string }) => a.condition ?? a.upstream_canonical ?? '').filter(Boolean) as string[];
+    // C1 (QA 2026-06-19): mechanism-filter the candidate anchors with the SAME eligibility rule the
+    // drafter's rankAnchorCandidates uses (ANCHOR_MECHANISM_GATE) so the card cannot LEAD an excluded
+    // (M0 reverse/sympathetic) anchor the drafter would drop — else card and drafter contradict on the
+    // highest-stakes pick. Fail-open: filter unavailable → unfiltered (the prompt's exclude backstop holds).
+    try {
+      const mech = loadMechanismFilter();
+      if (mech && sc.length) {
+        const filtered = sc.filter((n) => mech.isEligibleAnchor(n, c.claimedCondition));
+        if (filtered.length) sc = filtered; // never empty the set (would strand a real-but-all-excluded case to the prompt backstop)
+      }
+    } catch { /* fail-open: unfiltered */ }
 
     const probRow = (await db.case.findFirst({
       where: { id: caseId },

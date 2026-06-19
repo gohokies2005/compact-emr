@@ -16,6 +16,7 @@ import type { AppDb } from '../services/db-types.js';
 import { caseViabilityEnabled, deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
 import { deriveAiViability } from '../services/ai-viability.js';
 import { buildSoapOverview } from '../services/soap-overview.js';
+import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
 
 export function createCaseViabilityRouter(db: AppDb): Router {
   const router = Router();
@@ -46,7 +47,15 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       // AI_ROUTE_PICKER_ENABLED is on; deriveAiViability returns null when off / fail-open, and the
       // card falls back to the static M-tier engine. Both returned so the UI degrades gracefully.
       const aiViability = await deriveAiViability(db, caseId);
-      res.json({ data: await deriveCaseViabilityForCase(db, caseId), aiViability });
+      // Chart-read state for the SOAP traffic light (I2 fix): the calm light goes green only when the
+      // chart is actually fully read — an unread/partial chart pulls it to amber. Fail-open: unknown → null
+      // (the SOAP treats unknown conservatively). Cheap (no LLM).
+      let chartFullyRead: boolean | null = null;
+      try {
+        const r = await loadReconciledChartReadiness(db, caseId);
+        chartFullyRead = r ? (r.ready === true && (r.blockingFiles?.length ?? 0) === 0) : null;
+      } catch { chartFullyRead = null; }
+      res.json({ data: await deriveCaseViabilityForCase(db, caseId), aiViability, chartFullyRead });
     }),
   );
   return router;

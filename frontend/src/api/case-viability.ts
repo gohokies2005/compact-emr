@@ -120,7 +120,7 @@ export interface AiViabilityCard {
   readonly overall: string;
 }
 
-export function getCaseViability(caseId: string): Promise<{ data: CaseViability | null; aiViability?: AiViabilityCard | null }> {
+export function getCaseViability(caseId: string): Promise<{ data: CaseViability | null; aiViability?: AiViabilityCard | null; chartFullyRead?: boolean | null }> {
   return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/viability-card`);
 }
 

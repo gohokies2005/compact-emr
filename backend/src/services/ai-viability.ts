@@ -118,7 +118,18 @@ Produce the argument plan by calling emit_argument_plan. Pick the single best GR
  * Compute the AI viability card for a case via the route-picker brain. Returns null (fail-open) when
  * the flag is off, the key is unresolvable, inputs are empty, or the API call fails/truncates.
  */
-export async function deriveAiViability(db: AppDb, caseId: string): Promise<AiViabilityCard | null> {
+/**
+ * opts.compute=false → READ-ONLY: return the persisted plan if it matches current inputs, else null —
+ * NO LLM call (used by the synchronous GET /viability-card path, which must never make the ~22-25s picker
+ * call under the 29s API cap). opts.compute defaults to true (the async self-invoke compute path).
+ * opts.timeoutMs → the Anthropic client timeout; the async path owns the whole 29s window so it can run
+ * higher (~26s) than the synchronous 22s cap and actually COMPLETE + persist.
+ */
+export async function deriveAiViability(
+  db: AppDb,
+  caseId: string,
+  opts?: { compute?: boolean; timeoutMs?: number },
+): Promise<AiViabilityCard | null> {
   if (!aiRoutePickerEnabled()) return null;
   try {
     const c = (await db.case.findFirst({
@@ -169,6 +180,10 @@ export async function deriveAiViability(db: AppDb, caseId: string): Promise<AiVi
       return persisted;
     }
 
+    // READ-ONLY path (synchronous GET /viability-card): no fresh persisted plan → return null WITHOUT the
+    // ~22-25s LLM call (which can't fit the 29s cap). The route fires an async self-invoke to compute it.
+    if (opts?.compute === false) return null;
+
     const pp = loadPickerPrompt();
     if (!pp) return null; // vendored prompt unavailable → fail-open (card shows static)
 
@@ -179,7 +194,7 @@ export async function deriveAiViability(db: AppDb, caseId: string): Promise<AiVi
     // the single call either completes well inside the window (then persists + locks in) or fails-open
     // LOUDLY (the catch + console.warn run, card falls back to static). One synchronous call only.
     let anthropic: Anthropic;
-    try { anthropic = new Anthropic({ apiKey: await resolveAnthropicApiKey(), timeout: 22_000, maxRetries: 0 }); }
+    try { anthropic = new Anthropic({ apiKey: await resolveAnthropicApiKey(), timeout: opts?.timeoutMs ?? 22_000, maxRetries: 0 }); }
     catch { return null; }
 
     const resp = await anthropic.messages.create({

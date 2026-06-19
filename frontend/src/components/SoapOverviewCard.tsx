@@ -49,6 +49,17 @@ export function SoapOverviewCard({ caseId }: { readonly caseId: string }) {
     enabled: caseId.length > 0,
     retry: 1, // a rare picker timeout fails fast (no multi-minute retry storm); the static panels remain
     staleTime: 5 * 60 * 1000,
+    // The picker plan is now computed OFF the request path (async self-invoke); the first GET fires the
+    // compute and returns no aiViability yet. Poll until the plan lands (~25s, once), then stop. Only poll
+    // when the engine is ON (data !== null) but the plan isn't ready — never poll forever / when flag off.
+    // Capped (~16 polls ≈ 96s) so a genuinely-failing picker degrades to the static panels, not a poll storm.
+    refetchInterval: (query) => {
+      const d = query.state.data;
+      if (!d || d.data === null || d.aiViability) return false; // off / fail-open / plan present → stop
+      if (query.state.dataUpdateCount > 16) return false;       // give up → static panels remain
+      return 6000;
+    },
+    refetchIntervalInBackground: false, // don't burn API on a walked-away RN
   });
 
   if (q.isLoading) {

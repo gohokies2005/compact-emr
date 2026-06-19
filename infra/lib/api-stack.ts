@@ -284,6 +284,12 @@ export class ApiStack extends Stack {
       }
     });
 
+    // Off-request AI-viability compute (Ryan 2026-06-19): the API Lambda invokes ITSELF asynchronously to
+    // compute the route-picker plan off the 29s request path (the picker call can't fit under the cap
+    // synchronously). Needs its own name to invoke + permission to invoke itself. Blast radius: api only.
+    handler.addEnvironment('SELF_FUNCTION_NAME', handler.functionName);
+    handler.grantInvoke(handler);
+
     props.phiBucket.grantReadWrite(handler);
     props.doctorPacksBucket.grantRead(handler);
     props.documentsKey.grantEncryptDecrypt(handler);

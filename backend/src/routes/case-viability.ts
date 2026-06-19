@@ -14,7 +14,8 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb } from '../services/db-types.js';
 import { caseViabilityEnabled, deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
-import { deriveAiViability } from '../services/ai-viability.js';
+import { deriveAiViability, aiRoutePickerEnabled } from '../services/ai-viability.js';
+import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
 import { buildSoapOverview } from '../services/soap-overview.js';
 import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
 
@@ -44,9 +45,14 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
       // The card prefers the AI route-picker plan (the SAME brain the drafter uses) when
-      // AI_ROUTE_PICKER_ENABLED is on; deriveAiViability returns null when off / fail-open, and the
-      // card falls back to the static M-tier engine. Both returned so the UI degrades gracefully.
-      const aiViability = await deriveAiViability(db, caseId);
+      // AI_ROUTE_PICKER_ENABLED is on; the card falls back to the static M-tier engine otherwise.
+      // READ-ONLY here (compute:false) — NEVER run the ~22-25s picker call on this synchronous 29s-capped
+      // GET (that timed out → card rendered nothing). If there's no fresh persisted plan, fire an async
+      // self-invoke to compute it off the request path; the FE polls until it lands (~25s, once).
+      const aiViability = await deriveAiViability(db, caseId, { compute: false });
+      if (aiViability === null && aiRoutePickerEnabled()) {
+        void fireRecomputeViability(caseId); // fire-and-forget; never blocks/​fails the GET
+      }
       // Chart-read state for the SOAP traffic light (I2 fix): the calm light goes green only when the
       // chart is actually fully read — an unread/partial chart pulls it to amber. Fail-open: unknown → null
       // (the SOAP treats unknown conservatively). Cheap (no LLM).

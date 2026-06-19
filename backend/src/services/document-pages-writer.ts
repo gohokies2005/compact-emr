@@ -3,6 +3,12 @@ import { maybeEnqueueChartExtract } from './chart-extract-trigger.js';
 import { SERVICE_ACTORS } from './service-actors.js';
 import type { AppDb } from './db-types.js';
 
+// A file may only auto-skip as 'no medical content' when its TOTAL transcribed text is below this floor
+// (a non-record image — a photo/selfie/scenery — yields ~0 chars). If the vision model flagged every
+// page non-medical yet still transcribed substantive text, that contradiction defers to the normal
+// classify path (flag for review) rather than silently dropping it. Mirrors the 10-char read floor.
+const MIN_CHARS_FOR_NON_MEDICAL_SKIP = 10;
+
 export interface DocumentPageInput {
   readonly pageNumber: number;
   readonly text: string;
@@ -13,6 +19,12 @@ export interface DocumentPageInput {
   readonly extractionMethod?: string | null;
   readonly extractionCoverage?: string | null;
   readonly handwritingPresent?: boolean | null;
+  // Per-page 'no medical content' verdict (vision model, Ryan 2026-06-18). TRUE only when the page is
+  // affirmatively a non-record image (photo/selfie/scenery/screenshot/blank), NOT when it merely failed
+  // to read. Default null/undefined on Textract/native/legacy paths. The file auto-skips ONLY when EVERY
+  // page is true AND nothing substantive was transcribed (computed below), so one real page anywhere
+  // keeps the whole file in the case.
+  readonly noMedicalContent?: boolean | null;
 }
 
 export interface WriteDocumentPagesResult {
@@ -80,7 +92,16 @@ export async function writeDocumentPages(
       // valid small file ("CPAP" note) and must not block. Persisted into the attempt so the retroactive
       // reconciliation can self-heal a previously-flagged small file. (Ryan 2026-06-13.)
       const docPages = documentPageCount ?? pages.length;
-      const outcome = classifyReadAttempt({ method: 'textract', extractedText: concatenatedText, pageCount: docPages });
+      // NON-MEDICAL auto-skip (Ryan 2026-06-18): every page affirmatively judged a non-record image by
+      // the vision model AND nothing substantive transcribed → the file is junk (helicopter photos), not
+      // an unread record, so it must not block the case. Both conditions are required: a single real page
+      // (noMedicalContent !== true) or any substantive text keeps the file in the normal classify path
+      // (the data-loss guard — never silently drop a record).
+      const allNonMedical =
+        pages.length > 0 &&
+        pages.every((p) => p.noMedicalContent === true) &&
+        nonWhitespaceCharCount(concatenatedText) < MIN_CHARS_FOR_NON_MEDICAL_SKIP;
+      const outcome = classifyReadAttempt({ method: 'textract', extractedText: concatenatedText, pageCount: docPages, noMedicalContent: allNonMedical });
 
       const existing = await tx.fileReadStatus.findFirst({ where: { caseId: doc.caseId, filePath: doc.s3Key } });
       const newAttempt = {

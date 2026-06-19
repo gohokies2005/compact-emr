@@ -178,6 +178,15 @@ export interface ReadAttemptInput {
   // signal. null/unknown → treat as substantial (require the full word floor — conservative, no
   // regression). (Ryan 2026-06-13: "some files are small … that little detail would hold us all up.")
   readonly pageCount?: number | null;
+  // 'no medical content' signal (Ryan 2026-06-18: a veteran uploaded photos inside helicopters etc. —
+  // "if its really not medical dont have it stop the build"). TRUE only when the vision model POSITIVELY
+  // judged EVERY page of the file to be non-medical (a photograph/selfie/scenery/screenshot/blank — NOT
+  // "couldn't read it") AND nothing substantive was transcribed. When true, the file AUTO-SKIPS
+  // (non-blocking) REGARDLESS of page count — this is the one case where an unknown-size (pageCount null)
+  // 0-char file is safe to skip, because the model affirmatively read it and found no record, rather
+  // than failing to read a record. A real record that merely failed OCR never carries this flag (the
+  // model returns no_medical_content=false on any clinical content), so the data-loss guard holds.
+  readonly noMedicalContent?: boolean;
 }
 
 export interface ReadAttemptOutcome {
@@ -216,6 +225,16 @@ export function classifyReadAttempt(input: ReadAttemptInput): ReadAttemptOutcome
   const chars = nonWhitespaceCharCount(input.extractedText);
   const ratio = corruptedTokenRatio(input.extractedText);
   const pageCount = input.pageCount ?? null;
+
+  // NON-MEDICAL AUTO-SKIP (Ryan 2026-06-18): the vision model affirmatively judged every page of this
+  // file non-medical (a photo/selfie/scenery/screenshot/blank). It is NOT a record we failed to read,
+  // so it must never block the case — auto-skip it (non-blocking) regardless of page count. This is the
+  // ONE place an unknown-size 0-char file is safe to skip, because the signal is a POSITIVE
+  // "read it, no record here" judgment, not a read failure. Checked first so it overrides the
+  // size/garble/empty branches below. (Set only when ALL pages flagged + nothing substantive read.)
+  if (input.noMedicalContent === true) {
+    return { succeeded: false, autoSkip: true, wordCount: wc, corruptedTokenRatio: ratio, reason: 'auto-skipped: image — no medical content' };
+  }
 
   // Garbled text is OCR corruption, not brevity — never acceptable at any size (the worker re-reads it
   // via Claude vision upstream).

@@ -113,6 +113,7 @@ interface PageUpsertEntry {
   readonly extractionMethod: string | null;
   readonly extractionCoverage: string | null;
   readonly handwritingPresent: boolean | null;
+  readonly noMedicalContent: boolean | null;
 }
 
 function parsePageUpsertBody(body: unknown): { pages: readonly PageUpsertEntry[]; documentPageCount: number | null } {
@@ -141,11 +142,15 @@ function parsePageUpsertBody(body: unknown): { pages: readonly PageUpsertEntry[]
     const methodRaw = item['extractionMethod'];
     const coverageRaw = item['extractionCoverage'];
     const hwRaw = item['handwritingPresent'];
+    const nmcRaw = item['noMedicalContent'];
     if (methodRaw !== null && methodRaw !== undefined && typeof methodRaw !== 'string') {
       badRequest('extractionMethod must be a string or null', { field: 'pages[].extractionMethod' });
     }
     if (hwRaw !== null && hwRaw !== undefined && typeof hwRaw !== 'boolean') {
       badRequest('handwritingPresent must be a boolean or null', { field: 'pages[].handwritingPresent' });
+    }
+    if (nmcRaw !== null && nmcRaw !== undefined && typeof nmcRaw !== 'boolean') {
+      badRequest('noMedicalContent must be a boolean or null', { field: 'pages[].noMedicalContent' });
     }
     pages.push({
       pageNumber,
@@ -154,6 +159,7 @@ function parsePageUpsertBody(body: unknown): { pages: readonly PageUpsertEntry[]
       extractionMethod: typeof methodRaw === 'string' ? methodRaw.slice(0, 40) : null,
       extractionCoverage: typeof coverageRaw === 'string' && VALID_PAGE_COVERAGE.has(coverageRaw) ? coverageRaw : null,
       handwritingPresent: typeof hwRaw === 'boolean' ? hwRaw : null,
+      noMedicalContent: typeof nmcRaw === 'boolean' ? nmcRaw : null,
     });
   }
 

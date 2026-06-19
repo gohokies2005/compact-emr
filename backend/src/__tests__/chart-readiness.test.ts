@@ -292,6 +292,34 @@ describe('classifyReadAttempt', () => {
     const ok = 'CPAP titration ordered'; // > floor → passes
     expect(classifyReadAttempt({ method: 'textract', extractedText: ok }).succeeded).toBe(true);
   });
+
+  // NON-MEDICAL AUTO-SKIP (Ryan 2026-06-18): the vision model affirmatively judged the file a non-record
+  // image (helicopter photos etc.). It must NEVER block the case — auto-skip, non-blocking, at ANY size.
+  it('AUTO-SKIPS when the vision model judged the file non-medical — regardless of page count (junk never blocks)', () => {
+    const r = classifyReadAttempt({ method: 'claude_vision', extractedText: '', pageCount: 3, noMedicalContent: true });
+    expect(r.succeeded).toBe(false);
+    expect(r.autoSkip).toBe(true);
+    expect(r.reason).toContain('no medical content');
+  });
+
+  it('non-medical auto-skip closes the pageCount:null dead-end (the unopenable-PDF class — unknown-size empty junk → auto_skipped, not manual)', () => {
+    // Before the fix an unknown-size 0-char file dead-ended to manual_summary_required and froze the case.
+    // With the affirmative non-medical signal it auto-skips (non-blocking). Contrast the line below: the
+    // SAME unknown-size empty file WITHOUT the signal still flags manual (the data-loss guard).
+    const junk = classifyReadAttempt({ method: 'claude_vision', extractedText: '', noMedicalContent: true });
+    expect(junk.autoSkip).toBe(true);
+    const unknownEmpty = classifyReadAttempt({ method: 'textract', extractedText: '' });
+    expect(unknownEmpty.autoSkip).toBeFalsy();
+    expect(unknownEmpty.reason).toContain('empty');
+  });
+
+  it('does NOT auto-skip a real record just because noMedicalContent is absent/false (data-loss guard holds)', () => {
+    const realButFailed = classifyReadAttempt({ method: 'textract', extractedText: '', pageCount: 8, noMedicalContent: false });
+    expect(realButFailed.autoSkip).toBeFalsy();
+    expect(realButFailed.reason).toContain('empty');
+    // a real multi-page scan with substantive text and no flag still reads normally
+    expect(classifyReadAttempt({ method: 'claude_vision', extractedText: 'Chronic low back pain, MRI shows L4-L5 disc herniation.', pageCount: 2 }).succeeded).toBe(true);
+  });
 });
 
 describe('isValidManualSummary', () => {

@@ -863,6 +863,10 @@ _RECORD_PAGE_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
+            "no_medical_content": {
+                "type": "boolean",
+                "description": "Set true ONLY when this page contains NO medical or claims-relevant content whatsoever — it is purely a non-record image that a veteran included by accident or as incidental context. Positive cases (set true): a photograph of a person, place, or object (including military equipment, aircraft, vehicles, or scenery), a selfie, a landscape or travel photo, a screenshot of an app/website/text-message, a logo or marketing graphic, or a genuinely empty page with no writing or printing of any kind. HARD EXCLUSIONS — these are real records, so set FALSE even if the page is sparse, faint, skewed, or handwritten: any clinical text or notes, any medical or intake FORM (even if mostly blank fields), any lab/test value or vital sign, any letter or correspondence, any VA / disability / claims / decision / rating content, any visible date, any signature or stamp, any identification, insurance, or military ID card, and any handwriting that could plausibly be clinical (provider notes, a nurse's annotation, a buddy statement). A page can be hard to read and still be a record — illegibility is NOT a reason to set this true (use the coverage field for that). This flag silently drops the page from the case, so the cost of a wrong TRUE (losing a veteran's medical evidence) is far higher than a wrong FALSE (a human reviews a junk page). When there is ANY doubt, or you can see it is a record but cannot read it, set FALSE.",
+            },
             "transcription": {
                 "type": "string",
                 "description": "Verbatim text of the page — printed text AND handwriting together, in reading order. Transcribe exactly what is written. Mark any unreadable span inline as [illegible]. Do NOT guess, normalize, expand abbreviations, or correct apparent errors. If the page is blank, use an empty string.",
@@ -881,7 +885,7 @@ _RECORD_PAGE_TOOL = {
                 "description": "Brief plain-language note of WHAT was hard to read and where (e.g. 'handwritten provider note in bottom-right margin, faded'). Empty string if coverage is full or blank.",
             },
         },
-        "required": ["transcription", "handwriting_present", "coverage", "uncertain_regions"],
+        "required": ["no_medical_content", "transcription", "handwriting_present", "coverage", "uncertain_regions"],
         "additionalProperties": False,
     },
 }
@@ -910,7 +914,14 @@ _VISION_SYSTEM = (
     "a signature ONLY when they merely attest authorship; initials or a checkmark placed in a CLINICAL "
     "field (marking a finding present/absent, confirming a value, selecting an option) ARE content.\n"
     "- Report coverage honestly via the tool. If you had to mark real CONTENT [illegible], coverage "
-    "is 'partial', not 'full'."
+    "is 'partial', not 'full'.\n"
+    "- ASYMMETRIC COST — READ CAREFULLY. Skipping a real medical record is far worse than flagging a "
+    "junk page. A page wrongly marked no_medical_content is silently removed and a veteran loses "
+    "evidence; a junk page wrongly left unflagged merely gets a quick human glance. Always resolve doubt "
+    "toward FALSE. Judge no_medical_content PER PAGE, on this page alone — a 50-page chart with one "
+    "helicopter photo on page 3 means page 3 is no_medical_content and the other 49 pages are not. If you "
+    "transcribed any clinical text, form field, date, or value on this page, no_medical_content MUST be "
+    "false."
 )
 
 
@@ -962,6 +973,7 @@ def _claude_vision_page(page_bytes: bytes, media: str, api_key: str, model: str)
     body = json.dumps({
         "model": model,
         "max_tokens": VISION_PAGE_MAX_TOKENS,
+        "temperature": 0,  # clinical transcription + the no_medical_content judgment must be as reproducible as possible (Haiku/Sonnet both accept it)
         "system": _VISION_SYSTEM,
         "tools": [_RECORD_PAGE_TOOL],
         "tool_choice": {"type": "tool", "name": "record_page"},
@@ -983,12 +995,16 @@ def _claude_vision_page(page_bytes: bytes, media: str, api_key: str, model: str)
             break
     coverage = tool_input.get("coverage")
     text = tool_input.get("transcription") or ""
+    nmc = tool_input.get("no_medical_content")
     stop = payload.get("stop_reason")
     ok = stop == "tool_use" and bool(tool_input) and coverage in _VISION_COVERAGE
     return {
         "text": text if isinstance(text, str) else "",
         "coverage": coverage if coverage in _VISION_COVERAGE else None,
         "handwriting": tool_input.get("handwriting_present") if isinstance(tool_input.get("handwriting_present"), bool) else None,
+        # Default None (not False) when the model omitted/garbled it or the page wasn't truly read — only an
+        # explicit boolean True from a clean read auto-skips downstream. None is treated as "has content".
+        "no_medical_content": nmc if isinstance(nmc, bool) else None,
         "stop_reason": stop,
         "ok": ok,
     }
@@ -999,7 +1015,7 @@ def _vision_page_with_retry(page_bytes: bytes, media: str, api_key: str, model: 
     4xx client error (bad request) is terminal — no retry. Never raises: returns ok=False on final
     failure so the two-tier logic can escalate or the page is flagged. (QA F3: the raw urllib path
     doesn't get the SDK's backoff, so under the 8-way fan-out an instant 429 retry self-throttles.)"""
-    fail = {"text": "", "coverage": None, "handwriting": None, "stop_reason": "error", "ok": False}
+    fail = {"text": "", "coverage": None, "handwriting": None, "no_medical_content": None, "stop_reason": "error", "ok": False}
     for attempt in range(2):
         try:
             r = _claude_vision_page(page_bytes, media, api_key, model)
@@ -1048,13 +1064,13 @@ def _vision_transcribe_page(page_bytes: bytes, media: str, api_key: str) -> dict
                 or cov_rank.get(t2["coverage"] or "", 0) > cov_rank.get(t1["coverage"] or "", 0)
             )
             chosen, used = (t2, VISION_ESCALATE_MODEL) if t2_better else (t1, VISION_TIER1_MODEL)
-            return {"text": chosen["text"], "coverage": chosen["coverage"], "handwriting": chosen["handwriting"], "method": _model_short(used), "escalated": True}
+            return {"text": chosen["text"], "coverage": chosen["coverage"], "handwriting": chosen["handwriting"], "no_medical_content": chosen.get("no_medical_content"), "method": _model_short(used), "escalated": True}
         if t2["ok"]:
-            return {"text": t2["text"], "coverage": t2["coverage"], "handwriting": t2["handwriting"], "method": _model_short(VISION_ESCALATE_MODEL), "escalated": True}
+            return {"text": t2["text"], "coverage": t2["coverage"], "handwriting": t2["handwriting"], "no_medical_content": t2.get("no_medical_content"), "method": _model_short(VISION_ESCALATE_MODEL), "escalated": True}
         # escalation failed — fall back to tier-1 if IT was usable, else flag illegible below.
     if t1["ok"]:
-        return {"text": t1["text"], "coverage": t1["coverage"], "handwriting": t1["handwriting"], "method": _model_short(VISION_TIER1_MODEL), "escalated": False}
-    return {"text": "", "coverage": "illegible", "handwriting": None, "method": _model_short(VISION_TIER1_MODEL), "escalated": escalate}
+        return {"text": t1["text"], "coverage": t1["coverage"], "handwriting": t1["handwriting"], "no_medical_content": t1.get("no_medical_content"), "method": _model_short(VISION_TIER1_MODEL), "escalated": False}
+    return {"text": "", "coverage": "illegible", "handwriting": None, "no_medical_content": None, "method": _model_short(VISION_TIER1_MODEL), "escalated": escalate}
 
 
 def _vision_read(bucket: str, key: str, document_id: str, ext: str) -> dict[str, Any] | None:
@@ -1106,11 +1122,15 @@ def _vision_read(bucket: str, key: str, document_id: str, ext: str) -> dict[str,
     pages: list[dict[str, Any]] = []
     cov_counts: dict[str, int] = defaultdict(int)
     escalations = 0
+    nonmedical = 0
     for i, res in enumerate(results):
-        r = res or {"text": "", "coverage": "illegible", "handwriting": None, "method": _model_short(VISION_TIER1_MODEL), "escalated": True}
+        r = res or {"text": "", "coverage": "illegible", "handwriting": None, "no_medical_content": None, "method": _model_short(VISION_TIER1_MODEL), "escalated": True}
         cov_counts[r.get("coverage") or "unknown"] += 1
         if r.get("escalated"):
             escalations += 1
+        nmc = r.get("no_medical_content")
+        if nmc is True:
+            nonmedical += 1
         pages.append({
             "pageNumber": i + 1,
             "text": r["text"],
@@ -1118,6 +1138,7 @@ def _vision_read(bucket: str, key: str, document_id: str, ext: str) -> dict[str,
             "extractionMethod": r["method"],
             "extractionCoverage": r["coverage"],
             "handwritingPresent": r["handwriting"],
+            "noMedicalContent": nmc if isinstance(nmc, bool) else None,
         })
 
     _post_pages_batched(document_id, pages, n)
@@ -1125,6 +1146,7 @@ def _vision_read(bucket: str, key: str, document_id: str, ext: str) -> dict[str,
     print(json.dumps({
         "msg": "ocr: vision per-page read posted", "documentId": document_id, "path": "vision-scanned",
         "pages": n, "chars": total_chars, "escalations": escalations, "coverage": dict(cov_counts),
+        "nonMedicalPages": nonmedical, "allNonMedical": (nonmedical == n and n > 0),
         "tier1": VISION_TIER1_MODEL, "escalateModel": VISION_ESCALATE_MODEL,
     }))
     return {"started": [], "vision": True, "pages": n, "escalations": escalations, "coverage": dict(cov_counts)}

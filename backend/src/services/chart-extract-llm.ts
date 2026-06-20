@@ -14,6 +14,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { extractRatingDecisionGrants } from './rating-decision-grants.js';
 import {
   locateExtractionInputs,
   chunkDocuments,
@@ -797,7 +798,18 @@ export async function extractFullRead(
   for (let i = chunksRun; i < chunks.length; i++) {
     for (const p of chunks[i]!.pageNumbers) unrunPages.add(`${chunks[i]!.documentId}#${p}`);
   }
-  const raw = ranResults.flatMap((r) => r.raw);
+  // DETERMINISTIC GRANT AUTHORITY (Ryan 2026-06-20, 3rd recurrence of dropped grants): the broad
+  // LLM pass cannot be trusted with the load-bearing granted-SC anchor — it drops grants from
+  // rating decisions (Woodley, Hackworth) even with prompt hardening. Deterministically parse every
+  // grant recital from the rigid rating-decision form and MERGE into raw BEFORE grounding/dedup, so
+  // grants the LLM missed are recovered (incl. the partial-loss case the granted_sc_empty gate can't
+  // catch). groundAndDispose grounds them (sourceQuote is a verbatim page substring) and dedups vs
+  // the LLM rows (no double-count). NEVER fabricates (only "is granted" recitals match).
+  const deterministicGrants = extractRatingDecisionGrants(kept);
+  if (deterministicGrants.length > 0) {
+    console.warn(JSON.stringify({ event: 'chart_extract_deterministic_grants', count: deterministicGrants.length, conditions: deterministicGrants.map((g) => g.name).slice(0, 12) }));
+  }
+  const raw = [...ranResults.flatMap((r) => r.raw), ...deterministicGrants];
   const rawScreenings = ranResults.flatMap((r) => r.screenings);
   const costUsd = ranResults.reduce((s, r) => s + r.costUsd, 0);
   const truncatedWindows = ranResults.reduce((s, r) => s + r.truncated, 0);

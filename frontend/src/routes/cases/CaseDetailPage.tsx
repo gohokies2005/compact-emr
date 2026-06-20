@@ -45,7 +45,6 @@ import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopP
 import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 import { CaseViabilityCard } from '../../components/CaseViabilityCard';
 import { RecommendedPlanCard } from '../../components/RecommendedPlanCard';
-import { CaseReadinessVerdictCard } from '../../components/CaseReadinessVerdictCard';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 import { PreDraftSanityImpression, PostDraftSanityImpression } from '../../components/SanityImpressionLine';
 import { useChartReadiness } from '../../hooks/useChartReadiness';
@@ -586,18 +585,14 @@ export function CaseDetailPage() {
 
                   {/* 1. Background & argument + the veteran's theory (subjective). The card now
                       self-wraps in SectionCard (Phase 2 uniform-frame refactor) — no page-side wrap. */}
-                  {/* -1. THE calm consolidated SOAP-note Overview (2026-06-19) — one narrative + a traffic
-                      light, grounded on the AI route-picker plan (the same brain the drafter uses). Sits at
-                      the very top; renders nothing when AI_ROUTE_PICKER_ENABLED is off (panels show as
-                      before). The dense panels below become "view details" in a follow-on. */}
-                  {p.canSendFirstDraft ? <SoapOverviewCard key="soap-overview" caseId={caseId} /> : null}
-
-                  {/* 0. THE reconciled top-line go/no-go (2026-06-18) — one verdict over the four engines
-                      below, with explicit disagreements, so an RN isn't left reading contradictory chips.
-                      Pure readout of computeReadinessVerdict; advisory, Gate-2 supersedes. */}
+                  {/* -1. THE calm consolidated SOAP-note Overview (DECOUPLED 2026-06-20) — one narrative + a
+                      traffic light + one next action. Renders DETERMINISTICALLY from computeReadinessVerdict
+                      (the same brain as the old readiness card) over fast cached data, so it ALWAYS shows
+                      instantly; the AI route-picker plan is an optional prose upgrade, never a gate. This
+                      REPLACES the separate "Case readiness" card (same verdict, one calm lead, no duplicate). */}
                   {p.canSendFirstDraft ? (
-                    <CaseReadinessVerdictCard
-                      key="readiness-verdict"
+                    <SoapOverviewCard
+                      key="soap-overview"
                       caseId={caseId}
                       claimedCondition={c.claimedCondition}
                       hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}

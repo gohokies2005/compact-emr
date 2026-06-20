@@ -75,9 +75,6 @@ export function CaseViabilityCard({
           <span className="font-medium">{best.upstream_verbatim}</span>
           {' → '}
           {v.claimed_canonical ?? '—'}
-          <span className="ml-1 text-slate-500">
-            (M{best.M_eff ?? '–'} {best.tier})
-          </span>
         </div>
       ) : null}
       {/* OVER-CALL GUARD badge — the mechanism is a candidate, not a physician-reviewed "recognized
@@ -106,7 +103,7 @@ export function CaseViabilityCard({
       ) : null}
       {v.alternatives.length > 0 ? (
         <div className="mt-1 text-xs text-slate-500">
-          Other eligible anchors: {v.alternatives.map((a) => `${a.upstream_canonical} (M${a.M_eff ?? '–'})`).join(', ')}
+          Other eligible anchors: {v.alternatives.map((a) => a.upstream_canonical).join(', ')}
         </div>
       ) : null}
       {/* E5 COMPLETENESS SIGNAL — a thin parse must never masquerade as a confident anchor verdict. */}

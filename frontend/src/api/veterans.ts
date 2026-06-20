@@ -3,7 +3,11 @@ import { apiDelete, apiGet, apiPatch, apiPost } from './client';
 import type { ActiveMedication, ActiveProblem, Case, Document, ScCondition, ScConditionStatus, Veteran, YesNoUnknown } from '../types/prisma';
 
 export interface Envelope<T> { readonly data: T; }
-export interface Paginated<T> { readonly data: readonly T[]; readonly nextCursor?: string; }
+export interface Paginated<T> {
+  readonly data: readonly T[];
+  readonly nextCursor?: string;
+  readonly pagination?: { readonly page: number; readonly limit: number; readonly total: number; readonly hasMore: boolean };
+}
 // The list endpoint returns `activeCases` (the veteran's case count); `updatedAt` rides on the base
 // Veteran. (Was `caseCount`/`lastActivity` — names that never matched the API, so the Veterans page
 // rendered 0 / "—" for every row. 2026-06-03.)
@@ -22,10 +26,15 @@ export interface CreateVeteranInput {
 }
 export type UpdateVeteranInput = Partial<Omit<CreateVeteranInput, 'id'>> & { readonly version: number };
 
-export async function listVeterans(q: string): Promise<Paginated<VeteranListItem>> {
+// page + limit so the Veterans page can load EVERY veteran (paginated), not a silent 25-cap that hid
+// vets entirely (Ryan 2026-06-20 — "Warren is invisible"). limit=100 is the backend max per page; the
+// page accumulates via useInfiniteQuery + "Show more". The backend response carries pagination.hasMore.
+export async function listVeterans(q: string, page = 1, limit = 100): Promise<Paginated<VeteranListItem>> {
   const params = new URLSearchParams();
   if (q.trim()) params.set('q', q.trim());
-  return apiGet<Paginated<VeteranListItem>>(`/api/v1/veterans${params.toString() ? `?${params.toString()}` : ''}`);
+  params.set('page', String(page));
+  params.set('limit', String(limit));
+  return apiGet<Paginated<VeteranListItem>>(`/api/v1/veterans?${params.toString()}`);
 }
 export async function createVeteran(input: CreateVeteranInput): Promise<Envelope<Veteran>> { return apiPost('/api/v1/veterans', input); }
 export async function getVeteran(id: string): Promise<Envelope<VeteranDetail>> { return apiGet(`/api/v1/veterans/${encodeURIComponent(id)}`); }

@@ -16,21 +16,23 @@ import type { AppDb } from '../services/db-types.js';
 import { caseViabilityEnabled, deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
 import { deriveAiViability, aiRoutePickerEnabled } from '../services/ai-viability.js';
 import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
-import { buildSoapOverview } from '../services/soap-overview.js';
+import { buildSoapNote, type SoapContext } from '../services/soap-overview.js';
 import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
 
 export function createCaseViabilityRouter(db: AppDb): Router {
   const router = Router();
-  // Consolidated calm SOAP-note Overview (Ryan 2026-06-19) — one narrative + a traffic light, grounded
-  // on the AI picker plan. null when the picker flag is off / fail-open (the UI then shows the panels).
-  router.get(
+  // AI-synthesized SOAP-note Overview (Ryan 2026-06-20) — the model writes a smooth S/O/A/P note from the
+  // context the Overview already assembled (the FE POSTs it, like the sanity-impression). ONE bounded
+  // Sonnet call, fail-open to null (the card then shows the deterministic verdict line). Cached in-process.
+  router.post(
     '/cases/:id/soap-overview',
     requireRole(['admin', 'ops_staff', 'physician']),
     asyncHandler(async (req: Request, res: Response) => {
       const caseId = String(req.params.id);
       const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
-      res.json({ data: await buildSoapOverview(db, caseId) });
+      const ctx = (req.body ?? {}) as SoapContext;
+      res.json({ data: await buildSoapNote({ ...ctx, claimedCondition: String(ctx.claimedCondition ?? '') }) });
     }),
   );
   router.get(

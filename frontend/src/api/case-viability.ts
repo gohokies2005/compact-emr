@@ -8,7 +8,7 @@
 // excluded_traps.reason / missing_fact) — the card needs no scrubber of its own; the e2e asserts
 // no BVA % renders as a belt-and-suspenders check.
 
-import { apiGet } from './client';
+import { apiGet, apiPost } from './client';
 
 export type ViabilityBand = 'strong' | 'moderate' | 'conditional' | 'weak' | 'abstain' | 'redirect';
 export type AnchorTier = 'blessed' | 'conditional' | 'chain' | 'plausible' | 'excluded';
@@ -125,18 +125,33 @@ export function getCaseViability(caseId: string): Promise<{ data: CaseViability 
 }
 
 /**
- * Consolidated calm SOAP-note Overview (Ryan 2026-06-19) — one narrative + a traffic light, grounded
- * on the AI picker plan. null when AI_ROUTE_PICKER_ENABLED is off / fail-open → the Overview shows the
- * dense panels as before.
+ * AI-synthesized SOAP-note Overview (Ryan 2026-06-20) — the model writes a smooth Subjective / Objective /
+ * Assessment / Plan note from the context the Overview assembled. null = fail-open (the card falls back to
+ * the deterministic verdict line). The FE POSTs the context (like the sanity-impression).
  */
-export interface SoapOverview {
-  readonly light: 'green' | 'amber' | 'red';
-  readonly headline: string;
-  readonly soap: string;
-  readonly next_action: string;
-  readonly generated_at: string;
+export interface SoapNote {
+  readonly subjective: string;
+  readonly objective: string;
+  readonly assessment: string;
+  readonly plan: string;
+  readonly confidence: 'high' | 'moderate' | 'low';
+  readonly action: 'draft' | 'get_records' | 'clarify' | 'physician_review' | 'reject';
 }
 
-export function getSoapOverview(caseId: string): Promise<{ data: SoapOverview | null }> {
-  return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/soap-overview`);
+export interface SoapContextInput {
+  readonly claimedCondition: string;
+  readonly veteranStatement?: string | null;
+  readonly theory?: string | null;
+  readonly mechanism?: string | null;
+  readonly scConditions?: readonly string[];
+  readonly activeProblems?: readonly string[];
+  readonly keyFacts?: ReadonlyArray<{ readonly label: string; readonly value: string }>;
+  readonly medications?: ReadonlyArray<{ readonly drugName: string; readonly indication: string | null }>;
+  readonly coverageNote?: string | null;
+  readonly engineVerdict?: string | null;
+  readonly engineNextAction?: string | null;
+}
+
+export function getSoapNote(caseId: string, ctx: SoapContextInput): Promise<{ data: SoapNote | null }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/soap-overview`, ctx);
 }

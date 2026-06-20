@@ -1,158 +1,156 @@
 /**
- * Consolidated SOAP-note Overview (Ryan 2026-06-19) — the calm front of the case Overview. ONE short
- * SOAP-style narrative + ONE traffic light (green/amber/red), replacing the wall of dense engine panels
- * (those move behind a "view details" toggle, still available).
+ * AI-synthesized SOAP-note Overview (Ryan 2026-06-20). The RN's calm, human-readable lead on the case:
+ * the model SYNTHESIZES the assembled facts into a smooth Subjective / Objective / Assessment / Plan note
+ * — NOT a deterministic dump. It reads like a careful physician wrote it to be presented.
  *
- * TWO-BRAIN design (the load-bearing safety rule, per the 5-discipline panel):
- *   - The DETERMINISTIC inputs decide the traffic-LIGHT color + the hard facts. The AI does NOT pick the
- *     color. It only WRITES the calm SOAP prose around the facts it is handed, and self-checks.
- *   - It GROUNDS on the AI route-picker plan (deriveAiViability — the SAME brain the drafter + the card
- *     use) + the chart facts. It restates the chosen pathway; it never re-decides the argument (so the
- *     SOAP, the card, and the drafter cannot contradict — one brain, narrated once).
- *
- * Anti-fabrication: closed-world (only the provided facts), forced tool output, abstain when thin,
- * fail-open to null (the Overview then shows the plain engine read). Cached in-process by input-hash.
+ * Modeled on the proven sanity-impression path (tool-forced, fail-open, cached): a SINGLE bounded LLM call.
+ *   - MODEL: Sonnet 4.6 — fast enough to reliably complete UNDER the 29s API cap (Opus risks a timeout on
+ *     this longer output). Strong synthesis quality; cheap for volume.
+ *   - OUTPUT: a tool with the four SOAP sections + an overall confidence + a one-word plan action. Smooth
+ *     prose, no lists, no headers inside a section, no internal jargon (no M-tiers, no "pair-atlas", no BVA %).
+ *   - GROUNDED: writes ONLY from the assembled context (the same facts the Overview already has). Never
+ *     invents an AHI, an imaging finding, or a diagnosis not provided.
+ *   - FAIL-OPEN: incomplete input / API error / truncation → null (the card falls back to the deterministic
+ *     verdict line). Never throws.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
 import { createHash } from 'node:crypto';
 import { resolveAnthropicApiKey } from './letter-surgical-propose.js';
-import { deriveAiViability, aiRoutePickerEnabled, type AiViabilityCard } from './ai-viability.js';
-import type { AppDb } from './db-types.js';
 
-const MODEL = process.env['SOAP_OVERVIEW_MODEL'] || 'claude-sonnet-4-6';
+const MODEL = process.env['SOAP_NOTE_MODEL'] || 'claude-sonnet-4-6';
 
-export type TrafficLight = 'green' | 'amber' | 'red';
+export type SoapConfidence = 'high' | 'moderate' | 'low';
+export type SoapAction = 'draft' | 'get_records' | 'clarify' | 'physician_review' | 'reject';
 
-export interface SoapOverview {
-  readonly light: TrafficLight;
-  readonly headline: string;       // one calm sentence
-  readonly soap: string;           // 2-4 short paragraphs (the assessment/plan, plain clinical voice)
-  readonly next_action: string;    // one verb-first line ("Proceed to drafting"; "Obtain the sleep study")
-  readonly generated_at: string;
+export interface SoapNote {
+  readonly subjective: string;
+  readonly objective: string;
+  readonly assessment: string;
+  readonly plan: string;
+  readonly confidence: SoapConfidence;
+  readonly action: SoapAction;
 }
 
-/**
- * The light is DETERMINISTIC — derived from the picker viability + chart-read state, NEVER from the AI.
- * supportable + chart read → green; marginal/needs_physician_review → amber; not_supportable → red;
- * chart not fully read pulls green→amber (preliminary).
- */
-function deriveLight(viability: AiViabilityCard['viability'], chartFullyRead: boolean): TrafficLight {
-  if (viability === 'not_supportable') return 'red';
-  if (viability === 'needs_physician_review' || viability === 'marginal') return 'amber';
-  // supportable:
-  return chartFullyRead ? 'green' : 'amber';
+export interface SoapContext {
+  readonly claimedCondition: string;
+  /** The veteran's own words (their reported history / goal) — the Subjective source. */
+  readonly veteranStatement?: string | null;
+  /** The engine's framing in plain words, e.g. "OSA secondary to service-connected sinusitis/rhinitis". */
+  readonly theory?: string | null;
+  readonly mechanism?: string | null;
+  /** Service-connected conditions on file (anchors) — pass them ALL; the model picks the PERTINENT ones. */
+  readonly scConditions?: readonly string[];
+  /** Active problems / diagnoses. */
+  readonly activeProblems?: readonly string[];
+  /** Salient labeled facts (dx dates, AHI, imaging excerpts, in-service events) — {label,value}. */
+  readonly keyFacts?: ReadonlyArray<{ readonly label: string; readonly value: string }>;
+  /** Medications (drug + indication), when relevant to a secondary mechanism. */
+  readonly medications?: ReadonlyArray<{ readonly drugName: string; readonly indication: string | null }>;
+  /** One line on records capture, e.g. "All 1463 pages read." / "2 pages unread." */
+  readonly coverageNote?: string | null;
+  /** The deterministic engine read (band + confidence + next action) — a HINT the model explains, not gospel. */
+  readonly engineVerdict?: string | null;
+  readonly engineNextAction?: string | null;
 }
 
-const SYSTEM =
-  'You are an experienced RN charting a one-glance SOAP-style summary for a physician on a VA ' +
-  'nexus-letter case. You are given a DECISION that is already made (the chosen pathway, the traffic-' +
-  'light color, the chart facts). Your ONLY job is to narrate it calmly and plainly — you do NOT choose ' +
-  'the pathway or the color, and you NEVER invent a fact, a rating, a diagnosis, or a number that is ' +
-  'not in the inputs.\n' +
-  'Write like a careful clinician handing off: plain language, no jargon (no M-tier, no CFR codes, no ' +
-  '"E:", no probability math), no "I", calm and declarative. Structure as a short assessment + plan:\n' +
-  '- a one-sentence HEADLINE (what this case is, in plain words),\n' +
-  '- a SOAP body of 2-4 short paragraphs (who the veteran is + what they claim; what the record shows; ' +
-  'the likely supported pathway and why it holds; what is still needed if anything),\n' +
-  '- a NEXT_ACTION: one verb-first line matching the traffic light (green = proceed to drafting; amber = ' +
-  'the one thing to confirm/obtain first or that a physician should review; red = what records are ' +
-  'needed before this can proceed).\n' +
-  'The traffic light is ALREADY decided and given to you — your prose must EXPLAIN it, never contradict ' +
-  'it (do not write "ready to draft" under an amber/red light). If the inputs are thin, say so plainly ' +
-  'rather than inventing confidence. Record it with the record_soap tool.';
-
-const TOOL: Anthropic.Tool = {
-  name: 'record_soap',
-  description: 'Record the calm SOAP-note Overview. Narrate the provided decision; never invent facts.',
+const SOAP_TOOL: Anthropic.Tool = {
+  name: 'write_soap_note',
+  description: 'Write a smooth, human-readable SOAP-note overview of this VA nexus case for an RN to read at a glance.',
   input_schema: {
     type: 'object',
     additionalProperties: false,
-    required: ['acknowledged_light', 'headline', 'soap', 'next_action'],
+    required: ['subjective', 'objective', 'assessment', 'plan', 'confidence', 'action'],
     properties: {
-      acknowledged_light: { type: 'string', enum: ['green', 'amber', 'red'], description: 'Echo the traffic light you were given. Must match — your prose explains this color.' },
-      headline: { type: 'string', description: 'One calm plain-language sentence.' },
-      soap: { type: 'string', description: '2-4 short paragraphs, plain clinician voice, no jargon. Separate paragraphs with a blank line.' },
-      next_action: { type: 'string', description: 'One verb-first line consistent with the light.' },
+      subjective: { type: 'string', description: 'PERTINENT patient-reported information only, in flowing prose (2-4 sentences). What the veteran reports about onset, symptoms, in-service experience, and their own theory — distilled and readable, NOT a verbatim copy of their statement. No headers, no lists.' },
+      objective: { type: 'string', description: 'A short, readable overview of the PERTINENT objective findings: the confirmed diagnosis, the relevant service-connected conditions (only those that matter to this claim — NOT every rated condition), and any key diagnostics provided (e.g. AHI, imaging excerpts, sleep study, labs). End with the records-capture status (e.g. "All records were reviewed."). 2-4 sentences of prose, no lists.' },
+      assessment: { type: 'string', description: 'Tie it together as a clinician + VA-claims expert would: the medical mechanism linking the claim to the service-connected condition(s), how it fits VA theory and language (secondary causation/aggravation under 38 CFR 3.310, direct under 3.303, etc., as applicable), the strongest counterpoint, and an honest overall read of how strong what we have is. 3-5 sentences of smooth prose. No internal jargon (no M-tiers, no BVA percentages, no "pair-atlas").' },
+      plan: { type: 'string', description: 'The concrete next step in plain language: draft the letter, get specific records, clarify a specific point with the veteran, route to a physician, or decline — and WHY, in one or two sentences.' },
+      confidence: { type: 'string', enum: ['high', 'moderate', 'low'], description: 'Overall confidence in what we have to support this claim as filed.' },
+      action: { type: 'string', enum: ['draft', 'get_records', 'clarify', 'physician_review', 'reject'], description: 'The single recommended next action, matching the plan.' },
     },
   },
 };
 
-function renderInputs(claimed: string, plan: AiViabilityCard, chartFacts: string[], coverageNote: string, light: TrafficLight): string {
-  const lines: string[] = [];
-  lines.push(`TRAFFIC LIGHT (already decided — explain it, do not change it): ${light.toUpperCase()}`);
-  lines.push(`Claimed condition: ${claimed}`);
-  lines.push(`Chosen pathway (from the case engine — restate, do not re-decide): ${plan.lead.upstream} → ${plan.lead.claimed} (${plan.lead.framing})`);
-  if (plan.lead.mechanism) lines.push(`Mechanism: ${plan.lead.mechanism}`);
-  if (plan.convergent.length) lines.push(`Also supporting the same mechanism: ${plan.convergent.map((c) => c.upstream).join(', ')}`);
-  lines.push(`Engine viability: ${plan.viability}; confidence: ${plan.lead.confidence}`);
-  if (plan.lead.counterargument) lines.push(`Strongest counterargument to address: ${plan.lead.counterargument}`);
-  if (plan.missing.length) lines.push(`Still needed / would strengthen: ${plan.missing.map((m) => m.fact).join('; ')}`);
-  if (chartFacts.length) lines.push(`Chart problem list: ${chartFacts.slice(0, 40).join('; ')}`);
-  lines.push(`Records capture: ${coverageNote}`);
-  if (plan.overall) lines.push(`Engine bottom line: ${plan.overall}`);
-  return lines.join('\n');
+const SYSTEM =
+  'You are a board-certified physician who also knows VA disability law, writing a concise SOAP-note overview ' +
+  'of a veteran\'s nexus case for a nurse to read at a glance before the letter is drafted. Synthesize the ' +
+  'facts you are given into SMOOTH, HUMAN PROSE that reads like a thoughtful colleague wrote it — never a ' +
+  'list, never a data dump, never a verbatim echo of the inputs.\n' +
+  'Subjective = the pertinent things the VETERAN reports (distilled, in your words). Objective = the pertinent ' +
+  'confirmed diagnoses + the service-connected conditions that actually matter to THIS claim + any real ' +
+  'diagnostics provided (AHI, imaging, sleep study, labs) + the records-capture status. Do NOT list every ' +
+  'rated condition — pick what is pertinent. Assessment = the medical mechanism + how it maps to VA theory ' +
+  'and regulation (3.310 secondary/aggravation, 3.303 direct, presumptives) + the strongest counterpoint + an ' +
+  'honest overall read. Plan = the one concrete next step (draft / get records / clarify / physician review / ' +
+  'reject) and why.\n' +
+  'GROUND STRICTLY in the facts provided — never invent an AHI, an imaging finding, a date, or a diagnosis ' +
+  'that is not given. If a useful objective datum (like an AHI) was not provided, simply do not mention it. ' +
+  'No internal jargon (no M-tiers, no BVA/win-rate percentages, no "pair-atlas"), no markdown, no headers ' +
+  'inside a section. Write it with write_soap_note.';
+
+function renderContext(ctx: SoapContext): string {
+  const L: string[] = [];
+  L.push(`Claimed condition: ${ctx.claimedCondition}`);
+  if (ctx.veteranStatement) L.push(`Veteran's own statement (their words): ${ctx.veteranStatement}`);
+  if (ctx.theory) L.push(`Working theory/framing: ${ctx.theory}`);
+  if (ctx.mechanism) L.push(`Proposed mechanism: ${ctx.mechanism}`);
+  if (ctx.scConditions?.length) L.push(`Service-connected conditions on file: ${ctx.scConditions.join('; ')}`);
+  if (ctx.activeProblems?.length) L.push(`Active problems: ${ctx.activeProblems.join('; ')}`);
+  if (ctx.keyFacts?.length) L.push(`Key facts:\n- ${ctx.keyFacts.map((f) => `${f.label}: ${f.value}`).join('\n- ')}`);
+  if (ctx.medications?.length) L.push(`Medications: ${ctx.medications.map((m) => `${m.drugName}${m.indication ? ` (${m.indication})` : ''}`).join('; ')}`);
+  if (ctx.coverageNote) L.push(`Records capture: ${ctx.coverageNote}`);
+  if (ctx.engineVerdict) L.push(`Engine read (a hint to explain, not gospel): ${ctx.engineVerdict}`);
+  if (ctx.engineNextAction) L.push(`Engine's suggested next step: ${ctx.engineNextAction}`);
+  return L.join('\n');
 }
 
-/**
- * Build the calm SOAP Overview for a case. Grounds on the AI picker plan + chart. Returns null
- * (fail-open) when the picker is off / unavailable, the key is unresolvable, the call fails/truncates,
- * or the model fails to echo the deterministic light (anti-drift guard). Cached in-process.
- */
-export async function buildSoapOverview(db: AppDb, caseId: string): Promise<SoapOverview | null> {
-  if (!aiRoutePickerEnabled()) return null;
+function clamp(s: unknown, n: number): string {
+  return typeof s === 'string' ? s.trim().replace(/\s+/g, ' ').slice(0, n) : '';
+}
+
+const _cache = new Map<string, SoapNote | null>();
+
+/** Synthesize the SOAP note. Returns null (fail-open) on incomplete input / API error / truncation. */
+export async function buildSoapNote(ctx: SoapContext): Promise<SoapNote | null> {
+  if (!ctx.claimedCondition || ctx.claimedCondition.trim().length === 0) return null;
+
+  const key = createHash('sha256').update(JSON.stringify(ctx)).digest('hex');
+  if (_cache.has(key)) return _cache.get(key) ?? null;
+
+  let anthropic: Anthropic;
+  // Bound to the 29s API cap (Sonnet fits comfortably); fail-open if a slow call would blow the window.
+  try { anthropic = new Anthropic({ apiKey: await resolveAnthropicApiKey(), timeout: 25_000, maxRetries: 0 }); }
+  catch { return null; }
+
   try {
-    const plan = await deriveAiViability(db, caseId);
-    if (plan === null) return null; // no grounded decision → no narrative (fail-open)
-
-    const c = (await db.case.findFirst({
-      where: { id: caseId },
-      select: { claimedCondition: true, veteran: { select: { activeProblems: { select: { problem: true } } } } } as never,
-    })) as unknown as { claimedCondition: string; veteran: { activeProblems: Array<{ problem: string }> } | null } | null;
-    if (c === null || !c.claimedCondition) return null;
-    const chartFacts = [...new Set((c.veteran?.activeProblems ?? []).map((p) => (p.problem ?? '').trim()).filter(Boolean))];
-
-    // Chart-read state for the light. Conservative: treat as fully read unless we learn otherwise (the
-    // coverage breakdown lives in chart-readiness; for v1 the picker viability is the dominant signal).
-    const chartFullyRead = true;
-    const coverageNote = 'Records reviewed.';
-    const light = deriveLight(plan.viability, chartFullyRead);
-
-    const cacheKey = `soap:${caseId}:${createHash('sha256').update(JSON.stringify({ plan, chartFacts, light })).digest('hex')}`;
-    if (_cache.has(cacheKey)) return _cache.get(cacheKey) ?? null;
-
-    let anthropic: Anthropic;
-    try { anthropic = new Anthropic({ apiKey: await resolveAnthropicApiKey(), timeout: 60_000, maxRetries: 2 }); }
-    catch { return null; }
-
     const resp = await anthropic.messages.create({
       model: MODEL,
-      max_tokens: 900,
-      temperature: 0.3,
+      max_tokens: 1300,
       system: SYSTEM,
-      tools: [TOOL],
-      tool_choice: { type: 'tool', name: TOOL.name },
-      messages: [{ role: 'user', content: renderInputs(c.claimedCondition, plan, chartFacts, coverageNote, light) }],
+      tools: [SOAP_TOOL],
+      tool_choice: { type: 'tool', name: 'write_soap_note' },
+      messages: [{ role: 'user', content: renderContext(ctx) }],
     });
-    if (resp.stop_reason === 'max_tokens') return null;
-    const block = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === TOOL.name);
-    const out = block?.input as { acknowledged_light?: unknown; headline?: unknown; soap?: unknown; next_action?: unknown } | undefined;
-    if (!out) return null;
-    // ANTI-DRIFT: the narrator must echo the deterministic light. A mismatch = it drifted → discard
-    // (fail-open), never let prose contradict the engine-decided color.
-    if (out.acknowledged_light !== light) return null;
-    const headline = typeof out.headline === 'string' ? out.headline.trim() : '';
-    const soap = typeof out.soap === 'string' ? out.soap.trim() : '';
-    const next_action = typeof out.next_action === 'string' ? out.next_action.trim() : '';
-    if (!headline || !soap) return null;
-
-    const result: SoapOverview = { light, headline, soap, next_action, generated_at: new Date().toISOString() };
-    _cache.set(cacheKey, result);
-    return result;
-  } catch (err) {
-    console.warn(JSON.stringify({ msg: 'soap-overview: failed open', caseId, error: err instanceof Error ? err.message : String(err) }));
-    return null;
+    if (resp.stop_reason === 'max_tokens') return null; // truncated → discard, card falls back
+    const block = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'write_soap_note');
+    const inp = block?.input as Record<string, unknown> | undefined;
+    if (!inp) return null;
+    const subjective = clamp(inp['subjective'], 1200);
+    const objective = clamp(inp['objective'], 1200);
+    const assessment = clamp(inp['assessment'], 1600);
+    const plan = clamp(inp['plan'], 800);
+    const conf = inp['confidence'];
+    const action = inp['action'];
+    if (!assessment || !plan) return null;
+    const note: SoapNote = {
+      subjective, objective, assessment, plan,
+      confidence: (conf === 'high' || conf === 'moderate' || conf === 'low') ? conf : 'moderate',
+      action: (action === 'draft' || action === 'get_records' || action === 'clarify' || action === 'physician_review' || action === 'reject') ? action : 'physician_review',
+    };
+    _cache.set(key, note);
+    return note;
+  } catch {
+    return null; // API/network error → fail-open
   }
 }
-
-const _cache = new Map<string, SoapOverview | null>();

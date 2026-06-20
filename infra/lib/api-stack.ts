@@ -287,11 +287,12 @@ export class ApiStack extends Stack {
     // Off-request AI-viability compute (Ryan 2026-06-19): the API Lambda invokes ITSELF asynchronously to
     // compute the route-picker plan off the 29s request path (the picker call can't fit under the cap
     // synchronously). Needs its own name to invoke + permission to invoke itself. Blast radius: api only.
-    handler.addEnvironment('SELF_FUNCTION_NAME', handler.functionName);
-    // Self-invoke permission WITHOUT a circular dependency: granting on the function object
-    // (handler.grantInvoke(handler)) makes the role policy reference the function ARN while the function
-    // references the role → CloudFormation "Circular dependency". Grant on a CONSTRUCTED name-pattern ARN
-    // (a plain string from stack metadata, no resource ref) instead — matches this stack's own Lambdas.
+    // NOTE: do NOT add SELF_FUNCTION_NAME = handler.functionName — putting the Lambda's own name (a CFN Ref
+    // to itself) into its OWN environment makes the function self-reference → CloudFormation "Circular
+    // dependency" with every API-GW permission/integration that depends on the Lambda. The code instead reads
+    // the reserved AWS-provided env var AWS_LAMBDA_FUNCTION_NAME (always set by Lambda) — no self-ref needed.
+    // Self-invoke permission WITHOUT a circular dependency: grant on a CONSTRUCTED name-pattern ARN
+    // (a plain string from stack metadata, no resource ref) — granting on the function object would cycle.
     handler.addToRolePolicy(new iam.PolicyStatement({
       actions: ['lambda:InvokeFunction'],
       resources: [`arn:${Stack.of(this).partition}:lambda:${Stack.of(this).region}:${Stack.of(this).account}:function:${Stack.of(this).stackName}-*`],

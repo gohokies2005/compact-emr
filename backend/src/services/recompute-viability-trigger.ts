@@ -32,7 +32,9 @@ function client(): LambdaClient {
  * the async invoke was dispatched (not that the compute succeeded). Fail-open: returns false on any issue.
  */
 export async function fireRecomputeViability(caseId: string): Promise<boolean> {
-  const fn = process.env['SELF_FUNCTION_NAME'];
+  // The reserved AWS Lambda runtime env var (always set) — our own function name. We avoid a CDK-set
+  // SELF_FUNCTION_NAME because handler.functionName in the function's own env is a CFN self-ref → circular.
+  const fn = process.env['AWS_LAMBDA_FUNCTION_NAME'];
   if (!fn || !caseId) return false;
   try {
     await client().send(new InvokeCommand({

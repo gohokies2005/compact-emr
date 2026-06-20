@@ -288,7 +288,14 @@ export class ApiStack extends Stack {
     // compute the route-picker plan off the 29s request path (the picker call can't fit under the cap
     // synchronously). Needs its own name to invoke + permission to invoke itself. Blast radius: api only.
     handler.addEnvironment('SELF_FUNCTION_NAME', handler.functionName);
-    handler.grantInvoke(handler);
+    // Self-invoke permission WITHOUT a circular dependency: granting on the function object
+    // (handler.grantInvoke(handler)) makes the role policy reference the function ARN while the function
+    // references the role → CloudFormation "Circular dependency". Grant on a CONSTRUCTED name-pattern ARN
+    // (a plain string from stack metadata, no resource ref) instead — matches this stack's own Lambdas.
+    handler.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['lambda:InvokeFunction'],
+      resources: [`arn:${Stack.of(this).partition}:lambda:${Stack.of(this).region}:${Stack.of(this).account}:function:${Stack.of(this).stackName}-*`],
+    }));
 
     props.phiBucket.grantReadWrite(handler);
     props.doctorPacksBucket.grantRead(handler);

@@ -595,6 +595,7 @@ export function CaseDetailPage() {
                       key="soap-overview"
                       caseId={caseId}
                       claimedCondition={c.claimedCondition}
+                      veteranStatement={c.veteranStatement ?? null}
                       hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}
                     />
                   ) : null}

@@ -1,9 +1,9 @@
 {
   "app": "npx tsx bin/compact-emr.ts",
   "context": {
-    "drafter_image_tag": "72cb144-routepicker",
+    "drafter_image_tag": "0fa7a8b-routepicker",
     "email_redirect_all_to": "",
-    "render_image_tag": "81c0046-render-lambda",
+    "render_image_tag": "0fa7a8b-render-lambda",
     "chart_autofill": "on",
     "staging": {
       "domainName": "emr.flatratenexus.com",

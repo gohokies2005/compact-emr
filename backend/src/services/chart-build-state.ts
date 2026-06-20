@@ -19,6 +19,19 @@ import { createHash } from 'node:crypto';
 export const EXTRACTED_SOURCE = 'extracted';
 
 /**
+ * Extractor logic version. BUMP THIS whenever chart-extract logic changes in a way that should
+ * re-extract already-extracted open cases (a prompt fix, a new category, the deterministic grant
+ * authority, etc.). Each completed run stamps it into resultJson.extractorVersion; the reprocess
+ * "already_extracted_no_changes" cost-safety gate treats a run extracted under an OLDER version as
+ * STALE and re-extracts (so a fix actually reaches existing cases — the Hackworth trap, Ryan
+ * 2026-06-20). Deliberately NOT folded into computeTriggerHash: a hash change would wedge every
+ * case at 'extracting' (deriveChartBuildState returns 'extracting' with no run queued) — this
+ * version-stamp approach refreshes on the NEXT reprocess/draft instead, never wedging.
+ *   v1 (implicit) → original; v2 = deterministic rating-decision grant authority (commit b02a597).
+ */
+export const EXTRACTOR_VERSION = 2;
+
+/**
  * file_read_status.terminalStatus values that mean a document is DONE being read — success,
  * RN-resolved, or failed-needs-manual-summary. All are terminal: extraction proceeds on whatever
  * was readable, and a single un-OCR-able file never strands the case in "still building".

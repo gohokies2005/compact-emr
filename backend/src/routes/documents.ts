@@ -7,7 +7,7 @@ import { prisma as defaultPrisma } from '../db/client.js';
 import { requireRole } from '../auth/roles.js';
 import { isCaseDocumentS3Key } from '../services/s3-key-safety.js';
 import { nudgeDocumentReocr } from '../services/document-reocr.js';
-import { TERMINAL_READ_STATUSES, isScreeningSummaryKey, computeTriggerHash, runMatchesHash } from '../services/chart-build-state.js';
+import { TERMINAL_READ_STATUSES, isScreeningSummaryKey, computeTriggerHash, runMatchesHash, EXTRACTOR_VERSION } from '../services/chart-build-state.js';
 import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { classifyDocument } from '../services/documentClassifier.js';
 import { computeDuplicateOf } from '../services/documentDedupe.js';
@@ -317,9 +317,17 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
       // the exact bleed this gate closes). A case has only a handful of runs; selecting just triggerHash
       // for the completed ones is cheap. runMatchesHash handles the salted-prefix forced-run form.
       const successfulRuns = await prisma.chartExtractionRun.findMany({
-        where: { caseId, status: { in: ['complete', 'complete_with_gaps'] } }, select: { triggerHash: true },
+        where: { caseId, status: { in: ['complete', 'complete_with_gaps'] } }, select: { triggerHash: true, resultJson: true },
       });
-      const alreadyExtracted = successfulRuns.some((r) => runMatchesHash(r.triggerHash, currentHash));
+      // A run counts as "already extracted" ONLY if it matches the doc set AND was produced by the
+      // CURRENT extractor version. A run from before a chart-extract code fix (older/missing
+      // extractorVersion) is STALE → re-extract so the fix reaches this case (the Hackworth trap:
+      // a deployed grant-recall fix that the cost-safety gate refused to apply). Ryan 2026-06-20.
+      const alreadyExtracted = successfulRuns.some((r) => {
+        if (!runMatchesHash(r.triggerHash, currentHash)) return false;
+        const v = (r.resultJson as { extractorVersion?: number } | null)?.extractorVersion ?? 0;
+        return v >= EXTRACTOR_VERSION;
+      });
       extract = alreadyExtracted
         ? { enqueued: false, reason: 'already_extracted_no_changes' }
         : await maybeEnqueueChartExtract(prisma as unknown as AppDb, caseId, { forceSalt: `manual:${requestId}` });

@@ -10,7 +10,7 @@
  */
 
 import { planMerge, type ExistingChartRow } from './chart-merge.js';
-import { EXTRACTED_SOURCE } from './chart-build-state.js';
+import { EXTRACTED_SOURCE, EXTRACTOR_VERSION } from './chart-build-state.js';
 import type { FinalExtractedItem } from './chart-extract-llm.js';
 import type { AppDb } from './db-types.js';
 
@@ -117,6 +117,9 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
         itemsSkipped: plan.skippedManual + plan.skippedPriorExtracted + plan.skippedDuplicate,
         resultJson: {
           autofill,
+          // Stamp the extractor version so the reprocess cost-safety gate can re-extract a case
+          // whose last run predates a chart-extract code fix (the Hackworth stale-extraction trap).
+          extractorVersion: EXTRACTOR_VERSION,
           costUsd: input.costUsd ?? null,
           items: input.items,
           skipped: { manual: plan.skippedManual, priorExtracted: plan.skippedPriorExtracted, duplicate: plan.skippedDuplicate },

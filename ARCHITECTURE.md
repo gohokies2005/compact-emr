@@ -61,6 +61,7 @@ FRIENDLY NAME, never partial-ARN — see INCIDENTS). Deploy = GH Actions → CDK
 |---|---|---|---|---|
 | Per-page vision OCR | read scanned/handwritten pages | Anthropic, Sonnet | `CLAUDE_VISION_SCANNED_PAGES` | worker |
 | Chart-extract | structured chart facts, SC list, problems | Anthropic **direct**, Sonnet 4-6 | `CHART_AUTOFILL` / `CHART_EXTRACT_FULLREAD` | chart-extract Lambda (shares backend/src) |
+| ↳ **Granted-SC authority (deterministic)** | the granted-SC anchor is NOT trusted to the stochastic LLM — `rating-decision-grants.ts` regex-parses every "service connection for X is granted [at N%]" recital and MERGES into the extractor's `raw` before grounding/dedup (Sonnet supplements, can't drop the anchor). 2026-06-20, 3rd recurrence fix; PROVEN 4/4 vs Sonnet 0/4 on Hackworth. | deterministic (no model) | always on | `backend/src/services/rating-decision-grants.ts` → chart-extract Lambda |
 | **Viability route-picker** | card + Ask-Aegis grounding + drafter framing (ONE brain) | Anthropic, `claude-sonnet-4-6` (`AI_ROUTE_PICKER_MODEL`) | `AI_ROUTE_PICKER_ENABLED` = true | FRN `app/services/aiRoutePicker.js` → `backend/src/vendor/aiRoutePicker.cjs` (**sha-pinned** by `ai-route-picker-pin.test.ts`) |
 | Drafter | the nexus letter | Anthropic, Opus | drafter image tag (cdk.json) | FRN `app/services/*` → Fargate ECR image |
 | Ask-Aegis advisory | RN/physician case Q&A | **Bedrock**, Opus 4.6 | always on | FRN `app/config/advisory/rn_advisory_system_prompt.md` → `backend/src/advisory/systemPrompt.ts` |
@@ -132,6 +133,12 @@ failure (the SOAP "thinks for minutes then nothing" + the original double-call t
 - CI gates: `migrate:check`, `migrate:diff-check`, tsc, vitest.
 
 ---
+
+## 6b. 🛡 DRAFT RELIABILITY MECHANISMS (2026-06-20 hardening — the "stop failing silently" pass)
+- **Granted-SC = deterministic authority** (see §6 chart-extract row): the load-bearing anchor never depends on the LLM alone. `rating-decision-grants.ts`. History: [[project_chart_extraction_method_history]] — Sonnet STILL reads the whole chart (A/B winner); this is a narrow deterministic FLOOR under one templated field, NOT a revert.
+- **Stale-extraction auto-refresh** (`EXTRACTOR_VERSION` in `chart-build-state.ts`): a chart-extract code fix only helps NEW runs, and the reprocess cost-safety gate used to skip re-extraction whenever the DOC set was unchanged (`already_extracted_no_changes`) — so a deployed fix never reached open cases (the Hackworth trap). Now: each run stamps `resultJson.extractorVersion`; the reprocess gate treats a run from an OLDER version as STALE → re-extracts. **BUMP `EXTRACTOR_VERSION` on every chart-extract logic change.** NOT folded into `computeTriggerHash` (that would wedge every case at 'extracting'). Currently v2 = deterministic grant authority.
+- **No silent draft failures** (`pipelinePhase.summarizeForOperator`): a paused draft now names the specific failed phase + its recorded reason (PHASE_PLAIN map) as the `operatorMessage`, instead of the generic "we've paused this for a closer look" that hid ~14 distinct failures as one. The manifest already recorded the reason; it was being discarded. (Deploys with the drafter image.)
+- **Render glyph-fold** (`foldRenderable.js`): PDFKit can't render non-CP-1252 glyphs (ș, ≥) → corrupt PDF → render_parity_mismatch on an A-grade letter. Fold to ASCII at every PDF sink + persisted txt. Live (drafter + render image `0fa7a8b`).
 
 ## 7. 🗄 RETIRED / SUPERSEDED log (append-only — so dropped decisions don't resurface)
 

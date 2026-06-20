@@ -30,6 +30,30 @@ export interface SoapNote {
   readonly plan: string;
   readonly confidence: SoapConfidence;
   readonly action: SoapAction;
+  /** Deterministic grounding guard: a clinical measurement (AHI/BMI/%/mg/dB) stated in the note that does
+   *  NOT appear in the source facts → likely fabricated. Null = clean. The FE shows it as a verify caveat. */
+  readonly caveat: string | null;
+}
+
+// Anti-confabulation guard #1 (deterministic, $0): a CLINICAL MEASUREMENT value in the prose that is not
+// in the source facts is likely fabricated. We target only measurement-PATTERNED numbers (AHI/RDI/BMI/
+// O2 sat/%/mg/dB/mmHg) so we never false-flag a CFR cite (38 CFR 3.310), a year, or a page count. Numbers
+// present anywhere in the source context are allowed. Conservative: flags, never edits the prose.
+const MEASUREMENT_RE = /\b(AHI|RDI|BMI|apnea[- ]hypopnea index|oxygen saturation|O2 sat|SpO2)\b[^\d]{0,12}(\d{1,3}(?:\.\d+)?)|(\d{1,3}(?:\.\d+)?)\s?(%|mg|dB|mmHg)\b/gi;
+function checkGrounding(note: { subjective: string; objective: string; assessment: string; plan: string }, contextText: string): string | null {
+  const ctxDigits = new Set((contextText.match(/\d{1,4}(?:\.\d+)?/g) ?? []));
+  const prose = `${note.subjective} ${note.objective} ${note.assessment} ${note.plan}`;
+  const flagged: string[] = [];
+  let m: RegExpExecArray | null;
+  MEASUREMENT_RE.lastIndex = 0;
+  while ((m = MEASUREMENT_RE.exec(prose)) !== null) {
+    const num = m[2] ?? m[3]; // the captured numeric value
+    if (num && !ctxDigits.has(num) && !ctxDigits.has(num.replace(/\.\d+$/, ''))) {
+      flagged.push(m[0].trim());
+    }
+  }
+  if (flagged.length === 0) return null;
+  return `Verify these values — they are not in the chart facts provided: ${[...new Set(flagged)].slice(0, 4).join('; ')}.`;
 }
 
 export interface SoapContext {
@@ -143,10 +167,12 @@ export async function buildSoapNote(ctx: SoapContext): Promise<SoapNote | null> 
     const conf = inp['confidence'];
     const action = inp['action'];
     if (!assessment || !plan) return null;
+    const base = { subjective, objective, assessment, plan };
     const note: SoapNote = {
-      subjective, objective, assessment, plan,
+      ...base,
       confidence: (conf === 'high' || conf === 'moderate' || conf === 'low') ? conf : 'moderate',
       action: (action === 'draft' || action === 'get_records' || action === 'clarify' || action === 'physician_review' || action === 'reject') ? action : 'physician_review',
+      caveat: checkGrounding(base, renderContext(ctx)),
     };
     _cache.set(key, note);
     return note;

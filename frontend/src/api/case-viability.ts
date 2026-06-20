@@ -136,6 +136,8 @@ export interface SoapNote {
   readonly plan: string;
   readonly confidence: 'high' | 'moderate' | 'low';
   readonly action: 'draft' | 'get_records' | 'clarify' | 'physician_review' | 'reject';
+  /** Deterministic grounding guard: a clinical value in the note not found in the source facts (verify). */
+  readonly caveat?: string | null;
 }
 
 export interface SoapContextInput {

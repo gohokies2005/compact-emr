@@ -48,7 +48,7 @@ vi.mock('../api/strategy-preview', () => ({
 }));
 vi.mock('../api/case-viability', async () => {
   const actual = await vi.importActual<typeof import('../api/case-viability')>('../api/case-viability');
-  return { ...actual, getCaseViability: vi.fn(async () => ({ data: {
+  return { ...actual, getSoapNote: vi.fn(async () => ({ data: null })), getCaseViability: vi.fn(async () => ({ data: {
     version: 2, claimed_canonical: 'Obstructive sleep apnea', viability: 'strong',
     best_anchor: { upstream_canonical: 'PTSD', upstream_verbatim: 'PTSD', M_static: 4, M_eff: 4, E: null, tier: 'blessed', basis: '3.310a', is_granted_sc: true, mechanism_class: null, requires: null },
     alternatives: [], why: 'Strong.', missing_fact: null, presumptive_redirect: null, graveyard_redirect: null,
@@ -76,17 +76,19 @@ function renderPage() {
 }
 
 describe('CaseDetailPage — pre-draft Overview story order (locked)', () => {
-  it('renders the six sections in Ryan’s SOAP order: Background → Chart extraction → Anchor viability → Recommended plan → Assignments → Send to Drafter', async () => {
+  it('renders the SOAP-lead order (2026-06-20): Chart extraction → [collapsed: Background → Anchor viability → Recommended plan] → Assignments → Send to Drafter', async () => {
     renderPage();
-    // Wait for the lead section, then collect all six section headings.
-    const background = await screen.findByRole('heading', { name: 'Background & argument' });
-    const extraction = screen.getByRole('heading', { name: 'Chart extraction' });
+    // The AI SOAP note now LEADS (one calm "Case overview" card); Chart extraction stays visible; the dense
+    // analysis panels (Background / Anchor viability / Recommended plan) are now nested in a collapsed
+    // "View full analysis" <details> — they still MOUNT (so they're in the DOM), just below extraction.
+    const extraction = await screen.findByRole('heading', { name: 'Chart extraction' });
+    const background = screen.getByRole('heading', { name: 'Background & argument' });
     const assessment = screen.getByRole('heading', { name: 'Anchor viability' });
     const plan = screen.getByRole('heading', { name: 'Recommended plan' });
     const assignments = screen.getByRole('heading', { name: 'Assignments' });
     const send = screen.getByRole('heading', { name: 'Send to Drafter' });
 
-    const ordered = [background, extraction, assessment, plan, assignments, send];
+    const ordered = [extraction, background, assessment, plan, assignments, send];
     // each heading must precede the next in document order
     ordered.reduce((prev, cur) => {
       expect(prev.compareDocumentPosition(cur) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

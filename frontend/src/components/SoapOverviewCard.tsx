@@ -120,6 +120,11 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
           {note.subjective ? <Section label="Subjective">{note.subjective}</Section> : null}
           {note.objective ? <Section label="Objective">{note.objective}</Section> : null}
           {note.assessment ? <Section label="Assessment">{note.assessment}</Section> : null}
+          {note.caveat ? (
+            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-sm text-amber-800">
+              <span className="font-medium">⚠ Verify:</span> {note.caveat}
+            </div>
+          ) : null}
           <div className="mt-3 border-t border-[#E5DEC9] pt-2">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Plan</div>
             <div className="mt-0.5 text-[15px] font-medium text-slate-800"><span className="text-[#B08D3C]">→ </span>{note.plan}</div>

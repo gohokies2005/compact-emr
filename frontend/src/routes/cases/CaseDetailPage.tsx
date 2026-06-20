@@ -600,24 +600,26 @@ export function CaseDetailPage() {
                     />
                   ) : null}
 
-                  {p.canSendFirstDraft ? (
-                    <StrategyPreviewCard key="strategy" caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
-                  ) : null}
-
-                  {/* 2. Chart extraction (objective — "what we actually read"). Wider gate (the whole
-                      working window) so it stays visible during drafting / a Gate-2 halt / rn_review. */}
+                  {/* Chart extraction (objective — "what we actually read") stays visible; it also carries
+                      the reprocess/re-OCR actions. Wider gate so it shows during drafting / halt / rn_review. */}
                   {p.canSeeExtractionCoverage ? <ExtractionCoveragePanel key="extraction-coverage" caseId={caseId} /> : null}
 
-                  {/* 3. Assessment — the anchor viability we calculate (+ the presumptive bridge, inside). */}
-                  {p.canSendFirstDraft ? <CaseViabilityCard key="viability" caseId={caseId} completeness={chartReadiness.completeness} /> : null}
-
-                  {/* 4. Recommended plan — the one-brain readout of the engine (draft / draft-with-changes /
-                      contact). hasUnreadPages softens "contact for records" → "needs review". */}
-                  {p.canSendFirstDraft ? <RecommendedPlanCard key="recommended-plan" caseId={caseId} hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0} /> : null}
-
-                  {/* Final sanity check (auto-fired Opus gut-check) — a quiet SOAP "Overall impression"
-                      line under the plan; assembles from the strategy + coverage queries already loaded. */}
-                  {p.canSendFirstDraft ? <PreDraftSanityImpression key="sanity" caseId={caseId} claimedCondition={c.claimedCondition} /> : null}
+                  {/* The dense engine panels are now SUBSUMED by the SOAP note above (Ryan 2026-06-20) — kept
+                      one click away as raw data + the live fallback if an API call is down. Children mount
+                      even when collapsed, so the sanity cache + the readiness overlay still warm. */}
+                  {p.canSendFirstDraft ? (
+                    <details key="full-analysis" className="mb-4 rounded-lg border border-slate-200 bg-white">
+                      <summary className="cursor-pointer select-none px-4 py-2.5 text-sm font-medium text-slate-600 hover:text-slate-800">
+                        View full analysis
+                      </summary>
+                      <div className="space-y-4 px-2 pb-3">
+                        <StrategyPreviewCard key="strategy" caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
+                        <CaseViabilityCard key="viability" caseId={caseId} completeness={chartReadiness.completeness} />
+                        <RecommendedPlanCard key="recommended-plan" caseId={caseId} hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0} />
+                        <PreDraftSanityImpression key="sanity" caseId={caseId} claimedCondition={c.claimedCondition} />
+                      </div>
+                    </details>
+                  ) : null}
 
                   {/* 5. Assignments — moved INTO the story (was below the region). Staff only; floats in
                       review/halt states too (a physician must be assigned before send-to-doctor). */}

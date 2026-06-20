@@ -138,6 +138,40 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+// HOTFIX 2026-06-20 regression: a FAILED drafter run (runComplete:false) wrote no letter, but the worker
+// still sends the canonical txt key. The completion handler used to call resolveDocxKeyForMirror
+// UNCONDITIONALLY → S3 GetObject on a never-written key → NoSuchKey → unhandled 500 → the failure callback
+// itself failed → the SQS message redrove ~45m → the draft UI froze on step 1. Fix: only backfill/mirror on
+// runComplete; resolveDocxKeyForMirror is non-fatal; no phantom LetterRevision for a failed run. This test
+// injects a THROWING s3 to prove a failed run NEVER 500s on a missing artifact.
+describe('POST /complete — FAILED run must never 500 on a missing artifact (drafting-freeze hotfix)', () => {
+  function appWithThrowingS3(db: AppDb) {
+    const noSuchKey = Object.assign(new Error('The specified key does not exist.'), { name: 'NoSuchKey' });
+    const s3 = { send: vi.fn(async () => { throw noSuchKey; }) } as unknown as import('@aws-sdk/client-s3').S3Client;
+    const app = express();
+    app.use(express.json({ limit: '10mb' }));
+    app.use('/api/v1', createDrafterWorkerRouter(db, { s3, bucketName: 'phi-test' }));
+    app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      if (isHttpError(error)) return sendError(res, error.status, error.code, error.message, error.details);
+      return sendError(res, 500, 'internal_error', 'Unexpected server error.');
+    });
+    return { app, s3 };
+  }
+
+  it('records state:failed, stays in drafting, returns 200, never touches S3, writes NO phantom revision', async () => {
+    const { db, tx, job, caseRow: cr } = makeDb(jobRow({ state: 'running' }), caseRow({ status: 'drafting' }));
+    const { app, s3 } = appWithThrowingS3(db);
+    const res = await request(app)
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send({ ...completeBody({ runComplete: false }), artifactDocxS3Key: undefined });
+    expect(res.status).toBe(200); // RED before the hotfix: 500 (NoSuchKey escaped resolveDocxKeyForMirror)
+    expect(job.state).toBe('failed');
+    expect(cr.status).toBe('drafting'); // failed run held for retry, not rn_review
+    expect(s3.send).not.toHaveBeenCalled(); // runComplete gate → backfill skipped entirely
+    expect(tx.letterRevision.create).not.toHaveBeenCalled(); // no phantom revision pointing at missing artifacts
+  });
+});
+
 describe('POST /internal/drafter/jobs/:id/complete — late-artifact recovery', () => {
   it('merges artifact keys onto a watcher-swept failed job with NULL keys (200, no version bump)', async () => {
     const { db, tx, job, caseRow: cr } = makeDb(

@@ -1168,32 +1168,50 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
     parentVersion: number;
     txtKey: string;
     docxKey: string | null | undefined;
-  }): Promise<string> {
+  }): Promise<string | null> {
     if (typeof args.docxKey === 'string' && args.docxKey.trim() !== '') return args.docxKey;
-    const bucketName = deps.bucketName ?? process.env.PHI_BUCKET_NAME;
-    if (deps.renderLetter === undefined || deps.s3 === undefined || bucketName === undefined) {
-      throw new HttpError(502, 'internal_error', 'Drafter run produced no DOCX and DOCX backfill is not configured; refusing to mirror a letter revision with a missing artifact.', { reason: 'docx_backfill_unavailable', caseId: args.caseId, version: args.version });
+    // NON-FATAL (HOTFIX 2026-06-20): a DOCX backfill is an ENRICHMENT — it must NEVER 500 a terminal
+    // drafter callback (a 500 leaves the SQS message for redrive → the case loops ~45m → the draft UI
+    // freezes). Previously this THREW 502 on unconfigured deps / a missing TXT / a render failure, which
+    // froze drafting (on a failed run the canonical TXT key points at an object that was never written →
+    // NoSuchKey → 500). Now every failure path logs + returns null (the legacy null-docx fallback; the
+    // letter editor null-guards docxKey). Protects BOTH callers (happy-path completion + the resurrect path).
+    try {
+      const bucketName = deps.bucketName ?? process.env.PHI_BUCKET_NAME;
+      if (deps.renderLetter === undefined || deps.s3 === undefined || bucketName === undefined) {
+        console.warn(JSON.stringify({ msg: 'docx_backfill_unavailable', caseId: args.caseId, version: args.version }));
+        return null;
+      }
+      // Read the TXT (the source of truth) and render the trio into the letter-revisions keyspace.
+      const obj = await deps.s3.send(new GetObjectCommand({ Bucket: bucketName, Key: args.txtKey }));
+      if (obj.Body === undefined) {
+        console.warn(JSON.stringify({ msg: 'docx_backfill_txt_read_failed', caseId: args.caseId, key: args.txtKey }));
+        return null;
+      }
+      const letterText = await obj.Body.transformToString('utf-8');
+      const c = await db.case.findFirst({ where: { id: args.caseId } });
+      const veteran = c !== null ? await db.veteran.findUnique({ where: { id: c.veteranId } }) : null;
+      const keys = {
+        txtKey: buildLetterRevisionKey(args.caseId, args.version, 'txt'),
+        pdfKey: buildLetterRevisionKey(args.caseId, args.version, 'pdf'),
+        docxKey: buildLetterRevisionKey(args.caseId, args.version, 'docx'),
+      };
+      const caseData = {
+        id: args.caseId,
+        veteran_name: veteran !== null ? `${veteran.firstName} ${veteran.lastName}`.trim() : '',
+        veteran_last: veteran?.lastName ?? '',
+        claimed_condition: c?.claimedCondition ?? '',
+      };
+      const rendered = await deps.renderLetter({ caseData, letterText, version: args.version, draft: true, bucket: bucketName, keys });
+      if (!rendered.ok) {
+        console.warn(JSON.stringify({ msg: 'docx_backfill_render_failed', caseId: args.caseId, version: args.version }));
+        return null;
+      }
+      return keys.docxKey;
+    } catch (err) {
+      console.warn(JSON.stringify({ msg: 'docx_backfill_failed_open', caseId: args.caseId, error: err instanceof Error ? err.message : String(err) }));
+      return null;
     }
-    // Read the TXT (the source of truth) and render the trio into the letter-revisions keyspace.
-    const obj = await deps.s3.send(new GetObjectCommand({ Bucket: bucketName, Key: args.txtKey }));
-    if (obj.Body === undefined) throw new HttpError(502, 'internal_error', 'Drafter TXT object had no body; cannot backfill DOCX.', { reason: 'txt_read_failed', caseId: args.caseId, key: args.txtKey });
-    const letterText = await obj.Body.transformToString('utf-8');
-    const c = await db.case.findFirst({ where: { id: args.caseId } });
-    const veteran = c !== null ? await db.veteran.findUnique({ where: { id: c.veteranId } }) : null;
-    const keys = {
-      txtKey: buildLetterRevisionKey(args.caseId, args.version, 'txt'),
-      pdfKey: buildLetterRevisionKey(args.caseId, args.version, 'pdf'),
-      docxKey: buildLetterRevisionKey(args.caseId, args.version, 'docx'),
-    };
-    const caseData = {
-      id: args.caseId,
-      veteran_name: veteran !== null ? `${veteran.firstName} ${veteran.lastName}`.trim() : '',
-      veteran_last: veteran?.lastName ?? '',
-      claimed_condition: c?.claimedCondition ?? '',
-    };
-    const rendered = await deps.renderLetter({ caseData, letterText, version: args.version, draft: true, bucket: bucketName, keys });
-    if (!rendered.ok) throw new HttpError(502, 'internal_error', 'DOCX backfill render failed; refusing to mirror a letter revision with a missing artifact.', { reason: 'docx_backfill_render_failed', caseId: args.caseId, version: args.version });
-    return keys.docxKey;
   }
 
   /**
@@ -1463,15 +1481,26 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
       // #9 Fix 4: the mirrored LetterRevision must carry a non-null DOCX. The FRN drafter's docx
       // key is optional; when absent, backfill by rendering the TXT into the letter-revisions
       // keyspace BEFORE the transaction (the render does S3 PutObjects + a sync Lambda call).
-      // artifactPdfS3Key/artifactTxtS3Key are required non-empty by parseCompleteBody, so only the
-      // docx can be missing. Falls through to the existing docx key when the worker produced one.
-      const mirrorDocxKey = await resolveDocxKeyForMirror({
-        caseId: existing.caseId,
-        version: existing.version,
-        parentVersion: existing.parentVersion ?? existing.version,
-        txtKey: parsed.artifactTxtS3Key,
-        docxKey: parsed.artifactDocxS3Key,
-      });
+      //
+      // HOTFIX (2026-06-20): ONLY backfill/mirror for a SUCCESSFUL run. A FAILED run (runComplete=false,
+      // pipeline exitCode 2 at the readiness gate) wrote NO letter artifacts, yet the worker still sends
+      // the canonical txt key — so resolveDocxKeyForMirror's S3 GetObject on that never-written key threw
+      // NoSuchKey → unhandled 500 → the FAILURE callback itself failed ("failure-complete also failed") →
+      // the case could never record its failure and looped on the in-flight SQS message (~45m), freezing
+      // the draft UI on step 1. That is the drafting-freeze. For a failed run there is nothing to mirror.
+      // Belt-and-suspenders: even the happy-path backfill is now non-fatal — a backfill hiccup logs and
+      // falls back to the legacy null docx instead of 500-ing the whole completion callback.
+      // Only backfill/mirror a DOCX for a SUCCESSFUL run — a failed run wrote no letter (resolveDocxKeyForMirror
+      // is now non-fatal too, so this gate is belt-and-suspenders + avoids the wasted S3/render work).
+      const mirrorDocxKey: string | null = parsed.runComplete
+        ? await resolveDocxKeyForMirror({
+            caseId: existing.caseId,
+            version: existing.version,
+            parentVersion: existing.parentVersion ?? existing.version,
+            txtKey: parsed.artifactTxtS3Key,
+            docxKey: parsed.artifactDocxS3Key,
+          })
+        : (parsed.artifactDocxS3Key ?? null);
 
       const updated = await db.$transaction(async (tx) => {
         const job = await tx.draftJob.update({
@@ -1541,22 +1570,31 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
         // letter from ONE table by Case.currentVersion (no DraftJob fallback). Idempotent
         // find-then-create — re-delivery / late SIGTERM callbacks must not duplicate (the
         // row carries @@unique([caseId,version])).
-        const existingRev = await tx.letterRevision.findFirst({ where: { caseId: existing.caseId, version: existing.version } });
-        if (existingRev === null) {
-          await tx.letterRevision.create({
-            data: {
-              caseId: existing.caseId,
-              version: existing.version,
-              parentVersion: existing.parentVersion ?? existing.version,
-              source: 'drafter_run',
-              artifactTxtS3Key: parsed.artifactTxtS3Key,
-              artifactPdfS3Key: parsed.artifactPdfS3Key,
-              artifactDocxS3Key: mirrorDocxKey,
-              editedBy: SERVICE_ACTORS.DRAFTER,
-              editorRole: 'drafter',
-              sanityJson: null,
-            },
-          });
+        //
+        // HOTFIX (2026-06-20): ONLY mirror a revision for a SUCCESSFUL run. A FAILED run wrote no letter,
+        // and parseCompleteBody forces it to send canonical (never-uploaded) txt/pdf keys — pre-hotfix the
+        // backfill THREW before this ran, so no phantom revision existed; now that failed runs complete the
+        // transaction, mirroring here would create a revision pointing at artifacts that don't exist, which
+        // resolveCurrent() would surface as the "current" letter → a 404 in the editor. A failed run still
+        // bumps currentVersion on the DraftJob (operator UI shows "vN failed, retry") but writes NO revision.
+        if (parsed.runComplete) {
+          const existingRev = await tx.letterRevision.findFirst({ where: { caseId: existing.caseId, version: existing.version } });
+          if (existingRev === null) {
+            await tx.letterRevision.create({
+              data: {
+                caseId: existing.caseId,
+                version: existing.version,
+                parentVersion: existing.parentVersion ?? existing.version,
+                source: 'drafter_run',
+                artifactTxtS3Key: parsed.artifactTxtS3Key,
+                artifactPdfS3Key: parsed.artifactPdfS3Key,
+                artifactDocxS3Key: mirrorDocxKey,
+                editedBy: SERVICE_ACTORS.DRAFTER,
+                editorRole: 'drafter',
+                sanityJson: null,
+              },
+            });
+          }
         }
 
         return { job, case: caseUpdated };

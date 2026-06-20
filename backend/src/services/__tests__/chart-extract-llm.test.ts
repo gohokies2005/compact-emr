@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { coerceRawItems, coerceRawItemsCombined, coerceScreenings, groundScreenings, groundAndDispose, sanitizeIcd10, sanitizeCode16, sanitizeScStatus, sanitizeRatingPct, type RawExtractedItem, type ScreeningResult } from '../chart-extract-llm.js';
+import { coerceRawItems, coerceRawItemsCombined, coerceScreenings, groundScreenings, groundAndDispose, sanitizeIcd10, sanitizeCode16, sanitizeScStatus, sanitizeRatingPct, combinedSystemPrompt, type RawExtractedItem, type ScreeningResult } from '../chart-extract-llm.js';
 import type { BundleDocument, SectionWindow } from '../chart-extractor.js';
 
 const win: SectionWindow = {
@@ -298,5 +298,27 @@ describe('groundAndDispose', () => {
       { category: 'sc_condition', name: 'Tinnitus', status: 'denied', sourceDocumentId: 'd', sourcePage: 5, sourceQuote: 'tinnitus is service-connected at 10 percent', confidence: 0.9 },
     ]);
     expect(r.items[0]!.status).toBeUndefined();
+  });
+});
+
+describe('combinedSystemPrompt — grant recall on mixed rating-decision pages (CLM-9925837B7B / Hackworth regression)', () => {
+  const sys = combinedSystemPrompt().toLowerCase();
+
+  // RED before fix: the canonical VA rating-decision grant phrasing was absent, so the model dropped
+  // "Service connection for chronic headaches is granted with an evaluation of 50 percent" while
+  // emitting the denials on the same page.
+  it('teaches the "granted with an evaluation of N percent" rating-decision phrasing', () => {
+    expect(sys).toContain('granted with an evaluation of');
+  });
+
+  // RED before fix: nothing forced the model to walk a mixed grant/denial DECISION list — it
+  // pattern-completed the dominant disposition (denials) and dropped every grant.
+  it('mandates walking every numbered DECISION line (grants AND denials)', () => {
+    expect(sys).toContain('walk every numbered decision line');
+  });
+
+  // No-regress guard for the recall push: a 0 percent GRANT must stay service_connected, not become a denial.
+  it('clarifies that a 0 percent grant is still service_connected', () => {
+    expect(sys).toMatch(/0 percent grant.*still service_connected|noncompensable/);
   });
 });

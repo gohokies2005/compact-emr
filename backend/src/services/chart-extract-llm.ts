@@ -350,7 +350,7 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
   },
 };
 
-function combinedSystemPrompt(): string {
+export function combinedSystemPrompt(): string {
   return [
     'You parse a chunk of a veteran\'s VA medical record into structured rows across THREE categories:',
     '  - sc_condition: a condition the veteran is service-connected for OR is claiming for VA benefits — together with its benefit status.',
@@ -365,11 +365,16 @@ function combinedSystemPrompt(): string {
     // a benefit-status signal. A condition is SC iff it sits next to a benefit-status signal; a bare
     // clinical diagnosis with no such signal is a problem, not an SC condition.
     'CAPTURE AS sc_condition: every condition that appears next to a VA BENEFIT-STATUS SIGNAL. The signal is what makes it service-connection, not the diagnosis itself. Signals — capture the condition whenever you see one beside it:',
-    '  - granted  → "Service connection for X is granted / has been established", "an evaluation of N percent is assigned for X", "X is N percent disabling", "service-connected", "SC", a rating % or diagnostic code shown for the condition.',
+    '  - granted  → "Service connection for X is granted / has been established", "Service connection for X is granted with an evaluation of N percent", "an evaluation of N percent is assigned for X", "X is N percent disabling", "service-connected", "SC", a rating % or diagnostic code shown for the condition. A 0 percent GRANT ("granted with an evaluation of 0 percent") is STILL service_connected — a grant at a noncompensable rating, NOT a denial.',
     '  - denied   → "Service connection for X is denied / is not warranted / is not established", "X (denied)".',
     '  - pending  → a claim list or intake summary — "Claimed conditions", "Conditions claimed", a claim-status / "Your claims" page — listing the condition as claimed / pending / under review / received.',
     '  - deferred → "Service connection for X is deferred", "X — deferred pending ...".',
     'These live in MANY document types — rating decisions, code sheets, benefit/award letters, the 21-526EZ claim, AND claim-status / intake-summary lists. A claim that is only pending or denied is STILL an sc_condition; do not wait for a "granted" sentence. Capture EACH listed condition as its own row with its own status (+ ratingPct + dcCode when shown), even when a single rating-decision page itemizes many.',
+    // MIXED GRANT/DENIAL RECALL (Hackworth / CLM-9925837B7B, 2026-06-20). The model read a numbered
+    // DECISION page, emitted every DENIAL, and silently DROPPED all four GRANTS ("chronic headaches
+    // granted 50%", tinnitus 10%, ...) — a dominant-disposition pattern-completion. A dropped grant
+    // empties granted_service_connections and the drafter halts. Force item-by-item enumeration.
+    'WALK EVERY NUMBERED DECISION LINE. A VA rating decision has a numbered "DECISION" section that interleaves grants AND denials ("1. ... is granted ... 2. ... is denied ... 3. ... is granted ..."). Emit one sc_condition row for EVERY numbered line, item by item — do NOT skip the grants because the page also lists denials, and do not skip the denials because the page also lists grants. A grant and a denial on the same page are EQUALLY required; a page that mixes both is the rule, not the exception. Re-read the DECISION list and confirm you emitted one row per line before moving on.',
     '  - USE THE SPECIFIC NAMED CONDITION exactly as written. "Sigmoid Colitis", "Ulcerative Colitis", and "GERD" are SEPARATE rows — never collapse distinct conditions into an umbrella like "gastrointestinal problems".',
     // NAME MUST BE A DIAGNOSIS, NEVER A RATING (extraction precision (Woodley), 2026-06-13). Woodley's
     // SC tab showed a single row "90% service-connected" — the model put the COMBINED PERCENTAGE in the
@@ -395,6 +400,8 @@ function combinedSystemPrompt(): string {
     // right split — three NAMED rows, and the combined line emitted as NOTHING.
     '  "[p.5] Other Specified Trauma or Stressor-Related Disorder ... 70% ... Tinnitus ... 10% ... Lumbar Strain ... 20% ... Combined evaluation: 90%" → THREE sc_condition rows: {category:sc_condition,name:"Other Specified Trauma or Stressor-Related Disorder",status:"service_connected",ratingPct:70}, {category:sc_condition,name:"Tinnitus",status:"service_connected",ratingPct:10}, {category:sc_condition,name:"Lumbar Strain",status:"service_connected",ratingPct:20}. The "Combined evaluation: 90%" line is emitted as NOTHING — it is a total, not a condition.',
     '  "[p.3] Combined evaluation: 90%" → emit NOTHING (a combined/total, not a condition).',
+    // The mixed grant/denial page the model failed on (Hackworth). Denials present must NOT suppress grants.
+    '  "[p.13] DECISION: 1. Service connection for chronic headaches is granted with an evaluation of 50 percent. 2. Service connection for tinnitus is granted, 10 percent. 3. Service connection for sleep apnea is denied. 4. Service connection for a low back condition is deferred." → FOUR sc_condition rows, one per numbered line: {category:sc_condition,name:"chronic headaches",status:"service_connected",ratingPct:50}, {category:sc_condition,name:"tinnitus",status:"service_connected",ratingPct:10}, {category:sc_condition,name:"sleep apnea",status:"denied"}, {category:sc_condition,name:"low back condition",status:"deferred"}. The grants are NOT dropped because denials/deferrals appear on the same page.',
     '',
     // BLUE BUTTON STRUCTURE (Ryan 2026-06-13): VA Blue Button / CAPRI reports are templated — the
     // problem and medication lists sit under stable headers. Naming them lifts recall on the

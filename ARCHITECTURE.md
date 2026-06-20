@@ -65,6 +65,7 @@ FRIENDLY NAME, never partial-ARN — see INCIDENTS). Deploy = GH Actions → CDK
 | Drafter | the nexus letter | Anthropic, Opus | drafter image tag (cdk.json) | FRN `app/services/*` → Fargate ECR image |
 | Ask-Aegis advisory | RN/physician case Q&A | **Bedrock**, Opus 4.6 | always on | FRN `app/config/advisory/rn_advisory_system_prompt.md` → `backend/src/advisory/systemPrompt.ts` |
 | Opus sanity-impression | pre/post-draft gut-check | Anthropic, Opus | (cached per case+stage) | `backend/src/services/sanity-impression.ts` |
+| **SOAP-note Overview** | the RN's calm AI-synthesized S/O/A/P lead on the Overview | Anthropic **direct**, Sonnet 4-6 (`SOAP_NOTE_MODEL`) | always on | `backend/src/services/soap-overview.ts` (`buildSoapNote`); POST `/cases/:id/soap-overview` (FE posts the assembled context) |
 
 **⚠️ Auto-vendored prompt trap:** `systemPrompt.ts` and `aiRoutePicker.cjs` are GENERATED from the FRN source
 (`vendor-advisory-prompt.cjs` / the anchor vendor copy). **Hand-edits to the vendored files are reverted on
@@ -139,6 +140,17 @@ failure (the SOAP "thinks for minutes then nothing" + the original double-call t
 | 2026-06-19 | **Static M/E (mechanism/evidence) anchor ratings on the Overview card** ("M=4,E=2") | brittle static table, didn't match drafter judgment | the **AI route-picker** (`deriveAiViability`) — one brain for card + drafter + Ask-Aegis |
 | 2026-06-19 | The `/cases/:id/soap-overview` 2nd-LLM-call endpoint | 29s timeout silent-fail | SOAP card renders deterministically from the shared `viability-card` query (one LLM call) |
 | 2026-06-19 | Synchronous picker compute on GET `/viability-card` | ~22-25s call can't fit the 29s cap → silent fail | async self-invoke compute off the request path + persisted-plan read (see §5) |
+| 2026-06-20 | Deterministic string-assembled SOAP "note" on the Overview card | read like a dump (S echoed in A, O = a wall of every SC condition) | AI-synthesized SOAP note (`buildSoapNote`, Sonnet) — smooth S/O/A/P; the deterministic verdict stays the fail-open fallback |
+
+### OWED (Ryan-approved, 2026-06-20 — see handoff `20260620_soap_note_ai_synthesis_and_deploy_blocker.md`)
+- **Precompute the SOAP note on chart-extract FINISH** so it's ready when the chart opens (no 10-15s wait) —
+  fire at the tail of the internal-worker merge handler via the async self-invoke pattern; persist; chart-open
+  POST stays the backstop.
+- **Anti-confabulation guards**: a deterministic number/measurement/date verifier (every value in the note
+  must trace to the source facts) + a cheap short second LLM grounding pass (async, fail-open). These GATE
+  collapsing the dense panels.
+- **Collapse the dense panels** (Background & argument / Anchor viability / Recommended plan) behind a
+  "View details ▾" toggle once the guards are in; keep them as the API-down fallback.
 | 2026-06-16 | Textract-only OCR as the primary scanned-page reader | dropped combo-page handwriting (false "100% read") | per-page Sonnet vision worker + honest per-page coverage |
 | (legacy) | Local Node/SQLite dashboard as production EMR | moved to AWS | this EMR (`compact-emr-work`); localhost retains only the inbound Gmail poller |
 

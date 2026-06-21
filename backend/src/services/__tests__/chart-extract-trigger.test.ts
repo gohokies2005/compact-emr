@@ -16,13 +16,15 @@ const READ = [
   { filePath: 'cases/C-1/k2', terminalStatus: 'read' },
 ];
 
-function makeDb(opts: { docs?: typeof DOCS; readStatuses?: typeof READ; createThrowsP2002?: boolean } = {}) {
+function makeDb(opts: { docs?: typeof DOCS; readStatuses?: typeof READ; createThrowsP2002?: boolean; recentRun?: { createdAt: Date; status: string } | null } = {}) {
   const creates: Record<string, unknown>[] = [];
   const db = {
     case: { findFirst: vi.fn(async () => ({ veteranId: 'VET-1' })) },
     document: { findMany: vi.fn(async () => opts.docs ?? DOCS) },
     fileReadStatus: { findMany: vi.fn(async () => opts.readStatuses ?? READ) },
     chartExtractionRun: {
+      // recentRun = the runaway-guard lookup; default null = no recent run (existing-contract tests).
+      findFirst: vi.fn(async () => opts.recentRun ?? null),
       create: vi.fn(async (args: { data: Record<string, unknown> }) => {
         if (opts.createThrowsP2002) { const err = new Error('unique'); (err as Error & { code?: string }).code = 'P2002'; throw err; }
         creates.push(args.data);
@@ -49,6 +51,27 @@ describe('maybeEnqueueChartExtract — force salt (keystone 4b)', () => {
     const base = computeTriggerHash(DOCS, READ);
     expect(creates[0]?.['triggerHash']).toBe(`${base}:manual:req-1`);
     expect(creates[0]?.['triggerHash']).not.toBe(base); // the wedge-breaking property
+  });
+
+  // RUNAWAY GUARD (CLM-CCFDA1BCC3, 2026-06-20): a forceSalt enqueue within the rate window must be
+  // REFUSED so a client/automation hammering force-extract can't mint unbounded paid runs.
+  it('RATE GUARD: a recent (<5min) non-failed run blocks a new force-extract', async () => {
+    const { db, creates } = makeDb({ recentRun: { createdAt: new Date(Date.now() - 2 * 60 * 1000), status: 'complete' } });
+    const out = await maybeEnqueueChartExtract(db, 'C-1', { forceSalt: 'manual:loop' });
+    expect(out).toEqual({ enqueued: false, reason: 'rate_limited_recent_run' });
+    expect(creates).toHaveLength(0); // no paid run created
+  });
+
+  it('RATE GUARD: an OLD run (>5min) does NOT block a re-extract (legit reprocess passes)', async () => {
+    const { db } = makeDb({ recentRun: { createdAt: new Date(Date.now() - 60 * 60 * 1000), status: 'complete' } });
+    const out = await maybeEnqueueChartExtract(db, 'C-1', { forceSalt: 'manual:legit' });
+    expect(out.enqueued).toBe(true);
+  });
+
+  it('RATE GUARD: a recent FAILED run does NOT block (failure-recovery can retry immediately)', async () => {
+    const { db } = makeDb({ recentRun: { createdAt: new Date(Date.now() - 60 * 1000), status: 'failed' } });
+    const out = await maybeEnqueueChartExtract(db, 'C-1', { forceSalt: 'manual:retry' });
+    expect(out.enqueued).toBe(true);
   });
 
   it('force still honors the all-terminal gate: mid-OCR docs → ocr_in_progress, no run created', async () => {

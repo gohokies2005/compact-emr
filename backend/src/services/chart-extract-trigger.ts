@@ -30,9 +30,28 @@ export interface ChartExtractTriggerOptions {
   readonly forceSalt?: string;
 }
 
+// RUNAWAY GUARD (Ryan 2026-06-20 — CLM-CCFDA1BCC3 re-extracted every ~2 min, ~$34/hr, silently). A
+// forceSalt enqueue mints a fresh triggerHash every call, so a client/automation hammering reprocess
+// or force-extract creates unbounded paid runs. Cap a case to ONE extraction per window: if a run was
+// created within RATE_WINDOW_MS and isn't failed, refuse. Legit re-extracts (new upload, a fix-driven
+// reprocess) are minutes/hours/days apart, so they pass; only rapid repeats are blocked. A FAILED run
+// is exempt so failure-recovery can retry immediately.
+const RATE_WINDOW_MS = 5 * 60 * 1000;
+
 export async function maybeEnqueueChartExtract(db: AppDb, caseId: string, opts: ChartExtractTriggerOptions = {}): Promise<{ enqueued: boolean; reason?: string }> {
   const c = (await db.case.findFirst({ where: { id: caseId } })) as { veteranId: string } | null;
   if (c === null) return { enqueued: false, reason: 'case_not_found' };
+
+  const recentRun = await (db as unknown as {
+    chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { createdAt: true; status: true } }) => Promise<{ createdAt: Date; status: string } | null> };
+  }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true, status: true } });
+  if (recentRun && recentRun.status !== 'failed') {
+    const ageMs = Date.now() - new Date(recentRun.createdAt).getTime();
+    if (ageMs >= 0 && ageMs < RATE_WINDOW_MS) {
+      console.warn(JSON.stringify({ event: 'chart_extract_rate_limited', caseId, lastRunAgeMs: ageMs, lastStatus: recentRun.status, windowMs: RATE_WINDOW_MS }));
+      return { enqueued: false, reason: 'rate_limited_recent_run' };
+    }
+  }
 
   const allDocs = await (db as unknown as {
     document: { findMany: (args: { where: { caseId: string }; select: { id: true; s3Key: true } }) => Promise<{ id: string; s3Key: string }[]> };
@@ -78,5 +97,8 @@ export async function maybeEnqueueChartExtract(db: AppDb, caseId: string, opts: 
       .chartExtractionRun.delete({ where: { id: runId } }).catch(() => { /* best-effort */ });
     throw err;
   }
+  // Fail-LOUD on SUCCESS too (the agent's finding: a successful enqueue logged nothing, so a runaway
+  // producer was invisible). Now every enqueue leaves a line — feeds a runs-per-case alarm.
+  console.warn(JSON.stringify({ event: 'chart_extract_enqueued', caseId, runId, forced: opts.forceSalt !== undefined }));
   return { enqueued: true };
 }

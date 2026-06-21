@@ -4,7 +4,7 @@ import { Card } from './ui/Card';
 import { postDraft, type RnDecisionInput } from '../api/drafter';
 import { transitionCaseStatus, type CaseDetail } from '../api/cases';
 import { describeApiError } from '../api/client';
-import type { DraftJob, Gate2HaltPayload } from '../types/prisma';
+import { isBodyQualityHalt, type DraftJob, type Gate2HaltPayload } from '../types/prisma';
 
 /**
  * Gate-2 halt screen — shown when the pre-draft dx/event verification PARKED the case
@@ -33,8 +33,91 @@ function FindingRow({ label, verdict, evidence }: { readonly label: string; read
     </li>
   );
 }
+/** Humanize a body-quality finding id ('section7_dual_prong_missing_regs') into a short defect label. */
+const BODY_QUALITY_DEFECT_LABELS: Readonly<Record<string, string>> = {
+  letter_ssn_file_line_in_preamble: 'SSN / VA file number in the letter preamble',
+  letter_recipient_address_in_preamble: 'Hardcoded recipient address / salutation in the preamble',
+  section7_editorial_directive_leak: 'Editorial / restructuring directive leaked into Section VII',
+  letter_scope_creep_counsel_advocacy: 'Advocacy / counsel scope-creep in the letter prose',
+  letter_leak_token_in_prose: 'Editorial / restructuring directive token leaked into the prose',
+  section7_dual_prong_missing_regs: 'Section VII missing a required regulatory prong (causation + aggravation)',
+  section7_aggravation_only_missing_3310b: 'Section VII aggravation claim missing the 3.310(b) prong',
+  section7_causation_prong_on_aggravation_only_pair: 'Section VII causation prong on an aggravation-only pairing',
+  pmid_not_found: 'A cited PMID was not found (possible fabricated citation)',
+  pmid_content_mismatch: 'A cited PMID does not match the citation content',
+  locked_section_i_modified: 'Locked Section I (physician qualifications) was modified',
+  locked_section_ii_modified: 'Locked Section II (methodology) was modified',
+  letter_self_undercut: 'The letter undercuts its own opinion',
+  letter_section_iii_list_format: 'Section III is a list — it must be one prose paragraph',
+  letter_placeholder_token_in_prose: 'A scaffolding / placeholder token was left in the prose',
+};
+function defectLabel(id: string): string {
+  return BODY_QUALITY_DEFECT_LABELS[id] ?? id.replace(/_/g, ' ');
+}
+
+/**
+ * Body-quality park card — a FULL draft was produced but the deterministic body-quality gate found a
+ * letter-killing MATERIAL defect, so the letter is held for a targeted RE-DRAFT. This is NOT a
+ * dx/event verification hold, so the dx switch / override / "records are in" actions do not apply —
+ * the one action is to re-draft. Styled consistently with the dx halt card (amber), but the verb is
+ * "re-draft" and the defect list shows the specific issue(s) + section(s) from the FRN park payload.
+ */
+function BodyQualityHoldCard({ c, payload, onChanged }: { readonly c: CaseDetail; readonly payload: Gate2HaltPayload; readonly onChanged: () => void | Promise<void> }) {
+  const message = payload.plainEnglish || payload.operatorMessage || c.operatorMessage
+    || 'Drafting completed, but the automated quality gate found a letter-killing issue that must be fixed before a physician sees this letter. The draft was not discarded; it needs a targeted re-draft.';
+  // Accept BOTH payload shapes: the forthcoming richer `material:[{id,section,detail}]` and the
+  // current `materialIds:[string]`. Normalize to a single render list.
+  const findings = (payload.material && payload.material.length > 0)
+    ? payload.material.map((f) => ({ id: f.id, section: f.section ?? null, detail: f.detail ?? null }))
+    : (payload.materialIds ?? []).map((id) => ({ id, section: null as string | null, detail: null as string | null }));
+
+  const redraft = useMutation({
+    mutationFn: () => postDraft(c.id, { rnDecision: { proceed: true } }),
+    onSuccess: () => void onChanged(),
+    onError: (e: unknown) => window.alert(`Could not start the re-draft — ${describeApiError(e)}`),
+  });
+  function doRedraft() {
+    if (!window.confirm('Re-draft this letter? The flagged defect(s) will be re-generated. The prior draft stays attached for reference.')) return;
+    redraft.mutate();
+  }
+
+  return (
+    <Card className="rounded-2xl border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-5 shadow-aegis-card">
+      <div className="flex items-center gap-2">
+        <svg className="h-5 w-5 flex-none text-amber-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.515 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>
+        <h2 className="text-base font-semibold text-amber-900">Quality hold — letter held for re-draft</h2>
+      </div>
+      <p className="mt-2 text-sm text-amber-900">{message}</p>
+      {findings.length > 0 ? (
+        <ul className="mt-3 space-y-1.5 rounded-md border border-amber-200 bg-white p-3 text-sm">
+          {findings.map((f) => (
+            <li key={f.id} className="flex items-start gap-2">
+              <span className="mt-0.5 w-4 flex-none text-center font-bold text-red-700" aria-hidden="true">✗</span>
+              <span>
+                <span className="font-medium text-slate-800">{defectLabel(f.id)}</span>
+                {f.section ? <span className="text-slate-600"> — section {f.section}</span> : null}
+                {f.detail ? <span className="block text-xs text-slate-600">{f.detail}</span> : null}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button variant="secondary" size="sm" className="border border-amber-600 bg-amber-600 text-white shadow-sm hover:bg-amber-700" disabled={redraft.isPending} onClick={doRedraft}>Re-draft the letter</Button>
+      </div>
+      <p className="mt-3 text-xs text-amber-800">A re-draft re-runs the full draft to fix the flagged section(s). The prior draft is kept for reference. This is a content-quality hold, not a diagnosis or records issue.</p>
+    </Card>
+  );
+}
+
 export function Gate2HaltPanel({ c, job, onChanged }: { readonly c: CaseDetail; readonly job?: DraftJob; readonly onChanged: () => void | Promise<void> }) {
   const payload: Gate2HaltPayload = (job?.haltPayloadJson as Gate2HaltPayload | null | undefined) ?? {};
+
+  // Body-quality park → a distinct "held for re-draft" card (no dx switch/override/proceed options).
+  if (isBodyQualityHalt(payload)) {
+    return <BodyQualityHoldCard c={c} payload={payload} onChanged={onChanged} />;
+  }
+
   const message = payload.plainEnglish || payload.operatorMessage || c.operatorMessage || 'The pre-draft verification could not confirm the diagnosis and/or in-service event. Decide how to proceed.';
   const sw = payload.switchProposal ?? null;
 

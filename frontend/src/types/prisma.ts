@@ -111,6 +111,28 @@ export interface Gate2HaltPayload {
   readonly inServiceEventEvidence?: string | null;
   readonly switchProposal?: Gate2SwitchProposal | null;
   readonly operatorMessage?: string;
+  // ── Body-quality park (FRN draftBodyQualityGate) ────────────────────────────────────────────
+  // A FULL draft was produced but the deterministic body-quality gate found a letter-killing
+  // MATERIAL defect → the letter is parked for a targeted RE-DRAFT (not a dx/event hold). Detect via
+  // isBodyQualityHalt() below: reasonCode === 'body_quality_critical' (dedicated, future) OR
+  // haltGate === 'body_quality' (the current legacy emission that borrows the 'verify_error' code).
+  // The FRN side currently sends `materialIds` (string ids); the forthcoming dedicated payload may
+  // send richer `material` rows. Accept BOTH shapes.
+  readonly materialIds?: readonly string[] | null;
+  readonly material?: readonly Gate2BodyQualityFinding[] | null;
+}
+/** One body-quality defect row (forthcoming richer FRN park payload: {id, section, detail}). */
+export interface Gate2BodyQualityFinding { readonly id: string; readonly section?: string | null; readonly detail?: string | null }
+
+/**
+ * True when a halt payload is a BODY-QUALITY park (letter held for re-draft), not a dx/event
+ * verification hold. Forward/backward compatible: matches the dedicated 'body_quality_critical'
+ * reasonCode AND the current legacy emission (haltGate 'body_quality' carrying a borrowed
+ * 'verify_error' code, sent until the FRN drafter image redeploys).
+ */
+export function isBodyQualityHalt(payload: Gate2HaltPayload | null | undefined): boolean {
+  if (payload === null || payload === undefined) return false;
+  return payload.reasonCode === 'body_quality_critical' || payload.haltGate === 'body_quality';
 }
 
 export interface DraftJob { readonly id: string; readonly caseId: string; readonly version: number; readonly sqsMessageId?: string; readonly state: DraftJobState; readonly enqueuedAt: string; readonly startedAt?: string; readonly completedAt?: string; readonly errorMessage?: string; readonly updatedAt: string;

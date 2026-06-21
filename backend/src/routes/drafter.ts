@@ -1087,7 +1087,23 @@ export function createDrafterClientRouter(db: AppDb): Router {
 const HALT_REASON_CODES = [
   'dx_not_found', 'event_not_found', 'dx_and_event_not_found',
   'verify_error', 'verify_parse_error', 'verify_unavailable', 'no_records_text',
+  // Body-quality park (FRN cloud drafter draftBodyQualityGate): a FULL draft was produced but the
+  // deterministic body-quality gate found a letter-killing MATERIAL defect (editorial-meta leak /
+  // fabricated PMID / dual-prong missing / SSN-PHI / locked-block / Section III list-format). The
+  // letter is parked for a targeted RE-DRAFT — NOT a dx/event verification hold. Maps to status
+  // 'needs_rn_decision' + decision 'pause' (mirrors verify_error). The FRN side currently still
+  // emits 'verify_error' with haltGate 'body_quality' until its drafter image redeploys; BOTH the
+  // dedicated code here AND that legacy verify_error+body_quality path are accepted (see isBodyQualityHalt
+  // on the frontend). DO NOT remove verify_error.
+  'body_quality_critical',
 ] as const;
+
+// A halt reasonCode that maps to a draft_decisions 'pause' (a verification/quality step found a
+// blocking problem and paused the run for the RN) rather than a 'no' (a gate answered a yes/no
+// finding in the negative). body_quality_critical mirrors verify_error here.
+function isPauseDecisionReason(reasonCode: string): boolean {
+  return reasonCode.startsWith('verify') || reasonCode === 'no_records_text' || reasonCode === 'body_quality_critical';
+}
 
 interface ParsedHalt {
   haltGate: string;
@@ -1126,10 +1142,13 @@ function parseHaltBody(body: unknown): ParsedHalt {
   return out;
 }
 
-// Map a Gate-2 halt reasonCode to the draft_decisions item it concerns (for the chart panel).
+// Map a halt reasonCode to the draft_decisions item it concerns (for the chart panel).
 function haltItem(reasonCode: string): string {
   if (reasonCode === 'event_not_found') return 'in_service_event';
   if (reasonCode === 'dx_not_found' || reasonCode === 'dx_and_event_not_found') return 'dx_present';
+  // A body-quality park is NOT a dx-verification finding — label it honestly so the chart Decisions
+  // panel does not read as a diagnosis hold.
+  if (reasonCode === 'body_quality_critical') return 'body_quality';
   return 'dx_verification';
 }
 
@@ -1664,7 +1683,7 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
             draftAttempt: existing.version,
             gate: 2,
             item: haltItem(parsed.reasonCode),
-            decision: parsed.reasonCode.startsWith('verify') || parsed.reasonCode === 'no_records_text' ? 'pause' : 'no',
+            decision: isPauseDecisionReason(parsed.reasonCode) ? 'pause' : 'no',
             reason: parsed.plainEnglish.slice(0, 2000),
             rnUser: SERVICE_ACTORS.DRAFTER,
           },

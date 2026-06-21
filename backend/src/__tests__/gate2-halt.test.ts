@@ -94,4 +94,37 @@ describe('Gate-2 halt receiver', () => {
     const { db } = makeDb(jobRow(), caseR());
     await request(appFor(db)).post('/api/v1/internal/drafter/jobs/NOPE/halt').send(haltBody()).expect(404);
   });
+
+  // ── Body-quality park (FRN draftBodyQualityGate → /halt) ──────────────────────────────────────
+  // A FULL draft was produced but the deterministic body-quality gate found a letter-killing MATERIAL
+  // defect → the letter is parked for a targeted RE-DRAFT, NOT a dx/event hold.
+  it('accepts the dedicated body_quality_critical reasonCode (not 400), parks needs_rn_decision, persists findings', async () => {
+    const { db, job, c, spies } = makeDb(jobRow(), caseR());
+    const body = haltBody({
+      haltGate: 'body_quality',
+      reasonCode: 'body_quality_critical',
+      plainEnglish: 'Drafting completed but the quality gate found a fabricated PMID and a missing aggravation prong.',
+      materialIds: ['pmid_not_found', 'section7_dual_prong_missing_regs'],
+    });
+    const res = await request(appFor(db)).post('/api/v1/internal/drafter/jobs/JOB-1/halt').send(body).expect(200);
+    expect(job.state).toBe('halted');
+    expect(c.status).toBe('needs_rn_decision');
+    expect(c.operatorState).toBe('paused');
+    // The full halt payload (incl. the material findings) is persisted for the RN UI to render.
+    expect(job.haltPayloadJson).toMatchObject({ reasonCode: 'body_quality_critical', haltGate: 'body_quality', materialIds: ['pmid_not_found', 'section7_dual_prong_missing_regs'] });
+    // The chart Decisions log records it as a 'pause' (mirrors verify_error) on a 'body_quality' item
+    // (NOT a dx-verification item) so the panel does not read as a diagnosis hold.
+    expect(spies.draftDecisionCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ decision: 'pause', item: 'body_quality' }) }));
+    expect(res.body.data.case.status).toBe('needs_rn_decision');
+  });
+
+  it('still accepts the legacy verify_error code carrying haltGate body_quality (FRN pre-redeploy emission)', async () => {
+    const { db, job, c, spies } = makeDb(jobRow(), caseR());
+    const body = haltBody({ haltGate: 'body_quality', reasonCode: 'verify_error', plainEnglish: 'Body-quality defect found.', materialIds: ['letter_section_iii_list_format'] });
+    await request(appFor(db)).post('/api/v1/internal/drafter/jobs/JOB-1/halt').send(body).expect(200);
+    expect(c.status).toBe('needs_rn_decision');
+    expect(job.haltPayloadJson).toMatchObject({ reasonCode: 'verify_error', haltGate: 'body_quality' });
+    // verify_error keeps its existing 'pause' decision + dx_verification item mapping (unchanged).
+    expect(spies.draftDecisionCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ decision: 'pause', item: 'dx_verification' }) }));
+  });
 });

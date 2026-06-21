@@ -38,7 +38,36 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
       const body = (req.body ?? {}) as SoapContext & { forceRegenerate?: unknown };
-      const ctx: SoapContext = { ...body, claimedCondition: String(body.claimedCondition ?? '') };
+      const claimedCondition = String(body.claimedCondition ?? '');
+      // ONE-BRAIN GROUNDING (2026-06-21): the SOAP Assessment/Plan render the SAME route-picker plan the
+      // drafter pleads. Read the PERSISTED plan READ-ONLY (compute:false → $0, NO ~22s LLM call on this
+      // synchronous path) — deriveAiViability applies its own staleness guards (hash-match + inputClaimed ===
+      // live claim + schemaVersion + source), returning null when the flag is off / no plan / stale / wrong
+      // condition. On null we DO NOT ground SOAP on a stale plan; the FE-supplied strategy strings remain the
+      // fallback (today's behavior). The framing is set SERVER-SIDE and authoritatively — the FE cannot pass a
+      // contradicting theory. The plan's own hash is folded into the SOAP fingerprint so a plan recompute
+      // (new framing) invalidates the stored SOAP note.
+      let routePickerFraming: SoapContext['routePickerFraming'] = null;
+      try {
+        const plan = await deriveAiViability(db, caseId, { compute: false });
+        if (plan && plan.lead && plan.inputClaimed === claimedCondition) {
+          // The plan's identity for the SOAP fingerprint = Case.aiViabilityPlanHash (the sha of the plan's
+          // inputs). A route-picker recompute that changes the framing changes this hash → invalidates the
+          // stored SOAP note. Read it alongside (one extra small select; the heavy work is already cached).
+          const hashRow = (await db.case.findFirst({ where: { id: caseId }, select: { aiViabilityPlanHash: true } as never })) as unknown as { aiViabilityPlanHash: string | null } | null;
+          routePickerFraming = {
+            framing: plan.lead.framing,
+            cfr_basis: plan.lead.cfr_basis,
+            mechanism: plan.lead.mechanism,
+            rationale: plan.lead.rationale,
+            counterargument: plan.lead.counterargument,
+            confidence: plan.lead.confidence,
+            viability: plan.viability,
+            planHash: hashRow?.aiViabilityPlanHash ?? '',
+          };
+        }
+      } catch { routePickerFraming = null; /* fail-open: SOAP falls back to strategy strings */ }
+      const ctx: SoapContext = { ...body, claimedCondition, routePickerFraming };
       const result = await getOrBuildSoapNote(
         db as unknown as SoapOverviewCacheDb,
         caseId,

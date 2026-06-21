@@ -20,12 +20,18 @@ import { resolveAnthropicApiKey } from './letter-surgical-propose.js';
 
 const MODEL = process.env['SOAP_NOTE_MODEL'] || 'claude-sonnet-4-6';
 
-// Bump when the SoapNote SHAPE changes — the persisted-cache reader gates on it so an old-shape blob is
-// cleanly ignored (recompute) instead of silently mis-rendering a stale shape. (cost-safety 2026-06-21.)
-export const SOAP_NOTE_SCHEMA_VERSION = 1;
+// Bump when the SoapNote SHAPE or the GROUNDING CONTRACT changes — the persisted-cache reader gates on it
+// so an old-shape blob is cleanly ignored (recompute) instead of silently mis-rendering a stale shape.
+// v25 (2026-06-21, one-brain): the SOAP Assessment/Plan now RENDER the persisted route-picker plan
+// (Case.aiViabilityPlanJson.lead — the SAME brain the drafter pleads) instead of re-deciding framing;
+// the SYSTEM prompt no longer licenses the model to pick its own theory. Bumped so every pre-one-brain
+// stored note invalidates cleanly on deploy.
+export const SOAP_NOTE_SCHEMA_VERSION = 25;
 
 export type SoapConfidence = 'high' | 'moderate' | 'low';
 export type SoapAction = 'draft' | 'get_records' | 'clarify' | 'physician_review' | 'reject';
+/** The route-picker plan's viability band (mirrors AiViabilityCard['viability']). */
+export type RoutePickerViability = 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
 
 export interface SoapNote {
   readonly subjective: string;
@@ -80,6 +86,50 @@ export interface SoapContext {
   /** The deterministic engine read (band + confidence + next action) — a HINT the model explains, not gospel. */
   readonly engineVerdict?: string | null;
   readonly engineNextAction?: string | null;
+  /**
+   * The AUTHORITATIVE framing decision from the persisted route-picker plan (Case.aiViabilityPlanJson.lead +
+   * viability — the SAME vendored aiRoutePicker brain the drafter pleads). When present, the SOAP Assessment
+   * RENDERS this framing/CFR/mechanism faithfully and does NOT re-pick a theory; the deterministic action map
+   * (planViabilityToAction) drives the Plan's action so the SOAP cannot disagree with the drafter. When null
+   * (route-picker flag off / no plan / stale or wrong-condition plan) the SOAP falls back to the free-text
+   * `theory`/`mechanism` strategy strings (today's behavior). The server sets this authoritatively — the FE
+   * cannot supply a contradicting framing.
+   */
+  readonly routePickerFraming?: {
+    readonly framing: string;
+    readonly cfr_basis: string;
+    readonly mechanism: string;
+    readonly rationale: string;
+    readonly counterargument: string;
+    readonly confidence: string;
+    readonly viability: RoutePickerViability;
+    /** sha of the route-picker plan inputs (Case.aiViabilityPlanHash) — folded into the SOAP fingerprint so
+     *  a plan recompute (new framing) invalidates the stored SOAP note. Identity only; not rendered to the model. */
+    readonly planHash: string;
+  } | null;
+}
+
+/**
+ * Deterministic map from the route-picker plan's viability band to the SOAP Plan action (one-brain at the
+ * action layer — so the Plan line cannot say "draft" when the drafter's brain says "not_supportable"). Used
+ * to OVERRIDE the model's free `action` choice when a route-picker plan is grounding the note.
+ */
+export function planViabilityToAction(viability: RoutePickerViability): SoapAction {
+  switch (viability) {
+    case 'supportable': return 'draft';
+    case 'marginal': return 'physician_review';
+    case 'needs_physician_review': return 'physician_review';
+    case 'not_supportable': return 'reject';
+    default: return 'physician_review';
+  }
+}
+
+/** Map the route-picker plan's free-text confidence (e.g. "high"/"moderate"/"low") to the SOAP confidence enum. */
+function planConfidenceToSoap(conf: string): SoapConfidence {
+  const c = (conf || '').toLowerCase();
+  if (c.includes('high')) return 'high';
+  if (c.includes('low')) return 'low';
+  return 'moderate';
 }
 
 const SOAP_TOOL: Anthropic.Tool = {
@@ -112,6 +162,11 @@ const SYSTEM =
   'and regulation (3.310 secondary/aggravation, 3.303 direct, presumptives) + the strongest counterpoint + an ' +
   'honest overall read. Plan = the one concrete next step (draft / get records / clarify / physician review / ' +
   'reject) and why.\n' +
+  'IF the context includes a "DECIDED FRAMING" block, that framing decision is GIVEN — it is the team\'s ' +
+  'chosen theory for this letter. RENDER it faithfully in the Assessment: explain the GIVEN mechanism, apply ' +
+  'it to THIS veteran\'s facts, map it to the GIVEN regulatory basis, and address the GIVEN counterargument. ' +
+  'Do NOT substitute a different theory, anchor, or CFR basis than the one supplied. When no DECIDED FRAMING ' +
+  'block is present, determine the most defensible VA theory yourself from the facts.\n' +
   'GROUND STRICTLY in the facts provided — never invent an AHI, an imaging finding, a date, or a diagnosis ' +
   'that is not given. If a useful objective datum (like an AHI) was not provided, simply do not mention it. ' +
   'No internal jargon (no M-tiers, no BVA/win-rate percentages, no "pair-atlas"), no markdown, no headers ' +
@@ -121,8 +176,22 @@ function renderContext(ctx: SoapContext): string {
   const L: string[] = [];
   L.push(`Claimed condition: ${ctx.claimedCondition}`);
   if (ctx.veteranStatement) L.push(`Veteran's own statement (their words): ${ctx.veteranStatement}`);
-  if (ctx.theory) L.push(`Working theory/framing: ${ctx.theory}`);
-  if (ctx.mechanism) L.push(`Proposed mechanism: ${ctx.mechanism}`);
+  const rp = ctx.routePickerFraming;
+  if (rp) {
+    // AUTHORITATIVE framing — the SAME route-picker plan the drafter pleads. The model RENDERS this; it does
+    // NOT pick its own theory. Drop the free-text theory/mechanism so they cannot compete as a framing source.
+    // planHash is folded into the fingerprint (soapNoteFingerprint), NOT shown to the model — identity only.
+    const block: string[] = ['DECIDED FRAMING — render this faithfully; do NOT substitute a different theory:'];
+    if (rp.framing) block.push(`- Framing: ${rp.framing}`);
+    if (rp.cfr_basis) block.push(`- Regulatory basis (CFR): ${rp.cfr_basis}`);
+    if (rp.mechanism) block.push(`- Medical mechanism: ${rp.mechanism}`);
+    if (rp.rationale) block.push(`- Why this theory: ${rp.rationale}`);
+    if (rp.counterargument) block.push(`- Strongest counterargument to address: ${rp.counterargument}`);
+    L.push(block.join('\n'));
+  } else {
+    if (ctx.theory) L.push(`Working theory/framing: ${ctx.theory}`);
+    if (ctx.mechanism) L.push(`Proposed mechanism: ${ctx.mechanism}`);
+  }
   if (ctx.scConditions?.length) L.push(`Service-connected conditions on file: ${ctx.scConditions.join('; ')}`);
   if (ctx.activeProblems?.length) L.push(`Active problems: ${ctx.activeProblems.join('; ')}`);
   if (ctx.keyFacts?.length) L.push(`Key facts:\n- ${ctx.keyFacts.map((f) => `${f.label}: ${f.value}`).join('\n- ')}`);
@@ -131,6 +200,13 @@ function renderContext(ctx: SoapContext): string {
   if (ctx.engineVerdict) L.push(`Engine read (a hint to explain, not gospel): ${ctx.engineVerdict}`);
   if (ctx.engineNextAction) L.push(`Engine's suggested next step: ${ctx.engineNextAction}`);
   return L.join('\n');
+}
+
+/** Test-only access to the private renderContext (the exact string the model is given) so the one-brain
+ *  grounding contract — "the SOAP renders the route-picker framing, not the strategy strings" — is unit-
+ *  assertable without the Anthropic SDK. Not for production use. */
+export function __renderContextForTest(ctx: SoapContext): string {
+  return renderContext(ctx);
 }
 
 function clamp(s: unknown, n: number): string {
@@ -172,10 +248,17 @@ export async function buildSoapNote(ctx: SoapContext): Promise<SoapNote | null> 
     const action = inp['action'];
     if (!assessment || !plan) return null;
     const base = { subjective, objective, assessment, plan };
+    // One-brain at the action layer: when a route-picker plan is grounding the note, the Plan's action +
+    // confidence are DERIVED DETERMINISTICALLY from the plan's viability band + confidence — NOT the model's
+    // free choice — so the SOAP Plan cannot disagree with the drafter's brain (e.g. plan=not_supportable but
+    // model emits "draft"). Without a plan, trust the model's own enums (today's behavior).
+    const rp = ctx.routePickerFraming;
+    const modelConfidence: SoapConfidence = (conf === 'high' || conf === 'moderate' || conf === 'low') ? conf : 'moderate';
+    const modelAction: SoapAction = (action === 'draft' || action === 'get_records' || action === 'clarify' || action === 'physician_review' || action === 'reject') ? action : 'physician_review';
     const note: SoapNote = {
       ...base,
-      confidence: (conf === 'high' || conf === 'moderate' || conf === 'low') ? conf : 'moderate',
-      action: (action === 'draft' || action === 'get_records' || action === 'clarify' || action === 'physician_review' || action === 'reject') ? action : 'physician_review',
+      confidence: rp ? planConfidenceToSoap(rp.confidence) : modelConfidence,
+      action: rp ? planViabilityToAction(rp.viability) : modelAction,
       caveat: checkGrounding(base, renderContext(ctx)),
     };
     _cache.set(key, note);
@@ -193,8 +276,14 @@ export async function buildSoapNote(ctx: SoapContext): Promise<SoapNote | null> 
  * → no LLM call. The schema version is folded in so a shape bump invalidates every stored note.
  */
 export function soapNoteFingerprint(ctx: SoapContext): string {
+  // Fold in the route-picker plan IDENTITY (aiViabilityPlanHash) explicitly, not just the rendered prose:
+  // a plan recompute that yields a NEW framing produces a new planHash → a new fingerprint → the stored
+  // SOAP note invalidates and the next open serves the new plan. This is the load-bearing cache-correctness
+  // guard (without it a route-picker recompute would serve the STALE SOAP forever on an unchanged ctx). It
+  // is also rendered into renderContext, but the explicit hash exactly tracks "did the drafter's plan change."
+  const planHash = ctx.routePickerFraming?.planHash ?? '';
   return createHash('sha256')
-    .update(`v${SOAP_NOTE_SCHEMA_VERSION}\n${renderContext({ ...ctx, claimedCondition: String(ctx.claimedCondition ?? '') })}`)
+    .update(`v${SOAP_NOTE_SCHEMA_VERSION}\nplan:${planHash}\n${renderContext({ ...ctx, claimedCondition: String(ctx.claimedCondition ?? '') })}`)
     .digest('hex');
 }
 

@@ -8,6 +8,8 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   getOrBuildSoapNote,
   soapNoteFingerprint,
+  planViabilityToAction,
+  __renderContextForTest,
   SOAP_NOTE_SCHEMA_VERSION,
   type SoapContext,
   type SoapNote,
@@ -126,5 +128,99 @@ describe('getOrBuildSoapNote — read-through cache', () => {
   it('fingerprint is identical for identical inputs and changes when grounding facts change', () => {
     expect(soapNoteFingerprint(CTX)).toBe(soapNoteFingerprint({ ...CTX }));
     expect(soapNoteFingerprint(CTX)).not.toBe(soapNoteFingerprint({ ...CTX, keyFacts: [{ label: 'AHI', value: '41' }] }));
+  });
+});
+
+// ── ONE-BRAIN GROUNDING CONTRACT (2026-06-21): the SOAP Assessment/Plan RENDER the persisted route-picker
+// plan (Case.aiViabilityPlanJson.lead — the SAME brain the drafter pleads), NOT a re-picked theory. These
+// pin: (1) the rendered context the model receives carries the plan's framing as AUTHORITATIVE and DROPS the
+// free-text strategy strings; (2) a plan change (new planHash) invalidates the SOAP fingerprint; (3) the
+// deterministic action map mirrors the plan's viability band; (4) a null plan falls back to strategy strings.
+describe('SOAP one-brain grounding (route-picker plan is authoritative)', () => {
+  const PLAN_FRAMING: NonNullable<SoapContext['routePickerFraming']> = {
+    framing: 'OSA secondary to service-connected allergic rhinitis (causation)',
+    cfr_basis: '38 CFR 3.310(a)',
+    mechanism: 'Chronic nasal obstruction increases upper-airway resistance and collapsibility during sleep.',
+    rationale: 'Granted rhinitis is the strongest grant-defensible upstream anchor on file.',
+    counterargument: 'Obesity is an alternative OSA driver; address BMI in the letter.',
+    confidence: 'moderate',
+    viability: 'supportable',
+    planHash: 'PLANHASH-aaa',
+  };
+
+  it('renderContext renders the route-picker framing as AUTHORITATIVE and DROPS the free-text strategy strings', () => {
+    const grounded: SoapContext = { ...CTX, theory: 'WRONG strategy-preview theory', mechanism: 'WRONG strategy mechanism', routePickerFraming: PLAN_FRAMING };
+    const rendered = __renderContextForTest(grounded);
+    // The plan's framing/CFR/mechanism/counterargument are present and labeled as the DECIDED framing…
+    expect(rendered).toContain('DECIDED FRAMING');
+    expect(rendered).toContain(PLAN_FRAMING.framing);
+    expect(rendered).toContain(PLAN_FRAMING.cfr_basis);
+    expect(rendered).toContain(PLAN_FRAMING.mechanism);
+    expect(rendered).toContain(PLAN_FRAMING.counterargument);
+    // …and the FE-supplied strategy strings are NOT in the prompt (they cannot compete as a framing source).
+    expect(rendered).not.toContain('WRONG strategy-preview theory');
+    expect(rendered).not.toContain('WRONG strategy mechanism');
+    // The plan IDENTITY (hash) is NOT shown to the model (it is a fingerprint input only).
+    expect(rendered).not.toContain('PLANHASH-aaa');
+  });
+
+  it('ONE-BRAIN: the framing the SOAP grounds on === the plan lead framing (the headline contract)', () => {
+    // Simulate the persisted plan the drafter pleads; the route maps lead.* → routePickerFraming.
+    const planLead = { framing: PLAN_FRAMING.framing, cfr_basis: PLAN_FRAMING.cfr_basis, mechanism: PLAN_FRAMING.mechanism };
+    const grounded: SoapContext = { ...CTX, routePickerFraming: PLAN_FRAMING };
+    expect(grounded.routePickerFraming?.framing).toBe(planLead.framing);
+    const rendered = __renderContextForTest(grounded);
+    expect(rendered).toContain(planLead.framing);
+    expect(rendered).toContain(planLead.cfr_basis);
+    expect(rendered).toContain(planLead.mechanism);
+  });
+
+  it('falls back to the strategy strings when the plan is null (route-picker off / stale / wrong-condition)', () => {
+    const fallback: SoapContext = { ...CTX, theory: 'strategy theory shown', mechanism: 'strategy mechanism shown', routePickerFraming: null };
+    const rendered = __renderContextForTest(fallback);
+    expect(rendered).not.toContain('DECIDED FRAMING');
+    expect(rendered).toContain('strategy theory shown');
+    expect(rendered).toContain('strategy mechanism shown');
+  });
+
+  it('fingerprint folds the plan IDENTITY: a new planHash invalidates the SOAP cache; an unchanged one is stable', () => {
+    const a: SoapContext = { ...CTX, routePickerFraming: PLAN_FRAMING };
+    const sameHash: SoapContext = { ...CTX, routePickerFraming: { ...PLAN_FRAMING } };
+    const newHash: SoapContext = { ...CTX, routePickerFraming: { ...PLAN_FRAMING, planHash: 'PLANHASH-bbb' } };
+    expect(soapNoteFingerprint(a)).toBe(soapNoteFingerprint(sameHash)); // unchanged plan → cache hit
+    expect(soapNoteFingerprint(a)).not.toBe(soapNoteFingerprint(newHash)); // plan recompute → invalidate
+    // A grounded note and an ungrounded (fallback) note for the same chart are DIFFERENT fingerprints.
+    expect(soapNoteFingerprint(a)).not.toBe(soapNoteFingerprint({ ...CTX, routePickerFraming: null }));
+  });
+
+  it('the deterministic action map mirrors the plan viability band (no model free-choice drift)', () => {
+    expect(planViabilityToAction('supportable')).toBe('draft');
+    expect(planViabilityToAction('marginal')).toBe('physician_review');
+    expect(planViabilityToAction('needs_physician_review')).toBe('physician_review');
+    expect(planViabilityToAction('not_supportable')).toBe('reject');
+  });
+
+  it('$0-on-reopen still holds with a grounded plan: unchanged inputs + plan → stored served, no model call', async () => {
+    const grounded: SoapContext = { ...CTX, routePickerFraming: PLAN_FRAMING };
+    const stored = { inputHash: soapNoteFingerprint(grounded), schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: NOTE };
+    const generate = vi.fn(async () => NOTE);
+    const { db, upserts } = fakeDb(stored);
+    const res = await getOrBuildSoapNote(db, 'case-1', grounded, { generate });
+    expect(generate).not.toHaveBeenCalled(); // unchanged plan + chart → $0 reopen
+    expect(res.cached).toBe(true);
+    expect(res.stale).toBe(false);
+    expect(upserts()).toBe(0);
+  });
+
+  it('a route-picker recompute (new planHash) makes the stored SOAP STALE, served without auto-spend', async () => {
+    const grounded: SoapContext = { ...CTX, routePickerFraming: PLAN_FRAMING };
+    // Stored note was written under the OLD planHash; the live plan now has a new hash → stale, no auto-fire.
+    const stored = { inputHash: soapNoteFingerprint(grounded), schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: NOTE };
+    const generate = vi.fn(async () => NOTE);
+    const { db } = fakeDb(stored);
+    const recomputed: SoapContext = { ...CTX, routePickerFraming: { ...PLAN_FRAMING, planHash: 'PLANHASH-bbb', framing: 'NEW framing after recompute' } };
+    const res = await getOrBuildSoapNote(db, 'case-1', recomputed, { generate });
+    expect(generate).not.toHaveBeenCalled(); // honest staleness, never a silent re-bill
+    expect(res.stale).toBe(true);
   });
 });

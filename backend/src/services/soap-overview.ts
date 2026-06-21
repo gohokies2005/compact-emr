@@ -281,9 +281,20 @@ export function soapNoteFingerprint(ctx: SoapContext): string {
   // SOAP note invalidates and the next open serves the new plan. This is the load-bearing cache-correctness
   // guard (without it a route-picker recompute would serve the STALE SOAP forever on an unchanged ctx). It
   // is also rendered into renderContext, but the explicit hash exactly tracks "did the drafter's plan change."
-  const planHash = ctx.routePickerFraming?.planHash ?? '';
+  const rp = ctx.routePickerFraming;
+  // H4 (2026-06-21): if a plan is GROUNDING the note but its planHash is empty (legacy/partial row where the
+  // aiViabilityPlanHash column is null/'' while the plan JSON is populated), folding the empty hash would make
+  // OLD and NEW framing produce the SAME `plan:` segment → a framing change would never invalidate the stored
+  // note (stale forever). Derive a CONTENT identity from the framing fields instead, so a framing change still
+  // changes the fingerprint AND an unchanged framing still produces a stable fingerprint ($0-on-reopen holds).
+  // When the hash is present (the normal path), use it directly — it tracks "did the drafter's plan change."
+  const planIdentity = rp
+    ? (rp.planHash && rp.planHash.length > 0
+        ? rp.planHash
+        : `content:${createHash('sha256').update(`${rp.framing}\n${rp.cfr_basis}\n${rp.mechanism}`).digest('hex')}`)
+    : '';
   return createHash('sha256')
-    .update(`v${SOAP_NOTE_SCHEMA_VERSION}\nplan:${planHash}\n${renderContext({ ...ctx, claimedCondition: String(ctx.claimedCondition ?? '') })}`)
+    .update(`v${SOAP_NOTE_SCHEMA_VERSION}\nplan:${planIdentity}\n${renderContext({ ...ctx, claimedCondition: String(ctx.claimedCondition ?? '') })}`)
     .digest('hex');
 }
 
@@ -329,7 +340,7 @@ export async function getOrBuildSoapNote(
   db: SoapOverviewCacheDb,
   caseId: string,
   ctx: SoapContext,
-  opts?: { forceRegenerate?: boolean; generate?: (c: SoapContext) => Promise<SoapNote | null> },
+  opts?: { forceRegenerate?: boolean; noStore?: boolean; generate?: (c: SoapContext) => Promise<SoapNote | null> },
 ): Promise<SoapOverviewResult> {
   const generate = opts?.generate ?? buildSoapNote;
   const fingerprint = soapNoteFingerprint(ctx);
@@ -356,14 +367,21 @@ export async function getOrBuildSoapNote(
     return { data: storedNote, fingerprint, stale: true, cached: true };
   }
 
-  // Compute: either forced, or no usable stored note exists. One bounded LLM call, then persist.
+  // Compute: either forced, or no usable stored note exists. One bounded LLM call.
   const note = await generate(ctx);
-  try {
-    await db.soapOverview.upsert({
-      where: { caseId },
-      create: { caseId, inputHash: fingerprint, schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: (note ?? null) as object | null },
-      update: { inputHash: fingerprint, schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: (note ?? null) as object | null },
-    });
-  } catch { /* best-effort cache write — never block the response */ }
+  // H2 (2026-06-21): noStore = serve a fresh note for THIS open but do NOT persist it. The route sets this
+  // when it just fired an off-request route-picker recompute because no warm plan existed: persisting this
+  // (strategy-grounded, ungrounded-by-the-plan) note would let it be served $0 on later opens and MASK the
+  // route-picker plan that is now warming. By not storing, the next open recomputes (and, once the plan is
+  // warm, grounds correctly + the new planHash makes the fingerprint diverge from any stored note anyway).
+  if (!opts?.noStore) {
+    try {
+      await db.soapOverview.upsert({
+        where: { caseId },
+        create: { caseId, inputHash: fingerprint, schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: (note ?? null) as object | null },
+        update: { inputHash: fingerprint, schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: (note ?? null) as object | null },
+      });
+    } catch { /* best-effort cache write — never block the response */ }
+  }
   return { data: note, fingerprint, stale: false, cached: false };
 }

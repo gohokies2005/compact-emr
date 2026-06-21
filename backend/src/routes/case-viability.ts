@@ -48,13 +48,15 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       // contradicting theory. The plan's own hash is folded into the SOAP fingerprint so a plan recompute
       // (new framing) invalidates the stored SOAP note.
       let routePickerFraming: SoapContext['routePickerFraming'] = null;
+      let firedRecompute = false;
       try {
         const plan = await deriveAiViability(db, caseId, { compute: false });
         if (plan && plan.lead && plan.inputClaimed === claimedCondition) {
-          // The plan's identity for the SOAP fingerprint = Case.aiViabilityPlanHash (the sha of the plan's
-          // inputs). A route-picker recompute that changes the framing changes this hash → invalidates the
-          // stored SOAP note. Read it alongside (one extra small select; the heavy work is already cached).
-          const hashRow = (await db.case.findFirst({ where: { id: caseId }, select: { aiViabilityPlanHash: true } as never })) as unknown as { aiViabilityPlanHash: string | null } | null;
+          // framing + planHash come from ONE row version: deriveAiViability stamps plan.planHash from the SAME
+          // row read that produced the framing, so an async recompute between two reads can no longer stamp a
+          // NEW hash onto a note built from OLD framing (H3 — no second findFirst here). The hash is the plan's
+          // identity for the SOAP fingerprint: a route-picker recompute that changes the framing changes the
+          // hash → invalidates the stored SOAP note.
           routePickerFraming = {
             framing: plan.lead.framing,
             cfr_basis: plan.lead.cfr_basis,
@@ -63,18 +65,36 @@ export function createCaseViabilityRouter(db: AppDb): Router {
             counterargument: plan.lead.counterargument,
             confidence: plan.lead.confidence,
             viability: plan.viability,
-            planHash: hashRow?.aiViabilityPlanHash ?? '',
+            planHash: plan.planHash ?? '',
           };
+        } else if (aiRoutePickerEnabled()) {
+          // H2: the route-picker is ON but there is NO USABLE warm plan — either compute:false returned null
+          // (first open / invalidated) OR the persisted plan is for a different/stale claimed condition
+          // (inputClaimed !== live claim). Either way the note is NOT grounded this open. Fire the SAME
+          // off-request async recompute the /viability-card GET fires (fire-and-forget; never blocks/fails this
+          // POST and triggers NO LLM on this synchronous path) so a CURRENT plan is warm on the NEXT open. We
+          // record firedRecompute so the ungrounded fallback note is NOT persisted (noStore below) — else it
+          // would be served $0 forever and mask the warming plan; once the plan lands, its planHash changes the
+          // fingerprint and the next open grounds correctly.
+          void fireRecomputeViability(caseId);
+          firedRecompute = true;
         }
       } catch { routePickerFraming = null; /* fail-open: SOAP falls back to strategy strings */ }
       const ctx: SoapContext = { ...body, claimedCondition, routePickerFraming };
+      // H2: when we just fired a recompute because no usable warm plan exists AND the caller did not explicitly
+      // force a regenerate, serve a fresh strategy fallback note for THIS open but do NOT persist it — a
+      // persisted strategy note would be served for $0 on later opens and hide the route-picker plan that is
+      // now warming. (forceRegenerate still persists: the RN explicitly asked to spend + store.) A grounded
+      // note (plan present) always persists as before — $0-on-reopen holds.
       const result = await getOrBuildSoapNote(
         db as unknown as SoapOverviewCacheDb,
         caseId,
         ctx,
-        { forceRegenerate: body.forceRegenerate === true },
+        { forceRegenerate: body.forceRegenerate === true, noStore: firedRecompute && body.forceRegenerate !== true },
       );
-      res.json(result);
+      // H1: return the grounded framing so the FE headline matches the Assessment. When grounded, the FE
+      // PREFERS routePickerFraming.framing for the bold headline; when null it falls back to strategy.primaryArgument.
+      res.json({ ...result, grounded: routePickerFraming !== null, routePickerFraming });
     }),
   );
   router.get(

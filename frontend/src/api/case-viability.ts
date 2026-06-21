@@ -154,6 +154,18 @@ export interface SoapContextInput {
   readonly engineNextAction?: string | null;
 }
 
-export function getSoapNote(caseId: string, ctx: SoapContextInput): Promise<{ data: SoapNote | null }> {
-  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/soap-overview`, ctx);
+/** Server response for the SOAP overview. `data` is the note (stored or fresh); `fingerprint` identifies
+ *  the inputs the note was written from; `stale` = a stored note exists but the inputs changed since (new
+ *  info — the card shows a subtle hint, never auto-spends); `cached` = served from the DB cache ($0). */
+export interface SoapNoteResult {
+  readonly data: SoapNote | null;
+  readonly fingerprint?: string;
+  readonly stale?: boolean;
+  readonly cached?: boolean;
+}
+
+/** Fetch the SOAP overview. On open this SERVES THE STORED note for $0; pass { forceRegenerate: true }
+ *  (the "Regenerate with new info" button) to force a fresh model call. */
+export function getSoapNote(caseId: string, ctx: SoapContextInput, opts?: { forceRegenerate?: boolean }): Promise<SoapNoteResult> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/soap-overview`, { ...ctx, forceRegenerate: opts?.forceRegenerate === true });
 }

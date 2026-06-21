@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getStrategyPreview } from '../api/strategy-preview';
-import { getCaseViability, getSoapNote, type SoapContextInput } from '../api/case-viability';
+import { getCaseViability, getSoapNote, type SoapContextInput, type SoapNoteResult } from '../api/case-viability';
 import { getExtractionCoverage } from '../api/extraction-coverage';
 import { getSanityImpression, type SanityContextInput } from '../api/sanity-impression';
 import { computeReadinessVerdict, type ReadinessVerdict } from '../lib/caseReadinessVerdict';
@@ -32,7 +32,7 @@ const CONFIDENCE_LABEL: Record<string, string> = { high: 'High confidence', mode
 function Section({ label, children }: { readonly label: string; readonly children: ReactNode }) {
   return (
     <div className="mt-3">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-900">{label}</div>
       <div className="mt-0.5 text-[15px] leading-relaxed text-slate-700">{children}</div>
     </div>
   );
@@ -82,11 +82,21 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
     engineVerdict: result ? `${result.title} (${result.confidence} confidence)` : null,
     engineNextAction: result?.nextAction ?? null,
   };
+  const qc = useQueryClient();
+  const soapKey = ['case', caseId, 'soap-note'] as const;
   const soapQ = useQuery({
-    queryKey: ['case', caseId, 'soap-note'],
+    queryKey: soapKey,
     queryFn: () => getSoapNote(caseId, ctx),
     enabled: enabled && strategy !== null, // ctx is meaningful once the strategy/inputSet is loaded
     staleTime: 10 * 60 * 1000,
+  });
+  // "Regenerate with new info" — the ONLY path that re-bills the model on demand. Forces a fresh Sonnet
+  // call (forceRegenerate) and writes the new note back into the query cache. On open we always serve the
+  // STORED note; the user spends only by clicking this (or when new info changed the fingerprint and they
+  // choose to refresh). Disabled while the strategy/ctx isn't ready yet.
+  const regenerate = useMutation({
+    mutationFn: () => getSoapNote(caseId, ctx, { forceRegenerate: true }),
+    onSuccess: (res: SoapNoteResult) => { qc.setQueryData(soapKey, res); },
   });
 
   if (strategyQ.isLoading && viabilityQ.isLoading) {
@@ -101,6 +111,11 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   const light = VERDICT_LIGHT[result.verdict];
   const L = LIGHT[light];
   const note = soapQ.data?.data ?? null;
+  // The stored note's inputs changed since it was written (new info came in). We do NOT auto-spend — we
+  // surface a subtle hint and let the RN click Regenerate. Suppressed while a regenerate is in flight.
+  const isStale = soapQ.data?.stale === true && !regenerate.isPending;
+  const regenerating = regenerate.isPending;
+  const canRegenerate = enabled && strategy !== null;
   const headline = strategy?.primaryArgument
     || (v?.best_anchor?.upstream_verbatim ? `${v.claimed_canonical ?? claimedCondition} — secondary to ${v.best_anchor.upstream_verbatim}` : result.title);
 
@@ -126,10 +141,25 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
             </div>
           ) : null}
           <div className="mt-3 border-t border-[#E5DEC9] pt-2">
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Plan</div>
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-900">Plan</div>
             <div className="mt-0.5 text-[15px] font-medium text-slate-800"><span className="text-[#B08D3C]">→ </span>{note.plan}</div>
           </div>
-          <div className="mt-2 text-[11px] text-slate-400">{CONFIDENCE_LABEL[note.confidence] ?? note.confidence} · A physician confirms before any letter is signed.</div>
+          {isStale ? (
+            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800">
+              New information has come in since this summary was written. Click <span className="font-medium">Regenerate with new info</span> to refresh it.
+            </div>
+          ) : null}
+          <div className="mt-2 flex items-center justify-between">
+            <span className="text-[11px] text-slate-400">{CONFIDENCE_LABEL[note.confidence] ?? note.confidence} · A physician confirms before any letter is signed.</span>
+            <button
+              type="button"
+              onClick={() => regenerate.mutate()}
+              disabled={!canRegenerate || regenerating}
+              className="text-[11px] font-medium text-[#B08D3C] hover:underline disabled:cursor-not-allowed disabled:text-slate-300"
+            >
+              {regenerating ? 'Regenerating…' : 'Regenerate with new info'}
+            </button>
+          </div>
         </>
       ) : (
         // Deterministic fallback (AI summary loading or unavailable) — always useful.
@@ -138,8 +168,20 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
           <div className="mt-3 border-t border-[#E5DEC9] pt-2 text-[15px] font-medium text-slate-800">
             <span className="text-[#B08D3C]">→ </span>{result.nextAction}
           </div>
-          <div className="mt-2 text-[11px] text-slate-400">
-            {soapQ.isFetching ? 'Writing the summary…' : `${CONFIDENCE_LABEL[result.confidence] ?? result.confidence} · A physician confirms before any letter is signed.`}
+          <div className="mt-2 flex items-center justify-between">
+            <span className="text-[11px] text-slate-400">
+              {(soapQ.isFetching || regenerating) ? 'Writing the summary…' : `${CONFIDENCE_LABEL[result.confidence] ?? result.confidence} · A physician confirms before any letter is signed.`}
+            </span>
+            {canRegenerate && !soapQ.isFetching ? (
+              <button
+                type="button"
+                onClick={() => regenerate.mutate()}
+                disabled={regenerating}
+                className="text-[11px] font-medium text-[#B08D3C] hover:underline disabled:cursor-not-allowed disabled:text-slate-300"
+              >
+                {regenerating ? 'Regenerating…' : 'Regenerate with new info'}
+              </button>
+            ) : null}
           </div>
         </>
       )}

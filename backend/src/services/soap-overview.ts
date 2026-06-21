@@ -20,6 +20,10 @@ import { resolveAnthropicApiKey } from './letter-surgical-propose.js';
 
 const MODEL = process.env['SOAP_NOTE_MODEL'] || 'claude-sonnet-4-6';
 
+// Bump when the SoapNote SHAPE changes — the persisted-cache reader gates on it so an old-shape blob is
+// cleanly ignored (recompute) instead of silently mis-rendering a stale shape. (cost-safety 2026-06-21.)
+export const SOAP_NOTE_SCHEMA_VERSION = 1;
+
 export type SoapConfidence = 'high' | 'moderate' | 'low';
 export type SoapAction = 'draft' | 'get_records' | 'clarify' | 'physician_review' | 'reject';
 
@@ -179,4 +183,98 @@ export async function buildSoapNote(ctx: SoapContext): Promise<SoapNote | null> 
   } catch {
     return null; // API/network error → fail-open
   }
+}
+
+/**
+ * The input FINGERPRINT for a SOAP note: a sha256 over the EXACT rendered context the model is given
+ * (renderContext) plus the schema version. This is the grounding-input hash — it changes when, and only
+ * when, the facts that determine the note change (new dx, new SC anchor, new coverage, new key fact, a
+ * different theory/mechanism). An identical chart on re-open produces an identical fingerprint → cache hit
+ * → no LLM call. The schema version is folded in so a shape bump invalidates every stored note.
+ */
+export function soapNoteFingerprint(ctx: SoapContext): string {
+  return createHash('sha256')
+    .update(`v${SOAP_NOTE_SCHEMA_VERSION}\n${renderContext({ ...ctx, claimedCondition: String(ctx.claimedCondition ?? '') })}`)
+    .digest('hex');
+}
+
+/** A minimal Prisma-delegate view of the soap_overviews cache table — cast at the call site (mirrors how
+ *  the sanity-impression route accesses its own cache without widening the shared AppDb interface). */
+export interface SoapOverviewCacheDb {
+  soapOverview: {
+    findUnique: (a: { where: { caseId: string } }) => Promise<{ inputHash: string; schemaVersion: number; resultJson: unknown } | null>;
+    upsert: (a: { where: { caseId: string }; create: Record<string, unknown>; update: Record<string, unknown> }) => Promise<unknown>;
+  };
+}
+
+export interface SoapOverviewResult {
+  /** The note to render (stored or freshly generated), or null (fail-open). */
+  readonly data: SoapNote | null;
+  /** The current input fingerprint — the FE echoes it back so a regenerate targets the right inputs. */
+  readonly fingerprint: string;
+  /** True when a stored note exists for this case but its fingerprint NO LONGER matches the current inputs
+   *  (new info came in since it was written). The card shows a subtle "new info — regenerate" hint; it does
+   *  NOT auto-spend. Only meaningful when `data` is the stored (stale) note served on a non-regenerate read. */
+  readonly stale: boolean;
+  /** Whether this result came from the persisted cache ($0) or a fresh model call (informational). */
+  readonly cached: boolean;
+}
+
+/**
+ * Read-through SOAP cache (cost-safety 2026-06-21). The fix for "the SOAP note re-loads every time I open a
+ * chart": persist the generated note per case keyed by its input fingerprint and SERVE THE STORED ONE on
+ * open — regenerate ONLY when the fingerprint changed (new info) or the RN clicks "Regenerate with new
+ * info" (forceRegenerate). Durable across Lambda cold starts (DB row, not an in-process Map).
+ *
+ * Behavior:
+ *   - stored fingerprint matches current + shape current + not forced → SERVE STORED, no LLM ($0).
+ *   - forceRegenerate → always recompute + persist (the button).
+ *   - no stored note, or fingerprint changed, or stale shape → compute + persist. (On a plain open with a
+ *     CHANGED fingerprint we still serve the stale stored note immediately with stale=true rather than
+ *     auto-spending — honest staleness, no silent auto-fire. Set forceRegenerate to spend.)
+ *
+ * `generate` is injected (defaults to buildSoapNote) so the cache logic is unit-testable without the SDK.
+ * Fail-open everywhere: a cache read/write error never blocks; it degrades to a direct generate.
+ */
+export async function getOrBuildSoapNote(
+  db: SoapOverviewCacheDb,
+  caseId: string,
+  ctx: SoapContext,
+  opts?: { forceRegenerate?: boolean; generate?: (c: SoapContext) => Promise<SoapNote | null> },
+): Promise<SoapOverviewResult> {
+  const generate = opts?.generate ?? buildSoapNote;
+  const fingerprint = soapNoteFingerprint(ctx);
+
+  let stored: { inputHash: string; schemaVersion: number; resultJson: unknown } | null = null;
+  try { stored = await db.soapOverview.findUnique({ where: { caseId } }); }
+  catch { stored = null; /* fail-open: a cache-read error must never block the card */ }
+
+  const storedNote = (stored && stored.resultJson && typeof stored.resultJson === 'object')
+    ? (stored.resultJson as SoapNote) : null;
+  const storedFresh = stored !== null && storedNote !== null
+    && stored.schemaVersion === SOAP_NOTE_SCHEMA_VERSION && stored.inputHash === fingerprint;
+
+  // Plain open, stored note is current → serve it for $0. The whole point of the fix.
+  if (!opts?.forceRegenerate && storedFresh) {
+    return { data: storedNote, fingerprint, stale: false, cached: true };
+  }
+
+  // Plain open, but the stored note is STALE (inputs changed) and we have one to show → serve it with a
+  // staleness flag instead of silently re-billing. The RN clicks Regenerate to spend. (A stored note that
+  // is only shape-stale is treated as absent — we don't render an old shape.)
+  const storedShapeOk = stored !== null && storedNote !== null && stored.schemaVersion === SOAP_NOTE_SCHEMA_VERSION;
+  if (!opts?.forceRegenerate && storedShapeOk && storedNote !== null) {
+    return { data: storedNote, fingerprint, stale: true, cached: true };
+  }
+
+  // Compute: either forced, or no usable stored note exists. One bounded LLM call, then persist.
+  const note = await generate(ctx);
+  try {
+    await db.soapOverview.upsert({
+      where: { caseId },
+      create: { caseId, inputHash: fingerprint, schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: (note ?? null) as object | null },
+      update: { inputHash: fingerprint, schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: (note ?? null) as object | null },
+    });
+  } catch { /* best-effort cache write — never block the response */ }
+  return { data: note, fingerprint, stale: false, cached: false };
 }

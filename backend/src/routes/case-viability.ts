@@ -16,14 +16,20 @@ import type { AppDb } from '../services/db-types.js';
 import { caseViabilityEnabled, deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
 import { deriveAiViability, aiRoutePickerEnabled } from '../services/ai-viability.js';
 import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
-import { buildSoapNote, type SoapContext } from '../services/soap-overview.js';
+import { getOrBuildSoapNote, type SoapContext, type SoapOverviewCacheDb } from '../services/soap-overview.js';
 import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
 
 export function createCaseViabilityRouter(db: AppDb): Router {
   const router = Router();
   // AI-synthesized SOAP-note Overview (Ryan 2026-06-20) — the model writes a smooth S/O/A/P note from the
   // context the Overview already assembled (the FE POSTs it, like the sanity-impression). ONE bounded
-  // Sonnet call, fail-open to null (the card then shows the deterministic verdict line). Cached in-process.
+  // Sonnet call, fail-open to null (the card then shows the deterministic verdict line).
+  //
+  // COST-SAFETY (Ryan 2026-06-21): DB-PERSISTED read-through cache (soap_overviews), keyed by an input
+  // FINGERPRINT (hash of the chart inputs that feed the note). On open we SERVE THE STORED note for $0 —
+  // the model runs ONLY when the fingerprint changes (new info) or the RN clicks "Regenerate with new info"
+  // (body.forceRegenerate). The old in-process Map re-billed Sonnet on every cold Lambda (= every "in and
+  // out of charts"). Durable across cold starts. Response: { data, fingerprint, stale, cached }.
   router.post(
     '/cases/:id/soap-overview',
     requireRole(['admin', 'ops_staff', 'physician']),
@@ -31,8 +37,15 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       const caseId = String(req.params.id);
       const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
-      const ctx = (req.body ?? {}) as SoapContext;
-      res.json({ data: await buildSoapNote({ ...ctx, claimedCondition: String(ctx.claimedCondition ?? '') }) });
+      const body = (req.body ?? {}) as SoapContext & { forceRegenerate?: unknown };
+      const ctx: SoapContext = { ...body, claimedCondition: String(body.claimedCondition ?? '') };
+      const result = await getOrBuildSoapNote(
+        db as unknown as SoapOverviewCacheDb,
+        caseId,
+        ctx,
+        { forceRegenerate: body.forceRegenerate === true },
+      );
+      res.json(result);
     }),
   );
   router.get(

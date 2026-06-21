@@ -345,6 +345,26 @@ model SanityImpression {
   @@map("sanity_impressions")
 }
 
+// SOAP-overview cache (cost-safety 2026-06-21). The AI-synthesized Subjective/Objective/Assessment/Plan
+// note the RN Overview leads with (buildSoapNote, Sonnet) re-spent on EVERY chart/page open because it
+// was only cached in an in-process Map — a cold Lambda had an empty Map → a fresh billed call every open.
+// ONE row per case keyed by an input FINGERPRINT (hash of the chart inputs that feed the note). An
+// exact-fingerprint hit serves the stored note for $0; the model runs ONLY when the fingerprint changes
+// (new info) or the RN clicks "Regenerate with new info". schemaVersion gates an old-shape blob out.
+model SoapOverview {
+  id            String   @id @default(uuid())
+  caseId        String   @map("case_id")
+  inputHash     String   @map("input_hash") @db.VarChar(64)
+  schemaVersion Int      @default(1) @map("schema_version")
+  resultJson    Json?    @map("result_json")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([caseId], map: "soap_overview_case_uq")
+  @@index([caseId])
+  @@map("soap_overviews")
+}
+
 model Case {
   id                  String     @id
   veteranId           String     @map("veteran_id")

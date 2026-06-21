@@ -19,25 +19,32 @@ vi.mock('../auth/roles', () => ({
 }));
 
 function note(overrides: Partial<ChartNoteRecord> = {}): ChartNoteRecord {
-  return { id: 'NOTE-1', veteranId: 'VET-1', body: 'baseline note', createdBy: 'USER-1', createdAt: new Date('2026-05-24T00:00:00.000Z'), updatedAt: new Date('2026-05-24T00:00:00.000Z'), version: 1, ...overrides };
+  return { id: 'NOTE-1', veteranId: 'VET-1', body: 'baseline note', createdBy: 'USER-1', isQuickNote: false, createdAt: new Date('2026-05-24T00:00:00.000Z'), updatedAt: new Date('2026-05-24T00:00:00.000Z'), version: 1, ...overrides };
 }
 
 function makeDb(initial: ChartNoteRecord = note()) {
   let current = { ...initial };
   const chartNoteFindMany = vi.fn(async () => [current]);
-  const chartNoteFindFirst = vi.fn(async () => current);
+  // findFirst echoes the per-call args so the latest-quick endpoint's where:{isQuickNote} is honored in the
+  // mock: when the current row is NOT a quick note, a quick-note query resolves to null.
+  const chartNoteFindFirst = vi.fn(async (args?: { where?: { isQuickNote?: boolean } }) => {
+    if (args?.where?.isQuickNote === true && current.isQuickNote !== true) return null;
+    return current;
+  });
   const chartNoteCreate = vi.fn(async (args: { data: Partial<ChartNoteRecord> }) => { current = note({ ...args.data, version: 1 }); return current; });
   const chartNoteUpdate = vi.fn(async (args: { data: Record<string, unknown> }) => { current = { ...current, ...args.data, version: current.version + 1 } as ChartNoteRecord; return current; });
   const chartNoteDelete = vi.fn(async () => current);
   const veteranFindUnique = vi.fn(async () => ({ id: 'VET-1' }));
+  const appUserFindMany = vi.fn(async () => [{ name: 'Jane Ops', email: 'jane@example.com' }]);
   const activityLogCreate = vi.fn(async () => ({}));
   const tx = {
     chartNote: { findMany: chartNoteFindMany, findFirst: chartNoteFindFirst, create: chartNoteCreate, update: chartNoteUpdate, delete: chartNoteDelete },
     veteran: { findUnique: veteranFindUnique },
+    appUser: { findMany: appUserFindMany },
     activityLog: { create: activityLogCreate },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
-  return { db, spies: { chartNoteFindMany, chartNoteCreate, chartNoteUpdate, chartNoteDelete, activityLogCreate } };
+  return { db, spies: { chartNoteFindMany, chartNoteFindFirst, chartNoteCreate, chartNoteUpdate, chartNoteDelete, activityLogCreate } };
 }
 
 function appFor(db: AppDb) {
@@ -83,6 +90,49 @@ describe('chart-notes routes', () => {
   it('rejects empty body with 400', async () => {
     const res = await request(appFor(makeDb().db)).post('/api/v1/veterans/VET-1/chart-notes').send({ body: '   ' });
     expect(res.status).toBe(400);
+  });
+
+  // ---- Quick notes: flagged entries in the SAME stream (Ryan 2026-06-21) ----
+
+  it('creates a QUICK note with isQuickNote=true persisted + a quick_note_created activity', async () => {
+    mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/chart-notes').send({ body: 'Awaiting records', isQuickNote: true });
+    expect(res.status).toBe(201);
+    expect(res.body.data.isQuickNote).toBe(true);
+    expect(spies.chartNoteCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ isQuickNote: true, veteranId: 'VET-1' }) }));
+    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'quick_note_created' }) }));
+  });
+
+  it('defaults isQuickNote to false when omitted (ordinary staff note)', async () => {
+    const { db, spies } = makeDb();
+    const res = await request(appFor(db)).post('/api/v1/veterans/VET-1/chart-notes').send({ body: 'a normal note' });
+    expect(res.status).toBe(201);
+    expect(spies.chartNoteCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ isQuickNote: false }) }));
+    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'chart_note_created' }) }));
+  });
+
+  it('rejects a non-boolean isQuickNote with 400', async () => {
+    const res = await request(appFor(makeDb().db)).post('/api/v1/veterans/VET-1/chart-notes').send({ body: 'x', isQuickNote: 'yes' });
+    expect(res.status).toBe(400);
+  });
+
+  it('latest-quick returns the most-recent quick note (desc by createdAt) with a resolved author name', async () => {
+    const { db, spies } = makeDb(note({ id: 'Q1', body: 'newest quick', isQuickNote: true, createdBy: 'OPS' }));
+    const res = await request(appFor(db)).get('/api/v1/veterans/VET-1/chart-notes/latest-quick');
+    expect(res.status).toBe(200);
+    expect(res.body.data.body).toBe('newest quick');
+    expect(res.body.data.isQuickNote).toBe(true);
+    expect(res.body.data.createdByName).toBe('Jane Ops');
+    // It must query for quick notes only, newest first.
+    expect(spies.chartNoteFindFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ isQuickNote: true }), orderBy: { createdAt: 'desc' } }));
+  });
+
+  it('latest-quick returns null when the veteran has no quick note', async () => {
+    // current row is an ordinary note (isQuickNote=false) → the quick-only query resolves to null.
+    const res = await request(appFor(makeDb().db)).get('/api/v1/veterans/VET-1/chart-notes/latest-quick');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toBeNull();
   });
 
   it('lets the author (ops_staff) edit their own note', async () => {

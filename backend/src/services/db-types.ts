@@ -509,6 +509,8 @@ export interface ChartNoteRecord {
   veteranId: string;
   body: string;
   createdBy: string;
+  // Quick note = a flagged entry in this same stream (Ryan 2026-06-21). false = ordinary staff note.
+  isQuickNote: boolean;
   createdAt: Date;
   updatedAt: Date;
   version: number;

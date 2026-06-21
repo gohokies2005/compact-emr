@@ -36,6 +36,26 @@ export function createChartNotesRouter(db: AppDb): Router {
     }),
   );
 
+  // Latest quick note for a veteran (dashboard / case Overview surfaces the MOST-RECENT quick note,
+  // Ryan 2026-06-21). Uses the (veteran_id, is_quick_note, created_at) index; returns null when the
+  // veteran has no quick note yet. Cheaper than pulling the whole notes list just to read the latest.
+  router.get(
+    '/veterans/:veteranId/chart-notes/latest-quick',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const veteranId = String(req.params.veteranId);
+      const row = await db.chartNote.findFirst({ where: { veteranId, isQuickNote: true }, orderBy: { createdAt: 'desc' } });
+      if (row === null) { res.json({ data: null }); return; }
+      const sub = (row as { createdBy?: string }).createdBy;
+      const authors = typeof sub === 'string' && sub.length > 0
+        ? await db.appUser.findMany({ where: { cognitoSub: sub }, select: { name: true, email: true }, take: 1 })
+        : [];
+      const author = authors[0];
+      const createdByName = (author?.name && author.name.trim()) || author?.email || sub || 'Staff';
+      res.json({ data: { ...row, createdByName } });
+    }),
+  );
+
   router.post(
     '/veterans/:veteranId/chart-notes',
     requireRole(['admin', 'ops_staff', 'physician']), // physician leaves a note when sending a letter back
@@ -48,8 +68,8 @@ export function createChartNotesRouter(db: AppDb): Router {
         const veteran = await tx.veteran.findUnique({ where: { id: veteranId }, select: { id: true } });
         if (veteran === null) throw new HttpError(404, 'not_found', 'Veteran not found', { veteranId });
 
-        const row = await tx.chartNote.create({ data: { veteranId, body: parsed.body, createdBy: user.sub } });
-        await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'chart_note_created', veteranId, detailsJson: { noteId: row.id, veteranId } } });
+        const row = await tx.chartNote.create({ data: { veteranId, body: parsed.body, createdBy: user.sub, isQuickNote: parsed.isQuickNote } });
+        await tx.activityLog.create({ data: { actorUserId: user.sub, action: parsed.isQuickNote ? 'quick_note_created' : 'chart_note_created', veteranId, detailsJson: { noteId: row.id, veteranId, isQuickNote: parsed.isQuickNote } } });
         return row;
       });
 

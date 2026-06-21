@@ -20,9 +20,13 @@ function parseBody(body: Record<string, unknown>): string {
   return trimmed;
 }
 
-export function parseChartNoteCreate(body: unknown): { body: string } {
+export function parseChartNoteCreate(body: unknown): { body: string; isQuickNote: boolean } {
   if (!isRecord(body)) badRequest('Request body must be an object');
-  return { body: parseBody(body) };
+  // isQuickNote is OPTIONAL (default false). A quick note is just a flagged entry in this same stream,
+  // added via the fast "sticky" affordance for short notes (Ryan 2026-06-21).
+  const isQuickNoteRaw = body.isQuickNote;
+  if (isQuickNoteRaw !== undefined && typeof isQuickNoteRaw !== 'boolean') badRequest('isQuickNote must be a boolean', { field: 'isQuickNote' });
+  return { body: parseBody(body), isQuickNote: isQuickNoteRaw === true };
 }
 
 export function parseChartNotePatch(body: unknown): { version: number; body: string } {

@@ -28,6 +28,7 @@ import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { joinCaseLabel } from '../../components/messaging/caseLabel';
 import { EmailLogPanel } from '../../components/EmailLogPanel';
 import { ChartNotesPanel } from '../veterans/ChartNotesPanel';
+import { getLatestQuickNote } from '../../api/chart-notes';
 import { ConditionsPanel, MedicationsPanel, ProblemsPanel } from '../../components/ClinicalChartPanels';
 import { listCaseEmails } from '../../api/emails';
 import { getArtifactPdfUrl, postDraft, cancelDraftJob, getDraftConcurrency, uploadAndImportLetter, type DraftConcurrencyResult } from '../../api/drafter';
@@ -538,6 +539,10 @@ export function CaseDetailPage() {
       <div className="p-4">
         {tab === 'action' ? (
           <div className="space-y-6">
+            {/* Latest QUICK NOTE surfaced (Ryan 2026-06-21): the most-recent flagged quick note from the
+                chart-notes stream, shown at the top of the Overview so RNs see the at-a-glance status
+                without opening the Staff Notes tab. Self-hides when there is no quick note. */}
+            <LatestQuickNoteLine veteranId={c.veteranId} />
             {/* Abridged notes and records — the curated chart abridgement (Ryan 2026-06-12, renamed
                 from "Doctor Pack"). Auto-generates when the records finish parsing; the Regenerate
                 button inside is RN/admin-only (physician sees view-only). Now the first card in the
@@ -923,6 +928,27 @@ function InlineEditRow({ label, value, multiline = false, saving, onSave }: { re
           : <input className="input mt-2" value={draft} onChange={(e) => setDraft(e.target.value)} />)
       : <p className="mt-1 whitespace-pre-wrap text-sm text-slate-800">{value || <span className="text-slate-400">—</span>}</p>}
   </div>;
+}
+
+// Latest QUICK NOTE surfaced on the case Overview (Ryan 2026-06-21). Reads the most-recent flagged quick
+// note from the chart-notes stream via the dedicated latest-quick endpoint. Renders nothing when there is
+// no quick note yet, so the Overview stays clean for cases without one.
+function LatestQuickNoteLine({ veteranId }: { readonly veteranId: string }) {
+  const q = useQuery({
+    queryKey: ['chart-notes-latest-quick', veteranId],
+    queryFn: () => getLatestQuickNote(veteranId),
+    enabled: veteranId.length > 0,
+  });
+  const note = q.data?.data;
+  if (!note) return null;
+  return (
+    <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+      <span className="mt-px rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800">Quick note</span>
+      <span className="whitespace-pre-wrap">{note.body}
+        <span className="ml-1 text-xs text-amber-700/70">— {note.createdByName ?? note.createdBy} · {formatRelativeTime(note.createdAt)}</span>
+      </span>
+    </div>
+  );
 }
 
 function TransitionModal({ caseId, from, to, version, onClose, onDone }: { readonly caseId: string; readonly from: CaseStatus; readonly to: CaseStatus; readonly version: number; readonly onClose: () => void; readonly onDone: () => void }) {

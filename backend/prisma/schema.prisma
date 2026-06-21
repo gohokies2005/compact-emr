@@ -945,6 +945,10 @@ model ChartNote {
   veteranId String   @map("veteran_id")
   body      String
   createdBy String   @map("created_by")
+  // isQuickNote (Ryan 2026-06-21): quick notes are NOT a separate table/section — they are FLAGGED
+  // entries in this same staff-notes stream, added via the "sticky" fast-add for SHORT notes and
+  // rendered chronologically inline with a "Quick note" badge. The dashboard surfaces the latest one.
+  isQuickNote Boolean @default(false) @map("is_quick_note")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version   Int      @default(1)
@@ -952,6 +956,8 @@ model ChartNote {
 
   @@index([veteranId])
   @@index([createdAt])
+  // Latest-quick-note-by-veteran read (dashboard/Overview): filter isQuickNote + order by createdAt.
+  @@index([veteranId, isQuickNote, createdAt])
   @@map("chart_notes")
 }
 

@@ -5,6 +5,8 @@ export interface ChartNote {
   readonly veteranId: string;
   readonly body: string;
   readonly createdBy: string;
+  /** Resolved author display name (AppUser name/email); falls back to createdBy. (Ryan 2026-06-20) */
+  readonly createdByName?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly version: number;

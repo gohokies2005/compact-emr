@@ -33,6 +33,10 @@ export interface LetterPayload {
   // operator-imported finished PDF: it must be FINALIZED AS-IS (no re-render), never re-rendered by
   // the normal Approve. null on a plain DraftJob / older API responses (normal rendered lifecycle).
   readonly source?: string | null;
+  // Deterministic content-leak findings (editing meta-commentary like "canonical/template/rewrite as",
+  // or a database ID). Surfaced as a NON-BLOCKING editor warning so the physician/RN sees + fixes it
+  // before signing — the signature itself is never blocked (Ryan 2026-06-20). Empty/absent = clean.
+  readonly leaks?: readonly { readonly code: string; readonly note: string; readonly match: string }[];
 }
 
 export interface LetterSaveResult {

@@ -48,12 +48,12 @@ function NoteRow({ note, canEdit, canDelete, onChanged }: { readonly note: Chart
   if (editing) {
     return <div className="px-5 py-3.5">
       <div className="space-y-2"><textarea className="input min-h-20" maxLength={MAX} value={draft} onChange={(e) => setDraft(e.target.value)} /><div className="flex justify-end gap-2"><RowAction onClick={() => { setDraft(note.body); setEditing(false); }}>Cancel</RowAction><RowAction onClick={() => patch.mutate()} disabled={!draft.trim() || patch.isPending}>Save</RowAction></div></div>
-      <div className="mt-1"><span className="text-xs text-steel">Added by {note.createdBy} · {formatRelativeTime(note.createdAt)}</span></div>
+      <div className="mt-1"><span className="text-xs text-steel">Added by {note.createdByName ?? note.createdBy} · {formatRelativeTime(note.createdAt)}</span></div>
     </div>;
   }
   return <DataRow
     lead={<span className="block whitespace-pre-wrap font-normal text-slateInk">{note.body}</span>}
-    meta={`Added by ${note.createdBy} · ${formatRelativeTime(note.createdAt)}`}
+    meta={`Added by ${note.createdByName ?? note.createdBy} · ${formatRelativeTime(note.createdAt)}`}
     {...((canEdit || canDelete) ? { trailing: <>
       {canEdit ? <RowAction aria-label="Edit note" onClick={() => { setDraft(note.body); setEditing(true); }}>Edit</RowAction> : null}
       {canDelete ? <RowAction kind="danger" aria-label="Delete note" onClick={() => { if (window.confirm('Delete this note?')) del.mutate(); }}>Delete</RowAction> : null}

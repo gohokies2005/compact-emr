@@ -25,7 +25,14 @@ export function createChartNotesRouter(db: AppDb): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const veteranId = String(req.params.veteranId);
       const rows = await db.chartNote.findMany({ where: { veteranId }, orderBy: { createdAt: 'desc' } });
-      res.json({ data: rows });
+      // Resolve the author's Cognito sub → a real NAME, not a UUID (Ryan 2026-06-20, recurring).
+      // Batch-look-up the distinct authors; fall back to email, then (last resort) the raw id.
+      const subs = [...new Set(rows.map((r) => (r as { createdBy?: string }).createdBy).filter((s): s is string => typeof s === 'string' && s.length > 0))];
+      const users = subs.length > 0
+        ? await db.appUser.findMany({ where: { cognitoSub: { in: subs } }, select: { cognitoSub: true, name: true, email: true } })
+        : [];
+      const nameBySub = new Map(users.map((u) => [u.cognitoSub, (u.name && u.name.trim()) || u.email]));
+      res.json({ data: rows.map((r) => ({ ...r, createdByName: nameBySub.get((r as { createdBy?: string }).createdBy ?? '') ?? (r as { createdBy?: string }).createdBy ?? 'Staff' })) });
     }),
   );
 

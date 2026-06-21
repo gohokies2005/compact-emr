@@ -278,6 +278,18 @@ export function LetterEditorPage() {
         </Card>
 
         {message ? <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">{message}</div> : null}
+        {/* Content-leak warning (Ryan 2026-06-20): NON-BLOCKING, but VISIBLE — internal editing
+            meta-commentary ("canonical/template/rewrite as") or a database ID slipped into the letter
+            body. The signature is never blocked; this just makes the physician/RN see + fix it. */}
+        {letter.leaks && letter.leaks.length > 0 ? (
+          <div className="rounded-lg border border-rose-300 bg-rose-50 p-4">
+            <div className="text-sm font-semibold text-rose-900">This letter contains content that should be removed before delivery</div>
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-rose-800">
+              {letter.leaks.map((l) => <li key={l.code}>{l.note} &mdash; &ldquo;&hellip;{l.match}&hellip;&rdquo;</li>)}
+            </ul>
+            <div className="mt-2 text-xs text-rose-700">Edit the affected section below to remove it. (This does not block signing.)</div>
+          </div>
+        ) : null}
         <WarningList warnings={warnings} />
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">

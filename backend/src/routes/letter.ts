@@ -19,6 +19,7 @@ import { resolveRateCents } from '../services/pay-earnings.js';
 import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../services/chart-readiness.js';
 import { findChartReadinessOverride, resolveOverrideReason } from '../services/chart-readiness-override.js';
 import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash } from '../services/letter-current.js';
+import { detectLetterLeaks, blockingLeaks } from '../services/letter-leak-detector.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import {
   parseCredentialBlock,
@@ -42,7 +43,11 @@ const PRESIGN_TTL_SECONDS = 300;
 // the editor is read-only. 'delivered' staying OUT of this set is load-bearing for the ratified
 // sign/edit lifecycle (Ryan 2026-06-12): the approved/signed letter is send-only forever — no
 // editor path may mutate a delivered case (pinned by the G2 tests in letter-routes.test.ts).
-const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'rn_review', 'physician_review', 'correction_review']);
+// 'correction_requested' = the physician sent the letter BACK to the RN. The RN must be able to EDIT
+// it immediately in the full editor (it is NOT physician-signed, so nothing should bar editing) — not
+// just View/Redraft (Ryan 2026-06-20, Apolito). Editing creates a new version; it does not change
+// status. (correction_review = the RN actively reworking before sending back to the doctor.)
+const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'rn_review', 'physician_review', 'correction_requested', 'correction_review']);
 
 /**
  * G4 — ratified sign/edit lifecycle (Ryan 2026-06-12): "nurse cannot edit the version the doctor
@@ -243,6 +248,9 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           rendered: { pdfUrl, docxUrl },
           role: user.role,
           source: meta?.source ?? null,
+          // Loud warning whenever the letter is opened: forbidden content (editing meta-commentary,
+          // PMIDs) that blocks delivery and needs a re-draft (Ryan 2026-06-20). Empty = clean.
+          leaks: detectLetterLeaks(txt).map((l) => ({ code: l.code, note: l.note, match: l.match })),
         },
       });
     }),
@@ -593,6 +601,16 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       const cur = await resolveCurrent(caseId, c.currentVersion);
       if (cur === null) throw new HttpError(409, 'conflict', 'No current letter to approve.', { reason: 'no_letter', caseId });
       const text = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
+
+      // LEAK CHECK = WARN ONLY at signature (Ryan 2026-06-20, HARD: "the block belongs at the DRAFT,
+      // NEVER at the doctor's signature"). The physician has reviewed the letter — their signature must
+      // never be programmatically blocked. We LOG any residual leak for visibility, but we do NOT block
+      // approve. The real gate is at draft time (drafter pipeline) + the visible editor warning (GET
+      // /letter `leaks`), so the physician sees + fixes it during review, before signing.
+      const residualLeaks = blockingLeaks(detectLetterLeaks(text));
+      if (residualLeaks.length > 0) {
+        await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_approved_with_leak_warning', caseId, veteranId: c.veteranId, detailsJson: { caseId, leaks: residualLeaks.map((l) => l.code) } } });
+      }
 
       const newVersion = c.currentVersion + 1;
       const keys = {

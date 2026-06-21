@@ -43,11 +43,15 @@ import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseSt
 import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
 import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopPanels';
 import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
-import { CaseViabilityCard } from '../../components/CaseViabilityCard';
+// CaseViabilityCard mount REMOVED from this page (Ryan 2026-06-20, item #64): the static M/E
+// (mechanism/evidence) "Anchor viability" ratings card is erased from the case UI entirely. The
+// AI route-picker plan (RecommendedPlanCard / the SOAP-note Overview headline) is its replacement.
+// The component file + its standalone tests are kept (it still serves other lanes); only the mount
+// + import are gone here.
 import { RecommendedPlanCard } from '../../components/RecommendedPlanCard';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 import { PreDraftSanityImpression, PostDraftSanityImpression } from '../../components/SanityImpressionLine';
-import { useChartReadiness } from '../../hooks/useChartReadiness';
+import { useChartReadiness, type UseChartReadiness } from '../../hooks/useChartReadiness';
 import { formatRelativeTime } from '../../lib/date';
 import { formatFileSize, formatPageCount } from '../../lib/fileMeta';
 import { documentDisplayName } from '../../lib/docName';
@@ -79,16 +83,24 @@ export function decidePollIntervalMs(status: CaseStatus | undefined): number | f
 // the veteran chart uses, operating on the same veteran data via the same API. The vet-scoped tail
 // (Documents + the clinical sections) is sourced from the shared SHARED_TABS list so the claim page and
 // the veteran chart can't drift; the claim page prepends Overview + its claim-scoped tabs.
-// Order is Ryan-specified (item 12): Overview, Draft jobs, Staff Notes, Email, Messages, then the
-// shared tail (Documents, SC Conditions, Active Problems, Medications).
+// Order is Ryan-specified: Action, Summary, Ask Aegis, Draft jobs, Staff Notes, Email, Messages, then
+// the shared tail (Documents, SC Conditions, Active Problems, Medications), Decisions last.
 // Ask Aegis (advisory Q&A) and Decisions & overrides used to render as ALWAYS-ON page sections
 // below the tab card, so they appeared on every tab (Ryan 2026-06-12: "everywhere, in every tab").
-// They are now their OWN tabs inside the switch: Ask Aegis right after Overview; Decisions & overrides
-// pinned LAST (lowest-yield, after Medications). Doctor Pack was removed from this page entirely — it
+// They are now their OWN tabs inside the switch. Doctor Pack was removed from this page entirely — it
 // auto-generates when the case is sent to the physician and lives on the physician review page.
-type TabId = 'overview' | 'advisory' | 'drafts' | 'notes' | 'emails' | 'messages' | SharedTabId | 'decisions';
+//
+// CASE-PAGE RESTRUCTURE (Ryan 2026-06-20): the old single "Overview" tab is split into two:
+//   • ACTION (renamed from Overview) — the OPERATIONAL view: assignments, draft jobs, chart-extraction
+//     status, the verdict/next-action, delivery. The drafter/review panel set + the abridged-docs card
+//     live here, unchanged (same gates).
+//   • SUMMARY (new) — a clean CLINICAL read: the AI SOAP note at the TOP, then framing + opinion + cost,
+//     then "Pertinent service-connected problems" (the granted-SC conditions) and "Other pertinent
+//     medical history" (active problems NOT service-connected). No actions — a calm narrative surface.
+type TabId = 'action' | 'summary' | 'advisory' | 'drafts' | 'notes' | 'emails' | 'messages' | SharedTabId | 'decisions';
 const TABS: readonly TabItem<TabId>[] = [
-  { id: 'overview', label: 'Overview' },
+  { id: 'action', label: 'Action' },
+  { id: 'summary', label: 'Summary' },
   { id: 'advisory', label: 'Ask Aegis' },
   { id: 'drafts', label: 'Draft jobs' },
   NOTES_TAB,
@@ -109,7 +121,7 @@ export function CaseDetailPage() {
   const { user } = useAuth();
   const role: Role = user?.role ?? 'ops_staff';
   const qc = useQueryClient();
-  const [tab, setTab] = useState<TabId>('overview');
+  const [tab, setTab] = useState<TabId>('action');
   const [pendingTo, setPendingTo] = useState<CaseStatus | null>(null);
   const [signOffOpen, setSignOffOpen] = useState(false);
   const [redraftGate1Open, setRedraftGate1Open] = useState(false); // Gate-1 checklist before a redraft
@@ -524,7 +536,7 @@ export function CaseDetailPage() {
     <div className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       <TabBar tabs={TABS} active={tab} onChange={setTab} />
       <div className="p-4">
-        {tab === 'overview' ? (
+        {tab === 'action' ? (
           <div className="space-y-6">
             {/* Abridged notes and records — the curated chart abridgement (Ryan 2026-06-12, renamed
                 from "Doctor Pack"). Auto-generates when the records finish parsing; the Regenerate
@@ -583,30 +595,21 @@ export function CaseDetailPage() {
                       float up when the pre-draft slots are absent). Keys ride the outermost element so a
                       poll-driven visibility flip never remounts siblings (the L525 stability discipline). */}
 
-                  {/* 1. Background & argument + the veteran's theory (subjective). The card now
-                      self-wraps in SectionCard (Phase 2 uniform-frame refactor) — no page-side wrap. */}
-                  {/* -1. THE calm consolidated SOAP-note Overview (DECOUPLED 2026-06-20) — one narrative + a
-                      traffic light + one next action. Renders DETERMINISTICALLY from computeReadinessVerdict
-                      (the same brain as the old readiness card) over fast cached data, so it ALWAYS shows
-                      instantly; the AI route-picker plan is an optional prose upgrade, never a gate. This
-                      REPLACES the separate "Case readiness" card (same verdict, one calm lead, no duplicate). */}
-                  {p.canSendFirstDraft ? (
-                    <SoapOverviewCard
-                      key="soap-overview"
-                      caseId={caseId}
-                      claimedCondition={c.claimedCondition}
-                      veteranStatement={c.veteranStatement ?? null}
-                      hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}
-                    />
-                  ) : null}
+                  {/* SOAP-note Overview RELOCATED to the new Summary tab (Ryan 2026-06-20 restructure):
+                      the clinical narrative is the Summary surface; the Action tab is the operational view.
+                      What stays here is the operational story — chart extraction (what we read), the
+                      assignments, the send affordance, and (collapsed) the raw analysis. */}
 
                   {/* Chart extraction (objective — "what we actually read") stays visible; it also carries
                       the reprocess/re-OCR actions. Wider gate so it shows during drafting / halt / rn_review. */}
                   {p.canSeeExtractionCoverage ? <ExtractionCoveragePanel key="extraction-coverage" caseId={caseId} /> : null}
 
-                  {/* The dense engine panels are now SUBSUMED by the SOAP note above (Ryan 2026-06-20) — kept
-                      one click away as raw data + the live fallback if an API call is down. Children mount
-                      even when collapsed, so the sanity cache + the readiness overlay still warm. */}
+                  {/* The dense engine panels are kept one click away as raw data + the live fallback if an
+                      API call is down. Children mount even when collapsed, so the sanity cache + the
+                      readiness overlay still warm. The clinical SOAP-note read now lives on the Summary tab.
+                      The static M/E "Anchor viability" card (CaseViabilityCard) was REMOVED here entirely
+                      (Ryan 2026-06-20, item #64) — the AI route-picker plan (RecommendedPlanCard) is the
+                      replacement; no M/E ratings render anywhere on this page. */}
                   {p.canSendFirstDraft ? (
                     <details key="full-analysis" className="mb-4 rounded-lg border border-slate-200 bg-white">
                       <summary className="cursor-pointer select-none px-4 py-2.5 text-sm font-medium text-slate-600 hover:text-slate-800">
@@ -614,7 +617,6 @@ export function CaseDetailPage() {
                       </summary>
                       <div className="space-y-4 px-2 pb-3">
                         <StrategyPreviewCard key="strategy" caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
-                        <CaseViabilityCard key="viability" caseId={caseId} completeness={chartReadiness.completeness} />
                         <RecommendedPlanCard key="recommended-plan" caseId={caseId} hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0} />
                         <PreDraftSanityImpression key="sanity" caseId={caseId} claimedCondition={c.claimedCondition} />
                       </div>
@@ -737,18 +739,25 @@ export function CaseDetailPage() {
 
             {/* Post-approval RN delivery panel — invoice email + cover memo + Stripe link. Shows only
                 at delivered/paid, by which point the drafting/review panels above have cleared.
-                Admin/ops_staff only. (P2 restructure 2026-06-14: relocated into the Overview tab —
+                Admin/ops_staff only. (P2 restructure 2026-06-14: relocated into the Action tab —
                 gate unchanged.) */}
             {(c.status === 'delivered' || c.status === 'paid') && (role === 'admin' || role === 'ops_staff') ? (
               <DeliveryPanel caseId={caseId} onVerifyLetter={openLetterPdf} hasLetterPdf={!!viewableLetterJob} />
             ) : null}
 
             {/* Assignments moved INTO the case-top-panels story region (slot 5, 2026-06-16). */}
-
-            {/* The Overview summary fields (Framing / Upstream SC / Veteran statement / In-service
-                event / Drafting cost) — the tail of the Overview tab. */}
-            <OverviewTab c={c} saving={patch.isPending} onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })} />
+            {/* The framing / opinion / cost summary fields + the clinical SC vs. medical-history read
+                MOVED to the new Summary tab (Ryan 2026-06-20 restructure) — the Action tab is purely the
+                operational surface. */}
           </div>
+        ) : null}
+        {tab === 'summary' ? (
+          <SummaryTab
+            c={c}
+            chartReadiness={chartReadiness}
+            saving={patch.isPending}
+            onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })}
+          />
         ) : null}
         {tab === 'advisory' ? <AdvisoryPanel caseId={caseId} alwaysOpen /> : null}
         {tab === 'drafts' ? <DraftJobsTab caseId={caseId} /> : null}
@@ -809,7 +818,41 @@ function EditableClaimCondition({ c, onSave }: { readonly c: CaseDetail; readonl
 
 type EditableField = 'framingChoice' | 'upstreamScCondition' | 'veteranStatement' | 'inServiceEvent';
 
-function OverviewTab({ c, onSave, saving }: { readonly c: CaseDetail; readonly onSave: (field: EditableField, value: string) => void; readonly saving: boolean }) {
+// SUMMARY TAB (Ryan 2026-06-20 restructure) — a clean CLINICAL read, no actions. Top-to-bottom:
+//   1. the AI-synthesized SOAP-note Overview (once strategy/chart data exists);
+//   2. the framing / opinion-statement / cost summary fields (editable inline, the old Overview tail);
+//   3. "Pertinent service-connected problems" — the veteran's GRANTED-SC conditions;
+//   4. "Other pertinent medical history" — active problems that are NOT service-connected.
+// The SC-vs-problem split reuses the SAME veteran data the chart uses (getVeteran): scConditions with
+// status 'service_connected' are the SC list; activeProblems is the medical-history list. Read-only
+// here (edits happen on the SC Conditions / Active Problems tabs); this surface is for reading.
+function SummaryTab({ c, chartReadiness, onSave, saving }: {
+  readonly c: CaseDetail;
+  readonly chartReadiness: UseChartReadiness;
+  readonly onSave: (field: EditableField, value: string) => void;
+  readonly saving: boolean;
+}) {
+  return (
+    <div className="space-y-6">
+      {/* 1. The AI SOAP note leads — the clinical narrative (Subjective / Objective / Assessment / Plan)
+          with the deterministic verdict traffic-light + next action as the always-instant fallback. */}
+      <SoapOverviewCard
+        caseId={c.id}
+        claimedCondition={c.claimedCondition}
+        veteranStatement={c.veteranStatement ?? null}
+        hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}
+      />
+
+      {/* 2. Framing / opinion / cost — the case summary fields. */}
+      <CaseSummaryFields c={c} saving={saving} onSave={onSave} />
+
+      {/* 3 + 4. The clinical SC-vs-medical-history read, sourced from the shared veteran chart data. */}
+      <SummaryClinicalLists veteranId={c.veteranId} />
+    </div>
+  );
+}
+
+function CaseSummaryFields({ c, onSave, saving }: { readonly c: CaseDetail; readonly onSave: (field: EditableField, value: string) => void; readonly saving: boolean }) {
   // Authoritative total from the backend aggregate over ALL DraftJobs (c.draftingCostUsd) — the
   // old client-side sum over the truncated take:5 c.draftJobs list missed older cost-bearing runs
   // and showed "—" (Ryan 2026-06-04). null === no recorded cost on any job → honest "—".
@@ -826,6 +869,40 @@ function OverviewTab({ c, onSave, saving }: { readonly c: CaseDetail; readonly o
       </div>
     </div>
   </div>;
+}
+
+// Read-only clinical lists for the Summary tab — pulls the SAME veteran detail the chart uses
+// (['veteran', veteranId]; RQ dedupes with the clinical tabs) and splits it into the two product
+// sections Ryan asked for. "Pertinent service-connected problems" = scConditions whose status is
+// 'service_connected' (granted SC); "Other pertinent medical history" = the active problems list
+// (conditions the veteran has that are NOT service-connected). Editing is on the dedicated tabs.
+function SummaryClinicalLists({ veteranId }: { readonly veteranId: string }) {
+  const veteran = useQuery({ queryKey: ['veteran', veteranId], queryFn: () => getVeteran(veteranId), enabled: veteranId.length > 0 });
+  if (veteran.isLoading) return <div className="text-sm text-slate-500">Loading chart…</div>;
+  const v = veteran.data?.data;
+  const scConnected = (v?.scConditions ?? []).filter((r) => r.status === 'service_connected');
+  const otherHistory = v?.activeProblems ?? [];
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      <TabSection title="Pertinent service-connected problems">
+        {scConnected.length === 0 ? (
+          <EmptyState title="None recorded" message="No service-connected conditions are on this veteran's chart yet." />
+        ) : (
+          scConnected.map((r) => {
+            const meta = [r.dcCode ? `DC ${r.dcCode}` : null, r.ratingPct != null ? `${r.ratingPct}%` : null].filter(Boolean).join(' · ');
+            return <DataRow key={r.id} lead={formatConditionLabel(r.condition)} {...(meta ? { meta } : {})} trailing={<StatusChip tone="good">Service-connected</StatusChip>} />;
+          })
+        )}
+      </TabSection>
+      <TabSection title="Other pertinent medical history">
+        {otherHistory.length === 0 ? (
+          <EmptyState title="None recorded" message="No non-service-connected active problems are on this veteran's chart yet." />
+        ) : (
+          otherHistory.map((r) => <DataRow key={r.id} lead={formatConditionLabel(r.problem)} {...(r.notes ? { meta: r.notes } : {})} />)
+        )}
+      </TabSection>
+    </div>
+  );
 }
 
 function InlineEditRow({ label, value, multiline = false, saving, onSave }: { readonly label: string; readonly value: string; readonly multiline?: boolean; readonly saving: boolean; readonly onSave: (value: string) => void }) {

@@ -75,20 +75,23 @@ function renderPage() {
   );
 }
 
-describe('CaseDetailPage — pre-draft Overview story order (locked)', () => {
-  it('renders the SOAP-lead order (2026-06-20): Chart extraction → [collapsed: Background → Anchor viability → Recommended plan] → Assignments → Send to Drafter', async () => {
+describe('CaseDetailPage — pre-draft Action-tab story order (locked)', () => {
+  it('renders the Action-tab order (2026-06-20 restructure): Chart extraction → [collapsed: Background → Recommended plan] → Assignments → Send to Drafter', async () => {
     renderPage();
-    // The AI SOAP note now LEADS (one calm "Case overview" card); Chart extraction stays visible; the dense
-    // analysis panels (Background / Anchor viability / Recommended plan) are now nested in a collapsed
-    // "View full analysis" <details> — they still MOUNT (so they're in the DOM), just below extraction.
+    // RESTRUCTURE (2026-06-20): the clinical SOAP note moved to the new Summary tab; the static M/E
+    // "Anchor viability" card (CaseViabilityCard) was ERASED from the page (item #64). The Action tab is
+    // the operational story: Chart extraction stays visible; the dense analysis panels (Background &
+    // argument / Recommended plan) are nested in a collapsed "View full analysis" <details> — they still
+    // MOUNT (so they're in the DOM), just below extraction.
     const extraction = await screen.findByRole('heading', { name: 'Chart extraction' });
     const background = screen.getByRole('heading', { name: 'Background & argument' });
-    const assessment = screen.getByRole('heading', { name: 'Anchor viability' });
     const plan = screen.getByRole('heading', { name: 'Recommended plan' });
     const assignments = screen.getByRole('heading', { name: 'Assignments' });
     const send = screen.getByRole('heading', { name: 'Send to Drafter' });
+    // The erased M/E card must NOT render anywhere on the page.
+    expect(screen.queryByRole('heading', { name: 'Anchor viability' })).not.toBeInTheDocument();
 
-    const ordered = [extraction, background, assessment, plan, assignments, send];
+    const ordered = [extraction, background, plan, assignments, send];
     // each heading must precede the next in document order
     ordered.reduce((prev, cur) => {
       expect(prev.compareDocumentPosition(cur) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

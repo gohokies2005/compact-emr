@@ -86,8 +86,10 @@ describe('CaseDetailPage', () => {
   it('locks the claim tab order, drops Clarifications, and renders a sticky tab bar', async () => {
     renderPage();
     await screen.findByText('Hypertension');
+    // Case-page restructure (Ryan 2026-06-20): Overview → Action (operational), + a new Summary
+    // (clinical SOAP-note read) tab right after it.
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
-      'Overview', 'Ask Aegis', 'Draft jobs', 'Staff Notes', 'Email', 'Messages',
+      'Action', 'Summary', 'Ask Aegis', 'Draft jobs', 'Staff Notes', 'Email', 'Messages',
       'Documents', 'SC Conditions', 'Active Problems', 'Medications',
       'Decisions',
     ]);
@@ -100,15 +102,15 @@ describe('CaseDetailPage', () => {
     expect(tablist.className).toContain('bg-ivory');
   });
 
-  // P2 case-page tab/header restructure, 2026-06-14 (Ryan, Wayne Moseley layout): the patient
-  // header + banners are PINNED above the sticky tab bar and render on every tab, while the action
-  // panels (DoctorPack / C8c drafter-review set / Delivery / Assignments) and the summary fields
-  // moved INTO the Overview tab. These two assertions lock the new shape.
+  // Case-page tab/header restructure (Ryan 2026-06-20): the patient header + banners stay PINNED above
+  // the sticky tab bar (render on every tab). The OPERATIONAL panels (DoctorPack / drafter-review set /
+  // Delivery / Assignments) live on the ACTION tab; the framing/opinion/cost summary fields moved to the
+  // new SUMMARY tab. These assertions lock the new shape.
   it('keeps the patient header pinned on EVERY tab (name renders regardless of selected tab)', async () => {
     renderPage();
-    // Default tab (Overview): the name link is present.
+    // Default tab (Action): the name link is present.
     expect(await screen.findByRole('link', { name: /Doe, Jane/i })).toBeInTheDocument();
-    // Switch to a non-Overview tab and confirm the persistent header still shows the name + the
+    // Switch to a non-Action tab and confirm the persistent header still shows the name + the
     // status badge (both live ABOVE the tab bar now).
     await userEvent.click(screen.getByRole('tab', { name: 'Medications' }));
     expect(screen.getByRole('link', { name: /Doe, Jane/i })).toBeInTheDocument();
@@ -118,22 +120,24 @@ describe('CaseDetailPage', () => {
     expect(screen.getByRole('link', { name: /Doe, Jane/i })).toBeInTheDocument();
   });
 
-  it('renders the action/summary surface (Assignments + summary fields) INSIDE the Overview tab only', async () => {
+  it('renders Assignments on the Action tab and the summary fields on the Summary tab', async () => {
     mockRole = 'admin'; // Assignments panel is admin/ops_staff-only
     renderPage();
     await screen.findByText('Hypertension');
-    // Overview is the default tab: the summary fields + the Assignments panel render.
-    expect(screen.getByText('Framing')).toBeInTheDocument();
+    // Action is the default tab: the Assignments panel renders; the summary fields do NOT (they moved).
+    expect(screen.getByText('Assignments')).toBeInTheDocument();
+    expect(screen.queryByText('Drafting cost (API)')).not.toBeInTheDocument();
+    // The Summary tab carries the framing / opinion / cost fields.
+    await userEvent.click(screen.getByRole('tab', { name: 'Summary' }));
+    expect(await screen.findByText('Framing')).toBeInTheDocument();
     expect(screen.getByText('In-service event')).toBeInTheDocument();
     expect(screen.getByText('Drafting cost (API)')).toBeInTheDocument();
-    expect(screen.getByText('Assignments')).toBeInTheDocument();
-    // Leave Overview → the Overview-scoped surface unmounts (it is NOT a persistent page section).
-    await userEvent.click(screen.getByRole('tab', { name: 'Medications' }));
-    expect(screen.queryByText('Drafting cost (API)')).not.toBeInTheDocument();
+    // The Summary tab is a clinical read, not the action surface — Assignments is NOT here.
     expect(screen.queryByText('Assignments')).not.toBeInTheDocument();
-    // Back to Overview → it returns.
-    await userEvent.click(screen.getByRole('tab', { name: 'Overview' }));
-    expect(await screen.findByText('Drafting cost (API)')).toBeInTheDocument();
+    // Back to Action → the summary fields unmount, Assignments returns.
+    await userEvent.click(screen.getByRole('tab', { name: 'Action' }));
+    expect(await screen.findByText('Assignments')).toBeInTheDocument();
+    expect(screen.queryByText('Drafting cost (API)')).not.toBeInTheDocument();
   });
 
   it('exposes the veteran clinical chart tabs on the case page', async () => {

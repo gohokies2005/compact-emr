@@ -13,6 +13,7 @@ import {
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
+import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 import { getCase, type SignOffAnswers } from '../../api/cases';
 import { formatNameLastFirst } from '../../lib/format';
 import { approveLetter, finalizeImportLetter, getLetter } from '../../api/letter';
@@ -67,9 +68,14 @@ export function PhysicianReviewPage() {
   // an absent field means no banner — never block the review page on the pre-flight.
   const approveBlockers = c.approveBlockers ?? [];
 
+  // The grade (shipRecommendation) is ADVISORY, not a gate (Ryan 2026-06-20): a C-grade letter the
+  // physician judges acceptable (e.g. a known PACT-rhinitis risk the customer accepts) must still be
+  // reviewable + deliverable. The old `shipRecommendation === 'ship'` clause hid the Edit/Approve
+  // panel for any non-ship grade → "Not ready for review" dead-end (Pichette). The GradeChip below
+  // still shows the grade, so the physician sees it's a C and decides. Backend /approve has no grade
+  // gate. Render the panel for ANY completed letter in physician_review.
   const readyForPhysician =
     c.runComplete === true &&
-    c.shipRecommendation === 'ship' &&
     c.status === 'physician_review' &&
     latestDraftJob !== null;
 
@@ -139,6 +145,19 @@ export function PhysicianReviewPage() {
             </Link>
           </p>
         </Card>
+
+        {/* Clinical SOAP-note Overview at the top of the physician review (Ryan 2026-06-20, item #5):
+            the same calm AI-synthesized Subjective / Objective / Assessment / Plan read the RN sees on
+            the case Summary tab, so the physician opens to the clinical picture before the letter +
+            sign-off. Deterministic verdict fallback means it always shows; hasUnreadPages is false by
+            physician_review (the chart's read job is done). The abridged-docs Doctor Pack stays below
+            the letter panel (above the sign-off popup). */}
+        <SoapOverviewCard
+          caseId={c.id}
+          claimedCondition={c.claimedCondition}
+          veteranStatement={c.veteranStatement ?? null}
+          hasUnreadPages={false}
+        />
 
         {isImportedLetter && c.status === 'physician_review' ? (
           // Imported letter ready to finalize (2026-06-14). Distinct from the drafter_run ready panel:

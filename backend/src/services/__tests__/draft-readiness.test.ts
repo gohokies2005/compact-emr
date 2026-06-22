@@ -212,6 +212,46 @@ describe('evaluateDraftReadiness — same-brain (route-picker plan + chart facts
     expect(r.unclassifiedGaps).toBeUndefined();
   });
 
+  // ── #1 (Hackworth, 2026-06-21): the dx check must NOT bail on a canon-unknown claim surface. The vendored
+  // canon returns null for "Lumbar Back/Sciatica"/"lumbago"/"sciatica"; the old code returned false before the
+  // on-file/digest scan, false-flagging a documented lumbar dx.
+  it('#1 HACKWORTH: "Lumbar Back/Sciatica" is documented by an on-file "Lumbago" via the local synonym pre-fold', () => {
+    const r = evaluateDraftReadiness(base({
+      claimedCondition: 'Lumbar Back/Sciatica', problemNames: ['Lumbago'], scConditionNames: [],
+      // no plan — pure deterministic path, isolating the canon/bail fix.
+      routePlan: null,
+    }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(true);
+  });
+
+  it('#1 HACKWORTH: "Lumbar Back/Sciatica" is documented by an on-file "Sciatica"', () => {
+    const r = evaluateDraftReadiness(base({
+      claimedCondition: 'Lumbar Back/Sciatica', problemNames: ['Sciatica'], routePlan: null,
+    }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(true);
+  });
+
+  it('#1 HACKWORTH: "Lumbar Back/Sciatica" is documented by a digest assessment line mentioning lumbago', () => {
+    const r = evaluateDraftReadiness(base({
+      claimedCondition: 'Lumbar Back/Sciatica', problemNames: ['Tinnitus'], routePlan: null,
+      chartDigest: 'Assessment: chronic lumbago with radicular symptoms, ongoing PT.',
+    }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(true);
+  });
+
+  it('#1 GUARD: a canon-unknown claim with NOTHING matching on file STILL flags missing (no over-fold)', () => {
+    const r = evaluateDraftReadiness(base({
+      claimedCondition: 'Lumbar Back/Sciatica', problemNames: ['Tinnitus'], scConditionNames: ['Hypertension'],
+      chartDigest: 'Sleep study: AHI 32. PFT normal.', routePlan: null,
+    }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(false);
+  });
+
+  it('#1 GUARD: GERD (canon-known) not on file still flags missing — the raw fall-through does NOT fire for it', () => {
+    const r = evaluateDraftReadiness(base({ claimedCondition: 'GERD', problemNames: ['Tinnitus'], routePlan: null }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(false);
+  });
+
   it('#3 CROSS-BUCKET: "current diagnosis of the back injury" classifies to dx ONLY, not also event', () => {
     // This single fact trips both the dx (diagnos) and event (injur) cues. It must downgrade dx ONLY; with a
     // DD-214 on file the event essential stays satisfied deterministically — it must NOT be marked missing by

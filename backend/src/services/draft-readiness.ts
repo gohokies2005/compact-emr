@@ -209,12 +209,53 @@ function hasDoc(documents: { filename: string; docTag: string | null }[], re: Re
   return documents.some((d) => re.test(d.filename) || (d.docTag != null && re.test(d.docTag)));
 }
 
+// ── #1 (2026-06-21, Hackworth): the vendored conditionCanon misses several common claim surfaces — it returns
+// null for "Lumbar Back/Sciatica", "lumbago", and "sciatica" (its lumbar pattern needs spine/strain/disc/etc.).
+// A null claim canon used to BAIL the whole dx check (claimedCanon empty → return false) BEFORE the on-file /
+// digest scan, false-flagging Hackworth's documented lumbar dx. This in-repo, EMR-owned synonym pre-fold maps
+// those surfaces to the SAME canonical label the vendored table uses, so the claim and the on-file "lumbago"/
+// "sciatica" fold together WITHOUT touching the sha-pinned vendor .cjs (re-vendoring the FRN canonical source
+// is a separate drafter-side change). Cheap, additive, fail-safe: an unmatched string returns null (no fold).
+const LOCAL_CANON_SYNONYMS: ReadonlyArray<readonly [RegExp, string]> = [
+  // Lumbar/back family — the surfaces the vendored table's lumbar pattern does not cover.
+  [/\b(?:lumbago|sciatica|sciatic|lumbar back|lumbar radiculopathy|low ?back|back pain|back injury|back strain|back condition|back disability)\b/i, 'Lumbar / back'],
+];
+function localCanonPrefold(s: string): string | null {
+  for (const [re, label] of LOCAL_CANON_SYNONYMS) if (re.test(s)) return label;
+  return null;
+}
+/** The canonical label for a surface string: the in-repo synonym pre-fold first (covers surfaces the vendored
+ *  table misses), then the vendored canonicalizer. Null when neither recognizes it. */
+function canonLabel(canon: ((s: string) => string | null) | undefined, s: string): string | null {
+  const local = localCanonPrefold(s);
+  if (local !== null) return local;
+  return canon ? canon(s) : null;
+}
+
+// Raw-token fall-through: the discriminating content words of the claim (lower-cased, alphanumerics, length ≥ 4,
+// stopwords dropped). Used ONLY when neither the structured fold NOR the canonicalizer can place the claim, so a
+// claim the canon does not know ("Lumbar Back/Sciatica" with the canon unavailable) can still match an on-file
+// "lumbago"/"sciatica" or a digest line by substring. ≥ 4 chars avoids matching "the"/"and"/short noise.
+const TOKEN_STOPWORDS: ReadonlySet<string> = new Set(['with', 'and', 'the', 'for', 'left', 'right', 'chronic', 'acute', 'disorder', 'condition', 'syndrome', 'disease']);
+function claimTokens(claimed: string[]): string[] {
+  const toks = new Set<string>();
+  for (const c of claimed) {
+    for (const t of (c ?? '').toLowerCase().split(/[^a-z0-9]+/)) {
+      if (t.length >= 4 && !TOKEN_STOPWORDS.has(t)) toks.add(t);
+    }
+  }
+  return [...toks];
+}
+
 /**
  * Does the claimed condition appear as a documented diagnosis on file? Matches the claim against the problem
- * list AND the granted-SC list (a granted SC condition is dx-proof) AND — when the vendored canonicalizer is
- * available — the extracted-document digest, all CANONICALIZED so "Lumbar Back/Sciatica" matches an on-file
- * "lumbago"/"sciatica" (the normalizeName-only check missed these). Fail-open: canonicalizer absent → falls
- * back to normalizeName synonym folding against the structured lists only (today's behavior).
+ * list AND the granted-SC list (a granted SC condition is dx-proof) AND the extracted-document digest, folded
+ * through the in-repo synonym pre-fold + the vendored conditionCanon so "Lumbar Back/Sciatica" matches an
+ * on-file "lumbago"/"sciatica". When NEITHER fold can place the claim (#1 Hackworth bail fix), it does NOT
+ * give up — it falls through to a raw discriminating-token substring scan against the structured lists and the
+ * digest, so a canon-unknown claim can still be satisfied by its own words. Fail-open: over-match toward
+ * "documented" is the safe direction here (a false present is caught by the same-brain plan + Gate-2 backstop;
+ * a false missing needlessly blocks an RN on a documented dx, which was the Hackworth bug).
  */
 function conditionDocumented(
   claimed: string[],
@@ -227,23 +268,38 @@ function conditionDocumented(
   const onFile = [...problemNames, ...scConditionNames];
   if (onFile.some((p) => wanted.has(normalizeName(p)))) return true;
 
-  // Canonical match: fold the claim + each on-file entry through the vendored conditionCanon so distinct
-  // surface strings that name the SAME rated entity match. Then scan the extracted digest for the canonical
-  // label (a dx documented in the records but not yet in the structured problem list).
+  // Canonical match: fold the claim + each on-file entry through the in-repo pre-fold + vendored conditionCanon
+  // so distinct surface strings that name the SAME rated entity match. Then scan the extracted digest for the
+  // canonical label (a dx documented in the records but not yet in the structured problem list).
   const canon = loadCanonicalizer();
-  if (canon === undefined) return false;
-  const claimedCanon = new Set(claimed.map((c) => canon(c)).filter((x): x is string => x !== null && x.length > 0));
-  if (claimedCanon.size === 0) return false;
-  if (onFile.some((p) => { const c = canon(p); return c !== null && claimedCanon.has(c); })) return true;
-  // Digest scan: canonicalizeCondition matches its label patterns anywhere in the text and returns the first
-  // hit, so for a per-line digest we test line-by-line — a dx documented in the records (e.g. an assessment
-  // line) but not yet in the structured problem list still satisfies the check. Bounded scan (digest is capped
-  // upstream); a no-match line costs one regex sweep. The route-picker plan's missing[] is the stronger same-
-  // brain signal layered on top of this in the caller.
-  if (chartDigest && chartDigest.length > 0) {
-    for (const line of chartDigest.split('\n')) {
-      const c = canon(line);
-      if (c !== null && claimedCanon.has(c)) return true;
+  const claimedCanon = new Set(claimed.map((c) => canonLabel(canon, c)).filter((x): x is string => x !== null && x.length > 0));
+  if (claimedCanon.size > 0) {
+    if (onFile.some((p) => { const c = canonLabel(canon, p); return c !== null && claimedCanon.has(c); })) return true;
+    // Digest scan: canonLabel matches its label patterns anywhere in the text and returns the first hit, so for
+    // a per-line digest we test line-by-line — a dx documented in the records (e.g. an assessment line) but not
+    // yet in the structured problem list still satisfies the check. Bounded scan (digest is capped upstream).
+    if (chartDigest && chartDigest.length > 0) {
+      for (const line of chartDigest.split('\n')) {
+        const c = canonLabel(canon, line);
+        if (c !== null && claimedCanon.has(c)) return true;
+      }
+    }
+  }
+
+  // #1 BAIL FIX: when NEITHER fold could place the claim (canon unavailable AND no synonym hit), do NOT return
+  // false before the raw scan. Match the claim's own discriminating tokens against the on-file lists + the
+  // digest by substring, so a canon-unknown claim ("Lumbar Back/Sciatica") is still satisfied by an on-file
+  // "lumbago"/"sciatica" or a digest assessment line. (When the canon DID place the claim above, this raw scan
+  // is redundant — the canonical match is stricter — so we only run it on the bail path.)
+  if (claimedCanon.size === 0) {
+    const tokens = claimTokens(claimed);
+    if (tokens.length > 0) {
+      const onFileLc = onFile.map((p) => (p ?? '').toLowerCase());
+      if (onFileLc.some((p) => tokens.some((t) => p.includes(t)))) return true;
+      if (chartDigest && chartDigest.length > 0) {
+        const digestLc = chartDigest.toLowerCase();
+        if (tokens.some((t) => digestLc.includes(t))) return true;
+      }
     }
   }
   return false;

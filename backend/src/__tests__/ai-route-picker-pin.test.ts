@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 // EMR viability card (ai-viability.ts) loads SYSTEM+TOOL from it so the card + drafter cannot drift. This
 // pin trips the red build on ANY hand-edit or stale re-vendor — re-sync from the FRN canonical, then
 // update PINNED_AIROUTEPICKER_SHA256 in the SAME commit (mirrors anchor-table-pin.test.ts).
-const PINNED_AIROUTEPICKER_SHA256 = '74e676fed766c7e902e625a9b5fe4549edcd2ba98de6cae9ad25420d1602de58';
+const PINNED_AIROUTEPICKER_SHA256 = '4007dab02465c3e5f295e858dbd4f96aa46ccc35cb2c46a6bcd914db707a4dfa';
 
 describe('aiRoutePicker.cjs vendored prompt pin', () => {
   it('vendored aiRoutePicker.cjs sha256 === pin (catches drift from the FRN canonical)', () => {

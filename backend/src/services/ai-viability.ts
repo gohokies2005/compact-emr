@@ -120,6 +120,18 @@ const COMPUTING_STALE_MS = 135_000;
 function buildUserPrompt(claimed: string, sc: string[], problems: string[], events: string[], statement: string | null, guidance: string | null): string {
   const scLines = sc.length ? sc.map((s) => `- ${s}`).join('\n') : '- (none parsed)';
   const cand = sc.length ? sc.map((s) => `- ${s}`).join('\n') : '- (none)';
+  // DIRECT-ROUTE EVIDENCE (Ryan 2026-06-22, Zimmelman): the structured inServiceEvent column is often
+  // empty even when the veteran's own statement documents an in-service onset/diagnosis (Zimmelman: 1984
+  // STR esophagitis/GERD). The veteran statement is competent lay evidence under 38 USC 1154(b) and MUST
+  // reach the picker as a candidate IN-SERVICE EVENT so a DIRECT 3.303 route can lead — not only as the
+  // untrusted "proposed theory". Without this the picker saw "(none documented)" and fell to a secondary
+  // anchor (or, before, declared "no anchor → not supportable"). We surface BOTH: the statement stays in
+  // veteran_proposed_theory (its goal/narrative role) AND, when it plausibly references service, it is also
+  // listed as a lay in-service event the picker weighs for a direct route.
+  const allEvents = [...events];
+  if (statement && statement.trim().length >= 12 && /\b(in[- ]?service|active duty|while serving|during service|enlist|deploy|STR|service treatment|in the (navy|army|air force|marines|service)|\b(19|20)\d{2}\b)\b/i.test(statement)) {
+    allEvents.push(`Veteran statement references in-service onset/treatment (competent lay evidence under 38 USC 1154(b)): ${statement.trim().slice(0, 600)}`);
+  }
   return `<case>
 <claimed_condition>${claimed || '(unknown)'}</claimed_condition>
 
@@ -128,7 +140,7 @@ ${scLines}
 </granted_sc_conditions>
 
 <in_service_events>
-${events.length ? events.map((e) => `- ${e}`).join('\n') : '- (none documented)'}
+${allEvents.length ? allEvents.map((e) => `- ${e}`).join('\n') : '- (none documented)'}
 </in_service_events>
 
 <chart_facts>
@@ -137,7 +149,7 @@ Problem list: ${problems.slice(0, 60).join('; ') || '(none)'}
 </chart_facts>
 
 <candidate_anchors>
-These SC conditions passed the exclusion filter and are the ONLY anchors you may select for a secondary/aggravation theory:
+These SC conditions passed the exclusion filter and are the candidate anchors for a SECONDARY/aggravation theory. A DIRECT (3.303) or in-service aggravation route needs NO anchor from this list — if the record shows the claimed condition began in service, lead direct regardless of whether this list is empty:
 ${cand}
 </candidate_anchors>
 

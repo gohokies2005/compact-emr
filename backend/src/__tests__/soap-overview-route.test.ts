@@ -53,6 +53,14 @@ const getOrBuildSoapNote = vi.fn(async (_db: unknown, _caseId: string, ctx: unkn
 vi.mock('../services/ai-viability.js', () => ({ getAiViabilityState, aiRoutePickerEnabled }));
 vi.mock('../services/recompute-viability-trigger.js', () => ({ fireRecomputeViability }));
 vi.mock('../services/soap-overview.js', () => ({ getOrBuildSoapNote }));
+// The grounded path now assembles the SoapContext SERVER-SIDE via assembleSoapContextForCase (Zimmelman
+// reliability fix 2026-06-22) so the sync read's fingerprint matches the async precompute's. Mock it (it has
+// its own dedicated test) — it echoes back the framing it is handed so the H1 routePickerFraming assertions
+// still hold, and it does NOT add a case.findFirst to the ROUTE's own count (the H3 race is about the route).
+const assembleSoapContextForCase = vi.fn(async (_db: unknown, _caseId: string, rp: unknown) => ({
+  claimedCondition: 'Obstructive sleep apnea', routePickerFraming: rp, chartDigest: 'DIGEST', scConditions: [], activeProblems: [], keyFacts: [], medications: [], coverageNote: null, veteranStatement: null,
+}));
+vi.mock('../services/soap-context-assembler.js', () => ({ assembleSoapContextForCase }));
 // case-viability-stamp + chart-readiness are imported by the router for the GET path only; stub them so the
 // module loads. (The POST path under test never calls them.)
 const caseViabilityEnabled = vi.fn(() => false);

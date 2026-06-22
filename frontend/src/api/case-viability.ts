@@ -172,6 +172,10 @@ export interface SoapNote {
   readonly action: 'draft' | 'get_records' | 'clarify' | 'physician_review' | 'reject';
   /** Deterministic grounding guard: a clinical value in the note not found in the source facts (verify). */
   readonly caveat?: string | null;
+  /** True when this note is the deterministic EXPLANATORY fallback (the model truncated/failed/returned
+   *  nothing on this open) rather than a full model-written summary. The card shows a subtle hint; the note
+   *  still renders (never blank) and its decision/action still match the verdict (Zimmelman 2026-06-22). */
+  readonly fallback?: boolean;
 }
 
 export interface SoapContextInput {

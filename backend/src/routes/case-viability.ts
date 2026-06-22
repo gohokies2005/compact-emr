@@ -17,6 +17,7 @@ import { caseViabilityEnabled, deriveCaseViabilityForCase } from '../services/ca
 import { getAiViabilityState, aiRoutePickerEnabled } from '../services/ai-viability.js';
 import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
 import { getOrBuildSoapNote, type SoapContext, type SoapOverviewCacheDb } from '../services/soap-overview.js';
+import { assembleSoapContextForCase } from '../services/soap-context-assembler.js';
 import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
 import { buildDigestForCase } from '../advisory/chartSlice.js';
 
@@ -88,17 +89,31 @@ export function createCaseViabilityRouter(db: AppDb): Router {
           firedRecompute = true;
         }
       } catch { routePickerFraming = null; /* fail-open: SOAP falls back to strategy strings */ }
-      // SAME-BRAIN CHART READING (2026-06-21, Zimmelman): feed the SOAP the SAME extracted-document digest Ask
-      // Aegis cites (advisory/chartSlice buildDigestForCase). The SOAP was previously fed structured columns
-      // ONLY (the FE-POSTed keyFacts/scConditions/problems) and missed records Ask Aegis surfaced. Built
-      // SERVER-SIDE and set authoritatively (override any FE-supplied chartDigest — the FE cannot inject
-      // document text). Folded into renderContext → it also moves the SOAP fingerprint, so the stored note
-      // invalidates when the chart's extracted text changes. Fail-open: a digest hiccup → null (no document
-      // grounding, the note still builds from structured facts).
-      let chartDigest: string | null = null;
-      try { chartDigest = await buildDigestForCase(db, caseId); }
-      catch { chartDigest = null; }
-      const ctx: SoapContext = { ...body, claimedCondition, routePickerFraming, chartDigest };
+      // CONTEXT ASSEMBLY (Ryan 2026-06-22, Zimmelman reliability). When a route-picker plan GROUNDS the note,
+      // build the SoapContext from the SAME server-side assembler the OFF-REQUEST precompute uses
+      // (assembleSoapContextForCase) — so the fingerprint the sync read computes EQUALS the one the async job
+      // persisted under, and the precomputed (110s-budget, reliable-on-2776-pages) note is FOUND for $0. The
+      // FE-POSTed body fields are no longer the cacheable grounding inputs in the grounded path (the server's
+      // authoritative chart read is — the correct one-brain move). UNGROUNDED (route-picker off / no warm
+      // plan) keeps today's FE-body behavior so nothing regresses there. Fail-open: assembler throws → FE body.
+      let ctx: SoapContext;
+      if (routePickerFraming !== null) {
+        try {
+          ctx = await assembleSoapContextForCase(db, caseId, routePickerFraming);
+        } catch {
+          let chartDigest: string | null = null;
+          try { chartDigest = await buildDigestForCase(db, caseId); } catch { chartDigest = null; }
+          ctx = { ...body, claimedCondition, routePickerFraming, chartDigest };
+        }
+      } else {
+        // SAME-BRAIN CHART READING (2026-06-21, Zimmelman): even ungrounded, feed the SOAP the SAME
+        // extracted-document digest Ask Aegis cites. Built SERVER-SIDE + set authoritatively (the FE cannot
+        // inject document text). Folded into renderContext → moves the fingerprint when extracted text changes.
+        let chartDigest: string | null = null;
+        try { chartDigest = await buildDigestForCase(db, caseId); }
+        catch { chartDigest = null; }
+        ctx = { ...body, claimedCondition, routePickerFraming, chartDigest };
+      }
       // H2: when we just fired a recompute because no usable warm plan exists AND the caller did not explicitly
       // force a regenerate, serve a fresh strategy fallback note for THIS open but do NOT persist it — a
       // persisted strategy note would be served for $0 on later opens and hide the route-picker plan that is

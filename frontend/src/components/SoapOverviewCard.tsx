@@ -237,6 +237,11 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
 
       {note ? (
         <>
+          {note.fallback ? (
+            <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-600">
+              A full written summary couldn’t be generated automatically on this open, so this is a brief explanation derived from the case verdict. It refreshes on the next open (the full summary is computed in the background).
+            </div>
+          ) : null}
           {note.subjective ? <Section label="Subjective">{note.subjective}</Section> : null}
           {note.objective ? <Section label="Objective">{note.objective}</Section> : null}
           {note.assessment ? <Section label="Assessment">{note.assessment}</Section> : null}

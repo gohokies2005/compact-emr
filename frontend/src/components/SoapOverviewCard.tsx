@@ -132,6 +132,11 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
       ? `${v.claimed_canonical ?? claimedCondition} — secondary to ${v.best_anchor.upstream_verbatim}` : null,
     resultTitle: result.title,
   });
+  // #7 (2026-06-21): make the degraded (NOT plan-grounded) state VISIBLE. When the SOAP request has resolved
+  // but the note is NOT grounded on the route-picker plan (brain feed unavailable / no warm plan), the card is
+  // running on the deterministic-only source — say so plainly rather than silently. Suppressed while loading.
+  const soapResolved = soapQ.data !== undefined && !soapQ.isFetching && !regenerating;
+  const planUnavailable = soapResolved && soapQ.data?.grounded !== true;
 
   return (
     <div className={`mb-4 rounded-lg border border-l-4 ${L.rule} border-slate-200 ${L.tint} px-5 py-4`}>
@@ -143,6 +148,9 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
         </span>
       </div>
       <p className="mt-2 text-lg font-semibold leading-snug text-slate-900">{headline}</p>
+      {planUnavailable ? (
+        <p className="mt-1 text-[11px] text-slate-400">(plan unavailable — deterministic check only)</p>
+      ) : null}
 
       {note ? (
         <>

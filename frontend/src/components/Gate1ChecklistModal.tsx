@@ -147,6 +147,21 @@ export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draft
             {readiness.caseFraming.upstreamScCondition !== null ? <> · anchor: {readiness.caseFraming.upstreamScCondition}</> : null}
           </p>
         ) : null}
+        {/* #7 (2026-06-21): when the route-picker brain feed was unavailable, the checks ran on the
+            deterministic-only source — make that VISIBLE, not silent. */}
+        {readiness?.brainConsulted === false ? (
+          <p className="mt-1 text-xs text-amber-700">⚠ {readiness.degradedNote ?? 'Plan unavailable — deterministic check only.'}</p>
+        ) : null}
+        {/* #2: the brain flagged gaps that map to no specific checklist item — surface them so the RN sees
+            them (they did NOT silently satisfy any essential). */}
+        {readiness?.unclassifiedGaps !== undefined && readiness.unclassifiedGaps.length > 0 ? (
+          <div className="mt-1 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <p className="font-medium">The case plan flagged additional gaps to review:</p>
+            <ul className="mt-0.5 list-disc pl-4">
+              {readiness.unclassifiedGaps.map((g, i) => <li key={i}>{g.fact}{g.why ? ` — ${g.why}` : ''}</li>)}
+            </ul>
+          </div>
+        ) : null}
         <div className="mt-4 space-y-4">
           {items.map((i) => (
             <div key={i.key} className="rounded-lg border border-slate-200 p-3">

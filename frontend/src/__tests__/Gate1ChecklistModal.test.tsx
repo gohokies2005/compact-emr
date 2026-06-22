@@ -160,6 +160,34 @@ describe('Gate1ChecklistModal pre-fill', () => {
     expect(screen.queryByText(/default \(direct\)/)).not.toBeInTheDocument();
   });
 
+  // #7 (2026-06-21): when the route-picker brain feed was unavailable, the degraded (deterministic-only) state
+  // must be VISIBLE.
+  it('#7 shows the degraded note when brainConsulted is false', async () => {
+    readinessMock.mockResolvedValue(readiness({
+      brainConsulted: false,
+      degradedNote: 'Plan unavailable — deterministic check only.',
+    } as never));
+    renderModal();
+    await waitFor(() => expect(screen.getByText(/Plan unavailable — deterministic check only/)).toBeInTheDocument());
+  });
+
+  it('#7 does NOT show the degraded note when the brain was consulted', async () => {
+    readinessMock.mockResolvedValue(readiness({ brainConsulted: true } as never));
+    renderModal();
+    await waitFor(() => expect(readinessMock).toHaveBeenCalled());
+    expect(screen.queryByText(/deterministic check only/)).not.toBeInTheDocument();
+  });
+
+  // #2: brain gaps that map to no checklist item are surfaced.
+  it('#2 surfaces unclassifiedGaps to the RN', async () => {
+    readinessMock.mockResolvedValue(readiness({
+      unclassifiedGaps: [{ fact: 'no MRI on file', why: 'imaging would strengthen the claim' }],
+    } as never));
+    renderModal();
+    await waitFor(() => expect(screen.getByText(/additional gaps to review/)).toBeInTheDocument());
+    expect(screen.getByText(/no MRI on file/)).toBeInTheDocument();
+  });
+
   it('fail-open: feed error → blank modal, manual fill still works', async () => {
     readinessMock.mockRejectedValue(new Error('boom'));
     renderModal();

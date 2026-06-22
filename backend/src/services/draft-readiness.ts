@@ -149,6 +149,16 @@ export interface DraftReadinessResult {
    * ReadinessItem (it has no fixed essential to attach to). Absent/empty when the plan is clean (or no plan).
    */
   unclassifiedGaps?: ReadonlyArray<{ readonly fact: string; readonly why: string }>;
+  /**
+   * #7 (2026-06-21): was the route-picker brain successfully consulted? false ONLY when its feed ERRORED (the
+   * readiness then ran on the deterministic-only source). A clean null (no plan exists) is NOT degraded — the
+   * deterministic check is the intended behavior there — so brainConsulted stays true. Set only by
+   * getDraftReadiness (the DB gather); the pure evaluator does not set it. Absent ⇒ treat as consulted.
+   */
+  brainConsulted?: boolean;
+  /** #7: a short RN-facing note shown when the brain feed was unavailable, so the degraded (deterministic-only)
+   *  state is VISIBLE rather than silent. Present only when brainConsulted is false. */
+  degradedNote?: string;
 }
 
 const APPEAL_TYPES: ReadonlySet<ClaimType> = new Set<ClaimType>(['supplemental', 'hlr', 'appeal_bva']);
@@ -519,14 +529,24 @@ export async function getDraftReadiness(db: AppDb, caseId: string): Promise<Draf
   // (the SAME one the drafter pleads + the SOAP renders) and the extracted-chart digest (the SAME one Ask
   // Aegis cites) — instead of filename regexes + the weak normalizeName. compute:false → $0 (NO ~22s LLM call
   // on this synchronous GET; deriveAiViability applies its own staleness/wrong-condition guards). Both
-  // fail-open to null so a vendor/plan hiccup degrades to the deterministic-only behavior.
-  const [caseFraming, plan, chartDigest] = await Promise.all([
+  // fail-open so a vendor/plan hiccup degrades to the deterministic-only behavior.
+  //
+  // #7 (2026-06-21): the degraded state must be VISIBLE, not silent. We distinguish a feed ERROR (the brain
+  // call threw) from a legitimate null (no plan exists / chart has no extracted text). When the BRAIN PLAN feed
+  // ERRORED, the readiness silently reverted to the deterministic-only source; we surface that as
+  // brainConsulted=false + a degradedNote so the FE can show "(plan unavailable — deterministic check only)".
+  const planResult = await deriveAiViability(db, caseId, { compute: false }).then(
+    (v) => ({ ok: true as const, value: v }),
+    () => ({ ok: false as const, value: null }),
+  );
+  const [caseFraming, chartDigest] = await Promise.all([
     // Live-derive the SSOT framing through the ONE shared derivation (architect QA: consumers call the
     // producer function, never a second regex). Null (raced delete) → legacy path, fail-open.
     deriveCaseFramingForCase(db, caseId).catch(() => null),
-    deriveAiViability(db, caseId, { compute: false }).catch(() => null),
     buildDigestForCase(db, caseId).catch(() => null),
   ]);
+  const plan = planResult.value;
+  const planFeedErrored = !planResult.ok;
 
   // Only ground on the plan when it is for THIS claimed condition (deriveAiViability already guards this, but
   // re-check defensively — a wrong-condition plan must NEVER satisfy the dx check for a different condition).
@@ -542,7 +562,7 @@ export async function getDraftReadiness(db: AppDb, caseId: string): Promise<Draf
         }
       : null;
 
-  return evaluateDraftReadiness({
+  const result = evaluateDraftReadiness({
     claimType: c.claimType,
     framingChoice: c.framingChoice,
     caseFraming,
@@ -558,4 +578,13 @@ export async function getDraftReadiness(db: AppDb, caseId: string): Promise<Draf
     routePlan,
     documents,
   });
+
+  // #7: the brain was "consulted" when its feed did not error. A FEED ERROR means the readiness ran on the
+  // deterministic-only source — surface it so the degraded state is visible. (A clean null — no plan exists —
+  // is NOT degraded: the deterministic check is the intended behavior there, so brainConsulted stays true.)
+  return {
+    ...result,
+    brainConsulted: !planFeedErrored,
+    ...(planFeedErrored ? { degradedNote: 'Plan unavailable — deterministic check only.' } : {}),
+  };
 }

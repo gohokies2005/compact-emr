@@ -339,6 +339,20 @@ describe('getDraftReadiness (db gather)', () => {
     expect(r!.missing.map((m) => m.key)).toEqual(['sc_conditions']);
   });
 
+  it('#7 reports brainConsulted on a normal chart_ready evaluation (degraded state is observable)', async () => {
+    const db = mockDb({
+      caseRow: { veteranId: 'v1', claimType: 'initial', framingChoice: 'secondary', claimedCondition: 'Obstructive sleep apnea', claimedConditions: [], inServiceEvent: null },
+      granted: [{ id: 's1' }],
+      problems: [{ problem: 'Obstructive sleep apnea' }],
+      docs: [{ filename: 'Armand Frank DD-214.pdf', docTag: 'Other' }],
+    });
+    const r = await getDraftReadiness(db, 'CLM-1');
+    // The field is surfaced so the FE can render the degraded note. deriveAiViability fails-open INTERNALLY to
+    // null (no plan), which is NOT a degraded state — so brainConsulted stays true and no degradedNote is set.
+    expect(r!.brainConsulted).toBe(true);
+    expect(r!.degradedNote).toBeUndefined();
+  });
+
   it('says "still building" (NOT "documents missing") while extraction is running', async () => {
     const db = mockDb({
       caseRow: { veteranId: 'v1', claimType: 'initial', framingChoice: 'secondary', claimedCondition: 'OSA', claimedConditions: [], inServiceEvent: null },

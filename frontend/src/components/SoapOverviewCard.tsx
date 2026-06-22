@@ -5,6 +5,7 @@ import { getCaseViability, getSoapNote, type SoapContextInput, type SoapNoteResu
 import { getExtractionCoverage } from '../api/extraction-coverage';
 import { getSanityImpression, type SanityContextInput } from '../api/sanity-impression';
 import { computeReadinessVerdict, type ReadinessVerdict } from '../lib/caseReadinessVerdict';
+import { soapHeadline } from '../lib/soapHeadline';
 
 // AI-synthesized SOAP-note Overview (Ryan 2026-06-20). The calm lead on the case: a physician-voice
 // Subjective / Objective / Assessment / Plan note the MODEL writes from the assembled facts — smooth and
@@ -116,14 +117,21 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   const isStale = soapQ.data?.stale === true && !regenerate.isPending;
   const regenerating = regenerate.isPending;
   const canRegenerate = enabled && strategy !== null;
-  // H1 (2026-06-21): when the SOAP note is GROUNDED on the route-picker plan (the SAME brain the drafter
-  // pleads), the bold headline MUST be the plan's framing so it matches the Assessment below — otherwise the
-  // card showed theory A (the static strategy engine) in the headline and theory B (the plan) in the body.
-  // Only fall back to strategy.primaryArgument / the viability anchor when the note is ungrounded.
-  const groundedFraming = soapQ.data?.grounded === true ? (soapQ.data?.routePickerFraming?.framing ?? null) : null;
-  const headline = groundedFraming
-    || strategy?.primaryArgument
-    || (v?.best_anchor?.upstream_verbatim ? `${v.claimed_canonical ?? claimedCondition} — secondary to ${v.best_anchor.upstream_verbatim}` : result.title);
+  // H1 + H4 (2026-06-21): the bold headline. H1 — when GROUNDED on the route-picker plan (the SAME brain the
+  // drafter pleads) the headline is that plan's framing so it matches the Assessment below. H4 (adversarial QA)
+  // — when the served note is STALE the body is the stored (old-framing) note while routePickerFraming is the
+  // LIVE plan, so the live framing would CONTRADICT the stale Assessment; soapHeadline SUPPRESSES the grounded
+  // framing when stale and falls back to the neutral strategy/title headline (the "new info — regenerate" hint
+  // tells the RN the body is out of date; regenerating re-grounds headline + body together). Pure + unit-tested.
+  const headline = soapHeadline({
+    grounded: soapQ.data?.grounded,
+    stale: soapQ.data?.stale,
+    routePickerFraming: soapQ.data?.routePickerFraming?.framing ?? null,
+    strategyPrimaryArgument: strategy?.primaryArgument ?? null,
+    anchorHeadline: v?.best_anchor?.upstream_verbatim
+      ? `${v.claimed_canonical ?? claimedCondition} — secondary to ${v.best_anchor.upstream_verbatim}` : null,
+    resultTitle: result.title,
+  });
 
   return (
     <div className={`mb-4 rounded-lg border border-l-4 ${L.rule} border-slate-200 ${L.tint} px-5 py-4`}>

@@ -33,9 +33,10 @@ const CASE_LITE_SELECT = {
   assignedPhysicianId: true,
   assignedRnId: true,
   refundEligible: true,
-  quickNote: true,
-  quickNoteBy: true,
-  quickNoteAt: true,
+  // NOTE: the old overwritable scratchpad columns (quick_note / quick_note_by / quick_note_at,
+  // "Feature A") are RETIRED 2026-06-21. They are no longer selected, written, or shown — the DB
+  // columns remain (deprecated, nullable) but the at-a-glance note now comes from the most-recent
+  // PERSISTENT quick note in the chart-notes stream, batch-attached as `latestQuickNote` below.
   createdAt: true,
   updatedAt: true,
   // archivedAt (soft-delete timestamp) rides on the list row so the client can label an archived
@@ -103,6 +104,45 @@ function withRecordsSignal(row: Record<string, unknown>): Record<string, unknown
   const recordCount = typeof counts?.documents === 'number' ? counts.documents : 0;
   const invoicedCount = typeof counts?.payments === 'number' ? counts.payments : 0;
   return { ...rest, recordCount, recordsUploaded: recordCount > 0, invoiced: invoicedCount > 0 };
+}
+
+/** Shape of the latest-quick-note signal attached to each list row. Null when the case's veteran has no quick note. */
+export interface LatestQuickNoteSignal {
+  readonly id: string;
+  readonly body: string;
+  readonly createdAt: Date;
+  readonly createdBy: string;
+}
+
+/**
+ * Batch-fetch the MOST-RECENT persistent quick note per veteran for a page of cases, in ONE query
+ * (NOT N+1). Quick notes live in the chart-notes stream keyed by veteran_id (the retired Feature-A
+ * scratchpad lived on the Case row); the Cases list now surfaces this stream entry per row.
+ *
+ * `distinct: ['veteranId']` + `orderBy: [veteranId, createdAt desc]` is Postgres DISTINCT ON: it
+ * returns exactly one row per veteran — the newest quick note — so a page of N cases costs ONE
+ * extra query regardless of N. Returns a veteranId -> latest-quick map. Empty input → no query.
+ *
+ * Author NAME resolution is intentionally skipped here (the list row shows the note + relative time,
+ * not the author); the case-detail / chart latest-quick endpoint resolves the name when needed.
+ */
+async function loadLatestQuickNotesByVeteran(
+  db: AppDb,
+  veteranIds: readonly string[],
+): Promise<Map<string, LatestQuickNoteSignal>> {
+  const out = new Map<string, LatestQuickNoteSignal>();
+  const ids = [...new Set(veteranIds)];
+  if (ids.length === 0) return out;
+  const rows = await db.chartNote.findMany({
+    where: { veteranId: { in: ids }, isQuickNote: true },
+    distinct: ['veteranId'],
+    orderBy: [{ veteranId: 'asc' }, { createdAt: 'desc' }],
+    select: { id: true, veteranId: true, body: true, createdAt: true, createdBy: true },
+  });
+  for (const r of rows as ReadonlyArray<{ id: string; veteranId: string; body: string; createdAt: Date; createdBy: string }>) {
+    out.set(r.veteranId, { id: r.id, body: r.body, createdAt: r.createdAt, createdBy: r.createdBy });
+  }
+  return out;
 }
 
 /**
@@ -321,7 +361,20 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         return [count, rows] as const;
       });
 
-      res.json({ data: cases.map((c) => withRecordsSignal(c as unknown as Record<string, unknown>)), page, pageSize, total });
+      // Batch-attach the latest PERSISTENT quick note per row (one query for the whole page; replaces
+      // the retired Feature-A scratchpad column). Keyed by veteranId since quick notes live in the
+      // veteran-scoped chart-notes stream.
+      const latestQuickByVeteran = await loadLatestQuickNotesByVeteran(
+        db,
+        cases.map((c) => (c as unknown as { veteranId: string }).veteranId),
+      );
+      const data = cases.map((c) => {
+        const row = withRecordsSignal(c as unknown as Record<string, unknown>);
+        const veteranId = (c as unknown as { veteranId: string }).veteranId;
+        return { ...row, latestQuickNote: latestQuickByVeteran.get(veteranId) ?? null };
+      });
+
+      res.json({ data, page, pageSize, total });
     }),
   );
 
@@ -511,48 +564,22 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
     }),
   );
 
-  // PUT /cases/:id/quick-note — Feature A (Ryan 2026-06-06). An overwrite scratchpad shown in the
-  // claims list for at-a-glance status ("waiting on records"). Multi-user (RN + assigned physician);
-  // last-writer-wins with an author+time stamp (stored as the editor's EMAIL, never a uuid). It does
-  // NOT touch case.version — a scratch note must not collide with the editor/assignment optimistic
-  // concurrency. An empty/whitespace note clears the field.
-  // PATCH (not PUT): the API Gateway CORS allowMethods is [GET,POST,PATCH,DELETE,OPTIONS] — a PUT's
-  // preflight is rejected by the browser ("Network Error") before it ever reaches the Lambda. PATCH is
-  // also the right verb for a partial field update. (Caught in live testing 2026-06-06.)
+  // RETIRED 2026-06-21 — PATCH /cases/:id/quick-note ("Feature A" overwritable scratchpad). Quick notes
+  // are now PERSISTENT, chronological entries in the chart-notes stream (ChartNote.isQuickNote), written
+  // via POST /veterans/:id/chart-notes { isQuickNote: true }. The at-a-glance note shown on the Cases
+  // list + case header is the most-recent such entry (see loadLatestQuickNotesByVeteran). This route is
+  // kept registered and returns 410 Gone (not 404) so any stale client gets an explicit, debuggable
+  // signal instead of silently writing the now-dead case.quick_note column. The DB columns remain
+  // (deprecated, nullable) — no destructive migration. Remove this stub once no client references it.
   router.patch(
     '/cases/:id/quick-note',
-    requireStaffOrAssignedPhysician(db, ['admin', 'ops_staff']),
-    asyncHandler(async (req: Request, res: Response) => {
-      const user = currentUser(req);
-      const id = String(req.params.id);
-      const body = (req.body ?? {}) as { note?: unknown };
-      if (body.note !== undefined && body.note !== null && typeof body.note !== 'string') {
-        throw new HttpError(400, 'bad_request', 'note must be a string', { field: 'note' });
-      }
-      const raw = typeof body.note === 'string' ? body.note.trim() : '';
-      if (raw.length > 2000) throw new HttpError(400, 'bad_request', 'note exceeds 2000 chars', { field: 'note', max: 2000 });
-      const cleared = raw.length === 0;
-
-      const existing = await db.case.findFirst({ where: { id }, select: { id: true, veteranId: true } });
-      if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
-
-      const row = await db.case.update({
-        where: { id },
-        data: cleared
-          ? { quickNote: null, quickNoteBy: null, quickNoteAt: null }
-          : { quickNote: raw, quickNoteBy: user.email ?? user.id, quickNoteAt: new Date() },
-        select: { id: true, quickNote: true, quickNoteBy: true, quickNoteAt: true },
-      });
-      await db.activityLog.create({
-        data: {
-          actorUserId: user.id,
-          action: cleared ? 'quick_note_cleared' : 'quick_note_set',
-          caseId: id,
-          veteranId: existing.veteranId,
-          detailsJson: { caseId: id },
-        },
-      });
-      res.json({ data: row });
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (_req: Request, _res: Response) => {
+      throw new HttpError(
+        410,
+        'gone',
+        'The case quick-note scratchpad is retired. Add a quick note from the chart Staff Notes panel (it persists in the chart-notes stream).',
+      );
     }),
   );
 

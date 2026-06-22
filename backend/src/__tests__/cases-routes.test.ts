@@ -86,6 +86,11 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
   // mounted with no s3/bucket deps), so a valid ->delivered transition passes the gate. The gate's
   // own behavior (block on missing/non-affirmative sign-off) is covered in delivery-eligibility.test.
   const signOffFindMany = vi.fn(async () => [{ id: 'SO-1', answersJson: { ready: true }, signedVersion: null, signedContentSha256: null }]);
+  // Latest-quick-note batch read for the Cases list: returns one row per veteran (the mock just
+  // returns a single canned quick note; assertions below pin that it's a SINGLE distinct query).
+  const chartNoteFindMany = vi.fn(async () => [
+    { id: 'QN-1', veteranId: 'VET-1', body: 'awaiting records — C-file requested', createdAt: new Date('2026-06-20T00:00:00.000Z'), createdBy: 'USER-1' },
+  ]);
   const tx = {
     case: { findMany: caseFindMany, findFirst: caseFindFirst, findUnique: caseFindFirst, count: caseCount, create: caseCreate, update: caseUpdate, delete: caseDelete },
     veteran: { findUnique: veteranFindUnique },
@@ -94,10 +99,11 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
     activityLog: { create: activityLogCreate },
     physician: { findUnique: physicianFindUnique },
     signOff: { findMany: signOffFindMany },
+    chartNote: { findMany: chartNoteFindMany },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
 
-  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, caseDelete, draftJobFindMany, physicianFindUnique } };
+  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, caseDelete, draftJobFindMany, physicianFindUnique, chartNoteFindMany } };
 }
 
 function appFor(db: AppDb) {
@@ -366,24 +372,40 @@ describe('cases routes', () => {
     expect(data).not.toHaveProperty('claimedConditions');
   });
 
-  // Feature A quick-note (Ryan 2026-06-06): overwrite scratchpad, stamps the editor's EMAIL, and must
-  // NOT bump case.version (it can't collide with the editor/assignment optimistic concurrency).
-  it('PUT /quick-note sets the note + editor-email stamp without touching version', async () => {
+  // RETIRED Feature A (2026-06-21): the overwritable case scratchpad is gone. The PATCH route is kept
+  // as an explicit 410 Gone tombstone (not silently writing the dead column, not a confusing 404) so a
+  // stale client gets a debuggable signal. Quick notes are now persistent chart-notes-stream entries.
+  it('PATCH /quick-note is RETIRED → 410 Gone and never writes the case row', async () => {
     const { db, spies } = makeDb();
     const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1/quick-note').send({ note: 'waiting on records' });
-    expect(res.status).toBe(200);
-    const data = (spies.caseUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
-    expect(data).toMatchObject({ quickNote: 'waiting on records', quickNoteBy: 'a@example.com' });
-    expect(data).not.toHaveProperty('version');
-    expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'quick_note_set' }) }));
+    expect(res.status).toBe(410); // Gone — route stays registered as a tombstone (no error middleware mounted in this test app, so only status is asserted, mirroring the 409 tests)
+    expect(spies.caseUpdate).not.toHaveBeenCalled();
+    expect(spies.activityLogCreate).not.toHaveBeenCalled();
   });
 
-  it('PUT /quick-note with an empty/whitespace note CLEARS the field', async () => {
+  // The Cases list now surfaces the latest PERSISTENT quick note per row, batch-attached as
+  // `latestQuickNote`. CRITICAL: it must cost ONE extra query for the whole page (DISTINCT ON), not
+  // an N+1 per row — assert the chartNote.findMany was called exactly once with the distinct shape.
+  it('attaches latestQuickNote to each list row via a SINGLE batched distinct query (no N+1)', async () => {
     const { db, spies } = makeDb();
-    const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1/quick-note').send({ note: '   ' });
+    const res = await request(appFor(db)).get('/api/v1/cases?page=1&pageSize=25');
     expect(res.status).toBe(200);
-    const data = (spies.caseUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
-    expect(data).toEqual({ quickNote: null, quickNoteBy: null, quickNoteAt: null });
+    // one batched read for the whole page, not one-per-row
+    expect(spies.chartNoteFindMany).toHaveBeenCalledTimes(1);
+    const qnCalls = spies.chartNoteFindMany.mock.calls as unknown as Array<Array<{ where?: Record<string, unknown>; distinct?: unknown; orderBy?: unknown }>>;
+    const arg = qnCalls[0]?.[0] ?? {};
+    expect(arg.distinct).toEqual(['veteranId']);
+    expect(arg.where).toMatchObject({ isQuickNote: true, veteranId: { in: expect.arrayContaining(['VET-1']) } });
+    // the surfaced note rides the list row
+    expect(res.body.data[0].latestQuickNote).toMatchObject({ body: 'awaiting records — C-file requested' });
+  });
+
+  it('list row latestQuickNote is null when the veteran has no quick note', async () => {
+    const { db, spies } = makeDb();
+    spies.chartNoteFindMany.mockResolvedValueOnce([]);
+    const res = await request(appFor(db)).get('/api/v1/cases');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].latestQuickNote).toBeNull();
   });
 
   it('ARCHIVES a claim (204) — soft delete (sets archived_at), keeps the row + audit, no hard delete', async () => {

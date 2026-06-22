@@ -23,7 +23,13 @@ import { deriveCaseFramingForCase, loadMechanismFilter } from './case-framing-st
 import type { AppDb } from './db-types.js';
 
 const MODEL = process.env['AI_ROUTE_PICKER_MODEL'] || 'claude-sonnet-4-6';
-const MAX_TOKENS = 1800;
+// 6000 (was 1800): the emit_argument_plan tool output is schema-bounded but, on a complex case (many granted
+// SC conditions → large excluded/alternative/convergent arrays + per-field rationale, e.g. Zimmelman GERD with
+// 197 facts), exceeded 1800 → stop_reason:'max_tokens' → the plan was truncated and rejected ("analysis was too
+// long to complete"). This surfaced only AFTER the 120s/110s budget fix let the call run to the cap instead of
+// timing out at 26s first. 6000 fits the full bounded plan with headroom; generation stays well inside the 110s
+// async budget. Cost is per-token-generated (a ~3-4k-token plan ≈ 5-6¢), so the higher cap is headroom, not spend.
+const MAX_TOKENS = 6000;
 
 export function aiRoutePickerEnabled(): boolean {
   return process.env['AI_ROUTE_PICKER_ENABLED'] === 'true';

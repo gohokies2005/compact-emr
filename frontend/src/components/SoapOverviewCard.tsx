@@ -151,7 +151,11 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   // says not draftable it won't get drafted"). Show the plan COMPUTING (a spinner; we auto-fired/are polling)
   // or, on a genuine compute FAILURE, an honest "analysis failed — retry" with a retry button. Only when the
   // plan is 'ready' or the flag is 'off' do we fall through to the normal SOAP/verdict render below.
-  const planComputing = aiState?.status === 'computing' || aiState?.status === 'none' || compute.isPending;
+  // Adversarial-QA window (2026-06-21): when strategy resolves before the viability GET, aiState is still
+  // undefined while viabilityQ loads — treat that as computing so we never flash the resting deterministic
+  // verdict during the network window. undefined ≠ 'off', so the off path (after the GET resolves) is unaffected.
+  const planComputing = (viabilityQ.isLoading && aiState === undefined)
+    || aiState?.status === 'computing' || aiState?.status === 'none' || compute.isPending;
   const planErrored = aiState?.status === 'error' && !compute.isPending;
   if (planComputing) {
     return (

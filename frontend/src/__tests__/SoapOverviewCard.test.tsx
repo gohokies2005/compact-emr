@@ -82,6 +82,17 @@ describe('SoapOverviewCard — honest plan-state surface (Zimmelman)', () => {
     expect(computeMock).not.toHaveBeenCalled();
   });
 
+  it('strategy resolved but viability STILL loading → never flashes the resting verdict (adversarial QA window)', async () => {
+    // The GET /viability-card is still in flight (large chart) while strategy already resolved. aiState is
+    // undefined in this window; the card must NOT fall through to the deterministic "Not supportable as filed"
+    // (a sub-second flash of the exact misleading no-go). It should show the honest computing surface instead.
+    viabilityMock.mockReturnValue(new Promise<never>(() => {})); // never resolves → viabilityQ stays loading
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/Analyzing the case/i)).toBeInTheDocument());
+    expect(screen.queryByText(/Not supportable as filed/i)).not.toBeInTheDocument();
+    expect(computeMock).not.toHaveBeenCalled(); // no plan status yet → nothing to auto-fire
+  });
+
   it('off (flag disabled) → falls through to the normal deterministic render (no spinner, no error surface)', async () => {
     viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'off' } });
     renderCard();

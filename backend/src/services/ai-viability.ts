@@ -270,7 +270,10 @@ export async function getAiViabilityState(
 
     // ── COMPUTE path (async self-invoke OR the synchronous on-demand endpoint). Mark 'computing' so a
     // concurrent read shows a spinner (not a fake verdict) while this runs; then persist 'ready'/'error'.
-    void markPlanStatus(db, caseId, inputHash, 'computing', null);
+    // AWAIT the stamp (QA 2026-06-21): a fire-and-forget 'computing' write could land AFTER the awaited
+    // 'error' write on the instant-fail paths below (missing prompt / unconfigured key) and clobber it back
+    // to a 90s spinner; awaiting also makes the "concurrent read shows a spinner" comment actually true.
+    await markPlanStatus(db, caseId, inputHash, 'computing', null);
 
     const pp = loadPickerPrompt();
     if (!pp) { // vendored prompt unavailable → honest error (NOT a silent null that looks like "no plan")

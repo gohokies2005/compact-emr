@@ -66,11 +66,17 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
 
   const strategy = strategyQ.data?.data ?? null;
   const v = viabilityQ.data?.data ?? null;
+  // ONE-BRAIN (Ryan 2026-06-22): the chip is a PROJECTION of the AI route-picker band when a ready plan
+  // exists, so the chip color/label can never contradict the SOAP Assessment/Plan (which render the SAME
+  // plan). null when the plan is not ready (flag off / cold / error) → the deterministic engine drives the
+  // chip (fallback). aiState here is the discriminated reliability state from the viability-card response.
+  const aiStateForChip = viabilityQ.data?.aiViabilityState;
   const result = computeReadinessVerdict({
     strategy, viability: v,
     hasUnreadPages: hasUnreadPages ?? null,
     extraction: coverageQ.data?.data ?? null,
     sanity: sanityQ.data?.data?.impression ?? null,
+    routePickerViability: aiStateForChip?.status === 'ready' ? aiStateForChip.card.viability : null,
   });
 
   // Assemble the SOAP context once the fast inputs are in, then POST it for the AI synthesis. Keyed on the

@@ -20,7 +20,7 @@ import type { AppDb } from './db-types.js';
 import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote } from './soap-overview.js';
 import { type AiViabilityCard, getAiViabilityState } from './ai-viability.js';
 import { buildDigestForCase } from '../advisory/chartSlice.js';
-import { computeExtractionCoverage } from './extraction-coverage.js';
+import { loadExtractionCoverageForCase } from './extraction-coverage.js';
 import { loadReconciledChartReadiness } from './chart-readiness.js';
 
 /** The pieces of the route-picker plan the SOAP note grounds on (mirrors SoapContext['routePickerFraming']). */
@@ -37,24 +37,19 @@ interface CaseRowForSoap {
   } | null;
 }
 
-/** Server-side coverage note, derived identically to the FE string so the fingerprint is stable. Fail-open. */
+/** Server-side coverage note, derived identically to the FE string so the fingerprint is stable. Fail-open.
+ *
+ * FIX C (Ryan 2026-06-22, Zimmelman): this used to call computeExtractionCoverage with an EMPTY
+ * file-read-status array (and null run), so EVERY doc counted as "no readiness row → in progress" →
+ * extractedPages 0 → coveragePct 0 → the Objective said "0% of pages read" while the chart chip read 100%.
+ * It now goes through the SAME loadExtractionCoverageForCase the GET /extraction-coverage route uses
+ * (real file_read_status rows judged via isEffectivelyRead + the latest run), so the SOAP Objective % and
+ * the chart chip % are computed from one source and always agree. Empty chart (no docs) → totalFiles 0,
+ * which we treat as "nothing to report" (null) — exactly as the prior docs.length===0 guard did. */
 async function deriveCoverageNote(db: AppDb, caseId: string): Promise<string | null> {
   try {
-    const docs = (await db.document.findMany({
-      where: { caseId },
-      select: { id: true, s3Key: true, contentType: true, pageCount: true },
-    } as never)) as unknown as Array<{ id: string; s3Key: string; contentType: string; pageCount: number | null }>;
-    if (!docs || docs.length === 0) return null;
-    const pages = (await db.documentPage.findMany({
-      where: { document: { caseId } },
-      select: { documentId: true, pageNumber: true, extractionCoverage: true, handwritingPresent: true },
-    } as never).catch(() => [])) as unknown as Array<{ documentId: string; pageNumber: number; extractionCoverage: string | null; handwritingPresent: boolean | null }>;
-    const cov = computeExtractionCoverage(
-      docs.map((d) => ({ id: d.id, s3Key: d.s3Key, contentType: d.contentType, pageCount: d.pageCount })),
-      [],
-      null,
-      (pages ?? []).map((p) => ({ documentId: p.documentId, pageNumber: p.pageNumber, extractionCoverage: p.extractionCoverage ?? null, handwritingPresent: p.handwritingPresent ?? null })),
-    );
+    const cov = await loadExtractionCoverageForCase(db, caseId);
+    if (cov.totalFiles === 0) return null; // no chart inputs yet → nothing to report (was docs.length===0)
     const pct = typeof cov.coveragePct === 'number' ? cov.coveragePct : null;
     if (pct === null) return null;
     let hasUnread = false;
@@ -160,13 +155,16 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
   try {
     const state = await getAiViabilityState(db, caseId, { compute: false });
     const card = state.status === 'ready' ? state.card : null;
-    // Build the framing from the just-persisted plan (when the claim still matches). A note can still be
-    // precomputed WITHOUT a plan (ungrounded) — but the high-value case is the grounded note; if there is no
-    // ready plan we skip (the plan compute likely failed/abstained; the sync path handles the ungrounded note).
+    // Build the framing from the just-persisted plan (when the claim still matches). A note can ALSO be
+    // precomputed WITHOUT a plan (framing=null → ungrounded). FIX A (Ryan 2026-06-22, Zimmelman): the old
+    // code bailed (`if (!framing) return false`) on a cold/abstaining case, so NO note was ever persisted
+    // under the assembler fingerprint — the sync read (which now ALSO assembles via this same assembler)
+    // then found no stored note and fell back forever. We now assemble + persist the ungrounded note too,
+    // so a cold case still has a served, assembler-fingerprinted note on the next sync open. Grounded
+    // (framing present) remains the high-value path; both go through the SAME assembler so write==read.
     const framing = routePickerFramingFromCard(card, card?.inputClaimed ?? '');
-    if (!framing) return false;
     const ctx = await assembleSoapContextForCase(db, caseId, framing);
-    if (!ctx.claimedCondition) return false;
+    if (!ctx.claimedCondition) return false; // nothing to write about (no claimed condition) → genuinely skip
     await getOrBuildSoapNote(db as unknown as SoapOverviewCacheDb, caseId, ctx, { forceRegenerate: true, timeoutMs });
     return true;
   } catch {

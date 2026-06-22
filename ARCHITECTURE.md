@@ -66,18 +66,23 @@ FRIENDLY NAME, never partial-ARN — see INCIDENTS). Deploy = GH Actions → CDK
 | Drafter | the nexus letter | Anthropic, Opus | drafter image tag (cdk.json) | FRN `app/services/*` → Fargate ECR image |
 | Ask-Aegis advisory | RN/physician case Q&A | **Bedrock**, Opus 4.6 | always on | FRN `app/config/advisory/rn_advisory_system_prompt.md` → `backend/src/advisory/systemPrompt.ts` |
 | Opus sanity-impression | pre/post-draft gut-check | Anthropic, Opus | (cached per case+stage) | `backend/src/services/sanity-impression.ts` |
-| **SOAP-note Overview** | the RN's calm AI-synthesized S/O/A/P lead on the Overview | Anthropic **direct**, Sonnet 4-6 (`SOAP_NOTE_MODEL`) | always on | `backend/src/services/soap-overview.ts` (`buildSoapNote`); POST `/cases/:id/soap-overview` (FE posts the assembled context) |
+| **SOAP-note Overview** | the RN's calm AI-synthesized S/O/A/P lead on the Overview | Anthropic **direct**, Sonnet 4-6 (`SOAP_NOTE_MODEL`) | always on | `backend/src/services/soap-overview.ts` (`buildSoapNote`); POST `/cases/:id/soap-overview`. **Context is SERVER-derived** via `soap-context-assembler.ts` (`assembleSoapContextForCase`) for BOTH the async precompute and the sync read (write==read fingerprint, 2026-06-22) — the FE body no longer feeds the fingerprint. Coverage note uses the shared `loadExtractionCoverageForCase` (same % as the chart chip). |
+| ↳ **Overview chip (verdict)** | the one go/no-go chip + the deterministic detail card | deterministic (no model) | always on | `frontend/src/lib/caseReadinessVerdict.ts`. The chip is a **PROJECTION of the route-picker band** (`routePickerBandToVerdict`) when a plan is ready; the deterministic engine is **fallback-only** (drives the chip only when `routePickerViability == null`) and can never contradict a ready plan (band-vs-core conflict → visible disagreement, not a flip). |
 
 **⚠️ Auto-vendored prompt trap:** `systemPrompt.ts` and `aiRoutePicker.cjs` are GENERATED from the FRN source
 (`vendor-advisory-prompt.cjs` / the anchor vendor copy). **Hand-edits to the vendored files are reverted on
 the next vendor run.** Always edit the FRN canonical source, then re-vendor. The api-stack copies the whole
 vendor tree to `<task>/anchor-vendor` at deploy.
 
-**One brain, three surfaces (2026-06-19):** the route-picker plan drives (a) the Overview viability/SOAP
-card (`deriveAiViability`), (b) Ask-Aegis viability answers (narrated from the PERSISTED plan — no second LLM
-call on the 29s path; `advisory/aiViabilityPlanBlock.ts`), and (c) the drafter framing gate. The picker
-DECIDES; the card visualizes and Ask-Aegis explains. Confidence is subordinated to confirmed chart gate
-elements (no over-sell). Hard excludes (reverse-causation / pyramiding / wrong-direction) carry to all three.
+**One brain, four surfaces (2026-06-19, chip added 2026-06-22):** the route-picker plan drives (a) the
+Overview viability/SOAP card (`deriveAiViability`), (b) Ask-Aegis viability answers (narrated from the
+PERSISTED plan — no second LLM call on the 29s path; `advisory/aiViabilityPlanBlock.ts`), (c) the drafter
+framing gate, and (d) the **Overview verdict CHIP** (projected from the band via `routePickerBandToVerdict`,
+so the chip can never contradict the SOAP note it sits above). The picker DECIDES; the card visualizes,
+Ask-Aegis explains, the chip summarizes. Confidence is subordinated to confirmed chart gate elements (no
+over-sell). Hard excludes (reverse-causation / pyramiding / wrong-direction) carry to all surfaces. The
+chip→note agreement is pinned cross-module by `oneBrainChip.agreement.test.ts` (`routePickerBandToVerdict`
+go/no-go === `soap-action-map.ts planViabilityToAction` go/no-go).
 
 ---
 
@@ -149,6 +154,9 @@ failure (the SOAP "thinks for minutes then nothing" + the original double-call t
 | 2026-06-19 | The `/cases/:id/soap-overview` 2nd-LLM-call endpoint | 29s timeout silent-fail | SOAP card renders deterministically from the shared `viability-card` query (one LLM call) |
 | 2026-06-19 | Synchronous picker compute on GET `/viability-card` | ~22-25s call can't fit the 29s cap → silent fail | async self-invoke compute off the request path + persisted-plan read (see §5) |
 | 2026-06-20 | Deterministic string-assembled SOAP "note" on the Overview card | read like a dump (S echoed in A, O = a wall of every SC condition) | AI-synthesized SOAP note (`buildSoapNote`, Sonnet) — smooth S/O/A/P; the deterministic verdict stays the fail-open fallback |
+| 2026-06-22 | **`caseReadinessVerdict` (deterministic engine) OWNING the Overview chip** | the chip ("Not supportable") could CONTRADICT the SOAP note's Assessment/Plan ("supportable / proceed to draft") — two brains on one card | **the chip is now a PROJECTION of the AI route-picker viability band** (`routePickerBandToVerdict`, ONE brain — same plan the SOAP renders + the drafter pleads). The deterministic engine is DEMOTED to **fallback-only**: it drives the chip ONLY when there is no ready route-picker plan (flag off / cold / error, i.e. `routePickerViability == null`) and can never contradict a ready plan. When the band says supportable but the deterministic core would Stop, the band WINS the headline and the core's concern is surfaced as a VISIBLE `band_vs_deterministic` disagreement (no silent flip). `routePickerBandToVerdict` must agree band-for-band on go/no-go with `soap-action-map.ts planViabilityToAction` (pinned by `frontend .../oneBrainChip.agreement.test.ts`). |
+| 2026-06-22 | SOAP sync read building its `SoapContext` from the FE-POSTed body on the ungrounded branch | the sync-read fingerprint then differed from the async precompute's (which uses the assembler) → the precomputed note was NEVER found → permanent fallback note on every open (incl. hard refresh) | **BOTH sync branches build ctx via `assembleSoapContextForCase` (server-derived only; FE body no longer feeds the fingerprint)**, so write==read and the precomputed note serves for $0. `precomputeSoapNoteForCase` now also persists an UNGROUNDED note (framing=null) so cold cases have a served note. `SOAP_NOTE_SCHEMA_VERSION` 25→26 (pre-fix stored notes invalidate). |
+| 2026-06-22 | SOAP coverage note computing coverage with EMPTY file-read-statuses | every page counted as unread → SOAP Objective said "0% of pages read" while the chart chip read 100% (two readers of one report disagreed) | **one shared `loadExtractionCoverageForCase(db, caseId)`** (in `extraction-coverage.ts`) used by BOTH GET `/cases/:id/extraction-coverage` AND the SOAP assembler — identical inputs (real `file_read_status` rows via `isEffectivelyRead` + latest run + per-page provenance), so coverage can never drift. |
 
 ### OWED (Ryan-approved, 2026-06-20 — see handoff `20260620_soap_note_ai_synthesis_and_deploy_blocker.md`)
 - **Precompute the SOAP note on chart-extract FINISH** so it's ready when the chart opens (no 10-15s wait) —

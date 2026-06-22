@@ -87,14 +87,16 @@ const ALLOW_LIST: ReadonlyArray<{ readonly relPath: string; readonly fnHint: str
       'candidateCaseIds; the summary has no FileReadStatus row so it cannot surface. Safe by construction.',
   },
   {
-    relPath: 'routes/chart-readiness.ts',
-    fnHint: 'computeExtractionCoverage(docs, rows, latestRun',
+    relPath: 'services/extraction-coverage.ts',
+    fnHint: 'loadExtractionCoverageForCase',
     reason:
-      'GET /cases/:id/extraction-coverage (transparency report, 2026-06-14). The route loads the full ' +
-      'per-case doc set ONLY to pass it to computeExtractionCoverage, which EXCLUDES the synthetic ' +
-      'screening-summary (and _rendered outputs) up front via isChartInputKey → isScreeningSummaryKey ' +
-      'before any page accounting. Exclusion lives in the called pure helper, not this route body — same ' +
-      'pattern as the drafter-bundle entry; advisory report, never a gate, never wedges.',
+      'THE shared coverage loader (Ryan 2026-06-22, Zimmelman FIX C). Both GET /cases/:id/extraction-coverage ' +
+      'and the SOAP assembler now call this so their % can never drift. It loads the full per-case doc set ' +
+      'ONLY to pass it to computeExtractionCoverage, which EXCLUDES the synthetic screening-summary (and ' +
+      '_rendered outputs) up front via isChartInputKey → isScreeningSummaryKey before any page accounting. ' +
+      'Exclusion lives in the called pure helper, not this loader body — same pattern as the drafter-bundle ' +
+      'entry; advisory report, never a gate, never wedges. (Moved here from routes/chart-readiness.ts when the ' +
+      'GET route was made a thin caller of this loader.)',
   },
   {
     relPath: 'services/doctor-pack-grounded-pages.ts',

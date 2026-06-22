@@ -25,7 +25,7 @@
 //    degrades confidence toward 'low' / the verdict toward needs_review, never toward a confident draft.
 
 import type { StrategyPreview } from '../api/strategy-preview';
-import type { CaseViability, BridgePathway } from '../api/case-viability';
+import type { CaseViability, BridgePathway, RoutePickerViability } from '../api/case-viability';
 import type { ExtractionCoverage } from '../api/extraction-coverage';
 import type { ImpressionLevel } from '../api/sanity-impression';
 
@@ -128,7 +128,7 @@ export type ReadinessVerdict =
   | 'needs_review'; // signals conflict / too little to decide → a human looks
 
 export type Confidence = 'high' | 'medium' | 'low';
-export type DisagreementSource = 'ai_sanity' | 'extraction' | 'viability_vs_strategy';
+export type DisagreementSource = 'ai_sanity' | 'extraction' | 'viability_vs_strategy' | 'band_vs_deterministic';
 export interface Disagreement {
   readonly source: DisagreementSource;
   readonly note: string;
@@ -160,6 +160,43 @@ export interface ReadinessSignals {
   /** DISPLAY-ONLY: the coverage report, for the % in the disagreement note. Never the decision input. */
   readonly extraction: ExtractionCoverage | null; // null = report unavailable
   readonly sanity: ImpressionLevel | null; // null = unavailable (NOT 'clear')
+  /**
+   * ONE-BRAIN (Ryan 2026-06-22): the AI route-picker plan's viability band — the SAME brain the drafter
+   * pleads and the SOAP Assessment/Plan render. When present (a 'ready' plan), the HEADLINE verdict is a
+   * PROJECTION of this band (routePickerBandToVerdict), so the chip can never contradict the note. The
+   * deterministic core is still computed (it populates the detail plan + missingFact + the over-call /
+   * extraction / sanity overlays), but it no longer OWNS the headline — when it would say Stop while the
+   * band says supportable, that becomes a VISIBLE 'band_vs_deterministic' disagreement, NOT a silent flip.
+   * null = no ready plan (flag off / cold / error) → the deterministic core drives the headline (fallback).
+   */
+  readonly routePickerViability?: RoutePickerViability | null;
+}
+
+/**
+ * Project the AI route-picker plan's viability band → the top-line headline verdict (ONE-BRAIN, Ryan
+ * 2026-06-22). This is the chip's source of truth when a ready plan exists. It MUST agree, band-for-band,
+ * with soap-overview.ts `planViabilityToAction` (same band → same go/no-go in two enums) — a cross-module
+ * agreement test pins that. The mapping:
+ *   supportable             → draft           (go; planViabilityToAction → 'draft')
+ *   marginal                → needs_review    (no-go; planViabilityToAction → 'physician_review')
+ *   needs_physician_review  → needs_review    (no-go; planViabilityToAction → 'physician_review')
+ *   not_supportable         → not_supportable (no-go; planViabilityToAction → 'reject')
+ * The conservative unread-chart overlay still applies on top (a negative band on an unread chart →
+ * read_chart_first), so the band never asserts "not supportable" on a chart we haven't finished reading.
+ */
+export function routePickerBandToVerdict(band: RoutePickerViability): ReadinessVerdict {
+  switch (band) {
+    case 'supportable': return 'draft';
+    case 'marginal': return 'needs_review';
+    case 'needs_physician_review': return 'needs_review';
+    case 'not_supportable': return 'not_supportable';
+    default: return 'needs_review';
+  }
+}
+
+/** Is a verdict a "go" (drafting may proceed)? Used to detect a band-wins-over-deterministic-Stop conflict. */
+function isGoVerdict(v: ReadinessVerdict): boolean {
+  return v === 'draft' || v === 'draft_confirm_mechanism' || v === 'draft_reconcile' || v === 'draft_with_changes';
 }
 
 const VERDICT_TITLE: Record<ReadinessVerdict, string> = {
@@ -258,6 +295,34 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
   } else {
     verdict = 'needs_review';
   }
+  // The deterministic verdict BEFORE the route-picker band projects over it — kept so we can detect a
+  // genuine band-vs-core conflict (band says supportable while the core would Stop) and surface it.
+  const deterministicVerdict = verdict;
+
+  // ── ONE-BRAIN HEADLINE (Ryan 2026-06-22): the chip is a PROJECTION of the AI route-picker band when a
+  //    ready plan exists. The band is the SAME brain the drafter pleads + the SOAP Assessment renders, so
+  //    the chip cannot contradict the note. The deterministic core above is NOT discarded — it populated
+  //    `plan` (the detail card), `missingFact`, confidence, and the over-call / hard-disagreement entries —
+  //    but it no longer OWNS the headline. When the core would have said Stop/not-supportable while the band
+  //    says supportable, we DO NOT silently flip: the band wins the headline AND we add a VISIBLE
+  //    'band_vs_deterministic' disagreement so the RN sees the core's concern (e.g. a dx the info-light core
+  //    thinks is missing). When the band is null (flag off / cold / error) the deterministic verdict stands
+  //    (fallback-only — the prior behavior, fully preserved). The conservative unread-chart overlay below
+  //    still applies on top of the band-projected verdict, so a negative band never asserts "not supportable"
+  //    on an unread chart. ──
+  const band = signals.routePickerViability ?? null;
+  if (band != null) {
+    const bandVerdict = routePickerBandToVerdict(band);
+    // Conflict: the band clears the case for drafting but the deterministic core would have stopped it.
+    if (isGoVerdict(bandVerdict) && (deterministicVerdict === 'not_supportable' || deterministicVerdict === 'needs_review')) {
+      disagreements.push({
+        source: 'band_vs_deterministic',
+        note: `The route-picker plan reads this as ${band.replace(/_/g, ' ')}, but the deterministic check would ${deterministicVerdict === 'not_supportable' ? 'call it not supportable' : 'route it for review'} (it may see a missing diagnosis or anchor the plan resolved differently). Confirm before drafting.`,
+      });
+      confidence = lower(confidence);
+    }
+    verdict = bandVerdict; // the band wins the headline (one-brain)
+  }
 
   // Conservative extraction overlay (Ryan 2026-06-18): a NEGATIVE verdict reached on a chart that is
   // not fully read becomes "read the chart first" — never conclude "not supportable" / "request a
@@ -296,7 +361,30 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
   // sanity === null (unavailable) → no effect (absence is not all-clear).
 
   const nextAction = nextActionFor(verdict, plan, disagreements, sanity);
-  return { verdict, title: VERDICT_TITLE[verdict], detail: plan.detail, nextAction, confidence, disagreements, plan };
+  // The headline DETAIL must match the (possibly band-projected) verdict, not the deterministic plan's
+  // detail — otherwise a band-won "Ready to draft" headline would carry a "Not supportable as filed" line.
+  // When the band drove the headline to a verdict the deterministic core would NOT have produced, use a
+  // band-derived line; otherwise the deterministic plan.detail is the right summary (it matches). The detail
+  // CARD still renders `plan` (the full deterministic plan) unchanged — only this one-line summary follows
+  // the headline. read_chart_first (the conservative overlay) gets its own line regardless of source.
+  const detail = (band != null && verdict !== deterministicVerdict)
+    ? detailForBandVerdict(verdict, plan)
+    : plan.detail;
+  return { verdict, title: VERDICT_TITLE[verdict], detail, nextAction, confidence, disagreements, plan };
+}
+
+/** One-line summary for a headline verdict the route-picker band projected (so detail matches the chip). */
+function detailForBandVerdict(verdict: ReadinessVerdict, plan: RecommendedPlan): string {
+  switch (verdict) {
+    case 'draft': return 'A supportable theory is on the record per the route-picker plan.';
+    case 'draft_confirm_mechanism': return 'Draftable per the route-picker plan — confirm the mechanism with the physician.';
+    case 'draft_reconcile': return 'Draftable per the route-picker plan — reconcile the flagged disagreement first.';
+    case 'draft_with_changes': return plan.detail; // anchor-switch detail still applies
+    case 'read_chart_first': return 'Part of the record is still unread — finish reading the chart before deciding.';
+    case 'not_supportable': return 'The route-picker plan reads this as not supportable as filed.';
+    case 'needs_review': return 'The route-picker plan routes this for a physician review before drafting.';
+    default: return plan.detail;
+  }
 }
 
 function nextActionFor(verdict: ReadinessVerdict, plan: RecommendedPlan, disagreements: readonly Disagreement[], sanity: ImpressionLevel | null): string {

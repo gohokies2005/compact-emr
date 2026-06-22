@@ -109,9 +109,12 @@ export interface CaseViability {
  * AI_ROUTE_PICKER_ENABLED is on (else null → the card renders the static `data`). Plain language;
  * no M-tier/E jargon, no plausible-default chart junk.
  */
+/** The route-picker plan's viability band — the ONE brain the Overview chip projects (Ryan 2026-06-22). */
+export type RoutePickerViability = 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
+
 export interface AiViabilityCard {
   readonly source: 'ai_route_picker';
-  readonly viability: 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
+  readonly viability: RoutePickerViability;
   readonly lead: { readonly upstream: string; readonly claimed: string; readonly framing: string; readonly cfr_basis: string; readonly mechanism: string; readonly confidence: string; readonly rationale: string; readonly counterargument: string };
   readonly convergent: ReadonlyArray<{ readonly upstream: string; readonly note: string }>;
   readonly alternatives: ReadonlyArray<{ readonly upstream: string; readonly framing: string; readonly why_not: string }>;

@@ -96,23 +96,24 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       // FE-POSTed body fields are no longer the cacheable grounding inputs in the grounded path (the server's
       // authoritative chart read is — the correct one-brain move). UNGROUNDED (route-picker off / no warm
       // plan) keeps today's FE-body behavior so nothing regresses there. Fail-open: assembler throws → FE body.
+      // WRITE==READ (Ryan 2026-06-22, Zimmelman FIX A): BOTH the grounded and the ungrounded sync read build
+      // ctx via the SAME server-side assembler the OFF-REQUEST precompute uses (assembleSoapContextForCase),
+      // so the fingerprint the sync read computes EQUALS the one the async precompute persisted under — the
+      // precomputed (110s-budget, reliable-on-2776-pages) note is then FOUND for $0 and served, instead of the
+      // sync read building a DIFFERENT-fingerprinted ctx from the FE body (which always missed → permanent
+      // fallback, the bug). The FE body NO LONGER feeds the cacheable grounding inputs (the server's
+      // authoritative chart read does — the correct one-brain move; the FE cannot inject a contradicting
+      // theory or document text). routePickerFraming may be null (ungrounded) — the assembler handles both.
+      // Fail-open: if the assembler throws, fall back to a MINIMAL SERVER-DERIVED ctx (claimed condition +
+      // server-built chart digest) — NOT the FE body — so the fail-open path still does not let the FE feed
+      // the fingerprint (a body-fed ctx would re-introduce the write!=read divergence on the degraded path).
       let ctx: SoapContext;
-      if (routePickerFraming !== null) {
-        try {
-          ctx = await assembleSoapContextForCase(db, caseId, routePickerFraming);
-        } catch {
-          let chartDigest: string | null = null;
-          try { chartDigest = await buildDigestForCase(db, caseId); } catch { chartDigest = null; }
-          ctx = { ...body, claimedCondition, routePickerFraming, chartDigest };
-        }
-      } else {
-        // SAME-BRAIN CHART READING (2026-06-21, Zimmelman): even ungrounded, feed the SOAP the SAME
-        // extracted-document digest Ask Aegis cites. Built SERVER-SIDE + set authoritatively (the FE cannot
-        // inject document text). Folded into renderContext → moves the fingerprint when extracted text changes.
+      try {
+        ctx = await assembleSoapContextForCase(db, caseId, routePickerFraming);
+      } catch {
         let chartDigest: string | null = null;
-        try { chartDigest = await buildDigestForCase(db, caseId); }
-        catch { chartDigest = null; }
-        ctx = { ...body, claimedCondition, routePickerFraming, chartDigest };
+        try { chartDigest = await buildDigestForCase(db, caseId); } catch { chartDigest = null; }
+        ctx = { claimedCondition, routePickerFraming, chartDigest };
       }
       // H2: when we just fired a recompute because no usable warm plan exists AND the caller did not explicitly
       // force a regenerate, serve a fresh strategy fallback note for THIS open but do NOT persist it — a

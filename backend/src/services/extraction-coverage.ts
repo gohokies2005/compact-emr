@@ -1,6 +1,6 @@
 import { isScreeningSummaryKey, type ExtractionRunRef } from './chart-build-state.js';
 import { isEffectivelyRead, originalFileName } from './chart-readiness.js';
-import type { FileReadStatusRecord } from './db-types.js';
+import type { AppDb, FileReadStatusRecord } from './db-types.js';
 
 /**
  * Chart Extraction Coverage — a per-case TRANSPARENCY report (Ryan 2026-06-14).
@@ -346,4 +346,39 @@ export function computeExtractionCoverage(
 function toNonNegInt(v: unknown): number {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/**
+ * SHARED coverage loader (Ryan 2026-06-22, Zimmelman FIX C — "0% of pages read" though extraction is 100%).
+ *
+ * THE BUG IT KILLS: the SOAP assembler's deriveCoverageNote loaded the documents + per-page rows but passed
+ * `fileReadStatuses=[]` and `latestRun=null` to computeExtractionCoverage. With NO read-status rows, EVERY
+ * input doc fell to the "no readiness row → in_progress" branch → extractedPages stayed 0 → coveragePct=0,
+ * so the SOAP Objective said "0% of pages read" while the chart chip (GET /extraction-coverage, which loads
+ * the real rows) correctly said 100%. Two readers of the SAME report disagreed.
+ *
+ * THE FIX: ONE loader that assembles the EXACT inputs GET /cases/:id/extraction-coverage passes
+ * (chart-readiness.ts) — the same Document select, the same file_read_status rows, the same latest
+ * ChartExtractionRun, the same per-page provenance — so the route AND the assembler compute identical
+ * coverage and can never drift again. The route handler is now a thin caller of this; the assembler calls it
+ * too. Keep this in lockstep with the route's loads (they were copied here verbatim).
+ *
+ * `chartExtractionRun` is not a typed AppDb delegate (the route casts it), so we cast the same way here.
+ * No fail-open swallow inside — the callers own that (the route lets errors bubble to asyncHandler; the
+ * assembler wraps it in its own try/catch so a DB hiccup degrades the coverage NOTE to null, never blocks).
+ */
+export async function loadExtractionCoverageForCase(db: AppDb, caseId: string): Promise<ExtractionCoverage> {
+  const docs = (await db.document.findMany({
+    where: { caseId },
+    select: { id: true, s3Key: true, filename: true, contentType: true, pageCount: true },
+  })) as readonly CoverageDocInput[];
+  const rows = await db.fileReadStatus.findMany({ where: { caseId } });
+  const latestRun = await (db as unknown as {
+    chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { status: true; resultJson: true } }) => Promise<{ status: string; resultJson: unknown } | null> };
+  }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true } });
+  const pageRows = (await db.documentPage.findMany({
+    where: { document: { caseId } },
+    select: { documentId: true, pageNumber: true, extractionCoverage: true, handwritingPresent: true },
+  })) as unknown as readonly PageProvenanceInput[];
+  return computeExtractionCoverage(docs, rows, latestRun, pageRows);
 }

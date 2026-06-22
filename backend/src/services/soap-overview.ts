@@ -17,6 +17,12 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { createHash } from 'node:crypto';
 import { resolveAnthropicApiKey } from './letter-surgical-propose.js';
+// One-brain action map lives in an SDK-FREE module so a frontend agreement test can import it (the SDK
+// import above is unresolvable in the FE test env). Re-exported here so every existing importer of
+// planViabilityToAction / SoapAction / RoutePickerViability from soap-overview.js is unchanged.
+import { planViabilityToAction, type SoapAction, type RoutePickerViability } from './soap-action-map.js';
+export { planViabilityToAction };
+export type { SoapAction, RoutePickerViability };
 
 const MODEL = process.env['SOAP_NOTE_MODEL'] || 'claude-sonnet-4-6';
 
@@ -26,12 +32,15 @@ const MODEL = process.env['SOAP_NOTE_MODEL'] || 'claude-sonnet-4-6';
 // (Case.aiViabilityPlanJson.lead — the SAME brain the drafter pleads) instead of re-deciding framing;
 // the SYSTEM prompt no longer licenses the model to pick its own theory. Bumped so every pre-one-brain
 // stored note invalidates cleanly on deploy.
-export const SOAP_NOTE_SCHEMA_VERSION = 25;
+// v26 (2026-06-22, Zimmelman write==read): the SYNC read now builds its SoapContext from the SAME
+// server-side assembler the async precompute uses (assembleSoapContextForCase) for BOTH grounded and
+// ungrounded notes, and the coverage note is now computed from the real file-read-status rows (FIX C),
+// so the rendered context (hence the fingerprint) differs from any pre-fix stored note. Bumped so every
+// pre-fix stored note invalidates cleanly on deploy (a v25 blob would never match the v26 fingerprint).
+export const SOAP_NOTE_SCHEMA_VERSION = 26;
 
 export type SoapConfidence = 'high' | 'moderate' | 'low';
-export type SoapAction = 'draft' | 'get_records' | 'clarify' | 'physician_review' | 'reject';
-/** The route-picker plan's viability band (mirrors AiViabilityCard['viability']). */
-export type RoutePickerViability = 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
+// SoapAction + RoutePickerViability are imported+re-exported from ./soap-action-map.js (top of file).
 
 export interface SoapNote {
   readonly subjective: string;
@@ -128,21 +137,6 @@ export interface SoapContext {
      *  a plan recompute (new framing) invalidates the stored SOAP note. Identity only; not rendered to the model. */
     readonly planHash: string;
   } | null;
-}
-
-/**
- * Deterministic map from the route-picker plan's viability band to the SOAP Plan action (one-brain at the
- * action layer — so the Plan line cannot say "draft" when the drafter's brain says "not_supportable"). Used
- * to OVERRIDE the model's free `action` choice when a route-picker plan is grounding the note.
- */
-export function planViabilityToAction(viability: RoutePickerViability): SoapAction {
-  switch (viability) {
-    case 'supportable': return 'draft';
-    case 'marginal': return 'physician_review';
-    case 'needs_physician_review': return 'physician_review';
-    case 'not_supportable': return 'reject';
-    default: return 'physician_review';
-  }
 }
 
 /** Map the route-picker plan's free-text confidence (e.g. "high"/"moderate"/"low") to the SOAP confidence enum. */

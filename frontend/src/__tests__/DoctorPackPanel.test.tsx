@@ -82,7 +82,7 @@ describe('DoctorPackPanel — just the buttons', () => {
   it('ready: shows Regenerate for staff', async () => {
     getLatestMock.mockResolvedValue({ data: READY_PACK });
     renderPanel();
-    expect(await screen.findByRole('button', { name: 'Regenerate' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Regenerate abridged notes' })).toBeInTheDocument();
   });
 
   it('ready + physician: Open only, NO Regenerate (view-only)', async () => {
@@ -90,7 +90,7 @@ describe('DoctorPackPanel — just the buttons', () => {
     getLatestMock.mockResolvedValue({ data: READY_PACK });
     renderPanel();
     await screen.findByRole('button', { name: 'Open abridged notes (12pp)' });
-    expect(screen.queryByRole('button', { name: 'Regenerate' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Regenerate abridged notes' })).toBeNull();
   });
 
   it('does NOT render a title, subtitle, document list, or "Not included" clutter', async () => {
@@ -120,7 +120,7 @@ describe('DoctorPackPanel — just the buttons', () => {
     expect(alert).toHaveTextContent('Abridged notes generation failed');
     expect(alert).toHaveTextContent(realError); // verbatim — NO-SILENT-ERRORS
 
-    fireEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Regenerate abridged notes' }));
     await waitFor(() => expect(generateMock).toHaveBeenCalledWith('CASE-1'));
   });
 

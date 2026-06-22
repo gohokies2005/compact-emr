@@ -341,6 +341,14 @@ export function CaseDetailPage() {
     const hasKey = key !== null && key.length > 0;
     return hasKey || j.state === 'done' || j.state === 'failed';
   }) as InFlightDraftJob | undefined;
+
+  // SOAP-note placement (Ryan 2026-06-21): the SOAP card lives on the ACTION tab while the case is pre-draft /
+  // in-review (the RN's go/no-go read BEFORE drafting), and MOVES to the SUMMARY tab once a completed draft /
+  // letter exists (the clinical narrative becomes a reference record, not the next-action surface). Completed
+  // draft = any 'done' draft job OR a viewable letter on file (covers imported finals). Threaded into both tab
+  // renders so the card shows in exactly one place; defined AFTER viewableLetterJob (avoids a TDZ reference).
+  const hasCompletedDraft = (c.draftJobs ?? []).some((job) => job.state === 'done') || !!viewableLetterJob;
+
   async function openLetterPdf() {
     if (!viewableLetterJob) return;
     try {
@@ -595,10 +603,20 @@ export function CaseDetailPage() {
                       float up when the pre-draft slots are absent). Keys ride the outermost element so a
                       poll-driven visibility flip never remounts siblings (the L525 stability discipline). */}
 
-                  {/* SOAP-note Overview RELOCATED to the new Summary tab (Ryan 2026-06-20 restructure):
-                      the clinical narrative is the Summary surface; the Action tab is the operational view.
-                      What stays here is the operational story — chart extraction (what we read), the
-                      assignments, the send affordance, and (collapsed) the raw analysis. */}
+                  {/* SOAP-note Overview (Ryan 2026-06-21): while the case is PRE-DRAFT / in-review (no
+                      completed draft yet) the SOAP read leads the ACTION tab — it's the RN's go/no-go read
+                      before drafting. Once a completed draft/letter exists it MOVES to the Summary tab (it
+                      becomes a reference record, not the next action). hasCompletedDraft gates the move so the
+                      card is in exactly one tab at a time. */}
+                  {!hasCompletedDraft ? (
+                    <SoapOverviewCard
+                      key="soap-overview"
+                      caseId={c.id}
+                      claimedCondition={c.claimedCondition}
+                      veteranStatement={c.veteranStatement ?? null}
+                      hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}
+                    />
+                  ) : null}
 
                   {/* Chart extraction (objective — "what we actually read") stays visible; it also carries
                       the reprocess/re-OCR actions. Wider gate so it shows during drafting / halt / rn_review. */}
@@ -755,6 +773,7 @@ export function CaseDetailPage() {
           <SummaryTab
             c={c}
             chartReadiness={chartReadiness}
+            showSoap={hasCompletedDraft}
             saving={patch.isPending}
             onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })}
           />
@@ -826,22 +845,28 @@ type EditableField = 'framingChoice' | 'upstreamScCondition' | 'veteranStatement
 // The SC-vs-problem split reuses the SAME veteran data the chart uses (getVeteran): scConditions with
 // status 'service_connected' are the SC list; activeProblems is the medical-history list. Read-only
 // here (edits happen on the SC Conditions / Active Problems tabs); this surface is for reading.
-function SummaryTab({ c, chartReadiness, onSave, saving }: {
+function SummaryTab({ c, chartReadiness, showSoap, onSave, saving }: {
   readonly c: CaseDetail;
   readonly chartReadiness: UseChartReadiness;
+  /** The SOAP card lives here only once a completed draft/letter exists; pre-draft it leads the Action tab
+   *  (Ryan 2026-06-21). Gated so the card never renders in both tabs at once. */
+  readonly showSoap: boolean;
   readonly onSave: (field: EditableField, value: string) => void;
   readonly saving: boolean;
 }) {
   return (
     <div className="space-y-6">
       {/* 1. The AI SOAP note leads — the clinical narrative (Subjective / Objective / Assessment / Plan)
-          with the deterministic verdict traffic-light + next action as the always-instant fallback. */}
-      <SoapOverviewCard
-        caseId={c.id}
-        claimedCondition={c.claimedCondition}
-        veteranStatement={c.veteranStatement ?? null}
-        hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}
-      />
+          with the deterministic verdict traffic-light + next action as the always-instant fallback. Shown
+          here ONLY once a completed draft/letter exists (pre-draft it leads the Action tab). */}
+      {showSoap ? (
+        <SoapOverviewCard
+          caseId={c.id}
+          claimedCondition={c.claimedCondition}
+          veteranStatement={c.veteranStatement ?? null}
+          hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}
+        />
+      ) : null}
 
       {/* 2. Framing / opinion / cost — the case summary fields. */}
       <CaseSummaryFields c={c} saving={saving} onSave={onSave} />

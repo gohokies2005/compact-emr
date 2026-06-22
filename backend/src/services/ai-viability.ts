@@ -74,6 +74,16 @@ export interface AiViabilityCard {
   readonly missing: ReadonlyArray<{ fact: string; why: string }>;
   readonly nuance: string;
   readonly overall: string;
+  /**
+   * The sha of the plan's inputs (Case.aiViabilityPlanHash) AT THE ROW VERSION THIS CARD WAS READ FROM.
+   * Stamped at return time by deriveAiViability from the SAME row read that produced the framing — so a caller
+   * gets framing + hash from ONE row version (no second findFirst that an async recompute could race; QA
+   * 2026-06-21 H3). OPTIONAL by design: it is NEVER persisted into aiViabilityPlanJson (it is the hash OF that
+   * JSON's inputs — persisting it would be circular and let a stale embedded value override the live column),
+   * so the persisted blob (and consumers that read it directly, e.g. aiViabilityPlanBlock) carry no planHash.
+   * Absent/'' when read straight from the persisted JSON or when the column is empty (H4).
+   */
+  readonly planHash?: string;
 }
 
 const _cache = new Map<string, AiViabilityCard | null>();
@@ -176,8 +186,11 @@ export async function deriveAiViability(
     const persisted = c.aiViabilityPlanJson;
     if (c.aiViabilityPlanHash === inputHash && persisted && typeof persisted === 'object'
         && persisted.schemaVersion === AI_VIABILITY_PLAN_SCHEMA_VERSION && persisted.source === 'ai_route_picker' && persisted.lead) {
-      _cache.set(cacheKey, persisted); // warm the in-process cache for the rest of this instance
-      return persisted;
+      // Stamp planHash from THIS row read (the column we just loaded) — the caller gets framing + hash from one
+      // row version. The persisted JSON itself is hash-free; we attach it on the way out only (H3).
+      const stamped: AiViabilityCard = { ...persisted, planHash: c.aiViabilityPlanHash ?? '' };
+      _cache.set(cacheKey, stamped); // warm the in-process cache for the rest of this instance
+      return stamped;
     }
 
     // READ-ONLY path (synchronous GET /viability-card): no fresh persisted plan → return null WITHOUT the
@@ -229,6 +242,7 @@ export async function deriveAiViability(
       missing: ((plan['missing_facts'] as Array<Record<string, unknown>>) ?? []).map((x) => ({ fact: String(x['fact_needed'] ?? ''), why: String(x['why_it_matters'] ?? '') })).filter((x) => x.fact),
       nuance: String(plan['clinical_nuance'] ?? ''),
       overall: String(plan['overall_rationale'] ?? ''),
+      planHash: inputHash, // the hash these inputs produce; matches what we persist into the column below
     };
     _cache.set(cacheKey, card);
     // Persist the plan so Ask Aegis can NARRATE the same one-brain pick WITHOUT a second synchronous LLM
@@ -236,8 +250,13 @@ export async function deriveAiViability(
     // identical re-render is a no-op DB-side; fail-open (a write failure / missing column never breaks the
     // card — the advisory just falls back to its corpus-only answer).
     if (c.aiViabilityPlanHash !== inputHash) {
+      // Persist the plan JSON hash-FREE (planHash is the hash OF these inputs — it lives in the
+      // aiViabilityPlanHash COLUMN, not inside the blob; embedding it would be circular and a stale embedded
+      // value could mislead a future reader). The column is the single source of the hash (H3).
+      const { planHash: _ph, ...persistCard } = card;
+      void _ph;
       await db.case
-        .update({ where: { id: caseId }, data: { aiViabilityPlanJson: card as unknown as object, aiViabilityPlanHash: inputHash } as never })
+        .update({ where: { id: caseId }, data: { aiViabilityPlanJson: persistCard as unknown as object, aiViabilityPlanHash: inputHash } as never })
         .catch((e: unknown) => { console.warn(JSON.stringify({ msg: 'ai-viability: plan persist failed open', caseId, error: e instanceof Error ? e.message : String(e) })); });
     }
     return card;

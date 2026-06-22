@@ -212,6 +212,39 @@ describe('SOAP one-brain grounding (route-picker plan is authoritative)', () => 
     expect(upserts()).toBe(0);
   });
 
+  // H4 (2026-06-21): a grounded plan whose planHash is EMPTY (legacy/partial row: aiViabilityPlanHash null/''
+  // while aiViabilityPlanJson is populated) must STILL invalidate the SOAP cache when the framing changes —
+  // otherwise folding the empty hash makes old + new framing share the same `plan:` segment and the stale note
+  // is served forever. We derive a CONTENT identity from framing+cfr_basis+mechanism so a framing change moves
+  // the fingerprint AND an unchanged framing keeps it stable ($0-on-reopen still works).
+  describe('H4 — empty planHash with a grounded plan falls back to a content identity', () => {
+    const emptyHash = (over: Partial<NonNullable<SoapContext['routePickerFraming']>> = {}): SoapContext => ({
+      ...CTX, routePickerFraming: { ...PLAN_FRAMING, planHash: '', ...over },
+    });
+
+    it('empty-planHash + SAME framing → SAME fingerprint ($0-on-reopen still holds)', () => {
+      expect(soapNoteFingerprint(emptyHash())).toBe(soapNoteFingerprint(emptyHash()));
+    });
+
+    it('empty-planHash + CHANGED framing → DIFFERENT fingerprint (stale invalidates, never served forever)', () => {
+      const a = emptyHash();
+      const b = emptyHash({ framing: 'OSA secondary to a DIFFERENT anchor (causation)' });
+      expect(soapNoteFingerprint(a)).not.toBe(soapNoteFingerprint(b));
+      // and a changed CFR basis or mechanism also moves it.
+      expect(soapNoteFingerprint(a)).not.toBe(soapNoteFingerprint(emptyHash({ cfr_basis: '38 CFR 3.310(b)' })));
+      expect(soapNoteFingerprint(a)).not.toBe(soapNoteFingerprint(emptyHash({ mechanism: 'a wholly different mechanism' })));
+    });
+
+    it('empty-planHash + changed framing makes a stored note STALE (served, no auto-spend) — the live bug it fixes', async () => {
+      const stored = { inputHash: soapNoteFingerprint(emptyHash()), schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: NOTE };
+      const generate = vi.fn(async () => NOTE);
+      const { db } = fakeDb(stored);
+      const res = await getOrBuildSoapNote(db, 'case-1', emptyHash({ framing: 'NEW framing, empty hash' }), { generate });
+      expect(generate).not.toHaveBeenCalled(); // honest staleness, no silent re-bill
+      expect(res.stale).toBe(true);
+    });
+  });
+
   it('a route-picker recompute (new planHash) makes the stored SOAP STALE, served without auto-spend', async () => {
     const grounded: SoapContext = { ...CTX, routePickerFraming: PLAN_FRAMING };
     // Stored note was written under the OLD planHash; the live plan now has a new hash → stale, no auto-fire.

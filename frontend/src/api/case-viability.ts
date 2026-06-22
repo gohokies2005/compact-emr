@@ -154,14 +154,32 @@ export interface SoapContextInput {
   readonly engineNextAction?: string | null;
 }
 
+/** The route-picker plan's framing carried on the SOAP response so the FE headline can match the grounded
+ *  Assessment (H1). Present (with grounded:true) only when the SOAP note is grounded on the route-picker plan
+ *  (the SAME brain the drafter pleads); null when ungrounded (flag off / no plan / stale / wrong-condition). */
+export interface SoapRoutePickerFraming {
+  readonly framing: string;
+  readonly cfr_basis: string;
+  readonly mechanism: string;
+  readonly rationale: string;
+  readonly counterargument: string;
+  readonly confidence: string;
+  readonly viability: 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
+  readonly planHash: string;
+}
+
 /** Server response for the SOAP overview. `data` is the note (stored or fresh); `fingerprint` identifies
  *  the inputs the note was written from; `stale` = a stored note exists but the inputs changed since (new
- *  info — the card shows a subtle hint, never auto-spends); `cached` = served from the DB cache ($0). */
+ *  info — the card shows a subtle hint, never auto-spends); `cached` = served from the DB cache ($0).
+ *  `grounded` = the note's Assessment renders the route-picker plan (so the FE prefers its framing for the
+ *  headline); `routePickerFraming` = that plan's framing (null when ungrounded). (H1) */
 export interface SoapNoteResult {
   readonly data: SoapNote | null;
   readonly fingerprint?: string;
   readonly stale?: boolean;
   readonly cached?: boolean;
+  readonly grounded?: boolean;
+  readonly routePickerFraming?: SoapRoutePickerFraming | null;
 }
 
 /** Fetch the SOAP overview. On open this SERVES THE STORED note for $0; pass { forceRegenerate: true }

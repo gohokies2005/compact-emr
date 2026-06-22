@@ -116,7 +116,13 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   const isStale = soapQ.data?.stale === true && !regenerate.isPending;
   const regenerating = regenerate.isPending;
   const canRegenerate = enabled && strategy !== null;
-  const headline = strategy?.primaryArgument
+  // H1 (2026-06-21): when the SOAP note is GROUNDED on the route-picker plan (the SAME brain the drafter
+  // pleads), the bold headline MUST be the plan's framing so it matches the Assessment below — otherwise the
+  // card showed theory A (the static strategy engine) in the headline and theory B (the plan) in the body.
+  // Only fall back to strategy.primaryArgument / the viability anchor when the note is ungrounded.
+  const groundedFraming = soapQ.data?.grounded === true ? (soapQ.data?.routePickerFraming?.framing ?? null) : null;
+  const headline = groundedFraming
+    || strategy?.primaryArgument
     || (v?.best_anchor?.upstream_verbatim ? `${v.claimed_canonical ?? claimedCondition} — secondary to ${v.best_anchor.upstream_verbatim}` : result.title);
 
   return (

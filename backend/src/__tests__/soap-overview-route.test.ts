@@ -217,20 +217,32 @@ describe('GET /viability-card + POST /viability-card/compute — reliability sta
     expect(fireRecomputeViability).not.toHaveBeenCalled();
   });
 
-  it('POST /compute runs the SYNCHRONOUS compute (compute:true) and returns the resulting state', async () => {
-    getAiViabilityState.mockResolvedValue({ status: 'ready', card: plan() });
+  it('POST /compute FIRES the long async recompute (off-request, 120s budget) and returns computing — NO inline LLM call (Zimmelman long-budget fix 2026-06-22)', async () => {
+    // The endpoint no longer runs the picker INLINE (the 26s API-Gateway cap was the Zimmelman timeout). It
+    // fires the off-request async recompute and returns 'computing'; the FE polls the GET for the result.
     const res = await COMPUTE(makeDb().db);
     expect(res.status).toBe(200);
-    expect(res.body.aiViabilityState.status).toBe('ready');
-    // it asked for a real compute (not a read-only pass)
-    const opts = getAiViabilityState.mock.calls[0]![2] as { compute?: boolean };
-    expect(opts.compute).toBe(true);
+    expect(res.body.aiViabilityState.status).toBe('computing');
+    // it triggered the async path...
+    expect(fireRecomputeViability).toHaveBeenCalledOnce();
+    // ...and did NOT run an inline compute (getAiViabilityState compute:true) on the request path.
+    expect(getAiViabilityState).not.toHaveBeenCalled();
   });
 
-  it('POST /compute surfaces an honest error (NOT a fake verdict) when the compute fails', async () => {
-    getAiViabilityState.mockResolvedValue({ status: 'error', error: 'The analysis service is busy. Please retry in a moment.' });
+  it('POST /compute when the route-picker is OFF → returns off, fires no recompute', async () => {
+    aiRoutePickerEnabled.mockReturnValue(false);
     const res = await COMPUTE(makeDb().db);
-    expect(res.body.aiViabilityState.status).toBe('error');
-    expect(res.body.aiViabilityState.error).toMatch(/busy|retry/i);
+    expect(res.status).toBe(200);
+    expect(res.body.aiViabilityState.status).toBe('off');
+    expect(fireRecomputeViability).not.toHaveBeenCalled();
+    expect(getAiViabilityState).not.toHaveBeenCalled();
+  });
+
+  it('POST /compute still returns computing even if the async dispatch fails (the FE polls; the GET re-fires on cold) ', async () => {
+    fireRecomputeViability.mockResolvedValue(false); // dispatch failed open
+    const res = await COMPUTE(makeDb().db);
+    expect(res.status).toBe(200);
+    expect(res.body.aiViabilityState.status).toBe('computing');
+    expect(fireRecomputeViability).toHaveBeenCalledOnce();
   });
 });

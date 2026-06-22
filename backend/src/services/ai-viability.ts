@@ -268,11 +268,21 @@ export async function getAiViabilityState(
       return { status: 'none' };
     }
 
-    // ── COMPUTE path (async self-invoke OR the synchronous on-demand endpoint). Mark 'computing' so a
-    // concurrent read shows a spinner (not a fake verdict) while this runs; then persist 'ready'/'error'.
-    // AWAIT the stamp (QA 2026-06-21): a fire-and-forget 'computing' write could land AFTER the awaited
-    // 'error' write on the instant-fail paths below (missing prompt / unconfigured key) and clobber it back
-    // to a 90s spinner; awaiting also makes the "concurrent read shows a spinner" comment actually true.
+    // ── COMPUTE path (async self-invoke OR the synchronous on-demand endpoint).
+    // IN-FLIGHT GUARD (Ryan 2026-06-22, cost): a cold open can fan out multiple compute triggers (the GET fires
+    // the async recompute on 'none', and the FE's /compute auto-fire / Retry also fires it). If a FRESH
+    // 'computing' stamp for THESE EXACT inputs already exists, a compute is already running — short-circuit to
+    // {status:'computing'} WITHOUT firing a second ~5¢ Sonnet call. The `c` row was read at the top of this fn
+    // (same row that produced inputHash), so this is free (no extra query). This makes a cold open cost ONE
+    // compute, not three. (computingIsFresh keys off the stamp time so a crashed prior compute can still recompute
+    // after COMPUTING_STALE_MS.)
+    if (c.aiViabilityPlanHash === inputHash && c.aiViabilityPlanStatus === 'computing' && computingIsFresh(c)) {
+      return { status: 'computing' };
+    }
+    // Mark 'computing' so a concurrent read shows a spinner (not a fake verdict) while this runs; then persist
+    // 'ready'/'error'. AWAIT the stamp (QA 2026-06-21): a fire-and-forget 'computing' write could land AFTER the
+    // awaited 'error' write on the instant-fail paths below (missing prompt / unconfigured key) and clobber it
+    // back to a 90s spinner; awaiting also makes the "concurrent read shows a spinner" comment actually true.
     await markPlanStatus(db, caseId, inputHash, 'computing', null);
 
     const pp = loadPickerPrompt();

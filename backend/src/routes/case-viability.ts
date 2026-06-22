@@ -163,11 +163,15 @@ export function createCaseViabilityRouter(db: AppDb): Router {
     }),
   );
 
-  // Synchronous ON-DEMAND compute (Ryan 2026-06-21, Zimmelman) — the reliability keystone. The FE calls this
-  // when the read state is 'none' (first view) or 'error' (the retry button): it runs the picker call INSIDE
-  // this request (it owns its own ~29s window — nothing else on it) and returns the grounded plan after the
-  // spinner, OR an honest error. This kills the "fire async + hope it warms on a later open / click around"
-  // UX: the FIRST view grounds after a ~25s spinner rather than showing a misleading "Not supportable".
+  // ON-DEMAND compute trigger (Ryan 2026-06-22, Zimmelman long-budget fix) — the reliability keystone. The FE
+  // calls this when the read state is 'none' (first view, auto-fired) or 'error' (the retry button). It does
+  // NOT run the picker INLINE: a synchronous inline compute is bounded by the ~30s API-Gateway cap (26s
+  // timeoutMs), which is exactly what timed out forever on large charts. Instead it FIRES the off-request
+  // async recompute (fireRecomputeViability → InvocationType:'Event'), which runs on the API Lambda's 120s
+  // timeout with a 110s picker budget, and returns 'computing' immediately. The FE (which polls the GET every
+  // 4s while 'computing') then picks up 'ready' or a genuine 'error'. getAiViabilityState's compute:true path
+  // stamps 'computing' BEFORE the LLM call, so the very next GET returns 'computing' (the FE polls, it does
+  // not re-fire). Both auto-fire and Retry now drive this single long async path.
   router.post(
     '/cases/:id/viability-card/compute',
     requireRole(['admin', 'ops_staff', 'physician']),
@@ -176,10 +180,13 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       if (!aiRoutePickerEnabled()) { res.json({ aiViabilityState: { status: 'off' } }); return; }
       const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
-      // compute:true owns the request window — bound the picker call to ~26s, well inside the API cap. On any
-      // failure getAiViabilityState persists a stable 'error' (visible + retryable), never an endless re-fire.
-      const aiState = await getAiViabilityState(db, caseId, { compute: true, timeoutMs: 26_000 });
-      res.json({ aiViabilityState: aiStateForClient(aiState) });
+      // Fire the long async recompute off the request path; return 'computing' so the FE shows the spinner and
+      // polls. The async handler stamps 'computing' at start, so a poll race never re-fires a second compute
+      // (the in-flight guard in getAiViabilityState short-circuits a fresh 'computing'). Fail-open: if the
+      // async dispatch itself fails, fireRecomputeViability returns false but the FE still polls (the GET will
+      // re-fire on a cold 'none'), so we still return 'computing' rather than a misleading verdict.
+      void fireRecomputeViability(caseId);
+      res.json({ aiViabilityState: { status: 'computing' } });
     }),
   );
   return router;

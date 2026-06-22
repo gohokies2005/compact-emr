@@ -4,7 +4,7 @@
 // while computing, or an "analysis couldn’t be completed" + Retry on a genuine failure — and must NEVER
 // render the resting "Not supportable as filed" deterministic verdict (which misleads "it won't get drafted").
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -91,6 +91,22 @@ describe('SoapOverviewCard — honest plan-state surface (Zimmelman)', () => {
     await waitFor(() => expect(screen.getByText(/Analyzing the case/i)).toBeInTheDocument());
     expect(screen.queryByText(/Not supportable as filed/i)).not.toBeInTheDocument();
     expect(computeMock).not.toHaveBeenCalled(); // no plan status yet → nothing to auto-fire
+  });
+
+  it('Retry on error → transitions to the computing spinner (NOT stuck on error) — async-trigger fix 2026-06-22', async () => {
+    // The /compute endpoint now FIRES the long async recompute and returns {status:'computing'}. Clicking
+    // Retry must move the card off the error surface into the spinner (then it polls the GET for ready/error).
+    // While the compute mutation is pending, planComputing is true → the spinner shows; it must not stay stuck.
+    viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'error', error: 'The analysis timed out. Please retry.' } });
+    // make the compute mutation stay pending so we can observe the spinner deterministically
+    computeMock.mockReturnValue(new Promise(() => {}) as unknown as ReturnType<typeof computeCaseViability>);
+    renderCard();
+    const retry = await screen.findByRole('button', { name: /Retry analysis/i });
+    fireEvent.click(retry);
+    // compute.isPending → planComputing true → spinner, not the stuck error surface
+    await waitFor(() => expect(screen.getByText(/Analyzing the case/i)).toBeInTheDocument());
+    expect(screen.queryByText(/couldn’t be completed/i)).not.toBeInTheDocument();
+    expect(computeMock).toHaveBeenCalledTimes(1);
   });
 
   it('off (flag disabled) → falls through to the normal deterministic render (no spinner, no error surface)', async () => {

@@ -170,9 +170,13 @@ interface ChartSliceRaw {
 // One builder, both consumers — never a second digest path that can drift.
 export async function buildDigestForCase(db: AppDb, caseId: string): Promise<string | null> {
   try {
+    // #5 (Zimmelman, 2026-06-21): feed docs NEWEST-FIRST. buildDocumentDigest's per-doc FLOOR and tie-break
+    // both prioritize the FRONT of this list, so newest-first guarantees the modern dx/decision survives the
+    // total cap (older docs can no longer eat the whole budget and starve the newest records). The signal-desc
+    // span sort still leads with the most decision-relevant pages regardless of upload order.
     const docs = (await db.document.findMany({
       where: { caseId },
-      orderBy: { uploadedAt: 'asc' },
+      orderBy: { uploadedAt: 'desc' },
       select: { id: true, filename: true, docTag: true, pageCount: true },
     })) as unknown as readonly DigestDocInput[];
     if (docs.length === 0) return null;

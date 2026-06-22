@@ -21,6 +21,12 @@ import { classifyContentText } from '../services/key-docs-classifier.js';
 // --- Caps (byte-exact; enforced in tests). Total ~8,000 chars ≈ 2-3k tokens at ~3-4 chars/token. ---
 export const PER_DOC_DIGEST_CHARS = 1_200;
 export const TOTAL_DIGEST_CHARS = 8_000;
+// #5 (Zimmelman, 2026-06-21): a guaranteed per-doc FLOOR so EVERY extracted doc contributes a slice — the
+// newest records can no longer be starved out of the digest by older docs eating the total cap first. The
+// floor is taken from each doc's single HIGHEST-signal page (its most decision-relevant span). When there
+// are too many docs to floor them all within the total cap, the floor is granted NEWEST-FIRST (docs are fed
+// to the digest newest-first; see buildDigestForCase orderBy) so the modern dx/decision always lands.
+export const PER_DOC_FLOOR_CHARS = 400;
 
 // Inputs are the already-fetched rows (chartSlice.ts does the SELECT). Kept narrow + plain so the unit
 // tests stay DB-free.
@@ -138,22 +144,64 @@ export function buildDocumentDigest(
 
   const perDocUsed = new Map<number, number>();
   let totalUsed = 0;
-  const spanLines: string[] = [];
-  for (const pg of ranked) {
-    if (totalUsed >= totalCap) break;
+  // We ACCUMULATE the chars granted to each page across the floor + fill passes, then render ONE span line per
+  // page at the end (a page touched by both passes is still a single, contiguous span — never split or
+  // duplicated). pageKey identifies a page; pageGrant is the running char grant.
+  const pageKey = (pg: RankedPage): string => `${pg.docOrder}:${pg.pageNumber}`;
+  const pageGrant = new Map<string, number>();
+  const pageByKey = new Map<string, RankedPage>();
+  for (const pg of ranked) pageByKey.set(pageKey(pg), pg);
+
+  // Grant (up to) `limit` MORE chars to one page, clamped to the page's remaining text + the per-doc cap + the
+  // total cap. Accumulates into pageGrant (no line emitted here). Returns chars granted (0 if none fit).
+  const grant = (pg: RankedPage, limit: number): number => {
+    if (limit <= 0) return 0;
     const docUsed = perDocUsed.get(pg.docOrder) ?? 0;
     const docRemaining = perDocCap - docUsed;
-    if (docRemaining <= 0) continue;
+    if (docRemaining <= 0) return 0;
     const totalRemaining = totalCap - totalUsed;
-    const budget = Math.min(docRemaining, totalRemaining);
-    if (budget <= 0) continue;
-    const slice = pg.text.slice(0, budget);
-    if (slice.length === 0) continue;
+    const k = pageKey(pg);
+    const already = pageGrant.get(k) ?? 0;
+    const pageRemaining = pg.text.length - already;
+    const add = Math.min(limit, docRemaining, totalRemaining, pageRemaining);
+    if (add <= 0) return 0;
+    pageGrant.set(k, already + add);
+    perDocUsed.set(pg.docOrder, docUsed + add);
+    totalUsed += add;
+    return add;
+  };
+
+  // #5 FLOOR PASS (Zimmelman): reserve a guaranteed floor for EVERY doc — its single highest-signal page —
+  // BEFORE the signal-greedy fill, so older high-signal docs can no longer eat the whole total cap and starve
+  // the newest records. Docs are visited NEWEST-FIRST (docOrder asc === newest-first, since buildDigestForCase
+  // feeds them newest-first), so when the floor budget can't cover every doc the newest get the floor. The
+  // floor is the doc's top-ranked page (ranked is signal-desc), capped to PER_DOC_FLOOR_CHARS.
+  const floorCap = Math.min(perDocCap, PER_DOC_FLOOR_CHARS);
+  const topPageByDoc = new Map<number, RankedPage>();
+  for (const pg of ranked) if (!topPageByDoc.has(pg.docOrder)) topPageByDoc.set(pg.docOrder, pg);
+  const docOrdersNewestFirst = [...topPageByDoc.keys()].sort((a, b) => a - b);
+  for (const order of docOrdersNewestFirst) {
+    if (totalUsed >= totalCap) break;
+    grant(topPageByDoc.get(order)!, floorCap);
+  }
+
+  // FILL PASS: distribute the remaining total budget by signal desc (the original behavior), now on top of the
+  // floors. Each page can grow to its doc's full per-doc cap; the total cap stops it exactly.
+  for (const pg of ranked) {
+    if (totalUsed >= totalCap) break;
+    grant(pg, perDocCap);
+  }
+
+  // RENDER: one span line per granted page, in signal order (the original output order — signal desc, docOrder
+  // asc, pageNumber asc) so the most decision-relevant spans still lead. Each page is a single contiguous slice
+  // of its granted length (floor + fill merged), never split.
+  const spanLines: string[] = [];
+  for (const pg of ranked) {
+    const g = pageGrant.get(pageKey(pg)) ?? 0;
+    if (g <= 0) continue;
     const doc = docs[pg.docOrder];
     const label = doc ? abbreviateFilename(doc.filename, 36) : `doc${pg.docOrder}`;
-    spanLines.push(`  [${label} p${pg.pageNumber}] ${slice}`);
-    perDocUsed.set(pg.docOrder, docUsed + slice.length);
-    totalUsed += slice.length;
+    spanLines.push(`  [${label} p${pg.pageNumber}] ${pg.text.slice(0, g)}`);
   }
 
   if (spanLines.length > 0) {

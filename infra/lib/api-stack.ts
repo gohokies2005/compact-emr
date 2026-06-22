@@ -302,6 +302,12 @@ export class ApiStack extends Stack {
       actions: ['lambda:InvokeFunction'],
       resources: [`arn:${Stack.of(this).partition}:lambda:${Stack.of(this).region}:${Stack.of(this).account}:function:${Stack.of(this).stackName}-*`],
     }));
+    // The async route-picker recompute (InvocationType:'Event') is SELF-RETRYING by design — the FE re-fires on
+    // the next GET and a genuine compute failure stamps an honest 'error'/Retry. AWS-level async retries (default
+    // 2) would only re-drive a slow/failing picker into 2 MORE full Sonnet computes (~5¢ each) on exactly the
+    // slow cases we target, defeating the in-flight dedup. Disable them; cap event age so a stale queued event
+    // can't fire a pointless compute minutes later.
+    handler.configureAsyncInvoke({ retryAttempts: 0, maxEventAge: Duration.seconds(60) });
 
     props.phiBucket.grantReadWrite(handler);
     props.doctorPacksBucket.grantRead(handler);

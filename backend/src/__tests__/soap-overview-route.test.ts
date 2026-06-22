@@ -238,11 +238,15 @@ describe('GET /viability-card + POST /viability-card/compute — reliability sta
     expect(getAiViabilityState).not.toHaveBeenCalled();
   });
 
-  it('POST /compute still returns computing even if the async dispatch fails (the FE polls; the GET re-fires on cold) ', async () => {
-    fireRecomputeViability.mockResolvedValue(false); // dispatch failed open
+  it('POST /compute surfaces an honest error if the async dispatch FAILS — never a silent eternal spinner (no-dead-end, QA 2026-06-22)', async () => {
+    fireRecomputeViability.mockResolvedValue(false); // dispatch failed open (IAM/throttle/missing fn name)
     const res = await COMPUTE(makeDb().db);
     expect(res.status).toBe(200);
-    expect(res.body.aiViabilityState.status).toBe('computing');
+    // The compute will NEVER run (no async invoke landed), so returning 'computing' would spin forever with no
+    // work + no error. Surface 'error' + Retry instead. The async path stamps its OWN 'error' on a genuine
+    // compute failure; this covers the dispatch-never-fired case.
+    expect(res.body.aiViabilityState.status).toBe('error');
+    expect(res.body.aiViabilityState.error).toMatch(/could not start the analysis/i);
     expect(fireRecomputeViability).toHaveBeenCalledOnce();
   });
 });

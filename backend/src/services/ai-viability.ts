@@ -106,7 +106,10 @@ export type AiViabilityState =
 // A compute that has not produced/refreshed within this many ms is treated as STALE-IN-FLIGHT: a prior
 // 'computing' stamp from a crashed/timed-out invocation must not wedge the case in a spinner forever. After
 // this window the read path treats a lingering 'computing' as recomputable (status:'none').
-const COMPUTING_STALE_MS = 90_000;
+// MUST exceed the async picker budget (110s, placeholder-lambda.ts) + headroom — else a legitimately
+// long in-flight compute (the large-chart case this exists for) is declared stale at 90s mid-run and a
+// GET re-fires a SECOND Sonnet compute, double-billing the slow cases the dedup guard is meant to protect.
+const COMPUTING_STALE_MS = 135_000;
 
 function buildUserPrompt(claimed: string, sc: string[], problems: string[], events: string[], statement: string | null, guidance: string | null): string {
   const scLines = sc.length ? sc.map((s) => `- ${s}`).join('\n') : '- (none parsed)';

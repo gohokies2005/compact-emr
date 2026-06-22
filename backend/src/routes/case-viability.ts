@@ -182,11 +182,14 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
       // Fire the long async recompute off the request path; return 'computing' so the FE shows the spinner and
       // polls. The async handler stamps 'computing' at start, so a poll race never re-fires a second compute
-      // (the in-flight guard in getAiViabilityState short-circuits a fresh 'computing'). Fail-open: if the
-      // async dispatch itself fails, fireRecomputeViability returns false but the FE still polls (the GET will
-      // re-fire on a cold 'none'), so we still return 'computing' rather than a misleading verdict.
-      void fireRecomputeViability(caseId);
-      res.json({ aiViabilityState: { status: 'computing' } });
+      // (the in-flight guard in getAiViabilityState short-circuits a fresh 'computing'). NO-DEAD-END: honor the
+      // dispatch result — if the self-invoke could NOT be dispatched (IAM/throttle/missing fn name), surface an
+      // honest 'error' with Retry instead of returning 'computing' for a compute that will never run (which the
+      // FE would show as an eternal spinner). The async path stamps its own 'error' on a genuine compute failure.
+      const dispatched = await fireRecomputeViability(caseId);
+      res.json({ aiViabilityState: dispatched
+        ? { status: 'computing' }
+        : { status: 'error', error: 'Could not start the analysis. Please retry.' } });
     }),
   );
   return router;

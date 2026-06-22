@@ -18,6 +18,7 @@ import { deriveAiViability, aiRoutePickerEnabled } from '../services/ai-viabilit
 import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
 import { getOrBuildSoapNote, type SoapContext, type SoapOverviewCacheDb } from '../services/soap-overview.js';
 import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
+import { buildDigestForCase } from '../advisory/chartSlice.js';
 
 export function createCaseViabilityRouter(db: AppDb): Router {
   const router = Router();
@@ -80,7 +81,17 @@ export function createCaseViabilityRouter(db: AppDb): Router {
           firedRecompute = true;
         }
       } catch { routePickerFraming = null; /* fail-open: SOAP falls back to strategy strings */ }
-      const ctx: SoapContext = { ...body, claimedCondition, routePickerFraming };
+      // SAME-BRAIN CHART READING (2026-06-21, Zimmelman): feed the SOAP the SAME extracted-document digest Ask
+      // Aegis cites (advisory/chartSlice buildDigestForCase). The SOAP was previously fed structured columns
+      // ONLY (the FE-POSTed keyFacts/scConditions/problems) and missed records Ask Aegis surfaced. Built
+      // SERVER-SIDE and set authoritatively (override any FE-supplied chartDigest — the FE cannot inject
+      // document text). Folded into renderContext → it also moves the SOAP fingerprint, so the stored note
+      // invalidates when the chart's extracted text changes. Fail-open: a digest hiccup → null (no document
+      // grounding, the note still builds from structured facts).
+      let chartDigest: string | null = null;
+      try { chartDigest = await buildDigestForCase(db, caseId); }
+      catch { chartDigest = null; }
+      const ctx: SoapContext = { ...body, claimedCondition, routePickerFraming, chartDigest };
       // H2: when we just fired a recompute because no usable warm plan exists AND the caller did not explicitly
       // force a regenerate, serve a fresh strategy fallback note for THIS open but do NOT persist it — a
       // persisted strategy note would be served for $0 on later opens and hide the route-picker plan that is

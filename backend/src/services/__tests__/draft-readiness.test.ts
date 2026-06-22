@@ -102,6 +102,78 @@ describe('evaluateDraftReadiness', () => {
   });
 });
 
+// ── SAME-BRAIN Gate-1 (2026-06-21): the readiness reads the route-picker plan (the brain) + the granted-SC
+// list + a lay statement + the extracted digest — not just the problem list + filename regexes. These pin the
+// fix for false "missing dx/event" on a fully-extracted chart, and that GENUINE absences still flag.
+describe('evaluateDraftReadiness — same-brain (route-picker plan + chart facts)', () => {
+  const plan = (missing: Array<{ fact: string; why: string }>) => ({
+    framing: 'OSA secondary to service-connected chronic rhinitis (38 CFR 3.310(a))',
+    cfr_basis: '38 CFR 3.310(a)', mechanism: 'nasal obstruction worsens upper-airway collapse',
+    rationale: 'A defensible secondary causation theory anchored on the granted rhinitis.',
+    viability: 'supportable' as const, missing,
+  });
+
+  it('FALSE-MISSING FIX: the brain read the full chart and did NOT flag dx/event missing → both present even with an empty problem list', () => {
+    const r = evaluateDraftReadiness(base({
+      problemNames: [], inServiceEvent: '', documents: [{ filename: 'records.pdf', docTag: null }],
+      routePlan: plan([]), // brain found no gaps
+    }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(true);
+    expect(r.items.find((i) => i.key === 'in_service_event')!.present).toBe(true);
+    expect(r.ready).toBe(true);
+    expect(r.routePlan).toBeDefined();
+    expect(r.routePlan!.framing).toContain('secondary');
+  });
+
+  it('GENUINE ABSENCE still flags: the brain explicitly lists the diagnosis as missing', () => {
+    const r = evaluateDraftReadiness(base({
+      claimedCondition: 'GERD', problemNames: ['Tinnitus'],
+      routePlan: plan([{ fact: 'A current diagnosis of GERD', why: 'no medical record shows a GERD diagnosis' }]),
+    }));
+    const dx = r.missing.find((m) => m.key === 'current_diagnosis');
+    expect(dx).toBeDefined();
+    expect(dx!.message).toContain('A current diagnosis for GERD is not on file');
+  });
+
+  it('a lay/buddy statement (§1154(b)) satisfies the in-service-event check with no event text and no service doc', () => {
+    const r = evaluateDraftReadiness(base({
+      inServiceEvent: '', layStatement: 'My battle buddy witnessed the IED blast that caused the injury.',
+      documents: [{ filename: 'Benefit Summary.pdf', docTag: null }],
+    }));
+    const ev = r.items.find((i) => i.key === 'in_service_event')!;
+    expect(ev.present).toBe(true);
+    expect(ev.basis).toContain('1154(b)');
+  });
+
+  it('a granted SC condition counts as a documented diagnosis for the dx check', () => {
+    const r = evaluateDraftReadiness(base({
+      claimedCondition: 'Allergic rhinitis', problemNames: [], scConditionNames: ['Allergic rhinitis'],
+    }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(true);
+  });
+
+  it('canonicalizer match: claim "OSA" is documented by an on-file "Obstructive sleep apnea" via the vendored canonicalizer', () => {
+    // normalizeName already folds this synonym; this also exercises the canonical path on a problem-list entry.
+    const r = evaluateDraftReadiness(base({ claimedCondition: 'OSA', problemNames: ['Obstructive sleep apnea'], scConditionNames: [] }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(true);
+  });
+
+  it('NO plan → byte-identical legacy behavior (a missing dx still flags)', () => {
+    const r = evaluateDraftReadiness(base({ claimedCondition: 'GERD', problemNames: ['Tinnitus'], routePlan: null }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(false);
+    expect(r.routePlan).toBeUndefined();
+  });
+
+  it('a denial in the extracted digest satisfies the appeal denial check even when no filename says "denial"', () => {
+    const r = evaluateDraftReadiness(base({
+      claimType: 'supplemental',
+      documents: [{ filename: 'va_packet.pdf', docTag: null }, { filename: 'DD-214.pdf', docTag: null }],
+      chartDigest: 'Rating decision dated 2020-06-01: the claim for sleep apnea is denied because...',
+    }));
+    expect(r.items.find((i) => i.key === 'denial_letter')!.present).toBe(true);
+  });
+});
+
 describe('getDraftReadiness (db gather)', () => {
   function mockDb(opts: {
     caseRow: unknown;

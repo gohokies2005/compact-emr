@@ -29,6 +29,17 @@ export interface CaseFraming {
   readonly derivedAt: string;
 }
 
+/** The route-picker plan slice the readiness evaluation consulted (the SAME brain the drafter pleads). When
+ *  present the Gate-1 modal shows this REASONED framing + rationale instead of the bare SSOT label. */
+export interface RoutePlanForReadiness {
+  readonly framing: string;
+  readonly cfr_basis: string;
+  readonly mechanism: string;
+  readonly rationale: string;
+  readonly viability: 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
+  readonly missing: ReadonlyArray<{ readonly fact: string; readonly why: string }>;
+}
+
 export interface DraftReadinessResult {
   readonly ready: boolean;
   readonly items: readonly ReadinessItem[];
@@ -36,6 +47,7 @@ export interface DraftReadinessResult {
   readonly summary: string;
   readonly buildState: ChartBuildState;
   readonly caseFraming?: CaseFraming;
+  readonly routePlan?: RoutePlanForReadiness;
 }
 
 export async function getDraftReadiness(caseId: string): Promise<{ data: DraftReadinessResult }> {

@@ -65,7 +65,7 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
         {/* NO-SILENT-ERRORS: the worker's real cause, verbatim. */}
         <span className="whitespace-pre-wrap">{pack.errorMessage ?? 'No error message was recorded.'}</span>
         {canGenerate ? (
-          <Button type="button" variant="secondary" size="sm" loading={generate.isPending} onClick={() => generate.mutate()}>Regenerate</Button>
+          <Button type="button" variant="secondary" size="sm" loading={generate.isPending} onClick={() => generate.mutate()}>Regenerate abridged notes</Button>
         ) : null}
       </div>
     );
@@ -76,7 +76,7 @@ export function DoctorPackPanel({ caseId }: { readonly caseId: string }) {
         Open abridged notes ({pack.pageCount ?? '?'}pp)
       </Button>
       {canGenerate ? (
-        <Button type="button" variant="secondary" size="sm" loading={generate.isPending} onClick={() => generate.mutate()}>Regenerate</Button>
+        <Button type="button" variant="secondary" size="sm" loading={generate.isPending} onClick={() => generate.mutate()}>Regenerate abridged notes</Button>
       ) : null}
       {packQuery.isError ? <span className="text-sm text-rose-700">Could not load — {describeApiError(packQuery.error)}</span> : null}
     </div>

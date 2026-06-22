@@ -326,16 +326,21 @@ describe('unit: helpers', () => {
     expect(validateSchema(artifact)).toEqual([]);
   });
 
-  it('GATED_FILESET is the producer-synced v1.1 set (29, 2026-06-11 sync) in order', () => {
-    expect(GATED_FILESET).toHaveLength(29);
+  it('GATED_FILESET is the producer-synced v1.1 set (33, 2026-06-22 sync) in order', () => {
+    expect(GATED_FILESET).toHaveLength(33);
     expect(GATED_FILESET[0]).toBe('app/scripts/run-letter-pipeline.js');
     expect(GATED_FILESET[9]).toBe('app/services/routingResolver.js'); // last of the original 10
     // The 4 promotions the 2026-06-11 sync added (R4 drift fix):
-    expect(GATED_FILESET[15]).toBe('app/services/conditionCanon.js');
-    expect(GATED_FILESET[19]).toBe('app/services/draftingGuidance.js');
-    expect(GATED_FILESET[20]).toBe('app/services/forbiddenWordPass.js');
-    expect(GATED_FILESET[23]).toBe('app/services/opinionSentence.js');
-    expect(GATED_FILESET[28]).toBe('references/medical_literature/curated/routing.json'); // data file LAST
+    expect(GATED_FILESET[17]).toBe('app/services/conditionCanon.js');
+    expect(GATED_FILESET[22]).toBe('app/services/draftingGuidance.js');
+    expect(GATED_FILESET[24]).toBe('app/services/forbiddenWordPass.js');
+    expect(GATED_FILESET[27]).toBe('app/services/opinionSentence.js');
+    // The 4 promotions the 2026-06-22 cutover (52297d4) added (route-picker/checkpoint/body-quality/fold):
+    expect(GATED_FILESET[11]).toBe('app/services/aiRoutePicker.js');        // after aggravationTriggers.js
+    expect(GATED_FILESET[14]).toBe('app/services/checkpointManifest.js');   // after cavcRegistry.js
+    expect(GATED_FILESET[21]).toBe('app/services/draftBodyQualityGate.js'); // after deprecatedPhrases.js
+    expect(GATED_FILESET[23]).toBe('app/services/foldRenderable.js');       // after draftingGuidance.js
+    expect(GATED_FILESET[32]).toBe('references/medical_literature/curated/routing.json'); // data file LAST
   });
 
   it('ENFORCER_GATE_MAJOR is 1', () => {

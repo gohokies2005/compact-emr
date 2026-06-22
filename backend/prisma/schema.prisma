@@ -398,6 +398,18 @@ model Case {
   // fail-open at every read/write, so a migration-ordering gap just degrades to the corpus-only answer.
   aiViabilityPlanJson Json?      @map("ai_viability_plan_json")
   aiViabilityPlanHash String?    @map("ai_viability_plan_hash")
+  // Compute STATUS for the route-picker plan (Ryan 2026-06-21, Zimmelman): the original design persisted
+  // ONLY a successful plan, so a route-picker LLM error/timeout on a large chart left every field null →
+  // the GET re-fired the async recompute forever (same failure each time) AND the card showed a MISLEADING
+  // "Not supportable" deterministic verdict instead of an honest "analysis failed". These three columns make
+  // the failure VISIBLE + STABLE so the read path distinguishes never-computed / computing / failed / ready,
+  // serves an honest error (not a fake verdict), and bounds retries instead of looping. All nullable +
+  // fail-open: a migration-ordering gap or write failure just degrades to today's null-plan behavior.
+  // Values: 'ready' (a valid plan is persisted) | 'computing' (a sync/async compute is in flight) |
+  // 'error' (the last compute failed — aiViabilityPlanError carries the reason). NULL = never attempted.
+  aiViabilityPlanStatus   String?  @map("ai_viability_plan_status")
+  aiViabilityPlanError    String?  @map("ai_viability_plan_error")
+  aiViabilityPlanComputedAt DateTime? @map("ai_viability_plan_computed_at")
   // Stamp provenance (keystone pkg 5): who last wrote each stamped field group — 'derived'
   // (machine derivation: only-when-null persist, intake derive, backfill, restamp hook) or
   // 'manual' (RN/staff set: case PATCH/create, CDS run). NULL = legacy/unknown provenance and is

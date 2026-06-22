@@ -14,7 +14,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb } from '../services/db-types.js';
 import { caseViabilityEnabled, deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
-import { deriveAiViability, aiRoutePickerEnabled } from '../services/ai-viability.js';
+import { getAiViabilityState, aiRoutePickerEnabled } from '../services/ai-viability.js';
 import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
 import { getOrBuildSoapNote, type SoapContext, type SoapOverviewCacheDb } from '../services/soap-overview.js';
 import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
@@ -51,7 +51,12 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       let routePickerFraming: SoapContext['routePickerFraming'] = null;
       let firedRecompute = false;
       try {
-        const plan = await deriveAiViability(db, caseId, { compute: false });
+        // Reliability-aware read: a 'ready' plan grounds the note; on a cold 'none' we fire the off-request
+        // recompute (so the next open grounds), but we do NOT re-fire on 'error'/'computing' (that would loop
+        // the same failing call — the Zimmelman bug). On 'error'/'computing' the note simply falls back to the
+        // strategy strings for THIS open (noStore, so it does not mask the warming/failed state).
+        const aiState = await getAiViabilityState(db, caseId, { compute: false });
+        const plan = aiState.status === 'ready' ? aiState.card : null;
         if (plan && plan.lead && plan.inputClaimed === claimedCondition) {
           // framing + planHash come from ONE row version: deriveAiViability stamps plan.planHash from the SAME
           // row read that produced the framing, so an async recompute between two reads can no longer stamp a
@@ -69,15 +74,17 @@ export function createCaseViabilityRouter(db: AppDb): Router {
             planHash: plan.planHash ?? '',
           };
         } else if (aiRoutePickerEnabled()) {
-          // H2: the route-picker is ON but there is NO USABLE warm plan — either compute:false returned null
-          // (first open / invalidated) OR the persisted plan is for a different/stale claimed condition
-          // (inputClaimed !== live claim). Either way the note is NOT grounded this open. Fire the SAME
-          // off-request async recompute the /viability-card GET fires (fire-and-forget; never blocks/fails this
-          // POST and triggers NO LLM on this synchronous path) so a CURRENT plan is warm on the NEXT open. We
-          // record firedRecompute so the ungrounded fallback note is NOT persisted (noStore below) — else it
-          // would be served $0 forever and mask the warming plan; once the plan lands, its planHash changes the
-          // fingerprint and the next open grounds correctly.
-          void fireRecomputeViability(caseId);
+          // The route-picker is ON but there is NO USABLE warm plan this open: either the state is cold ('none'),
+          // a compute is in flight ('computing'), the last compute failed ('error'), or the persisted plan is
+          // for a different/stale claimed condition (inputClaimed !== live claim → status 'ready' but skipped
+          // above). In every case the note is NOT grounded this open, so we serve a strategy fallback and do NOT
+          // persist it (noStore) — it must not mask the warming/failed plan. We fire the off-request recompute
+          // ONLY when cold ('none') or a stale-condition 'ready' (treated like cold); we do NOT re-fire on
+          // 'error'/'computing' (that would loop the same failing call — the Zimmelman infinite-loop bug). On
+          // 'error' the FE's retry button drives the synchronous compute endpoint instead.
+          if (aiState.status === 'none' || aiState.status === 'ready') {
+            void fireRecomputeViability(caseId);
+          }
           firedRecompute = true;
         }
       } catch { routePickerFraming = null; /* fail-open: SOAP falls back to strategy strings */ }
@@ -122,10 +129,18 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       // The card prefers the AI route-picker plan (the SAME brain the drafter uses) when
       // AI_ROUTE_PICKER_ENABLED is on; the card falls back to the static M-tier engine otherwise.
       // READ-ONLY here (compute:false) — NEVER run the ~22-25s picker call on this synchronous 29s-capped
-      // GET (that timed out → card rendered nothing). If there's no fresh persisted plan, fire an async
-      // self-invoke to compute it off the request path; the FE polls until it lands (~25s, once).
-      const aiViability = await deriveAiViability(db, caseId, { compute: false });
-      if (aiViability === null && aiRoutePickerEnabled()) {
+      // GET (that timed out → card rendered nothing).
+      //
+      // RELIABILITY (Ryan 2026-06-21, Zimmelman): we now return the discriminated STATE — ready / computing /
+      // error / none — so the FE shows an HONEST surface (the grounded plan, a spinner, or "analysis failed —
+      // retry") and NEVER a misleading "Not supportable" resting verdict on a missing/failed plan. We fire the
+      // off-request recompute ONLY on a cold 'none' (no plan, none in flight, no recorded failure) — NOT on an
+      // 'error' (that would re-fire the same failing call on every open, the infinite loop) and NOT while
+      // 'computing'. On 'error', the FE's retry button hits POST /viability-card/compute (synchronous, owns its
+      // own window) instead.
+      const aiState = await getAiViabilityState(db, caseId, { compute: false });
+      const aiViability = aiState.status === 'ready' ? aiState.card : null;
+      if (aiState.status === 'none' && aiRoutePickerEnabled()) {
         void fireRecomputeViability(caseId); // fire-and-forget; never blocks/​fails the GET
       }
       // Chart-read state for the SOAP traffic light (I2 fix): the calm light goes green only when the
@@ -136,8 +151,52 @@ export function createCaseViabilityRouter(db: AppDb): Router {
         const r = await loadReconciledChartReadiness(db, caseId);
         chartFullyRead = r ? (r.ready === true && (r.blockingFiles?.length ?? 0) === 0) : null;
       } catch { chartFullyRead = null; }
-      res.json({ data: await deriveCaseViabilityForCase(db, caseId), aiViability, chartFullyRead });
+      // aiViabilityState: the discriminated reliability state ('ready'|'computing'|'error'|'none'|'off') the
+      // FE uses to show a spinner / honest-error / grounded plan instead of a fake resting verdict. The legacy
+      // `aiViability` field is kept for back-compat (the static fallback consumers still read it).
+      res.json({
+        data: await deriveCaseViabilityForCase(db, caseId),
+        aiViability,
+        aiViabilityState: aiStateForClient(aiState),
+        chartFullyRead,
+      });
+    }),
+  );
+
+  // Synchronous ON-DEMAND compute (Ryan 2026-06-21, Zimmelman) — the reliability keystone. The FE calls this
+  // when the read state is 'none' (first view) or 'error' (the retry button): it runs the picker call INSIDE
+  // this request (it owns its own ~29s window — nothing else on it) and returns the grounded plan after the
+  // spinner, OR an honest error. This kills the "fire async + hope it warms on a later open / click around"
+  // UX: the FIRST view grounds after a ~25s spinner rather than showing a misleading "Not supportable".
+  router.post(
+    '/cases/:id/viability-card/compute',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      if (!aiRoutePickerEnabled()) { res.json({ aiViabilityState: { status: 'off' } }); return; }
+      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      // compute:true owns the request window — bound the picker call to ~26s, well inside the API cap. On any
+      // failure getAiViabilityState persists a stable 'error' (visible + retryable), never an endless re-fire.
+      const aiState = await getAiViabilityState(db, caseId, { compute: true, timeoutMs: 26_000 });
+      res.json({ aiViabilityState: aiStateForClient(aiState) });
     }),
   );
   return router;
+}
+
+/** Project the server-side AiViabilityState into the FE-facing shape. The 'ready' card is sent so the FE can
+ *  render it without a second round-trip; 'error' carries the RN-safe message; 'computing'/'none'/'off' are
+ *  bare. (Imported type lives in ai-viability.ts; we inline the projection to avoid leaking server internals.) */
+function aiStateForClient(state: Awaited<ReturnType<typeof getAiViabilityState>>):
+  | { status: 'off' } | { status: 'none' } | { status: 'computing' }
+  | { status: 'error'; error: string }
+  | { status: 'ready'; card: import('../services/ai-viability.js').AiViabilityCard } {
+  switch (state.status) {
+    case 'ready': return { status: 'ready', card: state.card };
+    case 'error': return { status: 'error', error: state.error };
+    case 'computing': return { status: 'computing' };
+    case 'off': return { status: 'off' };
+    default: return { status: 'none' };
+  }
 }

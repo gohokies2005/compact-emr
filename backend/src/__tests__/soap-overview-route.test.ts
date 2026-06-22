@@ -29,9 +29,15 @@ vi.mock('../auth/roles', () => ({
     },
 }));
 
-// Service-layer mocks — controlled per test via the exported vi.fn handles.
-const deriveAiViability = vi.fn();
+// Service-layer mocks — controlled per test via the exported vi.fn handles. The route now reads the
+// discriminated reliability STATE via getAiViabilityState (Ryan 2026-06-21, Zimmelman) rather than the
+// null-collapsing deriveAiViability; the helpers below map the old per-test intent onto a state object.
+const getAiViabilityState = vi.fn();
 const aiRoutePickerEnabled = vi.fn(() => true);
+/** Set the route's read state to a 'ready' plan (grounds the note). */
+const stateReady = (p: Record<string, unknown>) => getAiViabilityState.mockResolvedValue({ status: 'ready', card: p });
+/** Set the read state to cold 'none' (no plan) — the route fires the off-request recompute. */
+const stateNone = () => getAiViabilityState.mockResolvedValue({ status: 'none' });
 const fireRecomputeViability = vi.fn(async () => true);
 // getOrBuildSoapNote echoes the opts so we can assert noStore + forceRegenerate, and reports back the ctx
 // it was handed so we can assert the route set routePickerFraming authoritatively.
@@ -44,12 +50,13 @@ const getOrBuildSoapNote = vi.fn(async (_db: unknown, _caseId: string, ctx: unkn
   __opts: opts,
 }));
 
-vi.mock('../services/ai-viability.js', () => ({ deriveAiViability, aiRoutePickerEnabled }));
+vi.mock('../services/ai-viability.js', () => ({ getAiViabilityState, aiRoutePickerEnabled }));
 vi.mock('../services/recompute-viability-trigger.js', () => ({ fireRecomputeViability }));
 vi.mock('../services/soap-overview.js', () => ({ getOrBuildSoapNote }));
 // case-viability-stamp + chart-readiness are imported by the router for the GET path only; stub them so the
 // module loads. (The POST path under test never calls them.)
-vi.mock('../services/case-viability-stamp.js', () => ({ caseViabilityEnabled: () => false, deriveCaseViabilityForCase: vi.fn(async () => null) }));
+const caseViabilityEnabled = vi.fn(() => false);
+vi.mock('../services/case-viability-stamp.js', () => ({ caseViabilityEnabled, deriveCaseViabilityForCase: vi.fn(async () => null) }));
 vi.mock('../services/chart-readiness.js', () => ({ loadReconciledChartReadiness: vi.fn(async () => null) }));
 
 const { createCaseViabilityRouter } = await import('../routes/case-viability.js');
@@ -81,18 +88,21 @@ function appFor(db: AppDb) {
 
 const POST = (db: AppDb, body: Record<string, unknown>) =>
   request(appFor(db)).post('/api/v1/cases/CASE-1/soap-overview').send(body);
+const GET = (db: AppDb) => request(appFor(db)).get('/api/v1/cases/CASE-1/viability-card');
+const COMPUTE = (db: AppDb) => request(appFor(db)).post('/api/v1/cases/CASE-1/viability-card/compute').send({});
 
 describe('POST /cases/:id/soap-overview — one-brain QA (H1/H2/H3)', () => {
   beforeEach(() => {
     mockUser = { sub: 'U1', roles: ['ops_staff'] };
-    deriveAiViability.mockReset();
+    getAiViabilityState.mockReset();
     aiRoutePickerEnabled.mockReset(); aiRoutePickerEnabled.mockReturnValue(true);
     fireRecomputeViability.mockReset(); fireRecomputeViability.mockResolvedValue(true);
     getOrBuildSoapNote.mockClear();
+    caseViabilityEnabled.mockReset(); caseViabilityEnabled.mockReturnValue(true);
   });
 
   it('H1: a warm plan grounds the note — response carries grounded:true + routePickerFraming with the plan framing', async () => {
-    deriveAiViability.mockResolvedValue(plan());
+    stateReady(plan());
     const res = await POST(makeDb().db, { claimedCondition: 'Obstructive sleep apnea' });
     expect(res.status).toBe(200);
     expect(res.body.grounded).toBe(true);
@@ -109,7 +119,7 @@ describe('POST /cases/:id/soap-overview — one-brain QA (H1/H2/H3)', () => {
   });
 
   it('H3: framing + planHash come from the ONE deriveAiViability return; the route does NOT do a 2nd case.findFirst for the hash', async () => {
-    deriveAiViability.mockResolvedValue(plan({ planHash: 'PLANHASH-fromreturn' }));
+    stateReady(plan({ planHash: 'PLANHASH-fromreturn' }));
     const { db, caseFindFirst } = makeDb();
     const res = await POST(db, { claimedCondition: 'Obstructive sleep apnea' });
     expect(res.status).toBe(200);
@@ -120,7 +130,7 @@ describe('POST /cases/:id/soap-overview — one-brain QA (H1/H2/H3)', () => {
   });
 
   it('H2: route-picker ON but NO warm plan → fires recompute once, serves ungrounded fallback, and tells the cache NOT to persist it (noStore)', async () => {
-    deriveAiViability.mockResolvedValue(null); // no warm persisted plan
+    stateNone(); // no warm persisted plan (cold)
     aiRoutePickerEnabled.mockReturnValue(true);
     const res = await POST(makeDb().db, { claimedCondition: 'Obstructive sleep apnea' });
     expect(res.status).toBe(200);
@@ -133,7 +143,7 @@ describe('POST /cases/:id/soap-overview — one-brain QA (H1/H2/H3)', () => {
   });
 
   it('H2: forceRegenerate with no warm plan STILL persists (the RN explicitly chose to spend + store)', async () => {
-    deriveAiViability.mockResolvedValue(null);
+    stateNone();
     aiRoutePickerEnabled.mockReturnValue(true);
     await POST(makeDb().db, { claimedCondition: 'Obstructive sleep apnea', forceRegenerate: true });
     expect(fireRecomputeViability).toHaveBeenCalledOnce();
@@ -143,7 +153,7 @@ describe('POST /cases/:id/soap-overview — one-brain QA (H1/H2/H3)', () => {
   });
 
   it('H2/H3: route-picker OFF + no plan → no recompute fired, ungrounded, note persists normally', async () => {
-    deriveAiViability.mockResolvedValue(null);
+    stateNone();
     aiRoutePickerEnabled.mockReturnValue(false);
     const res = await POST(makeDb().db, { claimedCondition: 'Obstructive sleep apnea' });
     expect(res.body.grounded).toBe(false);
@@ -153,10 +163,74 @@ describe('POST /cases/:id/soap-overview — one-brain QA (H1/H2/H3)', () => {
   });
 
   it('a wrong-condition plan does NOT ground (inputClaimed !== live claim) — and fires recompute to refresh', async () => {
-    deriveAiViability.mockResolvedValue(plan({ inputClaimed: 'Tinnitus' }));
+    stateReady(plan({ inputClaimed: 'Tinnitus' })); // a ready plan, but for a DIFFERENT claimed condition
     const res = await POST(makeDb().db, { claimedCondition: 'Obstructive sleep apnea' });
     expect(res.body.grounded).toBe(false);
     expect(res.body.routePickerFraming).toBeNull();
-    expect(fireRecomputeViability).toHaveBeenCalledOnce(); // stale-condition is treated like no warm plan
+    expect(fireRecomputeViability).toHaveBeenCalledOnce(); // stale-condition (ready-but-wrong-claim) → refire
+  });
+});
+
+// ── The reliability state plumbing (Ryan 2026-06-21, Zimmelman): the GET surfaces the discriminated state +
+// fires the off-request recompute ONLY when cold ('none') — never on 'error' (the infinite-loop fix) — and a
+// NEW synchronous compute endpoint owns its own window so the FIRST view grounds after a spinner. ──
+describe('GET /viability-card + POST /viability-card/compute — reliability state (Zimmelman)', () => {
+  beforeEach(() => {
+    mockUser = { sub: 'U1', roles: ['ops_staff'] };
+    getAiViabilityState.mockReset();
+    aiRoutePickerEnabled.mockReset(); aiRoutePickerEnabled.mockReturnValue(true);
+    fireRecomputeViability.mockReset(); fireRecomputeViability.mockResolvedValue(true);
+    caseViabilityEnabled.mockReset(); caseViabilityEnabled.mockReturnValue(true);
+  });
+
+  it('GET cold (none) → aiViabilityState:none + fires the off-request recompute once', async () => {
+    getAiViabilityState.mockResolvedValue({ status: 'none' });
+    const res = await GET(makeDb().db);
+    expect(res.status).toBe(200);
+    expect(res.body.aiViabilityState.status).toBe('none');
+    expect(res.body.aiViability).toBeNull();
+    expect(fireRecomputeViability).toHaveBeenCalledOnce();
+  });
+
+  it('REGRESSION: GET on a FAILED plan (error) → aiViabilityState:error AND does NOT re-fire the recompute (the infinite-loop fix)', async () => {
+    getAiViabilityState.mockResolvedValue({ status: 'error', error: 'The analysis timed out (the chart is large). Please retry.' });
+    const res = await GET(makeDb().db);
+    expect(res.status).toBe(200);
+    expect(res.body.aiViabilityState.status).toBe('error');
+    expect(res.body.aiViabilityState.error).toMatch(/timed out|retry/i);
+    expect(fireRecomputeViability).not.toHaveBeenCalled(); // must NOT loop the same failing compute
+  });
+
+  it('GET computing → aiViabilityState:computing AND does NOT fire a second compute (one in flight)', async () => {
+    getAiViabilityState.mockResolvedValue({ status: 'computing' });
+    const res = await GET(makeDb().db);
+    expect(res.body.aiViabilityState.status).toBe('computing');
+    expect(fireRecomputeViability).not.toHaveBeenCalled();
+  });
+
+  it('GET ready → aiViabilityState:ready carries the plan card + the legacy aiViability field', async () => {
+    getAiViabilityState.mockResolvedValue({ status: 'ready', card: plan() });
+    const res = await GET(makeDb().db);
+    expect(res.body.aiViabilityState.status).toBe('ready');
+    expect(res.body.aiViabilityState.card.lead.framing).toBe(LEAD.framing);
+    expect(res.body.aiViability).not.toBeNull();
+    expect(fireRecomputeViability).not.toHaveBeenCalled();
+  });
+
+  it('POST /compute runs the SYNCHRONOUS compute (compute:true) and returns the resulting state', async () => {
+    getAiViabilityState.mockResolvedValue({ status: 'ready', card: plan() });
+    const res = await COMPUTE(makeDb().db);
+    expect(res.status).toBe(200);
+    expect(res.body.aiViabilityState.status).toBe('ready');
+    // it asked for a real compute (not a read-only pass)
+    const opts = getAiViabilityState.mock.calls[0]![2] as { compute?: boolean };
+    expect(opts.compute).toBe(true);
+  });
+
+  it('POST /compute surfaces an honest error (NOT a fake verdict) when the compute fails', async () => {
+    getAiViabilityState.mockResolvedValue({ status: 'error', error: 'The analysis service is busy. Please retry in a moment.' });
+    const res = await COMPUTE(makeDb().db);
+    expect(res.body.aiViabilityState.status).toBe('error');
+    expect(res.body.aiViabilityState.error).toMatch(/busy|retry/i);
   });
 });

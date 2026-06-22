@@ -172,6 +172,63 @@ describe('evaluateDraftReadiness — same-brain (route-picker plan + chart facts
     }));
     expect(r.items.find((i) => i.key === 'denial_letter')!.present).toBe(true);
   });
+
+  // ── #2 (downgrade-only trust) + #3 (single-bucket classification), adversarial-QA 2026-06-21.
+  // The brain's missing[] may DOWNGRADE an essential (mark it missing) but may NEVER upgrade an essential to
+  // present off a fact it could not classify, and one fact must land in exactly ONE bucket.
+
+  it('#2 FALSE-PASS GUARD: an UNRECOGNIZED missing-dx fact + NO on-file dx → STILL FLAGS (no false-pass)', () => {
+    // "no MRI on file" / "onset during active duty" wordings the cues do NOT recognize must not silence the
+    // deterministic check. With no on-file dx, the dx essential must still flag missing.
+    const r = evaluateDraftReadiness(base({
+      claimedCondition: 'GERD', problemNames: ['Tinnitus'], inServiceEvent: '',
+      documents: [{ filename: 'records.pdf', docTag: null }],
+      routePlan: {
+        framing: 'GERD direct (38 CFR 3.303)', cfr_basis: '38 CFR 3.303', mechanism: 'x', rationale: 'y',
+        viability: 'marginal',
+        missing: [{ fact: 'no MRI on file', why: 'imaging would strengthen the claim' }],
+      },
+    }));
+    const dx = r.items.find((i) => i.key === 'current_diagnosis')!;
+    expect(dx.present).toBe(false); // the unrecognized fact must NOT mark the dx present
+    // the in-service event has no deterministic evidence either, and the brain's silence is NOT trustworthy
+    // here (an unclassified gap exists) → it must NOT be upgraded to present.
+    expect(r.items.find((i) => i.key === 'in_service_event')!.present).toBe(false);
+    // and the unrecognized gap is surfaced for the RN (over-flag, never false-pass).
+    expect(r.unclassifiedGaps).toBeDefined();
+    expect(r.unclassifiedGaps!.some((g) => g.fact === 'no MRI on file')).toBe(true);
+  });
+
+  it('#2 a clean plan (zero missing) still upgrades essentials to present (the legitimate same-brain win holds)', () => {
+    const r = evaluateDraftReadiness(base({
+      problemNames: [], inServiceEvent: '', documents: [{ filename: 'records.pdf', docTag: null }],
+      routePlan: {
+        framing: 'OSA secondary (38 CFR 3.310)', cfr_basis: '38 CFR 3.310(a)', mechanism: 'x', rationale: 'y',
+        viability: 'supportable', missing: [],
+      },
+    }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(true);
+    expect(r.items.find((i) => i.key === 'in_service_event')!.present).toBe(true);
+    expect(r.unclassifiedGaps).toBeUndefined();
+  });
+
+  it('#3 CROSS-BUCKET: "current diagnosis of the back injury" classifies to dx ONLY, not also event', () => {
+    // This single fact trips both the dx (diagnos) and event (injur) cues. It must downgrade dx ONLY; with a
+    // DD-214 on file the event essential stays satisfied deterministically — it must NOT be marked missing by
+    // contamination, and (critically) the dx essential MUST flag because the brain flagged it.
+    const r = evaluateDraftReadiness(base({
+      claimedCondition: 'Lumbar strain', problemNames: ['Tinnitus'], inServiceEvent: '',
+      documents: [{ filename: 'Hackworth DD-214.pdf', docTag: null }],
+      routePlan: {
+        framing: 'Lumbar direct (38 CFR 3.303)', cfr_basis: '38 CFR 3.303', mechanism: 'x', rationale: 'y',
+        viability: 'marginal',
+        missing: [{ fact: 'a current diagnosis of the back injury', why: 'no medical record shows it' }],
+      },
+    }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(false); // dx flagged (correct bucket)
+    expect(r.items.find((i) => i.key === 'in_service_event')!.present).toBe(true);   // DD-214 carries it; NOT contaminated
+    expect(r.unclassifiedGaps).toBeUndefined(); // the fact WAS classified (to dx) — not unclassified
+  });
 });
 
 describe('getDraftReadiness (db gather)', () => {

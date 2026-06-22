@@ -142,6 +142,13 @@ export interface DraftReadinessResult {
    * when the flag is off / no persisted plan / wrong-condition plan (the modal falls back to caseFraming).
    */
   routePlan?: RoutePlanForReadiness;
+  /**
+   * #2 (2026-06-21): brain-listed missing facts that did NOT map to any of the four essentials. The brain found
+   * a gap we cannot attribute to a specific checklist item, so (a) it could NOT silence the deterministic check
+   * for any essential (downgrade-only trust), and (b) the RN should see it. Surfaced as an advisory flag, not a
+   * ReadinessItem (it has no fixed essential to attach to). Absent/empty when the plan is clean (or no plan).
+   */
+  unclassifiedGaps?: ReadonlyArray<{ readonly fact: string; readonly why: string }>;
 }
 
 const APPEAL_TYPES: ReadonlySet<ClaimType> = new Set<ClaimType>(['supplemental', 'hlr', 'appeal_bva']);
@@ -149,15 +156,47 @@ const APPEAL_TYPES: ReadonlySet<ClaimType> = new Set<ClaimType>(['supplemental',
 // ── SAME-BRAIN absence classifier. The route-picker plan's missing[] is the brain's authoritative list of
 // genuine gaps (it read the full chart). We map each essential to keyword cues so "an in-service stressor is
 // not documented" counts against in_service_event, "no current diagnosis of X" against current_diagnosis, and
-// "the prior denial letter is not in the file" against prior_denial. If the brain did NOT flag an essential
-// missing, that essential is PRESENT per the brain — the core same-brain win over filename/column heuristics.
+// "the prior denial letter is not in the file" against prior_denial.
+//
+// TRUST MODEL (2026-06-21 adversarial-QA, holes #2 + #3):
+//   - #3 EXACTLY-ONE bucket: each missing fact is classified to a SINGLE bucket (the FIRST/strongest cue that
+//     matches), NOT tested against all three regexes independently. Otherwise "current diagnosis of the back
+//     injury" trips BOTH dx (diagnos) and event (injur) — cross-bucket contamination. Order = denial → dx →
+//     event (most-specific first; the generic "event" stem lives last so it never steals a dx/denial fact).
+//   - #2 DOWNGRADE-ONLY: a plan may only MARK an essential MISSING (downgrade) for facts whose cue it
+//     POSITIVELY recognizes. It may NEVER upgrade an essential to present from a fact it could not classify.
+//     A missing fact that matches NO bucket is "unclassified" — it must NOT silence the deterministic check
+//     for any bucket, and it raises an RN flag (over-flag, never false-pass). The caller therefore only
+//     trusts "the brain says present" (brainHasIt) when the plan has ZERO unclassified missing facts.
 // Stem-based (no trailing \b on word stems — "diagnos" must match "diagnosis"/"diagnosed"/"diagnostic").
 const DX_MISSING_CUES = /\b(diagnos|\bdx\b|confirmed condition|medical record (?:of|showing)|current (?:condition|disease))/i;
 const EVENT_MISSING_CUES = /\b(in[-\s]?service|stressor|injur|exposure|incident|nexus to service|service connection to|dd[-\s]?214|service record|\bstr\b|separation|event)/i;
 const DENIAL_MISSING_CUES = /\b(denial|denied|deny|decision letter|rating decision|prior claim|statement of the case|\bsoc\b)/i;
-function brainFlagsMissing(plan: RoutePlanForReadiness | null | undefined, cues: RegExp): boolean | null {
-  if (!plan) return null; // no plan → no brain opinion (caller keeps the deterministic result)
-  return plan.missing.some((m) => cues.test(`${m.fact} ${m.why}`));
+
+type MissingBucket = 'denial_letter' | 'current_diagnosis' | 'in_service_event';
+interface PlanAbsence {
+  /** Which essentials the brain POSITIVELY flagged as missing (each recognized fact → exactly one bucket). */
+  readonly buckets: ReadonlySet<MissingBucket>;
+  /** Brain-listed missing facts that matched NO cue. Their presence means the brain DID find gaps we cannot
+   *  attribute to a specific essential → we must not let "not flagged" upgrade any essential, and we flag for RN. */
+  readonly unclassified: ReadonlyArray<{ readonly fact: string; readonly why: string }>;
+}
+
+/** Classify the plan's missing[] facts into EXACTLY ONE bucket each (first/strongest match), tracking any that
+ *  match no bucket. Returns null when there is no plan (no brain opinion → caller keeps the deterministic result). */
+function classifyPlanMissing(plan: RoutePlanForReadiness | null | undefined): PlanAbsence | null {
+  if (!plan) return null;
+  const buckets = new Set<MissingBucket>();
+  const unclassified: { fact: string; why: string }[] = [];
+  for (const m of plan.missing) {
+    const text = `${m.fact} ${m.why}`;
+    // First-match-wins, most-specific first: denial → dx → event. A single fact lands in ONE bucket only.
+    if (DENIAL_MISSING_CUES.test(text)) buckets.add('denial_letter');
+    else if (DX_MISSING_CUES.test(text)) buckets.add('current_diagnosis');
+    else if (EVENT_MISSING_CUES.test(text)) buckets.add('in_service_event');
+    else unclassified.push({ fact: m.fact, why: m.why });
+  }
+  return { buckets, unclassified };
 }
 
 // Filename/docTag heuristics. docTag classification isn't populating yet (all 'Other'), so the
@@ -254,21 +293,28 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
   }
 
   // SAME-BRAIN gate (2026-06-21): the route-picker plan (the SAME brain the drafter pleads) read the FULL
-  // extracted chart. Its missing[] is the authoritative absence list. For each essential we take the FACT as
-  // present when EITHER the deterministic evidence is on file OR a plan exists and the brain did NOT list that
-  // essential as missing. A genuine absence still flags: deterministic evidence absent AND (no plan OR the
-  // brain flagged it). Fail-open: no plan → pure deterministic behavior (byte-identical to before).
+  // extracted chart. Its missing[] is the brain's absence list, classified into exactly-one bucket each (#3).
+  //
+  // TRUST (#2 downgrade-only): the brain may DOWNGRADE an essential to missing (a bucket it positively flagged)
+  // but may NEVER UPGRADE an essential to present off a fact it could not classify. So "the brain says present"
+  // (brainHasIt) is trusted ONLY when (a) a plan exists, (b) it did NOT flag that bucket, AND (c) it listed NO
+  // unclassified missing facts. If the brain flagged gaps we cannot attribute to a specific essential, we do not
+  // let its silence satisfy ANY essential (deterministic evidence must carry it) and we raise an RN flag below.
+  // Fail-open: no plan → planAbsence null → pure deterministic behavior (byte-identical to before).
   const plan = input.routePlan ?? null;
-  const brainSaysDenialMissing = brainFlagsMissing(plan, DENIAL_MISSING_CUES);
-  const brainSaysDxMissing = brainFlagsMissing(plan, DX_MISSING_CUES);
-  const brainSaysEventMissing = brainFlagsMissing(plan, EVENT_MISSING_CUES);
+  const planAbsence = classifyPlanMissing(plan);
+  const planTrustworthy = planAbsence !== null && planAbsence.unclassified.length === 0;
+  const brainSaysDenialMissing = planAbsence !== null ? planAbsence.buckets.has('denial_letter') : null;
+  const brainSaysDxMissing = planAbsence !== null ? planAbsence.buckets.has('current_diagnosis') : null;
+  const brainSaysEventMissing = planAbsence !== null ? planAbsence.buckets.has('in_service_event') : null;
 
   // 2. Denial letter — only required when the claim is an appeal (supplemental / HLR / BVA). Same-brain: the
   //    brain extracts a prior denial from the chart text even when the upload's filename doesn't say "denial".
   if (APPEAL_TYPES.has(input.claimType)) {
     const onFile = hasDoc(input.documents, DENIAL_DOC);
     const inDigest = (input.chartDigest ?? '').length > 0 && DENIAL_DOC.test(input.chartDigest!);
-    const brainHasIt = plan !== null && brainSaysDenialMissing === false;
+    // #2: trust "brain says present" only when the plan is trustworthy (no unclassified missing facts).
+    const brainHasIt = planTrustworthy && brainSaysDenialMissing === false;
     const present = onFile || inDigest || brainHasIt;
     items.push({
       key: 'denial_letter',
@@ -288,7 +334,8 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
   //    extracted records, canonicalized) OR the brain (which read the full chart) did not flag it missing.
   {
     const documented = conditionDocumented(claimedAll, input.problemNames, input.scConditionNames ?? [], input.chartDigest);
-    const brainHasIt = plan !== null && brainSaysDxMissing === false;
+    // #2: trust "brain says present" only when the plan is trustworthy (no unclassified missing facts).
+    const brainHasIt = planTrustworthy && brainSaysDxMissing === false;
     const present = documented || brainHasIt;
     items.push({
       key: 'current_diagnosis',
@@ -313,7 +360,8 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
     const hasServiceDoc = hasDoc(input.documents, SERVICE_DOC);
     const anchor = isSecondary && ssotTheory !== null && cf !== undefined ? cf.grantedScAnchors[0] : undefined;
     const anchorSatisfies = anchor !== undefined;
-    const brainHasIt = plan !== null && brainSaysEventMissing === false;
+    // #2: trust "brain says present" only when the plan is trustworthy (no unclassified missing facts).
+    const brainHasIt = planTrustworthy && brainSaysEventMissing === false;
     const present = hasEventText || hasLayStatement || hasServiceDoc || anchorSatisfies || brainHasIt;
     items.push({
       key: 'in_service_event',
@@ -332,6 +380,9 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
   }
 
   const missing = items.filter((i) => !i.present);
+  // #2: the brain flagged a gap we could not attribute to a specific essential — it has NOT downgraded any
+  // checklist item (over-flag, never false-pass), but the RN should see it. Surface it as an advisory flag.
+  const unclassifiedGaps = planAbsence?.unclassified ?? [];
   const ready = missing.length === 0;
   const summary = ready
     ? 'All essential documents are on file.'
@@ -343,6 +394,7 @@ export function evaluateDraftReadiness(input: DraftReadinessInput): DraftReadine
     ready, items, missing, summary, buildState: 'chart_ready',
     ...(cf !== undefined ? { caseFraming: cf } : {}),
     ...(plan !== null ? { routePlan: plan } : {}),
+    ...(unclassifiedGaps.length > 0 ? { unclassifiedGaps } : {}),
   };
 }
 

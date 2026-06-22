@@ -34,7 +34,10 @@ const SOURCE_LABEL: Record<string, string> = {
   rn_set: 'set by RN',
   derived: 'auto-derived from the granted SC conditions',
   text_parse_fallback: 'parsed from the veteran’s intake wording',
-  default_direct: 'default (direct)',
+  // #6 (2026-06-21): the default-fallback source means NO framing was derived — it is not a real "direct"
+  // decision. Showing "default (direct)" misleads the RN into thinking a direct theory was chosen. When there
+  // is no route-picker plan grounding the readiness, this is the neutral, honest label.
+  default_direct: 'framing not yet computed',
 };
 export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draftAttempt, onConfirmed, onClose }: {
   readonly caseId: string;

@@ -144,6 +144,22 @@ describe('Gate1ChecklistModal pre-fill', () => {
     expect(screen.getByRole('button', { name: 'Start draft' })).toBeDisabled();
   });
 
+  // #6 (2026-06-21): a default-fallback framing source with NO route-picker plan must read "framing not yet
+  // computed", never the misleading "default (direct)".
+  it('#6 shows "framing not yet computed" (NOT "default (direct)") on the no-plan default_direct path', async () => {
+    readinessMock.mockResolvedValue(readiness({
+      routePlan: undefined as never,
+      caseFraming: {
+        version: 1, framing: 'direct', grantedScAnchors: [], upstreamScCondition: null,
+        framingChoice: null, claimType: 'supplemental', source: 'default_direct',
+        derivedAt: '2026-06-10T00:00:00.000Z',
+      } as never,
+    }));
+    renderModal();
+    await waitFor(() => expect(screen.getByText(/framing not yet computed/)).toBeInTheDocument());
+    expect(screen.queryByText(/default \(direct\)/)).not.toBeInTheDocument();
+  });
+
   it('fail-open: feed error → blank modal, manual fill still works', async () => {
     readinessMock.mockRejectedValue(new Error('boom'));
     renderModal();

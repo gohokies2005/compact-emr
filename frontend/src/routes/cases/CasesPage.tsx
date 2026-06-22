@@ -6,7 +6,7 @@ import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { CASE_STATUS_LABELS, caseDisplayLabel, statusDisplayGroup, type CaseStatusDisplayGroup } from '../../lib/caseStatus';
 import { formatAbsoluteDate, formatRelativeTime } from '../../lib/date';
-import { listCases, deleteCase, restoreCase, updateQuickNote, assignCaseRn, type CaseLite } from '../../api/cases';
+import { listCases, deleteCase, restoreCase, assignCaseRn, type CaseLite } from '../../api/cases';
 import { describeApiError } from '../../api/client';
 import { listVeterans } from '../../api/veterans';
 import { getMe, listUsers, type StaffUser } from '../../api/users';
@@ -55,7 +55,7 @@ const caseSortValue = (key: string) => (c: CaseLite): unknown => {
     case 'type': return CLAIM_TYPE_LABELS[c.claimType];
     case 'status': return CASE_STATUS_LABELS[c.status];
     case 'records': return c.recordsUploaded ? 1 : 0; // sort: records-in (1) vs awaiting (0)
-    case 'note': return c.quickNote ?? '';
+    case 'note': return c.latestQuickNote?.body ?? '';
     case 'physician': return c.assignedPhysician?.fullName ?? '';
     case 'rn': return c.assignedRn?.name ?? c.assignedRn?.email ?? '';
     case 'submitted': return c.createdAt;
@@ -276,13 +276,8 @@ export function CasesPage() {
     onError: (e: unknown) => window.alert(`Could not restore this claim — ${describeApiError(e)}`),
   });
 
-  // Feature A quick-note popup (Epic/Cerner-style scratch note on the row).
-  const [noteCase, setNoteCase] = useState<CaseLite | null>(null);
-  const quickNoteMut = useMutation({
-    mutationFn: ({ id, note }: { id: string; note: string }) => updateQuickNote(id, note),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['cases'] }); setNoteCase(null); },
-    onError: (e: unknown) => window.alert(`Could not save the note — ${describeApiError(e)}`),
-  });
+  // (Retired 2026-06-21: the overwritable quick-note popup + mutation lived here. The Note column now
+  // shows the latest PERSISTENT quick note read-only; adding/editing happens in the chart Staff Notes.)
 
   // RN-column '+' assign popup (P3.4): REAL assignment on the claim — same version-checked wiring
   // as the chart's CaseAssignmentPanel. The 409 stale-version cause must surface verbatim.
@@ -401,13 +396,23 @@ export function CasesPage() {
                 delivery to invoiced, keeping the same format"). */}
             <td className="px-4 py-3 text-center"><span className="text-xs font-medium text-slate-600" title={c.invoiced && c.status === 'delivered' ? 'The invoice email has been sent — awaiting the veteran’s payment.' : undefined}>{caseDisplayLabel(c.status, { invoiced: c.invoiced })}</span></td>
             <td className="px-4 py-3 text-center"><RecordsChip recordsUploaded={c.recordsUploaded} /></td>
-            <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-              {c.quickNote ? (
-                <button type="button" title={c.quickNote} aria-label={`Quick note: ${c.quickNote}`} className="text-amber-500 hover:text-amber-600" onClick={() => setNoteCase(c)}>
-                  <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4"><path d="M4 3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7l-4-4H4zm9 1.5L16.5 8H13V4.5zM5 9h8v1.5H5V9zm0 3h6v1.5H5V12z"/></svg>
-                </button>
+            {/* NOTE column: the latest PERSISTENT quick note from the chart-notes stream (Ryan
+                2026-06-21, replaces the retired overwritable scratchpad). Read-only here — adding a
+                quick note happens in the chart Staff Notes panel; the newest one surfaces here. The
+                veteran link opens the chart where notes are written. Truncated with a full-text title. */}
+            <td className="max-w-[16rem] px-4 py-3" onClick={(e) => e.stopPropagation()}>
+              {c.latestQuickNote ? (
+                <Link
+                  to={`/veterans/${encodeURIComponent(c.veteranId)}`}
+                  title={`${c.latestQuickNote.body} · ${formatRelativeTime(c.latestQuickNote.createdAt)}`}
+                  aria-label={`Latest quick note: ${c.latestQuickNote.body}`}
+                  className="block truncate text-xs text-amber-700 hover:text-amber-900"
+                >
+                  <span className="mr-1 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700">Quick</span>
+                  {c.latestQuickNote.body}
+                </Link>
               ) : (
-                <button type="button" aria-label="Add quick note" title="Add a quick note" className="text-base leading-none text-slate-300 hover:text-indigo-600" onClick={() => setNoteCase(c)}>+</button>
+                <span className="text-slate-300" title="No quick note — add one from the chart Staff Notes panel">—</span>
               )}
             </td>
             <td className="px-4 py-3 text-slate-600">{c.assignedPhysician?.fullName ?? '—'}</td>
@@ -447,15 +452,6 @@ export function CasesPage() {
         <Button variant="secondary" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>Next</Button>
       </div>
     </div>
-
-    {noteCase ? (
-      <QuickNotePopup
-        c={noteCase}
-        saving={quickNoteMut.isPending}
-        onClose={() => setNoteCase(null)}
-        onSave={(note) => quickNoteMut.mutate({ id: noteCase.id, note })}
-      />
-    ) : null}
 
     {assignCase ? (
       <AssignRnPopup
@@ -557,28 +553,6 @@ function RecordsChip({ recordsUploaded }: { readonly recordsUploaded: boolean | 
     : <span className="text-xs font-medium text-slate-500" title="No uploaded records yet — waiting on the veteran's files (Stage-1 only).">Pending</span>;
 }
 
-// Epic/Cerner-style quick-note popup: overwrite scratchpad + a last-editor stamp. "Delete" clears it
-// (sends an empty note). This is the QUICK layer — the official record lives in the chart's Notes.
-function QuickNotePopup({ c, saving, onClose, onSave }: { readonly c: CaseLite; readonly saving: boolean; readonly onClose: () => void; readonly onSave: (note: string) => void }) {
-  const [draft, setDraft] = useState(c.quickNote ?? '');
-  return (
-    <div className="fixed inset-0 z-50 bg-slate-900/40 p-6" onClick={onClose}>
-      <div className="mx-auto mt-32 max-w-sm rounded-lg bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-sm font-semibold text-slate-900">Quick note · {c.id}</h2>
-          <button type="button" className="text-slate-400 hover:text-slate-600" aria-label="Close" onClick={onClose}>✕</button>
-        </div>
-        <p className="mt-0.5 text-xs text-slate-500">At-a-glance status. For the official record, use the chart’s Notes.</p>
-        <textarea className="input mt-3 min-h-24 w-full text-sm" autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="e.g. Waiting on records · rejected, refund offered" />
-        {c.quickNoteBy ? <p className="mt-1 text-xs text-slate-400">Last edited by {c.quickNoteBy}{c.quickNoteAt ? ` · ${formatRelativeTime(c.quickNoteAt)}` : ''}</p> : null}
-        <div className="mt-4 flex items-center justify-between">
-          <button type="button" className="text-xs font-medium text-rose-600 hover:text-rose-700 disabled:opacity-40" disabled={saving || !c.quickNote} onClick={() => onSave('')}>Delete</button>
-          <div className="flex gap-2">
-            <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
-            <Button variant="primary" size="sm" loading={saving} onClick={() => onSave(draft)}>Save</Button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+// (Retired 2026-06-21: QuickNotePopup — the overwritable scratchpad editor — was removed. Quick notes
+// are now persistent entries in the chart-notes stream, added from the chart Staff Notes panel; the
+// Cases-list Note column shows the latest one read-only.)

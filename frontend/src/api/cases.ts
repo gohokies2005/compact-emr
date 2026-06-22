@@ -23,9 +23,10 @@ export interface CaseLite {
   readonly assignedPhysicianId: string | null;
   readonly assignedRnId: string | null;
   readonly refundEligible: boolean;
-  readonly quickNote?: string | null;
-  readonly quickNoteBy?: string | null;
-  readonly quickNoteAt?: string | null;
+  // Latest PERSISTENT quick note for this case's veteran (newest chart-notes-stream entry flagged
+  // isQuickNote), batch-attached server-side. Replaces the retired overwritable scratchpad
+  // (case.quick_note*, "Feature A"). Null when the veteran has no quick note yet. (Ryan 2026-06-21)
+  readonly latestQuickNote?: LatestQuickNote | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   // Soft-delete timestamp (C5 lifecycle, 2026-06-13). Non-null = archived → the Closed view
@@ -44,13 +45,19 @@ export interface CaseLite {
   readonly invoiced?: boolean;
 }
 
-export interface QuickNote { readonly id: string; readonly quickNote: string | null; readonly quickNoteBy: string | null; readonly quickNoteAt: string | null; }
-
-// Overwrite the claim's quick-note scratchpad (empty string clears it). Does not bump case version.
-// PATCH not PUT — the API Gateway CORS only allows GET/POST/PATCH/DELETE (a PUT preflight is blocked).
-export async function updateQuickNote(id: string, note: string): Promise<{ data: QuickNote }> {
-  return apiPatch(`/api/v1/cases/${encodeURIComponent(id)}/quick-note`, { note });
+// Latest persistent quick note attached to a Cases-list row (subset of the chart-notes-stream entry
+// the backend surfaces). The list shows the body + a relative timestamp; author name is resolved by
+// the case-detail / chart latest-quick endpoint when needed, not on the list row.
+export interface LatestQuickNote {
+  readonly id: string;
+  readonly body: string;
+  readonly createdAt: string;
+  readonly createdBy: string;
 }
+
+// RETIRED 2026-06-21: the overwritable case quick-note scratchpad (PATCH /cases/:id/quick-note → 410
+// Gone) and its updateQuickNote() client are gone. Quick notes are now persistent chart-notes-stream
+// entries written via createChartNote(veteranId, body, /*isQuickNote*/ true) in api/chart-notes.ts.
 
 // Offset-paginated envelope (cases list uses page/pageSize/total, not cursor).
 export interface CaseListResult {
@@ -119,6 +126,9 @@ export interface CaseDetail extends Case {
   // Soft-delete timestamp (C6 lifecycle, 2026-06-13). Non-null = archived → the claim page shows
   // Reopen instead of Archive. GET /cases/:id returns the full Case row, so this is already present.
   readonly archivedAt?: string | null;
+  // DEPRECATED (Feature-A scratchpad retired 2026-06-21): the DB columns still exist (nullable) so the
+  // full Case row may still carry them, but nothing writes them anymore — always null in practice. The
+  // case header now reads the latest PERSISTENT quick note from the chart-notes stream, not these.
   readonly quickNote?: string | null;
   readonly quickNoteBy?: string | null;
   readonly quickNoteAt?: string | null;

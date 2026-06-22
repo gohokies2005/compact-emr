@@ -58,7 +58,7 @@ import { formatFileSize, formatPageCount } from '../../lib/fileMeta';
 import { documentDisplayName } from '../../lib/docName';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
 import {
-  archiveCase, deleteCase, getCase, listDraftJobs, patchCase, restoreCase, transitionCaseStatus, updateQuickNote,
+  archiveCase, deleteCase, getCase, listDraftJobs, patchCase, restoreCase, transitionCaseStatus,
   type CaseDetail, type PatchCaseInput, type TransitionInput,
 } from '../../api/cases';
 import type { CaseStatus, Role } from '../../types/prisma';
@@ -170,16 +170,9 @@ export function CaseDetailPage() {
     onError: async (err) => { if (err instanceof ConflictError) { await refetch(); window.alert('This case was modified elsewhere. Reloaded the latest version — please retry your edit.'); } },
   });
 
-  // Sticky scratch-note on the case (Epic/Cerner-style) — the team's free-text tracker, e.g.
-  // "Awaiting records — VA C-file requested 6/8". Replaces the phantom "Move to needs records" button
-  // (Ryan 2026-06-08): a records gap is a note someone tracks, not a status flip.
-  const [noteEditing, setNoteEditing] = useState(false);
-  const [noteDraft, setNoteDraft] = useState('');
-  const noteMut = useMutation({
-    mutationFn: (note: string) => updateQuickNote(caseId, note),
-    onSuccess: () => { refetch(); setNoteEditing(false); },
-    onError: (e: unknown) => window.alert(`Could not save the note — ${describeApiError(e)}.`),
-  });
+  // (Retired 2026-06-21: the overwritable case scratchpad state/mutation lived here. Quick notes are
+  // now persistent chart-notes-stream entries; the header surfaces the latest via LatestQuickNoteLine,
+  // and new ones are added from the chart Staff Notes panel.)
 
   const del = useMutation({
     mutationFn: () => deleteCase(caseId),
@@ -445,24 +438,12 @@ export function CaseDetailPage() {
             ) : null;
           })()}
           <p className="mt-1 text-xs text-harbor">Case {c.id} · {c.claimType} · <Link className="text-navy" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>chart</Link> · updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
-          {/* Sticky scratch-note — the team's free-text tracker (e.g. "Awaiting records — C-file requested
-              6/8"). The positive replacement for the old phantom "Move to needs records" button. */}
+          {/* Latest QUICK NOTE at the TOP OF CHART (Ryan 2026-06-21). Replaces the retired overwritable
+              scratchpad: the surfaced note is now the most-recent PERSISTENT quick note from the
+              chart-notes stream (add new ones from the chart Staff Notes panel; prior ones stay as
+              history). Self-hides when the veteran has no quick note. */}
           <div className="mt-3">
-            {noteEditing ? (
-              <div className="flex items-start gap-2">
-                <textarea className="input min-h-[2.5rem] max-w-xl flex-1" value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} placeholder="e.g. Awaiting records — VA C-file requested 6/8" autoFocus />
-                <RowAction onClick={() => noteMut.mutate(noteDraft.trim())} disabled={noteMut.isPending}>Save</RowAction>
-                {c.quickNote ? <RowAction kind="danger" onClick={() => noteMut.mutate('')} disabled={noteMut.isPending}>Clear</RowAction> : null}
-                <RowAction kind="danger" onClick={() => setNoteEditing(false)}>Cancel</RowAction>
-              </div>
-            ) : c.quickNote ? (
-              <button type="button" onClick={() => { setNoteDraft(c.quickNote ?? ''); setNoteEditing(true); }} className="inline-flex max-w-xl items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-left text-sm text-amber-900 hover:bg-amber-100" title="Edit note">
-                <span className="mt-px text-[10px] font-semibold uppercase tracking-wide text-amber-700">Note</span>
-                <span>{c.quickNote}{c.quickNoteBy ? <span className="ml-1 text-xs text-amber-700/70">— {c.quickNoteBy}{c.quickNoteAt ? ` · ${formatRelativeTime(c.quickNoteAt)}` : ''}</span> : null}</span>
-              </button>
-            ) : (
-              <button type="button" onClick={() => { setNoteDraft(''); setNoteEditing(true); }} className="text-xs font-medium text-steel hover:text-navy">+ Add a note (e.g. awaiting records)</button>
-            )}
+            <LatestQuickNoteLine veteranId={c.veteranId} />
           </div>
         </div>
         <div className="flex flex-wrap items-start gap-2">
@@ -539,10 +520,8 @@ export function CaseDetailPage() {
       <div className="p-4">
         {tab === 'action' ? (
           <div className="space-y-6">
-            {/* Latest QUICK NOTE surfaced (Ryan 2026-06-21): the most-recent flagged quick note from the
-                chart-notes stream, shown at the top of the Overview so RNs see the at-a-glance status
-                without opening the Staff Notes tab. Self-hides when there is no quick note. */}
-            <LatestQuickNoteLine veteranId={c.veteranId} />
+            {/* (Latest quick note now lives in the persistent patient header above the tab bar — Ryan
+                "top of chart" 2026-06-21 — so it shows on every tab and isn't duplicated here.) */}
             {/* Abridged notes and records — the curated chart abridgement (Ryan 2026-06-12, renamed
                 from "Doctor Pack"). Auto-generates when the records finish parsing; the Regenerate
                 button inside is RN/admin-only (physician sees view-only). Now the first card in the

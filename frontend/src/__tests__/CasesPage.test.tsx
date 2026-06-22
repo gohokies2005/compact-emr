@@ -24,7 +24,6 @@ vi.mock('../api/cases', () => ({
   assignCaseRn: assignCaseRnMock,
   deleteCase: vi.fn(async () => undefined),
   restoreCase: vi.fn(async () => ({ data: {} })),
-  updateQuickNote: vi.fn(async () => ({ data: {} })),
 }));
 vi.mock('../api/users', () => ({
   listUsers: listUsersMock,
@@ -45,6 +44,8 @@ const CASES_RESULT = {
       status: 'drafting', version: 3, currentVersion: 2, assignedPhysicianId: null, assignedRnId: null, assignedRn: null, refundEligible: false,
       createdAt: '2026-05-01T12:00:00Z', updatedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
       veteran: { id: 'VET-1', firstName: 'Matthew', lastName: 'Young', email: 'm@example.com' }, assignedPhysician: null,
+      // Latest PERSISTENT quick note surfaced read-only in the Note column (Ryan 2026-06-21).
+      latestQuickNote: { id: 'QN-1', body: 'Awaiting records — C-file requested 6/8', createdAt: '2026-06-20T12:00:00Z', createdBy: 'sub-me' },
     },
     {
       id: 'CASE-002', veteranId: 'VET-2', claimedCondition: 'Tinnitus', claimType: 'initial',
@@ -90,6 +91,17 @@ describe('CasesPage', () => {
     expect(screen.getAllByText('Pending').length).toBeGreaterThan(0);
     // No mock row carries invoiced:true → the Invoiced chip must be absent by default.
     expect(screen.queryByText('Invoiced')).toBeNull();
+  });
+
+  it('Note column shows the latest PERSISTENT quick note read-only (no editable scratchpad popup)', async () => {
+    renderPage();
+    // The surfaced latest quick note body renders in the row (truncated, but full text is present).
+    expect(await screen.findByText(/Awaiting records — C-file requested 6\/8/)).toBeInTheDocument();
+    // The retired overwritable scratchpad affordances must be gone: no "Add quick note" +, no popup.
+    expect(screen.queryByLabelText('Add quick note')).toBeNull();
+    expect(screen.queryByText(/At-a-glance status\. For the official record/)).toBeNull();
+    // VET-2 has no quick note → its Note cell shows the em-dash placeholder.
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
 
   it('invoiced delivered case: the STATUS LABEL ITSELF reads "Invoiced", same neutral format, no chip (Ryan 2026-06-12)', async () => {

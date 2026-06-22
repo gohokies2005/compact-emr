@@ -1,7 +1,7 @@
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getStrategyPreview } from '../api/strategy-preview';
-import { getCaseViability, getSoapNote, type SoapContextInput, type SoapNoteResult } from '../api/case-viability';
+import { getCaseViability, computeCaseViability, getSoapNote, type SoapContextInput, type SoapNoteResult } from '../api/case-viability';
 import { getExtractionCoverage } from '../api/extraction-coverage';
 import { getSanityImpression, type SanityContextInput } from '../api/sanity-impression';
 import { computeReadinessVerdict, type ReadinessVerdict } from '../lib/caseReadinessVerdict';
@@ -47,7 +47,16 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
 }) {
   const enabled = caseId.length > 0;
   const strategyQ = useQuery({ queryKey: ['case', caseId, 'strategy-preview'], queryFn: () => getStrategyPreview(caseId), enabled });
-  const viabilityQ = useQuery({ queryKey: ['case', caseId, 'viability-card'], queryFn: () => getCaseViability(caseId), enabled });
+  // The viability card carries the route-picker reliability STATE. While the plan is 'computing' we POLL so
+  // the grounded result folds in WITHOUT the RN clicking around (Ryan 2026-06-21: no "warm up / click around").
+  // 'none'/'error' are resolved by the on-demand compute mutation below (not by polling the GET — that would
+  // just re-read the same state). Polling stops as soon as the state is ready/error/off.
+  const viabilityQ = useQuery({
+    queryKey: ['case', caseId, 'viability-card'],
+    queryFn: () => getCaseViability(caseId),
+    enabled,
+    refetchInterval: (q) => (q.state.data?.aiViabilityState?.status === 'computing' ? 4000 : false),
+  });
   const coverageQ = useQuery({ queryKey: ['case', caseId, 'extraction-coverage'], queryFn: () => getExtractionCoverage(caseId), enabled });
   const sanityQ = useQuery({
     queryKey: ['case', caseId, 'sanity-impression', 'pre_draft', 0],
@@ -100,6 +109,34 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
     onSuccess: (res: SoapNoteResult) => { qc.setQueryData(soapKey, res); },
   });
 
+  // ── Route-picker plan RELIABILITY (Ryan 2026-06-21, Zimmelman) ───────────────────────────────────────
+  // The plan compute is the SAME brain the drafter uses. Rather than showing a misleading resting "Not
+  // supportable" verdict while the plan is missing/failed, we drive the plan to a grounded result and show an
+  // HONEST surface: a spinner while computing, a retry on error. The synchronous compute owns its own ~25s
+  // window so the FIRST view grounds after the spinner (no "warm up / click around").
+  const aiState = viabilityQ.data?.aiViabilityState;
+  const compute = useMutation({
+    mutationFn: () => computeCaseViability(caseId),
+    onSuccess: () => {
+      // The plan state changed — refetch the card (folds in the grounded plan/error) and re-ground the SOAP.
+      void qc.invalidateQueries({ queryKey: ['case', caseId, 'viability-card'] });
+      void qc.invalidateQueries({ queryKey: soapKey });
+    },
+  });
+  // Auto-trigger ONE synchronous compute on a COLD 'none' (first view) so the first render grounds after a
+  // spinner instead of resting on the degraded verdict. We do NOT auto-retry on 'error' (the RN clicks Retry —
+  // avoids hammering a failing provider) and do NOT fire while 'computing'/'ready'/'off'. Guarded by a ref so a
+  // re-render / poll does not fire a second concurrent compute.
+  const autoComputeFired = useRef(false);
+  useEffect(() => {
+    if (aiState?.status === 'none' && !autoComputeFired.current && !compute.isPending) {
+      autoComputeFired.current = true;
+      compute.mutate();
+    }
+    // Reset the one-shot guard when we leave 'none' (so a later genuine 'none' after an input change re-arms).
+    if (aiState?.status && aiState.status !== 'none') autoComputeFired.current = false;
+  }, [aiState?.status, compute]);
+
   if (strategyQ.isLoading && viabilityQ.isLoading) {
     return (
       <div className="mb-4 rounded-lg border border-l-4 border-slate-200 border-l-slate-300 bg-[#FBF8F1] px-5 py-4 text-sm text-slate-500">
@@ -107,6 +144,46 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
       </div>
     );
   }
+
+  // ── HONEST plan-state surface (Ryan 2026-06-21, Zimmelman) ───────────────────────────────────────────
+  // When the route-picker plan is the intended brain (aiViabilityState present + not 'off') but it is NOT
+  // ready, NEVER render the resting "Not supportable as filed" deterministic verdict — that misleads ("if it
+  // says not draftable it won't get drafted"). Show the plan COMPUTING (a spinner; we auto-fired/are polling)
+  // or, on a genuine compute FAILURE, an honest "analysis failed — retry" with a retry button. Only when the
+  // plan is 'ready' or the flag is 'off' do we fall through to the normal SOAP/verdict render below.
+  const planComputing = aiState?.status === 'computing' || aiState?.status === 'none' || compute.isPending;
+  const planErrored = aiState?.status === 'error' && !compute.isPending;
+  if (planComputing) {
+    return (
+      <div className="mb-4 rounded-lg border border-l-4 border-l-[#C19A5B] border-slate-200 bg-[#F7F2E8] px-5 py-4">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Case overview</span>
+        <p className="mt-2 flex items-center gap-2 text-[15px] font-medium text-slate-700">
+          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-[#C19A5B] border-t-transparent" />
+          Analyzing the case…
+        </p>
+        <p className="mt-1 text-[13px] text-slate-500">Reading the chart and selecting the strongest theory. This can take up to half a minute on a large chart.</p>
+      </div>
+    );
+  }
+  if (planErrored) {
+    return (
+      <div className="mb-4 rounded-lg border border-l-4 border-l-[#B0654F] border-slate-200 bg-[#F6EDE9] px-5 py-4">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Case overview</span>
+        <p className="mt-2 text-[15px] font-medium text-slate-800">The case analysis couldn’t be completed.</p>
+        <p className="mt-1 text-[13px] text-slate-600">{aiState && aiState.status === 'error' ? aiState.error : 'Please retry.'}</p>
+        <button
+          type="button"
+          onClick={() => compute.mutate()}
+          disabled={compute.isPending}
+          className="mt-3 rounded-md bg-[#B08D3C] px-3 py-1.5 text-[13px] font-medium text-white hover:bg-[#9a7a32] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {compute.isPending ? 'Retrying…' : 'Retry analysis'}
+        </button>
+        <p className="mt-2 text-[11px] text-slate-400">This is a system issue, not a finding about the case — the case has not been assessed.</p>
+      </div>
+    );
+  }
+
   if (result === null) return null;
 
   const light = VERDICT_LIGHT[result.verdict];
@@ -132,11 +209,13 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
       ? `${v.claimed_canonical ?? claimedCondition} — secondary to ${v.best_anchor.upstream_verbatim}` : null,
     resultTitle: result.title,
   });
-  // #7 (2026-06-21): make the degraded (NOT plan-grounded) state VISIBLE. When the SOAP request has resolved
-  // but the note is NOT grounded on the route-picker plan (brain feed unavailable / no warm plan), the card is
-  // running on the deterministic-only source — say so plainly rather than silently. Suppressed while loading.
+  // The degraded "(deterministic check only)" line now applies ONLY when the route-picker is genuinely OFF or
+  // unavailable (static-engine mode) — the computing/error states are handled by the honest surfaces above, so
+  // we never show this misleading line over a plan that is simply still computing or that failed. When the
+  // plan is 'ready' the SOAP grounds on it; we suppress the line then too.
+  const routePickerActive = aiState !== undefined && aiState.status !== 'off';
   const soapResolved = soapQ.data !== undefined && !soapQ.isFetching && !regenerating;
-  const planUnavailable = soapResolved && soapQ.data?.grounded !== true;
+  const planUnavailable = !routePickerActive && soapResolved && soapQ.data?.grounded !== true;
 
   return (
     <div className={`mb-4 rounded-lg border border-l-4 ${L.rule} border-slate-200 ${L.tint} px-5 py-4`}>

@@ -120,8 +120,42 @@ export interface AiViabilityCard {
   readonly overall: string;
 }
 
-export function getCaseViability(caseId: string): Promise<{ data: CaseViability | null; aiViability?: AiViabilityCard | null; chartFullyRead?: boolean | null }> {
+/**
+ * The discriminated RELIABILITY state of the route-picker plan (Ryan 2026-06-21, Zimmelman). The FE uses
+ * this to show an HONEST surface — a spinner while 'computing', a retry button on 'error', the grounded
+ * plan when 'ready' — instead of a misleading "Not supportable" resting verdict on a missing/failed plan.
+ *   - 'ready'     → a plan matching the current inputs (carries the card)
+ *   - 'computing' → a compute is in flight; the FE polls until it resolves
+ *   - 'error'     → the last compute FAILED (carries an RN-safe message); the FE shows "retry", not a verdict
+ *   - 'none'      → no plan/none in flight (the GET fired an off-request recompute; the FE may poll/compute)
+ *   - 'off'       → the AI_ROUTE_PICKER_ENABLED flag is off (the card uses the static engine)
+ */
+export type AiViabilityState =
+  | { readonly status: 'off' }
+  | { readonly status: 'none' }
+  | { readonly status: 'computing' }
+  | { readonly status: 'error'; readonly error: string }
+  | { readonly status: 'ready'; readonly card: AiViabilityCard };
+
+export interface CaseViabilityResponse {
+  readonly data: CaseViability | null;
+  readonly aiViability?: AiViabilityCard | null;
+  readonly aiViabilityState?: AiViabilityState;
+  readonly chartFullyRead?: boolean | null;
+}
+
+export function getCaseViability(caseId: string): Promise<CaseViabilityResponse> {
   return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/viability-card`);
+}
+
+/**
+ * On-demand SYNCHRONOUS compute (the spinner path + the retry button). Runs the picker call inside the
+ * request (~25s) and returns the resulting state — the grounded plan or an honest error. Use this when the
+ * read state is 'none' (first view) or 'error' (retry) so the FIRST view grounds after a spinner rather than
+ * showing a misleading no-go.
+ */
+export function computeCaseViability(caseId: string): Promise<{ aiViabilityState: AiViabilityState }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/viability-card/compute`, {});
 }
 
 /**

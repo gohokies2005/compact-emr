@@ -57,7 +57,13 @@ beforeEach(() => {
   getLetterMock.mockResolvedValue({ data: opsLetter });
   // The editor title is now the filename (Lastname_Firstname_COND_vN), built from the case detail.
   getCaseMock.mockResolvedValue({ data: { veteran: { firstName: 'Armand', lastName: 'Frank' }, claimedCondition: 'Obstructive Sleep Apnea' } } as unknown as Awaited<ReturnType<typeof getCase>>);
-  saveLetterMock.mockResolvedValue({ data: { version: 5, txt: 'Saved letter text.', warnings: [{ rule: 'short_letter', detail: 'Letter appears unusually short.' }] } });
+  // WarningList NOISE CUT (Ryan 2026-06-23): only the MEANINGFUL categories (placeholder token, locked-block
+  // mod) surface; cosmetic ones (em-dash, jargon, banned-word, sentence-variance) are dropped. The mock carries
+  // one of EACH so the test can assert the filter both ways.
+  saveLetterMock.mockResolvedValue({ data: { version: 5, txt: 'Saved letter text.', warnings: [
+    { rule: 'placeholder_token_introduced', detail: 'bracketed scaffolding token (e.g. [VERIFY ...]) — never ship in a finished letter' },
+    { rule: 'em_dash_introduced', detail: 'new em dashes (banned per FRN letter style)' },
+  ] } });
   previewMock.mockResolvedValue({ data: { proposal: PROPOSAL, preview: 'Preview of the limited edit.', warnings: [], costUsd: 0.42, model: 'claude-opus-4-8' } });
   applyMock.mockResolvedValue({ data: { version: 6, txt: 'Applied limited edit.', warnings: [] } });
   approveMock.mockResolvedValue({ data: { version: 5, status: 'delivered', finalPdfKey: 'drafter-artifacts/CASE-1/v5/letter.pdf' } });
@@ -97,12 +103,15 @@ describe('LetterEditorPage', () => {
     fireEvent.click(saveBtn);
   }
 
-  it('saves a new version and shows rule/detail warnings', async () => {
+  it('saves a new version and shows ONLY the meaningful warnings (drops cosmetic em-dash etc.)', async () => {
     renderPage();
     await clickSave();
     await waitFor(() => { expect(saveLetterMock).toHaveBeenCalledWith('CASE-1', { base_version: 4, txt: 'This is **bold** letter text.' }); }, FIND);
     expect(await screen.findByText('Saved version 5.', undefined, FIND)).toBeInTheDocument();
-    expect(screen.getByText('Letter appears unusually short.')).toBeInTheDocument();
+    // KEPT: the placeholder-token finding (a real "looks broken" defect) shows.
+    expect(screen.getByText(/bracketed scaffolding token/)).toBeInTheDocument();
+    // DROPPED: the cosmetic em-dash finding is filtered out of the RN-facing list.
+    expect(screen.queryByText(/new em dashes/)).not.toBeInTheDocument();
   });
 
   it('reloads on a stale save (ConflictError)', async () => {

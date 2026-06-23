@@ -119,6 +119,54 @@ describe('computeExtractionCoverage — extraction did not finish (card honesty)
   });
 });
 
+// ---- TWO-STAGE honesty model (Ryan 2026-06-23) -------------------------------
+// The card + SOAP banner read pagesRead (OCR) and chartAnalysis (semantic extract) as two distinct, plainly-
+// labeled stages from ONE coverage object, so a failed analysis can never hide behind a 100% pages-read number.
+describe('computeExtractionCoverage — two-stage (Pages read + Chart analysis)', () => {
+  const docs = () => [doc({ id: 'D1', s3Key: KEY1, pageCount: 5, filename: 'DD-214.pdf' }), doc({ id: 'D2', s3Key: KEY2, pageCount: 1200, filename: 'VA Blue Button Records.pdf' })];
+  const allRead = () => [frs({ filePath: KEY1, terminalStatus: 'read' }), frs({ filePath: KEY2, terminalStatus: 'read' })];
+
+  it('all read + analysis complete → pagesRead 100%, chartAnalysis complete with findings count', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'complete', resultJson: { items: new Array(253), gaps: { uncoveredPages: 0, truncatedWindows: 0 } } });
+    expect(cov.pagesRead.pct).toBe(100);
+    expect(cov.pagesRead.label).toBe('100% (1205 of 1205)');
+    expect(cov.chartAnalysis.state).toBe('complete');
+    expect(cov.chartAnalysis.label).toBe('✓ Complete (253 findings)');
+    expect(cov.chartAnalysis.findings).toBe(253);
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull(); // nothing to blame when complete
+  });
+
+  it('OCR 100% but analysis QUEUED → pagesRead 100%, chartAnalysis incomplete + names the largest file', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'queued' });
+    expect(cov.pagesRead.pct).toBe(100); // the OCR stage genuinely finished
+    expect(cov.chartAnalysis.state).toBe('incomplete');
+    expect(cov.chartAnalysis.label).toMatch(/didn’t finish/i);
+    expect(cov.chartAnalysis.reason).toMatch(/interrupted/i);
+    // the largest chart-input file is named as the likely cause (the dense Blue Button export)
+    expect(cov.chartAnalysis.likelyCauseFile).toBe('VA Blue Button Records.pdf');
+  });
+
+  it('analysis FAILED → chartAnalysis failed with a re-run label', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'failed' });
+    expect(cov.chartAnalysis.state).toBe('failed');
+    expect(cov.chartAnalysis.label).toMatch(/failed/i);
+    expect(cov.chartAnalysis.likelyCauseFile).toBe('VA Blue Button Records.pdf');
+  });
+
+  it('analysis RUNNING → chartAnalysis in_progress (no cause file blamed mid-run)', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'running' });
+    expect(cov.chartAnalysis.state).toBe('in_progress');
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull();
+  });
+
+  it('completed run with uncovered pages → chartAnalysis incomplete (finished but not fully)', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'complete', resultJson: { items: new Array(10), gaps: { uncoveredPages: 12, truncatedWindows: 0 } } });
+    expect(cov.chartAnalysis.state).toBe('incomplete');
+    expect(cov.chartAnalysis.label).toMatch(/some pages weren’t fully analyzed/i);
+    expect(cov.chartAnalysis.reason).toMatch(/12 pages were not folded/i);
+  });
+});
+
 // ---- screening-summary + rendered excluded -----------------------------------
 
 describe('computeExtractionCoverage — exclusions', () => {

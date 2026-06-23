@@ -44,13 +44,24 @@ export function describeApproveError(error: unknown): string {
   return 'Letter could not be approved (a sign-off + a ready chart are required). Please retry.';
 }
 
+// WarningList NOISE CUT (Ryan 2026-06-23): the save-time sanity check (letter-sanity.ts) emits both
+// MEANINGFUL findings (something is actually wrong with the letter) and COSMETIC style findings (em-dash,
+// engineering-jargon, sentence-variance, banned-word) that fired on every save and trained RNs to ignore the
+// whole panel. We surface ONLY the meaningful ones here: a leftover placeholder/scaffolding token, and a
+// modification to a locked block. (Editorial/meta-instruction LEAK tokens — "canonical/template/rewrite as" —
+// are shown SEPARATELY via the non-blocking `letter.leaks` block below, so they are still surfaced.) The
+// cosmetic rules stay in letter-sanity.ts but are not shown to the RN; cleanProseForSave already auto-fixes
+// dashes/quotes on every save, so the em-dash line was doubly redundant.
+const KEPT_WARNING_RULES: ReadonlySet<string> = new Set(['placeholder_token_introduced', 'locked_block_corrupted']);
+
 function WarningList({ warnings }: { readonly warnings: readonly LetterWarning[] }) {
-  if (warnings.length === 0) return null;
+  const kept = warnings.filter((w) => KEPT_WARNING_RULES.has(w.rule));
+  if (kept.length === 0) return null;
   return (
     <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-      <div className="text-sm font-semibold text-amber-900">Sanity warnings</div>
+      <div className="text-sm font-semibold text-amber-900">Needs a look before sending</div>
       <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-800">
-        {warnings.map((w) => <li key={w.rule}>{w.detail}</li>)}
+        {kept.map((w) => <li key={w.rule}>{w.detail}</li>)}
       </ul>
     </div>
   );

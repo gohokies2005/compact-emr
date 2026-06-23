@@ -45,7 +45,12 @@ function viability(band: ViabilityBand, over: Partial<CaseViability> = {}): Case
 }
 
 function coverage(status: CoverageStatus, coveragePct = 100): ExtractionCoverage {
-  return { totalPages: 10, extractedPages: status === 'complete' ? 10 : 8, coveragePct, gaps: [], status, unknownPageFiles: 0, totalFiles: 1, pageBreakdown: null };
+  const extractedPages = status === 'complete' ? 10 : 8;
+  return {
+    totalPages: 10, extractedPages, coveragePct, gaps: [], status, unknownPageFiles: 0, totalFiles: 1, pageBreakdown: null,
+    pagesRead: { pct: coveragePct, readUnits: extractedPages, totalUnits: 10, approximate: false, label: `${coveragePct}% (${extractedPages} of 10)` },
+    chartAnalysis: { state: status === 'failed' ? 'failed' : status === 'in_progress' ? 'in_progress' : 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: null },
+  };
 }
 
 const SIGNALS = (over: Partial<ReadinessSignals> = {}): ReadinessSignals => ({

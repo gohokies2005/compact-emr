@@ -13,16 +13,28 @@ const coverageMock = vi.mocked(getExtractionCoverage);
 const viewDocumentMock = vi.mocked(viewDocument);
 
 function cov(over: Partial<ExtractionCoverage> = {}): ExtractionCoverage {
-  return {
+  const base = {
     totalPages: 120,
     extractedPages: 120,
     coveragePct: 100,
-    gaps: [],
-    status: 'complete',
+    gaps: [] as ExtractionCoverage['gaps'],
+    status: 'complete' as ExtractionCoverage['status'],
     unknownPageFiles: 0,
     totalFiles: 10,
     pageBreakdown: null,
     ...over,
+  };
+  // Two-stage SSOT (Ryan 2026-06-23): default the two stages off the numbers so existing tests that only set
+  // coveragePct/status still produce a coherent object. A test that wants an incomplete analysis overrides
+  // chartAnalysis explicitly.
+  const approximate = base.unknownPageFiles > 0;
+  const pagesReadLabel = (approximate && base.totalFiles > 0 && base.totalPages === base.totalFiles)
+    ? `${base.totalFiles} ${base.totalFiles === 1 ? 'file' : 'files'}, page counts unavailable`
+    : `${base.coveragePct}% (${base.extractedPages} of ${base.totalPages})`;
+  return {
+    ...base,
+    pagesRead: over.pagesRead ?? { pct: base.coveragePct, readUnits: base.extractedPages, totalUnits: base.totalPages, approximate, label: pagesReadLabel },
+    chartAnalysis: over.chartAnalysis ?? { state: 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: null },
   };
 }
 
@@ -40,13 +52,43 @@ beforeEach(() => {
 });
 
 describe('ExtractionCoveragePanel', () => {
-  it('renders a 100% clean headline with no details toggle', async () => {
+  it('renders BOTH stages clean (Pages read + Chart analysis) with no details toggle', async () => {
     coverageMock.mockResolvedValue({ data: cov() });
     renderPanel();
-    expect(await screen.findByText(/100% of pages extracted \(120 of 120\)/)).toBeInTheDocument();
-    expect(screen.getByText(/successfully read and extracted/)).toBeInTheDocument();
+    // Two-stage SSOT: a "Pages read" line and a "Chart analysis" line, both labeled.
+    expect(await screen.findByText('Pages read')).toBeInTheDocument();
+    expect(screen.getByText(/100% \(120 of 120\)/)).toBeInTheDocument();
+    expect(screen.getByText('Chart analysis')).toBeInTheDocument();
+    expect(screen.getByText('✓ Complete')).toBeInTheDocument();
+    expect(screen.getByText(/read and analyzed/)).toBeInTheDocument();
     // No gaps → no "Show items" toggle.
     expect(screen.queryByRole('button', { name: /Show/ })).not.toBeInTheDocument();
+  });
+
+  it('OCR 100% but chart analysis DID NOT FINISH → shows the incomplete analysis line + names the cause file, chip NOT Complete', async () => {
+    coverageMock.mockResolvedValue({
+      data: cov({
+        coveragePct: 100,
+        status: 'complete_with_gaps',
+        gaps: [{ documentId: null, fileName: 'Chart analysis', reason: 'extraction_incomplete', pageLabel: 'did not finish — retry', isImage: false, terminalStatus: null }],
+        chartAnalysis: {
+          state: 'incomplete',
+          label: '⚠ Chart analysis didn’t finish — retry',
+          reason: 'The chart analysis was interrupted before it finished, so the structured chart may be missing records.',
+          likelyCauseFile: 'VA Blue Button Records.pdf',
+          findings: null,
+        },
+      }),
+    });
+    renderPanel();
+    // The OCR stage still reads 100% — but the analysis stage is honestly flagged.
+    expect(await screen.findByText(/100% \(120 of 120\)/)).toBeInTheDocument();
+    expect(screen.getByText('⚠ Chart analysis didn’t finish — retry')).toBeInTheDocument();
+    expect(screen.getByText(/interrupted before it finished/)).toBeInTheDocument();
+    expect(screen.getByText(/VA Blue Button Records\.pdf/)).toBeInTheDocument();
+    // The chip can NEVER say Complete over an unfinished analysis (the core honesty fix).
+    expect(screen.queryByText('Complete')).not.toBeInTheDocument();
+    expect(screen.getByText('Analysis incomplete')).toBeInTheDocument();
   });
 
   it('renders a gap row with a View file link and an image describe affordance', async () => {
@@ -63,7 +105,7 @@ describe('ExtractionCoveragePanel', () => {
     });
     renderPanel();
 
-    expect(await screen.findByText(/98% of pages extracted \(118 of 120\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/98% \(118 of 120\)/)).toBeInTheDocument();
 
     // Expand the details.
     fireEvent.click(screen.getByRole('button', { name: /Show 1 item/ }));

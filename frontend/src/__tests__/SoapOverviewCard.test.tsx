@@ -117,4 +117,48 @@ describe('SoapOverviewCard — honest plan-state surface (Zimmelman)', () => {
     expect(screen.queryByText(/Analyzing the case/i)).not.toBeInTheDocument();
     expect(computeMock).not.toHaveBeenCalled(); // off → no compute fired
   });
+
+  // CHART-ANALYSIS INCOMPLETE → prominent banner + PROVISIONAL verdict (Ryan 2026-06-23). When the chart the
+  // verdict is built on was not fully analyzed, the card must warn loudly and render the verdict as provisional
+  // — never a confident "not supportable" on an empty/partial chart.
+  it('chart analysis incomplete → prominent banner names the cause file + verdict is marked PROVISIONAL', async () => {
+    viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'off' } }); // reach the resting render
+    coverageMock.mockResolvedValue({
+      data: {
+        totalPages: 2776, extractedPages: 2776, coveragePct: 100, gaps: [], status: 'complete_with_gaps',
+        unknownPageFiles: 0, totalFiles: 4, pageBreakdown: null,
+        pagesRead: { pct: 100, readUnits: 2776, totalUnits: 2776, approximate: false, label: '100% (2776 of 2776)' },
+        chartAnalysis: {
+          state: 'incomplete',
+          label: '⚠ Chart analysis didn’t finish — retry',
+          reason: 'The chart analysis was interrupted before it finished, so the structured chart may be missing records.',
+          likelyCauseFile: 'VA Blue Button Records.pdf',
+          findings: null,
+        },
+      },
+    } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
+    renderCard();
+    // Prominent banner with plain language + the named likely-cause file.
+    await waitFor(() => expect(screen.getByText(/Chart analysis incomplete/i)).toBeInTheDocument());
+    expect(screen.getByText(/VA Blue Button Records\.pdf/)).toBeInTheDocument();
+    expect(screen.getByText(/may be based on an incomplete chart/i)).toBeInTheDocument();
+    // The verdict reads PROVISIONAL, not as a confident conclusion.
+    expect(screen.getAllByText(/provisional/i).length).toBeGreaterThan(0);
+  });
+
+  it('chart analysis complete → NO incomplete banner, verdict is not marked provisional', async () => {
+    viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'off' } });
+    coverageMock.mockResolvedValue({
+      data: {
+        totalPages: 40, extractedPages: 40, coveragePct: 100, gaps: [], status: 'complete',
+        unknownPageFiles: 0, totalFiles: 3, pageBreakdown: null,
+        pagesRead: { pct: 100, readUnits: 40, totalUnits: 40, approximate: false, label: '100% (40 of 40)' },
+        chartAnalysis: { state: 'complete', label: '✓ Complete (253 findings)', reason: null, likelyCauseFile: null, findings: 253 },
+      },
+    } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
+    renderCard();
+    await waitFor(() => expect(screen.getAllByText(/Not supportable as filed/i).length).toBeGreaterThan(0));
+    expect(screen.queryByText(/Chart analysis incomplete/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/provisional/i)).not.toBeInTheDocument();
+  });
 });

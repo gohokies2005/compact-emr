@@ -82,6 +82,23 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   // Assemble the SOAP context once the fast inputs are in, then POST it for the AI synthesis. Keyed on the
   // case (one call per case; cached server- and client-side). Enabled only when there's something to write.
   const cov = coverageQ.data?.data;
+  // CHART-ANALYSIS HONESTY (Ryan 2026-06-23): the verdict is built on the structured chart that Stage 2
+  // (chart analysis) produces. If that stage did NOT finish (failed / interrupted / still running / left
+  // gaps), the verdict may be built on an EMPTY or PARTIAL chart — so we render a prominent banner and mark
+  // the verdict PROVISIONAL rather than presenting a confident conclusion. Driven from the SAME coverage SSOT
+  // the chart-extraction card reads (cov.chartAnalysis), so the banner and the card line can never disagree.
+  const analysis = cov?.chartAnalysis ?? null;
+  const analysisIncomplete = analysis !== null && analysis.state !== 'complete';
+  const analysisBanner = !analysisIncomplete || analysis === null ? null : (() => {
+    const causeFile = analysis.likelyCauseFile;
+    const reason = analysis.state === 'failed'
+      ? 'the chart analysis failed'
+      : analysis.state === 'in_progress'
+        ? 'the chart analysis is still running'
+        : analysis.reason || 'the chart analysis did not finish';
+    const causeClause = causeFile ? ` A large records file (${causeFile}) likely couldn’t be fully processed.` : '';
+    return `Chart analysis incomplete — ${reason}.${causeClause} This assessment may be based on an incomplete chart; review the records directly and re-run extraction before relying on it.`;
+  })();
   const coveragePct = typeof cov?.coveragePct === 'number' ? cov.coveragePct : null;
   const coverageNote = coveragePct === null ? null
     : (!hasUnreadPages && coveragePct >= 99 ? 'All records were reviewed.' : `${coveragePct}% of pages read${hasUnreadPages ? '; some pages still unread' : ''}.`);
@@ -229,15 +246,28 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
 
   return (
     <div className={`mb-4 rounded-lg border border-l-4 ${L.rule} border-slate-200 ${L.tint} px-5 py-4`}>
+      {/* PROMINENT chart-analysis-incomplete banner (Ryan 2026-06-23). When the chart that the verdict is
+          built on was not fully analyzed, this sits ABOVE the verdict and the verdict reads as PROVISIONAL —
+          never a confident conclusion built on an empty/partial chart. Plain language, names the likely-cause
+          file when known. */}
+      {analysisBanner ? (
+        <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2.5">
+          <p className="text-[13px] font-semibold text-amber-900">⚠️ {analysisBanner}</p>
+        </div>
+      ) : null}
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Case overview</span>
         <span className="flex items-center gap-1.5 text-xs font-medium text-slate-700">
           <span className={`inline-block h-2 w-2 rounded-full ${L.dot}`} />
-          {result.title}
+          {analysisIncomplete ? `${result.title} (provisional)` : result.title}
         </span>
       </div>
-      <p className="mt-2 text-lg font-semibold leading-snug text-slate-900">{headline}</p>
-      {planUnavailable ? (
+      <p className="mt-2 text-lg font-semibold leading-snug text-slate-900">
+        {analysisIncomplete ? 'Provisional — ' : ''}{headline}
+      </p>
+      {analysisIncomplete ? (
+        <p className="mt-1 text-[11px] text-amber-700">This is a provisional read on an incomplete chart — re-run the chart analysis before relying on it.</p>
+      ) : planUnavailable ? (
         <p className="mt-1 text-[11px] text-slate-400">(plan unavailable — deterministic check only)</p>
       ) : null}
 

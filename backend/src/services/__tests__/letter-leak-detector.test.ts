@@ -34,6 +34,28 @@ describe('detectLetterLeaks — block content that must never appear in a nexus 
     expect(blockingLeaks(detectLetterLeaks('Restructure as a numbered list')).length).toBeGreaterThan(0);
   });
 
+  // meta_canonical TIGHTENING (Ryan 2026-06-23): the bare-word matcher false-positived on legit medical
+  // prose. It must fire ONLY in a DIRECTIVE context (canonical naming an editing object), never on ordinary
+  // scientific use of "canonical".
+  it('meta_canonical does NOT fire on legitimate "canonical mechanism/pathway" medical prose', () => {
+    const proseSamples = [
+      'The canonical mechanism by which obstructive sleep apnea aggravates hypertension is well established.',
+      'This follows the canonical pathway of sympathetic activation described in the literature.',
+      'Tinnitus has a canonical presentation that fits the in-service noise exposure.',
+      'The canonical understanding of PTSD-related sleep disruption supports the secondary theory.',
+    ];
+    for (const t of proseSamples) {
+      expect(detectLetterLeaks(t).map((l) => l.code)).not.toContain('meta_canonical');
+      expect(detectLetterLeaks(t)).toHaveLength(0); // and nothing else false-fires on clean prose
+    }
+  });
+
+  it('meta_canonical DOES fire on a real directive leak (canonical format/template/language)', () => {
+    expect(detectLetterLeaks('rather than the canonical format').map((l) => l.code)).toContain('meta_canonical');
+    expect(detectLetterLeaks('If the canonical Section VII template includes an aggravation prong').map((l) => l.code)).toContain('meta_canonical');
+    expect(detectLetterLeaks('retain only the exact canonical language').map((l) => l.code)).toContain('meta_canonical');
+  });
+
   // MUST NOT false-positive on legitimate nexus-letter language.
   it('does NOT flag the legitimate Section VII "in the alternative" dual-prong language', () => {
     const t = 'It is my opinion that the OSA is due to his PTSD and, in the alternative, is aggravated beyond its natural progression by that service-connected condition pursuant to 38 CFR 3.310(b).';

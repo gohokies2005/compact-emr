@@ -30,7 +30,16 @@ export interface LetterLeak {
 // dual-prong phrase; only the META/instruction wrappers around it.
 const LEAK_RULES: ReadonlyArray<{ code: string; re: RegExp; note: string; severity: LeakSeverity }> = [
   // LLM editing/meta-commentary — the catastrophic class. HARD BLOCK.
-  { code: 'meta_canonical', re: /\bcanonical\b/i, note: 'the word "canonical" (internal style term)', severity: 'block' },
+  // meta_canonical TIGHTENED (Ryan 2026-06-23): the bare /\bcanonical\b/ matcher false-positived on
+  // LEGITIMATE medical prose ("the canonical mechanism", "the canonical pathway", "canonical presentation")
+  // — "canonical" is ordinary scientific English. It only signals a LEAK when it names an internal EDITING
+  // OBJECT (the "canonical format/template/language/structure/version/sentence/section"), which is the form
+  // it took in the real leaks (Apolito "rather than the canonical format", Zodrow "the canonical Section VII
+  // template … the exact canonical language"). We require canonical to be DIRECTLY MODIFYING a format/
+  // editing noun — matching the drafter-side directive shape — so legit "canonical mechanism/pathway" prose
+  // passes. The conditional/locked-template/restructure rules below independently catch both real leaks, so
+  // narrowing this one loses no coverage. The optional "Section <roman>" allows "the canonical Section VII template".
+  { code: 'meta_canonical', re: /\bcanonical\s+(?:section\s+[ivx]+\s+)?(?:format|formatting|template|language|structure|version|wording|sentence|paragraph|list|layout)\b/i, note: 'an internal editing instruction referring to the "canonical" format/template (meta-commentary)', severity: 'block' },
   { code: 'meta_locked_template', re: /\blocked template\b|\btemplate includes\b|\bthe (?:section [ivx]+ )?template\b/i, note: 'references an internal "template" (editing meta-commentary)', severity: 'block' },
   { code: 'meta_restructure', re: /\b(?:restructure|rewrite|reformat)\s+(?:as|this|the\s+(?:section|letter|opinion)|it)\b/i, note: 'an editing instruction ("restructure/rewrite as…")', severity: 'block' },
   { code: 'meta_retain_exact', re: /\bretain only the exact\b/i, note: 'an editing instruction ("retain only the exact…")', severity: 'block' },

@@ -89,7 +89,7 @@ function makeDb(
     case: { findFirst: vi.fn(async () => initialCase), findUnique: vi.fn(async () => initialCase), findMany: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn(async () => initialCase) },
     veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
     letterRevision: { findFirst: vi.fn(async () => ({ ...currentRevision(initialCase.currentVersion), ...(opts.currentRevisionOverride ?? {}) })), findMany: vi.fn(async () => []), create: vi.fn(async () => currentRevision()), update: vi.fn(async () => currentRevision()) },
-    draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
+    draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
     activityLog: { create: vi.fn(async () => ({})) },
     signOff: { findMany: vi.fn(async () => signOffs), findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(async (a: { data: unknown }) => ({ id: 'SO-NEW', ...(a.data as object) })) },
     fileReadStatus: { findMany: vi.fn(async () => []), findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(), update: vi.fn(), upsert: vi.fn() },

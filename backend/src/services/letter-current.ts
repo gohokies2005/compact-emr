@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { HttpError } from '../http/errors.js';
 import type { AppDb } from './db-types.js';
 
@@ -27,6 +27,32 @@ export async function resolveCurrentTxtKey(db: AppDb, caseId: string, currentVer
     return { version: job.version, txtKey: job.artifactTxtS3Key };
   }
   return null;
+}
+
+/**
+ * STRANDED-LETTER RECOVERY support (CLM-9925837B7B, 2026-06-23): HeadObject existence probe.
+ * Returns false on NoSuchKey/NotFound, re-throws anything else (a transient S3 error must NOT be
+ * silently treated as "object absent" — that would skip a good letter). Shared by the letter
+ * router's read-path resolver, which walks DB versions DESC across BOTH artifact tables and returns
+ * the newest version whose TXT object actually EXISTS — so a failed re-draft that advanced
+ * Case.currentVersion to a dead version can never strand the prior good letter behind a 404.
+ *
+ * Two rules baked into that walk (learned from the live data, enforced by the caller):
+ *   1) NEVER reconstruct the S3 key from the DB version. The drafter's S3 folder counter and the DB
+ *      `version` field are OFFSET (live: DB v72 → S3 folder v53). Each row's stored artifactTxtS3Key
+ *      is authoritative; we trust the key, not an arithmetic guess.
+ *   2) A non-null artifactTxtS3Key is NOT proof the object exists — a failed run can carry a DANGLING
+ *      key (live: DraftJob v99 → .../v97/v97.txt, never written). HeadObject-verify before returning.
+ */
+export async function headObjectExists(s3: S3Client, bucketName: string, key: string): Promise<boolean> {
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: bucketName, Key: key }));
+    return true;
+  } catch (e: unknown) {
+    const name = e instanceof Error ? e.name : '';
+    if (name === 'NoSuchKey' || name === 'NotFound') return false;
+    throw e;
+  }
 }
 
 /** Optional caller context so the missing-artifact 404 names the case + version it failed on. */

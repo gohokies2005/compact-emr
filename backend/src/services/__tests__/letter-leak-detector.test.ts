@@ -16,12 +16,12 @@ describe('detectLetterLeaks — block content that must never appear in a nexus 
     expect(blockingLeaks(leaks).length).toBeGreaterThan(0); // Zodrow MUST hard-block
   });
 
-  it('flags an inline PMID as WARN (surfaced) but NEVER blocks a signature', () => {
+  it('does NOT flag an inline PMID at all (removed 2026-06-23 — cosmetic, not worth an alert)', () => {
     const t = 'McNicholas and Pevernagie, in their 2022 Journal of Sleep Research integrative disease model (PMID 35609941), provide the conceptual frame.';
     const leaks = detectLetterLeaks(t);
-    expect(leaks.map((l) => l.code)).toContain('inline_pmid');
-    expect(leaks.find((l) => l.code === 'inline_pmid')!.severity).toBe('warn');
-    expect(blockingLeaks(leaks)).toHaveLength(0); // a PMID alone must not block delivery
+    expect(leaks.map((l) => l.code)).not.toContain('inline_pmid');
+    expect(leaks.map((l) => l.code)).not.toContain('inline_doi');
+    expect(blockingLeaks(leaks)).toHaveLength(0); // and certainly never blocks
   });
 
   it('a Section VIII reference list with PMIDs does NOT block (the regression Ryan hit)', () => {

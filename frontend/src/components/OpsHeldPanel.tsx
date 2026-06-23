@@ -1,8 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
-import { GradeChip } from './ui/GradeChip';
 import { postDraft } from '../api/drafter';
 import { transitionCaseStatus, type CaseDetail } from '../api/cases';
 import { ConflictError } from '../api/client';
@@ -49,7 +48,14 @@ function operatorMessage(c: CaseDetail, job?: OpsDraftJob | null): string {
   // G8: Case.operatorMessage takes precedence if set (populated by /complete or by the
   // stuck-job watcher when it sweeps stale jobs). This is the RN-friendly text.
   if (typeof c.operatorMessage === 'string' && c.operatorMessage.trim().length > 0) {
-    return c.operatorMessage;
+    const raw = c.operatorMessage.trim();
+    // Strip intimidating code-speak (Ryan 2026-06-23): a raw API/exception string ("…threw: Claude API
+    // error: 500 {…request_id…}") means nothing to an RN. Replace it with a plain reason + the manual
+    // fix. A human-readable operatorMessage (e.g. a real content reason) passes through unchanged.
+    if (/threw|api error|request_id|exception|stack|\bError\b|[{}]/i.test(raw)) {
+      return 'The draft hit a temporary AI service error before it finished — not a problem with the case, and nothing was lost. Open the letter it already produced to review and finish it, or re-run a fresh draft.';
+    }
+    return raw;
   }
 
   if (c.operatorState === 'paused') {
@@ -69,11 +75,8 @@ function operatorMessage(c: CaseDetail, job?: OpsDraftJob | null): string {
 
 export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenEditor }: OpsHeldPanelProps) {
   const qc = useQueryClient();
-  const [detailsOpen, setDetailsOpen] = useState(false);
   const [confirmOpenAsIs, setConfirmOpenAsIs] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  const phases = useMemo(() => Object.entries(job?.manifestSnapshot?.phases ?? {}), [job]);
 
   const rerunMutation = useMutation({
     mutationFn: () => postDraft(c.id),
@@ -190,33 +193,9 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
         </div>
       ) : null}
 
-      <button
-        type="button"
-        className="mt-4 text-sm font-medium text-steel hover:text-navyDeep"
-        onClick={() => setDetailsOpen((current) => !current)}
-      >
-        Details {detailsOpen ? '▴' : '▾'}
-      </button>
-
-      {detailsOpen ? (
-        <div className="mt-4 rounded-2xl border border-aegis bg-mistSoft p-4">
-          <div className="grid gap-2 text-sm text-steel sm:grid-cols-3">
-            <div><GradeChip grade={c.grade} synthesizedFloor={job?.gradeSidecarJson?.synthesized_floor} reason={job?.gradeSidecarJson?.synthesized_floor_reason} /></div>
-            <div>Ship recommendation: {c.shipRecommendation ?? 'Unknown'}</div>
-            <div>Operator state: {c.operatorState ?? 'Unknown'}</div>
-          </div>
-
-          {phases.length > 0 ? (
-            <div className="mt-4 space-y-2">
-              {phases.map(([phaseId, phase]) => (
-                <div key={phaseId} className="rounded-xl bg-ivory p-3 text-sm text-steel">
-                  <span className="font-medium">{phase.summary ?? phase.status ?? 'Phase complete'}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      {/* The "Details" event-log (crashed/ran/skipped phases + grade/ship/operator-state chips) was
+          removed (Ryan 2026-06-23): it was intimidating code-speak that meant nothing to an RN. The
+          plain "why it didn't finish" + the recovery buttons above are all that's needed. */}
 
       {confirmOpenAsIs ? (
         <div role="dialog" aria-modal="true" aria-labelledby="open-as-is-title">

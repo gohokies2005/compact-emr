@@ -739,7 +739,11 @@ export function CaseDetailPage() {
                       2026-06-11; backend mirrors this). Editing creates a NEW version; the
                       version-safety in /draft + currentVersion pointer ensure the doctor always
                       reviews the newest version. */}
-                  {p.canShowRnEditorEntry ? (
+                  {/* Suppress this RN-editor-entry when OpsHeldPanel is showing — that panel already
+                      carries "Open letter editor" + "Send to doctor", so rendering both produced TWO
+                      "Open letter editor" buttons on one page (Ryan 2026-06-23). Keep it for the
+                      no-ops-panel RN-editable states (e.g. correction_review). */}
+                  {p.canShowRnEditorEntry && !p.canSeeOpsHeldPanel ? (
                     <div key="rn-editor-entry" className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
                       <h2 className="text-base font-semibold text-slate-900">Edit {letterFilename(c.veteran?.lastName, c.veteran?.firstName, c.claimedCondition, c.currentVersion ?? c.version)}</h2>
                       <p className="mt-1 text-sm text-slate-600">

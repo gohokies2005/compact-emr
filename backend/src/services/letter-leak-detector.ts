@@ -36,10 +36,11 @@ const LEAK_RULES: ReadonlyArray<{ code: string; re: RegExp; note: string; severi
   { code: 'meta_retain_exact', re: /\bretain only the exact\b/i, note: 'an editing instruction ("retain only the exact…")', severity: 'block' },
   { code: 'meta_flagged_section', re: /\b(?:is|are)\s+(?:technically\s+)?flagged in section/i, note: 'meta-commentary about section formatting rules', severity: 'block' },
   { code: 'meta_conditional_instruction', re: /\bif\s+(?:the\s+)?(?:canonical|locked|'?in the alternative'?)\b[^.]*\b(?:rewrite|retain|template|include)/i, note: 'a conditional editing instruction ("if the … template … rewrite …")', severity: 'block' },
-  // Database IDs — out of place in the letter body, but LEGITIMATE in Section VIII references, so
-  // WARN only — NEVER block a signature over a PMID (Ryan 2026-06-20).
-  { code: 'inline_pmid', re: /\bPMID\b\s*:?\s*\d{5,9}/i, note: 'a PMID identifier (fine in the references section; check it is not in the body)', severity: 'warn' },
-  { code: 'inline_doi', re: /\bdoi:\s*10\.\d{4,}/i, note: 'a DOI identifier (fine in the references section; check it is not in the body)', severity: 'warn' },
+  // PMID/DOI-in-body detection REMOVED (Ryan 2026-06-23): a PMID/DOI in the body rather than only the
+  // references is cosmetic, never harms the claim, and the warn banner caused more headache than the
+  // issue ever did ("i'll live with a PMID in there sometimes"). We no longer flag it at all. The meta_*
+  // rules above stay BLOCKING — those are internal editing instructions / style terms that actually
+  // leaked into the letter prose (the letter looks broken / AI-generated), which is a real defect.
 ];
 
 /**

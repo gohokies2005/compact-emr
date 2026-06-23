@@ -59,7 +59,10 @@ describe('buildSoapNote — NEVER returns null except for an empty claim', () =>
     const ctx: SoapContext = { claimedCondition: 'GERD / Gastritis', routePickerFraming: FRAMING('not_supportable') };
     const note = await buildSoapNote(ctx);
     expect(note).not.toBeNull();
-    expect(note!.fallback).toBe(true);
+    // Herman fix (2026-06-23): a not_supportable verdict is a STABLE conclusion (no LLM prose to retry), so it
+    // is fallback:FALSE — it persists ($0-on-reopen) and the FE does NOT wear the "couldn't be generated"
+    // chrome over a confident verdict. (Was fallback:true → re-rendered + re-fired on every open.)
+    expect(note!.fallback).toBe(false);
     // The note EXPLAINS why it's not supportable…
     expect(note!.assessment.toLowerCase()).toContain('not supportable');
     // …and the decision DERIVES from the plan viability (one-brain): not_supportable → reject.
@@ -100,12 +103,34 @@ describe('getOrBuildSoapNote — fallback-note persistence policy', () => {
     expect(upserts()).toBe(1);
   });
 
-  it('a NOT-SUPPORTABLE explanatory note (stable conclusion) IS persisted even though fallback:true', async () => {
+  it('a NOT-SUPPORTABLE explanatory note (stable conclusion, fallback:false) IS persisted', async () => {
+    // The REAL buildExplanatoryNote now stamps a not_supportable note fallback:FALSE (stable verdict). Drive
+    // the real generator (no spy) so this pins the integrated contract, not a hand-built shape.
     const ctx: SoapContext = { claimedCondition: 'GERD / Gastritis', routePickerFraming: FRAMING('not_supportable') };
-    const explanatory: SoapNote = { ...realNote, action: 'reject', fallback: true };
     const { db, upserts } = fakeDb();
-    await getOrBuildSoapNote(db, 'CASE-1', ctx, { generate: async () => explanatory });
+    const res = await getOrBuildSoapNote(db, 'CASE-1', ctx);
+    expect(res.data?.fallback).toBe(false); // stable verdict, not a transient failure
+    expect(res.data?.action).toBe('reject');
     expect(upserts()).toBe(1); // not_supportable is a stable verdict — persist it, don't churn
+  });
+
+  // HERMAN CLM-E9FEC31D99 REGRESSION (2026-06-23). The production bug: a not_supportable note re-rendered the
+  // brief "couldn't be generated" fallback on EVERY open and never healed, because the sync read computed an
+  // UNGROUNDED ctx (routePickerFraming null — the live chart inputHash had drifted from the persisted plan
+  // hash, so the plan read returned 'none'), and the OLD persistence guard required
+  // routePickerFraming?.viability !== 'not_supportable'. With routePickerFraming null, viability was undefined,
+  // so a not_supportable note (still fallback:true under the old code) was treated as TRANSIENT and never
+  // persisted → re-render + re-fire forever. After the fix: buildExplanatoryNote('not_supportable') is
+  // fallback:false regardless of grounding, so it persists on the ungrounded sync path too. ($0 next open.)
+  it('a not_supportable note persists on the UNGROUNDED sync path (no routePickerFraming) — the Herman never-heals bug', async () => {
+    // Ungrounded ctx: no routePickerFraming (the sync-read state when the plan hash has drifted). The
+    // deterministic not_supportable note comes from the `reason` branch, not a grounding plan.
+    const explanatory: SoapNote = { ...realNote, action: 'reject', fallback: false };
+    const ungroundedCtx: SoapContext = { claimedCondition: 'Ckd', engineNextAction: 'Do not draft as filed.' };
+    const { db, upserts } = fakeDb();
+    const res = await getOrBuildSoapNote(db, 'CASE-1', ungroundedCtx, { generate: async () => explanatory });
+    expect(res.data?.fallback).toBe(false);
+    expect(upserts()).toBe(1); // persisted even though ungrounded → next open is a $0 cache hit, no re-fire
   });
 
   it('schema version is current (sanity)', () => {

@@ -166,7 +166,20 @@ function actionToPlanSentence(action: SoapAction, claimed: string): string {
  * the assessment RENDERS that plan's framing/mechanism/counterargument and the action/confidence DERIVE from it
  * (one-brain — the fallback note cannot contradict the verdict). Without a plan, it explains from the engine
  * verdict + the claimed condition. `reason` tunes the assessment's opening ("the summary could not be
- * auto-written" vs "this case is not supportable as filed"). Always fallback:true.
+ * auto-written" vs "this case is not supportable as filed").
+ *
+ * STABLE-VERDICT vs TRANSIENT-FAILURE (Ryan 2026-06-23, Herman CLM-E9FEC31D99 "every open re-renders the
+ * brief fallback"). `fallback` is the signal the caller uses to decide whether to PERSIST the note and the
+ * signal the FE uses to decide whether to slap the "couldn't be generated — refreshes next open" chrome on
+ * it. Those two must key on "is this a TRANSIENT model failure?" — NOT merely "is this a deterministic note?".
+ * A `not_supportable` verdict is a STABLE conclusion (no LLM prose exists to write — the case has no
+ * affirmative theory), so it is fallback:FALSE: it persists ($0 on the next open) and reads as the verdict it
+ * is, not as a generation failure. Only `truncated`/`error`/`empty_model` (a real model failure where prose
+ * SHOULD have been produced) are fallback:TRUE — those are not persisted so the next open / the 110s async
+ * precompute retries and produces the real note. The OLD code stamped fallback:true on EVERY branch incl.
+ * not_supportable, so a not_supportable note (a) was treated as transient by getOrBuildSoapNote and never
+ * persisted (→ re-render + re-fire every open, the Herman bug) and (b) wore the misleading "couldn't be
+ * generated" chrome over a confident verdict.
  */
 function buildExplanatoryNote(ctx: SoapContext, reason: 'truncated' | 'error' | 'empty_model' | 'not_supportable'): SoapNote {
   const claimed = ctx.claimedCondition || 'the claimed condition';
@@ -211,7 +224,13 @@ function buildExplanatoryNote(ctx: SoapContext, reason: 'truncated' | 'error' | 
     ? ctx.engineNextAction
     : actionToPlanSentence(action, claimed);
   const base = { subjective, objective, assessment, plan };
-  return { ...base, confidence, action, caveat: checkGrounding(base, renderContext(ctx)), fallback: true };
+  // STABLE verdict → persist + no "couldn't generate" chrome. A not_supportable conclusion (whether reached
+  // via the reason or via a grounding plan that itself resolved not_supportable) is a finished answer — there
+  // is no LLM prose to retry. Everything else here is a genuine TRANSIENT model failure (truncated / error /
+  // empty_model) where prose SHOULD have been produced → fallback:true so it is NOT persisted and the next
+  // open / the 110s async precompute retries. (Herman CLM-E9FEC31D99 fix, 2026-06-23.)
+  const isStableVerdict = reason === 'not_supportable' || rp?.viability === 'not_supportable';
+  return { ...base, confidence, action, caveat: checkGrounding(base, renderContext(ctx)), fallback: !isStableVerdict };
 }
 
 const SOAP_TOOL: Anthropic.Tool = {
@@ -504,9 +523,17 @@ export async function getOrBuildSoapNote(
   // summary as the durable one and (b) make storedFresh serve it $0 forever, so the next open would never
   // retry the real model. By NOT storing it we serve it for THIS open (the card always shows a note) but the
   // next open recomputes — and the async self-invoke (110s budget) is where a large chart gets its real note.
-  // A genuine model note (fallback:false) and a not-supportable explanatory note (the verdict IS supportable=
-  // not_supportable, a stable conclusion) both persist normally. We only skip the TRANSIENT fallbacks.
-  const isTransientFallback = note?.fallback === true && ctx.routePickerFraming?.viability !== 'not_supportable';
+  // A genuine model note (fallback:false) and a not-supportable explanatory note both persist normally; only
+  // a TRANSIENT failure (truncated / error / empty_model) is skipped. As of 2026-06-23 (Herman) the `fallback`
+  // flag itself carries that distinction — buildExplanatoryNote stamps fallback:false for a STABLE verdict
+  // (not_supportable, reached via reason OR a grounding plan) and fallback:true ONLY for a real model failure.
+  // So the guard keys on `fallback` ALONE. The old code also required ctx.routePickerFraming?.viability !==
+  // 'not_supportable', which mis-fired on the SYNC read path: when the plan read came back UNGROUNDED
+  // (routePickerFraming null because the chart inputHash had drifted from the persisted plan hash), viability
+  // was undefined → the clause was true → a stable not_supportable note was wrongly treated as transient and
+  // NEVER persisted → re-rendered + re-fired the recompute on EVERY open (the Herman bug). Keying on `fallback`
+  // alone is correct regardless of grounding state.
+  const isTransientFallback = note?.fallback === true;
   if (!opts?.noStore && !isTransientFallback) {
     try {
       await db.soapOverview.upsert({

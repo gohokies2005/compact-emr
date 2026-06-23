@@ -16,7 +16,7 @@ import type { AppDb } from '../services/db-types.js';
 import { caseViabilityEnabled, deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
 import { getAiViabilityState, aiRoutePickerEnabled } from '../services/ai-viability.js';
 import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
-import { getOrBuildSoapNote, type SoapContext, type SoapOverviewCacheDb } from '../services/soap-overview.js';
+import { getOrBuildSoapNote, soapNoteFingerprint, SOAP_NOTE_SCHEMA_VERSION, type SoapContext, type SoapOverviewCacheDb } from '../services/soap-overview.js';
 import { assembleSoapContextForCase } from '../services/soap-context-assembler.js';
 import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
 import { buildDigestForCase } from '../advisory/chartSlice.js';
@@ -115,16 +115,45 @@ export function createCaseViabilityRouter(db: AppDb): Router {
         try { chartDigest = await buildDigestForCase(db, caseId); } catch { chartDigest = null; }
         ctx = { claimedCondition, routePickerFraming, chartDigest };
       }
+      // SHAPE-STALE SELF-HEAL (Ryan 2026-06-23, Zimmelman "re-renders every open"). A SOAP schema bump
+      // (SOAP_NOTE_SCHEMA_VERSION 25→26) strands every pre-deploy stored note: getOrBuildSoapNote treats an
+      // old-shape row as ABSENT, so a plain open falls through to a fresh sync generate. On a LARGE chart
+      // (Zimmelman = 2776 pages) that sync call (25s cap) truncates → a TRANSIENT fallback → which is
+      // deliberately NOT persisted → so the NEXT open recomputes again. The note therefore re-renders +
+      // re-bills Sonnet on EVERY open and never heals, because the only path that completes on a huge chart
+      // is the 110s async precompute, and that only fires when the PLAN is cold — Zimmelman's plan is warm.
+      // Fix: when a route-picker plan grounds the note (warm plan) but there is NO current-shape, fingerprint-
+      // matching stored row, fire the off-request async precompute (110s budget → writes the new-shape note)
+      // and serve THIS open noStore — so we don't persist a doomed sync-path fallback and don't clobber any
+      // existing row. The next open is a true $0 cache hit. This is the SAME firedRecompute/noStore mechanism
+      // already used for the cold-plan case, now also keyed on a stale/missing SOAP shape. Cheap: one indexed
+      // findUnique on soap_overviews. Fail-open: a read error leaves today's behavior untouched.
+      let soapShapeStale = false;
+      if (routePickerFraming && body.forceRegenerate !== true && !firedRecompute) {
+        try {
+          const fingerprint = soapNoteFingerprint(ctx);
+          const storedRow = await (db as unknown as SoapOverviewCacheDb).soapOverview.findUnique({ where: { caseId } });
+          const currentShapeMatch = storedRow !== null
+            && storedRow.schemaVersion === SOAP_NOTE_SCHEMA_VERSION
+            && storedRow.inputHash === fingerprint;
+          if (!currentShapeMatch) {
+            soapShapeStale = true;
+            void fireRecomputeViability(caseId); // 110s path re-writes the current-shape note off-request
+          }
+        } catch { soapShapeStale = false; /* fail-open: leave today's behavior */ }
+      }
       // H2: when we just fired a recompute because no usable warm plan exists AND the caller did not explicitly
       // force a regenerate, serve a fresh strategy fallback note for THIS open but do NOT persist it — a
       // persisted strategy note would be served for $0 on later opens and hide the route-picker plan that is
       // now warming. (forceRegenerate still persists: the RN explicitly asked to spend + store.) A grounded
-      // note (plan present) always persists as before — $0-on-reopen holds.
+      // note (plan present) always persists as before — $0-on-reopen holds. soapShapeStale extends this: a
+      // warm-plan case whose STORED SOAP note is the wrong shape also serves noStore for this open while the
+      // async precompute warms the new-shape note (so the doomed sync fallback is not persisted).
       const result = await getOrBuildSoapNote(
         db as unknown as SoapOverviewCacheDb,
         caseId,
         ctx,
-        { forceRegenerate: body.forceRegenerate === true, noStore: firedRecompute && body.forceRegenerate !== true },
+        { forceRegenerate: body.forceRegenerate === true, noStore: (firedRecompute || soapShapeStale) && body.forceRegenerate !== true },
       );
       // H1: return the grounded framing so the FE headline matches the Assessment. When grounded, the FE
       // PREFERS routePickerFraming.framing for the bold headline; when null it falls back to strategy.primaryArgument.

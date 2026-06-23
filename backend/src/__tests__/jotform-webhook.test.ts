@@ -36,6 +36,21 @@ describe('jotform webhook (doorbell)', () => {
     expect(create).toHaveBeenCalledWith({ data: { jotformFormId: '260898029223159', jotformSubmissionId: 'SUB-1', status: 'pending' } });
   });
 
+  // Contract the sweep depends on (2026-06-23 Herman Charles fix): the body echoes `result` so a
+  // sweep replay can tell a RECOVERY ('enqueued' = real-time webhook had dropped it) from a no-op.
+  it('echoes result=enqueued for a fresh submission', async () => {
+    const create = vi.fn(async () => ({ id: 'intake-new' }));
+    const res = await request(appFor({ create })).post('/api/v1/jotform/webhook/sek').type('form').send({ formID: '1', submissionID: 'FRESH-2' }).expect(200);
+    expect(res.body.result).toBe('enqueued');
+  });
+
+  it('echoes result=noop-duplicate for an already-ingested submission', async () => {
+    const create = vi.fn(async () => { throw { code: 'P2002' }; });
+    const findUnique = vi.fn(async () => ({ id: 'intake-existing', status: 'ready' }));
+    const res = await request(appFor({ create, findUnique })).post('/api/v1/jotform/webhook/sek').type('form').send({ formID: '1', submissionID: 'DONE-2' }).expect(200);
+    expect(res.body.result).toBe('noop-duplicate');
+  });
+
   it('is idempotent — a duplicate submission (P2002) still 200s', async () => {
     const create = vi.fn(async () => { throw { code: 'P2002' }; });
     const findUnique = vi.fn(async () => ({ id: 'intake-existing' }));

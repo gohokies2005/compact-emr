@@ -89,13 +89,17 @@ export function createJotformWebhookRouter(db: AppDb): Router {
     // submissions stopped arriving there was NO way to tell "Jotform isn't calling us" from "we
     // dropped it" — the incident was invisible for hours. Log ONE structured line per hit. formID /
     // submissionID are opaque ids, NOT PHI; never log req.body (it carries name/dob/etc.).
-    console.log(JSON.stringify({
-      msg: 'jotform-webhook: hit', formId, submissionId,
-      result: !intakeId ? 'no-intake' : shouldEnqueue ? 'enqueued' : 'noop-duplicate',
-    }));
+    const result = !intakeId ? 'no-intake' : shouldEnqueue ? 'enqueued' : 'noop-duplicate';
+    console.log(JSON.stringify({ msg: 'jotform-webhook: hit', formId, submissionId, result }));
 
     // Always 200 fast. (Jotform treats non-200/slow as failure and retries → handled idempotently.)
-    res.status(200).json({ ok: true });
+    // `result` is echoed so the SWEEP can tell a RECOVERY (it replayed a submission the real-time
+    // webhook had dropped → 'enqueued') from a no-op (already ingested → 'noop-duplicate'). A
+    // recovery during a sweep means the real-time doorbell silently missed a delivery — the exact
+    // failure that lost Herman Charles (CKD) on 2026-06-23 and stayed invisible for ~1h. The sweep
+    // turns that count into a CloudWatch alarm (JotformWebhookMissedAlarm). Real-time callers ignore
+    // this field; it is NOT PHI (opaque ids only).
+    res.status(200).json({ ok: true, result });
   }));
 
   return router;

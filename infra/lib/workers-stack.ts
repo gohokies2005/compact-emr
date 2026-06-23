@@ -1103,5 +1103,40 @@ export class WorkersStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+
+    // ===== Real-time webhook DROP detector (2026-06-23 incident, Herman Charles / CKD) =====
+    // The SweepErrorsAlarm above only fires if the sweep itself throws. It is BLIND to the failure
+    // that actually lost Herman's Stage 1 + Stage 2: Jotform silently DROPPED both real-time webhook
+    // deliveries (no 5xx on our side, nothing in the DLQ — the drop is UPSTREAM of SQS). The sweep
+    // recovered both an hour later, but with NO signal that the real-time path had failed. This
+    // MetricFilter counts each submission the sweep had to RECOVER (doorbell returned 'enqueued' on a
+    // replay = there was no ready row, i.e. the live webhook never delivered it). In a healthy system
+    // this is ~0/hr (every replay is a noop-duplicate). A non-zero hour means Jotform is dropping
+    // real-time deliveries — turn the previously-silent drop loud so ops can watch / re-register
+    // webhooks before the next intake is lost beyond the sweep's reach.
+    // The sweep uses the deprecated `logRetention` prop, so its log group is created by a custom
+    // resource (not a CDK LogGroup construct) — import it BY NAME to attach the MetricFilter without
+    // fighting the retention custom resource for ownership of the same group. The name is the Lambda
+    // log-group convention `/aws/lambda/<functionName>`.
+    const jotformSweepLogGroup = logs.LogGroup.fromLogGroupName(
+      this, 'JotformSweepLogGroupRef', `/aws/lambda/${jotformSweep.functionName}`);
+    const webhookMissedMetric = jotformSweepLogGroup.addMetricFilter('JotformWebhookMissedMetric', {
+      // Matches the per-recovery line emitted in runSweep:
+      //   { "msg": "jotform-sweep: recovered-missed-webhook", "submissionId": ..., ... }
+      filterPattern: logs.FilterPattern.literal('{ $.msg = "jotform-sweep: recovered-missed-webhook" }'),
+      metricNamespace: `compact-emr/${config.envName}/intake`,
+      metricName: 'WebhookDeliveriesMissedRecovered',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    new cloudwatch.Alarm(this, 'JotformWebhookMissedAlarm', {
+      alarmName: `compact-emr-${config.envName}-jotform-webhook-missed`,
+      alarmDescription: 'The hourly sweep had to RECOVER one+ Jotform submissions whose real-time webhook delivery was silently dropped (Jotform-side miss / our 5xx in a deploy window / a disabled webhook). The intake was saved by the sweep but the real-time path is failing — verify webhook registration on the affected form(s). This is the exact failure that lost Herman Charles (CKD) on 2026-06-23. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-sweep for the recovered-missed-webhook lines.',
+      metric: webhookMissedMetric.metric({ statistic: 'Sum', period: Duration.hours(1) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
   }
 }

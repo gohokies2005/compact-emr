@@ -21,12 +21,19 @@ import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-sec
  */
 
 interface JotformSubmission { id: string; form_id: string; created_at: string }
+/** What the doorbell did with a replayed submission (echoed in its 200 body). */
+type ReplayResult = 'enqueued' | 'noop-duplicate' | 'no-intake' | 'unknown';
+interface ReplayOutcome { status: number; result: ReplayResult }
 interface SweepDeps {
   listSubmissions: (sinceIso: string, offset: number) => Promise<JotformSubmission[]>;
-  replay: (formId: string, submissionId: string) => Promise<number>; // returns HTTP status
+  replay: (formId: string, submissionId: string) => Promise<ReplayOutcome>; // HTTP status + doorbell result
   log: (o: Record<string, unknown>) => void;
 }
-export interface SweepResult { listed: number; replayed: number; failed: number; failures: Array<{ submissionId: string; reason: string }>; sinceIso: string }
+// `recovered` = submissions the doorbell ENQUEUED during a sweep (result==='enqueued'), i.e. the
+// real-time webhook had DROPPED them. >0 means Jotform silently missed a delivery (Herman Charles,
+// 2026-06-23). The handler emits a `jotform-sweep: recovered` line per run so a CloudWatch
+// MetricFilter + alarm (JotformWebhookMissedAlarm) makes that previously-silent drop loud.
+export interface SweepResult { listed: number; replayed: number; recovered: number; failed: number; failures: Array<{ submissionId: string; reason: string }>; sinceIso: string }
 
 /**
  * Format a Date as `YYYY-MM-DD HH:MM:SS` in US Eastern (America/New_York).
@@ -58,18 +65,29 @@ export async function runSweep(sinceIso: string, deps: SweepDeps): Promise<Sweep
     subs.push(...page);
     if (page.length < 1000) break;
   }
-  const result: SweepResult = { listed: subs.length, replayed: 0, failed: 0, failures: [], sinceIso };
+  const result: SweepResult = { listed: subs.length, replayed: 0, recovered: 0, failed: 0, failures: [], sinceIso };
   for (const s of subs) {
     try {
-      const status = await deps.replay(s.form_id, s.id);
-      if (status === 200) result.replayed += 1;
-      else { result.failed += 1; result.failures.push({ submissionId: s.id, reason: `webhook HTTP ${status}` }); }
+      const { status, result: replayResult } = await deps.replay(s.form_id, s.id);
+      if (status === 200) {
+        result.replayed += 1;
+        // 'enqueued' during a sweep = the doorbell had NO ready row for this submission, i.e. the
+        // real-time webhook dropped it and the sweep just recovered it. (Steady state is all
+        // 'noop-duplicate'.) Surface each recovery individually so the metric line is auditable.
+        if (replayResult === 'enqueued') {
+          result.recovered += 1;
+          deps.log({ msg: 'jotform-sweep: recovered-missed-webhook', submissionId: s.id, formId: s.form_id, createdAt: s.created_at });
+        }
+      } else { result.failed += 1; result.failures.push({ submissionId: s.id, reason: `webhook HTTP ${status}` }); }
     } catch (err) {
       // Per-item catch surfaces the reason (FRN hard rule) — never a silent drop.
       result.failed += 1;
       result.failures.push({ submissionId: s.id, reason: err instanceof Error ? err.message : String(err) });
     }
   }
+  // One metric-bearing line per run (count, even when 0) so a CloudWatch MetricFilter has a datapoint
+  // every hour — the alarm keys on recovered>0 (a silent real-time webhook drop just got backstopped).
+  deps.log({ msg: 'jotform-sweep: recovered-count', recovered: result.recovered });
   deps.log({ msg: 'jotform-sweep: summary', ...result });
   return result;
 }
@@ -92,11 +110,19 @@ function jotformGet(host: string, path: string, apiKey: string): Promise<{ conte
   });
 }
 
-function postWebhook(apiDomain: string, secret: string, formId: string, submissionId: string): Promise<number> {
+function postWebhook(apiDomain: string, secret: string, formId: string, submissionId: string): Promise<ReplayOutcome> {
   const data = new URLSearchParams({ formID: formId, submissionID: submissionId }).toString();
   return new Promise((resolve, reject) => {
     const req = https.request({ host: apiDomain, path: `/api/v1/jotform/webhook/${secret}`, method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) } }, (r) => {
-      r.on('data', () => { /* drain */ }); r.on('end', () => resolve(r.statusCode ?? 0));
+      let b = ''; r.on('data', (c) => { b += c; });
+      r.on('end', () => {
+        const status = r.statusCode ?? 0;
+        // The doorbell echoes { ok, result }. Parse it to classify a recovery; default 'unknown' so a
+        // body-parse miss never crashes the sweep (status still drives replayed/failed counting).
+        let result: ReplayResult = 'unknown';
+        try { const parsed = JSON.parse(b) as { result?: ReplayResult }; if (parsed?.result) result = parsed.result; } catch { /* keep 'unknown' */ }
+        resolve({ status, result });
+      });
     });
     req.on('error', reject); req.write(data); req.end();
   });

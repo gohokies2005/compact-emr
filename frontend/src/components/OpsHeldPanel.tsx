@@ -38,6 +38,11 @@ interface OpsHeldPanelProps {
   // in the chart at all (2026-06-03 — Ryan "could not see the letter drafted anywhere").
   readonly hasLetter?: boolean;
   readonly onViewLetter?: () => void;
+  // Open the produced (partial) letter in the FULL EDITOR (2026-06-22). When a draft exists, the
+  // primary recovery is to fix it by hand — far cheaper than a ~$15 full re-run — so the lead
+  // affordance routes to the editor, NOT the read-only PDF. CaseDetailPage wires this to
+  // navigate(`/cases/:id/letter`), the same entry the physician/RN ready panels use.
+  readonly onOpenEditor?: () => void;
 }
 
 function operatorMessage(c: CaseDetail, job?: OpsDraftJob | null): string {
@@ -62,7 +67,7 @@ function operatorMessage(c: CaseDetail, job?: OpsDraftJob | null): string {
   return 'Drafter completed with concerns.';
 }
 
-export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHeldPanelProps) {
+export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenEditor }: OpsHeldPanelProps) {
   const qc = useQueryClient();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [confirmOpenAsIs, setConfirmOpenAsIs] = useState(false);
@@ -108,24 +113,35 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
     <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold text-navyDeep">Drafting was interrupted</h2>
+          {/* HONEST headline (2026-06-22): the old hardcoded "Drafting was interrupted" overstated the
+              no-letter case (the run may have failed before producing anything) — it read as a vague
+              "something broke" with no real cause. The case-specific operatorMessage below carries the
+              REAL reason (the failed phase + its recorded note, via summarizeForOperator). */}
+          <h2 className="text-base font-semibold text-navyDeep">
+            {hasLetter ? 'This draft did not finish — but it produced a letter' : 'This draft did not finish'}
+          </h2>
           <p className="mt-1 text-sm text-steel">
             {hasLetter
-              ? 'This draft stopped before it finished. You can open what it produced so far, or resume the draft to finish the letter.'
-              : 'This draft was interrupted before it finished and did not produce a letter. Resume it to run the draft to completion.'}
+              ? 'The run stopped before completing, but it produced a letter you can open and finish in the editor — usually faster and cheaper than a full re-run. Re-run only if a fresh draft is genuinely needed.'
+              : 'The run stopped and did not produce a letter. Re-run it to draft to completion. The reason is below.'}
           </p>
           <p className="mt-2 text-sm text-steel">{operatorMessage(c, job)}</p>
         </div>
 
         <div className="flex flex-wrap gap-2">
-          {/* Single recovery action (Ryan 2026-06-18). INTERIM HONESTY (2026-06-18): until the drafter
-              checkpoint/resume build lands, this RE-RUNS THE WHOLE DRAFT from the start (~$15) — it does
-              NOT yet pick up from the last completed phase. The confirm says so plainly so nobody burns a
-              full draft expecting a cheap continue. For a small change, the surgical / guided edit on the
-              letter page is the cheap path — this button is only for a genuine full restart. */}
+          {/* When a letter WAS produced, the LEAD action is to open + finish it in the editor (the cheap
+              path) — re-draft drops to secondary. When no letter exists, re-run is the only path and stays
+              primary. (2026-06-22 — repoints the old "Open what it produced" away from the read-only PDF.)
+              INTERIM: re-run RE-RUNS THE WHOLE DRAFT from the start (~$15); the confirm says so plainly. */}
+          {hasLetter && onOpenEditor ? (
+            <Button type="button" variant="primary" onClick={onOpenEditor}>
+              Open letter editor
+            </Button>
+          ) : null}
+
           <Button
             type="button"
-            variant="primary"
+            variant={hasLetter && onOpenEditor ? 'secondary' : 'primary'}
             loading={rerunMutation.isPending}
             disabled={rerunMutation.isPending}
             onClick={() => { if (window.confirm('This re-runs the ENTIRE draft from the start — a full ~$15 run (about 20 minutes). It does NOT yet resume from where it stopped. For a small fix, use the surgical or guided edit on the letter instead. Re-run the full draft?')) rerunMutation.mutate(); }}
@@ -133,9 +149,10 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
             Re-run full draft
           </Button>
 
+          {/* Read-only PDF view kept as a tertiary option (some reviewers prefer to skim the PDF first). */}
           {hasLetter && onViewLetter ? (
-            <Button type="button" variant="secondary" onClick={onViewLetter}>
-              Open what it produced
+            <Button type="button" variant="ghost" onClick={onViewLetter}>
+              View PDF
             </Button>
           ) : null}
 

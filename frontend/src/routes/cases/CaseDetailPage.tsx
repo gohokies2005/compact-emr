@@ -705,6 +705,7 @@ export function CaseDetailPage() {
                       isAdmin={role === 'admin'}
                       hasLetter={!!viewableLetterJob}
                       onViewLetter={openLetterPdf}
+                      onOpenEditor={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
                     />
                   ) : null}
 
@@ -715,6 +716,7 @@ export function CaseDetailPage() {
                       key="gate2-halt"
                       c={c}
                       {...(haltedJob ? { job: haltedJob as never } : {})}
+                      onOpenEditor={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
                       onChanged={async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-decisions'] })]); }}
                     />
                   ) : null}

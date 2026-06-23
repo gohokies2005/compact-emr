@@ -4,6 +4,7 @@ import {
   CASE_STATUS_TRANSITIONS,
   IN_FLIGHT_CASE_STATUSES,
   canRolePerformCaseStatusTransition,
+  isValidCaseStatusTransition,
 } from '../services/case-status-transitions.js';
 
 describe('case status transitions', () => {
@@ -21,7 +22,10 @@ describe('case status transitions', () => {
     // Gate-2 can park a drafting case for an RN decision.
     expect(CASE_STATUS_TRANSITIONS.drafting).toEqual(['rn_review', 'physician_review', 'needs_rn_decision', 'needs_records', 'rejected']);
     expect(CASE_STATUS_TRANSITIONS.rn_review).toEqual(['physician_review', 'drafting', 'rejected']);
-    expect(CASE_STATUS_TRANSITIONS.needs_rn_decision).toEqual(['drafting', 'records', 'rejected']);
+    // needs_rn_decision -> physician_review is the "see/edit/FORWARD" door (2026-06-22): a body-quality
+    // park over a produced+editable draft must move forward to the doctor once the RN fixes it by hand,
+    // never be trapped requiring a ~$15 re-draft to escape. (needs_records has no draft, so no such edge.)
+    expect(CASE_STATUS_TRANSITIONS.needs_rn_decision).toEqual(['drafting', 'records', 'physician_review', 'rejected']);
     expect(CASE_STATUS_TRANSITIONS.needs_records).toEqual(['drafting', 'records', 'rejected']);
     // physician_review -> rn_review legalizes the drafter's live /complete flip after a redraft
     // started in physician_review (assessment 2026-06-12 flagged the hop as absent from the map).
@@ -63,6 +67,27 @@ describe('case status transitions', () => {
 
   it('lets the RN (ops_staff) send rn_review to the doctor (physician_review)', () => {
     expect(canRolePerformCaseStatusTransition('ops_staff', 'rn_review', 'physician_review')).toBe(true);
+  });
+
+  // ── Forward door out of a body-quality park (2026-06-22, "see/edit/FORWARD — never a trap") ──
+  it('needs_rn_decision -> physician_review exists and the RN (ops_staff) may forward a hand-fixed held letter to the doctor', () => {
+    // The forward edge must be in the map (so the case can leave the park toward sign-off)...
+    expect(CASE_STATUS_TRANSITIONS.needs_rn_decision).toContain('physician_review');
+    // ...and the RN — the role that fixes the flagged section — must be allowed to drive it, identical
+    // to the canonical rn_review -> physician_review "send to doctor" hop. Without this the held letter
+    // could only go back to 'drafting' (re-draft, discarding the fix), which is the trap Ryan called out.
+    expect(canRolePerformCaseStatusTransition('ops_staff', 'needs_rn_decision', 'physician_review')).toBe(true);
+    expect(canRolePerformCaseStatusTransition('admin', 'needs_rn_decision', 'physician_review')).toBe(true);
+  });
+
+  it('needs_records (no produced draft) has NO forward-to-physician edge — there is nothing to send', () => {
+    // The map is the gate on which edges EXIST (role-permission is a separate, second check). A
+    // needs_records park never produced a draft, so it has no forward-to-doctor door — only the map
+    // (isValidCaseStatusTransition), not the role check, can express that "this edge does not exist".
+    expect(CASE_STATUS_TRANSITIONS.needs_records).not.toContain('physician_review');
+    expect(isValidCaseStatusTransition('needs_records', 'physician_review')).toBe(false);
+    // Contrast: the body-quality park DOES have the forward edge.
+    expect(isValidCaseStatusTransition('needs_rn_decision', 'physician_review')).toBe(true);
   });
 
   // ── Correction-round SSOT role gates (audit 2026-06-13) ───────────────────

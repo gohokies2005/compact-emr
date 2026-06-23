@@ -47,7 +47,15 @@ const PRESIGN_TTL_SECONDS = 300;
 // it immediately in the full editor (it is NOT physician-signed, so nothing should bar editing) — not
 // just View/Redraft (Ryan 2026-06-20, Apolito). Editing creates a new version; it does not change
 // status. (correction_review = the RN actively reworking before sending back to the doctor.)
-const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'rn_review', 'physician_review', 'correction_requested', 'correction_review']);
+// 'needs_rn_decision' = a body-quality PARK (a FULL draft was produced but the deterministic body-quality
+// gate found a letter-killing defect). Per the 2026-06-22 advisory/editable redesign, that hold is a SOFT
+// advisory, not re-draft-only: the RN may open the held letter in the full editor and fix the flagged
+// section by hand (cheaper than a ~$15 re-draft). Editing creates a new version; it does NOT change status.
+// Load-bearing safety: 'needs_rn_decision' carries a currentVersion only when /halt confirmed a produced
+// txt exists in S3 (a dx/event hold leaves currentVersion untouched → GET /letter resolves null → editor
+// shows nothing to edit). sign-offs.ts SEPARATELY refuses needs_rn_decision so a held-for-defect letter can
+// never be physician-signed while parked. 'needs_records' stays OUT — by definition no draft exists there.
+const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'rn_review', 'physician_review', 'correction_requested', 'correction_review', 'needs_rn_decision']);
 
 /**
  * G4 — ratified sign/edit lifecycle (Ryan 2026-06-12): "nurse cannot edit the version the doctor

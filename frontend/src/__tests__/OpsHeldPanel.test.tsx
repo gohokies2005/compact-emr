@@ -107,20 +107,40 @@ describe('OpsHeldPanel', () => {
     });
   });
 
-  it('renders the interrupted-draft panel with a single "Resume draft" action (Ryan 2026-06-18: no from-scratch)', () => {
+  it('renders an HONEST no-draft headline (not the misleading "Drafting was interrupted") + a single re-run action', () => {
     renderPanel();
 
-    expect(screen.getByText('Drafting was interrupted')).toBeInTheDocument();
-    // hasLetter is not passed → the no-letter copy variant; single "Resume draft" action, no "from scratch".
-    expect(screen.getByText(/This draft was interrupted before it finished/)).toBeInTheDocument();
+    // The hardcoded "Drafting was interrupted" headline was a defect — for a no-letter hold it
+    // overstated (the run may have failed before producing anything). Honest copy instead.
+    expect(screen.queryByText('Drafting was interrupted')).not.toBeInTheDocument();
+    expect(screen.getByText(/did not finish/i)).toBeInTheDocument();
+    // hasLetter is not passed → the no-letter copy variant; single re-run action, no "from scratch".
+    expect(screen.getByText(/did not produce a letter/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Re-run full draft' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /from scratch/i })).not.toBeInTheDocument();
-    // The case-specific operator message still renders beneath the plain-language summary.
+    // The case-specific operator message (the REAL reason) still renders beneath the summary.
     expect(
       screen.getByText(
         "We've paused this one for a closer look. Nothing's lost - your work is saved and we've flagged it for the team.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it('when a letter was produced, the primary affordance opens the EDITOR (not the read-only PDF)', () => {
+    const onOpenEditor = vi.fn();
+    const onViewLetter = vi.fn();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <OpsHeldPanel c={heldCase} job={heldJob} isAdmin={false} hasLetter onViewLetter={onViewLetter} onOpenEditor={onOpenEditor} />
+      </QueryClientProvider>,
+    );
+    // honest "produced" copy
+    expect(screen.getByText(/did not finish/i)).toBeInTheDocument();
+    const openEditorBtn = screen.getByRole('button', { name: /open letter editor/i });
+    fireEvent.click(openEditorBtn);
+    expect(onOpenEditor).toHaveBeenCalledTimes(1);
+    expect(onViewLetter).not.toHaveBeenCalled(); // the produced affordance no longer dead-ends at the PDF
   });
 
   it('calls postDraft when resuming the draft (after confirm)', async () => {

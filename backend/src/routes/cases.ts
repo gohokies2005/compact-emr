@@ -273,8 +273,15 @@ function roleGuardForStatusTransition(db: AppDb) {
     }
 
     // Don't send a letter "to the doctor" when no doctor is assigned (Ryan 2026-06-06). The
-    // rn_review -> physician_review hand-off requires an assigned physician on the case.
-    if (current.status === 'rn_review' && parsed.to === 'physician_review' && !current.assignedPhysicianId) {
+    // rn_review -> physician_review hand-off requires an assigned physician on the case — and so does
+    // the needs_rn_decision -> physician_review forward hop (2026-06-22): a body-quality park resolved
+    // by a hand-fix is "sent to the doctor" exactly like an rn_review send, so it carries the same
+    // no-unassigned-doctor guard. Both landing edges into physician_review are covered here.
+    if (
+      (current.status === 'rn_review' || current.status === 'needs_rn_decision') &&
+      parsed.to === 'physician_review' &&
+      !current.assignedPhysicianId
+    ) {
       throw new HttpError(409, 'conflict', 'Assign a physician to this case before sending it for review.', { caseId: id, reason: 'no_physician_assigned' });
     }
 

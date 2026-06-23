@@ -104,7 +104,11 @@ export interface PagesReadStage {
   readonly label: string; // "100% (28 of 28)" / "92% (118 of 128)" / "28 files, page counts unavailable"
 }
 
-export type ChartAnalysisState = 'complete' | 'in_progress' | 'incomplete' | 'failed';
+// 'not_analyzed' (Ryan 2026-06-23, cry-wolf fix): NO analysis run exists yet (runStatus === null) OR there
+// are no chart inputs to analyze. This is NOT a failure or a gap — it must NOT fire the SOAP banner, mark the
+// verdict provisional, or name a likely-cause file. Only queued/running (a real run exists but is unfinished),
+// failed, or a completed-run-with-real-gaps (→ 'incomplete') trip the honesty warning.
+export type ChartAnalysisState = 'complete' | 'in_progress' | 'incomplete' | 'failed' | 'not_analyzed';
 
 /** Stage 2 — the semantic extraction (the structured chart the SOAP/verdict is built on), in plain English. */
 export interface ChartAnalysisStage {
@@ -421,6 +425,14 @@ export function computeExtractionCoverage(
     runStatus, extractionUnfinished, runFailed, inProgress, uncoveredPages, truncatedWindows, findings, inputs,
   });
 
+  // SSOT INVARIANT (Ryan 2026-06-23): a 'complete' coverage object must NEVER carry a non-complete chart-analysis
+  // state — except 'not_analyzed' (an empty/new case is vacuously 'complete' yet has nothing to analyze). If the two
+  // stages ever disagreed, the card line and the SOAP banner would contradict. Defensive guard so a future edit to
+  // either branch can't silently re-introduce the false-"100% Complete" the whole two-stage model exists to kill.
+  if (status === 'complete' && chartAnalysis.state !== 'complete' && chartAnalysis.state !== 'not_analyzed') {
+    throw new Error(`extraction-coverage SSOT invariant violated: status='complete' but chartAnalysis.state='${chartAnalysis.state}'`);
+  }
+
   return {
     totalPages,
     extractedPages,
@@ -438,13 +450,19 @@ export function computeExtractionCoverage(
 /**
  * Derive the plain-English Stage-2 (Chart analysis) label from the run state + extraction gaps. PURE.
  *
- * State machine (honest about the silent-failure case the old single "100% Complete" hid):
+ * State machine (honest about the silent-failure case the old single "100% Complete" hid — and the
+ * cry-wolf case where a brand-new/empty case mis-read as "didn't finish"):
+ *   • no inputs OR runStatus === null → 'not_analyzed' (no run on record yet / nothing to analyze). NOT a
+ *                                     failure, NOT a gap — does NOT trip the banner / provisional / cause-file.
  *   • failed                        → 'failed'      "✗ Chart analysis failed — re-run extraction"
- *   • queued / running              → analysis is not finished. 'in_progress' while running; 'incomplete'
- *                                     when queued-but-not-finished (the silent crash/re-enqueue case).
- *   • inProgress (OCR still going)  → 'in_progress' (we can't have analyzed pages still being read).
+ *   • running                       → 'in_progress' (we can't have analyzed pages still being read).
+ *   • queued                        → 'incomplete'  the silent crash/re-enqueue case (a real run exists).
+ *   • inProgress (OCR still going)  → 'in_progress'.
  *   • complete run with gaps        → 'incomplete'  "⚠ Finished, but some pages weren't fully analyzed"
  *   • complete, no gaps             → 'complete'    "✓ Complete (N findings)".
+ *
+ * likelyCauseFile is named ONLY for 'failed' / 'incomplete' (a real shortfall to explain) — never for
+ * 'not_analyzed' / 'in_progress' / 'complete' (there is nothing to blame yet).
  */
 function deriveChartAnalysisStage(args: {
   runStatus: string | null;
@@ -458,12 +476,21 @@ function deriveChartAnalysisStage(args: {
 }): ChartAnalysisStage {
   const { runStatus, runFailed, inProgress, uncoveredPages, truncatedWindows, findings, inputs } = args;
   // The largest chart-input file by page count — the usual culprit when analysis truncates/times out. Named
-  // only when it is meaningfully large (>1 page) so we never point at a stray single-pager.
+  // only when it is meaningfully large (>1 page) so we never point at a stray single-pager. Computed once;
+  // surfaced ONLY for 'failed' / 'incomplete' (a real shortfall to explain), never for not_analyzed/in_progress.
   const largest = [...inputs]
     .filter((d) => typeof d.pageCount === 'number' && (d.pageCount ?? 0) > 1)
     .sort((a, b) => (b.pageCount ?? 0) - (a.pageCount ?? 0))[0];
   const likelyCauseFile = largest ? displayName(largest) : null;
   const findingsSuffix = findings !== null ? ` (${findings} ${findings === 1 ? 'finding' : 'findings'})` : '';
+
+  // NOT-ANALYZED (cry-wolf fix, Ryan 2026-06-23): no chart inputs to analyze, OR no analysis run on record yet
+  // (runStatus === null) with OCR settled. This is the brand-new / empty-case resting state — NOT a failure and
+  // NOT a gap. It must not fire the banner, mark the verdict provisional, or blame a file. We DON'T treat a null
+  // run as "didn't finish": a real run that was interrupted carries a 'queued'/'running'/'failed' status, not null.
+  if (inputs.length === 0 || (runStatus === null && !inProgress)) {
+    return { state: 'not_analyzed', label: 'Not analyzed yet', reason: null, likelyCauseFile: null, findings: findings ?? null };
+  }
 
   if (runFailed) {
     return {
@@ -475,11 +502,12 @@ function deriveChartAnalysisStage(args: {
     };
   }
   if (runStatus === 'running' || inProgress) {
+    // Genuinely working — OCR or a running analysis. Provisional-with-text on the SOAP side, but never blame a file.
     return { state: 'in_progress', label: 'Analyzing the chart…', reason: 'The chart analysis is still running.', likelyCauseFile: null, findings: findings ?? null };
   }
-  if (runStatus === 'queued' || runStatus === null) {
-    // queued-but-not-finished is the silent case the old card mis-reported as Complete. (runStatus null with
-    // OCR settled means no analysis run is on record yet — also "not analyzed".)
+  if (runStatus === 'queued') {
+    // queued-but-not-finished is the silent crash/re-enqueue case the old card mis-reported as Complete. A REAL run
+    // record exists (≠ null), so this is a true "didn't finish", not a never-ran case.
     return {
       state: 'incomplete',
       label: '⚠ Chart analysis didn’t finish — retry',

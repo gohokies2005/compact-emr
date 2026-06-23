@@ -24,7 +24,9 @@ export interface PagesReadStage {
   readonly label: string; // "100% (28 of 28)" / "28 files, page counts unavailable"
 }
 
-export type ChartAnalysisState = 'complete' | 'in_progress' | 'incomplete' | 'failed';
+// 'not_analyzed' (Ryan 2026-06-23): no analysis run on record yet OR nothing to analyze — NOT a failure/gap;
+// does NOT trip the SOAP banner / provisional verdict / cause-file. Mirrors backend extraction-coverage.ts.
+export type ChartAnalysisState = 'complete' | 'in_progress' | 'incomplete' | 'failed' | 'not_analyzed';
 
 export interface ChartAnalysisStage {
   readonly state: ChartAnalysisState;

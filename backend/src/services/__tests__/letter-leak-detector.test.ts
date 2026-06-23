@@ -56,6 +56,27 @@ describe('detectLetterLeaks — block content that must never appear in a nexus 
     expect(detectLetterLeaks('retain only the exact canonical language').map((l) => l.code)).toContain('meta_canonical');
   });
 
+  // meta_canonical WIDENING (Ryan 2026-06-23): the adjacent-only matcher missed near-misses with 1-2 words
+  // between "canonical" and the editing noun. Since this is the SOLE rule catching the editorial leaks, it must
+  // catch these too — while STILL passing the legit mechanism/pathway prose above.
+  it('meta_canonical catches near-misses with intervening words ("canonical letter format" etc.)', () => {
+    const directiveNearMisses = [
+      'restructure as the canonical letter format',
+      'rather than the canonical, well-recognized format',
+      'use the canonical nexus-letter template',
+      'in the canonical Section VII opinion structure',
+    ];
+    for (const t of directiveNearMisses) {
+      expect(detectLetterLeaks(t).map((l) => l.code)).toContain('meta_canonical');
+    }
+  });
+
+  it('meta_canonical still does NOT fire on "canonical mechanism" even with the widened matcher', () => {
+    // the editing-noun set excludes mechanism/pathway/etc., so intervening words can never make these match
+    expect(detectLetterLeaks('the canonical mechanism of sympathetic activation').map((l) => l.code)).not.toContain('meta_canonical');
+    expect(detectLetterLeaks('the canonical, well-described pathway of injury').map((l) => l.code)).not.toContain('meta_canonical');
+  });
+
   // MUST NOT false-positive on legitimate nexus-letter language.
   it('does NOT flag the legitimate Section VII "in the alternative" dual-prong language', () => {
     const t = 'It is my opinion that the OSA is due to his PTSD and, in the alternative, is aggravated beyond its natural progression by that service-connected condition pursuant to 38 CFR 3.310(b).';

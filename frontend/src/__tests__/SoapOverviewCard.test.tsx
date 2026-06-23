@@ -146,6 +146,39 @@ describe('SoapOverviewCard — honest plan-state surface (Zimmelman)', () => {
     expect(screen.getAllByText(/provisional/i).length).toBeGreaterThan(0);
   });
 
+  it('chart analysis FAILED → directional verdict TEXT suppressed (no "Not supportable"), shows re-run banner', async () => {
+    viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'off' } });
+    coverageMock.mockResolvedValue({
+      data: {
+        totalPages: 100, extractedPages: 100, coveragePct: 100, gaps: [], status: 'failed',
+        unknownPageFiles: 0, totalFiles: 2, pageBreakdown: null,
+        pagesRead: { pct: 100, readUnits: 100, totalUnits: 100, approximate: false, label: '100% (100 of 100)' },
+        chartAnalysis: { state: 'failed', label: '✗ Chart analysis failed — re-run extraction', reason: 'The chart analysis errored out, so no structured chart was built.', likelyCauseFile: 'VA Blue Button Records.pdf', findings: null },
+      },
+    } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/Chart analysis incomplete/i)).toBeInTheDocument());
+    // The directional "Not supportable as filed" verdict text must NOT be rendered on a failed (empty) chart.
+    expect(screen.queryByText(/Not supportable as filed/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/re-run/i).length).toBeGreaterThan(0);
+  });
+
+  it('a whole MISSING FILE (unread gap) → prominent banner + provisional, even if Stage-2 said complete', async () => {
+    viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'off' } });
+    coverageMock.mockResolvedValue({
+      data: {
+        totalPages: 50, extractedPages: 40, coveragePct: 80, status: 'complete_with_gaps',
+        unknownPageFiles: 0, totalFiles: 2, pageBreakdown: null,
+        gaps: [{ documentId: 'D2', fileName: 'Private records.pdf', reason: 'unread', pageLabel: '10 pages', isImage: false, terminalStatus: 'manual_summary_required' }],
+        pagesRead: { pct: 80, readUnits: 40, totalUnits: 50, approximate: false, label: '80% (40 of 50)' },
+        chartAnalysis: { state: 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: null },
+      },
+    } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/Chart analysis incomplete/i)).toBeInTheDocument());
+    expect(screen.getAllByText(/provisional/i).length).toBeGreaterThan(0);
+  });
+
   it('chart analysis complete → NO incomplete banner, verdict is not marked provisional', async () => {
     viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'off' } });
     coverageMock.mockResolvedValue({

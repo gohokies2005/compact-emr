@@ -26,7 +26,7 @@
 
 import type { StrategyPreview } from '../api/strategy-preview';
 import type { CaseViability, BridgePathway, RoutePickerViability } from '../api/case-viability';
-import type { ExtractionCoverage } from '../api/extraction-coverage';
+import type { ExtractionCoverage, ChartAnalysisState } from '../api/extraction-coverage';
 import type { ImpressionLevel } from '../api/sanity-impression';
 
 // ── The detailed plan (unchanged shape — RecommendedPlanCard consumes this) ──────────────────────
@@ -122,13 +122,14 @@ export type ReadinessVerdict =
   | 'draft_reconcile' // draftable, but the strategy + viability engines disagree on the anchor — reconcile first
   | 'draft_with_changes' // go, with a stronger anchor than the current framing
   | 'read_chart_first' // the chart isn't fully read — finish before deciding
+  | 'analysis_failed' // the chart ANALYSIS (semantic extract) failed/empty — re-run before any assessment
   | 'contact_records' // a specific record is needed from the veteran
   | 'contact_alternative' // a presumptive/bridge route to pursue
   | 'not_supportable' // no anchor and no route on the current record
   | 'needs_review'; // signals conflict / too little to decide → a human looks
 
 export type Confidence = 'high' | 'medium' | 'low';
-export type DisagreementSource = 'ai_sanity' | 'extraction' | 'viability_vs_strategy' | 'band_vs_deterministic';
+export type DisagreementSource = 'ai_sanity' | 'extraction' | 'viability_vs_strategy' | 'band_vs_deterministic' | 'chart_analysis';
 export interface Disagreement {
   readonly source: DisagreementSource;
   readonly note: string;
@@ -159,6 +160,25 @@ export interface ReadinessSignals {
   readonly hasUnreadPages: boolean | null;
   /** DISPLAY-ONLY: the coverage report, for the % in the disagreement note. Never the decision input. */
   readonly extraction: ExtractionCoverage | null; // null = report unavailable
+  /**
+   * THE SAFETY INPUT (Ryan 2026-06-23): the Stage-2 chart-ANALYSIS state, the SSOT that says whether the
+   * structured chart the verdict is built on actually got built. SEPARATE from hasUnreadPages (OCR/pages-read):
+   * a chart can be 100% OCR'd yet have a FAILED/INTERRUPTED analysis run, leaving an empty structured chart.
+   *   • 'failed'                  → the chart is known-empty; suppress the directional verdict TEXT entirely.
+   *   • 'incomplete'              → built on a partial chart → downgrade a directional verdict to read_chart_first.
+   *   • 'complete' / 'not_analyzed' → no analysis-driven downgrade (not_analyzed = new/empty case, vacuous).
+   *   • 'in_progress'             → still working → provisional (handled like incomplete: don't conclude).
+   *   • undefined = read it from `extraction.chartAnalysis.state` (the SSOT) — the normal path. Pass it
+   *     explicitly only to override (tests / a separate fetch).
+   *   • null = state UNKNOWN (coverage query LOADING or ERRORED) → FAIL SAFE: never render a confident verdict.
+   */
+  readonly chartAnalysisState?: ChartAnalysisState | null;
+  /**
+   * FAIL-SAFE flag for the fetch race (Ryan 2026-06-23): true when the coverage query is LOADING or ERRORED so
+   * chartAnalysisState could not be read. Unknown analysis state must fail SAFE (provisional/non-confident),
+   * never fail confident. The parent sets this from the coverage query status.
+   */
+  readonly chartAnalysisUnknown?: boolean;
   readonly sanity: ImpressionLevel | null; // null = unavailable (NOT 'clear')
   /**
    * ONE-BRAIN (Ryan 2026-06-22): the AI route-picker plan's viability band — the SAME brain the drafter
@@ -205,6 +225,7 @@ const VERDICT_TITLE: Record<ReadinessVerdict, string> = {
   draft_reconcile: 'Draftable — reconcile the anchor',
   draft_with_changes: 'Draftable — with a stronger anchor',
   read_chart_first: 'Read the chart first',
+  analysis_failed: 'Chart analysis failed — re-run to assess',
   contact_records: 'Contact the veteran — records needed',
   contact_alternative: 'Contact the veteran — alternative route',
   not_supportable: 'Not supportable as filed',
@@ -332,6 +353,48 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
     verdict = 'read_chart_first';
   }
 
+  // ── CHART-ANALYSIS SAFETY OVERLAY (Ryan 2026-06-23) — THE safety fix. ──────────────────────────────────
+  // The verdict above is built on the STRUCTURED chart that Stage-2 analysis produces. If that stage did not
+  // produce a real chart, the verdict — even a band-won "draft" or a confident "not supportable" — may be built
+  // on an EMPTY or PARTIAL chart and must NOT be rendered confidently. This is the exact Herman harm: a confident
+  // conclusion sitting on a failed analysis. The honesty layer is NOT cosmetic — it changes the VERDICT.
+  //   • UNKNOWN state (coverage loading/errored): FAIL SAFE. We cannot assert the chart was analyzed, so any
+  //     directional verdict (go OR negative) becomes provisional read_chart_first + low confidence. Unknown must
+  //     never fail confident. (not_analyzed/complete are the only states that don't trip this.)
+  //   • 'failed': the chart is known-empty. SUPPRESS the directional verdict TEXT — render analysis_failed
+  //     ("re-run to assess"), never "Not supportable" on a chart that was never analyzed.
+  //   • 'incomplete' / 'in_progress': built on a partial / not-yet-built chart → downgrade any directional verdict
+  //     to read_chart_first (provisional-with-text). A found bridge route (contact_alternative) still stands.
+  //   • 'complete' / 'not_analyzed': no analysis-driven downgrade.
+  // Resolve the analysis state: explicit override wins; otherwise read the SSOT off the extraction object. A bare
+  // missing extraction is NOT treated as "unknown→fail-safe" on its own (that would over-fire on every caller that
+  // simply doesn't pass coverage) — the parent must EXPLICITLY flag chartAnalysisUnknown for the loading/errored
+  // fail-safe. This keeps the SSOT-driven downgrade (extraction present + failed/incomplete) decoupled from the
+  // fetch-race fail-safe (parent-asserted), so neither over- nor under-fires.
+  const analysisState: ChartAnalysisState | null =
+    signals.chartAnalysisState !== undefined ? signals.chartAnalysisState : (extraction?.chartAnalysis?.state ?? null);
+  const analysisUnknown = signals.chartAnalysisUnknown === true;
+  // Verdicts that ASSERT something to the RN (a go, or a negative conclusion). contact_alternative (a found
+  // presumptive route) and the already-provisional read_chart_first are NOT downgraded further.
+  const isDirectional = isGoVerdict(verdict) || verdict === 'not_supportable' || verdict === 'needs_review' || verdict === 'contact_records';
+  if (analysisState === 'failed') {
+    // Chart known-empty → suppress the directional conclusion entirely.
+    if (verdict !== 'contact_alternative') {
+      verdict = 'analysis_failed';
+      confidence = 'low';
+      disagreements.push({ source: 'chart_analysis', note: 'The chart analysis failed, so no structured chart was built — re-run extraction before assessing this case. The verdict below is not a finding about the case.' });
+    }
+  } else if ((analysisState === 'incomplete' || analysisState === 'in_progress') && isDirectional) {
+    verdict = 'read_chart_first';
+    confidence = lower(confidence);
+    disagreements.push({ source: 'chart_analysis', note: 'The chart analysis didn’t finish, so this may be built on a partial chart — re-run extraction and re-check before relying on it.' });
+  } else if (analysisUnknown && isDirectional) {
+    // FAIL SAFE on the fetch race: state unknown → never a confident verdict.
+    verdict = 'read_chart_first';
+    confidence = lower(confidence);
+    disagreements.push({ source: 'chart_analysis', note: 'Chart-analysis state is still loading — confirm the chart was fully analyzed before relying on this assessment.' });
+  }
+
   // ── extraction overlay: incomplete parse lowers confidence + is surfaced (never flips supportable).
   //    Decision input (hasUnreadPages) is single-sourced; extraction is DISPLAY-ONLY for the % detail. ──
   if (hasUnreadPages) {
@@ -367,9 +430,17 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
   // band-derived line; otherwise the deterministic plan.detail is the right summary (it matches). The detail
   // CARD still renders `plan` (the full deterministic plan) unchanged — only this one-line summary follows
   // the headline. read_chart_first (the conservative overlay) gets its own line regardless of source.
-  const detail = (band != null && verdict !== deterministicVerdict)
-    ? detailForBandVerdict(verdict, plan)
-    : plan.detail;
+  // SAFETY-OVERLAY verdicts (analysis_failed / read_chart_first) own their own line REGARDLESS of band — a
+  // band-null analysis_failed must NOT fall through to plan.detail ("Not supportable as filed"), the exact Herman
+  // harm. They take precedence; otherwise band-projection rules, else the deterministic plan line.
+  const detail =
+    verdict === 'analysis_failed'
+      ? 'The chart analysis failed, so no structured chart was built. Re-run extraction before assessing this case — the line below is not a finding about the case.'
+      : verdict === 'read_chart_first'
+        ? 'Part of the record isn’t fully analyzed yet — finish reading/analyzing the chart before deciding.'
+        : (band != null && verdict !== deterministicVerdict)
+          ? detailForBandVerdict(verdict, plan)
+          : plan.detail;
   return { verdict, title: VERDICT_TITLE[verdict], detail, nextAction, confidence, disagreements, plan };
 }
 
@@ -403,6 +474,8 @@ function nextActionFor(verdict: ReadinessVerdict, plan: RecommendedPlan, disagre
         : 'Reconcile the anchor — get more records or a physician review before drafting.';
     case 'draft_with_changes':
       return plan.switchToAnchor ? `Draft anchored on ${plan.switchToAnchor}.` : 'Draft with the stronger anchor.';
+    case 'analysis_failed':
+      return 'Re-run the chart analysis (extraction), then re-check the case.';
     case 'read_chart_first':
       return 'Finish reading the chart, then re-check the plan.';
     case 'contact_records':

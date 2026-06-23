@@ -167,6 +167,50 @@ describe('computeExtractionCoverage — two-stage (Pages read + Chart analysis)'
   });
 });
 
+// ---- cry-wolf fix: not_analyzed for new/empty cases (2026-06-23) -------------
+// A brand-new case (no analysis run on record yet → runStatus null) or an empty case (no chart inputs) must read
+// as 'not_analyzed' — NOT 'incomplete'. not_analyzed must NOT fire the SOAP banner, mark provisional, or name a
+// likelyCauseFile. Only a REAL unfinished run (queued/running), a failed run, or a completed-with-gaps run warns.
+describe('computeExtractionCoverage — not_analyzed (cry-wolf fix)', () => {
+  const docs = () => [doc({ id: 'D1', s3Key: KEY1, pageCount: 5, filename: 'DD-214.pdf' }), doc({ id: 'D2', s3Key: KEY2, pageCount: 1200, filename: 'VA Blue Button Records.pdf' })];
+  const allRead = () => [frs({ filePath: KEY1, terminalStatus: 'read' }), frs({ filePath: KEY2, terminalStatus: 'read' })];
+
+  it('no analysis run yet (latestRun null) with OCR settled → chartAnalysis not_analyzed, NOT incomplete, no cause file', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), null);
+    expect(cov.chartAnalysis.state).toBe('not_analyzed');
+    expect(cov.chartAnalysis.state).not.toBe('incomplete');
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull(); // never blame a file on a never-ran case
+    expect(cov.chartAnalysis.reason).toBeNull();
+    // must NOT have raised an extraction_incomplete gap (that would fire the banner)
+    expect(cov.gaps.some((g) => g.reason === 'extraction_incomplete')).toBe(false);
+    expect(cov.status).toBe('complete'); // pages all read, nothing pending → vacuously complete
+  });
+
+  it('empty case (no chart inputs) → not_analyzed, vacuously complete, no banner, no cause file', () => {
+    const cov = computeExtractionCoverage([], [], null);
+    expect(cov.chartAnalysis.state).toBe('not_analyzed');
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull();
+    expect(cov.status).toBe('complete');
+  });
+
+  it('null run but OCR still in progress → in_progress (genuinely working), not not_analyzed', () => {
+    const rows = [frs({ filePath: KEY1, terminalStatus: 'read' })]; // D2 has no row yet → OCR in progress
+    const cov = computeExtractionCoverage(docs(), rows, null);
+    expect(cov.chartAnalysis.state).toBe('in_progress');
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull();
+  });
+
+  it('SSOT invariant: a complete status never carries a non-complete/non-not_analyzed analysis state', () => {
+    // Cover every status the function can emit and assert the invariant holds (the function also throws if violated).
+    for (const run of [null, { status: 'complete' }, { status: 'failed' }, { status: 'queued' }, { status: 'running' }] as const) {
+      const cov = computeExtractionCoverage(docs(), allRead(), run);
+      if (cov.status === 'complete') {
+        expect(['complete', 'not_analyzed']).toContain(cov.chartAnalysis.state);
+      }
+    }
+  });
+});
+
 // ---- screening-summary + rendered excluded -----------------------------------
 
 describe('computeExtractionCoverage — exclusions', () => {

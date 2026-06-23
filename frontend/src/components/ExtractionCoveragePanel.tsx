@@ -82,6 +82,9 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
     reason: null, likelyCauseFile: null, findings: null,
   };
   const analysisComplete = chartAnalysis.state === 'complete';
+  // 'not_analyzed' (new/empty case, Ryan 2026-06-23) is a NEUTRAL resting state — not a problem to flag. It must
+  // not render amber or scream "Partial"; it reads as a quiet "Not analyzed yet" with no alarming reason line.
+  const analysisNotAnalyzed = chartAnalysis.state === 'not_analyzed';
   // Complete requires BOTH stages clean AND no per-page review items (a file can read "100%" at file level
   // while the SEMANTIC analysis never finished, OR while individual pages are handwriting-uncertain — neither
   // may show as Complete). This is the core honesty fix: the chip can never say Complete over a failed analysis.
@@ -93,7 +96,9 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
   // Chart-analysis trouble takes precedence in the chip (it's the load-bearing stage the verdict is built on).
   const chip: { label: string; complete: boolean } = isComplete
     ? { label: 'Complete', complete: true }
-    : chartAnalysis.state === 'failed'
+    : analysisNotAnalyzed
+      ? { label: 'Not analyzed yet', complete: false } // neutral; styled separately below (not amber-alarming)
+      : chartAnalysis.state === 'failed'
       ? { label: 'Analysis failed', complete: false }
       : chartAnalysis.state === 'in_progress'
         ? { label: 'Analyzing…', complete: false }
@@ -118,7 +123,7 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
     <SectionCard
       title="Chart extraction"
       status={
-        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${chip.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
+        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${chip.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : analysisNotAnalyzed ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
           {chip.label}
         </span>
       }
@@ -136,7 +141,7 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
             </div>
             <div className="flex flex-wrap items-baseline gap-x-2">
               <dt className="text-[13px] font-semibold text-slate-800">Chart analysis</dt>
-              <dd className={`text-[13px] ${analysisComplete ? 'text-emerald-700' : 'text-amber-700'}`}>{chartAnalysis.label}</dd>
+              <dd className={`text-[13px] ${analysisComplete ? 'text-emerald-700' : analysisNotAnalyzed ? 'text-slate-500' : 'text-amber-700'}`}>{chartAnalysis.label}</dd>
               <span className="text-xs text-slate-400">(builds the chart the assessment uses)</span>
             </div>
           </dl>

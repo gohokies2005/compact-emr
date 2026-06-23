@@ -26,6 +26,7 @@ const VERDICT_LIGHT: Record<ReadinessVerdict, Light> = {
   draft: 'green',
   draft_confirm_mechanism: 'amber', draft_reconcile: 'amber', draft_with_changes: 'amber',
   read_chart_first: 'amber', contact_records: 'amber', contact_alternative: 'amber', needs_review: 'amber',
+  analysis_failed: 'red', // chart known-empty — a hard stop, not ambient amber
   not_supportable: 'red',
 };
 const CONFIDENCE_LABEL: Record<string, string> = { high: 'High confidence', moderate: 'Moderate confidence', medium: 'Medium confidence', low: 'Low confidence' };
@@ -71,12 +72,22 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   // plan). null when the plan is not ready (flag off / cold / error) → the deterministic engine drives the
   // chip (fallback). aiState here is the discriminated reliability state from the viability-card response.
   const aiStateForChip = viabilityQ.data?.aiViabilityState;
+  // CHART-ANALYSIS SAFETY (Ryan 2026-06-23): feed the Stage-2 analysis state into the VERDICT, not just a label.
+  // Unknown (coverage query loading/errored) must FAIL SAFE — the verdict goes provisional, never confident.
+  const covData = coverageQ.data?.data ?? null;
+  const chartAnalysisState = covData?.chartAnalysis?.state ?? null;
+  // FAIL SAFE only on a genuinely-unresolved query (LOADING / ERRORED) — a RESOLVED-but-null coverage ("no report
+  // available") is NOT unknown and must keep the prior behavior (no analysis-driven downgrade). Over-firing on
+  // resolved-null would turn every report-less case into a provisional read_chart_first.
+  const chartAnalysisUnknown = coverageQ.isLoading || coverageQ.isError;
   const result = computeReadinessVerdict({
     strategy, viability: v,
     hasUnreadPages: hasUnreadPages ?? null,
-    extraction: coverageQ.data?.data ?? null,
+    extraction: covData,
     sanity: sanityQ.data?.data?.impression ?? null,
     routePickerViability: aiStateForChip?.status === 'ready' ? aiStateForChip.card.viability : null,
+    chartAnalysisState,
+    chartAnalysisUnknown,
   });
 
   // Assemble the SOAP context once the fast inputs are in, then POST it for the AI synthesis. Keyed on the
@@ -88,14 +99,23 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   // the verdict PROVISIONAL rather than presenting a confident conclusion. Driven from the SAME coverage SSOT
   // the chart-extraction card reads (cov.chartAnalysis), so the banner and the card line can never disagree.
   const analysis = cov?.chartAnalysis ?? null;
-  const analysisIncomplete = analysis !== null && analysis.state !== 'complete';
-  const analysisBanner = !analysisIncomplete || analysis === null ? null : (() => {
-    const causeFile = analysis.likelyCauseFile;
-    const reason = analysis.state === 'failed'
+  // The banner fires ONLY when the analysis the verdict is built on is genuinely degraded — failed / interrupted /
+  // still running. 'complete' and 'not_analyzed' (new/empty case) NEVER trip it (the cry-wolf fix): a brand-new
+  // case must not scream "incomplete chart". point-3b: a whole MISSING FILE (an unread / needs-manual-summary gap)
+  // also degrades the chart the verdict is built on, so it raises the same provisional state even if Stage-2 itself
+  // reported complete.
+  const wholeFileGap = (cov?.gaps ?? []).some((g) => g.reason === 'unread' || g.reason === 'needs_manual_summary');
+  const analysisDegraded = analysis !== null && (analysis.state === 'failed' || analysis.state === 'incomplete' || analysis.state === 'in_progress');
+  const analysisIncomplete = analysisDegraded || wholeFileGap;
+  const analysisBanner = !analysisIncomplete ? null : (() => {
+    const causeFile = analysis?.likelyCauseFile ?? null;
+    const reason = analysis?.state === 'failed'
       ? 'the chart analysis failed'
-      : analysis.state === 'in_progress'
+      : analysis?.state === 'in_progress'
         ? 'the chart analysis is still running'
-        : analysis.reason || 'the chart analysis did not finish';
+        : analysisDegraded
+          ? (analysis?.reason || 'the chart analysis did not finish')
+          : 'a file in the record could not be read';
     const causeClause = causeFile ? ` A large records file (${causeFile}) likely couldn’t be fully processed.` : '';
     return `Chart analysis incomplete — ${reason}.${causeClause} This assessment may be based on an incomplete chart; review the records directly and re-run extraction before relying on it.`;
   })();
@@ -251,19 +271,23 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
           never a confident conclusion built on an empty/partial chart. Plain language, names the likely-cause
           file when known. */}
       {analysisBanner ? (
-        <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2.5">
-          <p className="text-[13px] font-semibold text-amber-900">⚠️ {analysisBanner}</p>
+        // LOUDER than routine amber notices (point-1, Ryan 2026-06-23): a red/orange 2px left rule + ring + a
+        // filled warning chip so it reads as a STOP, not as ambient amber that gets skimmed past.
+        <div className="mb-3 flex items-start gap-2.5 rounded-md border-2 border-l-[6px] border-[#B0654F] bg-[#FBEAE4] px-3 py-2.5 ring-1 ring-[#B0654F]/30">
+          <span className="mt-0.5 inline-flex h-5 w-5 flex-none items-center justify-center rounded-full bg-[#B0654F] text-[12px] font-bold text-white" aria-hidden>!</span>
+          <p className="text-[13px] font-semibold text-[#7B3F2E]">{analysisBanner}</p>
         </div>
       ) : null}
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Case overview</span>
         <span className="flex items-center gap-1.5 text-xs font-medium text-slate-700">
           <span className={`inline-block h-2 w-2 rounded-full ${L.dot}`} />
-          {analysisIncomplete ? `${result.title} (provisional)` : result.title}
+          {/* For analysis_failed the title already says "failed — re-run", so don't pile "(provisional)" on it. */}
+          {analysisIncomplete && result.verdict !== 'analysis_failed' ? `${result.title} (provisional)` : result.title}
         </span>
       </div>
       <p className="mt-2 text-lg font-semibold leading-snug text-slate-900">
-        {analysisIncomplete ? 'Provisional — ' : ''}{headline}
+        {analysisIncomplete && result.verdict !== 'analysis_failed' ? 'Provisional — ' : ''}{headline}
       </p>
       {analysisIncomplete ? (
         <p className="mt-1 text-[11px] text-amber-700">This is a provisional read on an incomplete chart — re-run the chart analysis before relying on it.</p>

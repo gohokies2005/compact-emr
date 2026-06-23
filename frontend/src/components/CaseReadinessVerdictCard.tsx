@@ -22,6 +22,7 @@ const VERDICT_TONE: Record<ReadinessVerdict, string> = {
   draft_reconcile: 'border-amber-300 bg-amber-50 text-amber-800',
   draft_with_changes: 'border-sky-200 bg-sky-50 text-sky-700',
   read_chart_first: 'border-amber-200 bg-amber-50 text-amber-700',
+  analysis_failed: 'border-rose-300 bg-rose-50 text-rose-800', // chart known-empty — a hard stop, not ambient amber
   contact_records: 'border-amber-200 bg-amber-50 text-amber-700',
   contact_alternative: 'border-amber-200 bg-amber-50 text-amber-700',
   not_supportable: 'border-rose-200 bg-rose-50 text-rose-700',
@@ -34,6 +35,8 @@ const DISAGREEMENT_LABEL: Record<string, string> = {
   ai_sanity: 'AI sanity check',
   extraction: 'Chart coverage',
   viability_vs_strategy: 'Engine disagreement',
+  band_vs_deterministic: 'Plan vs. deterministic check',
+  chart_analysis: 'Chart analysis',
 };
 
 export function CaseReadinessVerdictCard({ caseId, claimedCondition, hasUnreadPages }: {
@@ -55,12 +58,17 @@ export function CaseReadinessVerdictCard({ caseId, claimedCondition, hasUnreadPa
     enabled: false,
   });
 
+  // CHART-ANALYSIS SAFETY (Ryan 2026-06-23): feed Stage-2 analysis state into the verdict; fail SAFE while the
+  // coverage query is loading/errored (state unknown → never a confident verdict). A resolved-but-null coverage
+  // is NOT unknown (keeps the prior behavior).
   const result = computeReadinessVerdict({
     strategy: strategyQ.data?.data ?? null,
     viability: viabilityQ.data?.data ?? null,
     hasUnreadPages: hasUnreadPages ?? null,
     extraction: coverageQ.data?.data ?? null,
     sanity: sanityQ.data?.data?.impression ?? null,
+    chartAnalysisState: coverageQ.data?.data?.chartAnalysis?.state ?? null,
+    chartAnalysisUnknown: coverageQ.isLoading || coverageQ.isError,
   });
   if (result === null) return null; // nothing computed yet → the headline hides
 

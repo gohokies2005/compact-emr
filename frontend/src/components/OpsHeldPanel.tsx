@@ -98,7 +98,7 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
         from: c.status,
         to: 'physician_review',
         version: c.version,
-        transitionReason: 'admin override to physician review',
+        transitionReason: 'send to doctor for review',
       }),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ['case', c.id] });
@@ -139,6 +139,23 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
             </Button>
           ) : null}
 
+          {/* FORWARD PATH (2026-06-23, Ryan "no way to forward to doctor"): a produced letter — even on a
+              run that didn't finish cleanly — must be forwardable to the physician for review + signature
+              (drafting->physician_review is a legal transition). This is ops/RN-accessible (NOT admin-only,
+              unlike the old cryptic "Open as-is"); the assigned-physician guard + the doctor's own review
+              are the real gates. No dead-ends: view -> edit -> send to doctor. */}
+          {hasLetter ? (
+            <Button
+              type="button"
+              variant="secondary"
+              loading={openAsIsMutation.isPending}
+              disabled={openAsIsMutation.isPending}
+              onClick={() => { if (window.confirm('Send this letter to the assigned doctor for review and signature? The doctor reviews and signs before anything is delivered — you can keep editing until then.')) openAsIsMutation.mutate(); }}
+            >
+              Send to doctor for review
+            </Button>
+          ) : null}
+
           <Button
             type="button"
             variant={hasLetter && onOpenEditor ? 'secondary' : 'primary'}
@@ -156,7 +173,10 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
             </Button>
           ) : null}
 
-          {isAdmin ? (
+          {/* "Open as-is" is the admin override ONLY for the no-letter case (force to physician review
+              despite an ops hold). When a letter exists, the clear "Send to doctor for review" above is
+              the path for everyone, so this is hidden to avoid two buttons doing the same transition. */}
+          {isAdmin && !hasLetter ? (
             <Button type="button" variant="ghost" onClick={() => setConfirmOpenAsIs(true)}>
               Open as-is
             </Button>

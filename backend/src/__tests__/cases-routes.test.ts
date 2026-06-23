@@ -448,7 +448,9 @@ describe('cases routes', () => {
     });
 
     it('drafting -> physician_review (the legacy/manual landing edge) ALSO fires the auto-gen', async () => {
-      const { db } = makeDb(baseCase({ status: 'drafting', version: 3 }));
+      // assignedPhysicianId required: the no-unassigned-doctor guard now covers EVERY edge into
+      // physician_review (2026-06-23), drafting included — a "send to doctor" with no doctor 409s.
+      const { db } = makeDb(baseCase({ status: 'drafting', version: 3, assignedPhysicianId: 'PHYS-001' }));
       const res = await request(appFor(db))
         .post('/api/v1/cases/CASE-1/status')
         .send({ from: 'drafting', to: 'physician_review', version: 3 });
@@ -456,6 +458,17 @@ describe('cases routes', () => {
       expect(res.status).toBe(200);
       expect(doctorPackGenMock).toHaveBeenCalledTimes(1);
       expect(doctorPackGenMock).toHaveBeenCalledWith(db, expect.objectContaining({ trigger: 'auto_send_to_doctor', priorCaseVersion: 3 }));
+    });
+
+    it('drafting -> physician_review with NO assigned physician 409s (no-unassigned-doctor guard covers every edge into physician_review)', async () => {
+      const { db } = makeDb(baseCase({ status: 'drafting', version: 3, assignedPhysicianId: null }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'drafting', to: 'physician_review', version: 3 });
+      // 409 + doctor-pack never fired proves the guard blocked the unassigned send (this test harness's
+      // error handler returns an empty body, so the status + the no-side-effect are the observable proof).
+      expect(res.status).toBe(409);
+      expect(doctorPackGenMock).not.toHaveBeenCalled();
     });
 
     it('a re-fire where the service SKIPS (pack already current) still returns 200 — no duplicate, no error', async () => {

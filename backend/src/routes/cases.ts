@@ -272,13 +272,14 @@ function roleGuardForStatusTransition(db: AppDb) {
       }
     }
 
-    // Don't send a letter "to the doctor" when no doctor is assigned (Ryan 2026-06-06). The
-    // rn_review -> physician_review hand-off requires an assigned physician on the case — and so does
-    // the needs_rn_decision -> physician_review forward hop (2026-06-22): a body-quality park resolved
-    // by a hand-fix is "sent to the doctor" exactly like an rn_review send, so it carries the same
-    // no-unassigned-doctor guard. Both landing edges into physician_review are covered here.
+    // Don't send a letter "to the doctor" when no doctor is assigned (Ryan 2026-06-06). EVERY edge into
+    // physician_review carries this guard — a physician's queue is hard-filtered to their own assigned
+    // cases, so an unassigned case in physician_review is invisible to every doctor (a dead-end). Covered
+    // landing edges: rn_review (the canonical RN send), needs_rn_decision (2026-06-22 body-quality-park
+    // forward hop), and drafting (2026-06-23 "Send to doctor" on a produced-but-didn't-finish letter —
+    // the OpsHeldPanel forward path). Gate on parsed.to === 'physician_review', not the source, so any
+    // future source edge is covered automatically.
     if (
-      (current.status === 'rn_review' || current.status === 'needs_rn_decision') &&
       parsed.to === 'physician_review' &&
       !current.assignedPhysicianId
     ) {

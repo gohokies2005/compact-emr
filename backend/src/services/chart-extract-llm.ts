@@ -659,14 +659,25 @@ async function extractOneChunk(
   depth: number,
   maxTokens: number = CHUNK_MAX_TOKENS,
 ): Promise<CallResult> {
-  const resp = await anthropic.messages.create({
+  // STREAMING (keystone fix 2026-06-23): a dense single page can escalate maxTokens to
+  // CHUNK_MAX_TOKENS_CEILING (32k). On the NON-streaming .create() path the SDK refuses the request
+  // BEFORE sending — "Streaming is required for operations that may take longer than 10 minutes" — so
+  // a legitimately-dense rating-decision page CRASHED the whole run (ChartExtractionRun → failed; the
+  // coverage card then lied "100% Complete" off a stale earlier run). messages.stream(...).finalMessage()
+  // removes that ceiling entirely; the SDK accumulates input_json_delta internally, so the returned
+  // Anthropic.Message has the SAME stop_reason / usage / tool_use.input shape — every line below is
+  // unchanged. Per-request timeout sized UNDER the 15-min Lambda kill (the self-budget stops launching
+  // new batches at 12.5 min; a single chunk should never need 14 min — if it does that's a chunking
+  // bug, not a timeout to widen). Transient 500/529/overloaded/429 are retried by the SDK (maxRetries
+  // on the client); 400s are NOT retried (fail fast — a bad schema must not burn the Lambda budget).
+  const resp = await anthropic.messages.stream({
     model,
     max_tokens: maxTokens,
     system: combinedSystemPrompt(),
     tools: [EXTRACT_TOOL_COMBINED],
     tool_choice: { type: 'tool', name: 'record_chart_items' },
     messages: [{ role: 'user', content: chunkUserPrompt(unit) }],
-  });
+  }, { timeout: 14 * 60 * 1000 }).finalMessage();
   const costUsd = resp.usage.input_tokens * INPUT_USD_PER_TOKEN + resp.usage.output_tokens * OUTPUT_USD_PER_TOKEN;
 
   if (resp.stop_reason === 'max_tokens') {
@@ -711,7 +722,11 @@ async function extractOneChunk(
 
 /** Build the live extractor. Windowed path is per-window; full-read path is per-chunk + combined. */
 export function makeChartExtractor(apiKey: string): ChartExtractor {
-  const anthropic = new Anthropic({ apiKey });
+  // maxRetries bumped 2→4 (2026-06-23): the SDK auto-retries transient 500/529 (overloaded) and 429
+  // with exponential backoff and does NOT retry 400s — exactly the transient-retry requirement. A few
+  // extra attempts ride out the bursty Anthropic overload spikes so one wobble doesn't fail a whole
+  // re-extraction. Applies to BOTH paths (single shared client). 400 BadRequestError still fails fast.
+  const anthropic = new Anthropic({ apiKey, maxRetries: 4 });
 
   async function extractWindowed(documents: BundleDocument[]): Promise<ExtractionResult> {
     const windows = locateExtractionInputs(documents);
@@ -719,14 +734,17 @@ export function makeChartExtractor(apiKey: string): ChartExtractor {
     let costUsd = 0;
     let truncatedWindows = 0;
     for (const w of windows) {
-      const resp = await anthropic.messages.create({
+      // Streaming for consistency with the full-read path (2026-06-23). MAX_TOKENS (2000) is below the
+      // 10-min non-streaming ceiling so this path didn't crash, but streaming future-proofs it if
+      // MAX_TOKENS is ever raised and keeps both paths on one mechanism. Same Anthropic.Message shape.
+      const resp = await anthropic.messages.stream({
         model: MODEL,
         max_tokens: MAX_TOKENS,
         system: systemPrompt(w.category),
         tools: [EXTRACT_TOOL],
         tool_choice: { type: 'tool', name: 'record_chart_items' },
         messages: [{ role: 'user', content: windowUserPrompt(w) }],
-      });
+      }).finalMessage();
       costUsd += resp.usage.input_tokens * INPUT_USD_PER_TOKEN + resp.usage.output_tokens * OUTPUT_USD_PER_TOKEN;
       if (resp.stop_reason === 'max_tokens') {
         truncatedWindows++;

@@ -553,6 +553,40 @@ export class WorkersStack extends Stack {
     dlqDepthAlarm('DraftJobDlqDepthAlarm', `compact-emr-${config.envName}-draft-job-dlq-depth`, draftJobDlq, 'A drafter job');
     dlqDepthAlarm('DoctorPackAssemblerDlqDepthAlarm', `compact-emr-${config.envName}-doctor-pack-assembler-dlq-depth`, dpDlq, 'A doctor-pack assembly message');
 
+    // ===== Chart-extract HARD-FAILURE alarm (run marked failed / semantic-extraction crash) =====
+    // The chart-extract worker's top-level catch logs {"msg":"chart_extract_error",...} on a failed
+    // attempt (handler.ts); on the final SQS attempt it posts the ChartExtractionRun status='failed'.
+    // This is the CRASH / failed-run class — DISTINCT from the advisory chart_extract_* coverage-gap
+    // WARN lines in chart-extract-llm.ts (those are console.warn on an otherwise-successful run and
+    // carry an `event` field, not `msg`). Filtering on $.msg = "chart_extract_error" pages ONLY on a
+    // real failure. Modeled on the OCR vision spend MetricFilter+Alarm above (same fromLogGroupName
+    // pattern, since the worker uses implicit logRetention with no explicit LogGroup construct).
+    const chartExtractLogGroup = logs.LogGroup.fromLogGroupName(
+      this, 'ChartExtractLogGroupRef', `/aws/lambda/${chartExtractWorker.functionName}`,
+    );
+    const chartExtractErrorMetricFilter = new logs.MetricFilter(this, 'ChartExtractErrorMetricFilter', {
+      logGroup: chartExtractLogGroup,
+      metricNamespace: `compact-emr-${config.envName}`,
+      metricName: 'ChartExtractErrors',
+      filterPattern: logs.FilterPattern.stringValue('$.msg', '=', 'chart_extract_error'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const chartExtractErrorsAlarm = new cloudwatch.Alarm(this, 'ChartExtractErrorsAlarm', {
+      alarmName: `compact-emr-${config.envName}-chart-extract-errors`,
+      alarmDescription:
+        `The chart-extract worker logged chart_extract_error (semantic-extraction crash / failed run). ` +
+        `On the final SQS attempt the ChartExtractionRun is marked failed and the coverage card now reads ` +
+        `"chart analysis didn't finish — retry" instead of a false "100% Complete". Inspect ` +
+        `/aws/lambda/compact-emr-${config.envName}-chart-extract for the runId + error. (2026-06-23)`,
+      metric: chartExtractErrorMetricFilter.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    chartExtractErrorsAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+
     // ===== Doctor Pack assembler Lambda =====
     // The WeasyPrint dependencies (cairo, pango, gobject) require a custom layer.
     // For now we declare the Lambda; the layer ARN is wired via env var DOCTOR_PACK_WEASYPRINT_LAYER_ARN

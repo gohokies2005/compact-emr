@@ -50,6 +50,14 @@ async function deriveCoverageNote(db: AppDb, caseId: string): Promise<string | n
   try {
     const cov = await loadExtractionCoverageForCase(db, caseId);
     if (cov.totalFiles === 0) return null; // no chart inputs yet → nothing to report (was docs.length===0)
+    // EXTRACTION DID-NOT-FINISH (card-honesty 2026-06-23): if the chart analysis failed or is still
+    // queued/running, the structured chart is incomplete/empty — say so plainly so the SOAP Objective
+    // (and the verdict the RN reads off it) is flagged "based on an incomplete chart" instead of being
+    // presented as a confident "not supportable" built on an empty chart. Single source: the same
+    // coverage layer the card uses, so card + verdict can never disagree.
+    if (cov.status === 'failed' || cov.status === 'in_progress' || cov.gaps.some((g) => g.reason === 'extraction_incomplete')) {
+      return 'Chart analysis did not finish — this read is based on an incomplete chart and may be missing records; re-run the extraction before relying on the verdict.';
+    }
     const pct = typeof cov.coveragePct === 'number' ? cov.coveragePct : null;
     if (pct === null) return null;
     let hasUnread = false;

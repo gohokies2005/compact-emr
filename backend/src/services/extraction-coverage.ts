@@ -60,7 +60,10 @@ export type CoverageGapReason =
   | 'unread' // a file that failed OCR and has no manual summary (manual_summary_required)
   | 'truncated_dense' // the extraction run truncated dense windows (resultJson.gaps.truncatedWindows)
   | 'needs_manual_summary' // alias surface for a blocking file awaiting an RN summary
-  | 'extraction_gap'; // pages OCR'd but left uncovered by the extraction run (gaps.uncoveredPages)
+  | 'extraction_gap' // pages OCR'd but left uncovered by the extraction run (gaps.uncoveredPages)
+  | 'extraction_incomplete'; // the most-recent extraction run failed / is still queued/running — the
+  // chart analysis did NOT finish, so the structured chart (and any verdict built on it) is unreliable
+  // even though OCR ("pages read") is 100%. The honesty fix for the false "100% Complete" card.
 
 export interface CoverageGap {
   // documentId is null for a run-level gap (truncated/uncovered pages aren't tied to one document in
@@ -280,6 +283,18 @@ export function computeExtractionCoverage(
     });
   }
 
+  // EXTRACTION DID-NOT-FINISH (card-honesty fix 2026-06-23). "Pages read" (OCR) finishing 100% does
+  // NOT mean the chart was analyzed: the semantic extraction run is a SEPARATE, slower phase. If the
+  // most-recent run failed, or is still queued/running, the structured chart is incomplete/empty and
+  // any SOAP/route-picker verdict built on it is unreliable — NEVER render that as a confident
+  // "Complete / not supportable". `failed` already routes to status 'failed' below; `queued`/`running`
+  // (e.g. the crash re-enqueued the run, or the stuck-run watcher hasn't swept it yet) are the silent
+  // case the old code mis-reported as 'complete'. We surface an explicit 'extraction_incomplete' gap
+  // and force status off 'complete'. The CALLER (route loader) passes the LATEST run by createdAt, so
+  // a newer unfinished run correctly overrides a stale earlier 'complete'.
+  const runStatus = latestRun?.status ?? null;
+  const extractionUnfinished = runStatus === 'queued' || runStatus === 'running';
+
   // Run-level EXTRACTION gaps (separate plane from per-file OCR). Only meaningful once a run exists.
   const rj = (latestRun?.resultJson ?? null) as { gaps?: { uncoveredPages?: unknown; truncatedWindows?: unknown } } | null;
   const uncoveredPages = toNonNegInt(rj?.gaps?.uncoveredPages);
@@ -308,6 +323,16 @@ export function computeExtractionCoverage(
       terminalStatus: null,
     });
   }
+  if (extractionUnfinished) {
+    gaps.push({
+      documentId: null,
+      fileName: 'Chart analysis',
+      reason: 'extraction_incomplete',
+      pageLabel: runStatus === 'running' ? 'in progress' : 'did not finish — retry',
+      isImage: false,
+      terminalStatus: null,
+    });
+  }
 
   // coveragePct: honest. 100 ONLY when every page is extracted AND no page counts were unknown.
   let coveragePct: number;
@@ -322,14 +347,19 @@ export function computeExtractionCoverage(
     // exactly 100 (all read), cap at 99 above already conveys "approximate". Leave as-is.
   }
 
-  const runFailed = latestRun?.status === 'failed';
+  const runFailed = runStatus === 'failed';
+  // A still-running extraction reads as in_progress. A queued-but-not-finished latest run (the silent
+  // crash/re-enqueue case) is NOT 'complete' — it carries the extraction_incomplete gap and reads as
+  // complete_with_gaps so the card says "chart analysis didn't finish — retry", never "Complete".
   const status: CoverageStatus = runFailed
     ? 'failed'
-    : inProgress
+    : runStatus === 'running'
       ? 'in_progress'
-      : gaps.length > 0 || unknownPageFiles > 0
-        ? 'complete_with_gaps'
-        : 'complete';
+      : inProgress
+        ? 'in_progress'
+        : gaps.length > 0 || unknownPageFiles > 0 || extractionUnfinished
+          ? 'complete_with_gaps'
+          : 'complete';
 
   return {
     totalPages,

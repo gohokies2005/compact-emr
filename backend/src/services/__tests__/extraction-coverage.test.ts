@@ -84,6 +84,41 @@ describe('computeExtractionCoverage — clean chart', () => {
   });
 });
 
+// ---- card-honesty: extraction did not finish (2026-06-23) --------------------
+// The false "100% Complete" bug: OCR ("pages read") finishing 100% does NOT mean the SEMANTIC
+// extraction run finished. If the LATEST run failed / is queued / is running, the structured chart is
+// incomplete and the card must NOT say "Complete". (Herman CLM-E9FEC31D99 root cause.)
+
+describe('computeExtractionCoverage — extraction did not finish (card honesty)', () => {
+  const docs = () => [doc({ id: 'D1', s3Key: KEY1, pageCount: 5 }), doc({ id: 'D2', s3Key: KEY2, pageCount: 7 })];
+  const allRead = () => [frs({ filePath: KEY1, terminalStatus: 'read' }), frs({ filePath: KEY2, terminalStatus: 'read' })];
+
+  it('latest run FAILED → status failed, NOT complete (even with all pages read)', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'failed' });
+    expect(cov.status).toBe('failed');
+    expect(cov.status).not.toBe('complete');
+  });
+
+  it('latest run QUEUED (re-enqueued/stuck) → complete_with_gaps + extraction_incomplete gap, NOT complete', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'queued' });
+    expect(cov.status).toBe('complete_with_gaps');
+    expect(cov.status).not.toBe('complete');
+    expect(cov.gaps.some((g) => g.reason === 'extraction_incomplete')).toBe(true);
+  });
+
+  it('latest run RUNNING → in_progress, NOT complete', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'running' });
+    expect(cov.status).toBe('in_progress');
+    expect(cov.gaps.some((g) => g.reason === 'extraction_incomplete')).toBe(true);
+  });
+
+  it('latest run COMPLETE with all pages read → still 100% complete (no false-positive gap)', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'complete' });
+    expect(cov.status).toBe('complete');
+    expect(cov.gaps.some((g) => g.reason === 'extraction_incomplete')).toBe(false);
+  });
+});
+
 // ---- screening-summary + rendered excluded -----------------------------------
 
 describe('computeExtractionCoverage — exclusions', () => {

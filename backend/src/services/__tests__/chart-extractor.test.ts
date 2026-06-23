@@ -6,6 +6,9 @@ import {
   normalizeForQuoteMatch,
   dispositionForConfidence,
   dedupeIdenticalDocuments,
+  chunkDocuments,
+  splitOversizedPage,
+  CHUNK_CHARS,
   type BundleDocument,
 } from '../chart-extractor.js';
 
@@ -221,4 +224,58 @@ describe('dispositionForConfidence (auto-fill gate)', () => {
   it('auto-fills high confidence', () => expect(dispositionForConfidence(0.9)).toBe('autofill'));
   it('flags the middle band for review', () => expect(dispositionForConfidence(0.7)).toBe('needs_review'));
   it('drops low confidence entirely', () => expect(dispositionForConfidence(0.4)).toBe('drop'));
+});
+
+// ── Oversized-page cap (2026-06-23): a Blue Button .txt PAGE that alone exceeds the chunk budget must
+// be SLICED by char offset (no chunk forces the 32k-output escalation that crashed the run), and every
+// slice must keep the [p.N] marker so provenance/grounding still resolve. Normal pages are unchanged. ──
+describe('splitOversizedPage (oversized single page → char-offset slices)', () => {
+  it('returns the single piece unchanged for a normal-sized page (no behavior change)', () => {
+    const marked = `[p.7]\n${'a'.repeat(1000)}`;
+    expect(splitOversizedPage(7, marked)).toEqual([marked]);
+  });
+
+  it('slices a >budget page into multiple pieces, each re-marked with the same [p.N]', () => {
+    const body = 'WORDA '.repeat(20_000); // ~120k chars >> CHUNK_CHARS (48k)
+    const marked = `[p.42]\n${body}`;
+    const slices = splitOversizedPage(42, marked);
+    expect(slices.length).toBeGreaterThan(1);
+    for (const s of slices) {
+      expect(s.startsWith('[p.42]\n')).toBe(true);
+      expect(s.length).toBeLessThanOrEqual(CHUNK_CHARS);
+    }
+  });
+});
+
+describe('chunkDocuments — oversized page does NOT become one giant chunk', () => {
+  it('a single page far larger than the budget yields multiple per-page chunks (no escalation-forcing chunk)', () => {
+    const doc: BundleDocument = {
+      id: 'doc-huge',
+      filename: 'BlueButton.txt',
+      pages: [{ pageNumber: 1, text: 'X'.repeat(80_000) }], // a real 80k-char Blue Button page
+    };
+    const chunks = chunkDocuments([doc]);
+    // BEFORE the fix this was ONE chunk of ~80k chars (forcing the 32k-output ceiling). Now it's >1.
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) {
+      expect(c.text.length).toBeLessThanOrEqual(CHUNK_CHARS);
+      expect(c.pageNumbers).toEqual([1]); // every slice still cites page 1 (grounding intact)
+    }
+  });
+
+  it('normal multi-page docs chunk exactly as before (no regression)', () => {
+    const doc: BundleDocument = {
+      id: 'doc-norm',
+      filename: 'normal.txt',
+      pages: [
+        { pageNumber: 1, text: 'p1 '.repeat(100) },
+        { pageNumber: 2, text: 'p2 '.repeat(100) },
+        { pageNumber: 3, text: 'p3 '.repeat(100) },
+      ],
+    };
+    const chunks = chunkDocuments([doc]);
+    // All three small pages fit in one chunk (well under budget) — unchanged behavior.
+    expect(chunks.length).toBe(1);
+    expect(chunks[0]!.pageNumbers).toEqual([1, 2, 3]);
+  });
 });

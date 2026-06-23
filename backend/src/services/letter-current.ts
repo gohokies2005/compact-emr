@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { GetObjectCommand, HeadObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, type S3Client } from '@aws-sdk/client-s3';
 import { HttpError } from '../http/errors.js';
 import type { AppDb } from './db-types.js';
 
@@ -53,6 +53,51 @@ export async function headObjectExists(s3: S3Client, bucketName: string, key: st
     if (name === 'NoSuchKey' || name === 'NotFound') return false;
     throw e;
   }
+}
+
+export interface S3DrafterArtifactRef {
+  version: number;
+  txtKey: string;
+  pdfKey: string | null;
+  docxKey: string | null;
+}
+
+/**
+ * S3-TRUTH FALLBACK (CLM-9925837B7B, 2026-06-23): when NO DB row resolves to a present artifact — a good
+ * drafter letter exists in S3 but its DraftJob/LetterRevision row lost or offset its key (Hackworth v73 is
+ * in S3 but currentVersion points at the failed v97/v98 and no row carries a resolvable key) — discover the
+ * letter directly from S3. Lists drafter-artifacts/<caseId>/vN/ folders, picks the NEWEST vN whose vN.txt
+ * object actually exists, returns its txt/pdf/docx keys. DISCOVERY of what exists (S3 = artifact source of
+ * truth), not key-reconstruction from a DB version. Fail-soft: any list/probe error returns null.
+ */
+export async function resolveLatestS3DrafterArtifact(s3: S3Client, bucketName: string, caseId: string): Promise<S3DrafterArtifactRef | null> {
+  const prefix = `drafter-artifacts/${caseId}/`;
+  let listed;
+  try {
+    listed = await s3.send(new ListObjectsV2Command({ Bucket: bucketName, Prefix: prefix, Delimiter: '/' }));
+  } catch {
+    return null;
+  }
+  const versions: number[] = [];
+  for (const cp of listed.CommonPrefixes ?? []) {
+    const m = /\/v(\d+)\/$/.exec(cp.Prefix ?? '');
+    if (m !== null) versions.push(Number(m[1]));
+  }
+  versions.sort((a, b) => b - a);
+  for (const v of versions) {
+    const txtKey = `${prefix}v${v}/v${v}.txt`;
+    if (await headObjectExists(s3, bucketName, txtKey)) {
+      const pdfKey = `${prefix}v${v}/v${v}.pdf`;
+      const docxKey = `${prefix}v${v}/v${v}.docx`;
+      return {
+        version: v,
+        txtKey,
+        pdfKey: (await headObjectExists(s3, bucketName, pdfKey)) ? pdfKey : null,
+        docxKey: (await headObjectExists(s3, bucketName, docxKey)) ? docxKey : null,
+      };
+    }
+  }
+  return null;
 }
 
 /** Optional caller context so the missing-artifact 404 names the case + version it failed on. */

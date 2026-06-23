@@ -18,7 +18,7 @@ import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from 
 import { resolveRateCents } from '../services/pay-earnings.js';
 import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../services/chart-readiness.js';
 import { findChartReadinessOverride, resolveOverrideReason } from '../services/chart-readiness-override.js';
-import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash, headObjectExists } from '../services/letter-current.js';
+import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash, headObjectExists, resolveLatestS3DrafterArtifact } from '../services/letter-current.js';
 import { detectLetterLeaks, blockingLeaks } from '../services/letter-leak-detector.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import {
@@ -215,7 +215,17 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
     // Nothing recoverable anywhere: return the STRICT row (if one exists). The normal read path then
     // runs readTxtFromS3 on it and yields the precise "letter_artifact_missing — re-draft" 404 (more
     // helpful than a generic no_letter). If strict is also null, the caller yields the generic 404.
-    if (latest === null) return strict;
+    if (latest === null) {
+      // S3-TRUTH FALLBACK: no DB row resolved to a present artifact. Discover the newest letter that
+      // actually EXISTS in S3 (a good drafter letter whose DB row lost/offset its key — Hackworth v73,
+      // where currentVersion points at the failed v97/v98 and no row carries a resolvable key).
+      const s3hit = await resolveLatestS3DrafterArtifact(s3(), bucket() as string, caseId);
+      if (s3hit !== null) {
+        console.warn(`[letter] s3-truth-recovery: case ${caseId} currentVersion=${currentVersion} had no DB-resolvable artifact; served S3 drafter-artifact v${s3hit.version}`);
+        return s3hit;
+      }
+      return strict;
+    }
     const rev = await db.letterRevision.findFirst({ where: { caseId, version: latest.version } });
     if (rev !== null && rev.artifactTxtS3Key === latest.txtKey) {
       return { version: rev.version, txtKey: rev.artifactTxtS3Key, pdfKey: rev.artifactPdfS3Key, docxKey: rev.artifactDocxS3Key };

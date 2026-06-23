@@ -1138,5 +1138,54 @@ export class WorkersStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+
+    // ===== jotform-ingest fail-loud alarms (2026-06-22, Travis Spring intake-loss class) =====
+    // The SECOND systemic silent intake-loss leak: the jotform-ingest worker would fail the WHOLE
+    // submission when ONE file tripped the 50MB cap — it PATCHed the intake to status=failed and
+    // returned SUCCESS to SQS (so the DLQ stayed empty and NOTHING alarmed). Travis Spring's Stage-2
+    // (a 65.2MB attachment) vanished for ~2 days unseen. The worker fix makes one bad file a
+    // skipped-not-fatal SKIP; these two alarms turn whatever genuine failures REMAIN loud.
+
+    // (a) Lambda Errors > 0. Mirrors JotformSweepErrorsAlarm. A throw out of the handler (the worker
+    // exhausting retries into the DLQ, an unhandled bug, the API callback failing) breaches within the
+    // hour. NOT-breaching on missing data so idle hours don't false-alarm. No SNS yet (console-visible,
+    // matches the other intake alarms) — wire an ops topic when one exists.
+    new cloudwatch.Alarm(this, 'JotformIngestErrorsAlarm', {
+      alarmName: `compact-emr-${config.envName}-jotform-ingest-errors`,
+      alarmDescription: 'The jotform-ingest worker is erroring (handler throw / failing API callback / DLQ-bound retries). A veteran intake may be stuck or lost. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-ingest.',
+      metric: jotformIngest.metricErrors({ statistic: 'Sum', period: Duration.hours(1) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // (b) Swallowed-failure detector: any intake the worker PATCHes to status=failed. This is the
+    // EXACT class that hid Travis Spring — a per-submission failure that returns SUCCESS to SQS, so
+    // it never reaches the DLQ and the Errors alarm above never sees it. The worker emits one
+    // `jotform-ingest: FAILED` JSON line per failed intake (now carrying submissionId); a MetricFilter
+    // counts those lines and the alarm fires the same hour. After the per-file-isolation fix an
+    // oversized file is a SKIP (no FAILED line), so any FAILED here is a genuine ingest failure worth
+    // looking at — an intake sitting in `failed` instead of `ready`. Modeled on JotformWebhookMissedMetric.
+    // The Lambda uses the deprecated `logRetention` prop, so its log group is owned by a retention
+    // custom resource — import it BY NAME to attach the MetricFilter without fighting for ownership.
+    const jotformIngestLogGroup = logs.LogGroup.fromLogGroupName(
+      this, 'JotformIngestLogGroupRef', `/aws/lambda/${jotformIngest.functionName}`);
+    const ingestFailedMetric = jotformIngestLogGroup.addMetricFilter('JotformIngestFailedMetric', {
+      filterPattern: logs.FilterPattern.literal('{ $.msg = "jotform-ingest: FAILED" }'),
+      metricNamespace: `compact-emr/${config.envName}/intake`,
+      metricName: 'IntakeIngestFailed',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    new cloudwatch.Alarm(this, 'JotformIngestFailedAlarm', {
+      alarmName: `compact-emr-${config.envName}-jotform-ingest-failed`,
+      alarmDescription: 'One+ Jotform intakes were PATCHed to status=failed by the ingest worker in the last hour — a SWALLOWED failure (returns SUCCESS to SQS, never hits the DLQ). This is the silent-loss class that hid Travis Spring for ~2 days. The intake is sitting in the pool as failed, not ready. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-ingest for the FAILED lines (submissionId + error included) and use the RN Retry button or backfill.',
+      metric: ingestFailedMetric.metric({ statistic: 'Sum', period: Duration.hours(1) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
   }
 }

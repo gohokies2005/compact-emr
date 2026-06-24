@@ -44,7 +44,9 @@ export function SendToDoctorModal({ caseId, open, onClose, onConfirm }: SendToDo
       setErrorMessage(null);
       onClose();
       if (res.noteError) {
-        window.alert(`The case was sent to the doctor, but your note couldn't be attached (${res.noteError}). You can add it on the case's Messages tab.`);
+        // The case already moved — the precise technical reason (often a 403 "not the assigned RN")
+        // adds anxiety, not action, so keep it plain (codebase's no-code-speak-to-RNs principle; QA UX #1).
+        window.alert("The case was sent to the doctor. Your note wasn't attached automatically — you can post it on the case's Messages tab.");
       }
     },
     onError: (e: unknown) => {

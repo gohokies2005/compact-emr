@@ -61,7 +61,7 @@ describe('SendToDoctorModal', () => {
     // The transition STILL ran and the modal closed — the send was not blocked by the note failure.
     await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining("note couldn't be attached"));
+    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('Messages tab'));
     alertSpy.mockRestore();
   });
 

@@ -149,7 +149,8 @@ describe('PhysicianReviewPage', () => {
     expect(screen.getAllByText(/Young, Matthew/).length).toBeGreaterThan(0);
   });
 
-  it('shows the not-ready empty state when the case is not ready', async () => {
+  it('shows the not-ready empty state when there is NO current letter (pre-draft halt)', async () => {
+    // runComplete false AND no letter (the default getLetter mock has no txt/pdf) → genuinely not ready.
     getCaseMock.mockResolvedValue({
       data: { ...readyCase, runComplete: false, shipRecommendation: 'revise' },
     });
@@ -158,6 +159,29 @@ describe('PhysicianReviewPage', () => {
     expect(
       await screen.findByText('This case is not ready for physician review.'),
     ).toBeInTheDocument();
+  });
+
+  // Halted-then-hand-edited-then-forwarded letter (Ryan 2026-06-24, CLM-CCFDA1BCC3): the run never
+  // "completed" (runComplete=false) so the old gate dead-ended the physician on "Not ready" even though
+  // a real letter sat in the queue. A forwarded letter must be reviewable + signable (no-block rule);
+  // "it's not really paused … just call it done but unverified."
+  it('halted-then-edited letter (runComplete false BUT a real letter exists) is reviewable + flagged Unverified, NOT a dead-end', async () => {
+    getCaseMock.mockResolvedValue({
+      data: { ...readyCase, runComplete: false, shipRecommendation: 'revise', grade: null },
+    });
+    getLetterMock.mockResolvedValue({
+      data: {
+        source: 'drafter',
+        txt: 'I. Introduction\nThis nexus letter was hand-edited after the run was halted.',
+        version: 4,
+        rendered: { pdfUrl: 'https://x/current.pdf', docxUrl: null },
+      },
+    } as unknown as Awaited<ReturnType<typeof getLetter>>);
+    renderReview();
+
+    expect(await screen.findByText('Letter is ready for your review')).toBeInTheDocument();
+    expect(screen.queryByText('This case is not ready for physician review.')).toBeNull();
+    expect(screen.getByText(/Unverified/i)).toBeInTheDocument();
   });
 
   // P0a/P0b (Ryan 2026-06-13): the View-PDF resolves the CURRENT version via GET /cases/:id/letter

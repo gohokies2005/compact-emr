@@ -74,10 +74,26 @@ export function PhysicianReviewPage() {
   // panel for any non-ship grade → "Not ready for review" dead-end (Pichette). The GradeChip below
   // still shows the grade, so the physician sees it's a C and decides. Backend /approve has no grade
   // gate. Render the panel for ANY completed letter in physician_review.
+  // A current letter the doctor can sign — txt is the source of truth; a rendered PDF also counts.
+  const letter = letterQuery.data?.data ?? null;
+  const hasCurrentLetter =
+    letter !== null &&
+    ((typeof letter.txt === 'string' && letter.txt.trim().length > 0) || Boolean(letter.rendered?.pdfUrl));
+
+  // runComplete means "the automated drafter finished its own run" — NOT "a valid letter exists".
+  // A halted-then-hand-edited draft (paused for days, edited, then forwarded into the queue) and an
+  // imported PDF both legitimately have runComplete=false. Gating the review panel on runComplete
+  // dead-ended those on "Not ready for physician review" even though a real letter was forwarded — a
+  // no-block-rule violation (Ryan 2026-06-24, CLM-CCFDA1BCC3: "it's not really paused … just call it
+  // done but unverified"). Render the review/sign panel for ANY physician_review case that HAS a
+  // current letter; the "Unverified" badge (panel) tells the physician the automated pipeline didn't
+  // complete. Backend /approve already has no runComplete gate. A pre-draft halt with NO letter
+  // (hasCurrentLetter=false) still correctly falls through to "Not ready".
   const readyForPhysician =
-    c.runComplete === true &&
     c.status === 'physician_review' &&
-    latestDraftJob !== null;
+    latestDraftJob !== null &&
+    (c.runComplete === true || hasCurrentLetter);
+  const draftUnverified = c.runComplete !== true;
 
   // P0a (Ryan 2026-06-13): the physician View-PDF MUST render the current saved version, not a
   // job-pinned artifact. The old path called getArtifactPdfUrl(latestDraftJob.id) → that draft
@@ -208,6 +224,7 @@ export function PhysicianReviewPage() {
             <PhysicianLetterReadyPanel
               c={c}
               job={latestDraftJob}
+              unverified={draftUnverified}
               canSendBack
               onOpenPdf={openLetterPdf}
               onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}

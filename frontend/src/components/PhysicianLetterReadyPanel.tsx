@@ -22,6 +22,11 @@ interface PhysicianLetterReadyPanelProps {
   // reviews/edits first, then explicitly sends. Exactly one is expected per render.
   readonly onOpenSignOff?: () => void;
   readonly onSendToDoctor?: () => void;
+  // The letter exists + is forwardable/signable, but the automated drafter run did NOT complete
+  // cleanly (halted-then-hand-edited, or otherwise runComplete=false). Shows an advisory "Unverified"
+  // badge and lets Open-PDF resolve the CURRENT letter even when this (halted) job has no pinned PDF
+  // key. The doctor still reviews + signs normally (Ryan 2026-06-24).
+  readonly unverified?: boolean;
   // When set, "Send to doctor" is disabled and shows this reason (e.g. no physician assigned yet).
   readonly sendToDoctorBlockedReason?: string | undefined;
   readonly sending?: boolean;
@@ -49,6 +54,7 @@ export function PhysicianLetterReadyPanel({
   onSendToDoctor,
   sendToDoctorBlockedReason,
   sending,
+  unverified,
   onChanged,
 }: PhysicianLetterReadyPanelProps) {
   const [sendBackOpen, setSendBackOpen] = useState(false);
@@ -70,15 +76,22 @@ export function PhysicianLetterReadyPanel({
               Probative score: {typeof score === 'number' ? `${score}/10` : 'Not scored'}
             </span>
           </div>
+          {unverified ? (
+            <p className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800">
+              Unverified — the automated draft did not finish (it was halted, then edited and forwarded). Review carefully before signing.
+            </p>
+          ) : null}
         </div>
 
         <div className="flex flex-wrap gap-2">
           <Button
             type="button"
             variant="secondary"
-            disabled={!pdfKey}
+            // When unverified (a halted-then-edited job), this job has no pinned PDF key — but the
+            // parent's onOpenPdf resolves the CURRENT letter PDF, so keep the button live.
+            disabled={!pdfKey && !unverified}
             onClick={() => {
-              if (pdfKey) void onOpenPdf(pdfKey);
+              if (pdfKey || unverified) void onOpenPdf(pdfKey ?? '');
             }}
           >
             Open PDF

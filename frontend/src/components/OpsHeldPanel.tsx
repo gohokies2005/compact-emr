@@ -5,6 +5,7 @@ import { Card } from './ui/Card';
 import { postDraft } from '../api/drafter';
 import { transitionCaseStatus, type CaseDetail } from '../api/cases';
 import { ConflictError } from '../api/client';
+import { SendToDoctorModal } from './SendToDoctorModal';
 import type { DraftJob } from '../types/prisma';
 
 interface ManifestPhase {
@@ -77,6 +78,7 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
   const qc = useQueryClient();
   const [confirmOpenAsIs, setConfirmOpenAsIs] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [sendToDoctorOpen, setSendToDoctorOpen] = useState(false);
 
   const rerunMutation = useMutation({
     mutationFn: () => postDraft(c.id),
@@ -153,7 +155,7 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
               variant="secondary"
               loading={openAsIsMutation.isPending}
               disabled={openAsIsMutation.isPending}
-              onClick={() => { if (window.confirm('Send this letter to the assigned doctor for review and signature? The doctor reviews and signs before anything is delivered — you can keep editing until then.')) openAsIsMutation.mutate(); }}
+              onClick={() => setSendToDoctorOpen(true)}
             >
               Send to doctor for review
             </Button>
@@ -192,6 +194,15 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
           {errorMessage}
         </div>
       ) : null}
+
+      {/* Send-to-doctor for a halted-but-produced letter: same optional-message prompt as the normal
+          RN review send (Ryan 2026-06-24). onConfirm runs the drafting->physician_review transition. */}
+      <SendToDoctorModal
+        caseId={c.id}
+        open={sendToDoctorOpen}
+        onClose={() => setSendToDoctorOpen(false)}
+        onConfirm={async () => { await openAsIsMutation.mutateAsync(); }}
+      />
 
       {/* The "Details" event-log (crashed/ran/skipped phases + grade/ship/operator-state chips) was
           removed (Ryan 2026-06-23): it was intimidating code-speak that meant nothing to an RN. The

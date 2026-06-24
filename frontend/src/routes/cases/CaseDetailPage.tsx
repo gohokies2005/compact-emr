@@ -16,6 +16,7 @@ import { SendToDrafterPanel } from '../../components/SendToDrafterPanel';
 import { ExtractionCoveragePanel } from '../../components/ExtractionCoveragePanel';
 import { ChartRecoveryBanner } from '../../components/ChartRecoveryBanner';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
+import { SendToDoctorModal } from '../../components/SendToDoctorModal';
 import { DeliveryPanel } from '../../components/DeliveryPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
@@ -255,7 +256,9 @@ export function CaseDetailPage() {
   });
 
   // Send to doctor for review: rn_review -> physician_review. Completed drafts no longer auto-route
-  // to the doctor — the RN reviews/edits, then explicitly sends. (Ryan 2026-06-04.)
+  // to the doctor — the RN reviews/edits, then explicitly sends. (Ryan 2026-06-04.) The send now
+  // always opens SendToDoctorModal for an optional handoff message (Ryan 2026-06-24).
+  const [sendToDoctorOpen, setSendToDoctorOpen] = useState(false);
   const sendToDoctor = useMutation({
     mutationFn: () => {
       const cur = caseQuery.data?.data;
@@ -263,7 +266,8 @@ export function CaseDetailPage() {
       return transitionCaseStatus(caseId, { from: 'rn_review', to: 'physician_review', version: cur.version });
     },
     onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
-    onError: (e: unknown) => window.alert(e instanceof ConflictError ? 'This case changed — reload and try sending again.' : `Could not send to the doctor — ${describeApiError(e)}.`),
+    // Errors are surfaced by SendToDoctorModal (which awaits mutateAsync) — no window.alert here, or
+    // the user would get a double error (modal banner + alert).
   });
 
   // Import final letter (2026-06-14): drop an already-finished letter PDF (rig-origin draft or
@@ -680,7 +684,7 @@ export function CaseDetailPage() {
                       canSendBack={false}
                       onOpenPdf={openLetterPdf}
                       onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
-                      onSendToDoctor={() => { if (window.confirm('Send this letter to the doctor for review? It will move to the physician queue.')) sendToDoctor.mutate(); }}
+                      onSendToDoctor={() => setSendToDoctorOpen(true)}
                       sendToDoctorBlockedReason={c.assignedPhysician ? undefined : 'Assign a physician below before sending.'}
                       sending={sendToDoctor.isPending}
                       onChanged={async () => {
@@ -688,6 +692,15 @@ export function CaseDetailPage() {
                       }}
                     />
                   ) : null}
+
+                  {/* Send-to-doctor handoff: ALWAYS offers an optional message to the reviewing
+                      physician (Ryan 2026-06-24). Empty message = behaves like the old bare confirm. */}
+                  <SendToDoctorModal
+                    caseId={caseId}
+                    open={sendToDoctorOpen}
+                    onClose={() => setSendToDoctorOpen(false)}
+                    onConfirm={async () => { await sendToDoctor.mutateAsync(); }}
+                  />
 
                   {/* Post-draft sanity impression — the auto-fired Opus gut-check on the FINISHED letter,
                       a quiet "Overall impression" line beneath whichever letter-ready panel is showing. */}

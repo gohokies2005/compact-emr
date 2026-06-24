@@ -165,16 +165,10 @@ describe('OpsHeldPanel', () => {
     confirmSpy.mockRestore();
   });
 
-  it('shows details from the manifest summary', () => {
-    renderPanel();
-
-    fireEvent.click(screen.getByRole('button', { name: /Details/ }));
-
-    expect(screen.getByText('Grade: C+')).toBeInTheDocument();
-    expect(screen.getByText('Ship recommendation: revise')).toBeInTheDocument();
-    expect(screen.getByText('Operator state: paused')).toBeInTheDocument();
-    expect(screen.getByText('Grade was below ship threshold.')).toBeInTheDocument();
-  });
+  // NOTE: the "shows details from the manifest summary" test was removed (2026-06-24) — the Details
+  // event-log it exercised was intentionally deleted on 2026-06-23 ("de-clutter the didn't-finish
+  // panel"; it was intimidating code-speak for an RN). The test had been left stale (a pre-existing
+  // red on main). The plain "why it didn't finish" copy + the recovery buttons are tested above.
 
   it('allows admin open-as-is override with confirmation', async () => {
     renderPanel(true);
@@ -187,7 +181,9 @@ describe('OpsHeldPanel', () => {
         from: 'drafting',
         to: 'physician_review',
         version: 4,
-        transitionReason: 'admin override to physician review',
+        // transitionReason is 'send to doctor for review' (the single shared openAsIsMutation reason
+        // since the forward-path consolidation) — was previously asserted as the stale 'admin override…'.
+        transitionReason: 'send to doctor for review',
       });
     });
   });

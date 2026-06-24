@@ -398,7 +398,7 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
   // left a few pages out is 'complete' WITH minorGap. The verdict must PROCEED (no downgrade — a few of 3029 pages
   // is not a halt), so this is NOT in the else-if chain above (state==='complete' never trips those). We only ADD a
   // soft caution + lower confidence one notch so the near-completeness is honestly surfaced without blocking.
-  if (extraction?.chartAnalysis?.state === 'complete' && extraction?.chartAnalysis?.minorGap === true && isDirectional) {
+  if (analysisState === 'complete' && extraction?.chartAnalysis?.minorGap === true && isDirectional) {
     confidence = lower(confidence);
     disagreements.push({
       source: 'chart_analysis',

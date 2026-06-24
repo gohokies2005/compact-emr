@@ -182,6 +182,26 @@ describe('computeExtractionCoverage — two-stage (Pages read + Chart analysis)'
     expect(cov.chartAnalysis.label).toMatch(/some pages weren’t fully analyzed/i);
     expect(cov.chartAnalysis.reason).toMatch(/200 pages were not folded/i);
   });
+
+  // SIZE-AWARE floor (clinical-safety QA 2026-06-24): on a SMALL chart (≤50 pages) a few missing pages is more
+  // likely to be the load-bearing document, so we require near-complete (95%) before softening — 90% is NOT
+  // enough on a tiny chart. A 30-page chart with 3 uncovered (90%) stays provisional; 1 uncovered (97%) cautions.
+  const smallDocs = () => [doc({ id: 'S1', s3Key: KEY1, pageCount: 30, filename: 'C&P exam.pdf' })];
+  const smallRead = () => [frs({ filePath: KEY1, terminalStatus: 'read' })];
+
+  it('SMALL chart (30pp), 3 uncovered = 90% → stays incomplete (below the 95% small-chart floor), NOT softened', () => {
+    const cov = computeExtractionCoverage(smallDocs(), smallRead(), { status: 'complete', resultJson: { items: new Array(5), gaps: { uncoveredPages: 3, truncatedWindows: 0 } } });
+    expect(cov.coveragePct).toBe(90);
+    expect(cov.chartAnalysis.state).toBe('incomplete');
+    expect(cov.chartAnalysis.minorGap).toBe(false);
+  });
+
+  it('SMALL chart (30pp), 1 uncovered = 97% → softened to complete WITH minorGap (above the 95% small-chart floor)', () => {
+    const cov = computeExtractionCoverage(smallDocs(), smallRead(), { status: 'complete', resultJson: { items: new Array(5), gaps: { uncoveredPages: 1, truncatedWindows: 0 } } });
+    expect(cov.coveragePct).toBe(97);
+    expect(cov.chartAnalysis.state).toBe('complete');
+    expect(cov.chartAnalysis.minorGap).toBe(true);
+  });
 });
 
 // ---- cry-wolf fix: not_analyzed for new/empty cases (2026-06-23) -------------

@@ -131,6 +131,13 @@ export interface ChartAnalysisStage {
 // Below it, a completed-run-with-gaps stays 'incomplete' (provisional). coveragePct already subtracts the
 // uncovered pages, so it IS the analyzed-coverage fraction.
 export const ANALYSIS_COVERAGE_FLOOR = 90;
+// SIZE-AWARE floor (clinical-safety QA 2026-06-24). The flat 90% is scale-blind: 90% of a 3029-page chart is
+// 16 unfolded pages (a caution — Fitton), but 90% of a 30-page chart is 3 missing pages, and on a tiny chart
+// those few pages are far likelier to BE the rating decision / STR event the opinion hinges on. So on a SMALL
+// chart we require near-complete before softening; large charts keep Ryan's 90%. Honors "90%+ is OK" where he
+// meant it (Fitton-class charts) while protecting the small-chart edge he deferred ("if even lower IDK, rare").
+export const SMALL_CHART_PAGES = 50; // at/under this many pages, each page is more load-bearing
+export const SMALL_CHART_COVERAGE_FLOOR = 95;
 
 // ===== Per-page provenance layer (vision rebuild 2026-06-16) =====
 // SEPARATE from the file-level accounting above (which counts a file as read via the SHARED
@@ -542,12 +549,16 @@ function deriveChartAnalysisStage(args: {
     // NEAR-COMPLETE TOLERANCE (Ryan 2026-06-24, Fitton): a COMPLETED run that still analyzed ≥ the floor (e.g. 16
     // of 3029 pages not folded in = 99%) must NOT force the case provisional / block the SOAP. Treat it as
     // 'complete' WITH a caution (minorGap) so the verdict proceeds + the red banner is suppressed, but the soft
-    // caution is still surfaced. Below the floor it stays 'incomplete' (provisional), the prior behavior.
-    if (coveragePct >= ANALYSIS_COVERAGE_FLOOR && totalPages > 0) {
+    // caution is still surfaced. Below the floor it stays 'incomplete' (provisional), the prior behavior. The
+    // floor is SIZE-AWARE (clinical-safety QA): a small chart needs near-complete coverage before we soften,
+    // because a few missing pages on a 30-page chart is far likelier to be the load-bearing document.
+    const floor = totalPages <= SMALL_CHART_PAGES ? SMALL_CHART_COVERAGE_FLOOR : ANALYSIS_COVERAGE_FLOOR;
+    if (coveragePct >= floor && totalPages > 0) {
+      const causeClause = likelyCauseFile ? ` The largest records file (${likelyCauseFile}) is the likely source.` : '';
       return {
         state: 'complete',
         label: `✓ Mostly complete${findingsSuffix} — ${coveragePct}% analyzed`,
-        reason: `${bits.join(' and ')} (${coveragePct}% of ${totalPages} pages analyzed). The chart is nearly complete; review the records directly if the claim hinges on a specific document.`,
+        reason: `${bits.join(' and ')} (${coveragePct}% of ${totalPages} pages analyzed). The chart is nearly complete.${causeClause} Review the records directly if the claim hinges on a specific document.`,
         likelyCauseFile,
         findings: findings ?? null,
         minorGap: true,

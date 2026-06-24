@@ -34,7 +34,10 @@ const SOURCE_LABEL: Record<string, string> = {
   rn_set: 'set by RN',
   derived: 'auto-derived from the granted SC conditions',
   text_parse_fallback: 'parsed from the veteran’s intake wording',
-  default_direct: 'default (direct)',
+  // #6 (2026-06-21): the default-fallback source means NO framing was derived — it is not a real "direct"
+  // decision. Showing "default (direct)" misleads the RN into thinking a direct theory was chosen. When there
+  // is no route-picker plan grounding the readiness, this is the neutral, honest label.
+  default_direct: 'framing not yet computed',
 };
 export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draftAttempt, onConfirmed, onClose }: {
   readonly caseId: string;
@@ -128,12 +131,36 @@ export function Gate1ChecklistModal({ caseId, claimType, claimedCondition, draft
       <div className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg bg-white p-6 shadow-2xl" style={{ maxHeight: '85vh' }}>
         <h2 className="text-base font-semibold text-slate-900">Before we draft</h2>
         <p className="mt-1 text-sm text-slate-500">Confirm each item before starting the draft.</p>
-        {readiness?.caseFraming !== undefined ? (
+        {/* The REASONED framing from the route-picker plan (the SAME brain the drafter pleads) — shown instead
+            of the bare SSOT label / "default (direct)" when a plan is available. Falls back to the SSOT
+            caseFraming label when no plan grounds the readiness (flag off / no plan / chart still building). */}
+        {readiness?.routePlan !== undefined ? (
+          <div className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <p>Plan framing: <span className="font-semibold text-slate-800">{readiness.routePlan.framing}</span>
+              {readiness.routePlan.cfr_basis ? <> · {readiness.routePlan.cfr_basis}</> : null}</p>
+            {readiness.routePlan.rationale ? <p className="mt-0.5">{readiness.routePlan.rationale}</p> : null}
+          </div>
+        ) : readiness?.caseFraming !== undefined ? (
           <p className="mt-1 text-xs text-slate-500">
             Framing: <span className="font-semibold">{readiness.caseFraming.framing}</span>
             {' · '}{SOURCE_LABEL[readiness.caseFraming.source] ?? readiness.caseFraming.source}
             {readiness.caseFraming.upstreamScCondition !== null ? <> · anchor: {readiness.caseFraming.upstreamScCondition}</> : null}
           </p>
+        ) : null}
+        {/* #7 (2026-06-21): when the route-picker brain feed was unavailable, the checks ran on the
+            deterministic-only source — make that VISIBLE, not silent. */}
+        {readiness?.brainConsulted === false ? (
+          <p className="mt-1 text-xs text-amber-700">⚠ {readiness.degradedNote ?? 'Plan unavailable — deterministic check only.'}</p>
+        ) : null}
+        {/* #2: the brain flagged gaps that map to no specific checklist item — surface them so the RN sees
+            them (they did NOT silently satisfy any essential). */}
+        {readiness?.unclassifiedGaps !== undefined && readiness.unclassifiedGaps.length > 0 ? (
+          <div className="mt-1 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <p className="font-medium">The case plan flagged additional gaps to review:</p>
+            <ul className="mt-0.5 list-disc pl-4">
+              {readiness.unclassifiedGaps.map((g, i) => <li key={i}>{g.fact}{g.why ? ` — ${g.why}` : ''}</li>)}
+            </ul>
+          </div>
         ) : null}
         <div className="mt-4 space-y-4">
           {items.map((i) => (

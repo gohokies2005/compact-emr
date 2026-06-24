@@ -84,6 +84,133 @@ describe('computeExtractionCoverage — clean chart', () => {
   });
 });
 
+// ---- card-honesty: extraction did not finish (2026-06-23) --------------------
+// The false "100% Complete" bug: OCR ("pages read") finishing 100% does NOT mean the SEMANTIC
+// extraction run finished. If the LATEST run failed / is queued / is running, the structured chart is
+// incomplete and the card must NOT say "Complete". (Herman CLM-E9FEC31D99 root cause.)
+
+describe('computeExtractionCoverage — extraction did not finish (card honesty)', () => {
+  const docs = () => [doc({ id: 'D1', s3Key: KEY1, pageCount: 5 }), doc({ id: 'D2', s3Key: KEY2, pageCount: 7 })];
+  const allRead = () => [frs({ filePath: KEY1, terminalStatus: 'read' }), frs({ filePath: KEY2, terminalStatus: 'read' })];
+
+  it('latest run FAILED → status failed, NOT complete (even with all pages read)', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'failed' });
+    expect(cov.status).toBe('failed');
+    expect(cov.status).not.toBe('complete');
+  });
+
+  it('latest run QUEUED (re-enqueued/stuck) → complete_with_gaps + extraction_incomplete gap, NOT complete', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'queued' });
+    expect(cov.status).toBe('complete_with_gaps');
+    expect(cov.status).not.toBe('complete');
+    expect(cov.gaps.some((g) => g.reason === 'extraction_incomplete')).toBe(true);
+  });
+
+  it('latest run RUNNING → in_progress, NOT complete', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'running' });
+    expect(cov.status).toBe('in_progress');
+    expect(cov.gaps.some((g) => g.reason === 'extraction_incomplete')).toBe(true);
+  });
+
+  it('latest run COMPLETE with all pages read → still 100% complete (no false-positive gap)', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'complete' });
+    expect(cov.status).toBe('complete');
+    expect(cov.gaps.some((g) => g.reason === 'extraction_incomplete')).toBe(false);
+  });
+});
+
+// ---- TWO-STAGE honesty model (Ryan 2026-06-23) -------------------------------
+// The card + SOAP banner read pagesRead (OCR) and chartAnalysis (semantic extract) as two distinct, plainly-
+// labeled stages from ONE coverage object, so a failed analysis can never hide behind a 100% pages-read number.
+describe('computeExtractionCoverage — two-stage (Pages read + Chart analysis)', () => {
+  const docs = () => [doc({ id: 'D1', s3Key: KEY1, pageCount: 5, filename: 'DD-214.pdf' }), doc({ id: 'D2', s3Key: KEY2, pageCount: 1200, filename: 'VA Blue Button Records.pdf' })];
+  const allRead = () => [frs({ filePath: KEY1, terminalStatus: 'read' }), frs({ filePath: KEY2, terminalStatus: 'read' })];
+
+  it('all read + analysis complete → pagesRead 100%, chartAnalysis complete with findings count', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'complete', resultJson: { items: new Array(253), gaps: { uncoveredPages: 0, truncatedWindows: 0 } } });
+    expect(cov.pagesRead.pct).toBe(100);
+    expect(cov.pagesRead.label).toBe('100% (1205 of 1205)');
+    expect(cov.chartAnalysis.state).toBe('complete');
+    expect(cov.chartAnalysis.label).toBe('✓ Complete (253 findings)');
+    expect(cov.chartAnalysis.findings).toBe(253);
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull(); // nothing to blame when complete
+  });
+
+  it('OCR 100% but analysis QUEUED → pagesRead 100%, chartAnalysis incomplete + names the largest file', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'queued' });
+    expect(cov.pagesRead.pct).toBe(100); // the OCR stage genuinely finished
+    expect(cov.chartAnalysis.state).toBe('incomplete');
+    expect(cov.chartAnalysis.label).toMatch(/didn’t finish/i);
+    expect(cov.chartAnalysis.reason).toMatch(/interrupted/i);
+    // the largest chart-input file is named as the likely cause (the dense Blue Button export)
+    expect(cov.chartAnalysis.likelyCauseFile).toBe('VA Blue Button Records.pdf');
+  });
+
+  it('analysis FAILED → chartAnalysis failed with a re-run label', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'failed' });
+    expect(cov.chartAnalysis.state).toBe('failed');
+    expect(cov.chartAnalysis.label).toMatch(/failed/i);
+    expect(cov.chartAnalysis.likelyCauseFile).toBe('VA Blue Button Records.pdf');
+  });
+
+  it('analysis RUNNING → chartAnalysis in_progress (no cause file blamed mid-run)', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'running' });
+    expect(cov.chartAnalysis.state).toBe('in_progress');
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull();
+  });
+
+  it('completed run with uncovered pages → chartAnalysis incomplete (finished but not fully)', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'complete', resultJson: { items: new Array(10), gaps: { uncoveredPages: 12, truncatedWindows: 0 } } });
+    expect(cov.chartAnalysis.state).toBe('incomplete');
+    expect(cov.chartAnalysis.label).toMatch(/some pages weren’t fully analyzed/i);
+    expect(cov.chartAnalysis.reason).toMatch(/12 pages were not folded/i);
+  });
+});
+
+// ---- cry-wolf fix: not_analyzed for new/empty cases (2026-06-23) -------------
+// A brand-new case (no analysis run on record yet → runStatus null) or an empty case (no chart inputs) must read
+// as 'not_analyzed' — NOT 'incomplete'. not_analyzed must NOT fire the SOAP banner, mark provisional, or name a
+// likelyCauseFile. Only a REAL unfinished run (queued/running), a failed run, or a completed-with-gaps run warns.
+describe('computeExtractionCoverage — not_analyzed (cry-wolf fix)', () => {
+  const docs = () => [doc({ id: 'D1', s3Key: KEY1, pageCount: 5, filename: 'DD-214.pdf' }), doc({ id: 'D2', s3Key: KEY2, pageCount: 1200, filename: 'VA Blue Button Records.pdf' })];
+  const allRead = () => [frs({ filePath: KEY1, terminalStatus: 'read' }), frs({ filePath: KEY2, terminalStatus: 'read' })];
+
+  it('no analysis run yet (latestRun null) with OCR settled → chartAnalysis not_analyzed, NOT incomplete, no cause file', () => {
+    const cov = computeExtractionCoverage(docs(), allRead(), null);
+    expect(cov.chartAnalysis.state).toBe('not_analyzed');
+    expect(cov.chartAnalysis.state).not.toBe('incomplete');
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull(); // never blame a file on a never-ran case
+    expect(cov.chartAnalysis.reason).toBeNull();
+    // must NOT have raised an extraction_incomplete gap (that would fire the banner)
+    expect(cov.gaps.some((g) => g.reason === 'extraction_incomplete')).toBe(false);
+    expect(cov.status).toBe('complete'); // pages all read, nothing pending → vacuously complete
+  });
+
+  it('empty case (no chart inputs) → not_analyzed, vacuously complete, no banner, no cause file', () => {
+    const cov = computeExtractionCoverage([], [], null);
+    expect(cov.chartAnalysis.state).toBe('not_analyzed');
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull();
+    expect(cov.status).toBe('complete');
+  });
+
+  it('null run but OCR still in progress → in_progress (genuinely working), not not_analyzed', () => {
+    const rows = [frs({ filePath: KEY1, terminalStatus: 'read' })]; // D2 has no row yet → OCR in progress
+    const cov = computeExtractionCoverage(docs(), rows, null);
+    expect(cov.chartAnalysis.state).toBe('in_progress');
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull();
+  });
+
+  it('SSOT invariant: a complete status never carries a non-complete/non-not_analyzed analysis state', () => {
+    // Cover every status the function can emit and assert the invariant holds (the function also throws if violated).
+    for (const run of [null, { status: 'complete' }, { status: 'failed' }, { status: 'queued' }, { status: 'running' }] as const) {
+      const cov = computeExtractionCoverage(docs(), allRead(), run);
+      if (cov.status === 'complete') {
+        expect(['complete', 'not_analyzed']).toContain(cov.chartAnalysis.state);
+      }
+    }
+  });
+});
+
 // ---- screening-summary + rendered excluded -----------------------------------
 
 describe('computeExtractionCoverage — exclusions', () => {

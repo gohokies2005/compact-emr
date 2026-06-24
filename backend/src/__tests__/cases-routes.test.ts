@@ -470,7 +470,9 @@ describe('cases routes', () => {
     });
 
     it('drafting -> physician_review (the legacy/manual landing edge) ALSO fires the auto-gen', async () => {
-      const { db } = makeDb(baseCase({ status: 'drafting', version: 3 }));
+      // assignedPhysicianId required: the no-unassigned-doctor guard now covers EVERY edge into
+      // physician_review (2026-06-23), drafting included — a "send to doctor" with no doctor 409s.
+      const { db } = makeDb(baseCase({ status: 'drafting', version: 3, assignedPhysicianId: 'PHYS-001' }));
       const res = await request(appFor(db))
         .post('/api/v1/cases/CASE-1/status')
         .send({ from: 'drafting', to: 'physician_review', version: 3 });
@@ -478,6 +480,17 @@ describe('cases routes', () => {
       expect(res.status).toBe(200);
       expect(doctorPackGenMock).toHaveBeenCalledTimes(1);
       expect(doctorPackGenMock).toHaveBeenCalledWith(db, expect.objectContaining({ trigger: 'auto_send_to_doctor', priorCaseVersion: 3 }));
+    });
+
+    it('drafting -> physician_review with NO assigned physician 409s (no-unassigned-doctor guard covers every edge into physician_review)', async () => {
+      const { db } = makeDb(baseCase({ status: 'drafting', version: 3, assignedPhysicianId: null }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'drafting', to: 'physician_review', version: 3 });
+      // 409 + doctor-pack never fired proves the guard blocked the unassigned send (this test harness's
+      // error handler returns an empty body, so the status + the no-side-effect are the observable proof).
+      expect(res.status).toBe(409);
+      expect(doctorPackGenMock).not.toHaveBeenCalled();
     });
 
     it('a re-fire where the service SKIPS (pack already current) still returns 200 — no duplicate, no error', async () => {
@@ -528,6 +541,33 @@ describe('cases routes', () => {
       const res = await request(appFor(db))
         .post('/api/v1/cases/CASE-1/status')
         .send({ from: 'rn_review', to: 'physician_review', version: 7 });
+
+      expect(res.status).toBe(409);
+      expect(doctorPackGenMock).not.toHaveBeenCalled();
+    });
+
+    // ── FORWARD DOOR out of a body-quality park (2026-06-22, "see/edit/FORWARD — never a trap") ──
+    it('needs_rn_decision -> physician_review: the RN forwards a hand-fixed held letter to the doctor (200, status flips, auto-gen fires)', async () => {
+      const { db, spies } = makeDb(baseCase({ status: 'needs_rn_decision', version: 9, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'needs_rn_decision', to: 'physician_review', version: 9 });
+
+      // Before the case-status-transitions map + cases.ts guard fix this 403'd (illegal edge) — the park
+      // was a trap that could only be left by a re-draft. The forward door is now legal for ops_staff.
+      expect(res.status).toBe(200);
+      expect(res.body.data.status).toBe('physician_review');
+      expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'physician_review' }) }));
+      // Lands physician_review like any other "send to doctor" hop → the doctor-pack auto-gen fires.
+      expect(doctorPackGenMock).toHaveBeenCalledTimes(1);
+      expect(doctorPackGenMock).toHaveBeenCalledWith(db, expect.objectContaining({ trigger: 'auto_send_to_doctor', priorCaseVersion: 9 }));
+    });
+
+    it('needs_rn_decision -> physician_review without an assigned physician 409s BEFORE any auto-gen (mirrors the rn_review send guard)', async () => {
+      const { db } = makeDb(baseCase({ status: 'needs_rn_decision', version: 9, assignedPhysicianId: null }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'needs_rn_decision', to: 'physician_review', version: 9 });
 
       expect(res.status).toBe(409);
       expect(doctorPackGenMock).not.toHaveBeenCalled();

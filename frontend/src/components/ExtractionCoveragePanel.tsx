@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { SectionCard } from './ui/SectionCard';
 import { PdfViewerModal, type ViewableDoc } from './PdfViewerModal';
-import { getExtractionCoverage, type CoverageGap, type PageReviewRef } from '../api/extraction-coverage';
+import { getExtractionCoverage, type CoverageGap, type ChartAnalysisStage, type PageReviewRef } from '../api/extraction-coverage';
 
 /**
  * Chart Extraction Coverage — per-case TRANSPARENCY report (Ryan 2026-06-14).
@@ -32,6 +32,7 @@ const REASON_TEXT: Record<CoverageGap['reason'], string> = {
   needs_manual_summary: 'Couldn’t be read — needs a manual summary',
   truncated_dense: 'Very dense section — only partly extracted',
   extraction_gap: 'Some pages weren’t folded into the chart',
+  extraction_incomplete: 'Chart analysis didn’t finish — re-run it',
 };
 
 // Per-page review-row copy (vision rebuild). Calm + honest: a handwriting page usually DID capture the
@@ -65,33 +66,52 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
   // Per-page vision breakdown (null for non-vision charts → behaves exactly as before).
   const pb = cov.pageBreakdown;
   const reviewPages = pb?.reviewPages ?? [];
-  // Complete requires BOTH: no file-level gaps AND no per-page review items (a file can read "100%" at
-  // file level while individual pages are handwriting-uncertain — that must NOT show as Complete).
-  const isComplete = cov.coveragePct >= 100 && cov.gaps.length === 0 && cov.unknownPageFiles === 0 && reviewPages.length === 0;
+  // TWO-STAGE honesty model (Ryan 2026-06-23): the two stages come straight off the coverage SSOT so this
+  // card and the SOAP banner can never disagree. Stage 1 = Pages read (OCR). Stage 2 = Chart analysis.
+  // DEFENSIVE: an older/partial API payload (e.g. a backend not yet redeployed) may not carry the two stage
+  // fields — fall back to deriving them from the numbers we always have, so the card never crashes and reads
+  // exactly as it did before the two-stage SSOT shipped.
+  const pagesRead = cov.pagesRead ?? {
+    pct: cov.coveragePct, readUnits: cov.extractedPages, totalUnits: cov.totalPages,
+    approximate: cov.unknownPageFiles > 0,
+    label: `${cov.coveragePct}% (${cov.extractedPages} of ${cov.totalPages})`,
+  };
+  const chartAnalysis: ChartAnalysisStage = cov.chartAnalysis ?? {
+    state: cov.status === 'failed' ? 'failed' : cov.status === 'in_progress' ? 'in_progress' : 'complete',
+    label: cov.status === 'failed' ? '✗ Chart analysis failed — re-run extraction' : cov.status === 'in_progress' ? 'Analyzing the chart…' : '✓ Complete',
+    reason: null, likelyCauseFile: null, findings: null,
+  };
+  const analysisComplete = chartAnalysis.state === 'complete';
+  // 'not_analyzed' (new/empty case, Ryan 2026-06-23) is a NEUTRAL resting state — not a problem to flag. It must
+  // not render amber or scream "Partial"; it reads as a quiet "Not analyzed yet" with no alarming reason line.
+  const analysisNotAnalyzed = chartAnalysis.state === 'not_analyzed';
+  // Complete requires BOTH stages clean AND no per-page review items (a file can read "100%" at file level
+  // while the SEMANTIC analysis never finished, OR while individual pages are handwriting-uncertain — neither
+  // may show as Complete). This is the core honesty fix: the chip can never say Complete over a failed analysis.
+  const isComplete = analysisComplete && cov.coveragePct >= 100 && cov.gaps.length === 0 && cov.unknownPageFiles === 0 && reviewPages.length === 0;
   // CALM/NEUTRAL (Ryan 2026-06-16): the container is a quiet neutral SectionCard; status is conveyed by a
   // SMALL chip only, never a filled banner. Advisory, never red.
-  // 3-STATE chip (RN UX 2026-06-16): Complete (green) / "N unread" (amber, real content missing) /
-  // "Review N pages" (amber, handwriting low-confidence) / "Partial" (amber, file-level gaps only).
   const unreadable = pb?.unreadable ?? 0;
   const handwritingUncertain = pb?.handwritingUncertain ?? 0;
+  // Chart-analysis trouble takes precedence in the chip (it's the load-bearing stage the verdict is built on).
   const chip: { label: string; complete: boolean } = isComplete
     ? { label: 'Complete', complete: true }
-    : unreadable > 0
-      ? { label: `${unreadable} unread`, complete: false }
-      : handwritingUncertain > 0
-        ? { label: `Review ${handwritingUncertain} ${handwritingUncertain === 1 ? 'page' : 'pages'}`, complete: false }
-        : { label: 'Partial', complete: false };
+    : analysisNotAnalyzed
+      ? { label: 'Not analyzed yet', complete: false } // neutral; styled separately below (not amber-alarming)
+      : chartAnalysis.state === 'failed'
+      ? { label: 'Analysis failed', complete: false }
+      : chartAnalysis.state === 'in_progress'
+        ? { label: 'Analyzing…', complete: false }
+        : chartAnalysis.state === 'incomplete'
+          ? { label: 'Analysis incomplete', complete: false }
+          : unreadable > 0
+            ? { label: `${unreadable} unread`, complete: false }
+            : handwritingUncertain > 0
+              ? { label: `Review ${handwritingUncertain} ${handwritingUncertain === 1 ? 'page' : 'pages'}`, complete: false }
+              : { label: 'Partial', complete: false };
   const tone = { sub: 'text-slate-500' };
   const totalItems = cov.gaps.length + reviewPages.length;
-
   const approximate = cov.unknownPageFiles > 0;
-  const headline = cov.status === 'in_progress'
-    ? 'Chart extraction is still in progress…'
-    : cov.status === 'failed'
-      ? 'Chart extraction did not complete'
-      : approximate && cov.totalFiles > 0 && cov.totalPages === cov.totalFiles
-        ? `Chart extraction: ${cov.totalFiles} ${cov.totalFiles === 1 ? 'file' : 'files'}, page counts unavailable`
-        : `Chart extraction: ${cov.coveragePct}% of pages extracted (${cov.extractedPages} of ${cov.totalPages})`;
 
   function openFile(documentId: string | null, fileName: string, isImage: boolean) {
     if (documentId == null) return;
@@ -103,18 +123,39 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
     <SectionCard
       title="Chart extraction"
       status={
-        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${chip.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
+        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${chip.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : analysisNotAnalyzed ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
           {chip.label}
         </span>
       }
     >
       <div className="flex flex-wrap items-start justify-between gap-3 text-sm text-slate-800">
         <div className="max-w-2xl">
-          {/* headline carries the % + page count (e.g. "100% of pages extracted (40 of 40)") */}
-          <p className="font-semibold">{headline}</p>
+          {/* TWO clearly-labeled, plain-English stages (Ryan 2026-06-23). Never one "100% Complete" that
+              hides a failed analysis. Stage 1 = Pages read (OCR). Stage 2 = Chart analysis (the structured
+              chart the SOAP/verdict is built on). */}
+          <dl className="space-y-1.5">
+            <div className="flex flex-wrap items-baseline gap-x-2">
+              <dt className="text-[13px] font-semibold text-slate-800">Pages read</dt>
+              <dd className="text-[13px] text-slate-700">{pagesRead.label}</dd>
+              <span className="text-xs text-slate-400">(documents scanned to text)</span>
+            </div>
+            <div className="flex flex-wrap items-baseline gap-x-2">
+              <dt className="text-[13px] font-semibold text-slate-800">Chart analysis</dt>
+              <dd className={`text-[13px] ${analysisComplete ? 'text-emerald-700' : analysisNotAnalyzed ? 'text-slate-500' : 'text-amber-700'}`}>{chartAnalysis.label}</dd>
+              <span className="text-xs text-slate-400">(builds the chart the assessment uses)</span>
+            </div>
+          </dl>
+          {/* Plain reason + likely-cause file when the analysis stage is not clean. */}
+          {!analysisComplete && chartAnalysis.reason ? (
+            <p className="mt-1.5 text-[13px] text-amber-800">
+              {chartAnalysis.reason}
+              {chartAnalysis.likelyCauseFile ? ` The likely cause is a large records file (${chartAnalysis.likelyCauseFile}).` : ''}
+            </p>
+          ) : null}
           {isComplete ? (
-            <p className={`mt-1 ${tone.sub}`}>Every uploaded chart page was successfully read and extracted.</p>
-          ) : (
+            <p className={`mt-1 ${tone.sub}`}>Every uploaded chart page was read and analyzed.</p>
+          ) : analysisComplete ? (
+            // OCR/per-page-only caveats (analysis itself finished cleanly).
             <p className={`mt-1 ${tone.sub}`}>
               {approximate ? 'Some page counts are unavailable, so this is approximate. ' : ''}
               {unreadable > 0
@@ -126,7 +167,7 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
                     : ''}
               This does not block drafting.
             </p>
-          )}
+          ) : null}
           {/* Capture breakdown — only when the vision path stamped per-page signals. Blanks shown as a
               calm reassurance, never as items to chase. */}
           {pb && pb.pagesWithSignal > 0 ? (

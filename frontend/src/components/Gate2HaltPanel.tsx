@@ -62,9 +62,18 @@ function defectLabel(id: string): string {
  * the one action is to re-draft. Styled consistently with the dx halt card (amber), but the verb is
  * "re-draft" and the defect list shows the specific issue(s) + section(s) from the FRN park payload.
  */
-function BodyQualityHoldCard({ c, payload, onChanged }: { readonly c: CaseDetail; readonly payload: Gate2HaltPayload; readonly onChanged: () => void | Promise<void> }) {
+function BodyQualityHoldCard({ c, payload, job, onChanged, onOpenEditor }: { readonly c: CaseDetail; readonly payload: Gate2HaltPayload; readonly job?: DraftJob; readonly onChanged: () => void | Promise<void>; readonly onOpenEditor?: () => void }) {
+  // A produced draft exists when /halt confirmed + persisted an artifact key (option A, 2026-06-22).
+  // When it does, the hold is ADVISORY/editable — the RN can open + fix the flagged section by hand
+  // (far cheaper than a ~$15 re-draft). When no key exists (the txt was genuinely missing), the only
+  // path is re-draft. The presence of the key is the SAME signal getLetter uses to resolve the letter.
+  const hasProducedDraft =
+    (typeof job?.artifactTxtS3Key === 'string' && job.artifactTxtS3Key.length > 0) ||
+    (typeof job?.artifactPdfS3Key === 'string' && job.artifactPdfS3Key.length > 0);
+  const canOpenEditor = hasProducedDraft && onOpenEditor !== undefined;
+
   const message = payload.plainEnglish || payload.operatorMessage || c.operatorMessage
-    || 'Drafting completed, but the automated quality gate found a letter-killing issue that must be fixed before a physician sees this letter. The draft was not discarded; it needs a targeted re-draft.';
+    || 'The automated quality gate flagged a letter-killing issue that should be fixed before a physician sees this letter. The draft was not discarded.';
   // Accept BOTH payload shapes: the forthcoming richer `material:[{id,section,detail}]` and the
   // current `materialIds:[string]`. Normalize to a single render list.
   const findings = (payload.material && payload.material.length > 0)
@@ -81,13 +90,36 @@ function BodyQualityHoldCard({ c, payload, onChanged }: { readonly c: CaseDetail
     redraft.mutate();
   }
 
+  // FORWARD DOOR (2026-06-22, "see/edit/FORWARD — never a trap"): a body-quality hold is a SOFT
+  // caution, not a block. After the RN opens + fixes the flagged section by hand, the held letter
+  // must move FORWARD to the doctor — not require a ~$15 re-draft to escape the park. This sends
+  // needs_rn_decision -> physician_review (the edge added to case-status-transitions.ts; the backend
+  // mirrors the rn_review "send to doctor" assigned-physician guard). The truthful-attestation safety
+  // is untouched: sign-off still demands honest answers — it gates on ANSWER CONTENT at the doctor,
+  // not on blocking forward progress here. Shown only when a real produced draft exists (otherwise
+  // there's nothing to send — re-draft is the only path).
+  const sendToDoctor = useMutation({
+    mutationFn: () => transitionCaseStatus(c.id, { from: c.status, to: 'physician_review', version: c.version, transitionReason: 'RN resolved body-quality hold — sent to physician for review' }),
+    onSuccess: () => void onChanged(),
+    onError: (e: unknown) => window.alert(`Could not send to the doctor — ${describeApiError(e)}`),
+  });
+  function doSendToDoctor() {
+    if (!window.confirm('Send this letter to the doctor for review? Do this once the flagged section has been fixed in the editor. The doctor still reviews and signs off before delivery.')) return;
+    sendToDoctor.mutate();
+  }
+
   return (
     <Card className="rounded-2xl border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 p-5 shadow-aegis-card">
       <div className="flex items-center gap-2">
         <svg className="h-5 w-5 flex-none text-amber-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.515 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>
-        <h2 className="text-base font-semibold text-amber-900">Quality hold — letter held for re-draft</h2>
+        <h2 className="text-base font-semibold text-amber-900">
+          {canOpenEditor ? 'Quality check — review before this goes to the doctor' : 'Quality hold — letter held for re-draft'}
+        </h2>
       </div>
       <p className="mt-2 text-sm text-amber-900">{message}</p>
+      {canOpenEditor ? (
+        <p className="mt-1 text-sm text-amber-900">The draft is ready to open — you can fix the flagged section by hand in the editor, or re-draft it.</p>
+      ) : null}
       {findings.length > 0 ? (
         <ul className="mt-3 space-y-1.5 rounded-md border border-amber-200 bg-white p-3 text-sm">
           {findings.map((f) => (
@@ -103,19 +135,47 @@ function BodyQualityHoldCard({ c, payload, onChanged }: { readonly c: CaseDetail
         </ul>
       ) : null}
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button variant="secondary" size="sm" className="border border-amber-600 bg-amber-600 text-white shadow-sm hover:bg-amber-700" disabled={redraft.isPending} onClick={doRedraft}>Re-draft the letter</Button>
+        {canOpenEditor ? (
+          <Button variant="secondary" size="sm" className="border border-amber-600 bg-amber-600 text-white shadow-sm hover:bg-amber-700" onClick={onOpenEditor}>Open letter editor</Button>
+        ) : null}
+        {canOpenEditor ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            className="border border-amber-300 bg-white text-amber-900 shadow-sm hover:bg-amber-50"
+            disabled={sendToDoctor.isPending}
+            onClick={doSendToDoctor}
+          >
+            Send to doctor for review
+          </Button>
+        ) : null}
+        <Button
+          variant="secondary"
+          size="sm"
+          className={canOpenEditor ? 'border border-amber-300 bg-white text-amber-900 shadow-sm hover:bg-amber-50' : 'border border-amber-600 bg-amber-600 text-white shadow-sm hover:bg-amber-700'}
+          disabled={redraft.isPending}
+          onClick={doRedraft}
+        >
+          Re-draft the letter
+        </Button>
       </div>
-      <p className="mt-3 text-xs text-amber-800">A re-draft re-runs the full draft to fix the flagged section(s). The prior draft is kept for reference. This is a content-quality hold, not a diagnosis or records issue.</p>
+      <p className="mt-3 text-xs text-amber-800">
+        {canOpenEditor
+          ? 'Fix the flagged section by hand in the editor (a new version), then Send to doctor for review — the doctor still reviews and signs off before delivery. This is a soft quality caution, not a block: re-draft is optional. Not a diagnosis or records issue.'
+          : 'A re-draft re-runs the full draft to fix the flagged section(s). The prior draft is kept for reference. This is a content-quality hold, not a diagnosis or records issue.'}
+      </p>
     </Card>
   );
 }
 
-export function Gate2HaltPanel({ c, job, onChanged }: { readonly c: CaseDetail; readonly job?: DraftJob; readonly onChanged: () => void | Promise<void> }) {
+export function Gate2HaltPanel({ c, job, onChanged, onOpenEditor }: { readonly c: CaseDetail; readonly job?: DraftJob; readonly onChanged: () => void | Promise<void>; readonly onOpenEditor?: () => void }) {
   const payload: Gate2HaltPayload = (job?.haltPayloadJson as Gate2HaltPayload | null | undefined) ?? {};
 
-  // Body-quality park → a distinct "held for re-draft" card (no dx switch/override/proceed options).
+  // Body-quality park → a distinct card. When a draft was produced (artifact key present), the hold is
+  // ADVISORY/editable (open the editor + fix by hand); otherwise re-draft is the only path. The dx
+  // switch/override/proceed options never apply to a content defect.
   if (isBodyQualityHalt(payload)) {
-    return <BodyQualityHoldCard c={c} payload={payload} onChanged={onChanged} />;
+    return <BodyQualityHoldCard c={c} payload={payload} {...(job ? { job } : {})} onChanged={onChanged} {...(onOpenEditor ? { onOpenEditor } : {})} />;
   }
 
   const message = payload.plainEnglish || payload.operatorMessage || c.operatorMessage || 'The pre-draft verification could not confirm the diagnosis and/or in-service event. Decide how to proceed.';

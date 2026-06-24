@@ -144,6 +144,50 @@ describe('Gate1ChecklistModal pre-fill', () => {
     expect(screen.getByRole('button', { name: 'Start draft' })).toBeDisabled();
   });
 
+  // #6 (2026-06-21): a default-fallback framing source with NO route-picker plan must read "framing not yet
+  // computed", never the misleading "default (direct)".
+  it('#6 shows "framing not yet computed" (NOT "default (direct)") on the no-plan default_direct path', async () => {
+    readinessMock.mockResolvedValue(readiness({
+      routePlan: undefined as never,
+      caseFraming: {
+        version: 1, framing: 'direct', grantedScAnchors: [], upstreamScCondition: null,
+        framingChoice: null, claimType: 'supplemental', source: 'default_direct',
+        derivedAt: '2026-06-10T00:00:00.000Z',
+      } as never,
+    }));
+    renderModal();
+    await waitFor(() => expect(screen.getByText(/framing not yet computed/)).toBeInTheDocument());
+    expect(screen.queryByText(/default \(direct\)/)).not.toBeInTheDocument();
+  });
+
+  // #7 (2026-06-21): when the route-picker brain feed was unavailable, the degraded (deterministic-only) state
+  // must be VISIBLE.
+  it('#7 shows the degraded note when brainConsulted is false', async () => {
+    readinessMock.mockResolvedValue(readiness({
+      brainConsulted: false,
+      degradedNote: 'Plan unavailable — deterministic check only.',
+    } as never));
+    renderModal();
+    await waitFor(() => expect(screen.getByText(/Plan unavailable — deterministic check only/)).toBeInTheDocument());
+  });
+
+  it('#7 does NOT show the degraded note when the brain was consulted', async () => {
+    readinessMock.mockResolvedValue(readiness({ brainConsulted: true } as never));
+    renderModal();
+    await waitFor(() => expect(readinessMock).toHaveBeenCalled());
+    expect(screen.queryByText(/deterministic check only/)).not.toBeInTheDocument();
+  });
+
+  // #2: brain gaps that map to no checklist item are surfaced.
+  it('#2 surfaces unclassifiedGaps to the RN', async () => {
+    readinessMock.mockResolvedValue(readiness({
+      unclassifiedGaps: [{ fact: 'no MRI on file', why: 'imaging would strengthen the claim' }],
+    } as never));
+    renderModal();
+    await waitFor(() => expect(screen.getByText(/additional gaps to review/)).toBeInTheDocument());
+    expect(screen.getByText(/no MRI on file/)).toBeInTheDocument();
+  });
+
   it('fail-open: feed error → blank modal, manual fill still works', async () => {
     readinessMock.mockRejectedValue(new Error('boom'));
     renderModal();

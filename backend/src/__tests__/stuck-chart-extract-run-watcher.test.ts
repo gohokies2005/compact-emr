@@ -82,7 +82,7 @@ describe('stuck-chart-extract-run-watcher reap predicate', () => {
       },
       fileReadStatus: { findMany: vi.fn(async () => statuses) },
       document: { findMany: vi.fn(async () => docs) },
-      activityLog: { create: vi.fn(async (a: unknown) => { created.push(a); }) },
+      activityLog: { create: vi.fn(async (a: unknown) => { created.push(a); }), findMany: vi.fn(async () => []) },
     } as unknown as PrismaClient;
 
     const res = await handler(prisma);
@@ -90,6 +90,35 @@ describe('stuck-chart-extract-run-watcher reap predicate', () => {
     expect(enqueueMock).toHaveBeenCalledTimes(1);
     expect(enqueueMock).toHaveBeenCalledWith(expect.anything(), 'case-1');
     expect(created.length).toBe(1); // the chart_extract_run_enqueued_missing audit row
+  });
+
+  it('never-enqueued backstop: heals an OLD case via a recent document_deleted (read-status outside the 24h window) — the Enoch fix', async () => {
+    // The case was OCR'd long ago, so fileReadStatus is OUTSIDE the lookback → the read-status source
+    // returns nothing. A file was just deleted → a 'document_deleted' activity is recent. The fix pulls
+    // the case back into scope via that activity, and (all-terminal, no matching run) enqueues the run.
+    enqueueMock.mockClear();
+    const docs = [{ id: 'd1', s3Key: 'cases/old-case/u-scan.pdf' }];
+    const statuses = [{ caseId: 'old-case', filePath: 'cases/old-case/u-scan.pdf', terminalStatus: 'read' }];
+    const created: unknown[] = [];
+    const prisma = {
+      chartExtractionRun: {
+        findMany: vi.fn(async () => []),                 // no stuck runs
+        updateMany: vi.fn(async () => ({ count: 0 })),
+        findFirst: vi.fn(async () => null),              // NO run for this doc-set → missing
+      },
+      // No read-status rows in the 24h window (the candidate scan has no caseId filter → []); the
+      // per-case lookups DO carry where.caseId → return the case's terminal status.
+      fileReadStatus: { findMany: vi.fn(async (args: { where?: { caseId?: string } }) => (args.where?.caseId ? statuses : [])) },
+      document: { findMany: vi.fn(async () => docs) },
+      activityLog: {
+        create: vi.fn(async (a: unknown) => { created.push(a); }),
+        findMany: vi.fn(async () => [{ caseId: 'old-case' }]), // recent document_deleted
+      },
+    } as unknown as PrismaClient;
+
+    const res = await handler(prisma);
+    expect(res.enqueuedMissing).toBe(1);
+    expect(enqueueMock).toHaveBeenCalledWith(expect.anything(), 'old-case');
   });
 
   it('never-enqueued backstop: does NOT enqueue when a run already matches the current doc-set hash', async () => {
@@ -105,7 +134,7 @@ describe('stuck-chart-extract-run-watcher reap predicate', () => {
       },
       fileReadStatus: { findMany: vi.fn(async () => statuses) },
       document: { findMany: vi.fn(async () => docs) },
-      activityLog: { create: vi.fn(async () => {}) },
+      activityLog: { create: vi.fn(async () => {}), findMany: vi.fn(async () => []) },
     } as unknown as PrismaClient;
 
     const res = await handler(prisma);
@@ -128,7 +157,7 @@ describe('stuck-chart-extract-run-watcher reap predicate', () => {
       },
       fileReadStatus: { findMany: vi.fn(async () => statuses) },
       document: { findMany: vi.fn(async () => docs) },
-      activityLog: { create: vi.fn(async () => {}) },
+      activityLog: { create: vi.fn(async () => {}), findMany: vi.fn(async () => []) },
     } as unknown as PrismaClient;
 
     const res = await handler(prisma);
@@ -165,7 +194,7 @@ describe('stuck-chart-extract-run-watcher reap predicate', () => {
         document: {
           findMany: vi.fn(async (args: { where: { caseId: string } }) => [{ id: `d-${args.where.caseId}`, s3Key: `cases/${args.where.caseId}/u-scan.pdf` }]),
         },
-        activityLog: { create: vi.fn(async () => {}) },
+        activityLog: { create: vi.fn(async () => {}), findMany: vi.fn(async () => []) },
       } as unknown as PrismaClient;
 
       const res = await handler(prisma);
@@ -190,7 +219,7 @@ describe('stuck-chart-extract-run-watcher reap predicate', () => {
         chartExtractionRun: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })), findFirst: vi.fn(async () => null) },
         fileReadStatus: { findMany: vi.fn(async (args: { where?: { caseId?: string } }) => { const cid = args.where?.caseId; return cid ? allStatuses.filter((s) => s.caseId === cid) : allStatuses; }) },
         document: { findMany: vi.fn(async (args: { where: { caseId: string } }) => [{ id: `d-${args.where.caseId}`, s3Key: `cases/${args.where.caseId}/u.pdf` }]) },
-        activityLog: { create: vi.fn(async () => {}) },
+        activityLog: { create: vi.fn(async () => {}), findMany: vi.fn(async () => []) },
       } as unknown as PrismaClient;
 
       const res = await handler(prisma);

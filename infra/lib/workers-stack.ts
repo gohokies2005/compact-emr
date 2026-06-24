@@ -553,6 +553,40 @@ export class WorkersStack extends Stack {
     dlqDepthAlarm('DraftJobDlqDepthAlarm', `compact-emr-${config.envName}-draft-job-dlq-depth`, draftJobDlq, 'A drafter job');
     dlqDepthAlarm('DoctorPackAssemblerDlqDepthAlarm', `compact-emr-${config.envName}-doctor-pack-assembler-dlq-depth`, dpDlq, 'A doctor-pack assembly message');
 
+    // ===== Chart-extract HARD-FAILURE alarm (run marked failed / semantic-extraction crash) =====
+    // The chart-extract worker's top-level catch logs {"msg":"chart_extract_error",...} on a failed
+    // attempt (handler.ts); on the final SQS attempt it posts the ChartExtractionRun status='failed'.
+    // This is the CRASH / failed-run class — DISTINCT from the advisory chart_extract_* coverage-gap
+    // WARN lines in chart-extract-llm.ts (those are console.warn on an otherwise-successful run and
+    // carry an `event` field, not `msg`). Filtering on $.msg = "chart_extract_error" pages ONLY on a
+    // real failure. Modeled on the OCR vision spend MetricFilter+Alarm above (same fromLogGroupName
+    // pattern, since the worker uses implicit logRetention with no explicit LogGroup construct).
+    const chartExtractLogGroup = logs.LogGroup.fromLogGroupName(
+      this, 'ChartExtractLogGroupRef', `/aws/lambda/${chartExtractWorker.functionName}`,
+    );
+    const chartExtractErrorMetricFilter = new logs.MetricFilter(this, 'ChartExtractErrorMetricFilter', {
+      logGroup: chartExtractLogGroup,
+      metricNamespace: `compact-emr-${config.envName}`,
+      metricName: 'ChartExtractErrors',
+      filterPattern: logs.FilterPattern.stringValue('$.msg', '=', 'chart_extract_error'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const chartExtractErrorsAlarm = new cloudwatch.Alarm(this, 'ChartExtractErrorsAlarm', {
+      alarmName: `compact-emr-${config.envName}-chart-extract-errors`,
+      alarmDescription:
+        `The chart-extract worker logged chart_extract_error (semantic-extraction crash / failed run). ` +
+        `On the final SQS attempt the ChartExtractionRun is marked failed and the coverage card now reads ` +
+        `"chart analysis didn't finish — retry" instead of a false "100% Complete". Inspect ` +
+        `/aws/lambda/compact-emr-${config.envName}-chart-extract for the runId + error. (2026-06-23)`,
+      metric: chartExtractErrorMetricFilter.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    chartExtractErrorsAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+
     // ===== Doctor Pack assembler Lambda =====
     // The WeasyPrint dependencies (cairo, pango, gobject) require a custom layer.
     // For now we declare the Lambda; the layer ARN is wired via env var DOCTOR_PACK_WEASYPRINT_LAYER_ARN
@@ -1098,6 +1132,90 @@ export class WorkersStack extends Stack {
       alarmName: `compact-emr-${config.envName}-jotform-sweep-errors`,
       alarmDescription: 'The hourly Jotform intake safety-net sweep is erroring (IAM / Jotform / code). Intake submissions on unregistered forms may be silently dropped. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-sweep.',
       metric: jotformSweep.metricErrors({ statistic: 'Sum', period: Duration.hours(1) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // ===== Real-time webhook DROP detector (2026-06-23 incident, Herman Charles / CKD) =====
+    // The SweepErrorsAlarm above only fires if the sweep itself throws. It is BLIND to the failure
+    // that actually lost Herman's Stage 1 + Stage 2: Jotform silently DROPPED both real-time webhook
+    // deliveries (no 5xx on our side, nothing in the DLQ — the drop is UPSTREAM of SQS). The sweep
+    // recovered both an hour later, but with NO signal that the real-time path had failed. This
+    // MetricFilter counts each submission the sweep had to RECOVER (doorbell returned 'enqueued' on a
+    // replay = there was no ready row, i.e. the live webhook never delivered it). In a healthy system
+    // this is ~0/hr (every replay is a noop-duplicate). A non-zero hour means Jotform is dropping
+    // real-time deliveries — turn the previously-silent drop loud so ops can watch / re-register
+    // webhooks before the next intake is lost beyond the sweep's reach.
+    // The sweep uses the deprecated `logRetention` prop, so its log group is created by a custom
+    // resource (not a CDK LogGroup construct) — import it BY NAME to attach the MetricFilter without
+    // fighting the retention custom resource for ownership of the same group. The name is the Lambda
+    // log-group convention `/aws/lambda/<functionName>`.
+    const jotformSweepLogGroup = logs.LogGroup.fromLogGroupName(
+      this, 'JotformSweepLogGroupRef', `/aws/lambda/${jotformSweep.functionName}`);
+    const webhookMissedMetric = jotformSweepLogGroup.addMetricFilter('JotformWebhookMissedMetric', {
+      // Matches the per-recovery line emitted in runSweep:
+      //   { "msg": "jotform-sweep: recovered-missed-webhook", "submissionId": ..., ... }
+      filterPattern: logs.FilterPattern.literal('{ $.msg = "jotform-sweep: recovered-missed-webhook" }'),
+      metricNamespace: `compact-emr/${config.envName}/intake`,
+      metricName: 'WebhookDeliveriesMissedRecovered',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    new cloudwatch.Alarm(this, 'JotformWebhookMissedAlarm', {
+      alarmName: `compact-emr-${config.envName}-jotform-webhook-missed`,
+      alarmDescription: 'The hourly sweep had to RECOVER one+ Jotform submissions whose real-time webhook delivery was silently dropped (Jotform-side miss / our 5xx in a deploy window / a disabled webhook). The intake was saved by the sweep but the real-time path is failing — verify webhook registration on the affected form(s). This is the exact failure that lost Herman Charles (CKD) on 2026-06-23. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-sweep for the recovered-missed-webhook lines.',
+      metric: webhookMissedMetric.metric({ statistic: 'Sum', period: Duration.hours(1) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // ===== jotform-ingest fail-loud alarms (2026-06-22, Travis Spring intake-loss class) =====
+    // The SECOND systemic silent intake-loss leak: the jotform-ingest worker would fail the WHOLE
+    // submission when ONE file tripped the 50MB cap — it PATCHed the intake to status=failed and
+    // returned SUCCESS to SQS (so the DLQ stayed empty and NOTHING alarmed). Travis Spring's Stage-2
+    // (a 65.2MB attachment) vanished for ~2 days unseen. The worker fix makes one bad file a
+    // skipped-not-fatal SKIP; these two alarms turn whatever genuine failures REMAIN loud.
+
+    // (a) Lambda Errors > 0. Mirrors JotformSweepErrorsAlarm. A throw out of the handler (the worker
+    // exhausting retries into the DLQ, an unhandled bug, the API callback failing) breaches within the
+    // hour. NOT-breaching on missing data so idle hours don't false-alarm. No SNS yet (console-visible,
+    // matches the other intake alarms) — wire an ops topic when one exists.
+    new cloudwatch.Alarm(this, 'JotformIngestErrorsAlarm', {
+      alarmName: `compact-emr-${config.envName}-jotform-ingest-errors`,
+      alarmDescription: 'The jotform-ingest worker is erroring (handler throw / failing API callback / DLQ-bound retries). A veteran intake may be stuck or lost. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-ingest.',
+      metric: jotformIngest.metricErrors({ statistic: 'Sum', period: Duration.hours(1) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // (b) Swallowed-failure detector: any intake the worker PATCHes to status=failed. This is the
+    // EXACT class that hid Travis Spring — a per-submission failure that returns SUCCESS to SQS, so
+    // it never reaches the DLQ and the Errors alarm above never sees it. The worker emits one
+    // `jotform-ingest: FAILED` JSON line per failed intake (now carrying submissionId); a MetricFilter
+    // counts those lines and the alarm fires the same hour. After the per-file-isolation fix an
+    // oversized file is a SKIP (no FAILED line), so any FAILED here is a genuine ingest failure worth
+    // looking at — an intake sitting in `failed` instead of `ready`. Modeled on JotformWebhookMissedMetric.
+    // The Lambda uses the deprecated `logRetention` prop, so its log group is owned by a retention
+    // custom resource — import it BY NAME to attach the MetricFilter without fighting for ownership.
+    const jotformIngestLogGroup = logs.LogGroup.fromLogGroupName(
+      this, 'JotformIngestLogGroupRef', `/aws/lambda/${jotformIngest.functionName}`);
+    const ingestFailedMetric = jotformIngestLogGroup.addMetricFilter('JotformIngestFailedMetric', {
+      filterPattern: logs.FilterPattern.literal('{ $.msg = "jotform-ingest: FAILED" }'),
+      metricNamespace: `compact-emr/${config.envName}/intake`,
+      metricName: 'IntakeIngestFailed',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    new cloudwatch.Alarm(this, 'JotformIngestFailedAlarm', {
+      alarmName: `compact-emr-${config.envName}-jotform-ingest-failed`,
+      alarmDescription: 'One+ Jotform intakes were PATCHed to status=failed by the ingest worker in the last hour — a SWALLOWED failure (returns SUCCESS to SQS, never hits the DLQ). This is the silent-loss class that hid Travis Spring for ~2 days. The intake is sitting in the pool as failed, not ready. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-ingest for the FAILED lines (submissionId + error included) and use the RN Retry button or backfill.',
+      metric: ingestFailedMetric.metric({ statistic: 'Sum', period: Duration.hours(1) }),
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, type S3Client } from '@aws-sdk/client-s3';
 import { HttpError } from '../http/errors.js';
 import type { AppDb } from './db-types.js';
 
@@ -25,6 +25,77 @@ export async function resolveCurrentTxtKey(db: AppDb, caseId: string, currentVer
   const job = await db.draftJob.findFirst({ where: { caseId, version: currentVersion } });
   if (job !== null && typeof job.artifactTxtS3Key === 'string') {
     return { version: job.version, txtKey: job.artifactTxtS3Key };
+  }
+  return null;
+}
+
+/**
+ * STRANDED-LETTER RECOVERY support (CLM-9925837B7B, 2026-06-23): HeadObject existence probe.
+ * Returns false on NoSuchKey/NotFound, re-throws anything else (a transient S3 error must NOT be
+ * silently treated as "object absent" — that would skip a good letter). Shared by the letter
+ * router's read-path resolver, which walks DB versions DESC across BOTH artifact tables and returns
+ * the newest version whose TXT object actually EXISTS — so a failed re-draft that advanced
+ * Case.currentVersion to a dead version can never strand the prior good letter behind a 404.
+ *
+ * Two rules baked into that walk (learned from the live data, enforced by the caller):
+ *   1) NEVER reconstruct the S3 key from the DB version. The drafter's S3 folder counter and the DB
+ *      `version` field are OFFSET (live: DB v72 → S3 folder v53). Each row's stored artifactTxtS3Key
+ *      is authoritative; we trust the key, not an arithmetic guess.
+ *   2) A non-null artifactTxtS3Key is NOT proof the object exists — a failed run can carry a DANGLING
+ *      key (live: DraftJob v99 → .../v97/v97.txt, never written). HeadObject-verify before returning.
+ */
+export async function headObjectExists(s3: S3Client, bucketName: string, key: string): Promise<boolean> {
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: bucketName, Key: key }));
+    return true;
+  } catch (e: unknown) {
+    const name = e instanceof Error ? e.name : '';
+    if (name === 'NoSuchKey' || name === 'NotFound') return false;
+    throw e;
+  }
+}
+
+export interface S3DrafterArtifactRef {
+  version: number;
+  txtKey: string;
+  pdfKey: string | null;
+  docxKey: string | null;
+}
+
+/**
+ * S3-TRUTH FALLBACK (CLM-9925837B7B, 2026-06-23): when NO DB row resolves to a present artifact — a good
+ * drafter letter exists in S3 but its DraftJob/LetterRevision row lost or offset its key (Hackworth v73 is
+ * in S3 but currentVersion points at the failed v97/v98 and no row carries a resolvable key) — discover the
+ * letter directly from S3. Lists drafter-artifacts/<caseId>/vN/ folders, picks the NEWEST vN whose vN.txt
+ * object actually exists, returns its txt/pdf/docx keys. DISCOVERY of what exists (S3 = artifact source of
+ * truth), not key-reconstruction from a DB version. Fail-soft: any list/probe error returns null.
+ */
+export async function resolveLatestS3DrafterArtifact(s3: S3Client, bucketName: string, caseId: string): Promise<S3DrafterArtifactRef | null> {
+  const prefix = `drafter-artifacts/${caseId}/`;
+  let listed;
+  try {
+    listed = await s3.send(new ListObjectsV2Command({ Bucket: bucketName, Prefix: prefix, Delimiter: '/' }));
+  } catch {
+    return null;
+  }
+  const versions: number[] = [];
+  for (const cp of listed.CommonPrefixes ?? []) {
+    const m = /\/v(\d+)\/$/.exec(cp.Prefix ?? '');
+    if (m !== null) versions.push(Number(m[1]));
+  }
+  versions.sort((a, b) => b - a);
+  for (const v of versions) {
+    const txtKey = `${prefix}v${v}/v${v}.txt`;
+    if (await headObjectExists(s3, bucketName, txtKey)) {
+      const pdfKey = `${prefix}v${v}/v${v}.pdf`;
+      const docxKey = `${prefix}v${v}/v${v}.docx`;
+      return {
+        version: v,
+        txtKey,
+        pdfKey: (await headObjectExists(s3, bucketName, pdfKey)) ? pdfKey : null,
+        docxKey: (await headObjectExists(s3, bucketName, docxKey)) ? docxKey : null,
+      };
+    }
   }
   return null;
 }

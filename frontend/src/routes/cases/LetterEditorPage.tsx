@@ -44,13 +44,24 @@ export function describeApproveError(error: unknown): string {
   return 'Letter could not be approved (a sign-off + a ready chart are required). Please retry.';
 }
 
+// WarningList NOISE CUT (Ryan 2026-06-23): the save-time sanity check (letter-sanity.ts) emits both
+// MEANINGFUL findings (something is actually wrong with the letter) and COSMETIC style findings (em-dash,
+// engineering-jargon, sentence-variance, banned-word) that fired on every save and trained RNs to ignore the
+// whole panel. We surface ONLY the meaningful ones here: a leftover placeholder/scaffolding token, and a
+// modification to a locked block. (Editorial/meta-instruction LEAK tokens — "canonical/template/rewrite as" —
+// are shown SEPARATELY via the non-blocking `letter.leaks` block below, so they are still surfaced.) The
+// cosmetic rules stay in letter-sanity.ts but are not shown to the RN; cleanProseForSave already auto-fixes
+// dashes/quotes on every save, so the em-dash line was doubly redundant.
+const KEPT_WARNING_RULES: ReadonlySet<string> = new Set(['placeholder_token_introduced', 'locked_block_corrupted']);
+
 function WarningList({ warnings }: { readonly warnings: readonly LetterWarning[] }) {
-  if (warnings.length === 0) return null;
+  const kept = warnings.filter((w) => KEPT_WARNING_RULES.has(w.rule));
+  if (kept.length === 0) return null;
   return (
     <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
-      <div className="text-sm font-semibold text-amber-900">Sanity warnings</div>
+      <div className="text-sm font-semibold text-amber-900">Needs a look before sending</div>
       <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-800">
-        {warnings.map((w) => <li key={w.rule}>{w.detail}</li>)}
+        {kept.map((w) => <li key={w.rule}>{w.detail}</li>)}
       </ul>
     </div>
   );
@@ -282,12 +293,12 @@ export function LetterEditorPage() {
             meta-commentary ("canonical/template/rewrite as") or a database ID slipped into the letter
             body. The signature is never blocked; this just makes the physician/RN see + fix it. */}
         {letter.leaks && letter.leaks.length > 0 ? (
-          <div className="rounded-lg border border-rose-300 bg-rose-50 p-4">
-            <div className="text-sm font-semibold text-rose-900">This letter contains content that should be removed before delivery</div>
-            <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-rose-800">
-              {letter.leaks.map((l) => <li key={l.code}>{l.note} &mdash; &ldquo;&hellip;{l.match}&hellip;&rdquo;</li>)}
+          <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+            <div className="text-sm font-semibold text-amber-900">Optional cleanup — this does NOT block signing or sending to the doctor</div>
+            <p className="mt-1 text-xs text-amber-800">We spotted formatting that&rsquo;s usually tidied before a letter goes out. It does not affect the medical opinion. Fix it by editing the highlighted text below, or leave it for the doctor:</p>
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-800">
+              {letter.leaks.map((l) => <li key={l.code}><span className="font-medium">{l.note}</span> &mdash; found here: &ldquo;&hellip;{l.match}&hellip;&rdquo;</li>)}
             </ul>
-            <div className="mt-2 text-xs text-rose-700">Edit the affected section below to remove it. (This does not block signing.)</div>
           </div>
         ) : null}
         <WarningList warnings={warnings} />

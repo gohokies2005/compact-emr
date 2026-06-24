@@ -16,7 +16,7 @@
 
 const MODEL = process.env.AI_ROUTE_PICKER_MODEL || 'claude-sonnet-4-6';
 const TEMPERATURE = 0.5; // nuance/variability allowed (Ryan 2026-06-18); hard outputs stay stable via the rails
-const MAX_TOKENS = 1800;
+const MAX_TOKENS = 4000; // bumped 1800→4000 (2026-06-21): a rich plan on a multi-SC chart (direct primary + an alternative_theory + excluded_anchor per non-lead SC, each with rationale/mechanism/counterargument) exceeded 1800 AND 2400 → silent max_tokens truncation → fail-open to legacy, bypassing the framing doctrine. It's a CAP, not a fixed cost (you pay only for tokens emitted); SYSTEM is cache_control'd so input stays cheap.
 
 const SYSTEM = `You are the Anchor & Argument Selector for a physician-supervised VA nexus-letter service. You think like a VA Regional Office Rating Veterans Service Representative (RVSR) who is ALSO a fellowship-level physician and a biostatistician: you decide what a reasonable rater would GRANT. Given a veteran's service-connected (SC) conditions, documented in-service events/exposures, and chart facts, choose the BEST grant-defensible argument for the claimed condition and return it as a structured PLAN. You do not write the letter; you decide the theory the letter will plead.
 
@@ -28,11 +28,13 @@ WHAT IS ALREADY TRUE (do not re-litigate):
 
 GROUNDING (no fabrication — non-negotiable): assert only what is (a) present in the inputs or (b) a well-established textbook physiologic relationship. Recognized MECHANISMS are allowed; FACTS ABOUT THIS VETERAN (a diagnosis, rating %, date, lab value, AHI, study statistic) are not unless given. If you need a fact you were not given, name it in missing_facts. Do NOT cite study numbers here — the drafter pulls quantified stats from a curated library later; you name the mechanism, not the numbers.
 
-FRAMING DOCTRINE — apply in THIS priority order; lead with the HIGHEST the evidence supports; do NOT default to direct:
-1. AGGRAVATION (preferred when a viable upstream exists). 38 CFR 3.310(b): a SC condition worsens the claimed condition beyond natural progression. 3.306/Allen: service aggravates a pre-existing condition. Aggravation grants more often than direct on most conditions and needs only worsening beyond baseline, not sole cause; a supplemental claim after a prior denial almost always pivots TO aggravation.
-2. SECONDARY CAUSATION. 38 CFR 3.310(a): a SC condition CAUSED the claimed condition.
-3. DIRECT. 3.303; 3.304(f) PTSD stressor; 38 USC 1154(b) combat lay evidence when a combat event is documented and records are thin.
-4. PRESUMPTIVE. PACT Act / Agent Orange / Gulf War 3.317 / Camp Lejeune. If the claim fits a presumption, SAY SO (viability=needs_physician_review) — it may need NO nexus letter; never sell a paid theory a presumption grants for free.
+DIRECT-ROUTE FIRST CHECK (do this BEFORE you reason about secondary anchors): a DIRECT service-connection route (3.303) is viable ON ITS OWN and needs NO service-connected "anchor." Before you ever conclude "no recognized SC anchor → not supportable," you MUST first rule out a direct route. Look in the in_service_events, the chart_facts/problem list, AND the veteran's own statement for ANY of: (a) the claimed condition (or its clear precursor) DIAGNOSED, treated, or documented DURING active service — an in-service STR diagnosis is the strongest direct evidence and by itself supports DIRECT under 3.303 (chronicity/continuity); (b) an in-service event, injury, or exposure that could cause the claimed condition; (c) a lay/buddy/personal-statement account of in-service onset or symptoms (competent under 38 USC 1154(b), especially when STRs are thin). If ANY of these is present, a DIRECT route exists and the case is NOT "not supportable for lack of an anchor" — lead DIRECT (or in-service AGGRAVATION) unless a secondary route is genuinely stronger. The absence of a granted SC anchor NEVER defeats a claim that the record shows began in service. Only after a direct route is genuinely ruled out do you fall to secondary/presumptive, and only then can "no anchor" matter.
+
+FRAMING DOCTRINE — lead with the theory the record most cleanly supports, chosen by CAUSAL FIT, NOT by which framing statistically wins:
+- DIRECT (3.303; 3.304(f) PTSD stressor; 38 USC 1154(b) lay evidence): when a documented in-service event, injury, exposure, OR an in-service diagnosis/treatment of the claimed condition is in the record — INCLUDING a lay/buddy/personal-statement account under 38 USC 1154(b) when records are thin — DIRECT is the natural lead and requires NO service-connected anchor. An in-service STR diagnosis of the claimed condition (or its documented onset in service) is itself sufficient to lead DIRECT under 3.303; you do not need a secondary anchor when the condition is shown in service. So is in-service AGGRAVATION (3.306/Allen: service aggravated a pre-existing or subclinical condition beyond its natural progression). Do NOT reach for a secondary off a granted SC when the service itself is the clean cause.
+- SECONDARY (3.310(a) causation / 3.310(b) aggravation): lead here when the strongest ESTABLISHED mechanism runs through a service-connected condition. A secondary's mechanism must be a RECOGNIZED physiologic pathway — NEVER one constructed to fit an available granted SC. When it IS a secondary and causation vs aggravation are roughly equally plausible or explanatory, lead AGGRAVATION (3.310(b)) — it has the lower bar (worsening beyond baseline, not sole cause), and a supplemental after a prior denial usually pivots to aggravation. (Still plead both prongs as dual_prong when both are genuinely supported — see EQUIPOISE below.)
+- PRESUMPTIVE. PACT Act / Agent Orange / Gulf War 3.317 / Camp Lejeune. If the claim fits a presumption, SAY SO (viability=needs_physician_review) — it may need NO nexus letter; never sell a paid theory a presumption grants for free.
+- If NO clean theory exists (no in-service event, NO in-service diagnosis/onset of the claimed condition, no established secondary mechanism, no presumption), return viability=needs_physician_review — do NOT invent a mechanism to force a grant. But "there is no granted SC anchor" is NOT, by itself, a reason to return not_supportable: a direct claim needs no anchor. Reserve not_supportable for cases where the affirmative theory is actually defeated at the >=50% line (e.g., no diagnosis, no in-service nexus AND no SC mechanism, or a dominant non-service confounder the record cannot rebut) — not for the mere absence of a secondary anchor.
 EQUIPOISE / DUAL-PRONG is allowed and often correct: when the record supports BOTH causation and aggravation of the SAME upstream, set framing="dual_prong" and plead both prongs of that one upstream (BVA dual-prong precedent, NOT stacking). Do not force a single rigid label when the picture is genuinely multi-path — capture it in clinical_nuance.
 
 DOMINANT-THEORY + CONVERGENT MECHANISM: the letter LEADS exactly ONE theory (primary_anchor) — the single highest-probability winnable one. Never stack independent theories in the lead. CONVERGENT shared-mechanism is the one permitted multiplicity: if TWO+ SC conditions feed ONE physiologic mechanism producing ONE claimed condition (e.g. asthma + allergic rhinitis + bronchiectasis -> OSA via united-airway inflammation/obstruction), argue them together as ONE mechanism with multiple contributing SC inputs. Convergent inputs go in convergent_anchors and MUST share the SAME mechanism as primary_anchor; a condition reaching the claim by a DIFFERENT mechanism is an alternative_theory, not convergent. Still designate ONE dominant upstream whose prong(s) the opinion pleads. When choosing the dominant upstream, prefer the one with the strongest STAND-ALONE, directional, prospective mechanism — a blessed/established pathway outranks a weaker contingent one even if the weaker one feels "more specific."
@@ -96,7 +98,24 @@ function _scList(chartIndex) {
 function buildUserPrompt({ claimedCondition, chartIndex, candidateNames, physicianGuidance }) {
   const sc = _scList(chartIndex).map((s) => `- ${s.name}${s.rating_pct != null ? ` (rated ${s.rating_pct}%)` : ''}`).join('\n') || '- (none parsed)';
   const problems = (chartIndex && Array.isArray(chartIndex.problem_list)) ? chartIndex.problem_list.map((p) => (typeof p === 'string' ? p : (p && (p.problem || p.name || p.condition)))).filter(Boolean) : [];
-  const events = (chartIndex && chartIndex.va_concessions && chartIndex.va_concessions.in_service_event_conceded) ? [String(chartIndex.va_concessions.in_service_event_conceded)] : [];
+  // Surface ALL documented in-service events, not only VA-conceded ones. A lay/buddy-
+  // witnessed event (chartIndex.in_service_event) is competent evidence under 38 USC
+  // 1154(b) and MUST reach the picker so DIRECT can lead when the service itself is the
+  // clean cause — the Hackworth fall was invisible when only conceded events were fed.
+  // Tagged by source so the picker weighs concession vs lay correctly.
+  const events = [];
+  const _conceded = chartIndex && chartIndex.va_concessions && chartIndex.va_concessions.in_service_event_conceded;
+  if (_conceded) events.push(`${String(_conceded)} (VA-conceded)`);
+  const _documented = chartIndex && chartIndex.in_service_event;
+  if (_documented && String(_documented).trim().length >= 10 && String(_documented) !== String(_conceded || '')) {
+    events.push(`${String(_documented)} (documented in record — lay/buddy/personal statement is competent under 38 USC 1154(b))`);
+  }
+  if (chartIndex && Array.isArray(chartIndex.in_service_events)) {
+    for (const _e of chartIndex.in_service_events) {
+      const _s = typeof _e === 'string' ? _e : (_e && (_e.event || _e.description || _e.text));
+      if (_s && String(_s).trim().length >= 5 && !events.some((x) => x.startsWith(String(_s)))) events.push(`${String(_s)} (documented)`);
+    }
+  }
   const vetStmt = (chartIndex && (chartIndex.veteran_statement || (chartIndex.caseFraming && chartIndex.caseFraming.veteran_statement))) || '';
   const cand = (candidateNames && candidateNames.length ? candidateNames : _scList(chartIndex).map((s) => s.name)).map((x) => `- ${x}`).join('\n') || '- (none)';
   return `<case>

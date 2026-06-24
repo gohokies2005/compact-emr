@@ -23,7 +23,13 @@ import { deriveCaseFramingForCase, loadMechanismFilter } from './case-framing-st
 import type { AppDb } from './db-types.js';
 
 const MODEL = process.env['AI_ROUTE_PICKER_MODEL'] || 'claude-sonnet-4-6';
-const MAX_TOKENS = 1800;
+// 6000 (was 1800): the emit_argument_plan tool output is schema-bounded but, on a complex case (many granted
+// SC conditions → large excluded/alternative/convergent arrays + per-field rationale, e.g. Zimmelman GERD with
+// 197 facts), exceeded 1800 → stop_reason:'max_tokens' → the plan was truncated and rejected ("analysis was too
+// long to complete"). This surfaced only AFTER the 120s/110s budget fix let the call run to the cap instead of
+// timing out at 26s first. 6000 fits the full bounded plan with headroom; generation stays well inside the 110s
+// async budget. Cost is per-token-generated (a ~3-4k-token plan ≈ 5-6¢), so the higher cap is headroom, not spend.
+const MAX_TOKENS = 6000;
 
 export function aiRoutePickerEnabled(): boolean {
   return process.env['AI_ROUTE_PICKER_ENABLED'] === 'true';
@@ -88,9 +94,44 @@ export interface AiViabilityCard {
 
 const _cache = new Map<string, AiViabilityCard | null>();
 
+/**
+ * The reliability state of a case's route-picker plan (Ryan 2026-06-21, Zimmelman). The original API
+ * returned `AiViabilityCard | null`, collapsing "no plan yet", "computing", and "compute FAILED" into a
+ * single null — which is exactly why a failed compute looked identical to a cold plan and the card showed a
+ * misleading "Not supportable" verdict forever. This discriminated state lets callers (the GET, the SOAP/
+ * Gate-1, the FE) tell those apart and show an HONEST loading / failed / ready surface instead of a fake
+ * no-go. `deriveAiViability` stays a thin back-compat wrapper that returns `card` (or null) from this.
+ */
+export type AiViabilityState =
+  | { readonly status: 'off' } // the AI_ROUTE_PICKER_ENABLED flag is off — no AI surface at all
+  | { readonly status: 'ready'; readonly card: AiViabilityCard } // a valid plan matching current inputs
+  | { readonly status: 'computing' } // a compute is in flight (sync or async) — the FE shows a spinner + polls
+  | { readonly status: 'error'; readonly error: string } // the last compute FAILED — the FE shows retry, NOT a verdict
+  | { readonly status: 'none' }; // no plan, not computing, no recorded error (cold) — a compute should be triggered
+
+// A compute that has not produced/refreshed within this many ms is treated as STALE-IN-FLIGHT: a prior
+// 'computing' stamp from a crashed/timed-out invocation must not wedge the case in a spinner forever. After
+// this window the read path treats a lingering 'computing' as recomputable (status:'none').
+// MUST exceed the async picker budget (110s, placeholder-lambda.ts) + headroom — else a legitimately
+// long in-flight compute (the large-chart case this exists for) is declared stale at 90s mid-run and a
+// GET re-fires a SECOND Sonnet compute, double-billing the slow cases the dedup guard is meant to protect.
+const COMPUTING_STALE_MS = 135_000;
+
 function buildUserPrompt(claimed: string, sc: string[], problems: string[], events: string[], statement: string | null, guidance: string | null): string {
   const scLines = sc.length ? sc.map((s) => `- ${s}`).join('\n') : '- (none parsed)';
   const cand = sc.length ? sc.map((s) => `- ${s}`).join('\n') : '- (none)';
+  // DIRECT-ROUTE EVIDENCE (Ryan 2026-06-22, Zimmelman): the structured inServiceEvent column is often
+  // empty even when the veteran's own statement documents an in-service onset/diagnosis (Zimmelman: 1984
+  // STR esophagitis/GERD). The veteran statement is competent lay evidence under 38 USC 1154(b) and MUST
+  // reach the picker as a candidate IN-SERVICE EVENT so a DIRECT 3.303 route can lead — not only as the
+  // untrusted "proposed theory". Without this the picker saw "(none documented)" and fell to a secondary
+  // anchor (or, before, declared "no anchor → not supportable"). We surface BOTH: the statement stays in
+  // veteran_proposed_theory (its goal/narrative role) AND, when it plausibly references service, it is also
+  // listed as a lay in-service event the picker weighs for a direct route.
+  const allEvents = [...events];
+  if (statement && statement.trim().length >= 12 && /\b(in[- ]?service|active duty|while serving|during service|enlist|deploy|STR|service treatment|in the (navy|army|air force|marines|service)|\b(19|20)\d{2}\b)\b/i.test(statement)) {
+    allEvents.push(`Veteran statement references in-service onset/treatment (competent lay evidence under 38 USC 1154(b)): ${statement.trim().slice(0, 600)}`);
+  }
   return `<case>
 <claimed_condition>${claimed || '(unknown)'}</claimed_condition>
 
@@ -99,7 +140,7 @@ ${scLines}
 </granted_sc_conditions>
 
 <in_service_events>
-${events.length ? events.map((e) => `- ${e}`).join('\n') : '- (none documented)'}
+${allEvents.length ? allEvents.map((e) => `- ${e}`).join('\n') : '- (none documented)'}
 </in_service_events>
 
 <chart_facts>
@@ -108,7 +149,7 @@ Problem list: ${problems.slice(0, 60).join('; ') || '(none)'}
 </chart_facts>
 
 <candidate_anchors>
-These SC conditions passed the exclusion filter and are the ONLY anchors you may select for a secondary/aggravation theory:
+These SC conditions passed the exclusion filter and are the candidate anchors for a SECONDARY/aggravation theory. A DIRECT (3.303) or in-service aggravation route needs NO anchor from this list — if the record shows the claimed condition began in service, lead direct regardless of whether this list is empty:
 ${cand}
 </candidate_anchors>
 
@@ -124,106 +165,192 @@ ${statement || '(none provided)'}
 Produce the argument plan by calling emit_argument_plan. Pick the single best GRANT-defensible theory under the framing-priority doctrine; honor the team steer when defensible; abstain honestly if no theory reaches >=50%.`;
 }
 
+// The shape we read off the case row for both the read and the compute path.
+interface CaseRow {
+  claimedCondition: string;
+  veteranStatement: string | null;
+  inServiceEvent: string | null;
+  framingChoice: string | null;
+  upstreamScCondition: string | null;
+  aiViabilityPlanHash: string | null;
+  aiViabilityPlanJson: AiViabilityCard | null;
+  aiViabilityPlanStatus: string | null;
+  aiViabilityPlanError: string | null;
+  aiViabilityPlanComputedAt: Date | string | null;
+}
+
+// The deterministic compute INPUTS for a case: the hash (cache + persist key) plus everything the LLM needs.
+interface PlanInputs {
+  readonly inputHash: string;
+  readonly sc: string[];
+  readonly problems: string[];
+  readonly events: string[];
+  readonly guidance: string | null;
+}
+
+/** Build the deterministic route-picker inputs + the inputHash for a case. The hash MUST be computed
+ *  identically on the read short-circuit and the persist (else a fresh plan is never found again — the
+ *  permanent-mismatch failure mode). Sharing this one builder between read + write is the guarantee. */
+async function buildPlanInputs(db: AppDb, caseId: string, c: CaseRow): Promise<PlanInputs> {
+  const cf = await deriveCaseFramingForCase(db, caseId);
+  let sc = (cf?.grantedScAnchors ?? []).map((a: { condition?: string; upstream_canonical?: string }) => a.condition ?? a.upstream_canonical ?? '').filter(Boolean) as string[];
+  // C1 (QA 2026-06-19): mechanism-filter the candidate anchors with the SAME eligibility rule the
+  // drafter's rankAnchorCandidates uses (ANCHOR_MECHANISM_GATE) so the card cannot LEAD an excluded
+  // (M0 reverse/sympathetic) anchor the drafter would drop. Fail-open: filter unavailable → unfiltered.
+  try {
+    const mech = loadMechanismFilter();
+    if (mech && sc.length) {
+      const filtered = sc.filter((n) => mech.isEligibleAnchor(n, c.claimedCondition));
+      if (filtered.length) sc = filtered; // never empty the set (would strand a real-but-all-excluded case)
+    }
+  } catch { /* fail-open: unfiltered */ }
+
+  const probRow = (await db.case.findFirst({
+    where: { id: caseId },
+    select: { veteran: { select: { activeProblems: { select: { problem: true } } } } } as never,
+  })) as unknown as { veteran: { activeProblems: Array<{ problem: string }> } | null } | null;
+  const problems = [...new Set((probRow?.veteran?.activeProblems ?? []).map((p) => (p.problem ?? '').trim()).filter(Boolean))];
+
+  const events = c.inServiceEvent ? [c.inServiceEvent] : [];
+  const guidanceBits: string[] = [];
+  if (c.framingChoice) guidanceBits.push(`framing preference: ${c.framingChoice}`);
+  if (c.upstreamScCondition) guidanceBits.push(`suggested upstream anchor: ${c.upstreamScCondition}`);
+  const guidance = guidanceBits.join('; ') || null;
+
+  const inputHash = createHash('sha256').update(JSON.stringify({ claimed: c.claimedCondition, sc, problems, events, guidance, vs: c.veteranStatement })).digest('hex');
+  return { inputHash, sc, problems, events, guidance };
+}
+
+const PLAN_ROW_SELECT = { claimedCondition: true, veteranStatement: true, inServiceEvent: true, framingChoice: true, upstreamScCondition: true, aiViabilityPlanHash: true, aiViabilityPlanJson: true, aiViabilityPlanStatus: true, aiViabilityPlanError: true, aiViabilityPlanComputedAt: true } as never;
+
+/** True when a 'computing' stamp is still within the in-flight window (a real compute may be running). */
+function computingIsFresh(row: CaseRow): boolean {
+  const at = row.aiViabilityPlanComputedAt ? new Date(row.aiViabilityPlanComputedAt).getTime() : 0;
+  return at > 0 && Date.now() - at < COMPUTING_STALE_MS;
+}
+
 /**
- * Compute the AI viability card for a case via the route-picker brain. Returns null (fail-open) when
- * the flag is off, the key is unresolvable, inputs are empty, or the API call fails/truncates.
+ * The RELIABILITY-AWARE read of a case's route-picker plan (Ryan 2026-06-21, Zimmelman). Returns a
+ * discriminated state so the caller can show an HONEST surface — loading / failed / ready — instead of the
+ * old null-collapses-everything behavior that rendered a misleading "Not supportable" verdict on a failed
+ * or never-run compute.
+ *
+ * opts.compute=false (default for synchronous GET/SOAP/Gate-1 paths): NO LLM call. Returns:
+ *   - 'ready'      when a persisted plan matches the current inputs (the $0 short-circuit)
+ *   - 'computing'  when a compute is in flight (a fresh 'computing' stamp) — the FE polls
+ *   - 'error'      when the last compute FAILED (a stable 'error' stamp) — the FE shows retry, not a verdict
+ *   - 'none'       when there is no plan, none in flight, and no recorded failure (cold) — trigger a compute
+ *   - 'off'        when the flag is off
+ * opts.compute=true (the async self-invoke + the synchronous on-demand endpoint): runs the ~22-26s picker
+ * call, persists 'computing'→'ready'/'error', and returns the resulting state. opts.timeoutMs bounds the call.
  */
-/**
- * opts.compute=false → READ-ONLY: return the persisted plan if it matches current inputs, else null —
- * NO LLM call (used by the synchronous GET /viability-card path, which must never make the ~22-25s picker
- * call under the 29s API cap). opts.compute defaults to true (the async self-invoke compute path).
- * opts.timeoutMs → the Anthropic client timeout; the async path owns the whole 29s window so it can run
- * higher (~26s) than the synchronous 22s cap and actually COMPLETE + persist.
- */
-export async function deriveAiViability(
+export async function getAiViabilityState(
   db: AppDb,
   caseId: string,
   opts?: { compute?: boolean; timeoutMs?: number },
-): Promise<AiViabilityCard | null> {
-  if (!aiRoutePickerEnabled()) return null;
+): Promise<AiViabilityState> {
+  if (!aiRoutePickerEnabled()) return { status: 'off' };
+  let inputHash = '';
   try {
-    const c = (await db.case.findFirst({
-      where: { id: caseId },
-      select: { claimedCondition: true, veteranStatement: true, inServiceEvent: true, framingChoice: true, upstreamScCondition: true, aiViabilityPlanHash: true, aiViabilityPlanJson: true } as never,
-    })) as unknown as { claimedCondition: string; veteranStatement: string | null; inServiceEvent: string | null; framingChoice: string | null; upstreamScCondition: string | null; aiViabilityPlanHash: string | null; aiViabilityPlanJson: AiViabilityCard | null } | null;
-    if (c === null || !c.claimedCondition) return null;
+    const c = (await db.case.findFirst({ where: { id: caseId }, select: PLAN_ROW_SELECT })) as unknown as CaseRow | null;
+    if (c === null || !c.claimedCondition) return { status: 'none' };
 
-    const cf = await deriveCaseFramingForCase(db, caseId);
-    let sc = (cf?.grantedScAnchors ?? []).map((a: { condition?: string; upstream_canonical?: string }) => a.condition ?? a.upstream_canonical ?? '').filter(Boolean) as string[];
-    // C1 (QA 2026-06-19): mechanism-filter the candidate anchors with the SAME eligibility rule the
-    // drafter's rankAnchorCandidates uses (ANCHOR_MECHANISM_GATE) so the card cannot LEAD an excluded
-    // (M0 reverse/sympathetic) anchor the drafter would drop — else card and drafter contradict on the
-    // highest-stakes pick. Fail-open: filter unavailable → unfiltered (the prompt's exclude backstop holds).
-    try {
-      const mech = loadMechanismFilter();
-      if (mech && sc.length) {
-        const filtered = sc.filter((n) => mech.isEligibleAnchor(n, c.claimedCondition));
-        if (filtered.length) sc = filtered; // never empty the set (would strand a real-but-all-excluded case to the prompt backstop)
-      }
-    } catch { /* fail-open: unfiltered */ }
-
-    const probRow = (await db.case.findFirst({
-      where: { id: caseId },
-      select: { veteran: { select: { activeProblems: { select: { problem: true } } } } } as never,
-    })) as unknown as { veteran: { activeProblems: Array<{ problem: string }> } | null } | null;
-    const problems = [...new Set((probRow?.veteran?.activeProblems ?? []).map((p) => (p.problem ?? '').trim()).filter(Boolean))];
-
-    const events = c.inServiceEvent ? [c.inServiceEvent] : [];
-    const guidanceBits: string[] = [];
-    if (c.framingChoice) guidanceBits.push(`framing preference: ${c.framingChoice}`);
-    if (c.upstreamScCondition) guidanceBits.push(`suggested upstream anchor: ${c.upstreamScCondition}`);
-    const guidance = guidanceBits.join('; ') || null;
-
-    const inputHash = createHash('sha256').update(JSON.stringify({ claimed: c.claimedCondition, sc, problems, events, guidance, vs: c.veteranStatement })).digest('hex');
+    const inputs = await buildPlanInputs(db, caseId, c);
+    inputHash = inputs.inputHash;
     const cacheKey = `${caseId}:${inputHash}`;
-    if (_cache.has(cacheKey)) return _cache.get(cacheKey) ?? null;
+    if (_cache.has(cacheKey)) {
+      const cached = _cache.get(cacheKey) ?? null;
+      if (cached) return { status: 'ready', card: cached };
+    }
 
-    // ── LOCK IT IN (Ryan 2026-06-19): DB-persisted short-circuit. A COLD Lambda instance has an empty
-    // in-process cache, so without this it would re-call the LLM on EVERY Overview open even though a valid
-    // plan is already persisted — the cost + the "thinks for minutes then nothing" 29s-timeout silent fail.
-    // If the persisted plan's hash matches the current inputs AND its shape is current, serve it for $0 /
-    // instant (no LLM). Recompute ONLY when inputs changed, no plan exists, or the persisted shape is stale.
+    // ── $0 short-circuit: a persisted plan whose hash + shape match the current inputs. Read + write compute
+    // the hash through the SAME buildPlanInputs, so a fresh plan is always re-found (kills the permanent
+    // hash-mismatch failure mode by construction).
     const persisted = c.aiViabilityPlanJson;
     if (c.aiViabilityPlanHash === inputHash && persisted && typeof persisted === 'object'
         && persisted.schemaVersion === AI_VIABILITY_PLAN_SCHEMA_VERSION && persisted.source === 'ai_route_picker' && persisted.lead) {
-      // Stamp planHash from THIS row read (the column we just loaded) — the caller gets framing + hash from one
-      // row version. The persisted JSON itself is hash-free; we attach it on the way out only (H3).
       const stamped: AiViabilityCard = { ...persisted, planHash: c.aiViabilityPlanHash ?? '' };
-      _cache.set(cacheKey, stamped); // warm the in-process cache for the rest of this instance
-      return stamped;
+      _cache.set(cacheKey, stamped);
+      return { status: 'ready', card: stamped };
     }
 
-    // READ-ONLY path (synchronous GET /viability-card): no fresh persisted plan → return null WITHOUT the
-    // ~22-25s LLM call (which can't fit the 29s cap). The route fires an async self-invoke to compute it.
-    if (opts?.compute === false) return null;
+    // READ-ONLY (synchronous paths): never run the ~22s LLM under the 29s cap. Map the persisted status —
+    // for THESE inputs — to an honest state so the FE shows the right surface and the caller triggers a
+    // compute only when one is actually needed (status 'none' or a stale 'computing').
+    if (opts?.compute === false) {
+      const statusMatchesInputs = c.aiViabilityPlanHash === inputHash; // the recorded status is ABOUT these inputs
+      if (statusMatchesInputs && c.aiViabilityPlanStatus === 'error') {
+        return { status: 'error', error: c.aiViabilityPlanError || 'The analysis could not be completed.' };
+      }
+      if (statusMatchesInputs && c.aiViabilityPlanStatus === 'computing' && computingIsFresh(c)) {
+        return { status: 'computing' };
+      }
+      // No fresh plan, no error/in-flight for these inputs → cold. The caller fires the compute.
+      return { status: 'none' };
+    }
+
+    // ── COMPUTE path (async self-invoke OR the synchronous on-demand endpoint).
+    // IN-FLIGHT GUARD (Ryan 2026-06-22, cost): a cold open can fan out multiple compute triggers (the GET fires
+    // the async recompute on 'none', and the FE's /compute auto-fire / Retry also fires it). If a FRESH
+    // 'computing' stamp for THESE EXACT inputs already exists, a compute is already running — short-circuit to
+    // {status:'computing'} WITHOUT firing a second ~5¢ Sonnet call. The `c` row was read at the top of this fn
+    // (same row that produced inputHash), so this is free (no extra query). This makes a cold open cost ONE
+    // compute, not three. (computingIsFresh keys off the stamp time so a crashed prior compute can still recompute
+    // after COMPUTING_STALE_MS.)
+    if (c.aiViabilityPlanHash === inputHash && c.aiViabilityPlanStatus === 'computing' && computingIsFresh(c)) {
+      return { status: 'computing' };
+    }
+    // Mark 'computing' so a concurrent read shows a spinner (not a fake verdict) while this runs; then persist
+    // 'ready'/'error'. AWAIT the stamp (QA 2026-06-21): a fire-and-forget 'computing' write could land AFTER the
+    // awaited 'error' write on the instant-fail paths below (missing prompt / unconfigured key) and clobber it
+    // back to a 90s spinner; awaiting also makes the "concurrent read shows a spinner" comment actually true.
+    await markPlanStatus(db, caseId, inputHash, 'computing', null);
 
     const pp = loadPickerPrompt();
-    if (!pp) return null; // vendored prompt unavailable → fail-open (card shows static)
+    if (!pp) { // vendored prompt unavailable → honest error (NOT a silent null that looks like "no plan")
+      await markPlanStatus(db, caseId, inputHash, 'error', 'The route-picker brain is unavailable.');
+      return { status: 'error', error: 'The route-picker brain is unavailable.' };
+    }
 
-    // Bound the picker call to the Lambda's 29s budget (aws-cloud-sme live finding 2026-06-19): the SDK
-    // default (120s timeout + 2 retries) lets a slow/overloaded Sonnet call run PAST the 29s API-Gateway/
-    // Lambda cap, which KILLS the function before our catch can fail-open — so the card silently renders
-    // nothing AND the plan never persists (a vicious cycle that never "locks in"). Cap at 22s, no retries:
-    // the single call either completes well inside the window (then persists + locks in) or fails-open
-    // LOUDLY (the catch + console.warn run, card falls back to static). One synchronous call only.
     let anthropic: Anthropic;
     try { anthropic = new Anthropic({ apiKey: await resolveAnthropicApiKey(), timeout: opts?.timeoutMs ?? 22_000, maxRetries: 0 }); }
-    catch { return null; }
+    catch {
+      await markPlanStatus(db, caseId, inputHash, 'error', 'The analysis service is not configured.');
+      return { status: 'error', error: 'The analysis service is not configured.' };
+    }
 
-    const resp = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      temperature: 0.5,
-      system: pp.SYSTEM,
-      tools: [pp.TOOL],
-      tool_choice: { type: 'tool', name: pp.TOOL.name },
-      messages: [{ role: 'user', content: buildUserPrompt(c.claimedCondition, sc, problems, events, c.veteranStatement, guidance) }],
-    });
-    if (resp.stop_reason === 'max_tokens') return null;
+    let resp: Anthropic.Message;
+    try {
+      resp = await anthropic.messages.create({
+        model: MODEL,
+        max_tokens: MAX_TOKENS,
+        temperature: 0.5,
+        system: pp.SYSTEM,
+        tools: [pp.TOOL],
+        tool_choice: { type: 'tool', name: pp.TOOL.name },
+        messages: [{ role: 'user', content: buildUserPrompt(c.claimedCondition, inputs.sc, inputs.problems, inputs.events, c.veteranStatement, inputs.guidance) }],
+      });
+    } catch (e) {
+      // The LLM call FAILED (timeout / overload / network) — the dominant Zimmelman failure on a large chart.
+      // Persist an honest, STABLE error for these inputs so the next read shows "analysis failed — retry"
+      // and the GET stops re-firing the async recompute on every open (the infinite-loop fix).
+      const error = e instanceof Error ? e.message : String(e);
+      await markPlanStatus(db, caseId, inputHash, 'error', humanizeComputeError(error));
+      console.warn(JSON.stringify({ msg: 'ai-viability: compute LLM call failed', caseId, error }));
+      return { status: 'error', error: humanizeComputeError(error) };
+    }
+
+    if (resp.stop_reason === 'max_tokens') {
+      await markPlanStatus(db, caseId, inputHash, 'error', 'The analysis was too long to complete. Please retry.');
+      return { status: 'error', error: 'The analysis was too long to complete. Please retry.' };
+    }
     const block = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === pp.TOOL.name);
     const plan = block?.input as Record<string, unknown> | undefined;
     const pa = plan?.['primary_anchor'] as Record<string, unknown> | undefined;
-    if (!plan || !pa || typeof pa['upstream'] !== 'string') return null;
+    if (!plan || !pa || typeof pa['upstream'] !== 'string') {
+      await markPlanStatus(db, caseId, inputHash, 'error', 'The analysis returned an unusable result. Please retry.');
+      return { status: 'error', error: 'The analysis returned an unusable result. Please retry.' };
+    }
 
     const card: AiViabilityCard = {
       source: 'ai_route_picker',
@@ -242,26 +369,67 @@ export async function deriveAiViability(
       missing: ((plan['missing_facts'] as Array<Record<string, unknown>>) ?? []).map((x) => ({ fact: String(x['fact_needed'] ?? ''), why: String(x['why_it_matters'] ?? '') })).filter((x) => x.fact),
       nuance: String(plan['clinical_nuance'] ?? ''),
       overall: String(plan['overall_rationale'] ?? ''),
-      planHash: inputHash, // the hash these inputs produce; matches what we persist into the column below
+      planHash: inputHash,
     };
     _cache.set(cacheKey, card);
-    // Persist the plan so Ask Aegis can NARRATE the same one-brain pick WITHOUT a second synchronous LLM
-    // call on the 29s-capped /ask path (one brain: drafter + card + advisory). Hash-guarded so an
-    // identical re-render is a no-op DB-side; fail-open (a write failure / missing column never breaks the
-    // card — the advisory just falls back to its corpus-only answer).
-    if (c.aiViabilityPlanHash !== inputHash) {
-      // Persist the plan JSON hash-FREE (planHash is the hash OF these inputs — it lives in the
-      // aiViabilityPlanHash COLUMN, not inside the blob; embedding it would be circular and a stale embedded
-      // value could mislead a future reader). The column is the single source of the hash (H3).
-      const { planHash: _ph, ...persistCard } = card;
-      void _ph;
-      await db.case
-        .update({ where: { id: caseId }, data: { aiViabilityPlanJson: persistCard as unknown as object, aiViabilityPlanHash: inputHash } as never })
-        .catch((e: unknown) => { console.warn(JSON.stringify({ msg: 'ai-viability: plan persist failed open', caseId, error: e instanceof Error ? e.message : String(e) })); });
-    }
-    return card;
+    // Persist the plan JSON hash-FREE + stamp status 'ready' + the matching hash, ATOMICALLY in one update so
+    // a reader never sees status:'ready' against a stale hash. Fail-open (a write failure never breaks the card).
+    const { planHash: _ph, ...persistCard } = card;
+    void _ph;
+    await db.case
+      .update({ where: { id: caseId }, data: { aiViabilityPlanJson: persistCard as unknown as object, aiViabilityPlanHash: inputHash, aiViabilityPlanStatus: 'ready', aiViabilityPlanError: null, aiViabilityPlanComputedAt: new Date() } as never })
+      .catch((e: unknown) => { console.warn(JSON.stringify({ msg: 'ai-viability: plan persist failed open', caseId, error: e instanceof Error ? e.message : String(e) })); });
+    return { status: 'ready', card };
   } catch (err) {
-    console.warn(JSON.stringify({ msg: 'ai-viability: failed open', caseId, error: err instanceof Error ? err.message : String(err) }));
-    return null;
+    // An UNEXPECTED error (not the LLM call itself — that is caught above) on the compute path. On a read-only
+    // path we still degrade to 'none' (the GET handles it). On the compute path, persist an honest error so the
+    // failure is visible + stable rather than an endless silent re-fire.
+    const error = err instanceof Error ? err.message : String(err);
+    console.warn(JSON.stringify({ msg: 'ai-viability: failed open', caseId, error }));
+    if (opts?.compute !== false && inputHash) {
+      await markPlanStatus(db, caseId, inputHash, 'error', humanizeComputeError(error)).catch(() => {});
+      return { status: 'error', error: humanizeComputeError(error) };
+    }
+    return { status: 'none' };
   }
+}
+
+/** Map a raw compute error to a short, RN-safe message (no stack traces / provider internals leaked). */
+function humanizeComputeError(raw: string): string {
+  const r = raw.toLowerCase();
+  if (r.includes('timeout') || r.includes('timed out') || r.includes('aborted')) {
+    return 'The analysis timed out (the chart is large). Please retry.';
+  }
+  if (r.includes('overloaded') || r.includes('rate') || r.includes('529') || r.includes('429')) {
+    return 'The analysis service is busy. Please retry in a moment.';
+  }
+  return 'The analysis could not be completed. Please retry.';
+}
+
+/** Stamp the plan status for a case AGAINST a specific inputHash (so a reader can tell the status is about
+ *  the CURRENT inputs, not a prior version). Best-effort: a write failure is logged, never thrown. The hash
+ *  is written alongside the status so 'computing'/'error' are scoped to these exact inputs. */
+async function markPlanStatus(db: AppDb, caseId: string, inputHash: string, status: 'computing' | 'error', error: string | null): Promise<void> {
+  try {
+    await db.case.update({
+      where: { id: caseId },
+      data: { aiViabilityPlanStatus: status, aiViabilityPlanError: error, aiViabilityPlanHash: inputHash, aiViabilityPlanComputedAt: new Date() } as never,
+    });
+  } catch (e) {
+    console.warn(JSON.stringify({ msg: 'ai-viability: status stamp failed open', caseId, status, error: e instanceof Error ? e.message : String(e) }));
+  }
+}
+
+/**
+ * Back-compat wrapper preserving the original `AiViabilityCard | null` contract. Existing callers (the GET,
+ * the SOAP/Gate-1, advisory) keep working unchanged; the rich reliability state is available via
+ * getAiViabilityState for the new loading/error-aware surfaces.
+ */
+export async function deriveAiViability(
+  db: AppDb,
+  caseId: string,
+  opts?: { compute?: boolean; timeoutMs?: number },
+): Promise<AiViabilityCard | null> {
+  const state = await getAiViabilityState(db, caseId, opts);
+  return state.status === 'ready' ? state.card : null;
 }

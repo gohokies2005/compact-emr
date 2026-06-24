@@ -29,6 +29,17 @@ export interface CaseFraming {
   readonly derivedAt: string;
 }
 
+/** The route-picker plan slice the readiness evaluation consulted (the SAME brain the drafter pleads). When
+ *  present the Gate-1 modal shows this REASONED framing + rationale instead of the bare SSOT label. */
+export interface RoutePlanForReadiness {
+  readonly framing: string;
+  readonly cfr_basis: string;
+  readonly mechanism: string;
+  readonly rationale: string;
+  readonly viability: 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
+  readonly missing: ReadonlyArray<{ readonly fact: string; readonly why: string }>;
+}
+
 export interface DraftReadinessResult {
   readonly ready: boolean;
   readonly items: readonly ReadinessItem[];
@@ -36,6 +47,15 @@ export interface DraftReadinessResult {
   readonly summary: string;
   readonly buildState: ChartBuildState;
   readonly caseFraming?: CaseFraming;
+  readonly routePlan?: RoutePlanForReadiness;
+  /** #2: brain-listed gaps that mapped to no specific essential — shown to the RN; the brain's silence did NOT
+   *  satisfy any essential off these (downgrade-only trust). Absent/empty when the plan is clean / no plan. */
+  readonly unclassifiedGaps?: ReadonlyArray<{ readonly fact: string; readonly why: string }>;
+  /** #7: false ONLY when the route-picker brain feed ERRORED (the check ran deterministic-only). A clean "no
+   *  plan" is NOT degraded → stays true. Absent ⇒ treat as consulted. */
+  readonly brainConsulted?: boolean;
+  /** #7: RN-facing note shown when the brain feed was unavailable, so the degraded state is visible. */
+  readonly degradedNote?: string;
 }
 
 export async function getDraftReadiness(caseId: string): Promise<{ data: DraftReadinessResult }> {

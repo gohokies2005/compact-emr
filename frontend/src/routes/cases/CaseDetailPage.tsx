@@ -16,6 +16,7 @@ import { SendToDrafterPanel } from '../../components/SendToDrafterPanel';
 import { ExtractionCoveragePanel } from '../../components/ExtractionCoveragePanel';
 import { ChartRecoveryBanner } from '../../components/ChartRecoveryBanner';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
+import { SendToDoctorModal } from '../../components/SendToDoctorModal';
 import { DeliveryPanel } from '../../components/DeliveryPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
@@ -249,7 +250,9 @@ export function CaseDetailPage() {
   });
 
   // Send to doctor for review: rn_review -> physician_review. Completed drafts no longer auto-route
-  // to the doctor — the RN reviews/edits, then explicitly sends. (Ryan 2026-06-04.)
+  // to the doctor — the RN reviews/edits, then explicitly sends. (Ryan 2026-06-04.) The send now
+  // always opens SendToDoctorModal for an optional handoff message (Ryan 2026-06-24).
+  const [sendToDoctorOpen, setSendToDoctorOpen] = useState(false);
   const sendToDoctor = useMutation({
     mutationFn: () => {
       const cur = caseQuery.data?.data;
@@ -257,7 +260,8 @@ export function CaseDetailPage() {
       return transitionCaseStatus(caseId, { from: 'rn_review', to: 'physician_review', version: cur.version });
     },
     onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
-    onError: (e: unknown) => window.alert(e instanceof ConflictError ? 'This case changed — reload and try sending again.' : `Could not send to the doctor — ${describeApiError(e)}.`),
+    // Errors are surfaced by SendToDoctorModal (which awaits mutateAsync) — no window.alert here, or
+    // the user would get a double error (modal banner + alert).
   });
 
   // Import final letter (2026-06-14): drop an already-finished letter PDF (rig-origin draft or
@@ -335,6 +339,14 @@ export function CaseDetailPage() {
     const hasKey = key !== null && key.length > 0;
     return hasKey || j.state === 'done' || j.state === 'failed';
   }) as InFlightDraftJob | undefined;
+
+  // SOAP-note placement (Ryan 2026-06-21): the SOAP card lives on the ACTION tab while the case is pre-draft /
+  // in-review (the RN's go/no-go read BEFORE drafting), and MOVES to the SUMMARY tab once a completed draft /
+  // letter exists (the clinical narrative becomes a reference record, not the next-action surface). Completed
+  // draft = any 'done' draft job OR a viewable letter on file (covers imported finals). Threaded into both tab
+  // renders so the card shows in exactly one place; defined AFTER viewableLetterJob (avoids a TDZ reference).
+  const hasCompletedDraft = (c.draftJobs ?? []).some((job) => job.state === 'done') || !!viewableLetterJob;
+
   async function openLetterPdf() {
     if (!viewableLetterJob) return;
     try {
@@ -579,10 +591,20 @@ export function CaseDetailPage() {
                       float up when the pre-draft slots are absent). Keys ride the outermost element so a
                       poll-driven visibility flip never remounts siblings (the L525 stability discipline). */}
 
-                  {/* SOAP-note Overview RELOCATED to the new Summary tab (Ryan 2026-06-20 restructure):
-                      the clinical narrative is the Summary surface; the Action tab is the operational view.
-                      What stays here is the operational story — chart extraction (what we read), the
-                      assignments, the send affordance, and (collapsed) the raw analysis. */}
+                  {/* SOAP-note Overview (Ryan 2026-06-21): while the case is PRE-DRAFT / in-review (no
+                      completed draft yet) the SOAP read leads the ACTION tab — it's the RN's go/no-go read
+                      before drafting. Once a completed draft/letter exists it MOVES to the Summary tab (it
+                      becomes a reference record, not the next action). hasCompletedDraft gates the move so the
+                      card is in exactly one tab at a time. */}
+                  {!hasCompletedDraft ? (
+                    <SoapOverviewCard
+                      key="soap-overview"
+                      caseId={c.id}
+                      claimedCondition={c.claimedCondition}
+                      veteranStatement={c.veteranStatement ?? null}
+                      hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}
+                    />
+                  ) : null}
 
                   {/* Chart extraction (objective — "what we actually read") stays visible; it also carries
                       the reprocess/re-OCR actions. Wider gate so it shows during drafting / halt / rn_review. */}
@@ -646,7 +668,7 @@ export function CaseDetailPage() {
                       canSendBack={false}
                       onOpenPdf={openLetterPdf}
                       onEditText={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
-                      onSendToDoctor={() => { if (window.confirm('Send this letter to the doctor for review? It will move to the physician queue.')) sendToDoctor.mutate(); }}
+                      onSendToDoctor={() => setSendToDoctorOpen(true)}
                       sendToDoctorBlockedReason={c.assignedPhysician ? undefined : 'Assign a physician below before sending.'}
                       sending={sendToDoctor.isPending}
                       onChanged={async () => {
@@ -654,6 +676,15 @@ export function CaseDetailPage() {
                       }}
                     />
                   ) : null}
+
+                  {/* Send-to-doctor handoff: ALWAYS offers an optional message to the reviewing
+                      physician (Ryan 2026-06-24). Empty message = behaves like the old bare confirm. */}
+                  <SendToDoctorModal
+                    caseId={caseId}
+                    open={sendToDoctorOpen}
+                    onClose={() => setSendToDoctorOpen(false)}
+                    onConfirm={async () => { await sendToDoctor.mutateAsync(); }}
+                  />
 
                   {/* Post-draft sanity impression — the auto-fired Opus gut-check on the FINISHED letter,
                       a quiet "Overall impression" line beneath whichever letter-ready panel is showing. */}
@@ -671,6 +702,7 @@ export function CaseDetailPage() {
                       isAdmin={role === 'admin'}
                       hasLetter={!!viewableLetterJob}
                       onViewLetter={openLetterPdf}
+                      onOpenEditor={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
                     />
                   ) : null}
 
@@ -681,6 +713,7 @@ export function CaseDetailPage() {
                       key="gate2-halt"
                       c={c}
                       {...(haltedJob ? { job: haltedJob as never } : {})}
+                      onOpenEditor={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}
                       onChanged={async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-decisions'] })]); }}
                     />
                   ) : null}
@@ -703,7 +736,11 @@ export function CaseDetailPage() {
                       2026-06-11; backend mirrors this). Editing creates a NEW version; the
                       version-safety in /draft + currentVersion pointer ensure the doctor always
                       reviews the newest version. */}
-                  {p.canShowRnEditorEntry ? (
+                  {/* Suppress this RN-editor-entry when OpsHeldPanel is showing — that panel already
+                      carries "Open letter editor" + "Send to doctor", so rendering both produced TWO
+                      "Open letter editor" buttons on one page (Ryan 2026-06-23). Keep it for the
+                      no-ops-panel RN-editable states (e.g. correction_review). */}
+                  {p.canShowRnEditorEntry && !p.canSeeOpsHeldPanel ? (
                     <div key="rn-editor-entry" className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
                       <h2 className="text-base font-semibold text-slate-900">Edit {letterFilename(c.veteran?.lastName, c.veteran?.firstName, c.claimedCondition, c.currentVersion ?? c.version)}</h2>
                       <p className="mt-1 text-sm text-slate-600">
@@ -739,6 +776,7 @@ export function CaseDetailPage() {
           <SummaryTab
             c={c}
             chartReadiness={chartReadiness}
+            showSoap={hasCompletedDraft}
             saving={patch.isPending}
             onSave={(field, value) => patch.mutate({ version: c.version, [field]: value })}
           />
@@ -810,22 +848,28 @@ type EditableField = 'framingChoice' | 'upstreamScCondition' | 'veteranStatement
 // The SC-vs-problem split reuses the SAME veteran data the chart uses (getVeteran): scConditions with
 // status 'service_connected' are the SC list; activeProblems is the medical-history list. Read-only
 // here (edits happen on the SC Conditions / Active Problems tabs); this surface is for reading.
-function SummaryTab({ c, chartReadiness, onSave, saving }: {
+function SummaryTab({ c, chartReadiness, showSoap, onSave, saving }: {
   readonly c: CaseDetail;
   readonly chartReadiness: UseChartReadiness;
+  /** The SOAP card lives here only once a completed draft/letter exists; pre-draft it leads the Action tab
+   *  (Ryan 2026-06-21). Gated so the card never renders in both tabs at once. */
+  readonly showSoap: boolean;
   readonly onSave: (field: EditableField, value: string) => void;
   readonly saving: boolean;
 }) {
   return (
     <div className="space-y-6">
       {/* 1. The AI SOAP note leads — the clinical narrative (Subjective / Objective / Assessment / Plan)
-          with the deterministic verdict traffic-light + next action as the always-instant fallback. */}
-      <SoapOverviewCard
-        caseId={c.id}
-        claimedCondition={c.claimedCondition}
-        veteranStatement={c.veteranStatement ?? null}
-        hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}
-      />
+          with the deterministic verdict traffic-light + next action as the always-instant fallback. Shown
+          here ONLY once a completed draft/letter exists (pre-draft it leads the Action tab). */}
+      {showSoap ? (
+        <SoapOverviewCard
+          caseId={c.id}
+          claimedCondition={c.claimedCondition}
+          veteranStatement={c.veteranStatement ?? null}
+          hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0}
+        />
+      ) : null}
 
       {/* 2. Framing / opinion / cost — the case summary fields. */}
       <CaseSummaryFields c={c} saving={saving} onSave={onSave} />

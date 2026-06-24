@@ -53,7 +53,18 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   rejected: [],
   // Gate-2 parked states: the RN resumes (drafting via the rnDecision draft) or rejects. needs_records
   // can also drop back to records to gather more, then re-run.
-  needs_rn_decision: ['drafting', 'records', 'rejected'],
+  //
+  // needs_rn_decision -> physician_review (2026-06-22, "see/edit/FORWARD"): a body-quality park is a
+  // SOFT advisory hold over a FULL produced draft (the /halt receiver advanced currentVersion onto it
+  // and letter.ts made it editor-editable). Once the RN fixes the flagged section by hand, the hold is
+  // resolved and the letter must move FORWARD to the doctor — never be trapped requiring a ~$15 re-draft
+  // to escape. Without this edge the held-and-fixed letter could ONLY go back to 'drafting' (re-draft,
+  // discarding the RN's fix) and sign-offs.ts correctly refused the parked case, so the human path the
+  // sign-off error TOLD them to take ("fix + send to physician_review") didn't exist. This edge is the
+  // forward door. Role = the default (admin, ops_staff) below — identical to the canonical
+  // rn_review->physician_review "send to doctor" hop. The cases.ts middleware mirrors the assigned-
+  // physician guard onto this edge so a held case can't land in the doctor's queue unassigned.
+  needs_rn_decision: ['drafting', 'records', 'physician_review', 'rejected'],
   needs_records: ['drafting', 'records', 'rejected'],
 };
 

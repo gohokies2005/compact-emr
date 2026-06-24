@@ -44,8 +44,14 @@ function viability(band: ViabilityBand, over: Partial<CaseViability> = {}): Case
   };
 }
 
-function coverage(status: CoverageStatus, coveragePct = 100): ExtractionCoverage {
-  return { totalPages: 10, extractedPages: status === 'complete' ? 10 : 8, coveragePct, gaps: [], status, unknownPageFiles: 0, totalFiles: 1, pageBreakdown: null };
+function coverage(status: CoverageStatus, coveragePct = 100, analysisState?: ExtractionCoverage['chartAnalysis']['state']): ExtractionCoverage {
+  const extractedPages = status === 'complete' ? 10 : 8;
+  const state = analysisState ?? (status === 'failed' ? 'failed' : status === 'in_progress' ? 'in_progress' : 'complete');
+  return {
+    totalPages: 10, extractedPages, coveragePct, gaps: [], status, unknownPageFiles: 0, totalFiles: 1, pageBreakdown: null,
+    pagesRead: { pct: coveragePct, readUnits: extractedPages, totalUnits: 10, approximate: false, label: `${coveragePct}% (${extractedPages} of 10)` },
+    chartAnalysis: { state, label: '✓ Complete', reason: null, likelyCauseFile: null, findings: null },
+  };
 }
 
 const SIGNALS = (over: Partial<ReadinessSignals> = {}): ReadinessSignals => ({
@@ -155,5 +161,66 @@ describe('computeReadinessVerdict — reconciliation contract', () => {
 
   it('recommendedPlan re-export still works (back-compat shim): Strong → draft kind', () => {
     expect(recommendedPlan({ strategy: strategy('Strong'), viability: null })?.kind).toBe('draft');
+  });
+});
+
+// ── CHART-ANALYSIS SAFETY OVERLAY (Ryan 2026-06-23) — THE safety fix: the verdict, not just a label, stops
+//    being confident when the chart the verdict is built on wasn't actually analyzed. ──
+describe('computeReadinessVerdict — chart-analysis safety overlay', () => {
+  it('analysis FAILED on a Strong/supportable case → analysis_failed (directional TEXT suppressed), low confidence', () => {
+    const r = computeReadinessVerdict(SIGNALS({ extraction: coverage('failed', 100, 'failed') }))!;
+    expect(r.verdict).toBe('analysis_failed'); // NOT a confident "draft" on an empty chart
+    expect(r.confidence).toBe('low');
+    expect(r.detail).not.toMatch(/not supportable/i);
+    expect(r.detail).toMatch(/re-run/i);
+    expect(r.disagreements.some((d) => d.source === 'chart_analysis')).toBe(true);
+    expect(r.nextAction).toMatch(/re-run/i);
+  });
+
+  it('analysis FAILED suppresses a would-be "not supportable" too (never assert not-supportable on an unanalyzed chart)', () => {
+    const r = computeReadinessVerdict(SIGNALS({
+      strategy: strategy('Stop'), viability: viability('abstain'),
+      extraction: coverage('failed', 100, 'failed'),
+    }))!;
+    expect(r.verdict).toBe('analysis_failed');
+    expect(r.detail).not.toMatch(/not supportable/i);
+  });
+
+  it('analysis INCOMPLETE (queued/interrupted) with OCR 100% → directional verdict downgraded to read_chart_first, lower confidence', () => {
+    const r = computeReadinessVerdict(SIGNALS({ extraction: coverage('complete_with_gaps', 100, 'incomplete') }))!;
+    expect(r.verdict).toBe('read_chart_first'); // the verdict (not just the headline label) goes provisional
+    expect(r.confidence).not.toBe('high');
+    expect(r.disagreements.some((d) => d.source === 'chart_analysis')).toBe(true);
+  });
+
+  it('analysis IN_PROGRESS → directional verdict goes provisional read_chart_first', () => {
+    const r = computeReadinessVerdict(SIGNALS({ extraction: coverage('in_progress', 100, 'in_progress') }))!;
+    expect(r.verdict).toBe('read_chart_first');
+  });
+
+  it('FAIL-SAFE: coverage loading/errored (chartAnalysisUnknown) → never a confident verdict, goes provisional', () => {
+    const r = computeReadinessVerdict(SIGNALS({ extraction: null, chartAnalysisUnknown: true }))!;
+    expect(r.verdict).toBe('read_chart_first'); // unknown fails SAFE, not confident
+    expect(r.confidence).not.toBe('high');
+    expect(r.disagreements.some((d) => d.source === 'chart_analysis')).toBe(true);
+  });
+
+  it('not_analyzed (new/empty case) does NOT downgrade — a clean Strong case stays a confident draft', () => {
+    const r = computeReadinessVerdict(SIGNALS({ extraction: coverage('complete', 100, 'not_analyzed') }))!;
+    expect(r.verdict).toBe('draft');
+    expect(r.confidence).toBe('high');
+    expect(r.disagreements.some((d) => d.source === 'chart_analysis')).toBe(false);
+  });
+
+  it('a found bridge (contact_alternative) is NOT clobbered by a failed analysis', () => {
+    const r = computeReadinessVerdict(SIGNALS({
+      strategy: strategy('Stop'),
+      viability: viability('abstain', { bridge_pathways: [{
+        bridge_provisional: true, physician_review_required: true, exposure: 'Gulf War', intermediate_dx: 'asthma',
+        intermediate_presumptive_basis: '3.317', claimed: 'OSA', pair_tier: null, pair_M: null, suggestion: 'establish asthma first',
+      }] }),
+      extraction: coverage('failed', 100, 'failed'),
+    }))!;
+    expect(r.verdict).toBe('contact_alternative'); // a presumptive route still stands
   });
 });

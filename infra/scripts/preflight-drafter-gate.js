@@ -48,6 +48,11 @@ export const FUTURE_SKEW_MS = 60 * 60 * 1000; // 1h
 // framingGate canon extraction), draftingGuidance.js, forbiddenWordPass.js, opinionSentence.js
 // (drafter35-38 era promotions that never got mirrored here — R4 would have hard-blocked any
 // v1.1 per-file artifact since then, proving the enforcer wasn't run for the drafter39 deploy).
+// SYNCED 29→33 (2026-06-22, drafter image cutover 52297d4): producer classified 4 new reachable
+// output-determining modules — aiRoutePicker.js (after aggravationTriggers.js), checkpointManifest.js
+// (after cavcRegistry.js), draftBodyQualityGate.js (after deprecatedPhrases.js), foldRenderable.js
+// (after draftingGuidance.js). Positions match producer/alphabetical order so the recomputed hash
+// matches the artifact's d625a1f7…. directSc/eventCanon/pactPresumptive remain EXCLUDED (dark, flag-OFF).
 // Producer remains the SSOT for this list; re-sync on every producer fileset change.
 export const GATED_FILESET = [
   'app/scripts/run-letter-pipeline.js',
@@ -61,15 +66,19 @@ export const GATED_FILESET = [
   'app/services/templatePicker.js',
   'app/services/routingResolver.js',
   'app/services/aggravationTriggers.js',
+  'app/services/aiRoutePicker.js',
   'app/services/authorsDecisions.js',
   'app/services/cavcRegistry.js',
+  'app/services/checkpointManifest.js',
   'app/services/citationAuditor.js',
   'app/services/citationRegistry.js',
   'app/services/conditionCanon.js',
   'app/services/conditionFormat.js',
   'app/services/conditionTemplates.js',
   'app/services/deprecatedPhrases.js',
+  'app/services/draftBodyQualityGate.js',
   'app/services/draftingGuidance.js',
+  'app/services/foldRenderable.js',
   'app/services/forbiddenWordPass.js',
   'app/services/linter.js',
   'app/services/llm/client.js',

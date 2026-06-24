@@ -109,9 +109,12 @@ export interface CaseViability {
  * AI_ROUTE_PICKER_ENABLED is on (else null → the card renders the static `data`). Plain language;
  * no M-tier/E jargon, no plausible-default chart junk.
  */
+/** The route-picker plan's viability band — the ONE brain the Overview chip projects (Ryan 2026-06-22). */
+export type RoutePickerViability = 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
+
 export interface AiViabilityCard {
   readonly source: 'ai_route_picker';
-  readonly viability: 'supportable' | 'marginal' | 'needs_physician_review' | 'not_supportable';
+  readonly viability: RoutePickerViability;
   readonly lead: { readonly upstream: string; readonly claimed: string; readonly framing: string; readonly cfr_basis: string; readonly mechanism: string; readonly confidence: string; readonly rationale: string; readonly counterargument: string };
   readonly convergent: ReadonlyArray<{ readonly upstream: string; readonly note: string }>;
   readonly alternatives: ReadonlyArray<{ readonly upstream: string; readonly framing: string; readonly why_not: string }>;
@@ -120,8 +123,42 @@ export interface AiViabilityCard {
   readonly overall: string;
 }
 
-export function getCaseViability(caseId: string): Promise<{ data: CaseViability | null; aiViability?: AiViabilityCard | null; chartFullyRead?: boolean | null }> {
+/**
+ * The discriminated RELIABILITY state of the route-picker plan (Ryan 2026-06-21, Zimmelman). The FE uses
+ * this to show an HONEST surface — a spinner while 'computing', a retry button on 'error', the grounded
+ * plan when 'ready' — instead of a misleading "Not supportable" resting verdict on a missing/failed plan.
+ *   - 'ready'     → a plan matching the current inputs (carries the card)
+ *   - 'computing' → a compute is in flight; the FE polls until it resolves
+ *   - 'error'     → the last compute FAILED (carries an RN-safe message); the FE shows "retry", not a verdict
+ *   - 'none'      → no plan/none in flight (the GET fired an off-request recompute; the FE may poll/compute)
+ *   - 'off'       → the AI_ROUTE_PICKER_ENABLED flag is off (the card uses the static engine)
+ */
+export type AiViabilityState =
+  | { readonly status: 'off' }
+  | { readonly status: 'none' }
+  | { readonly status: 'computing' }
+  | { readonly status: 'error'; readonly error: string }
+  | { readonly status: 'ready'; readonly card: AiViabilityCard };
+
+export interface CaseViabilityResponse {
+  readonly data: CaseViability | null;
+  readonly aiViability?: AiViabilityCard | null;
+  readonly aiViabilityState?: AiViabilityState;
+  readonly chartFullyRead?: boolean | null;
+}
+
+export function getCaseViability(caseId: string): Promise<CaseViabilityResponse> {
   return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/viability-card`);
+}
+
+/**
+ * On-demand SYNCHRONOUS compute (the spinner path + the retry button). Runs the picker call inside the
+ * request (~25s) and returns the resulting state — the grounded plan or an honest error. Use this when the
+ * read state is 'none' (first view) or 'error' (retry) so the FIRST view grounds after a spinner rather than
+ * showing a misleading no-go.
+ */
+export function computeCaseViability(caseId: string): Promise<{ aiViabilityState: AiViabilityState }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/viability-card/compute`, {});
 }
 
 /**
@@ -138,6 +175,10 @@ export interface SoapNote {
   readonly action: 'draft' | 'get_records' | 'clarify' | 'physician_review' | 'reject';
   /** Deterministic grounding guard: a clinical value in the note not found in the source facts (verify). */
   readonly caveat?: string | null;
+  /** True when this note is the deterministic EXPLANATORY fallback (the model truncated/failed/returned
+   *  nothing on this open) rather than a full model-written summary. The card shows a subtle hint; the note
+   *  still renders (never blank) and its decision/action still match the verdict (Zimmelman 2026-06-22). */
+  readonly fallback?: boolean;
 }
 
 export interface SoapContextInput {

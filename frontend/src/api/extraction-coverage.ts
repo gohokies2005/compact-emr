@@ -10,9 +10,31 @@ export type CoverageGapReason =
   | 'unread'
   | 'truncated_dense'
   | 'needs_manual_summary'
-  | 'extraction_gap';
+  | 'extraction_gap'
+  | 'extraction_incomplete'; // the chart analysis (semantic extract) did not finish — distinct from OCR
 
 export type CoverageStatus = 'complete' | 'complete_with_gaps' | 'in_progress' | 'failed';
+
+// TWO-STAGE honesty model (Ryan 2026-06-23) — mirrors backend/src/services/extraction-coverage.ts.
+export interface PagesReadStage {
+  readonly pct: number;
+  readonly readUnits: number;
+  readonly totalUnits: number;
+  readonly approximate: boolean;
+  readonly label: string; // "100% (28 of 28)" / "28 files, page counts unavailable"
+}
+
+// 'not_analyzed' (Ryan 2026-06-23): no analysis run on record yet OR nothing to analyze — NOT a failure/gap;
+// does NOT trip the SOAP banner / provisional verdict / cause-file. Mirrors backend extraction-coverage.ts.
+export type ChartAnalysisState = 'complete' | 'in_progress' | 'incomplete' | 'failed' | 'not_analyzed';
+
+export interface ChartAnalysisStage {
+  readonly state: ChartAnalysisState;
+  readonly label: string; // "✓ Complete (253 findings)" / "⚠ Chart analysis didn’t finish — retry"
+  readonly reason: string | null;
+  readonly likelyCauseFile: string | null;
+  readonly findings: number | null;
+}
 
 export interface CoverageGap {
   // null for a run-level gap (truncated/uncovered pages aren't tied to one document); a documentId
@@ -54,6 +76,9 @@ export interface ExtractionCoverage {
   readonly unknownPageFiles: number;
   readonly totalFiles: number;
   readonly pageBreakdown: PageCoverageBreakdown | null;
+  // Two-stage SSOT: the card renders these two lines; the SOAP banner reads chartAnalysis.state.
+  readonly pagesRead: PagesReadStage;
+  readonly chartAnalysis: ChartAnalysisStage;
 }
 
 export async function getExtractionCoverage(caseId: string): Promise<{ data: ExtractionCoverage }> {

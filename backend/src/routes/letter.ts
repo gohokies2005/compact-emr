@@ -18,7 +18,7 @@ import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from 
 import { resolveRateCents } from '../services/pay-earnings.js';
 import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../services/chart-readiness.js';
 import { findChartReadinessOverride, resolveOverrideReason } from '../services/chart-readiness-override.js';
-import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash } from '../services/letter-current.js';
+import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash, headObjectExists, resolveLatestS3DrafterArtifact } from '../services/letter-current.js';
 import { detectLetterLeaks, blockingLeaks } from '../services/letter-leak-detector.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import {
@@ -47,7 +47,15 @@ const PRESIGN_TTL_SECONDS = 300;
 // it immediately in the full editor (it is NOT physician-signed, so nothing should bar editing) — not
 // just View/Redraft (Ryan 2026-06-20, Apolito). Editing creates a new version; it does not change
 // status. (correction_review = the RN actively reworking before sending back to the doctor.)
-const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'rn_review', 'physician_review', 'correction_requested', 'correction_review']);
+// 'needs_rn_decision' = a body-quality PARK (a FULL draft was produced but the deterministic body-quality
+// gate found a letter-killing defect). Per the 2026-06-22 advisory/editable redesign, that hold is a SOFT
+// advisory, not re-draft-only: the RN may open the held letter in the full editor and fix the flagged
+// section by hand (cheaper than a ~$15 re-draft). Editing creates a new version; it does NOT change status.
+// Load-bearing safety: 'needs_rn_decision' carries a currentVersion only when /halt confirmed a produced
+// txt exists in S3 (a dx/event hold leaves currentVersion untouched → GET /letter resolves null → editor
+// shows nothing to edit). sign-offs.ts SEPARATELY refuses needs_rn_decision so a held-for-defect letter can
+// never be physician-signed while parked. 'needs_records' stays OUT — by definition no draft exists there.
+const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'rn_review', 'physician_review', 'correction_requested', 'correction_review', 'needs_rn_decision']);
 
 /**
  * G4 — ratified sign/edit lifecycle (Ryan 2026-06-12): "nurse cannot edit the version the doctor
@@ -169,9 +177,13 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
   const s3 = (): S3Client => deps.s3 ?? new S3Client({});
   const bucket = (): string | undefined => deps.bucketName ?? process.env.PHI_BUCKET_NAME;
 
-  // Resolve the current letter's artifacts strictly by Case.currentVersion (the single
-  // source of truth). Prefer the unified LetterRevision row; fall back to the DraftJob row
-  // for drafted-but-pre-mirror cases. Both are keyed to the SAME version.
+  // Resolve the current letter's artifacts STRICTLY by Case.currentVersion (the single source of
+  // truth). Prefer the unified LetterRevision row; fall back to the DraftJob row for drafted-but-
+  // pre-mirror cases. Both are keyed to the SAME version. This strict form is used by the MUTATING
+  // paths (PUT save, surgical-AI apply, approve): they build version currentVersion+1 over the
+  // CURRENT version, so they must NEVER silently fall back to an older version (that would break the
+  // version chain / re-derive an edit over the wrong base). Read-only resolution uses
+  // resolveCurrentForRead below, which can recover a stranded prior letter.
   async function resolveCurrent(caseId: string, currentVersion: number): Promise<CurrentLetter | null> {
     if (!Number.isInteger(currentVersion) || currentVersion < 1) return null;
     const rev = await db.letterRevision.findFirst({ where: { caseId, version: currentVersion } });
@@ -181,6 +193,73 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
     const job = await db.draftJob.findFirst({ where: { caseId, version: currentVersion } });
     if (job !== null && typeof job.artifactTxtS3Key === 'string') {
       return { version: job.version, txtKey: job.artifactTxtS3Key, pdfKey: job.artifactPdfS3Key, docxKey: job.artifactDocxS3Key };
+    }
+    return null;
+  }
+
+  // READ-PATH resolution with STRANDED-LETTER RECOVERY (CLM-9925837B7B, 2026-06-23): when
+  // currentVersion resolves to a real, S3-present artifact, return it (current behavior). When it
+  // does NOT (a failed re-draft advanced currentVersion to a dead version that produced no artifact),
+  // fall back to the most-recent PRIOR version whose TXT object actually exists in S3, so the good
+  // letter is never stranded behind a failed attempt. Only when NO version anywhere has a present
+  // artifact does the caller get a clean 404. We HeadObject-verify the resolved version's TXT so a
+  // dangling key (a non-null artifactTxtS3Key whose object was never written) can never be returned.
+  async function resolveCurrentForRead(caseId: string, currentVersion: number): Promise<CurrentLetter | null> {
+    const strict = await resolveCurrent(caseId, currentVersion);
+    if (strict !== null && await headObjectExists(s3(), bucket() as string, strict.txtKey)) {
+      return strict;
+    }
+    // currentVersion is unresolvable or its TXT is missing — recover the latest version that truly
+    // has a letter. Re-read the winning row to carry its pdf/docx keys (the walk is txt-keyed).
+    const latest = await resolveLatestResolvableTxt(caseId, currentVersion);
+    // Nothing recoverable anywhere: return the STRICT row (if one exists). The normal read path then
+    // runs readTxtFromS3 on it and yields the precise "letter_artifact_missing — re-draft" 404 (more
+    // helpful than a generic no_letter). If strict is also null, the caller yields the generic 404.
+    if (latest === null) {
+      // S3-TRUTH FALLBACK: no DB row resolved to a present artifact. Discover the newest letter that
+      // actually EXISTS in S3 (a good drafter letter whose DB row lost/offset its key — Hackworth v73,
+      // where currentVersion points at the failed v97/v98 and no row carries a resolvable key).
+      const s3hit = await resolveLatestS3DrafterArtifact(s3(), bucket() as string, caseId);
+      if (s3hit !== null) {
+        console.warn(`[letter] s3-truth-recovery: case ${caseId} currentVersion=${currentVersion} had no DB-resolvable artifact; served S3 drafter-artifact v${s3hit.version}`);
+        return s3hit;
+      }
+      return strict;
+    }
+    const rev = await db.letterRevision.findFirst({ where: { caseId, version: latest.version } });
+    if (rev !== null && rev.artifactTxtS3Key === latest.txtKey) {
+      return { version: rev.version, txtKey: rev.artifactTxtS3Key, pdfKey: rev.artifactPdfS3Key, docxKey: rev.artifactDocxS3Key };
+    }
+    const job = await db.draftJob.findFirst({ where: { caseId, version: latest.version } });
+    if (job !== null && job.artifactTxtS3Key === latest.txtKey) {
+      return { version: job.version, txtKey: latest.txtKey, pdfKey: job.artifactPdfS3Key, docxKey: job.artifactDocxS3Key };
+    }
+    // The winning row's txt key changed underfoot (extremely unlikely) — return txt-only; the GET
+    // path tolerates null pdf/docx (the editor opens the TXT; PDF/DOCX presign just go null).
+    return { version: latest.version, txtKey: latest.txtKey, pdfKey: null, docxKey: null };
+  }
+
+  // Walk DB versions DESC across BOTH tables and return the newest whose TXT object is present in S3.
+  // Inlined (not the shared lib resolveLatestResolvableLetter) so it reuses THIS router's db + s3()
+  // exactly as the strict resolver does, and stays test-injectable through the same deps.
+  async function resolveLatestResolvableTxt(caseId: string, _currentVersion: number): Promise<{ version: number; txtKey: string } | null> {
+    const candidates = new Map<number, string>();
+    const revs = await db.letterRevision.findMany({ where: { caseId }, orderBy: { version: 'desc' } });
+    for (const r of revs) {
+      if (typeof r.artifactTxtS3Key === 'string' && r.artifactTxtS3Key.length > 0 && !candidates.has(r.version)) {
+        candidates.set(r.version, r.artifactTxtS3Key);
+      }
+    }
+    const jobs = await db.draftJob.findMany({ where: { caseId }, orderBy: { version: 'desc' } });
+    for (const j of jobs) {
+      if (typeof j.artifactTxtS3Key === 'string' && j.artifactTxtS3Key.length > 0 && !candidates.has(j.version)) {
+        candidates.set(j.version, j.artifactTxtS3Key);
+      }
+    }
+    const versionsDesc = Array.from(candidates.keys()).sort((a, b) => b - a);
+    for (const version of versionsDesc) {
+      const txtKey = candidates.get(version) as string;
+      if (await headObjectExists(s3(), bucket() as string, txtKey)) return { version, txtKey };
     }
     return null;
   }
@@ -211,8 +290,19 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       const bucketName = bucket();
       if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
 
-      const cur = await resolveCurrent(caseId, c.currentVersion);
+      // READ-PATH resolution with stranded-letter recovery (CLM-9925837B7B): when currentVersion
+      // resolves to a real S3-present artifact, that wins; otherwise fall back to the latest prior
+      // version that actually has a letter, so a failed re-draft never strands a good letter behind
+      // a 404. Only a case with NO present artifact at ANY version 404s.
+      const cur = await resolveCurrentForRead(caseId, c.currentVersion);
       if (cur === null) throw new HttpError(404, 'not_found', 'No letter has been drafted for this case yet.', { reason: 'no_letter', caseId });
+      // FAIL-LOUD (CLM-9925837B7B, 2026-06-23): a failed re-draft advanced Case.currentVersion onto a
+      // dead (artifact-less) version, stranding the prior good letter behind a 404. The read-path resolver
+      // recovered it; log loudly so we can see how often this happens and back it out at the drafter source
+      // (the failure /complete path advancing currentVersion with no HeadObject guard — worklist #82).
+      if (cur.version !== c.currentVersion) {
+        console.warn(`[letter] stranded-recovery: case ${caseId} currentVersion=${c.currentVersion} had no resolvable artifact; served prior good letter v${cur.version}`);
+      }
 
       const txt = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
       const client = s3();

@@ -5,9 +5,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // buried-grant failure class (a single dense rating-decision page that overflows the token ceiling).
 
 const createMock = vi.fn();
+// The extractor now calls messages.stream(params, opts).finalMessage() (streaming fix 2026-06-23).
+// Mock BOTH surfaces onto the same createMock so call-arg/count assertions are unchanged: stream()
+// returns a thenable-ish handle whose finalMessage() resolves to whatever createMock returns. We pass
+// only the first arg (the params object) to createMock so existing arg-shape assertions still match,
+// ignoring the per-request { timeout } options arg.
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class {
-    messages = { create: (...args: unknown[]) => createMock(...args) };
+    messages = {
+      create: (...args: unknown[]) => createMock(...args),
+      stream: (params: unknown) => ({ finalMessage: () => createMock(params) }),
+    };
   },
 }));
 

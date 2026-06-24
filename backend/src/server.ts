@@ -150,7 +150,10 @@ export function createApp(options: CreateAppOptions = {}) {
   }));
   app.use('/api/v1', authenticateJwt(), createPhysiciansRouter(db, { bucketName: process.env.PHI_BUCKET_NAME, s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) }));
   app.use('/api/v1', authenticateJwt(), createChartNotesRouter(db));
-  app.use('/api/v1', authenticateJwt(), createAdvisoryRouter(db));
+  app.use('/api/v1', authenticateJwt(), createAdvisoryRouter(db, {
+    s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
+    bucketName: process.env.PHI_BUCKET_NAME,
+  }));
   app.use('/api/v1', authenticateJwt(), createStrategyPreviewRouter(db));
   // P4 anchor-viability card (caseViability v1) — DARK behind EMR_CASE_VIABILITY_ENABLED.
   app.use('/api/v1', authenticateJwt(), createCaseViabilityRouter(db));

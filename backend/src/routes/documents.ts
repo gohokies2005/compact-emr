@@ -395,6 +395,21 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
       });
     });
 
+    // Re-enqueue a fresh chart extraction for the REMAINING doc-set. Deleting a file changes the
+    // chart fingerprint (triggerHash), so the last successful run no longer matches → the derived
+    // build-state flips to "extracting" — but nothing re-runs it, pinning the case in a PHANTOM
+    // "Reading and extracting…" forever with no run behind it (Enoch CLM-76E3584247, 2026-06-24).
+    // maybeEnqueueChartExtract enqueues a fresh run when the remaining docs are all OCR-terminal
+    // (mid-OCR → 'ocr_in_progress' no-op, the next /pages completion re-fires; last doc gone →
+    // 'no_documents'). Log-only/best-effort AFTER the commit — an enqueue failure must never fail
+    // the delete (mirrors the /pages post-commit trigger). The stuck-run watcher is the backstop.
+    try {
+      const enq = await maybeEnqueueChartExtract(prisma as unknown as AppDb, document.caseId);
+      console.warn(JSON.stringify({ event: 'chart_extract_after_delete', caseId: document.caseId, ...enq }));
+    } catch (err) {
+      console.error(JSON.stringify({ event: 'chart_extract_after_delete_failed', caseId: document.caseId, error: err instanceof Error ? err.message : String(err) }));
+    }
+
     res.status(204).send();
   });
 

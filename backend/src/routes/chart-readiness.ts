@@ -16,7 +16,7 @@ import {
   parseReadAttempt,
 } from '../services/file-read-validation.js';
 import { computeTriggerHash, deriveChartBuildState, isScreeningSummaryKey, runMatchesHash } from '../services/chart-build-state.js';
-import { computeExtractionCoverage, type CoverageDocInput, type PageProvenanceInput } from '../services/extraction-coverage.js';
+import { loadExtractionCoverageForCase } from '../services/extraction-coverage.js';
 import { buildSanityImpression, type SanityContext } from '../services/sanity-impression.js';
 import { AUTO_REMEDIATE_ACTION } from '../services/chart-auto-remediate.js';
 import type { AppDb, FileReadAttempt, FileReadStatusRecord } from '../services/db-types.js';
@@ -311,27 +311,12 @@ export function createChartReadinessRouter(db: AppDb): Router {
     requireRole(['admin', 'ops_staff', 'physician']),
     asyncHandler(async (req: Request, res: Response) => {
       const caseId = String(req.params.id);
-      // Same select shape the coverage service consumes (id for the presigned view join; filename +
-      // contentType for the image/AI-describe affordance; pageCount for honest page totals). Cast like
-      // the chart-readiness route does — DocumentRecord in db-types is the minimal {s3Key} view.
-      const docs = (await db.document.findMany({
-        where: { caseId },
-        select: { id: true, s3Key: true, filename: true, contentType: true, pageCount: true },
-      })) as readonly CoverageDocInput[];
-      const rows = await db.fileReadStatus.findMany({ where: { caseId } });
-      const latestRun = await (db as unknown as {
-        chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { status: true; resultJson: true } }) => Promise<{ status: string; resultJson: unknown } | null> };
-      }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true } });
-
-      // Per-page provenance for the honest per-page breakdown (vision rebuild). Tiny select (no text);
-      // null coverage rows (Textract/native/legacy) contribute nothing — the breakdown stays null for
-      // non-vision charts, preserving the prior file-level-only response.
-      const pageRows = (await db.documentPage.findMany({
-        where: { document: { caseId } },
-        select: { documentId: true, pageNumber: true, extractionCoverage: true, handwritingPresent: true },
-      })) as unknown as readonly PageProvenanceInput[];
-
-      const coverage = computeExtractionCoverage(docs, rows, latestRun, pageRows);
+      // ONE shared loader (Ryan 2026-06-22, Zimmelman FIX C): the SOAP assembler's coverage note and this
+      // transparency route MUST report the same %; they drifted (the assembler passed empty read-statuses
+      // → false "0%"). loadExtractionCoverageForCase assembles the canonical inputs (Document rows judged
+      // through the SHARED isEffectivelyRead predicate, the latest ChartExtractionRun gaps, and per-page
+      // provenance) so both callers compute identical coverage and can never diverge again.
+      const coverage = await loadExtractionCoverageForCase(db, caseId);
       res.json({ data: coverage });
     }),
   );

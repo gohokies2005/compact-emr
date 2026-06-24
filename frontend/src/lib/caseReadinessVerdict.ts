@@ -25,8 +25,8 @@
 //    degrades confidence toward 'low' / the verdict toward needs_review, never toward a confident draft.
 
 import type { StrategyPreview } from '../api/strategy-preview';
-import type { CaseViability, BridgePathway } from '../api/case-viability';
-import type { ExtractionCoverage } from '../api/extraction-coverage';
+import type { CaseViability, BridgePathway, RoutePickerViability } from '../api/case-viability';
+import type { ExtractionCoverage, ChartAnalysisState } from '../api/extraction-coverage';
 import type { ImpressionLevel } from '../api/sanity-impression';
 
 // ── The detailed plan (unchanged shape — RecommendedPlanCard consumes this) ──────────────────────
@@ -122,13 +122,14 @@ export type ReadinessVerdict =
   | 'draft_reconcile' // draftable, but the strategy + viability engines disagree on the anchor — reconcile first
   | 'draft_with_changes' // go, with a stronger anchor than the current framing
   | 'read_chart_first' // the chart isn't fully read — finish before deciding
+  | 'analysis_failed' // the chart ANALYSIS (semantic extract) failed/empty — re-run before any assessment
   | 'contact_records' // a specific record is needed from the veteran
   | 'contact_alternative' // a presumptive/bridge route to pursue
   | 'not_supportable' // no anchor and no route on the current record
   | 'needs_review'; // signals conflict / too little to decide → a human looks
 
 export type Confidence = 'high' | 'medium' | 'low';
-export type DisagreementSource = 'ai_sanity' | 'extraction' | 'viability_vs_strategy';
+export type DisagreementSource = 'ai_sanity' | 'extraction' | 'viability_vs_strategy' | 'band_vs_deterministic' | 'chart_analysis';
 export interface Disagreement {
   readonly source: DisagreementSource;
   readonly note: string;
@@ -159,7 +160,63 @@ export interface ReadinessSignals {
   readonly hasUnreadPages: boolean | null;
   /** DISPLAY-ONLY: the coverage report, for the % in the disagreement note. Never the decision input. */
   readonly extraction: ExtractionCoverage | null; // null = report unavailable
+  /**
+   * THE SAFETY INPUT (Ryan 2026-06-23): the Stage-2 chart-ANALYSIS state, the SSOT that says whether the
+   * structured chart the verdict is built on actually got built. SEPARATE from hasUnreadPages (OCR/pages-read):
+   * a chart can be 100% OCR'd yet have a FAILED/INTERRUPTED analysis run, leaving an empty structured chart.
+   *   • 'failed'                  → the chart is known-empty; suppress the directional verdict TEXT entirely.
+   *   • 'incomplete'              → built on a partial chart → downgrade a directional verdict to read_chart_first.
+   *   • 'complete' / 'not_analyzed' → no analysis-driven downgrade (not_analyzed = new/empty case, vacuous).
+   *   • 'in_progress'             → still working → provisional (handled like incomplete: don't conclude).
+   *   • undefined = read it from `extraction.chartAnalysis.state` (the SSOT) — the normal path. Pass it
+   *     explicitly only to override (tests / a separate fetch).
+   *   • null = state UNKNOWN (coverage query LOADING or ERRORED) → FAIL SAFE: never render a confident verdict.
+   */
+  readonly chartAnalysisState?: ChartAnalysisState | null;
+  /**
+   * FAIL-SAFE flag for the fetch race (Ryan 2026-06-23): true when the coverage query is LOADING or ERRORED so
+   * chartAnalysisState could not be read. Unknown analysis state must fail SAFE (provisional/non-confident),
+   * never fail confident. The parent sets this from the coverage query status.
+   */
+  readonly chartAnalysisUnknown?: boolean;
   readonly sanity: ImpressionLevel | null; // null = unavailable (NOT 'clear')
+  /**
+   * ONE-BRAIN (Ryan 2026-06-22): the AI route-picker plan's viability band — the SAME brain the drafter
+   * pleads and the SOAP Assessment/Plan render. When present (a 'ready' plan), the HEADLINE verdict is a
+   * PROJECTION of this band (routePickerBandToVerdict), so the chip can never contradict the note. The
+   * deterministic core is still computed (it populates the detail plan + missingFact + the over-call /
+   * extraction / sanity overlays), but it no longer OWNS the headline — when it would say Stop while the
+   * band says supportable, that becomes a VISIBLE 'band_vs_deterministic' disagreement, NOT a silent flip.
+   * null = no ready plan (flag off / cold / error) → the deterministic core drives the headline (fallback).
+   */
+  readonly routePickerViability?: RoutePickerViability | null;
+}
+
+/**
+ * Project the AI route-picker plan's viability band → the top-line headline verdict (ONE-BRAIN, Ryan
+ * 2026-06-22). This is the chip's source of truth when a ready plan exists. It MUST agree, band-for-band,
+ * with soap-overview.ts `planViabilityToAction` (same band → same go/no-go in two enums) — a cross-module
+ * agreement test pins that. The mapping:
+ *   supportable             → draft           (go; planViabilityToAction → 'draft')
+ *   marginal                → needs_review    (no-go; planViabilityToAction → 'physician_review')
+ *   needs_physician_review  → needs_review    (no-go; planViabilityToAction → 'physician_review')
+ *   not_supportable         → not_supportable (no-go; planViabilityToAction → 'reject')
+ * The conservative unread-chart overlay still applies on top (a negative band on an unread chart →
+ * read_chart_first), so the band never asserts "not supportable" on a chart we haven't finished reading.
+ */
+export function routePickerBandToVerdict(band: RoutePickerViability): ReadinessVerdict {
+  switch (band) {
+    case 'supportable': return 'draft';
+    case 'marginal': return 'needs_review';
+    case 'needs_physician_review': return 'needs_review';
+    case 'not_supportable': return 'not_supportable';
+    default: return 'needs_review';
+  }
+}
+
+/** Is a verdict a "go" (drafting may proceed)? Used to detect a band-wins-over-deterministic-Stop conflict. */
+function isGoVerdict(v: ReadinessVerdict): boolean {
+  return v === 'draft' || v === 'draft_confirm_mechanism' || v === 'draft_reconcile' || v === 'draft_with_changes';
 }
 
 const VERDICT_TITLE: Record<ReadinessVerdict, string> = {
@@ -168,6 +225,7 @@ const VERDICT_TITLE: Record<ReadinessVerdict, string> = {
   draft_reconcile: 'Draftable — reconcile the anchor',
   draft_with_changes: 'Draftable — with a stronger anchor',
   read_chart_first: 'Read the chart first',
+  analysis_failed: 'Chart analysis failed — re-run to assess',
   contact_records: 'Contact the veteran — records needed',
   contact_alternative: 'Contact the veteran — alternative route',
   not_supportable: 'Not supportable as filed',
@@ -258,6 +316,34 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
   } else {
     verdict = 'needs_review';
   }
+  // The deterministic verdict BEFORE the route-picker band projects over it — kept so we can detect a
+  // genuine band-vs-core conflict (band says supportable while the core would Stop) and surface it.
+  const deterministicVerdict = verdict;
+
+  // ── ONE-BRAIN HEADLINE (Ryan 2026-06-22): the chip is a PROJECTION of the AI route-picker band when a
+  //    ready plan exists. The band is the SAME brain the drafter pleads + the SOAP Assessment renders, so
+  //    the chip cannot contradict the note. The deterministic core above is NOT discarded — it populated
+  //    `plan` (the detail card), `missingFact`, confidence, and the over-call / hard-disagreement entries —
+  //    but it no longer OWNS the headline. When the core would have said Stop/not-supportable while the band
+  //    says supportable, we DO NOT silently flip: the band wins the headline AND we add a VISIBLE
+  //    'band_vs_deterministic' disagreement so the RN sees the core's concern (e.g. a dx the info-light core
+  //    thinks is missing). When the band is null (flag off / cold / error) the deterministic verdict stands
+  //    (fallback-only — the prior behavior, fully preserved). The conservative unread-chart overlay below
+  //    still applies on top of the band-projected verdict, so a negative band never asserts "not supportable"
+  //    on an unread chart. ──
+  const band = signals.routePickerViability ?? null;
+  if (band != null) {
+    const bandVerdict = routePickerBandToVerdict(band);
+    // Conflict: the band clears the case for drafting but the deterministic core would have stopped it.
+    if (isGoVerdict(bandVerdict) && (deterministicVerdict === 'not_supportable' || deterministicVerdict === 'needs_review')) {
+      disagreements.push({
+        source: 'band_vs_deterministic',
+        note: `The route-picker plan reads this as ${band.replace(/_/g, ' ')}, but the deterministic check would ${deterministicVerdict === 'not_supportable' ? 'call it not supportable' : 'route it for review'} (it may see a missing diagnosis or anchor the plan resolved differently). Confirm before drafting.`,
+      });
+      confidence = lower(confidence);
+    }
+    verdict = bandVerdict; // the band wins the headline (one-brain)
+  }
 
   // Conservative extraction overlay (Ryan 2026-06-18): a NEGATIVE verdict reached on a chart that is
   // not fully read becomes "read the chart first" — never conclude "not supportable" / "request a
@@ -265,6 +351,48 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
   // verdict is NOT downgraded (it only loses confidence, handled below); a found bridge route stands.
   if (hasUnreadPages && (verdict === 'contact_records' || verdict === 'not_supportable' || verdict === 'needs_review')) {
     verdict = 'read_chart_first';
+  }
+
+  // ── CHART-ANALYSIS SAFETY OVERLAY (Ryan 2026-06-23) — THE safety fix. ──────────────────────────────────
+  // The verdict above is built on the STRUCTURED chart that Stage-2 analysis produces. If that stage did not
+  // produce a real chart, the verdict — even a band-won "draft" or a confident "not supportable" — may be built
+  // on an EMPTY or PARTIAL chart and must NOT be rendered confidently. This is the exact Herman harm: a confident
+  // conclusion sitting on a failed analysis. The honesty layer is NOT cosmetic — it changes the VERDICT.
+  //   • UNKNOWN state (coverage loading/errored): FAIL SAFE. We cannot assert the chart was analyzed, so any
+  //     directional verdict (go OR negative) becomes provisional read_chart_first + low confidence. Unknown must
+  //     never fail confident. (not_analyzed/complete are the only states that don't trip this.)
+  //   • 'failed': the chart is known-empty. SUPPRESS the directional verdict TEXT — render analysis_failed
+  //     ("re-run to assess"), never "Not supportable" on a chart that was never analyzed.
+  //   • 'incomplete' / 'in_progress': built on a partial / not-yet-built chart → downgrade any directional verdict
+  //     to read_chart_first (provisional-with-text). A found bridge route (contact_alternative) still stands.
+  //   • 'complete' / 'not_analyzed': no analysis-driven downgrade.
+  // Resolve the analysis state: explicit override wins; otherwise read the SSOT off the extraction object. A bare
+  // missing extraction is NOT treated as "unknown→fail-safe" on its own (that would over-fire on every caller that
+  // simply doesn't pass coverage) — the parent must EXPLICITLY flag chartAnalysisUnknown for the loading/errored
+  // fail-safe. This keeps the SSOT-driven downgrade (extraction present + failed/incomplete) decoupled from the
+  // fetch-race fail-safe (parent-asserted), so neither over- nor under-fires.
+  const analysisState: ChartAnalysisState | null =
+    signals.chartAnalysisState !== undefined ? signals.chartAnalysisState : (extraction?.chartAnalysis?.state ?? null);
+  const analysisUnknown = signals.chartAnalysisUnknown === true;
+  // Verdicts that ASSERT something to the RN (a go, or a negative conclusion). contact_alternative (a found
+  // presumptive route) and the already-provisional read_chart_first are NOT downgraded further.
+  const isDirectional = isGoVerdict(verdict) || verdict === 'not_supportable' || verdict === 'needs_review' || verdict === 'contact_records';
+  if (analysisState === 'failed') {
+    // Chart known-empty → suppress the directional conclusion entirely.
+    if (verdict !== 'contact_alternative') {
+      verdict = 'analysis_failed';
+      confidence = 'low';
+      disagreements.push({ source: 'chart_analysis', note: 'The chart analysis failed, so no structured chart was built — re-run extraction before assessing this case. The verdict below is not a finding about the case.' });
+    }
+  } else if ((analysisState === 'incomplete' || analysisState === 'in_progress') && isDirectional) {
+    verdict = 'read_chart_first';
+    confidence = lower(confidence);
+    disagreements.push({ source: 'chart_analysis', note: 'The chart analysis didn’t finish, so this may be built on a partial chart — re-run extraction and re-check before relying on it.' });
+  } else if (analysisUnknown && isDirectional) {
+    // FAIL SAFE on the fetch race: state unknown → never a confident verdict.
+    verdict = 'read_chart_first';
+    confidence = lower(confidence);
+    disagreements.push({ source: 'chart_analysis', note: 'Chart-analysis state is still loading — confirm the chart was fully analyzed before relying on this assessment.' });
   }
 
   // ── extraction overlay: incomplete parse lowers confidence + is surfaced (never flips supportable).
@@ -296,7 +424,38 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
   // sanity === null (unavailable) → no effect (absence is not all-clear).
 
   const nextAction = nextActionFor(verdict, plan, disagreements, sanity);
-  return { verdict, title: VERDICT_TITLE[verdict], detail: plan.detail, nextAction, confidence, disagreements, plan };
+  // The headline DETAIL must match the (possibly band-projected) verdict, not the deterministic plan's
+  // detail — otherwise a band-won "Ready to draft" headline would carry a "Not supportable as filed" line.
+  // When the band drove the headline to a verdict the deterministic core would NOT have produced, use a
+  // band-derived line; otherwise the deterministic plan.detail is the right summary (it matches). The detail
+  // CARD still renders `plan` (the full deterministic plan) unchanged — only this one-line summary follows
+  // the headline. read_chart_first (the conservative overlay) gets its own line regardless of source.
+  // SAFETY-OVERLAY verdicts (analysis_failed / read_chart_first) own their own line REGARDLESS of band — a
+  // band-null analysis_failed must NOT fall through to plan.detail ("Not supportable as filed"), the exact Herman
+  // harm. They take precedence; otherwise band-projection rules, else the deterministic plan line.
+  const detail =
+    verdict === 'analysis_failed'
+      ? 'The chart analysis failed, so no structured chart was built. Re-run extraction before assessing this case — the line below is not a finding about the case.'
+      : verdict === 'read_chart_first'
+        ? 'Part of the record isn’t fully analyzed yet — finish reading/analyzing the chart before deciding.'
+        : (band != null && verdict !== deterministicVerdict)
+          ? detailForBandVerdict(verdict, plan)
+          : plan.detail;
+  return { verdict, title: VERDICT_TITLE[verdict], detail, nextAction, confidence, disagreements, plan };
+}
+
+/** One-line summary for a headline verdict the route-picker band projected (so detail matches the chip). */
+function detailForBandVerdict(verdict: ReadinessVerdict, plan: RecommendedPlan): string {
+  switch (verdict) {
+    case 'draft': return 'A supportable theory is on the record per the route-picker plan.';
+    case 'draft_confirm_mechanism': return 'Draftable per the route-picker plan — confirm the mechanism with the physician.';
+    case 'draft_reconcile': return 'Draftable per the route-picker plan — reconcile the flagged disagreement first.';
+    case 'draft_with_changes': return plan.detail; // anchor-switch detail still applies
+    case 'read_chart_first': return 'Part of the record is still unread — finish reading the chart before deciding.';
+    case 'not_supportable': return 'The route-picker plan reads this as not supportable as filed.';
+    case 'needs_review': return 'The route-picker plan routes this for a physician review before drafting.';
+    default: return plan.detail;
+  }
 }
 
 function nextActionFor(verdict: ReadinessVerdict, plan: RecommendedPlan, disagreements: readonly Disagreement[], sanity: ImpressionLevel | null): string {
@@ -315,6 +474,8 @@ function nextActionFor(verdict: ReadinessVerdict, plan: RecommendedPlan, disagre
         : 'Reconcile the anchor — get more records or a physician review before drafting.';
     case 'draft_with_changes':
       return plan.switchToAnchor ? `Draft anchored on ${plan.switchToAnchor}.` : 'Draft with the stronger anchor.';
+    case 'analysis_failed':
+      return 'Re-run the chart analysis (extraction), then re-check the case.';
     case 'read_chart_first':
       return 'Finish reading the chart, then re-check the plan.';
     case 'contact_records':

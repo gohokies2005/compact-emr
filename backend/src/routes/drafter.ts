@@ -1142,6 +1142,16 @@ function parseHaltBody(body: unknown): ParsedHalt {
   return out;
 }
 
+// True when this halt class is one where a FULL letter WAS produced (a body-quality park), so the
+// /halt receiver should try to PRESERVE that draft (persist its txt key + advance currentVersion) —
+// as opposed to a dx/event verification hold (dx_not_found / event_not_found / no_records_text), which
+// halts BEFORE any letter exists and must stay no-draft. Detection mirrors the frontend isBodyQualityHalt:
+// the dedicated 'body_quality_critical' code OR the legacy emission (haltGate 'body_quality' borrowing
+// the allowlisted 'verify_error' code until the FRN drafter image redeploys).
+export function haltShouldCarryDraft(reasonCode: string, haltGate: string): boolean {
+  return reasonCode === 'body_quality_critical' || haltGate === 'body_quality';
+}
+
 // Map a halt reasonCode to the draft_decisions item it concerns (for the chart panel).
 function haltItem(reasonCode: string): string {
   if (reasonCode === 'event_not_found') return 'in_service_event';
@@ -1652,6 +1662,40 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
 
       const now = new Date();
       const message = parsed.operatorMessage ?? parsed.plainEnglish;
+
+      // ── PRESERVE A PRODUCED DRAFT (option A, no-FRN-change path, 2026-06-22) ──
+      // A body-quality park is the ONE halt class where a FULL letter WAS produced. The FRN drafter
+      // does not POST an artifact key on /halt, so reconstruct the CANONICAL key the wrapper would have
+      // uploaded — drafter-artifacts/<caseId>/v<N>/v<N>.txt — validate it, and HeadObject-check it.
+      // ONLY when the object ACTUALLY exists do we persist artifactTxtS3Key onto the DraftJob row AND
+      // advance Case.currentVersion to the halted version, so resolveCurrentTxtKey (DraftJob fallback)
+      // and getLetter reach the held letter. When it does NOT exist — the genuine no-draft case (incl.
+      // every dx/event verification hold) OR S3/bucket unconfigured (local dev) — we change NOTHING about
+      // version/key: the case stays no-draft so the dx-halt confirm/halt panel is untouched. Fail-SAFE
+      // default: never advance currentVersion onto a draft we cannot prove exists. Done BEFORE the
+      // transaction (a HeadObject is a network call; the DB txn stays short).
+      let preservedTxtKey: string | null = null;
+      if (haltShouldCarryDraft(parsed.reasonCode, parsed.haltGate)) {
+        const bucketName = deps.bucketName ?? process.env.PHI_BUCKET_NAME;
+        const s3 = deps.s3;
+        if (s3 !== undefined && typeof bucketName === 'string' && bucketName.length > 0) {
+          const artifactPrefix = (process.env['DRAFTER_ARTIFACTS_S3_PREFIX'] || 'drafter-artifacts/').replace(/^\/+/, '');
+          const candidate = `${artifactPrefix}${existing.caseId}/v${existing.version}/v${existing.version}.txt`;
+          if (isDrafterArtifactS3Key(candidate)) {
+            try {
+              await s3.send(new HeadObjectCommand({ Bucket: bucketName, Key: candidate }));
+              preservedTxtKey = candidate; // object confirmed present → safe to surface
+            } catch {
+              // NoSuchKey / NotFound / network: treat as no-draft (fail-safe). Logged so a body-quality
+              // park whose txt is genuinely missing leaves a CloudWatch trace (vs. a silent no-op).
+              console.warn(JSON.stringify({ msg: 'halt_draft_artifact_absent', jobId, caseId: existing.caseId, version: existing.version, candidate: candidate.split('/').pop() }));
+            }
+          }
+        } else {
+          console.warn(JSON.stringify({ msg: 'halt_draft_check_skipped_unconfigured', jobId, caseId: existing.caseId, version: existing.version }));
+        }
+      }
+
       const updated = await db.$transaction(async (tx) => {
         const job = await tx.draftJob.update({
           where: { id: jobId },
@@ -1663,6 +1707,8 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
             errorMessage: parsed.plainEnglish.slice(0, 2000),
             haltPayloadJson: parsed.payload,
             ...(parsed.manifest !== undefined ? { manifestSnapshot: parsed.manifest } : {}),
+            // Surface the produced letter ONLY when its txt object was confirmed present in S3.
+            ...(preservedTxtKey !== null ? { artifactTxtS3Key: preservedTxtKey } : {}),
           },
         });
         const caseUpdated = await tx.case.update({
@@ -1673,6 +1719,10 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
             operatorMessage: message.slice(0, 2000),
             runComplete: false,
             version: { increment: 1 },
+            // Advance the "current letter" pointer to the held version ONLY when a real draft exists, so
+            // getLetter/editor reach it. status stays 'needs_rn_decision' (the gate) — currentVersion is
+            // NOT a delivery/sign-off authority (F4 invariant). Absent → pointer untouched (no-draft).
+            ...(preservedTxtKey !== null ? { currentVersion: existing.version } : {}),
           },
         });
         // Record the gate-2 FINDING in the chart-visible decision log (so the panel shows WHY it

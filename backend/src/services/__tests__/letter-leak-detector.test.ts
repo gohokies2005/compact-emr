@@ -16,12 +16,12 @@ describe('detectLetterLeaks — block content that must never appear in a nexus 
     expect(blockingLeaks(leaks).length).toBeGreaterThan(0); // Zodrow MUST hard-block
   });
 
-  it('flags an inline PMID as WARN (surfaced) but NEVER blocks a signature', () => {
+  it('does NOT flag an inline PMID at all (removed 2026-06-23 — cosmetic, not worth an alert)', () => {
     const t = 'McNicholas and Pevernagie, in their 2022 Journal of Sleep Research integrative disease model (PMID 35609941), provide the conceptual frame.';
     const leaks = detectLetterLeaks(t);
-    expect(leaks.map((l) => l.code)).toContain('inline_pmid');
-    expect(leaks.find((l) => l.code === 'inline_pmid')!.severity).toBe('warn');
-    expect(blockingLeaks(leaks)).toHaveLength(0); // a PMID alone must not block delivery
+    expect(leaks.map((l) => l.code)).not.toContain('inline_pmid');
+    expect(leaks.map((l) => l.code)).not.toContain('inline_doi');
+    expect(blockingLeaks(leaks)).toHaveLength(0); // and certainly never blocks
   });
 
   it('a Section VIII reference list with PMIDs does NOT block (the regression Ryan hit)', () => {
@@ -32,6 +32,49 @@ describe('detectLetterLeaks — block content that must never appear in a nexus 
   it('editorial-meta leaks ARE blocking (canonical/restructure)', () => {
     expect(blockingLeaks(detectLetterLeaks('the canonical format')).length).toBeGreaterThan(0);
     expect(blockingLeaks(detectLetterLeaks('Restructure as a numbered list')).length).toBeGreaterThan(0);
+  });
+
+  // meta_canonical TIGHTENING (Ryan 2026-06-23): the bare-word matcher false-positived on legit medical
+  // prose. It must fire ONLY in a DIRECTIVE context (canonical naming an editing object), never on ordinary
+  // scientific use of "canonical".
+  it('meta_canonical does NOT fire on legitimate "canonical mechanism/pathway" medical prose', () => {
+    const proseSamples = [
+      'The canonical mechanism by which obstructive sleep apnea aggravates hypertension is well established.',
+      'This follows the canonical pathway of sympathetic activation described in the literature.',
+      'Tinnitus has a canonical presentation that fits the in-service noise exposure.',
+      'The canonical understanding of PTSD-related sleep disruption supports the secondary theory.',
+    ];
+    for (const t of proseSamples) {
+      expect(detectLetterLeaks(t).map((l) => l.code)).not.toContain('meta_canonical');
+      expect(detectLetterLeaks(t)).toHaveLength(0); // and nothing else false-fires on clean prose
+    }
+  });
+
+  it('meta_canonical DOES fire on a real directive leak (canonical format/template/language)', () => {
+    expect(detectLetterLeaks('rather than the canonical format').map((l) => l.code)).toContain('meta_canonical');
+    expect(detectLetterLeaks('If the canonical Section VII template includes an aggravation prong').map((l) => l.code)).toContain('meta_canonical');
+    expect(detectLetterLeaks('retain only the exact canonical language').map((l) => l.code)).toContain('meta_canonical');
+  });
+
+  // meta_canonical WIDENING (Ryan 2026-06-23): the adjacent-only matcher missed near-misses with 1-2 words
+  // between "canonical" and the editing noun. Since this is the SOLE rule catching the editorial leaks, it must
+  // catch these too — while STILL passing the legit mechanism/pathway prose above.
+  it('meta_canonical catches near-misses with intervening words ("canonical letter format" etc.)', () => {
+    const directiveNearMisses = [
+      'restructure as the canonical letter format',
+      'rather than the canonical, well-recognized format',
+      'use the canonical nexus-letter template',
+      'in the canonical Section VII opinion structure',
+    ];
+    for (const t of directiveNearMisses) {
+      expect(detectLetterLeaks(t).map((l) => l.code)).toContain('meta_canonical');
+    }
+  });
+
+  it('meta_canonical still does NOT fire on "canonical mechanism" even with the widened matcher', () => {
+    // the editing-noun set excludes mechanism/pathway/etc., so intervening words can never make these match
+    expect(detectLetterLeaks('the canonical mechanism of sympathetic activation').map((l) => l.code)).not.toContain('meta_canonical');
+    expect(detectLetterLeaks('the canonical, well-described pathway of injury').map((l) => l.code)).not.toContain('meta_canonical');
   });
 
   // MUST NOT false-positive on legitimate nexus-letter language.

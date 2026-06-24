@@ -119,7 +119,12 @@ export class ApiStack extends Stack {
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: path.resolve(__dirname, '../../backend/src/placeholder-lambda.ts'),
       handler: 'handler',
-      timeout: Duration.seconds(29), // HttpApi caps at 30s; leave 1s headroom.
+      // HttpApi still caps SYNCHRONOUS requests at ~30s (the client gets a 504 past that), and synchronous
+      // LLM calls remain bounded by their own 26s timeoutMs — so this longer Lambda timeout is consumed ONLY
+      // by the async self-invoke recompute path (InvocationType:'Event', see recompute-viability-trigger.ts),
+      // which runs the route-picker OFF the API-Gateway request path. That async invoke needs the longer
+      // budget to complete the picker on large charts (Zimmelman); 120s leaves headroom over its 110s call.
+      timeout: Duration.seconds(120),
       memorySize: 512,
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
@@ -297,6 +302,12 @@ export class ApiStack extends Stack {
       actions: ['lambda:InvokeFunction'],
       resources: [`arn:${Stack.of(this).partition}:lambda:${Stack.of(this).region}:${Stack.of(this).account}:function:${Stack.of(this).stackName}-*`],
     }));
+    // The async route-picker recompute (InvocationType:'Event') is SELF-RETRYING by design — the FE re-fires on
+    // the next GET and a genuine compute failure stamps an honest 'error'/Retry. AWS-level async retries (default
+    // 2) would only re-drive a slow/failing picker into 2 MORE full Sonnet computes (~5¢ each) on exactly the
+    // slow cases we target, defeating the in-flight dedup. Disable them; cap event age so a stale queued event
+    // can't fire a pointless compute minutes later.
+    handler.configureAsyncInvoke({ retryAttempts: 0, maxEventAge: Duration.seconds(60) });
 
     props.phiBucket.grantReadWrite(handler);
     props.doctorPacksBucket.grantRead(handler);

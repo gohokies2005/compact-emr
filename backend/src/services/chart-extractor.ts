@@ -315,10 +315,44 @@ export interface DocumentChunk {
   chunkIndex: number;
 }
 
-/** Char budget per chunk (~12K input tokens for Sonnet). Whole pages only — never split mid-page. */
+/** Char budget per chunk (~12K input tokens for Sonnet). Whole pages only — never split mid-page,
+ *  EXCEPT a single page that ALONE exceeds the budget (see splitOversizedPage). */
 export const CHUNK_CHARS = 48_000;
 /** Re-include the last N pages of the prior chunk so an item straddling a page boundary isn't lost. */
 export const CHUNK_OVERLAP_PAGES = 1;
+
+/**
+ * OVERSIZED-PAGE CAP (2026-06-23). A VA Blue Button .txt can carry 65k–80k-char PAGES. The chunker
+ * used to "always take at least one page even if it alone exceeds the budget" → that one giant page
+ * became a single ~20k-output-token chunk that, being a single unsplittable page, FORCED the
+ * extractOneChunk escalation to the 32k output ceiling (and, before the streaming fix, crashed the
+ * whole run). This splits a single page whose marked text exceeds CHAR_OFFSET_SPLIT into contiguous
+ * char-offset slices, each re-prefixed with the SAME [p.N] marker so provenance/grounding still work
+ * (groundExtractedItem matches the sourceQuote against the WHOLE page.text, so a quote inside any one
+ * slice still grounds). Normal-sized pages return a single [marked] piece — behavior UNCHANGED. The
+ * split point is a char offset, NOT a token boundary, and we accept that a quote straddling a slice
+ * boundary may not ground in that one slice; the slices overlap by SPLIT_OVERLAP_CHARS to make a
+ * boundary-straddling line recoverable, mirroring the page-overlap rationale. Pure.
+ */
+const CHAR_OFFSET_SPLIT = CHUNK_CHARS; // a page longer than one chunk budget gets sliced
+const SPLIT_OVERLAP_CHARS = 2_000; // re-include the tail of the prior slice so a boundary line isn't lost
+
+/** Split ONE page's marked text into <=CHAR_OFFSET_SPLIT char slices, each carrying the [p.N] marker.
+ *  Returns a single-element array for a normal page (no behavior change). Exported for unit testing. */
+export function splitOversizedPage(pageNumber: number, marked: string): string[] {
+  if (marked.length <= CHAR_OFFSET_SPLIT) return [marked];
+  const header = `[p.${pageNumber}]\n`;
+  // Strip the leading marker, slice the body, re-prefix every slice so each chunk cites the page.
+  const body = marked.startsWith(header) ? marked.slice(header.length) : marked;
+  const slices: string[] = [];
+  const step = CHAR_OFFSET_SPLIT - header.length - SPLIT_OVERLAP_CHARS;
+  for (let off = 0; off < body.length; off += step) {
+    const piece = body.slice(off, off + (CHAR_OFFSET_SPLIT - header.length));
+    slices.push(`${header}${piece}`);
+    if (off + (CHAR_OFFSET_SPLIT - header.length) >= body.length) break;
+  }
+  return slices;
+}
 
 /**
  * Dedupe BYTE-IDENTICAL-CONTENT documents before extraction (Ryan 2026-06-17 cost-safety: "there
@@ -365,6 +399,19 @@ export function chunkDocuments(documents: BundleDocument[]): DocumentChunk[] {
     const pages = doc.pages;
     let i = 0;
     while (i < pages.length) {
+      const firstPage = pages[i]!;
+      const firstMarked = `[p.${firstPage.pageNumber}]\n${firstPage.text}`;
+      // OVERSIZED SINGLE PAGE: a page that ALONE exceeds the budget is sliced by char offset (each
+      // slice keeps the same [p.N] marker) so no chunk forces the 32k-output escalation. Each slice
+      // becomes its OWN chunk covering that one page; advance past the page (no page-overlap step —
+      // the slice overlap already covers boundary lines within the page).
+      if (firstMarked.length > CHUNK_CHARS) {
+        for (const slice of splitOversizedPage(firstPage.pageNumber, firstMarked)) {
+          chunks.push({ documentId: doc.id, filename: doc.filename, pageNumbers: [firstPage.pageNumber], text: slice, chunkIndex: globalIdx++ });
+        }
+        i = i + 1;
+        continue;
+      }
       const pieces: string[] = [];
       const pageNumbers: number[] = [];
       let total = 0;
@@ -372,7 +419,10 @@ export function chunkDocuments(documents: BundleDocument[]): DocumentChunk[] {
       while (j < pages.length) {
         const page = pages[j]!;
         const marked = `[p.${page.pageNumber}]\n${page.text}`;
-        // Always take at least one page, even if it alone exceeds the budget (huge OCR page).
+        // A later page that alone exceeds the budget ends THIS chunk; it is handled as an oversized
+        // single page on the next outer iteration (so it gets char-sliced, not jammed in whole).
+        if (j > i && marked.length > CHUNK_CHARS) break;
+        // Always take at least one page, even if it alone exceeds the budget (handled above for j===i).
         if (total + marked.length > CHUNK_CHARS && pieces.length > 0) break;
         pieces.push(marked);
         pageNumbers.push(page.pageNumber);

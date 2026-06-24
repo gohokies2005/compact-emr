@@ -1,11 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
-import { GradeChip } from './ui/GradeChip';
 import { postDraft } from '../api/drafter';
 import { transitionCaseStatus, type CaseDetail } from '../api/cases';
 import { ConflictError } from '../api/client';
+import { SendToDoctorModal } from './SendToDoctorModal';
 import type { DraftJob } from '../types/prisma';
 
 interface ManifestPhase {
@@ -38,13 +38,25 @@ interface OpsHeldPanelProps {
   // in the chart at all (2026-06-03 — Ryan "could not see the letter drafted anywhere").
   readonly hasLetter?: boolean;
   readonly onViewLetter?: () => void;
+  // Open the produced (partial) letter in the FULL EDITOR (2026-06-22). When a draft exists, the
+  // primary recovery is to fix it by hand — far cheaper than a ~$15 full re-run — so the lead
+  // affordance routes to the editor, NOT the read-only PDF. CaseDetailPage wires this to
+  // navigate(`/cases/:id/letter`), the same entry the physician/RN ready panels use.
+  readonly onOpenEditor?: () => void;
 }
 
 function operatorMessage(c: CaseDetail, job?: OpsDraftJob | null): string {
   // G8: Case.operatorMessage takes precedence if set (populated by /complete or by the
   // stuck-job watcher when it sweeps stale jobs). This is the RN-friendly text.
   if (typeof c.operatorMessage === 'string' && c.operatorMessage.trim().length > 0) {
-    return c.operatorMessage;
+    const raw = c.operatorMessage.trim();
+    // Strip intimidating code-speak (Ryan 2026-06-23): a raw API/exception string ("…threw: Claude API
+    // error: 500 {…request_id…}") means nothing to an RN. Replace it with a plain reason + the manual
+    // fix. A human-readable operatorMessage (e.g. a real content reason) passes through unchanged.
+    if (/threw|api error|request_id|exception|stack|\bError\b|[{}]/i.test(raw)) {
+      return 'The draft hit a temporary AI service error before it finished — not a problem with the case, and nothing was lost. Open the letter it already produced to review and finish it, or re-run a fresh draft.';
+    }
+    return raw;
   }
 
   if (c.operatorState === 'paused') {
@@ -62,13 +74,11 @@ function operatorMessage(c: CaseDetail, job?: OpsDraftJob | null): string {
   return 'Drafter completed with concerns.';
 }
 
-export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHeldPanelProps) {
+export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenEditor }: OpsHeldPanelProps) {
   const qc = useQueryClient();
-  const [detailsOpen, setDetailsOpen] = useState(false);
   const [confirmOpenAsIs, setConfirmOpenAsIs] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  const phases = useMemo(() => Object.entries(job?.manifestSnapshot?.phases ?? {}), [job]);
+  const [sendToDoctorOpen, setSendToDoctorOpen] = useState(false);
 
   const rerunMutation = useMutation({
     mutationFn: () => postDraft(c.id),
@@ -93,7 +103,7 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
         from: c.status,
         to: 'physician_review',
         version: c.version,
-        transitionReason: 'admin override to physician review',
+        transitionReason: 'send to doctor for review',
       }),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ['case', c.id] });
@@ -108,24 +118,50 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
     <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-base font-semibold text-navyDeep">Drafting was interrupted</h2>
+          {/* HONEST headline (2026-06-22): the old hardcoded "Drafting was interrupted" overstated the
+              no-letter case (the run may have failed before producing anything) — it read as a vague
+              "something broke" with no real cause. The case-specific operatorMessage below carries the
+              REAL reason (the failed phase + its recorded note, via summarizeForOperator). */}
+          <h2 className="text-base font-semibold text-navyDeep">
+            {hasLetter ? 'This draft did not finish — but it produced a letter' : 'This draft did not finish'}
+          </h2>
           <p className="mt-1 text-sm text-steel">
             {hasLetter
-              ? 'This draft stopped before it finished. You can open what it produced so far, or resume the draft to finish the letter.'
-              : 'This draft was interrupted before it finished and did not produce a letter. Resume it to run the draft to completion.'}
+              ? 'The run stopped before completing, but it produced a letter you can open and finish in the editor — usually faster and cheaper than a full re-run. Re-run only if a fresh draft is genuinely needed.'
+              : 'The run stopped and did not produce a letter. Re-run it to draft to completion. The reason is below.'}
           </p>
           <p className="mt-2 text-sm text-steel">{operatorMessage(c, job)}</p>
         </div>
 
         <div className="flex flex-wrap gap-2">
-          {/* Single recovery action (Ryan 2026-06-18). INTERIM HONESTY (2026-06-18): until the drafter
-              checkpoint/resume build lands, this RE-RUNS THE WHOLE DRAFT from the start (~$15) — it does
-              NOT yet pick up from the last completed phase. The confirm says so plainly so nobody burns a
-              full draft expecting a cheap continue. For a small change, the surgical / guided edit on the
-              letter page is the cheap path — this button is only for a genuine full restart. */}
+          {/* When a letter WAS produced, the LEAD action is to open + finish it in the editor (the cheap
+              path) — re-draft drops to secondary. When no letter exists, re-run is the only path and stays
+              primary. (2026-06-22 — repoints the old "Open what it produced" away from the read-only PDF.)
+              INTERIM: re-run RE-RUNS THE WHOLE DRAFT from the start (~$15); the confirm says so plainly. */}
+          {hasLetter && onOpenEditor ? (
+            <Button type="button" variant="primary" onClick={onOpenEditor}>
+              Open letter editor
+            </Button>
+          ) : null}
+
+          {/* FORWARD PATH (2026-06-23, Ryan "no way to forward to doctor"): a produced letter — even on a
+              run that didn't finish cleanly — must be forwardable to the physician for review + signature
+              (drafting->physician_review is a legal transition). This is ops/RN-accessible (NOT admin-only,
+              unlike the old cryptic "Open as-is"); the assigned-physician guard + the doctor's own review
+              are the real gates. No dead-ends: view -> edit -> send to doctor. */}
+          {hasLetter ? (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setSendToDoctorOpen(true)}
+            >
+              Send to doctor for review
+            </Button>
+          ) : null}
+
           <Button
             type="button"
-            variant="primary"
+            variant={hasLetter && onOpenEditor ? 'secondary' : 'primary'}
             loading={rerunMutation.isPending}
             disabled={rerunMutation.isPending}
             onClick={() => { if (window.confirm('This re-runs the ENTIRE draft from the start — a full ~$15 run (about 20 minutes). It does NOT yet resume from where it stopped. For a small fix, use the surgical or guided edit on the letter instead. Re-run the full draft?')) rerunMutation.mutate(); }}
@@ -133,13 +169,17 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
             Re-run full draft
           </Button>
 
+          {/* Read-only PDF view kept as a tertiary option (some reviewers prefer to skim the PDF first). */}
           {hasLetter && onViewLetter ? (
-            <Button type="button" variant="secondary" onClick={onViewLetter}>
-              Open what it produced
+            <Button type="button" variant="ghost" onClick={onViewLetter}>
+              View PDF
             </Button>
           ) : null}
 
-          {isAdmin ? (
+          {/* "Open as-is" is the admin override ONLY for the no-letter case (force to physician review
+              despite an ops hold). When a letter exists, the clear "Send to doctor for review" above is
+              the path for everyone, so this is hidden to avoid two buttons doing the same transition. */}
+          {isAdmin && !hasLetter ? (
             <Button type="button" variant="ghost" onClick={() => setConfirmOpenAsIs(true)}>
               Open as-is
             </Button>
@@ -153,33 +193,24 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter }: OpsHe
         </div>
       ) : null}
 
-      <button
-        type="button"
-        className="mt-4 text-sm font-medium text-steel hover:text-navyDeep"
-        onClick={() => setDetailsOpen((current) => !current)}
-      >
-        Details {detailsOpen ? '▴' : '▾'}
-      </button>
+      {/* Send-to-doctor for a halted-but-produced letter: same optional-message prompt as the normal
+          RN review send (Ryan 2026-06-24). The transition runs INLINE here (not via openAsIsMutation)
+          so the modal owns error display — routing it through openAsIsMutation would ALSO fire that
+          mutation's onError and paint a second error banner behind the modal (QA MED #3). The admin
+          "Open as-is" path below keeps openAsIsMutation (and its panel-level error). */}
+      <SendToDoctorModal
+        caseId={c.id}
+        open={sendToDoctorOpen}
+        onClose={() => setSendToDoctorOpen(false)}
+        onConfirm={async () => {
+          await transitionCaseStatus(c.id, { from: c.status, to: 'physician_review', version: c.version, transitionReason: 'send to doctor for review' });
+          await qc.invalidateQueries({ queryKey: ['case', c.id] });
+        }}
+      />
 
-      {detailsOpen ? (
-        <div className="mt-4 rounded-2xl border border-aegis bg-mistSoft p-4">
-          <div className="grid gap-2 text-sm text-steel sm:grid-cols-3">
-            <div><GradeChip grade={c.grade} synthesizedFloor={job?.gradeSidecarJson?.synthesized_floor} reason={job?.gradeSidecarJson?.synthesized_floor_reason} /></div>
-            <div>Ship recommendation: {c.shipRecommendation ?? 'Unknown'}</div>
-            <div>Operator state: {c.operatorState ?? 'Unknown'}</div>
-          </div>
-
-          {phases.length > 0 ? (
-            <div className="mt-4 space-y-2">
-              {phases.map(([phaseId, phase]) => (
-                <div key={phaseId} className="rounded-xl bg-ivory p-3 text-sm text-steel">
-                  <span className="font-medium">{phase.summary ?? phase.status ?? 'Phase complete'}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      {/* The "Details" event-log (crashed/ran/skipped phases + grade/ship/operator-state chips) was
+          removed (Ryan 2026-06-23): it was intimidating code-speak that meant nothing to an RN. The
+          plain "why it didn't finish" + the recovery buttons above are all that's needed. */}
 
       {confirmOpenAsIs ? (
         <div role="dialog" aria-modal="true" aria-labelledby="open-as-is-title">

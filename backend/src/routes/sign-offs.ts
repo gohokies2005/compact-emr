@@ -39,8 +39,19 @@ export function createSignOffsRouter(db: AppDb, deps: SignOffsRouterDeps = {}): 
       const caseId = String(req.params.id);
       const parsed = parseSignOffCreate(req.body);
 
-      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true, assignedPhysicianId: true, currentVersion: true } });
+      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, veteranId: true, assignedPhysicianId: true, currentVersion: true, status: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+
+      // Status gate (2026-06-22): a sign-off ATTESTS a finished letter is ready to deliver — it must
+      // never bind to a PARKED case. A body-quality park (status needs_rn_decision) now advances
+      // currentVersion onto the HELD draft so the RN can open + fix it in the editor; that makes a real,
+      // byte-bindable letter resolvable at that version. Without this guard a physician could sign the
+      // parked-for-defect letter (sign-offs.ts otherwise has no status check). needs_records has no
+      // draft at all. Both are refused outright: resolve the hold (fix + send to physician_review)
+      // before any sign-off. This is the load-bearing companion to advancing currentVersion on /halt.
+      if (c.status === 'needs_rn_decision' || c.status === 'needs_records') {
+        throw new HttpError(409, 'conflict', 'This case is parked for an RN decision — the letter cannot be signed off until the hold is resolved and the case returns to physician review.', { reason: 'case_parked', caseId, status: c.status });
+      }
 
       // Affirmativeness gate (audit 2026-06-07): a sign-off ATTESTS the letter is ready — every item must
       // be "Yes". A "No" means resolve it or send the case back to the RN; you cannot sign off against it.

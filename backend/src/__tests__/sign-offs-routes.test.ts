@@ -394,6 +394,30 @@ describe('sign-offs routes', () => {
     expect(res.body.error.code).toBe('chart_not_ready');
   });
 
+  // ── Status gate (2026-06-22): a sign-off may never bind to a PARKED case ──
+  // Advancing currentVersion onto a body-quality HELD draft (status needs_rn_decision) makes a real,
+  // byte-bindable letter resolvable at that version. sign-offs.ts had NO case-status guard, so a
+  // physician could sign that parked-for-defect letter. Refuse the act outright while parked.
+  it('refuses a sign-off while the case is parked at needs_rn_decision (409)', async () => {
+    mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+    const { db, spies } = makeDb(baseCase({ status: 'needs_rn_decision', assignedPhysicianId: 'PHYS-001' }), {
+      physicianBySub: { 'PHYS-SUB': buildPhysician({ id: 'PHYS-001', cognitoSub: 'PHYS-SUB' }) },
+    });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/sign-off').send({ answers: { records_reviewed: true } });
+    expect(res.status).toBe(409);
+    expect(spies.signOffCreate).not.toHaveBeenCalled();
+  });
+
+  it('refuses a sign-off while the case is parked at needs_records (409)', async () => {
+    mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+    const { db, spies } = makeDb(baseCase({ status: 'needs_records', assignedPhysicianId: 'PHYS-001' }), {
+      physicianBySub: { 'PHYS-SUB': buildPhysician({ id: 'PHYS-001', cognitoSub: 'PHYS-SUB' }) },
+    });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/sign-off').send({ answers: { records_reviewed: true } });
+    expect(res.status).toBe(409);
+    expect(spies.signOffCreate).not.toHaveBeenCalled();
+  });
+
   it('(c) a non-signing role cannot override (ops_staff is 403 at the route gate)', async () => {
     // ops_staff is barred from POST /sign-off entirely (requireRole) — the override is only ever
     // reachable by a signing role, so a non-physician/non-admin can never override.

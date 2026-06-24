@@ -1,6 +1,6 @@
 import { isScreeningSummaryKey, type ExtractionRunRef } from './chart-build-state.js';
 import { isEffectivelyRead, originalFileName } from './chart-readiness.js';
-import type { FileReadStatusRecord } from './db-types.js';
+import type { AppDb, FileReadStatusRecord } from './db-types.js';
 
 /**
  * Chart Extraction Coverage — a per-case TRANSPARENCY report (Ryan 2026-06-14).
@@ -60,7 +60,10 @@ export type CoverageGapReason =
   | 'unread' // a file that failed OCR and has no manual summary (manual_summary_required)
   | 'truncated_dense' // the extraction run truncated dense windows (resultJson.gaps.truncatedWindows)
   | 'needs_manual_summary' // alias surface for a blocking file awaiting an RN summary
-  | 'extraction_gap'; // pages OCR'd but left uncovered by the extraction run (gaps.uncoveredPages)
+  | 'extraction_gap' // pages OCR'd but left uncovered by the extraction run (gaps.uncoveredPages)
+  | 'extraction_incomplete'; // the most-recent extraction run failed / is still queued/running — the
+  // chart analysis did NOT finish, so the structured chart (and any verdict built on it) is unreliable
+  // even though OCR ("pages read") is 100%. The honesty fix for the false "100% Complete" card.
 
 export interface CoverageGap {
   // documentId is null for a run-level gap (truncated/uncovered pages aren't tied to one document in
@@ -80,6 +83,41 @@ export interface CoverageGap {
 }
 
 export type CoverageStatus = 'complete' | 'complete_with_gaps' | 'in_progress' | 'failed';
+
+// ===== TWO-STAGE honesty model (Ryan 2026-06-23) =====
+// A chart goes through TWO separate phases, and the old card reported ONE "100% Complete" number that
+// CONFLATED them — so a chart whose pages were all OCR'd but whose SEMANTIC analysis never finished read as
+// "100% Complete", hiding a failed analysis the SOAP/verdict was then built on. We now report the two phases
+// as two clearly-labeled, plain-English stages, BOTH derived from this one coverage object (single source of
+// truth) so the card lines and the SOAP banner can never disagree:
+//   • Stage 1 — Pages read (OCR): the raw text-capture phase. "Pages read: 100% (28 of 28)".
+//   • Stage 2 — Chart analysis: the semantic extraction that builds the structured chart the SOAP is based on.
+//     state ∈ complete / in_progress / incomplete / failed, with a plain label + a plain reason when not
+//     complete, the likely-cause file when nameable, and a findings count when known.
+
+/** Stage 1 — the OCR text-capture phase, in plain English. */
+export interface PagesReadStage {
+  readonly pct: number; // 0–100, the SAME number coveragePct carried (pages effectively read / total)
+  readonly readUnits: number; // pages (or file-units) read
+  readonly totalUnits: number; // total pages (or file-units)
+  readonly approximate: boolean; // some files had no page count → "(N files, page counts unavailable)"
+  readonly label: string; // "100% (28 of 28)" / "92% (118 of 128)" / "28 files, page counts unavailable"
+}
+
+// 'not_analyzed' (Ryan 2026-06-23, cry-wolf fix): NO analysis run exists yet (runStatus === null) OR there
+// are no chart inputs to analyze. This is NOT a failure or a gap — it must NOT fire the SOAP banner, mark the
+// verdict provisional, or name a likely-cause file. Only queued/running (a real run exists but is unfinished),
+// failed, or a completed-run-with-real-gaps (→ 'incomplete') trip the honesty warning.
+export type ChartAnalysisState = 'complete' | 'in_progress' | 'incomplete' | 'failed' | 'not_analyzed';
+
+/** Stage 2 — the semantic extraction (the structured chart the SOAP/verdict is built on), in plain English. */
+export interface ChartAnalysisStage {
+  readonly state: ChartAnalysisState;
+  readonly label: string; // "✓ Complete (253 findings)" / "⚠ Didn't finish — retry" / "Analyzing…" / "✗ Failed — re-run"
+  readonly reason: string | null; // plain reason when not complete (null when complete)
+  readonly likelyCauseFile: string | null; // the largest/densest records file, when nameable
+  readonly findings: number | null; // count of structured findings extracted, when known
+}
 
 // ===== Per-page provenance layer (vision rebuild 2026-06-16) =====
 // SEPARATE from the file-level accounting above (which counts a file as read via the SHARED
@@ -129,6 +167,11 @@ export interface ExtractionCoverage {
   // Per-page vision breakdown. null when NO page carries a vision signal (pure Textract/native/legacy
   // case) — the UI then shows only the file-level numbers, exactly as before the vision rebuild.
   readonly pageBreakdown: PageCoverageBreakdown | null;
+  // TWO-STAGE honesty model (Ryan 2026-06-23). Both derived from the SAME fields above so they can never
+  // disagree with coveragePct/status or with each other. The card renders these two lines; the SOAP banner
+  // reads chartAnalysis.state. pagesRead is the OCR phase; chartAnalysis is the semantic-extract phase.
+  readonly pagesRead: PagesReadStage;
+  readonly chartAnalysis: ChartAnalysisStage;
 }
 
 const REVIEW_PAGES_CAP = 200; // never enumerate more than this in the UI list (a 2000-page chart)
@@ -280,10 +323,24 @@ export function computeExtractionCoverage(
     });
   }
 
+  // EXTRACTION DID-NOT-FINISH (card-honesty fix 2026-06-23). "Pages read" (OCR) finishing 100% does
+  // NOT mean the chart was analyzed: the semantic extraction run is a SEPARATE, slower phase. If the
+  // most-recent run failed, or is still queued/running, the structured chart is incomplete/empty and
+  // any SOAP/route-picker verdict built on it is unreliable — NEVER render that as a confident
+  // "Complete / not supportable". `failed` already routes to status 'failed' below; `queued`/`running`
+  // (e.g. the crash re-enqueued the run, or the stuck-run watcher hasn't swept it yet) are the silent
+  // case the old code mis-reported as 'complete'. We surface an explicit 'extraction_incomplete' gap
+  // and force status off 'complete'. The CALLER (route loader) passes the LATEST run by createdAt, so
+  // a newer unfinished run correctly overrides a stale earlier 'complete'.
+  const runStatus = latestRun?.status ?? null;
+  const extractionUnfinished = runStatus === 'queued' || runStatus === 'running';
+
   // Run-level EXTRACTION gaps (separate plane from per-file OCR). Only meaningful once a run exists.
-  const rj = (latestRun?.resultJson ?? null) as { gaps?: { uncoveredPages?: unknown; truncatedWindows?: unknown } } | null;
+  const rj = (latestRun?.resultJson ?? null) as { gaps?: { uncoveredPages?: unknown; truncatedWindows?: unknown }; items?: unknown } | null;
   const uncoveredPages = toNonNegInt(rj?.gaps?.uncoveredPages);
   const truncatedWindows = toNonNegInt(rj?.gaps?.truncatedWindows);
+  // Findings count for the "Chart analysis: ✓ Complete (N findings)" label, when the run recorded items.
+  const findings = Array.isArray(rj?.items) ? rj.items.length : null;
 
   if (uncoveredPages > 0) {
     gaps.push({
@@ -308,6 +365,16 @@ export function computeExtractionCoverage(
       terminalStatus: null,
     });
   }
+  if (extractionUnfinished) {
+    gaps.push({
+      documentId: null,
+      fileName: 'Chart analysis',
+      reason: 'extraction_incomplete',
+      pageLabel: runStatus === 'running' ? 'in progress' : 'did not finish — retry',
+      isImage: false,
+      terminalStatus: null,
+    });
+  }
 
   // coveragePct: honest. 100 ONLY when every page is extracted AND no page counts were unknown.
   let coveragePct: number;
@@ -322,14 +389,49 @@ export function computeExtractionCoverage(
     // exactly 100 (all read), cap at 99 above already conveys "approximate". Leave as-is.
   }
 
-  const runFailed = latestRun?.status === 'failed';
+  const runFailed = runStatus === 'failed';
+  // A still-running extraction reads as in_progress. A queued-but-not-finished latest run (the silent
+  // crash/re-enqueue case) is NOT 'complete' — it carries the extraction_incomplete gap and reads as
+  // complete_with_gaps so the card says "chart analysis didn't finish — retry", never "Complete".
   const status: CoverageStatus = runFailed
     ? 'failed'
-    : inProgress
+    : runStatus === 'running'
       ? 'in_progress'
-      : gaps.length > 0 || unknownPageFiles > 0
-        ? 'complete_with_gaps'
-        : 'complete';
+      : inProgress
+        ? 'in_progress'
+        : gaps.length > 0 || unknownPageFiles > 0 || extractionUnfinished
+          ? 'complete_with_gaps'
+          : 'complete';
+
+  // ── TWO-STAGE honesty model (Ryan 2026-06-23) — derived from the SAME numbers above ────────────────────
+  // Stage 1: Pages read (OCR). This is exactly coveragePct + the page counts the headline already used.
+  const approximate = unknownPageFiles > 0;
+  const pagesReadLabel = (approximate && inputs.length > 0 && totalPages === inputs.length)
+    ? `${inputs.length} ${inputs.length === 1 ? 'file' : 'files'}, page counts unavailable`
+    : `${coveragePct}% (${extractedPages} of ${totalPages})`;
+  const pagesRead: PagesReadStage = {
+    pct: coveragePct,
+    readUnits: extractedPages,
+    totalUnits: totalPages,
+    approximate,
+    label: pagesReadLabel,
+  };
+
+  // Stage 2: Chart analysis (the semantic extract). The likely-cause file is the LARGEST chart-input doc by
+  // page count (the dense records file — a Blue Button export is the usual culprit when analysis times out /
+  // truncates). Only named when there is a clear large file (> 1 page and it stands out), so we don't point
+  // at a random 1-pager. This NEVER re-runs anything; it's a label off existing data.
+  const chartAnalysis = deriveChartAnalysisStage({
+    runStatus, extractionUnfinished, runFailed, inProgress, uncoveredPages, truncatedWindows, findings, inputs,
+  });
+
+  // SSOT INVARIANT (Ryan 2026-06-23): a 'complete' coverage object must NEVER carry a non-complete chart-analysis
+  // state — except 'not_analyzed' (an empty/new case is vacuously 'complete' yet has nothing to analyze). If the two
+  // stages ever disagreed, the card line and the SOAP banner would contradict. Defensive guard so a future edit to
+  // either branch can't silently re-introduce the false-"100% Complete" the whole two-stage model exists to kill.
+  if (status === 'complete' && chartAnalysis.state !== 'complete' && chartAnalysis.state !== 'not_analyzed') {
+    throw new Error(`extraction-coverage SSOT invariant violated: status='complete' but chartAnalysis.state='${chartAnalysis.state}'`);
+  }
 
   return {
     totalPages,
@@ -340,10 +442,132 @@ export function computeExtractionCoverage(
     unknownPageFiles,
     totalFiles: inputs.length,
     pageBreakdown: computePageCoverageBreakdown(docs, pages),
+    pagesRead,
+    chartAnalysis,
   };
+}
+
+/**
+ * Derive the plain-English Stage-2 (Chart analysis) label from the run state + extraction gaps. PURE.
+ *
+ * State machine (honest about the silent-failure case the old single "100% Complete" hid — and the
+ * cry-wolf case where a brand-new/empty case mis-read as "didn't finish"):
+ *   • no inputs OR runStatus === null → 'not_analyzed' (no run on record yet / nothing to analyze). NOT a
+ *                                     failure, NOT a gap — does NOT trip the banner / provisional / cause-file.
+ *   • failed                        → 'failed'      "✗ Chart analysis failed — re-run extraction"
+ *   • running                       → 'in_progress' (we can't have analyzed pages still being read).
+ *   • queued                        → 'incomplete'  the silent crash/re-enqueue case (a real run exists).
+ *   • inProgress (OCR still going)  → 'in_progress'.
+ *   • complete run with gaps        → 'incomplete'  "⚠ Finished, but some pages weren't fully analyzed"
+ *   • complete, no gaps             → 'complete'    "✓ Complete (N findings)".
+ *
+ * likelyCauseFile is named ONLY for 'failed' / 'incomplete' (a real shortfall to explain) — never for
+ * 'not_analyzed' / 'in_progress' / 'complete' (there is nothing to blame yet).
+ */
+function deriveChartAnalysisStage(args: {
+  runStatus: string | null;
+  extractionUnfinished: boolean;
+  runFailed: boolean;
+  inProgress: boolean;
+  uncoveredPages: number;
+  truncatedWindows: number;
+  findings: number | null;
+  inputs: readonly CoverageDocInput[];
+}): ChartAnalysisStage {
+  const { runStatus, runFailed, inProgress, uncoveredPages, truncatedWindows, findings, inputs } = args;
+  // The largest chart-input file by page count — the usual culprit when analysis truncates/times out. Named
+  // only when it is meaningfully large (>1 page) so we never point at a stray single-pager. Computed once;
+  // surfaced ONLY for 'failed' / 'incomplete' (a real shortfall to explain), never for not_analyzed/in_progress.
+  const largest = [...inputs]
+    .filter((d) => typeof d.pageCount === 'number' && (d.pageCount ?? 0) > 1)
+    .sort((a, b) => (b.pageCount ?? 0) - (a.pageCount ?? 0))[0];
+  const likelyCauseFile = largest ? displayName(largest) : null;
+  const findingsSuffix = findings !== null ? ` (${findings} ${findings === 1 ? 'finding' : 'findings'})` : '';
+
+  // NOT-ANALYZED (cry-wolf fix, Ryan 2026-06-23): no chart inputs to analyze, OR no analysis run on record yet
+  // (runStatus === null) with OCR settled. This is the brand-new / empty-case resting state — NOT a failure and
+  // NOT a gap. It must not fire the banner, mark the verdict provisional, or blame a file. We DON'T treat a null
+  // run as "didn't finish": a real run that was interrupted carries a 'queued'/'running'/'failed' status, not null.
+  if (inputs.length === 0 || (runStatus === null && !inProgress)) {
+    return { state: 'not_analyzed', label: 'Not analyzed yet', reason: null, likelyCauseFile: null, findings: findings ?? null };
+  }
+
+  if (runFailed) {
+    return {
+      state: 'failed',
+      label: '✗ Chart analysis failed — re-run extraction',
+      reason: 'The chart analysis errored out, so no structured chart was built.',
+      likelyCauseFile,
+      findings: findings ?? null,
+    };
+  }
+  if (runStatus === 'running' || inProgress) {
+    // Genuinely working — OCR or a running analysis. Provisional-with-text on the SOAP side, but never blame a file.
+    return { state: 'in_progress', label: 'Analyzing the chart…', reason: 'The chart analysis is still running.', likelyCauseFile: null, findings: findings ?? null };
+  }
+  if (runStatus === 'queued') {
+    // queued-but-not-finished is the silent crash/re-enqueue case the old card mis-reported as Complete. A REAL run
+    // record exists (≠ null), so this is a true "didn't finish", not a never-ran case.
+    return {
+      state: 'incomplete',
+      label: '⚠ Chart analysis didn’t finish — retry',
+      reason: 'The chart analysis was interrupted before it finished, so the structured chart may be missing records.',
+      likelyCauseFile,
+      findings: findings ?? null,
+    };
+  }
+  // A completed run that left pages uncovered or truncated dense windows → finished but not fully.
+  if (uncoveredPages > 0 || truncatedWindows > 0) {
+    const bits: string[] = [];
+    if (uncoveredPages > 0) bits.push(`${uncoveredPages} ${uncoveredPages === 1 ? 'page was' : 'pages were'} not folded into the chart`);
+    if (truncatedWindows > 0) bits.push(`${truncatedWindows} dense ${truncatedWindows === 1 ? 'section was' : 'sections were'} only partly analyzed`);
+    return {
+      state: 'incomplete',
+      label: `⚠ Mostly complete${findingsSuffix} — some pages weren’t fully analyzed`,
+      reason: `${bits.join(' and ')}. The chart may be missing some records.`,
+      likelyCauseFile,
+      findings: findings ?? null,
+    };
+  }
+  return { state: 'complete', label: `✓ Complete${findingsSuffix}`, reason: null, likelyCauseFile: null, findings: findings ?? null };
 }
 
 function toNonNegInt(v: unknown): number {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/**
+ * SHARED coverage loader (Ryan 2026-06-22, Zimmelman FIX C — "0% of pages read" though extraction is 100%).
+ *
+ * THE BUG IT KILLS: the SOAP assembler's deriveCoverageNote loaded the documents + per-page rows but passed
+ * `fileReadStatuses=[]` and `latestRun=null` to computeExtractionCoverage. With NO read-status rows, EVERY
+ * input doc fell to the "no readiness row → in_progress" branch → extractedPages stayed 0 → coveragePct=0,
+ * so the SOAP Objective said "0% of pages read" while the chart chip (GET /extraction-coverage, which loads
+ * the real rows) correctly said 100%. Two readers of the SAME report disagreed.
+ *
+ * THE FIX: ONE loader that assembles the EXACT inputs GET /cases/:id/extraction-coverage passes
+ * (chart-readiness.ts) — the same Document select, the same file_read_status rows, the same latest
+ * ChartExtractionRun, the same per-page provenance — so the route AND the assembler compute identical
+ * coverage and can never drift again. The route handler is now a thin caller of this; the assembler calls it
+ * too. Keep this in lockstep with the route's loads (they were copied here verbatim).
+ *
+ * `chartExtractionRun` is not a typed AppDb delegate (the route casts it), so we cast the same way here.
+ * No fail-open swallow inside — the callers own that (the route lets errors bubble to asyncHandler; the
+ * assembler wraps it in its own try/catch so a DB hiccup degrades the coverage NOTE to null, never blocks).
+ */
+export async function loadExtractionCoverageForCase(db: AppDb, caseId: string): Promise<ExtractionCoverage> {
+  const docs = (await db.document.findMany({
+    where: { caseId },
+    select: { id: true, s3Key: true, filename: true, contentType: true, pageCount: true },
+  })) as readonly CoverageDocInput[];
+  const rows = await db.fileReadStatus.findMany({ where: { caseId } });
+  const latestRun = await (db as unknown as {
+    chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { status: true; resultJson: true } }) => Promise<{ status: string; resultJson: unknown } | null> };
+  }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true } });
+  const pageRows = (await db.documentPage.findMany({
+    where: { document: { caseId } },
+    select: { documentId: true, pageNumber: true, extractionCoverage: true, handwritingPresent: true },
+  })) as unknown as readonly PageProvenanceInput[];
+  return computeExtractionCoverage(docs, rows, latestRun, pageRows);
 }

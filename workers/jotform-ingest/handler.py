@@ -29,11 +29,22 @@ import urllib.request
 from typing import Any
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 
 s3 = boto3.client("s3")
 
+# Single-threaded multipart: s3transfer's default is multithreaded, which would read our urllib-backed
+# _CappedReader from several threads at once — urllib's response object is NOT thread-safe and the
+# byte-counter would race. use_threads=False makes upload_fileobj read the stream sequentially.
+_SINGLE_THREAD_TRANSFER = TransferConfig(use_threads=False)
+
 JOTFORM_BASE = os.environ.get("JOTFORM_API_BASE", "https://hipaa-api.jotform.com").rstrip("/")
-MAX_FILE_BYTES = 50 * 1024 * 1024
+# Cap raised 50MB -> 300MB (2026-06-22, Travis Spring intake-loss class). Now that files STREAM to S3
+# (no response.read() into RAM and no per-file try/except sinking the whole submission), the old 50MB
+# RAM ceiling no longer applies. 300MB covers real VA C-file / full-claims PDFs (routinely 50-250MB)
+# with headroom while still bounding a runaway/malicious upload. The cap is enforced mid-stream by a
+# byte-counting wrapper so we never buffer the whole file; an oversized file is SKIPPED-not-fatal.
+MAX_FILE_BYTES = 300 * 1024 * 1024
 
 
 def _api_base_url() -> str:
@@ -72,18 +83,47 @@ def _jotform_get(path: str) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _download(url: str) -> bytes:
-    # Jotform HIPAA file URLs need the APIKEY to authorize the download. The path can contain spaces
-    # / commas (the original filename), which urllib rejects ("URL can't contain control characters")
-    # — encode the path before requesting.
+class _FileTooLargeError(RuntimeError):
+    """Raised mid-stream when a file exceeds MAX_FILE_BYTES. Caught per-file so one oversized
+    upload is SKIPPED-not-fatal — it must never sink the rest of the submission (Travis Spring)."""
+
+
+class _CappedReader:
+    """A read()-only file-object wrapper around the HTTP response that (a) lets boto3 stream the
+    body to S3 in chunks (never buffering the whole file in RAM) and (b) enforces MAX_FILE_BYTES
+    DURING the stream, so an oversized file aborts before we OOM or finish a pointless upload."""
+
+    def __init__(self, response: Any, max_bytes: int) -> None:
+        self._response = response
+        self._max_bytes = max_bytes
+        self.bytes_read = 0
+
+    def read(self, amt: int = -1) -> bytes:
+        chunk = self._response.read() if amt is None or amt < 0 else self._response.read(amt)
+        self.bytes_read += len(chunk)
+        if self.bytes_read > self._max_bytes:
+            raise _FileTooLargeError(
+                f"file exceeds {self._max_bytes // (1024 * 1024)} MB cap")
+        return chunk
+
+
+def _stream_to_s3(url: str, bucket: str, key: str, content_type: str) -> int:
+    """Download a Jotform upload and STREAM it straight to S3 (no response.read() into RAM, no /tmp
+    staging) via boto3 multipart upload_fileobj. Returns the byte count. Raises _FileTooLargeError
+    if the file blows the cap mid-stream. Jotform HIPAA file URLs need the APIKEY to authorize the
+    download; the path can contain spaces / commas (the original filename) which urllib rejects
+    ("URL can't contain control characters") — encode the path before requesting."""
     parts = urllib.parse.urlsplit(url)
     safe_url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, urllib.parse.quote(parts.path), parts.query, parts.fragment))
     req = urllib.request.Request(safe_url, headers={"APIKEY": _jotform_api_key()})
     with urllib.request.urlopen(req, timeout=120) as response:
-        data = response.read(MAX_FILE_BYTES + 1)
-    if len(data) > MAX_FILE_BYTES:
-        raise RuntimeError("file exceeds 50 MB")
-    return data
+        reader = _CappedReader(response, MAX_FILE_BYTES)
+        s3.upload_fileobj(
+            reader, bucket, key,
+            ExtraArgs={"ContentType": content_type, "ServerSideEncryption": "aws:kms"},
+            Config=_SINGLE_THREAD_TRANSFER,
+        )
+    return reader.bytes_read
 
 
 _CT_BY_EXT = {
@@ -222,14 +262,36 @@ def _ingest_one(intake_id: str, submission_id: str) -> None:
     parsed, file_urls = out["parsed"], out["file_urls"]
 
     manifest: list[dict[str, Any]] = []
+    skipped_count = 0
     bucket = _phi_bucket()
     for url in file_urls:
         name = _filename_from_url(url)
         ct = _content_type(name)
-        data = _download(url)
         key = f"intake/{intake_id}/{name}"
-        s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType=ct, ServerSideEncryption="aws:kms")
-        manifest.append({"name": name, "s3Key": key, "contentType": ct, "sizeBytes": len(data)})
+        # PER-FILE ISOLATION (2026-06-22, Travis Spring class): one bad file — oversize, download
+        # error, S3 hiccup — is SKIPPED + flagged, NOT fatal. The loop CONTINUES so the rest of the
+        # submission still ingests and the intake reaches a usable state. Before this, one >50MB file
+        # raised, the whole submission PATCHed status=failed, and the intake vanished silently.
+        try:
+            size = _stream_to_s3(url, bucket, key, ct)
+            manifest.append({"name": name, "s3Key": key, "contentType": ct, "sizeBytes": size})
+        except Exception as file_exc:  # noqa: BLE001 — isolate the file, never the submission
+            reason = f"{type(file_exc).__name__}: {file_exc}"
+            skipped_count += 1
+            # Surface the skipped file to the RN INSIDE the manifest, but with NO s3Key: the intakes
+            # GET passes it through (it renders in the file list) and the assign/copy loop SKIPS any
+            # entry without an s3Key (intakes.ts: `if (typeof f?.s3Key !== 'string') continue;`), so a
+            # skipped file is visible-but-inert — never a dangling pointer, never an API/schema change.
+            manifest.append({"name": name, "skipped": True, "skipReason": reason})
+            # Fail loud per-file: submissionId + the specific failing fileName so a skip is greppable
+            # and alarmable, not silent. This is a SKIP (intake still goes ready), not a FAILED.
+            print(json.dumps({
+                "msg": "jotform-ingest: file-skipped",
+                "intakeId": intake_id,
+                "submissionId": submission_id,
+                "fileName": name,
+                "error": reason,
+            }))
 
     body: dict[str, Any] = {
         "status": "ready",
@@ -264,7 +326,13 @@ def _ingest_one(intake_id: str, submission_id: str) -> None:
     if isinstance(created, str):
         body["submittedAt"] = created.replace(" ", "T") + ("Z" if "Z" not in created else "")
     _patch_intake(intake_id, body)
-    print(json.dumps({"msg": "jotform-ingest: ready", "intakeId": intake_id, "files": len(manifest)}))
+    print(json.dumps({
+        "msg": "jotform-ingest: ready",
+        "intakeId": intake_id,
+        "submissionId": submission_id,
+        "files": len(manifest) - skipped_count,
+        "skipped": skipped_count,
+    }))
 
 
 def handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
@@ -283,7 +351,7 @@ def handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
             _ingest_one(intake_id, submission_id)
         except Exception as exc:  # noqa: BLE001 — surface the reason, never a silent drop
             reason = f"{type(exc).__name__}: {exc}"
-            print(json.dumps({"msg": "jotform-ingest: FAILED", "intakeId": intake_id, "error": reason}))
+            print(json.dumps({"msg": "jotform-ingest: FAILED", "intakeId": intake_id, "submissionId": submission_id, "error": reason}))
             try:
                 _patch_intake(intake_id, {"status": "failed", "errorMessage": reason})
             except Exception as patch_exc:  # noqa: BLE001

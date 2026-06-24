@@ -153,8 +153,6 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
             <Button
               type="button"
               variant="secondary"
-              loading={openAsIsMutation.isPending}
-              disabled={openAsIsMutation.isPending}
               onClick={() => setSendToDoctorOpen(true)}
             >
               Send to doctor for review
@@ -196,12 +194,18 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
       ) : null}
 
       {/* Send-to-doctor for a halted-but-produced letter: same optional-message prompt as the normal
-          RN review send (Ryan 2026-06-24). onConfirm runs the drafting->physician_review transition. */}
+          RN review send (Ryan 2026-06-24). The transition runs INLINE here (not via openAsIsMutation)
+          so the modal owns error display — routing it through openAsIsMutation would ALSO fire that
+          mutation's onError and paint a second error banner behind the modal (QA MED #3). The admin
+          "Open as-is" path below keeps openAsIsMutation (and its panel-level error). */}
       <SendToDoctorModal
         caseId={c.id}
         open={sendToDoctorOpen}
         onClose={() => setSendToDoctorOpen(false)}
-        onConfirm={async () => { await openAsIsMutation.mutateAsync(); }}
+        onConfirm={async () => {
+          await transitionCaseStatus(c.id, { from: c.status, to: 'physician_review', version: c.version, transitionReason: 'send to doctor for review' });
+          await qc.invalidateQueries({ queryKey: ['case', c.id] });
+        }}
       />
 
       {/* The "Details" event-log (crashed/ran/skipped phases + grade/ship/operator-state chips) was

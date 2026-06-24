@@ -46,7 +46,10 @@ export function PhysicianReviewPage() {
   });
   const isImportedLetter = letterQuery.data?.data.source === 'external_import';
 
-  if (caseQuery.isLoading) {
+  // Also wait on the letter query: readyForPhysician depends on hasCurrentLetter (from getLetter), so
+  // rendering before it settles would briefly flash "Not ready for review" on a halted-but-has-letter
+  // case before flipping to the panel (QA LOW, 2026-06-24). Both queries fire in parallel on mount.
+  if (caseQuery.isLoading || letterQuery.isLoading) {
     return (
       <AppShell>
         <Spinner label="Loading case" />

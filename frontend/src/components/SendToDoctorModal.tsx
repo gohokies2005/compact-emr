@@ -16,24 +16,39 @@ interface SendToDoctorModalProps {
 // "Send to doctor for review" prompt (Ryan 2026-06-24 + the 2026-06-21 handoff-message spec): a
 // message box ALWAYS comes up on send, but it is OPTIONAL — type a note and it posts to the case's
 // RN↔physician thread (so the doctor sees it), or send with the box empty and it behaves exactly as
-// the old bare confirm did. The message is posted BEFORE the transition so a failed post never
-// strands a "sent" case without its note (the error is surfaced and the case is NOT moved).
+// the old bare confirm did. The transition (move to the doctor) runs FIRST and is the load-bearing
+// action; the note is strictly best-effort, so a note problem can NEVER block the send (no-block rule).
 export function SendToDoctorModal({ caseId, open, onClose, onConfirm }: SendToDoctorModalProps) {
   const [message, setMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const mutation = useMutation({
-    mutationFn: async () => {
-      const body = message.trim();
-      if (body) await createCaseMessage(caseId, { body });
+    mutationFn: async (): Promise<{ noteError: string | null }> => {
+      // Move the case FIRST, then attach the optional note best-effort. If the note POST fails — the
+      // sender isn't this case's assigned RN (the message thread is gated to the assigned RN), the
+      // body exceeds the 4000-char server cap, or a transient error — the case is already with the
+      // doctor; we surface a notice to add it on the Messages tab. A note failure must not strand the
+      // send. (QA HIGH #1 + HIGH #2, 2026-06-24.)
       await onConfirm();
+      const body = message.trim();
+      if (!body) return { noteError: null };
+      try {
+        await createCaseMessage(caseId, { body });
+        return { noteError: null };
+      } catch (e: unknown) {
+        return { noteError: describeApiError(e) };
+      }
     },
-    onSuccess: () => {
+    onSuccess: (res) => {
       setMessage('');
       setErrorMessage(null);
       onClose();
+      if (res.noteError) {
+        window.alert(`The case was sent to the doctor, but your note couldn't be attached (${res.noteError}). You can add it on the case's Messages tab.`);
+      }
     },
     onError: (e: unknown) => {
+      // Only the transition itself failing reaches here (the note is caught above) — the case did NOT move.
       setErrorMessage(`Could not send to the doctor — ${describeApiError(e)}. The case was not moved; please retry.`);
     },
   });
@@ -61,12 +76,12 @@ export function SendToDoctorModal({ caseId, open, onClose, onConfirm }: SendToDo
               setErrorMessage(null);
             }}
             rows={5}
-            maxLength={5000}
+            maxLength={4000}
             autoFocus
             className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
             placeholder="Example: Reviewed and edited — the §VII opinion is tightened. Flagging the 1996 weight note as the key in-service hook."
           />
-          <span className="mt-1 block text-xs text-slate-500">{message.length}/5000</span>
+          <span className="mt-1 block text-xs text-slate-500">{message.length}/4000</span>
         </label>
 
         {errorMessage ? (

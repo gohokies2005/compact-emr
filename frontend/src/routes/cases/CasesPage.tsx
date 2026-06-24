@@ -44,9 +44,9 @@ const RN_ME = '__me__';
 const RN_UNASSIGNED = '__none__';
 const CASE_COLUMNS: readonly { readonly key: string; readonly label: string }[] = [
   { key: 'id', label: 'Case' }, { key: 'veteran', label: 'Veteran' }, { key: 'condition', label: 'Condition' },
-  { key: 'type', label: 'Type' }, { key: 'status', label: 'Status' }, { key: 'records', label: 'Records' }, { key: 'note', label: 'Note' }, { key: 'physician', label: 'Physician' }, { key: 'rn', label: 'RN' }, { key: 'submitted', label: 'Submitted' }, { key: 'updated', label: 'Updated' }, { key: 'version', label: 'v' },
+  { key: 'type', label: 'Type' }, { key: 'status', label: 'Status' }, { key: 'records', label: 'Records' }, { key: 'note', label: 'Note' }, { key: 'physician', label: 'Physician' }, { key: 'rn', label: 'RN' }, { key: 'submitted', label: 'Submitted' }, { key: 'updated', label: 'Updated' }, { key: 'stage', label: 'Stage' },
 ];
-const caseSortType = (key: string): ColType => (key === 'updated' || key === 'submitted' ? 'date' : key === 'version' || key === 'records' ? 'number' : 'text');
+const caseSortType = (key: string): ColType => (key === 'updated' || key === 'submitted' ? 'date' : key === 'stage' || key === 'records' ? 'number' : 'text');
 const caseSortValue = (key: string) => (c: CaseLite): unknown => {
   switch (key) {
     case 'id': return c.id;
@@ -60,7 +60,8 @@ const caseSortValue = (key: string) => (c: CaseLite): unknown => {
     case 'rn': return c.assignedRn?.name ?? c.assignedRn?.email ?? '';
     case 'submitted': return c.createdAt;
     case 'updated': return c.updatedAt;
-    case 'version': return c.version;
+    // Stage 2 once the veteran has uploaded records (recordsUploaded); Stage 1 = intake only. Sort 2 > 1.
+    case 'stage': return c.recordsUploaded ? 2 : 1;
     default: return '';
   }
 };
@@ -323,10 +324,10 @@ export function CasesPage() {
   function exportCsv() {
     // Cases is server-paginated, so this exports the CURRENT page only (after filters + sort).
     if (pageTruncated) console.warn(`cases CSV export: current page only (${pageRows.length} of ${total}); backend full-export is a follow-up.`);
-    const headers = ['Case ID', 'Veteran', 'Condition', 'Type', 'Status', 'Records', 'Physician', 'RN', 'Submitted', 'Updated', 'Version'];
+    const headers = ['Case ID', 'Veteran', 'Condition', 'Type', 'Status', 'Records', 'Physician', 'RN', 'Submitted', 'Updated', 'Stage'];
     const matrix = rows.map((c) => [
       c.id, c.veteran ? `${c.veteran.lastName}, ${c.veteran.firstName}` : c.veteranId, c.claimedCondition,
-      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.recordsUploaded ? 'Received' : 'Pending', c.assignedPhysician?.fullName ?? '', c.assignedRn?.name ?? c.assignedRn?.email ?? '', c.createdAt, c.updatedAt, c.version,
+      CLAIM_TYPE_LABELS[c.claimType], CASE_STATUS_LABELS[c.status], c.recordsUploaded ? 'Received' : 'Pending', c.assignedPhysician?.fullName ?? '', c.assignedRn?.name ?? c.assignedRn?.email ?? '', c.createdAt, c.updatedAt, c.recordsUploaded ? 'Stage 2' : 'Stage 1',
     ]);
     exportRowsToCsv(`cases-export-${new Date().toISOString().slice(0, 10)}.csv`, headers, matrix);
   }
@@ -425,7 +426,9 @@ export function CasesPage() {
                 Updated stays relative ("for updates keep how long ago"). Hover = full local timestamp. */}
             <td className="whitespace-nowrap px-4 py-3 text-slate-500" title={new Date(c.createdAt).toLocaleString()}>{formatAbsoluteDate(c.createdAt)}</td>
             <td className="px-4 py-3 text-slate-500" title={new Date(c.updatedAt).toLocaleString()}>{formatRelativeTime(c.updatedAt)}</td>
-            <td className="px-4 py-3 text-slate-400">{c.version}</td>
+            {/* Stage (Ryan 2026-06-24, replaces the version 'v' column): Stage 1 = intake only; Stage 2 once
+                the veteran has uploaded records (recordsUploaded). Tells staff at a glance how far the case got. */}
+            <td className="px-4 py-3 text-slate-500" title={c.recordsUploaded ? 'Stage 2 — intake + records uploaded' : 'Stage 1 — intake only, awaiting records'}>{c.recordsUploaded ? 'Stage 2' : 'Stage 1'}</td>
             <td className="px-4 py-3 text-right whitespace-nowrap">
               {c.archivedAt != null ? (
                 <button type="button" className="text-xs font-medium text-indigo-600 hover:text-indigo-700 disabled:opacity-50" disabled={restoreMut.isPending}

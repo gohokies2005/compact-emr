@@ -34,7 +34,7 @@ function cov(over: Partial<ExtractionCoverage> = {}): ExtractionCoverage {
   return {
     ...base,
     pagesRead: over.pagesRead ?? { pct: base.coveragePct, readUnits: base.extractedPages, totalUnits: base.totalPages, approximate, label: pagesReadLabel },
-    chartAnalysis: over.chartAnalysis ?? { state: 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: null },
+    chartAnalysis: over.chartAnalysis ?? { state: 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: null, minorGap: false },
   };
 }
 
@@ -77,6 +77,7 @@ describe('ExtractionCoveragePanel', () => {
           reason: 'The chart analysis was interrupted before it finished, so the structured chart may be missing records.',
           likelyCauseFile: 'VA Blue Button Records.pdf',
           findings: null,
+          minorGap: false,
         },
       }),
     });

@@ -44,13 +44,13 @@ function viability(band: ViabilityBand, over: Partial<CaseViability> = {}): Case
   };
 }
 
-function coverage(status: CoverageStatus, coveragePct = 100, analysisState?: ExtractionCoverage['chartAnalysis']['state']): ExtractionCoverage {
+function coverage(status: CoverageStatus, coveragePct = 100, analysisState?: ExtractionCoverage['chartAnalysis']['state'], minorGap = false): ExtractionCoverage {
   const extractedPages = status === 'complete' ? 10 : 8;
   const state = analysisState ?? (status === 'failed' ? 'failed' : status === 'in_progress' ? 'in_progress' : 'complete');
   return {
     totalPages: 10, extractedPages, coveragePct, gaps: [], status, unknownPageFiles: 0, totalFiles: 1, pageBreakdown: null,
     pagesRead: { pct: coveragePct, readUnits: extractedPages, totalUnits: 10, approximate: false, label: `${coveragePct}% (${extractedPages} of 10)` },
-    chartAnalysis: { state, label: '✓ Complete', reason: null, likelyCauseFile: null, findings: null },
+    chartAnalysis: { state, label: minorGap ? '✓ Mostly complete — 99% analyzed' : '✓ Complete', reason: minorGap ? '16 pages were not folded into the chart (99% of 3029 pages analyzed). The chart is nearly complete.' : null, likelyCauseFile: null, findings: null, minorGap },
   };
 }
 
@@ -210,6 +210,15 @@ describe('computeReadinessVerdict — chart-analysis safety overlay', () => {
     expect(r.verdict).toBe('draft');
     expect(r.confidence).toBe('high');
     expect(r.disagreements.some((d) => d.source === 'chart_analysis')).toBe(false);
+  });
+
+  it('NEAR-COMPLETE (minorGap, Fitton): a completed ≥90% analysis with a few uncovered pages → verdict STILL draft (not provisional), only a soft caution + one-notch lower confidence', () => {
+    const r = computeReadinessVerdict(SIGNALS({ extraction: coverage('complete_with_gaps', 99, 'complete', true) }))!;
+    expect(r.verdict).toBe('draft'); // PROCEEDS — never downgraded to read_chart_first for a near-complete chart
+    expect(r.confidence).toBe('medium'); // one notch below the clean-go 'high'
+    const ca = r.disagreements.find((d) => d.source === 'chart_analysis');
+    expect(ca).toBeDefined();
+    expect(ca!.note).toMatch(/not folded into the chart|nearly complete|≥90%/i);
   });
 
   it('a found bridge (contact_alternative) is NOT clobbered by a failed analysis', () => {

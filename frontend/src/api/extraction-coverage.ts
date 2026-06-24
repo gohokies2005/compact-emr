@@ -34,6 +34,10 @@ export interface ChartAnalysisStage {
   readonly reason: string | null;
   readonly likelyCauseFile: string | null;
   readonly findings: number | null;
+  // NEAR-COMPLETE TOLERANCE (Ryan 2026-06-24, Fitton): true when a completed run left a SMALL run-level
+  // shortfall but analyzed ≥90% — state is 'complete' (verdict proceeds, NO red banner) and `reason` carries
+  // a CAUTION the UI shows as a soft amber note instead of the blocking provisional banner.
+  readonly minorGap: boolean;
 }
 
 export interface CoverageGap {

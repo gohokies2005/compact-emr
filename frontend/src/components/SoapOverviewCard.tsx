@@ -107,6 +107,12 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   const wholeFileGap = (cov?.gaps ?? []).some((g) => g.reason === 'unread' || g.reason === 'needs_manual_summary');
   const analysisDegraded = analysis !== null && (analysis.state === 'failed' || analysis.state === 'incomplete' || analysis.state === 'in_progress');
   const analysisIncomplete = analysisDegraded || wholeFileGap;
+  // NEAR-COMPLETE TOLERANCE (Ryan 2026-06-24, Fitton): a completed run that analyzed ≥90% but left a few pages
+  // out is 'complete' WITH minorGap — the verdict proceeds and the red provisional banner is suppressed, but we
+  // surface a SOFT amber caution (the reason) so the near-completeness is still visible. Never shown alongside
+  // the red banner (a whole-file gap takes precedence and reads as the louder provisional state).
+  const minorGapCaution = !analysisIncomplete && analysis?.state === 'complete' && analysis?.minorGap === true
+    ? (analysis?.reason ?? null) : null;
   const analysisBanner = !analysisIncomplete ? null : (() => {
     const causeFile = analysis?.likelyCauseFile ?? null;
     const reason = analysis?.state === 'failed'
@@ -276,6 +282,13 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
         <div className="mb-3 flex items-start gap-2.5 rounded-md border-2 border-l-[6px] border-[#B0654F] bg-[#FBEAE4] px-3 py-2.5 ring-1 ring-[#B0654F]/30">
           <span className="mt-0.5 inline-flex h-5 w-5 flex-none items-center justify-center rounded-full bg-[#B0654F] text-[12px] font-bold text-white" aria-hidden>!</span>
           <p className="text-[13px] font-semibold text-[#7B3F2E]">{analysisBanner}</p>
+        </div>
+      ) : minorGapCaution ? (
+        // NEAR-COMPLETE TOLERANCE (Ryan 2026-06-24, Fitton): a SOFT amber caution — the chart analyzed ≥90% and the
+        // verdict proceeds normally; this just flags the small shortfall. Quieter than the red provisional banner.
+        <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2">
+          <span className="mt-0.5 text-amber-600" aria-hidden>⚠</span>
+          <p className="text-[12px] text-amber-800">{minorGapCaution}</p>
         </div>
       ) : null}
       <div className="flex items-center justify-between">

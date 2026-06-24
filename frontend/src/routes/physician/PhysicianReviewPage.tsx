@@ -165,19 +165,6 @@ export function PhysicianReviewPage() {
           </p>
         </Card>
 
-        {/* Clinical SOAP-note Overview at the top of the physician review (Ryan 2026-06-20, item #5):
-            the same calm AI-synthesized Subjective / Objective / Assessment / Plan read the RN sees on
-            the case Summary tab, so the physician opens to the clinical picture before the letter +
-            sign-off. Deterministic verdict fallback means it always shows; hasUnreadPages is false by
-            physician_review (the chart's read job is done). The abridged-docs Doctor Pack stays below
-            the letter panel (above the sign-off popup). */}
-        <SoapOverviewCard
-          caseId={c.id}
-          claimedCondition={c.claimedCondition}
-          veteranStatement={c.veteranStatement ?? null}
-          hasUnreadPages={false}
-        />
-
         {isImportedLetter && c.status === 'physician_review' ? (
           // Imported letter ready to finalize (2026-06-14). Distinct from the drafter_run ready panel:
           // there is no grade/hints/draftJob — the imported PDF is the final artifact. Render READY and
@@ -262,7 +249,19 @@ export function PhysicianReviewPage() {
           />
         )}
 
-        {/* Chunk D: Doctor Pack (curated chart abridgement) between the letter panel and Ask Aegis. */}
+        {/* Clinical SOAP-note Overview (Ryan 2026-06-24, item: grade + signature ABOVE the SOAP note in the
+            doctor view). Moved BELOW the letter/grade/sign-off panel so the physician sees the letter grade and
+            the approve/sign action FIRST (the decision they're here to make), with the calm AI-synthesized
+            Subjective / Objective / Assessment / Plan clinical context beneath it. Deterministic verdict
+            fallback means it always shows; hasUnreadPages is false by physician_review (the read job is done). */}
+        <SoapOverviewCard
+          caseId={c.id}
+          claimedCondition={c.claimedCondition}
+          veteranStatement={c.veteranStatement ?? null}
+          hasUnreadPages={false}
+        />
+
+        {/* Chunk D: Doctor Pack (curated chart abridgement) between the SOAP overview and Ask Aegis. */}
         {caseId ? <DoctorPackPanel caseId={caseId} /> : null}
 
         {caseId ? <AdvisoryPanel caseId={caseId} /> : null}

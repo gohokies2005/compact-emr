@@ -159,11 +159,28 @@ describe('computeExtractionCoverage — two-stage (Pages read + Chart analysis)'
     expect(cov.chartAnalysis.likelyCauseFile).toBeNull();
   });
 
-  it('completed run with uncovered pages → chartAnalysis incomplete (finished but not fully)', () => {
+  // NEAR-COMPLETE TOLERANCE (Ryan 2026-06-24, Fitton CLM-4EC87FD0C4): a COMPLETED run that left only a SMALL
+  // shortfall on a large chart (≥90% analyzed) is 'complete' WITH a caution (minorGap) — NOT 'incomplete'. 16 of
+  // 3029 pages must not force the case provisional or block the SOAP. The 1205-page fixture with 12 uncovered = 99%.
+  it('completed run, SMALL shortfall on a large chart (≥90%) → chartAnalysis complete WITH minorGap (caution, not provisional)', () => {
     const cov = computeExtractionCoverage(docs(), allRead(), { status: 'complete', resultJson: { items: new Array(10), gaps: { uncoveredPages: 12, truncatedWindows: 0 } } });
-    expect(cov.chartAnalysis.state).toBe('incomplete');
-    expect(cov.chartAnalysis.label).toMatch(/some pages weren’t fully analyzed/i);
+    expect(cov.coveragePct).toBe(99);
+    expect(cov.chartAnalysis.state).toBe('complete'); // proceeds — verdict not provisional, no red banner
+    expect(cov.chartAnalysis.minorGap).toBe(true);
+    expect(cov.chartAnalysis.label).toMatch(/mostly complete/i);
+    expect(cov.chartAnalysis.label).toMatch(/99% analyzed/i);
     expect(cov.chartAnalysis.reason).toMatch(/12 pages were not folded/i);
+    expect(cov.chartAnalysis.reason).toMatch(/nearly complete/i);
+  });
+
+  it('completed run, LARGE shortfall (<90% analyzed) → chartAnalysis incomplete (provisional), minorGap false', () => {
+    // 200 of 1205 pages uncovered → 83% analyzed, below the 90% floor → stays the prior provisional behavior.
+    const cov = computeExtractionCoverage(docs(), allRead(), { status: 'complete', resultJson: { items: new Array(10), gaps: { uncoveredPages: 200, truncatedWindows: 0 } } });
+    expect(cov.coveragePct).toBeLessThan(90);
+    expect(cov.chartAnalysis.state).toBe('incomplete');
+    expect(cov.chartAnalysis.minorGap).toBe(false);
+    expect(cov.chartAnalysis.label).toMatch(/some pages weren’t fully analyzed/i);
+    expect(cov.chartAnalysis.reason).toMatch(/200 pages were not folded/i);
   });
 });
 

@@ -134,6 +134,7 @@ describe('SoapOverviewCard — honest plan-state surface (Zimmelman)', () => {
           reason: 'The chart analysis was interrupted before it finished, so the structured chart may be missing records.',
           likelyCauseFile: 'VA Blue Button Records.pdf',
           findings: null,
+          minorGap: false,
         },
       },
     } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
@@ -153,7 +154,7 @@ describe('SoapOverviewCard — honest plan-state surface (Zimmelman)', () => {
         totalPages: 100, extractedPages: 100, coveragePct: 100, gaps: [], status: 'failed',
         unknownPageFiles: 0, totalFiles: 2, pageBreakdown: null,
         pagesRead: { pct: 100, readUnits: 100, totalUnits: 100, approximate: false, label: '100% (100 of 100)' },
-        chartAnalysis: { state: 'failed', label: '✗ Chart analysis failed — re-run extraction', reason: 'The chart analysis errored out, so no structured chart was built.', likelyCauseFile: 'VA Blue Button Records.pdf', findings: null },
+        chartAnalysis: { state: 'failed', label: '✗ Chart analysis failed — re-run extraction', reason: 'The chart analysis errored out, so no structured chart was built.', likelyCauseFile: 'VA Blue Button Records.pdf', findings: null, minorGap: false },
       },
     } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
     renderCard();
@@ -171,7 +172,7 @@ describe('SoapOverviewCard — honest plan-state surface (Zimmelman)', () => {
         unknownPageFiles: 0, totalFiles: 2, pageBreakdown: null,
         gaps: [{ documentId: 'D2', fileName: 'Private records.pdf', reason: 'unread', pageLabel: '10 pages', isImage: false, terminalStatus: 'manual_summary_required' }],
         pagesRead: { pct: 80, readUnits: 40, totalUnits: 50, approximate: false, label: '80% (40 of 50)' },
-        chartAnalysis: { state: 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: null },
+        chartAnalysis: { state: 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: null, minorGap: false },
       },
     } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
     renderCard();
@@ -186,11 +187,30 @@ describe('SoapOverviewCard — honest plan-state surface (Zimmelman)', () => {
         totalPages: 40, extractedPages: 40, coveragePct: 100, gaps: [], status: 'complete',
         unknownPageFiles: 0, totalFiles: 3, pageBreakdown: null,
         pagesRead: { pct: 100, readUnits: 40, totalUnits: 40, approximate: false, label: '100% (40 of 40)' },
-        chartAnalysis: { state: 'complete', label: '✓ Complete (253 findings)', reason: null, likelyCauseFile: null, findings: 253 },
+        chartAnalysis: { state: 'complete', label: '✓ Complete (253 findings)', reason: null, likelyCauseFile: null, findings: 253, minorGap: false },
       },
     } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
     renderCard();
     await waitFor(() => expect(screen.getAllByText(/Not supportable as filed/i).length).toBeGreaterThan(0));
+    expect(screen.queryByText(/Chart analysis incomplete/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/provisional/i)).not.toBeInTheDocument();
+  });
+
+  it('NEAR-COMPLETE (minorGap, Fitton): completed ≥90% with a few uncovered pages → NO red banner, NOT provisional, but a SOFT caution is shown', async () => {
+    viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'off' } });
+    coverageMock.mockResolvedValue({
+      data: {
+        totalPages: 3029, extractedPages: 3013, coveragePct: 99, status: 'complete_with_gaps',
+        unknownPageFiles: 0, totalFiles: 5, pageBreakdown: null,
+        gaps: [{ documentId: null, fileName: 'Chart extraction', reason: 'extraction_gap', pageLabel: '16 pages', isImage: false, terminalStatus: null }],
+        pagesRead: { pct: 99, readUnits: 3013, totalUnits: 3029, approximate: false, label: '99% (3013 of 3029)' },
+        chartAnalysis: { state: 'complete', label: '✓ Mostly complete (522 findings) — 99% analyzed', reason: '16 pages were not folded into the chart (99% of 3029 pages analyzed). The chart is nearly complete; review the records directly if the claim hinges on a specific document.', likelyCauseFile: 'Fitton_Migraine_Misc_5.pdf', findings: 522, minorGap: true },
+      },
+    } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
+    renderCard();
+    // The SOFT caution renders (the near-complete note)…
+    await waitFor(() => expect(screen.getByText(/nearly complete/i)).toBeInTheDocument());
+    // …but the LOUD red "incomplete" banner and the "(provisional)" verdict marker do NOT.
     expect(screen.queryByText(/Chart analysis incomplete/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/provisional/i)).not.toBeInTheDocument();
   });

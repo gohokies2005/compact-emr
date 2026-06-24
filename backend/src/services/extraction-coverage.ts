@@ -114,10 +114,23 @@ export type ChartAnalysisState = 'complete' | 'in_progress' | 'incomplete' | 'fa
 export interface ChartAnalysisStage {
   readonly state: ChartAnalysisState;
   readonly label: string; // "✓ Complete (253 findings)" / "⚠ Didn't finish — retry" / "Analyzing…" / "✗ Failed — re-run"
-  readonly reason: string | null; // plain reason when not complete (null when complete)
+  readonly reason: string | null; // plain reason when not complete (null when complete; a CAUTION when minorGap)
   readonly likelyCauseFile: string | null; // the largest/densest records file, when nameable
   readonly findings: number | null; // count of structured findings extracted, when known
+  // NEAR-COMPLETE TOLERANCE (Ryan 2026-06-24, Fitton CLM-4EC87FD0C4): true when a COMPLETED run left a SMALL
+  // run-level shortfall (a few uncovered/truncated pages) but analyzed ≥ ANALYSIS_COVERAGE_FLOOR% of the chart.
+  // The state is then 'complete' (the verdict proceeds + the red provisional banner does NOT fire) but `reason`
+  // carries a CAUTION and this flag is set so the UI/verdict can surface a SOFT caution instead. On a 3029-page
+  // chart, 16 pages not folded in must NOT block the SOAP — it's a caution, not a halt. Below the floor stays
+  // 'incomplete' (provisional). A whole MISSING FILE is a separate, more serious gap and is NOT softened here.
+  readonly minorGap: boolean;
 }
+
+// A completed run that analyzed at least this % of the chart is "good enough to proceed, with a caution"
+// (Ryan 2026-06-24): the SOAP generates + the verdict is not forced provisional, but a soft caution is shown.
+// Below it, a completed-run-with-gaps stays 'incomplete' (provisional). coveragePct already subtracts the
+// uncovered pages, so it IS the analyzed-coverage fraction.
+export const ANALYSIS_COVERAGE_FLOOR = 90;
 
 // ===== Per-page provenance layer (vision rebuild 2026-06-16) =====
 // SEPARATE from the file-level accounting above (which counts a file as read via the SHARED
@@ -423,6 +436,7 @@ export function computeExtractionCoverage(
   // at a random 1-pager. This NEVER re-runs anything; it's a label off existing data.
   const chartAnalysis = deriveChartAnalysisStage({
     runStatus, extractionUnfinished, runFailed, inProgress, uncoveredPages, truncatedWindows, findings, inputs,
+    coveragePct, totalPages,
   });
 
   // SSOT INVARIANT (Ryan 2026-06-23): a 'complete' coverage object must NEVER carry a non-complete chart-analysis
@@ -473,8 +487,10 @@ function deriveChartAnalysisStage(args: {
   truncatedWindows: number;
   findings: number | null;
   inputs: readonly CoverageDocInput[];
+  coveragePct: number;
+  totalPages: number;
 }): ChartAnalysisStage {
-  const { runStatus, runFailed, inProgress, uncoveredPages, truncatedWindows, findings, inputs } = args;
+  const { runStatus, runFailed, inProgress, uncoveredPages, truncatedWindows, findings, inputs, coveragePct, totalPages } = args;
   // The largest chart-input file by page count — the usual culprit when analysis truncates/times out. Named
   // only when it is meaningfully large (>1 page) so we never point at a stray single-pager. Computed once;
   // surfaced ONLY for 'failed' / 'incomplete' (a real shortfall to explain), never for not_analyzed/in_progress.
@@ -489,7 +505,7 @@ function deriveChartAnalysisStage(args: {
   // NOT a gap. It must not fire the banner, mark the verdict provisional, or blame a file. We DON'T treat a null
   // run as "didn't finish": a real run that was interrupted carries a 'queued'/'running'/'failed' status, not null.
   if (inputs.length === 0 || (runStatus === null && !inProgress)) {
-    return { state: 'not_analyzed', label: 'Not analyzed yet', reason: null, likelyCauseFile: null, findings: findings ?? null };
+    return { state: 'not_analyzed', label: 'Not analyzed yet', reason: null, likelyCauseFile: null, findings: findings ?? null, minorGap: false };
   }
 
   if (runFailed) {
@@ -499,11 +515,12 @@ function deriveChartAnalysisStage(args: {
       reason: 'The chart analysis errored out, so no structured chart was built.',
       likelyCauseFile,
       findings: findings ?? null,
+      minorGap: false,
     };
   }
   if (runStatus === 'running' || inProgress) {
     // Genuinely working — OCR or a running analysis. Provisional-with-text on the SOAP side, but never blame a file.
-    return { state: 'in_progress', label: 'Analyzing the chart…', reason: 'The chart analysis is still running.', likelyCauseFile: null, findings: findings ?? null };
+    return { state: 'in_progress', label: 'Analyzing the chart…', reason: 'The chart analysis is still running.', likelyCauseFile: null, findings: findings ?? null, minorGap: false };
   }
   if (runStatus === 'queued') {
     // queued-but-not-finished is the silent crash/re-enqueue case the old card mis-reported as Complete. A REAL run
@@ -514,6 +531,7 @@ function deriveChartAnalysisStage(args: {
       reason: 'The chart analysis was interrupted before it finished, so the structured chart may be missing records.',
       likelyCauseFile,
       findings: findings ?? null,
+      minorGap: false,
     };
   }
   // A completed run that left pages uncovered or truncated dense windows → finished but not fully.
@@ -521,15 +539,30 @@ function deriveChartAnalysisStage(args: {
     const bits: string[] = [];
     if (uncoveredPages > 0) bits.push(`${uncoveredPages} ${uncoveredPages === 1 ? 'page was' : 'pages were'} not folded into the chart`);
     if (truncatedWindows > 0) bits.push(`${truncatedWindows} dense ${truncatedWindows === 1 ? 'section was' : 'sections were'} only partly analyzed`);
+    // NEAR-COMPLETE TOLERANCE (Ryan 2026-06-24, Fitton): a COMPLETED run that still analyzed ≥ the floor (e.g. 16
+    // of 3029 pages not folded in = 99%) must NOT force the case provisional / block the SOAP. Treat it as
+    // 'complete' WITH a caution (minorGap) so the verdict proceeds + the red banner is suppressed, but the soft
+    // caution is still surfaced. Below the floor it stays 'incomplete' (provisional), the prior behavior.
+    if (coveragePct >= ANALYSIS_COVERAGE_FLOOR && totalPages > 0) {
+      return {
+        state: 'complete',
+        label: `✓ Mostly complete${findingsSuffix} — ${coveragePct}% analyzed`,
+        reason: `${bits.join(' and ')} (${coveragePct}% of ${totalPages} pages analyzed). The chart is nearly complete; review the records directly if the claim hinges on a specific document.`,
+        likelyCauseFile,
+        findings: findings ?? null,
+        minorGap: true,
+      };
+    }
     return {
       state: 'incomplete',
       label: `⚠ Mostly complete${findingsSuffix} — some pages weren’t fully analyzed`,
       reason: `${bits.join(' and ')}. The chart may be missing some records.`,
       likelyCauseFile,
       findings: findings ?? null,
+      minorGap: false,
     };
   }
-  return { state: 'complete', label: `✓ Complete${findingsSuffix}`, reason: null, likelyCauseFile: null, findings: findings ?? null };
+  return { state: 'complete', label: `✓ Complete${findingsSuffix}`, reason: null, likelyCauseFile: null, findings: findings ?? null, minorGap: false };
 }
 
 function toNonNegInt(v: unknown): number {

@@ -394,6 +394,18 @@ export function computeReadinessVerdict(signals: ReadinessSignals): ReadinessRes
     confidence = lower(confidence);
     disagreements.push({ source: 'chart_analysis', note: 'Chart-analysis state is still loading — confirm the chart was fully analyzed before relying on this assessment.' });
   }
+  // NEAR-COMPLETE TOLERANCE (Ryan 2026-06-24, Fitton CLM-4EC87FD0C4): a COMPLETED analysis that covered ≥90% but
+  // left a few pages out is 'complete' WITH minorGap. The verdict must PROCEED (no downgrade — a few of 3029 pages
+  // is not a halt), so this is NOT in the else-if chain above (state==='complete' never trips those). We only ADD a
+  // soft caution + lower confidence one notch so the near-completeness is honestly surfaced without blocking.
+  if (extraction?.chartAnalysis?.state === 'complete' && extraction?.chartAnalysis?.minorGap === true && isDirectional) {
+    confidence = lower(confidence);
+    disagreements.push({
+      source: 'chart_analysis',
+      note: extraction?.chartAnalysis?.reason
+        ?? 'A few pages were not folded into the chart, but the analysis is ≥90% complete — proceeding; review the records directly if the claim hinges on a specific document.',
+    });
+  }
 
   // ── extraction overlay: incomplete parse lowers confidence + is surfaced (never flips supportable).
   //    Decision input (hasUnreadPages) is single-sourced; extraction is DISPLAY-ONLY for the % detail. ──

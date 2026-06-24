@@ -106,6 +106,13 @@ export interface AnswerArgs {
   // answer that REVIVES an excluded pathway is caught (block-class). Without this the self-check's
   // excluded-pair guard is a dead wire (QA 2026-06-19, ai-sme #3).
   viabilityExcludedHints?: readonly string[];
+  // FEATURE A — "critique THIS letter" (Ryan 2026-06-24): the case's CURRENT drafted letter text, so an
+  // RN/physician can ask Ask Aegis about the draft ("is the §VII opinion strong enough?", "does the nexus
+  // match the evidence?"). Fetched at the route (where db+s3 live), passed as TRANSIENT context — it is
+  // NEVER indexed into the corpus (no contamination) and NEVER citable as evidence (it is OUR own draft).
+  // null/absent → no letter in context (today's behavior). Small (a few thousand tokens); the MAX_INPUT
+  // budget check below covers it.
+  letterText?: string | null;
 }
 export type AnswerOutcome =
   | {
@@ -132,7 +139,18 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
   // Prepend the route-picker plan block (if present) as the FIRST thing the model sees — it's the
   // authoritative ground-truth framing for a viability question (the same brain the drafter/card use).
   const planBlock = (args.viabilityPlanBlock ?? '').trim();
-  const userContent = planBlock ? `${planBlock}\n\n${corpusContent}` : corpusContent;
+  // FEATURE A: inject the case's CURRENT drafted letter as a delimited, read-only block so the RN/physician
+  // can ask about it. It is OUR draft (not corpus, not chart) — explicitly labeled NOT-citable, and defanged
+  // for the same forged-fence reason as the chart. Transient context only; never persisted to the corpus.
+  const letter = (args.letterText ?? '').trim();
+  const letterBlock = letter
+    ? [
+        '=== DRAFTED LETTER UNDER REVIEW (our working draft — critique it against the REFERENCE MATERIAL and the VETERAN CHART; this is NOT reference material, never cite it as evidence or precedent) ===',
+        defangFence(letter),
+        '=== END DRAFTED LETTER ===',
+      ].join('\n')
+    : '';
+  const userContent = [planBlock, letterBlock, corpusContent].filter((s) => s.length > 0).join('\n\n');
 
   if (estimateTokens(deps.systemPrompt) + estimateTokens(userContent) > MAX_INPUT_TOKENS) {
     return { ok: false, reason: 'over_budget' };

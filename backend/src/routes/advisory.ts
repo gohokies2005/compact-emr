@@ -17,6 +17,8 @@ import { realRetrieve, realRetrieveAvailable } from '../advisory/realRetrieve.js
 import { vendoredSanitize } from '../advisory/vendoredSanitize.js';
 import { answerQuestion, type AnswerDeps, type ChartSliceLike, type InvokeResultLike } from '../advisory/advisoryAnswer.js';
 import { buildAiPlanGroundingBlock } from '../advisory/aiViabilityPlanBlock.js';
+import { resolveCurrentTxtWithHash } from '../services/letter-current.js';
+import type { S3Client } from '@aws-sdk/client-s3';
 
 interface RequestActor { readonly sub: string; readonly role: Role; }
 function currentUser(req: Request): RequestActor {
@@ -34,6 +36,28 @@ export interface AdvisoryRouterDeps {
   invoke?: (systemPrompt: string, userContent: string) => Promise<InvokeResultLike>;
   systemPrompt?: string;
   sanitize?: (s: string) => string;
+  // FEATURE A — "critique THIS letter" (Ryan 2026-06-24): fetch the case's current drafted letter so the
+  // RN/physician can ask Ask Aegis about the draft. The default fetcher uses s3+bucketName; if those are
+  // absent (tests) it returns null → no letter in context (today's behavior). Override fetchLetterText in tests.
+  s3?: S3Client;
+  bucketName?: string;
+  fetchLetterText?: (caseId: string) => Promise<string | null>;
+}
+
+// Best-effort current-letter-text fetcher. Fail-open: any error / no letter / no s3 → null (the advisory
+// answer simply runs corpus+chart only, exactly as before). The letter is TRANSIENT context — never indexed.
+function buildLetterFetcher(db: AppDb, s3?: S3Client, bucketName?: string): (caseId: string) => Promise<string | null> {
+  if (s3 === undefined || !bucketName) return async () => null;
+  return async (caseId: string) => {
+    try {
+      const c = await db.case.findFirst({ where: { id: caseId }, select: { currentVersion: true } });
+      if (c === null || c.currentVersion === null || c.currentVersion === undefined) return null;
+      const r = await resolveCurrentTxtWithHash(db, s3, bucketName, caseId, c.currentVersion);
+      return r !== null && typeof r.txt === 'string' && r.txt.trim().length > 0 ? r.txt : null;
+    } catch {
+      return null;
+    }
+  };
 }
 
 export function createAdvisoryRouter(db: AppDb, overrides: AdvisoryRouterDeps = {}): Router {
@@ -44,6 +68,7 @@ export function createAdvisoryRouter(db: AppDb, overrides: AdvisoryRouterDeps = 
   const invoke = overrides.invoke ?? ((s: string, u: string) => invokeAdvisory(s, u));
   const systemPrompt = overrides.systemPrompt ?? buildSystemPrompt();
   const sanitize = overrides.sanitize ?? vendoredSanitize;
+  const fetchLetterText = overrides.fetchLetterText ?? buildLetterFetcher(db, overrides.s3, overrides.bucketName);
 
   router.post(
     '/cases/:id/advisory/ask',
@@ -70,10 +95,12 @@ export function createAdvisoryRouter(db: AppDb, overrides: AdvisoryRouterDeps = 
       // call here (29s-safe). Fail-open: empty → corpus-only answer (unchanged behavior). The plan's
       // excluded anchors feed the deterministic self-check so a revived excluded pathway is caught.
       const grounding = await buildAiPlanGroundingBlock(db, caseId, question).catch(() => ({ block: null, excludedHints: [] as string[] }));
+      // FEATURE A: pull the case's current drafted letter (best-effort) so questions can critique it.
+      const letterText = await fetchLetterText(caseId).catch(() => null);
 
       let outcome;
       try {
-        outcome = await answerQuestion(deps, { caseId, question, viabilityPlanBlock: grounding.block, viabilityExcludedHints: grounding.excludedHints });
+        outcome = await answerQuestion(deps, { caseId, question, viabilityPlanBlock: grounding.block, viabilityExcludedHints: grounding.excludedHints, letterText });
       } catch (e) {
         // The model / retrieval threw — log it (oversight) and return a clean error, never a stack trace.
         const reason = e instanceof Error ? e.message : String(e);

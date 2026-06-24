@@ -119,7 +119,7 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     if (physicianOnly && !(await isAssignedPhysicianForCase(prisma as unknown as AppDb, u?.sub ?? '', c.assignedPhysicianId))) {
       return error(res, 403, 'forbidden', 'Physician is not assigned to this case.', { caseId });
     }
-    const documents = await prisma.document.findMany({
+    const documents = (await prisma.document.findMany({
       where: { caseId }, // CASE-SCOPED — never the veteran's other cases.
       orderBy: { uploadedAt: 'desc' },
       select: {
@@ -127,7 +127,9 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
         pageCount: true, s3Key: true, uploadedAt: true, uploadedBy: true, updatedAt: true, version: true,
         pages: { orderBy: { pageNumber: 'asc' }, take: 12, select: { text: true } },
       },
-    });
+    })).filter((doc) => !isScreeningSummaryKey(doc.s3Key)); // hide the synthetic extraction OUTPUT — a physician
+    // reviewing the case's RECORDS shouldn't see the AI's internal screening-summary .txt (also satisfies the
+    // doc-set-exclusion closure guard: this is a per-case document-set query, so it must reference the exclusion).
     const enriched = documents.map((doc) => {
       const { pages, ...rest } = doc;
       const text = (pages ?? []).map((p) => p.text).join('\n');

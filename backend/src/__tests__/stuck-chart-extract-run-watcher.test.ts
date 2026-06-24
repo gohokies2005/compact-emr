@@ -121,16 +121,38 @@ describe('stuck-chart-extract-run-watcher reap predicate', () => {
     expect(enqueueMock).toHaveBeenCalledWith(expect.anything(), 'old-case');
   });
 
-  it('never-enqueued backstop: does NOT enqueue when a run already matches the current doc-set hash', async () => {
+  it('never-enqueued backstop: STICKY — does NOT re-enqueue when a COMPLETE run exists, even if its hash drifted (Dorf CLM-CA36097BA6, 2026-06-24 phantom-run fix)', async () => {
     enqueueMock.mockClear();
     const docs = [{ id: 'd1', s3Key: 'cases/case-2/u-scan.pdf' }];
     const statuses = [{ caseId: 'case-2', filePath: 'cases/case-2/u-scan.pdf', terminalStatus: 'read' }];
-    const matchingHash = computeTriggerHash(docs, statuses);
+    // The completed run's stored triggerHash has DRIFTED from the live recompute (the #81 instability). The OLD
+    // latest-run-hash check (runMatchesHash) returned false here and manufactured a phantom duplicate run on an
+    // already-extracted chart — the recurring false "Chart analysis didn't finish — retry". The sticky status
+    // check skips because a COMPLETE run exists, regardless of hash. The per-case query carries where.caseId;
+    // the sweep query (no caseId) still returns [].
     const prisma = {
       chartExtractionRun: {
-        findMany: vi.fn(async () => []),
+        findMany: vi.fn(async (args: { where?: { caseId?: string } }) => (args.where?.caseId ? [{ status: 'complete' }] : [])),
         updateMany: vi.fn(async () => ({ count: 0 })),
-        findFirst: vi.fn(async () => ({ triggerHash: matchingHash })), // run exists for THIS doc-set
+      },
+      fileReadStatus: { findMany: vi.fn(async () => statuses) },
+      document: { findMany: vi.fn(async () => docs) },
+      activityLog: { create: vi.fn(async () => {}), findMany: vi.fn(async () => []) },
+    } as unknown as PrismaClient;
+
+    const res = await handler(prisma);
+    expect(res.enqueuedMissing).toBe(0);
+    expect(enqueueMock).not.toHaveBeenCalled();
+  });
+
+  it('never-enqueued backstop: STICKY — does NOT re-enqueue when a run is already in flight (queued/running)', async () => {
+    enqueueMock.mockClear();
+    const docs = [{ id: 'd1', s3Key: 'cases/case-3/u-scan.pdf' }];
+    const statuses = [{ caseId: 'case-3', filePath: 'cases/case-3/u-scan.pdf', terminalStatus: 'read' }];
+    const prisma = {
+      chartExtractionRun: {
+        findMany: vi.fn(async (args: { where?: { caseId?: string } }) => (args.where?.caseId ? [{ status: 'queued' }] : [])),
+        updateMany: vi.fn(async () => ({ count: 0 })),
       },
       fileReadStatus: { findMany: vi.fn(async () => statuses) },
       document: { findMany: vi.fn(async () => docs) },

@@ -525,21 +525,16 @@ function deriveChartAnalysisStage(args: {
       minorGap: false,
     };
   }
-  if (runStatus === 'running' || inProgress) {
-    // Genuinely working — OCR or a running analysis. Provisional-with-text on the SOAP side, but never blame a file.
+  if (runStatus === 'running' || runStatus === 'queued' || inProgress) {
+    // Genuinely working — OCR, a running analysis, OR a QUEUED run waiting for the worker (Ryan 2026-06-24,
+    // "on first chart load… have to reprocess almost every time"). A freshly-enqueued/in-flight run is NOT a
+    // failure: labeling 'queued' as "didn't finish — retry" cried wolf on every first open and trained RNs to
+    // reprocess needlessly. It reads as "Analyzing…" (in_progress) so the card SELF-HEALS via the coverage poll
+    // when the run lands — no manual reprocess. A GENUINELY stuck queued run is swept to 'failed' by the 45-min
+    // stuck-run watcher (which then DOES show "re-run"), so this never hides a real crash for long. Never blame a
+    // file mid-run. (Provisional-with-text on the SOAP side — the verdict still reads read_chart_first, not a
+    // confident conclusion, so the Herman honesty guarantee holds.)
     return { state: 'in_progress', label: 'Analyzing the chart…', reason: 'The chart analysis is still running.', likelyCauseFile: null, findings: findings ?? null, minorGap: false };
-  }
-  if (runStatus === 'queued') {
-    // queued-but-not-finished is the silent crash/re-enqueue case the old card mis-reported as Complete. A REAL run
-    // record exists (≠ null), so this is a true "didn't finish", not a never-ran case.
-    return {
-      state: 'incomplete',
-      label: '⚠ Chart analysis didn’t finish — retry',
-      reason: 'The chart analysis was interrupted before it finished, so the structured chart may be missing records.',
-      likelyCauseFile,
-      findings: findings ?? null,
-      minorGap: false,
-    };
   }
   // A completed run that left pages uncovered or truncated dense windows → finished but not fully.
   if (uncoveredPages > 0 || truncatedWindows > 0) {

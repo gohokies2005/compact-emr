@@ -55,7 +55,15 @@ async function deriveCoverageNote(db: AppDb, caseId: string): Promise<string | n
     // (and the verdict the RN reads off it) is flagged "based on an incomplete chart" instead of being
     // presented as a confident "not supportable" built on an empty chart. Single source: the same
     // coverage layer the card uses, so card + verdict can never disagree.
-    if (cov.status === 'failed' || cov.status === 'in_progress' || cov.gaps.some((g) => g.reason === 'extraction_incomplete')) {
+    // Key on the chartAnalysis STAGE (the SSOT the card reads), not the raw status/gap, so the SOAP note and the
+    // chart card can never give contradictory tense (QA 2026-06-24). An IN-FLIGHT (queued/running) analysis is
+    // "still running" — NOT "did not finish — re-run" (that cried wolf on every first load). Only a genuinely
+    // failed/interrupted-incomplete analysis says re-run.
+    const analysisState = cov.chartAnalysis?.state;
+    if (analysisState === 'in_progress' || cov.status === 'in_progress') {
+      return 'The chart analysis is still running — this read may be based on a partial chart; re-check once it finishes.';
+    }
+    if (cov.status === 'failed' || analysisState === 'failed' || analysisState === 'incomplete' || cov.gaps.some((g) => g.reason === 'extraction_incomplete')) {
       return 'Chart analysis did not finish — this read is based on an incomplete chart and may be missing records; re-run the extraction before relying on the verdict.';
     }
     const pct = typeof cov.coveragePct === 'number' ? cov.coveragePct : null;

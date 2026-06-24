@@ -136,14 +136,16 @@ describe('computeExtractionCoverage — two-stage (Pages read + Chart analysis)'
     expect(cov.chartAnalysis.likelyCauseFile).toBeNull(); // nothing to blame when complete
   });
 
-  it('OCR 100% but analysis QUEUED → pagesRead 100%, chartAnalysis incomplete + names the largest file', () => {
+  it('OCR 100% but analysis QUEUED (in flight) → chartAnalysis in_progress "Analyzing…", NOT a "didn\'t finish — retry" (Ryan 2026-06-24)', () => {
+    // A queued run is waiting for / running on the worker — NOT a failure. Labeling it "didn't finish — retry"
+    // cried wolf on every first chart load and trained RNs to reprocess needlessly. It reads as "Analyzing…" so
+    // the card self-heals when the run lands; only a genuinely-FAILED run (swept by the 45-min watcher) says re-run.
     const cov = computeExtractionCoverage(docs(), allRead(), { status: 'queued' });
     expect(cov.pagesRead.pct).toBe(100); // the OCR stage genuinely finished
-    expect(cov.chartAnalysis.state).toBe('incomplete');
-    expect(cov.chartAnalysis.label).toMatch(/didn’t finish/i);
-    expect(cov.chartAnalysis.reason).toMatch(/interrupted/i);
-    // the largest chart-input file is named as the likely cause (the dense Blue Button export)
-    expect(cov.chartAnalysis.likelyCauseFile).toBe('VA Blue Button Records.pdf');
+    expect(cov.chartAnalysis.state).toBe('in_progress');
+    expect(cov.chartAnalysis.label).toMatch(/analyzing/i);
+    expect(cov.chartAnalysis.reason).toMatch(/still running/i);
+    expect(cov.chartAnalysis.likelyCauseFile).toBeNull(); // never blame a file on an in-flight run
   });
 
   it('analysis FAILED → chartAnalysis failed with a re-run label', () => {

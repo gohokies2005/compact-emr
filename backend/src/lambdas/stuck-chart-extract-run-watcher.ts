@@ -4,7 +4,6 @@ import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import {
   computeTriggerHash,
   isScreeningSummaryKey,
-  runMatchesHash,
   TERMINAL_READ_STATUSES,
 } from '../services/chart-build-state.js';
 import type { AppDb } from '../services/db-types.js';
@@ -210,11 +209,11 @@ async function enqueueMissingExtractRuns(prisma: PrismaClient, now: Date): Promi
     // the cap — they're cheap skips — so a tick that finds nothing missing still scans the full window.
     if (enqueued >= NEVER_ENQUEUED_PROCESS_CAP) { capped = true; break; }
     try {
-      // Compute the current doc-set + whether all OCR-terminal + whether a matching run exists.
-      const [docsRaw, statuses, latestRun] = await Promise.all([
+      // Compute the current doc-set + whether all OCR-terminal + the case's RECENT runs (not just the latest).
+      const [docsRaw, statuses, recentRuns] = await Promise.all([
         prisma.document.findMany({ where: { caseId }, select: { id: true, s3Key: true } }),
         prisma.fileReadStatus.findMany({ where: { caseId }, select: { filePath: true, terminalStatus: true } }),
-        prisma.chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true } }),
+        prisma.chartExtractionRun.findMany({ where: { caseId }, orderBy: { createdAt: 'desc' }, take: 20, select: { status: true } }),
       ]);
       const docs = docsRaw.filter((d) => !isScreeningSummaryKey(d.s3Key));
       if (docs.length === 0) continue; // nothing to extract
@@ -225,8 +224,18 @@ async function enqueueMissingExtractRuns(prisma: PrismaClient, now: Date): Promi
       if (!allTerminal) continue; // still OCR'ing — the /pages completion will enqueue naturally
 
       const currentHash = computeTriggerHash(docs, statuses);
-      // A run for the CURRENT doc-set already exists → not missing; skip (avoid a redundant enqueue call).
-      if (latestRun !== null && runMatchesHash(latestRun.triggerHash, currentHash)) continue;
+      // STICKY anti-phantom (Dorf CLM-CA36097BA6, 2026-06-24). The old check looked ONLY at the LATEST run's
+      // triggerHash, so when a COMPLETED run's stored hash drifted from the live recompute (read-status timing —
+      // the #81 hash-instability), the watcher manufactured a phantom DUPLICATE run on an ALREADY-COMPLETE chart →
+      // the recurring false "Chart analysis didn't finish — retry" the RN had to reprocess away (~half of cases in
+      // 48h). Mirror deriveChartBuildState's stickiness (Ewell precedent): NEVER re-enqueue when ANY recent run is
+      // complete/complete_with_gaps (the chart IS extracted, even if a later hash drifted) OR queued/running (a run
+      // is already in flight — the primary upload/pages/delete path enqueued it). Only a case with NO complete and
+      // NO in-flight run is a genuine never-enqueued orphan worth this backstop. A genuine doc-set CHANGE is handled
+      // by the primary enqueue path (upload/pages/delete), not this backstop.
+      const extractedOrInFlight = recentRuns.some((r) =>
+        r.status === 'complete' || r.status === 'complete_with_gaps' || r.status === 'queued' || r.status === 'running');
+      if (extractedOrInFlight) continue;
 
       // Missing run for an all-terminal doc-set → enqueue it (idempotent; P2002-safe under a race).
       const res = await maybeEnqueueChartExtract(prisma as unknown as AppDb, caseId);

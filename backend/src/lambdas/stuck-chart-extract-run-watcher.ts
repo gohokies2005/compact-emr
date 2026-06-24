@@ -181,8 +181,24 @@ async function enqueueMissingExtractRuns(prisma: PrismaClient, now: Date): Promi
     orderBy: { lastCheckedAt: 'asc' },
     take: NEVER_ENQUEUED_CASE_LIMIT * 20, // headroom: many rows per case collapse to few caseIds
   });
+  // ALSO catch cases whose doc-set CHANGED via a delete. Deleting a file changes the chart fingerprint,
+  // so the last successful run no longer matches and the case shows "extracting" with no run behind it —
+  // but an OLD case's fileReadStatus rows sit outside the lookback window, so the read-status source above
+  // misses it entirely (Enoch CLM-76E3584247, 2026-06-24: OCR'd 5 days ago, a file deleted today, pinned
+  // in a phantom "extracting" with no recovery). A 'document_deleted' activity within the window pulls the
+  // case back into scope; the per-case gate below is the SAME idempotent all-terminal/no-current-run check,
+  // so a delete that needs no re-extract (mid-OCR, or a run already matches) is just a cheap skip.
+  const recentDeletes = await prisma.activityLog.findMany({
+    where: { action: 'document_deleted', ts: { gt: lookbackBoundary }, caseId: { not: null } },
+    select: { caseId: true },
+    orderBy: { ts: 'asc' },
+    take: NEVER_ENQUEUED_CASE_LIMIT * 5,
+  });
   // Preserve oldest-first order while de-duplicating caseIds (Set preserves insertion order).
-  const caseIds = [...new Set(recentStatuses.map((r) => r.caseId))].slice(0, NEVER_ENQUEUED_CASE_LIMIT);
+  const caseIds = [...new Set([
+    ...recentStatuses.map((r) => r.caseId),
+    ...recentDeletes.map((r) => r.caseId).filter((c): c is string => typeof c === 'string'),
+  ])].slice(0, NEVER_ENQUEUED_CASE_LIMIT);
   if (caseIds.length === 0) return 0;
 
   let enqueued = 0;

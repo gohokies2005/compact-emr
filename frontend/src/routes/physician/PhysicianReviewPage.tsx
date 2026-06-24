@@ -14,6 +14,7 @@ import { SignOffPopup } from '../../components/SignOffPopup';
 import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
+import { PhysicianHandoffNotes } from '../../components/PhysicianHandoffNotes';
 import { getCase, type SignOffAnswers } from '../../api/cases';
 import { formatNameLastFirst } from '../../lib/format';
 import { approveLetter, finalizeImportLetter, getLetter } from '../../api/letter';
@@ -248,6 +249,11 @@ export function PhysicianReviewPage() {
             message="This case is not ready for physician review."
           />
         )}
+
+        {/* RN→doctor handoff notes (Ryan 2026-06-24, Spring bug): the note the RN attached when sending the
+            case for review. It was written to case_messages but no screen rendered it; this surfaces it on the
+            physician's primary page, under the letter action and above the clinical SOAP. Hides when empty. */}
+        <PhysicianHandoffNotes caseId={c.id} />
 
         {/* Clinical SOAP-note Overview (Ryan 2026-06-24, item: grade + signature ABOVE the SOAP note in the
             doctor view). Moved BELOW the letter/grade/sign-off panel so the physician sees the letter grade and

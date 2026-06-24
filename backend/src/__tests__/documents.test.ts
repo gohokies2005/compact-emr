@@ -14,6 +14,14 @@ vi.mock('../services/chart-extract-queue.js', () => ({
   publishChartExtractQueued: vi.fn(async () => undefined),
 }));
 
+// The case-scoped documents route authorizes a physician via isAssignedPhysicianForCase. Mock it to return
+// true ONLY for the assigned-physician sentinel so both the allow + deny branches are exercised. importActual
+// preserves the module's other exports (only this fn is stubbed).
+vi.mock('../services/physician-resolver.js', async (orig) => ({
+  ...(await (orig() as Promise<Record<string, unknown>>)),
+  isAssignedPhysicianForCase: vi.fn(async (_db: unknown, _sub: string, assignedPhysicianId: string | null) => assignedPhysicianId === 'PHYS-ASSIGNED'),
+}));
+
 function appFor(prisma: unknown, role: 'admin' | 'ops_staff' | 'physician' = 'ops_staff') {
   process.env.AUTH_TEST_JWT_SECRET = 'test-secret';
   process.env.AUTH_TEST_ISSUER = 'compact-emr-tests';
@@ -67,6 +75,33 @@ describe('document routes', () => {
     expect(prisma.document.findMany).toHaveBeenCalledWith(expect.objectContaining({
       select: expect.objectContaining({ pages: expect.objectContaining({ take: 12 }) }),
     }));
+  });
+
+  // CASE-SCOPED physician-authorized list (Ryan 2026-06-24) — the REAL auth contract the FE component's mocked
+  // test can't cover (QA finding: a mocked happy path hid the 403). where:{caseId} so no cross-case PHI.
+  const caseDocRow = { id: 'doc-1', caseId: 'CASE-1', filename: 'record.pdf', sizeBytes: BigInt(12), contentType: 'application/pdf', docTag: 'STR', pageCount: 1, s3Key: 'cases/CASE-1/a.pdf', uploadedAt: new Date(), uploadedBy: 'u', updatedAt: new Date(), version: 1, pages: [] as { text: string }[] };
+
+  it('GET /cases/:id/documents — admin gets the CASE-SCOPED list (where caseId, never veteran-wide)', async () => {
+    const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1', assignedPhysicianId: 'PHYS-ASSIGNED' })) }, document: { findMany: vi.fn(async () => [caseDocRow]) } };
+    const res = await request(appFor(prisma, 'admin')).get('/api/v1/cases/CASE-1/documents').expect(200);
+    expect(res.body.data[0].id).toBe('doc-1');
+    expect(prisma.document.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { caseId: 'CASE-1' } }));
+  });
+
+  it('GET /cases/:id/documents — the ASSIGNED physician is authorized (200)', async () => {
+    const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1', assignedPhysicianId: 'PHYS-ASSIGNED' })) }, document: { findMany: vi.fn(async () => [caseDocRow]) } };
+    await request(appFor(prisma, 'physician')).get('/api/v1/cases/CASE-1/documents').expect(200);
+  });
+
+  it('GET /cases/:id/documents — a NON-assigned physician is forbidden (403) and never reads the docs', async () => {
+    const prisma = { case: { findFirst: vi.fn(async () => ({ id: 'CASE-1', assignedPhysicianId: 'OTHER-PHYS' })) }, document: { findMany: vi.fn() } };
+    await request(appFor(prisma, 'physician')).get('/api/v1/cases/CASE-1/documents').expect(403);
+    expect(prisma.document.findMany).not.toHaveBeenCalled();
+  });
+
+  it('GET /cases/:id/documents — 404 when the case does not exist', async () => {
+    const prisma = { case: { findFirst: vi.fn(async () => null) }, document: { findMany: vi.fn() } };
+    await request(appFor(prisma, 'admin')).get('/api/v1/cases/NOPE/documents').expect(404);
   });
 
   it('creates a 5-minute KMS-enforced presigned PUT URL', async () => {

@@ -34,6 +34,15 @@ vi.mock('../components/DoctorPackPanel', () => ({
   DoctorPackPanel: () => <div data-testid="doctor-pack-panel" />,
 }));
 
+// Stub the two child panels that fire their own data queries (they have their own suites) so the
+// review/approve-flow tests stay focused + deterministic — same pattern as DoctorPackPanel above.
+vi.mock('../components/PhysicianHandoffNotes', () => ({
+  PhysicianHandoffNotes: () => <div data-testid="handoff-notes" />,
+}));
+vi.mock('../components/PhysicianDocumentsList', () => ({
+  PhysicianDocumentsList: () => <div data-testid="physician-documents-list" />,
+}));
+
 // Stub the attestation popup: when open, expose a single button. For the normal (drafter_run) path it
 // fires onSignedOff (chains approve); for an imported letter the page wires onSubmitAnswers instead, so
 // the stub fires that with a complete affirmative answer set. The page-level chain (the code under

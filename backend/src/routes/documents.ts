@@ -11,6 +11,7 @@ import { TERMINAL_READ_STATUSES, isScreeningSummaryKey, computeTriggerHash, runM
 import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { classifyDocument } from '../services/documentClassifier.js';
 import { computeDuplicateOf } from '../services/documentDedupe.js';
+import { isAssignedPhysicianForCase } from '../services/physician-resolver.js';
 import type { AppDb } from '../services/db-types.js';
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -101,6 +102,40 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     res.json({
       data: enriched.map((d) => ({ ...d.rest, sizeBytes: d.sizeBytes, autoTitle: d.title, docType: d.docType, duplicateOfId: duplicateOf.get(d.id) ?? null })),
     });
+  });
+
+  // CASE-SCOPED document list (Ryan 2026-06-24, physician review page "full docs at the bottom"). Distinct
+  // from the veteran-wide /veterans/:id/documents list above (ops-only, returns EVERY case's docs): this one
+  // is gated for the assigned PHYSICIAN too and queries where:{caseId}, so a physician only ever receives THIS
+  // case's documents — the cross-case PHI the veteran-wide route carries never reaches them (QA scope finding).
+  // Same classifier-title + dedupe serialization as the veteran-wide route.
+  router.get('/cases/:id/documents', requireRole(['admin', 'ops_staff', 'physician']), async (req: Request, res: Response) => {
+    const caseId = String(req.params.id);
+    const u = (req as Request & { user?: { sub: string; roles: readonly string[] } }).user;
+    const roles = u?.roles ?? [];
+    const physicianOnly = roles.includes('physician') && !roles.includes('admin') && !roles.includes('ops_staff');
+    const c = await prisma.case.findFirst({ where: { id: caseId }, select: { id: true, assignedPhysicianId: true } });
+    if (c === null) return error(res, 404, 'not_found', 'Case not found', { caseId });
+    if (physicianOnly && !(await isAssignedPhysicianForCase(prisma as unknown as AppDb, u?.sub ?? '', c.assignedPhysicianId))) {
+      return error(res, 403, 'forbidden', 'Physician is not assigned to this case.', { caseId });
+    }
+    const documents = await prisma.document.findMany({
+      where: { caseId }, // CASE-SCOPED — never the veteran's other cases.
+      orderBy: { uploadedAt: 'desc' },
+      select: {
+        id: true, caseId: true, filename: true, sizeBytes: true, contentType: true, docTag: true,
+        pageCount: true, s3Key: true, uploadedAt: true, uploadedBy: true, updatedAt: true, version: true,
+        pages: { orderBy: { pageNumber: 'asc' }, take: 12, select: { text: true } },
+      },
+    });
+    const enriched = documents.map((doc) => {
+      const { pages, ...rest } = doc;
+      const text = (pages ?? []).map((p) => p.text).join('\n');
+      const cls = classifyDocument({ filename: doc.filename, text });
+      return { rest, sizeBytes: doc.sizeBytes.toString(), title: cls.title, docType: cls.docType, id: doc.id, leadingText: text, sizeBytesPositive: doc.sizeBytes > 0n, uploadedAt: doc.uploadedAt };
+    });
+    const duplicateOf = computeDuplicateOf(enriched.map((d) => ({ id: d.id, sizeBytesStr: d.sizeBytes, sizeBytesPositive: d.sizeBytesPositive, leadingText: d.leadingText, uploadedAt: d.uploadedAt })));
+    res.json({ data: enriched.map((d) => ({ ...d.rest, sizeBytes: d.sizeBytes, autoTitle: d.title, docType: d.docType, duplicateOfId: duplicateOf.get(d.id) ?? null })) });
   });
 
   router.post('/veterans/:id/documents/presign', requireRole(['admin', 'ops_staff']), async (req: Request, res: Response) => {

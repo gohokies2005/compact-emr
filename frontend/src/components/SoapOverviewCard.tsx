@@ -58,7 +58,27 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
     enabled,
     refetchInterval: (q) => (q.state.data?.aiViabilityState?.status === 'computing' ? 4000 : false),
   });
-  const coverageQ = useQuery({ queryKey: ['case', caseId, 'extraction-coverage'], queryFn: () => getExtractionCoverage(caseId), enabled });
+  // SELF-HEAL the amber→green flip WITHOUT a hard refresh (Ryan 2026-06-24). The verdict goes amber/provisional
+  // while the chart analysis isn't confirmed complete. Two ways it used to get stuck on amber until a manual hard
+  // refresh: (1) a STALE cached "incomplete" from a prior visit (e.g. before a re-extraction finished) — fixed by
+  // refetchOnMount:'always' so opening the card always re-reads fresh coverage; (2) the extraction finishing while
+  // the RN/physician is sitting on the page — fixed by polling every 5s WHILE the analysis is in flight, which
+  // folds in the completed state on its own and then stops. Coverage GET is a cheap read (no model spend).
+  const coverageQ = useQuery({
+    queryKey: ['case', caseId, 'extraction-coverage'],
+    queryFn: () => getExtractionCoverage(caseId),
+    enabled,
+    refetchOnMount: 'always',
+    refetchInterval: (q) => {
+      const cov = q.state.data?.data;
+      const inFlight = cov?.status === 'in_progress' || cov?.chartAnalysis?.state === 'in_progress';
+      // Cap the poll so a WEDGED extraction (stuck 'in_progress' until the 45-min watcher fails it) can't poll
+      // for the lifetime of an open tab. ~60 polls × 5s ≈ 5 min covers a normal large extraction; after that the
+      // user can refresh. Coverage GET is a $0 read, so this is just hygiene, not a cost guard.
+      const polls = q.state.dataUpdateCount ?? 0;
+      return inFlight && polls < 60 ? 5000 : false;
+    },
+  });
   const sanityQ = useQuery({
     queryKey: ['case', caseId, 'sanity-impression', 'pre_draft', 0],
     queryFn: () => getSanityImpression(caseId, { stage: 'pre_draft', claimedCondition } as SanityContextInput),
@@ -148,6 +168,11 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
     queryFn: () => getSoapNote(caseId, ctx),
     enabled: enabled && strategy !== null, // ctx is meaningful once the strategy/inputSet is loaded
     staleTime: 10 * 60 * 1000,
+    // NOTE: do NOT poll this query on note.fallback. A TRANSIENT fallback is deliberately not persisted, so a
+    // non-forced getSoapNote re-RUNS the model (a live Sonnet call) — polling it would re-bill every few seconds
+    // on a large/ungrounded chart (QA cost finding 2026-06-24). The off-request precompute is the reliability
+    // home for the real note; the fallback prose heals on the next open. Only the cheap coverage poll below
+    // self-heals the amber→green VERDICT (which is what the user actually asked for and is a $0 read).
   });
   // "Regenerate with new info" — the ONLY path that re-bills the model on demand. Forces a fresh Sonnet
   // call (forceRegenerate) and writes the new note back into the query cache. On open we always serve the

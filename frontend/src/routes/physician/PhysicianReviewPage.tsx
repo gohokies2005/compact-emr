@@ -15,6 +15,7 @@ import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 import { PhysicianHandoffNotes } from '../../components/PhysicianHandoffNotes';
+import { PhysicianDocumentsList } from '../../components/PhysicianDocumentsList';
 import { getCase, type SignOffAnswers } from '../../api/cases';
 import { formatNameLastFirst } from '../../lib/format';
 import { approveLetter, finalizeImportLetter, getLetter } from '../../api/letter';
@@ -271,6 +272,10 @@ export function PhysicianReviewPage() {
         {caseId ? <DoctorPackPanel caseId={caseId} /> : null}
 
         {caseId ? <AdvisoryPanel caseId={caseId} /> : null}
+
+        {/* Full document list at the BOTTOM (Ryan 2026-06-24, Option A): so the physician can review ALL of the
+            case's records if desired — the Doctor Pack above is a curated abridgement. Read-only viewer. */}
+        {caseId ? <PhysicianDocumentsList caseId={c.id} /> : null}
 
         {isImportedLetter ? (
           // Imported letter: the popup's affirmative answers go STRAIGHT to finalize-import (records

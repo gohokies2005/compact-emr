@@ -55,6 +55,9 @@ export async function deleteMedication(id: string): Promise<void> { return apiDe
 export interface PresignDocumentInput { readonly caseId: string; readonly filename: string; readonly sizeBytes: number; readonly contentType: string; }
 export interface PresignDocumentResponse { readonly uploadUrl: string; readonly s3Key: string; readonly expiresInSeconds: number; readonly requiredHeaders: Record<string, string>; }
 export async function listDocuments(veteranId: string): Promise<Envelope<readonly Document[]>> { return apiGet(`/api/v1/veterans/${encodeURIComponent(veteranId)}/documents`); }
+// CASE-SCOPED list (physician-authorized): only THIS case's documents — used by the physician review page so a
+// physician never receives the veteran's other-case docs. Same Document shape as the veteran-wide list.
+export async function listCaseDocuments(caseId: string): Promise<Envelope<readonly Document[]>> { return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/documents`); }
 export async function presignDocument(veteranId: string, body: PresignDocumentInput): Promise<Envelope<PresignDocumentResponse>> { return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/documents/presign`, body); }
 export async function recordDocument(veteranId: string, body: PresignDocumentInput & { readonly s3Key: string; readonly docTag?: string }): Promise<Envelope<Document>> { return apiPost(`/api/v1/veterans/${encodeURIComponent(veteranId)}/documents`, body); }
 export async function downloadDocument(id: string): Promise<Envelope<{ downloadUrl: string }>> { return apiGet(`/api/v1/documents/${encodeURIComponent(id)}/download`); }

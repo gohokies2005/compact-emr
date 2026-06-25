@@ -116,7 +116,17 @@ function buildUserPrompt({ claimedCondition, chartIndex, candidateNames, physici
       if (_s && String(_s).trim().length >= 5 && !events.some((x) => x.startsWith(String(_s)))) events.push(`${String(_s)} (documented)`);
     }
   }
-  const vetStmt = (chartIndex && (chartIndex.veteran_statement || (chartIndex.caseFraming && chartIndex.caseFraming.veteran_statement))) || '';
+  // The drafter materializes the veteran statement at chart/index.json
+  // claim_intake_summary.veteran_statement (drafter-worker.js writer path). Read that
+  // canonical location FIRST so the picker actually SEES the veteran's argument on cloud
+  // bundles; the two legacy paths stay as fallbacks. Additive + fail-open: when all are
+  // empty vetStmt === '' exactly as before. The statement is framed authority="none"
+  // trust="untrusted-input" in <veteran_proposed_theory> below — that framing is unchanged.
+  const vetStmt = (chartIndex && (
+    (chartIndex.claim_intake_summary && chartIndex.claim_intake_summary.veteran_statement)
+    || chartIndex.veteran_statement
+    || (chartIndex.caseFraming && chartIndex.caseFraming.veteran_statement)
+  )) || '';
   const cand = (candidateNames && candidateNames.length ? candidateNames : _scList(chartIndex).map((s) => s.name)).map((x) => `- ${x}`).join('\n') || '- (none)';
   return `<case>
 <claimed_condition>${claimedCondition || '(unknown)'}</claimed_condition>

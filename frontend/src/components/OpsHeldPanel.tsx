@@ -6,28 +6,11 @@ import { postDraft } from '../api/drafter';
 import { transitionCaseStatus, type CaseDetail } from '../api/cases';
 import { ConflictError } from '../api/client';
 import { SendToDoctorModal } from './SendToDoctorModal';
+import { buildDraftHaltSummary } from '../lib/draftHaltSummary';
 import type { DraftJob } from '../types/prisma';
 
-interface ManifestPhase {
-  readonly operator_message?: string | null;
-  readonly summary?: string | null;
-  readonly status?: string | null;
-}
-
-interface ManifestSnapshot {
-  readonly phases?: Record<string, ManifestPhase>;
-}
-
-interface GradeSidecarJson {
-  readonly detail_phase?: string | null;
-  readonly synthesized_floor?: boolean | null;
-  readonly synthesized_floor_reason?: string | null;
-}
-
-export interface OpsDraftJob extends DraftJob {
-  readonly manifestSnapshot?: ManifestSnapshot | null;
-  readonly gradeSidecarJson?: GradeSidecarJson | null;
-}
+// DraftJob already carries manifestSnapshot + gradeSidecarJson + grade + shipRecommendation; no override needed.
+export type OpsDraftJob = DraftJob;
 
 interface OpsHeldPanelProps {
   readonly c: CaseDetail;
@@ -114,6 +97,14 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
     },
   });
 
+  // Plain-language halt summary (Ryan 2026-06-24): conditional grade + RN-friendly step checklist + the
+  // specific fix(es), all from data ALREADY persisted on the held job (no drafter work). Cosmetic halts on a
+  // ship-grade letter say "ready to ship"; anything that touched content says "fix first" and names it.
+  const summary = buildDraftHaltSummary(job?.manifestSnapshot, job?.gradeSidecarJson);
+  // The safety gate lives in the helper (summary.shipAsIs) so it's locked by tests: a substantive halt or a
+  // floor grade NEVER shows "ready to ship", even if an earlier grader said 'ship' before a later crash.
+  const readyToShip = summary.shipAsIs;
+
   return (
     <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -186,6 +177,48 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
           ) : null}
         </div>
       </div>
+
+      {/* Conditional grade + RN-friendly step checklist + the specific fix (Ryan 2026-06-24). All from data
+          already on the held job. Cosmetic halt on a ship-grade letter => "ready to ship"; a content halt =>
+          "fix first" + names the item (the safety rule: a real problem never wears the all-good face). */}
+      {(summary.grade || summary.stoppedAtLabel) ? (
+        <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4">
+          {summary.grade ? (
+            <p className="text-sm font-semibold text-navyDeep">
+              Grade: {summary.grade}{summary.gradeIsFloor ? ' (provisional)' : ''}{' — '}
+              <span className={readyToShip ? 'text-emerald-700' : 'text-amber-700'}>
+                {readyToShip ? 'ready to ship' : `fix ${summary.fixList.length > 1 ? `${summary.fixList.length} items` : summary.fixList.length === 1 ? 'one item' : 'the flagged step'} first`}
+              </span>
+            </p>
+          ) : null}
+          {summary.rationale ? <p className="mt-1 text-xs text-steel">{summary.rationale}</p> : null}
+
+          <ul className="mt-3 space-y-1">
+            {summary.steps.map((s) => (
+              <li key={s.label} className="flex items-start gap-2 text-sm">
+                <span aria-hidden className={s.status === 'stopped' ? 'text-rose-600' : s.status === 'done' ? 'text-emerald-600' : 'text-slate-300'}>
+                  {s.status === 'stopped' ? '✗' : s.status === 'done' ? '✓' : '○'}
+                </span>
+                <span className={s.status === 'pending' ? 'text-slate-400' : 'text-slate-700'}>
+                  {s.label}{s.status === 'stopped' ? ' — stopped here' : ''}
+                  {s.reason ? <span className="mt-0.5 block text-xs text-steel">{s.reason}</span> : null}
+                </span>
+              </li>
+            ))}
+          </ul>
+
+          {summary.fixList.length > 0 ? (
+            <div className="mt-3">
+              <p className="text-xs font-semibold text-amber-800">Fix before sending:</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-5 text-sm text-slate-700">
+                {summary.fixList.map((f, i) => <li key={i}>{f}</li>)}
+              </ul>
+            </div>
+          ) : null}
+
+          <p className="mt-3 text-sm font-medium text-navyDeep">→ {summary.nextAction}</p>
+        </div>
+      ) : null}
 
       {errorMessage ? (
         <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">

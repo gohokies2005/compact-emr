@@ -1,12 +1,51 @@
 import { useMemo, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { SectionCard } from './ui/SectionCard';
 import { Spinner } from './ui/Spinner';
 import { ConflictError } from '../api/client';
-import { assignCasePhysician, assignCaseRn } from '../api/cases';
+import { assignCasePhysician, assignCaseRn, getCase, type CaseDetail } from '../api/cases';
 import { listPhysicians, type PhysicianPublic } from '../api/physicians';
 import { listUsers } from '../api/users';
+
+// The assign endpoints are optimistic-locked on the case `version`. A background poll
+// (chart-extract / readiness / case refetch) routinely bumps that version between page-load
+// and the click, so the `version` captured at render is frequently stale by the time the RN
+// presses Assign — the server 409s ("Case version is stale") and, before this, the RN saw
+// "This case changed elsewhere" and had to retry by hand (it only "worked after waiting" when a
+// refetch happened to land first). Fix: read the freshest version we have at submit time, and on
+// a 409 refetch the case ONCE to learn the true server version and retry the assignment once.
+// Only a SECOND 409 (a genuine concurrent edit) surfaces to the RN. Single retry — never a loop.
+
+// Freshest version we currently know for this case: the live ['case', caseId] query cache (kept
+// current by the same background polls that cause the stale-prop) falling back to the prop.
+function freshestVersion(qc: QueryClient, caseId: string, fallback: number): number {
+  const cached = qc.getQueryData<{ data: CaseDetail }>(['case', caseId]);
+  const v = cached?.data?.version;
+  return typeof v === 'number' ? v : fallback;
+}
+
+// Run an assignment that is version-checked, auto-recovering from a routine optimistic-lock 409.
+// `assign(version)` performs the PATCH for a given version. On a 409 we refetch the case to get the
+// authoritative server version, seed the cache, and retry the assignment exactly once with it.
+async function assignWithVersionRetry(
+  qc: QueryClient,
+  caseId: string,
+  initialVersion: number,
+  assign: (version: number) => Promise<unknown>,
+): Promise<void> {
+  try {
+    await assign(initialVersion);
+    return;
+  } catch (error) {
+    if (!(error instanceof ConflictError)) throw error;
+    // Routine background-poll version bump: learn the true version straight from the server,
+    // seed the cache so the rest of the page agrees, and retry once.
+    const fresh = await getCase(caseId);
+    qc.setQueryData(['case', caseId], fresh);
+    await assign(fresh.data.version);
+  }
+}
 
 interface CaseAssignmentPanelProps {
   readonly caseId: string;
@@ -36,18 +75,24 @@ export function CaseAssignmentPanel({ caseId, version, assignedPhysician, assign
   };
 
   const assignPhysicianMutation = useMutation({
-    mutationFn: () => assignCasePhysician(caseId, { physicianId: selectedPhysicianId, version }),
+    mutationFn: () =>
+      assignWithVersionRetry(qc, caseId, freshestVersion(qc, caseId, version), (v) =>
+        assignCasePhysician(caseId, { physicianId: selectedPhysicianId, version: v }),
+      ),
     onSuccess: async () => { setMessage('Physician assignment updated.'); await invalidateCase(); },
     onError: (error: unknown) => {
-      setMessage(error instanceof ConflictError ? 'This case changed elsewhere. Reload and try the assignment again.' : 'Physician could not be assigned. Please retry.');
+      setMessage(error instanceof ConflictError ? 'This case was just updated by someone else — reload and try again.' : 'Physician could not be assigned. Please retry.');
     },
   });
 
   const assignRnMutation = useMutation({
-    mutationFn: () => assignCaseRn(caseId, { rnUserId: selectedRnId, version }),
+    mutationFn: () =>
+      assignWithVersionRetry(qc, caseId, freshestVersion(qc, caseId, version), (v) =>
+        assignCaseRn(caseId, { rnUserId: selectedRnId, version: v }),
+      ),
     onSuccess: async () => { setMessage('RN liaison assignment updated.'); await invalidateCase(); },
     onError: (error: unknown) => {
-      setMessage(error instanceof ConflictError ? 'This case changed elsewhere. Reload and try the assignment again.' : 'RN liaison could not be assigned. Please retry.');
+      setMessage(error instanceof ConflictError ? 'This case was just updated by someone else — reload and try again.' : 'RN liaison could not be assigned. Please retry.');
     },
   });
 

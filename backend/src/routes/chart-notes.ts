@@ -4,6 +4,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb, Role } from '../services/db-types.js';
 import { parseChartNoteCreate, parseChartNotePatch } from '../services/chart-note-validation.js';
+import { resolveActorNames, pickDisplayName } from '../services/actor-name-resolver.js';
 
 interface RequestActor { readonly sub: string; readonly roles: readonly Role[]; readonly role: Role; }
 
@@ -25,14 +26,14 @@ export function createChartNotesRouter(db: AppDb): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const veteranId = String(req.params.veteranId);
       const rows = await db.chartNote.findMany({ where: { veteranId }, orderBy: { createdAt: 'desc' } });
-      // Resolve the author's Cognito sub → a real NAME, not a UUID (Ryan 2026-06-20, recurring).
-      // Batch-look-up the distinct authors; fall back to email, then (last resort) the raw id.
-      const subs = [...new Set(rows.map((r) => (r as { createdBy?: string }).createdBy).filter((s): s is string => typeof s === 'string' && s.length > 0))];
-      const users = subs.length > 0
-        ? await db.appUser.findMany({ where: { cognitoSub: { in: subs } }, select: { cognitoSub: true, name: true, email: true } })
-        : [];
-      const nameBySub = new Map(users.map((u) => [u.cognitoSub, (u.name && u.name.trim()) || u.email]));
-      res.json({ data: rows.map((r) => ({ ...r, createdByName: nameBySub.get((r as { createdBy?: string }).createdBy ?? '') ?? (r as { createdBy?: string }).createdBy ?? 'Staff' })) });
+      // Resolve the author's Cognito sub → a real NAME, not a UUID (Ryan 2026-06-20/24, recurring).
+      // Shared resolver checks BOTH app_users AND the physician directory (a physician-authored note
+      // used to leak its sub) and never returns a raw id (unknown → "Staff", system → "System").
+      const nameBySub = await resolveActorNames(db, rows.map((r) => (r as { createdBy?: string }).createdBy));
+      res.json({ data: rows.map((r) => {
+        const sub = (r as { createdBy?: string }).createdBy ?? '';
+        return { ...r, createdByName: nameBySub.get(sub) ?? pickDisplayName(sub, { users: new Map(), physicians: new Map() }) };
+      }) });
     }),
   );
 
@@ -46,12 +47,9 @@ export function createChartNotesRouter(db: AppDb): Router {
       const veteranId = String(req.params.veteranId);
       const row = await db.chartNote.findFirst({ where: { veteranId, isQuickNote: true }, orderBy: { createdAt: 'desc' } });
       if (row === null) { res.json({ data: null }); return; }
-      const sub = (row as { createdBy?: string }).createdBy;
-      const authors = typeof sub === 'string' && sub.length > 0
-        ? await db.appUser.findMany({ where: { cognitoSub: sub }, select: { name: true, email: true }, take: 1 })
-        : [];
-      const author = authors[0];
-      const createdByName = (author?.name && author.name.trim()) || author?.email || sub || 'Staff';
+      const sub = (row as { createdBy?: string }).createdBy ?? '';
+      const nameBySub = await resolveActorNames(db, [sub]);
+      const createdByName = nameBySub.get(sub) ?? pickDisplayName(sub, { users: new Map(), physicians: new Map() });
       res.json({ data: { ...row, createdByName } });
     }),
   );

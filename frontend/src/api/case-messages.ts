@@ -6,6 +6,9 @@ export interface CaseMessage {
   readonly id: string;
   readonly caseId: string;
   readonly senderSub: string;
+  // Server-resolved display name for senderSub (app_user name/email or physician fullName; "Staff"
+  // when the account is gone, "System" for system-stamped). Always present — never the raw UUID.
+  readonly senderName?: string;
   readonly senderRole: CaseMessageSenderRole;
   readonly body: string;
   readonly readAt: string | null;

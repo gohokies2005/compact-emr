@@ -70,7 +70,7 @@ function NoteRow({ note, canEdit, canDelete, onChanged }: { readonly note: Chart
   if (editing) {
     return <div className="px-5 py-3.5">
       <div className="space-y-2"><textarea className="input min-h-20" maxLength={MAX} value={draft} onChange={(e) => setDraft(e.target.value)} /><div className="flex justify-end gap-2"><RowAction onClick={() => { setDraft(note.body); setEditing(false); }}>Cancel</RowAction><RowAction onClick={() => patch.mutate()} disabled={!draft.trim() || patch.isPending}>Save</RowAction></div></div>
-      <div className="mt-1"><span className="text-xs text-steel">Added by {note.createdByName ?? note.createdBy} · {formatRelativeTime(note.createdAt)}</span></div>
+      <div className="mt-1"><span className="text-xs text-steel">Added by {note.createdByName ?? 'Staff'} · {formatRelativeTime(note.createdAt)}</span></div>
     </div>;
   }
   return <DataRow
@@ -78,7 +78,7 @@ function NoteRow({ note, canEdit, canDelete, onChanged }: { readonly note: Chart
       {note.isQuickNote ? <span className="mr-1.5 inline-block rounded bg-amber-100 px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wide text-amber-700">Quick note</span> : null}
       {note.body}
     </span>}
-    meta={`Added by ${note.createdByName ?? note.createdBy} · ${formatRelativeTime(note.createdAt)}`}
+    meta={`Added by ${note.createdByName ?? 'Staff'} · ${formatRelativeTime(note.createdAt)}`}
     {...((canEdit || canDelete) ? { trailing: <>
       {canEdit ? <RowAction aria-label="Edit note" onClick={() => { setDraft(note.body); setEditing(true); }}>Edit</RowAction> : null}
       {canDelete ? <RowAction kind="danger" aria-label="Delete note" onClick={() => { if (window.confirm('Delete this note?')) del.mutate(); }}>Delete</RowAction> : null}

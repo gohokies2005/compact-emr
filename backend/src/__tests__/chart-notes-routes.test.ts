@@ -35,12 +35,28 @@ function makeDb(initial: ChartNoteRecord = note()) {
   const chartNoteUpdate = vi.fn(async (args: { data: Record<string, unknown> }) => { current = { ...current, ...args.data, version: current.version + 1 } as ChartNoteRecord; return current; });
   const chartNoteDelete = vi.fn(async () => current);
   const veteranFindUnique = vi.fn(async () => ({ id: 'VET-1' }));
-  const appUserFindMany = vi.fn(async () => [{ name: 'Jane Ops', email: 'jane@example.com' }]);
+  // The shared resolver batches by cognitoSub; echo only the subs it asks for so an unknown author
+  // (e.g. a sub with no account) resolves to the neutral "Staff" fallback, not a UUID.
+  const appUserFindMany = vi.fn(async (args?: { where?: { cognitoSub?: { in?: string[] } } }) => {
+    const wanted = args?.where?.cognitoSub?.in ?? [];
+    const pool = [
+      { cognitoSub: 'OPS', name: 'Jane Ops', email: 'jane@example.com' },
+      { cognitoSub: 'USER-1', name: 'Jane Ops', email: 'jane@example.com' },
+    ];
+    return pool.filter((u) => wanted.includes(u.cognitoSub));
+  });
+  // Physician directory (the resolver also checks here — a physician-authored note must resolve too).
+  const physicianFindMany = vi.fn(async (args?: { where?: { cognitoSub?: { in?: string[] } } }) => {
+    const wanted = args?.where?.cognitoSub?.in ?? [];
+    const pool = [{ cognitoSub: 'PHYS', fullName: 'Dr. Alice Stone' }];
+    return pool.filter((p) => wanted.includes(p.cognitoSub));
+  });
   const activityLogCreate = vi.fn(async () => ({}));
   const tx = {
     chartNote: { findMany: chartNoteFindMany, findFirst: chartNoteFindFirst, create: chartNoteCreate, update: chartNoteUpdate, delete: chartNoteDelete },
     veteran: { findUnique: veteranFindUnique },
     appUser: { findMany: appUserFindMany },
+    physician: { findMany: physicianFindMany },
     activityLog: { create: activityLogCreate },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
@@ -76,6 +92,26 @@ describe('chart-notes routes', () => {
     const res = await request(appFor(makeDb().db)).get('/api/v1/veterans/VET-1/chart-notes');
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(1);
+  });
+
+  it('resolves the author to a NAME (not a UUID) for an ops_staff-authored note', async () => {
+    const res = await request(appFor(makeDb(note({ createdBy: 'OPS' })).db)).get('/api/v1/veterans/VET-1/chart-notes');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].createdByName).toBe('Jane Ops');
+    expect(res.body.data[0].createdByName).not.toBe('OPS');
+  });
+
+  it('resolves a PHYSICIAN-authored note via the physician directory (the old leak)', async () => {
+    const res = await request(appFor(makeDb(note({ createdBy: 'PHYS' })).db)).get('/api/v1/veterans/VET-1/chart-notes');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].createdByName).toBe('Dr. Alice Stone');
+  });
+
+  it('falls back to "Staff" for an unknown author sub — NEVER the raw UUID', async () => {
+    const res = await request(appFor(makeDb(note({ createdBy: 'deadbeef-uuid-not-an-account' })).db)).get('/api/v1/veterans/VET-1/chart-notes');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].createdByName).toBe('Staff');
+    expect(res.body.data[0].createdByName).not.toContain('deadbeef');
   });
 
   it('creates a note with createdBy from the JWT sub and writes activity', async () => {

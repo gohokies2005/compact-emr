@@ -5,9 +5,10 @@ import { ChartNotesPanel } from '../routes/veterans/ChartNotesPanel';
 
 vi.mock('../auth/useAuth', () => ({ useAuth: () => ({ user: { sub: 'admin-sub', email: 'a@x.com', roles: ['admin'], role: 'admin' } }) }));
 vi.mock('../api/chart-notes', () => ({
+  // The backend now resolves createdByName (sub -> real name); the raw createdBy stays as the id.
   listChartNotes: vi.fn(async () => ({ data: [
-    { id: 'N1', veteranId: 'VET-1', body: 'Spoke with the veteran today', createdBy: 'ops-sub', isQuickNote: false, createdAt: new Date(Date.now() - 3_600_000).toISOString(), updatedAt: new Date().toISOString(), version: 1 },
-    { id: 'Q1', veteranId: 'VET-1', body: 'Awaiting records — C-file requested 6/8', createdBy: 'ops-sub', isQuickNote: true, createdAt: new Date(Date.now() - 1_800_000).toISOString(), updatedAt: new Date().toISOString(), version: 1 },
+    { id: 'N1', veteranId: 'VET-1', body: 'Spoke with the veteran today', createdBy: 'ops-sub', createdByName: 'Nina RN', isQuickNote: false, createdAt: new Date(Date.now() - 3_600_000).toISOString(), updatedAt: new Date().toISOString(), version: 1 },
+    { id: 'Q1', veteranId: 'VET-1', body: 'Awaiting records — C-file requested 6/8', createdBy: 'ops-sub', createdByName: 'Nina RN', isQuickNote: true, createdAt: new Date(Date.now() - 1_800_000).toISOString(), updatedAt: new Date().toISOString(), version: 1 },
   ] })),
   createChartNote: vi.fn(), patchChartNote: vi.fn(), deleteChartNote: vi.fn(), getLatestQuickNote: vi.fn(async () => ({ data: null })),
 }));
@@ -19,7 +20,9 @@ describe('ChartNotesPanel', () => {
     // The panel is now headless — the "Staff Notes" heading is the parent tab label, not an <h2> here.
     expect(screen.getByRole('button', { name: 'Save note' })).toBeInTheDocument();
     expect(await screen.findByText('Spoke with the veteran today')).toBeInTheDocument();
-    expect(screen.getAllByText(/Added by ops-sub/).length).toBeGreaterThan(0);
+    // Shows the resolved NAME, never the raw Cognito sub (Ryan 2026-06-24).
+    expect(screen.getAllByText(/Added by Nina RN/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/ops-sub/)).not.toBeInTheDocument();
     // admin sees edit + delete affordances
     expect(screen.getAllByRole('button', { name: 'Edit note' }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: 'Delete note' }).length).toBeGreaterThan(0);

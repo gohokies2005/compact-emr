@@ -3,6 +3,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb, Role } from '../services/db-types.js';
 import { isAssignedPhysicianForCase } from '../services/physician-resolver.js';
+import { resolveActorNames, pickDisplayName } from '../services/actor-name-resolver.js';
 import { parseCaseMessageCreate, parseMarkRead } from '../services/case-message-validation.js';
 
 interface Actor { readonly sub: string; readonly roles: readonly Role[]; readonly role: Role }
@@ -46,7 +47,14 @@ export function createCaseMessagesRouter(db: AppDb): Router {
     const { caseId, user } = await assertParticipant(req);
     const messages = await db.caseMessage.findMany({ where: { caseId }, orderBy: { createdAt: 'asc' } });
     const unreadCount = await db.caseMessage.count({ where: { caseId, readAt: null, senderSub: { not: user.sub } } });
-    res.json({ data: messages, unreadCount });
+    // Resolve each sender's Cognito sub → a real NAME so the physician's handoff-note panel (and any
+    // future flat-thread UI) shows the RN/physician by name, never a raw UUID (Ryan 2026-06-24).
+    const nameBySub = await resolveActorNames(db, messages.map((m) => m.senderSub));
+    const data = messages.map((m) => ({
+      ...m,
+      senderName: nameBySub.get(m.senderSub) ?? pickDisplayName(m.senderSub, { users: new Map(), physicians: new Map() }),
+    }));
+    res.json({ data, unreadCount });
   }));
 
   router.post('/cases/:id/messages', asyncHandler(async (req: Request, res: Response) => {

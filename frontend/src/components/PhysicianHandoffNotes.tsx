@@ -15,8 +15,17 @@ import { listCaseMessages, type CaseMessage } from '../api/case-messages';
 // then this guarantees the physician at least SEES the RN's handoff note. Renders nothing when there are
 // no notes (no empty clutter on the review page). Fail-open: a fetch error simply hides the panel.
 
-function senderLabel(role: CaseMessage['senderRole']): string {
+function roleLabel(role: CaseMessage['senderRole']): string {
   return role === 'physician' ? 'Physician' : 'Care team (RN)';
+}
+
+// Prefer the server-resolved author NAME (never a raw UUID); fall back to the role label when the
+// backend could not resolve a name (older rows / missing account). Ryan 2026-06-24: RNs must see the
+// person's name, not a Cognito sub.
+function senderLabel(m: Pick<CaseMessage, 'senderName' | 'senderRole'>): string {
+  const name = m.senderName?.trim();
+  if (name) return `${name} · ${roleLabel(m.senderRole)}`;
+  return roleLabel(m.senderRole);
 }
 
 function formatWhen(iso: string): string {
@@ -46,7 +55,7 @@ export function PhysicianHandoffNotes({ caseId }: { readonly caseId: string }) {
         {messages.map((m) => (
           <li key={m.id} className="rounded-md border border-slate-100 bg-slate-50 px-3 py-2">
             <div className="flex items-baseline justify-between gap-2">
-              <span className="text-xs font-medium text-slate-700">{senderLabel(m.senderRole)}</span>
+              <span className="text-xs font-medium text-slate-700">{senderLabel(m)}</span>
               <span className="text-[11px] text-slate-400">{formatWhen(m.createdAt)}</span>
             </div>
             <p className="mt-1 whitespace-pre-wrap text-sm text-slate-800">{m.body}</p>

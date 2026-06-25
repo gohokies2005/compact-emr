@@ -26,11 +26,26 @@ function makeDb(opts: { messages?: CaseMessageRecord[] } = {}) {
     findFirst: vi.fn(async (a: { where: { id: string } }) => store.find((m) => m.id === a.where.id) ?? null),
     updateMany: vi.fn(async (a: { where: { senderSub: { not: string } } }) => ({ count: store.filter((m) => m.senderSub !== a.where.senderSub.not && m.readAt === null).length })),
   };
-  const physician = { findUnique: vi.fn(async (a: { where: { cognitoSub?: string } }) => (a.where.cognitoSub === 'DR-SUB' ? PHYS : null)) };
-  const appUser = { findUnique: vi.fn(async (a: { where: { cognitoSub?: string } }) =>
-    a.where.cognitoSub === 'RN-SUB' ? { id: 'RN-1', cognitoSub: 'RN-SUB', email: 'rn@x', roles: [{ role: 'ops_staff' }] }
-    : a.where.cognitoSub === 'OTHER-SUB' ? { id: 'RN-OTHER', cognitoSub: 'OTHER-SUB', email: 'o@x', roles: [{ role: 'ops_staff' }] }
-    : null) };
+  // findUnique = participant gate; findMany = the actor-name resolver (batch by cognitoSub).
+  const physicianPool = [{ cognitoSub: 'DR-SUB', fullName: 'Dr. Pat Healer' }];
+  const physician = {
+    findUnique: vi.fn(async (a: { where: { cognitoSub?: string } }) => (a.where.cognitoSub === 'DR-SUB' ? PHYS : null)),
+    findMany: vi.fn(async (a: { where?: { cognitoSub?: { in?: string[] } } }) => {
+      const wanted = a.where?.cognitoSub?.in ?? [];
+      return physicianPool.filter((p) => wanted.includes(p.cognitoSub));
+    }),
+  };
+  const appUserPool = [{ id: 'RN-1', cognitoSub: 'RN-SUB', name: 'Nina RN', email: 'rn@x', roles: [{ role: 'ops_staff' }] }];
+  const appUser = {
+    findUnique: vi.fn(async (a: { where: { cognitoSub?: string } }) =>
+      a.where.cognitoSub === 'RN-SUB' ? { id: 'RN-1', cognitoSub: 'RN-SUB', email: 'rn@x', roles: [{ role: 'ops_staff' }] }
+      : a.where.cognitoSub === 'OTHER-SUB' ? { id: 'RN-OTHER', cognitoSub: 'OTHER-SUB', email: 'o@x', roles: [{ role: 'ops_staff' }] }
+      : null),
+    findMany: vi.fn(async (a: { where?: { cognitoSub?: { in?: string[] } } }) => {
+      const wanted = a.where?.cognitoSub?.in ?? [];
+      return appUserPool.filter((u) => wanted.includes(u.cognitoSub)).map((u) => ({ cognitoSub: u.cognitoSub, name: u.name, email: u.email }));
+    }),
+  };
   const db = { case: { findFirst: vi.fn(async () => caseRow) }, caseMessage, physician, appUser } as unknown as AppDb;
   return { db, caseMessage };
 }
@@ -57,6 +72,19 @@ describe('case messaging routes (D4)', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(1);
     expect(res.body.unreadCount).toBe(1); // the RN's message is unread for the physician
+    // The author resolves to a NAME, never the raw Cognito sub (Ryan 2026-06-24).
+    expect(res.body.data[0].senderName).toBe('Nina RN');
+    expect(res.body.data[0].senderName).not.toBe('RN-SUB');
+  });
+
+  it('resolves a physician sender via the physician directory + falls back to "Staff" for an unknown sub', async () => {
+    mockUser = { sub: 'DR-SUB', roles: ['physician'] };
+    const { db } = makeDb({ messages: [msg({ id: 'M1', senderSub: 'DR-SUB', senderRole: 'physician' }), msg({ id: 'M2', senderSub: 'ghost-sub-no-account', senderRole: 'ops_staff' })] });
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/messages');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].senderName).toBe('Dr. Pat Healer');
+    expect(res.body.data[1].senderName).toBe('Staff');
+    expect(res.body.data[1].senderName).not.toContain('ghost');
   });
 
   it('assigned RN can post a message -> 201 with senderRole', async () => {

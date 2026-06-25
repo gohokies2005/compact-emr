@@ -19,5 +19,7 @@ export function roleClassName(role: BubbleRole): string {
 export function senderLabel(sub: string, directory: SubDirectory): string {
   const entry = directory[sub];
   if (entry?.name) return entry.name;
-  return sub;
+  // The author isn't in the staff/physician directory (deactivated / not yet synced). Show a neutral
+  // label, NEVER the raw Cognito sub — an RN must never see a UUID where a name belongs (Ryan 2026-06-24).
+  return 'Staff';
 }

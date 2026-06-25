@@ -836,9 +836,15 @@ export async function loadExtractionCoverageForCase(db: AppDb, caseId: string): 
   // KeyDoc classification (Doctor-Pack tier) for the relevance-aware framing (Dr. Kasky #76). Keyed by
   // filePath (== Document.s3Key). When a case has no KeyDoc rows yet, this is [] → relevance is null
   // (fail-open) and the card shows the honest raw %. Existing data; no re-classification here.
-  const keyDocRows = (await db.keyDoc.findMany({
-    where: { caseId },
-    select: { filePath: true, docType: true, classification: true, importance: true },
-  })) as unknown as readonly KeyDocClassInput[];
+  // keyDoc classification is ADVISORY (drives the relevance read only). Fail-open: a missing
+  // keyDoc delegate (e.g. older callers / test harnesses) or a query error must NEVER 500 the
+  // chart-readiness route — fall back to no relevance summary (the honest % still renders).
+  let keyDocRows: readonly KeyDocClassInput[] = [];
+  try {
+    keyDocRows = (await db.keyDoc?.findMany?.({
+      where: { caseId },
+      select: { filePath: true, docType: true, classification: true, importance: true },
+    })) as unknown as readonly KeyDocClassInput[] ?? [];
+  } catch { keyDocRows = []; }
   return computeExtractionCoverage(docs, rows, latestRun, pageRows, keyDocRows);
 }

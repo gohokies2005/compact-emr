@@ -1,12 +1,14 @@
 import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { postDraft } from '../api/drafter';
 import { transitionCaseStatus, type CaseDetail } from '../api/cases';
 import { ConflictError } from '../api/client';
+import { getLetter } from '../api/letter';
 import { SendToDoctorModal } from './SendToDoctorModal';
 import { buildDraftHaltSummary } from '../lib/draftHaltSummary';
+import { humanizeParityReason } from '../lib/letterLocation';
 import type { DraftJob } from '../types/prisma';
 
 // DraftJob already carries manifestSnapshot + gradeSidecarJson + grade + shipRecommendation; no override needed.
@@ -105,6 +107,23 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
   // floor grade NEVER shows "ready to ship", even if an earlier grader said 'ship' before a later crash.
   const readyToShip = summary.shipAsIs;
 
+  // FIX 4 (Dr. Kasky 2026-06-25): a render-parity halt reason reads "PDF text diverges from v3.txt at
+  // offset 11037 — txt:'…'" — a raw char offset that means nothing to an RN. We fetch the CURRENT letter
+  // txt (the SAME source the editor uses) and map the offset → "Section VII, paragraph 2". Done EMR-side
+  // at display time so it ALSO works on an already-halted case with no redraft. Fail-open: if the txt can't
+  // be fetched, humanizeParityReason returns the original offset string (it never throws). The query is
+  // disabled when there's no letter to map against (a no-letter halt has no parity-offset reason anyway).
+  const letterQuery = useQuery({
+    queryKey: ['case', c.id, 'letter'],
+    queryFn: () => getLetter(c.id),
+    enabled: Boolean(hasLetter),
+    retry: false,
+    staleTime: 60_000,
+  });
+  const letterTxt = letterQuery.data?.data.txt ?? null;
+  const opMsg = operatorMessage(c, job);
+  const humanizedOpMsg = humanizeParityReason(opMsg, letterTxt, opMsg);
+
   return (
     <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -121,7 +140,16 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
               ? 'The run stopped before completing, but it produced a letter you can open and finish in the editor — usually faster and cheaper than a full re-run. Re-run only if a fresh draft is genuinely needed.'
               : 'The run stopped and did not produce a letter. Re-run it to draft to completion. The reason is below.'}
           </p>
-          <p className="mt-2 text-sm text-steel">{operatorMessage(c, job)}</p>
+          <p className="mt-2 text-sm text-steel">
+            {humanizedOpMsg.text}
+            {/* The raw offset/snippet stays available as a secondary tooltip line — lead with the
+                human location, keep the technical detail for anyone who wants it (Fix 4). */}
+            {humanizedOpMsg.mapped && humanizedOpMsg.rawSnippet ? (
+              <span className="mt-0.5 block text-xs text-slate-400" title={opMsg}>
+                Technical detail: near “{humanizedOpMsg.rawSnippet}”.
+              </span>
+            ) : null}
+          </p>
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -186,8 +214,17 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
           {summary.grade ? (
             <p className="text-sm font-semibold text-navyDeep">
               Grade: {summary.grade}{summary.gradeIsFloor ? ' (provisional)' : ''}{' — '}
+              {/* Fix 5 (Dr. Kasky 2026-06-25): the targeted_revision_hints are SUBSTANTIVE argument items
+                  (medical-judgment), NOT RN mechanical fixes — so when fixList is non-empty the RN sees
+                  "ready to forward — considerations for the physician", NOT a "fix N items first" hard
+                  framing. The RN is never blocked: Send-to-doctor stays live regardless. (A truly
+                  blocking stopped step still shows the flagged-step language.) */}
               <span className={readyToShip ? 'text-emerald-700' : 'text-amber-700'}>
-                {readyToShip ? 'ready to ship' : `fix ${summary.fixList.length > 1 ? `${summary.fixList.length} items` : summary.fixList.length === 1 ? 'one item' : 'the flagged step'} first`}
+                {readyToShip
+                  ? 'ready to ship'
+                  : summary.fixList.length > 0
+                    ? `ready to forward — ${summary.fixList.length === 1 ? 'one consideration' : `${summary.fixList.length} considerations`} for the physician`
+                    : 'review the flagged step first'}
               </span>
             </p>
           ) : null}
@@ -201,22 +238,39 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
                 </span>
                 <span className={s.status === 'pending' ? 'text-slate-400' : 'text-slate-700'}>
                   {s.label}{s.status === 'stopped' ? ' — stopped here' : ''}
-                  {s.reason ? <span className="mt-0.5 block text-xs text-steel">{s.reason}</span> : null}
+                  {/* Fix 4: if the stopped-step reason is a parity/offset reason, replace it with the
+                      mapped "Section VII, paragraph 2" human location (using the fetched letter txt);
+                      otherwise show the reason verbatim. Fail-open via humanizeParityReason. */}
+                  {s.reason ? (
+                    <span className="mt-0.5 block text-xs text-steel">
+                      {humanizeParityReason(s.reason, letterTxt, s.reason).text}
+                    </span>
+                  ) : null}
                 </span>
               </li>
             ))}
           </ul>
 
+          {/* Fix 5: these are the grader's substantive argument hints — physician CONSIDERATIONS, not RN
+              required fixes. Relabelled + reframed as optional for the physician; they do NOT block the RN
+              from forwarding. (The physician sees the same items as "Considerations before signing" on the
+              review page.) */}
           {summary.fixList.length > 0 ? (
             <div className="mt-3">
-              <p className="text-xs font-semibold text-amber-800">Fix before sending:</p>
+              <p className="text-xs font-semibold text-slate-700">Considerations for the physician (optional — not required to send):</p>
               <ul className="mt-1 list-disc space-y-0.5 pl-5 text-sm text-slate-700">
                 {summary.fixList.map((f, i) => <li key={i}>{f}</li>)}
               </ul>
             </div>
           ) : null}
 
-          <p className="mt-3 text-sm font-medium text-navyDeep">→ {summary.nextAction}</p>
+          <p className="mt-3 text-sm font-medium text-navyDeep">
+            {/* When the only thing outstanding is substantive considerations (no blocking stopped step),
+                the RN's next action is to forward — not "do NOT send until corrected". */}
+            → {summary.fixList.length > 0 && !readyToShip
+              ? 'Send to the doctor for review — the considerations above are optional notes for the physician.'
+              : summary.nextAction}
+          </p>
         </div>
       ) : null}
 

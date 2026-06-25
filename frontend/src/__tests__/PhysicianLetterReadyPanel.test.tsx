@@ -94,7 +94,10 @@ describe('PhysicianLetterReadyPanel', () => {
     expect(screen.getByText('Letter is ready for your review')).toBeInTheDocument();
     expect(screen.getByText('Grade: A-')).toBeInTheDocument();
     expect(screen.getByText('Probative score: 8/10')).toBeInTheDocument();
-    expect(screen.getByText('Top 3 things to consider:')).toBeInTheDocument();
+    // Fix 5 (Dr. Kasky 2026-06-25): substantive argument hints are physician "Considerations before
+    // signing", framed OPTIONAL — not RN "Fix before sending" required items.
+    expect(screen.getByText('Considerations before signing')).toBeInTheDocument();
+    expect(screen.getByText('Not required — consider before you sign.')).toBeInTheDocument();
 
     expect(
       screen.getByText('preferred pediatric-onset framing over genetic-predisposition language.'),
@@ -104,7 +107,7 @@ describe('PhysicianLetterReadyPanel', () => {
     expect(screen.queryByText('Do not show this.')).not.toBeInTheDocument();
 
     const disclosureRegion = screen
-      .getByText('Top 3 things to consider:')
+      .getByText('Considerations before signing')
       .closest('div');
 
     expect(disclosureRegion).not.toBeNull();

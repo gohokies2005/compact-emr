@@ -114,11 +114,15 @@ export function PhysicianLetterReadyPanel({
         </div>
       </div>
 
+      {/* Considerations before signing (Dr. Kasky 2026-06-25): the grader's substantive content/argument
+          hints (reframe a citation's direction, add an aggravation baseline sentence, bridge a cohort) are
+          MEDICAL-judgment items for the physician — NOT RN mechanical fixes. They live here, in the
+          physician review surface, framed OPTIONAL ("Not required — consider before you sign"). They never
+          block forwarding or signing; the sign-off attestation is unchanged. Shown in full (Ryan 2026-06-04). */}
       {hints.length > 0 ? (
-        <div className="mt-6">
-          <h3 className="text-sm font-semibold text-navyDeep">
-            Top {hints.length === 1 ? 'thing' : `${hints.length} things`} to consider:
-          </h3>
+        <div className="mt-6 rounded-lg border border-slate-200 bg-slate-50 p-4">
+          <h3 className="text-sm font-semibold text-navyDeep">Considerations before signing</h3>
+          <p className="mt-0.5 text-xs text-steel">Not required — consider before you sign.</p>
           <ul className="mt-3 space-y-2">
             {hints.map((hint, index) => (
               <li key={`${hint.section ?? 'section'}-${index}`} className="text-sm text-steel">

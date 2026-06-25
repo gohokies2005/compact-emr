@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { buildDrafterBundle, buildJobBundleS3Key, writeBundleToS3 } from './drafter-bundle.js';
 import { stampCaseFraming } from './case-framing-stamp.js';
 import { caseViabilityEnabled, stampCaseViability } from './case-viability-stamp.js';
+import { stampAiViabilityPlan } from './ai-viability-plan-stamp.js';
 import { publishDraftJobQueued } from './draft-job-queue.js';
 import { SERVICE_ACTORS } from './service-actors.js';
 import type { AppDb } from './db-types.js';
@@ -71,6 +72,10 @@ export async function enqueueAutoRerunForCase(
   if (caseViabilityEnabled()) {
     bundle = await stampCaseViability(db, caseId, bundle, { persist: true });
   }
+  // Honor the persisted route-picker plan on the auto-re-run path too (QA 2026-06-25). Without this,
+  // a stuck-job full re-draft re-derives framing fresh and can diverge from the SOAP theory the RN
+  // saw — the exact Spring divergence Fix 3 exists to kill. Fail-open: absent plan → bundle unchanged.
+  bundle = await stampAiViabilityPlan(db, caseId, bundle);
   const bundleS3Key = buildJobBundleS3Key(caseId, jobId);
   await writeBundleToS3(bucket, bundleS3Key, bundle, 'job');
 

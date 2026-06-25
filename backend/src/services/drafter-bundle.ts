@@ -6,6 +6,9 @@ import { deriveChartBuildState, type ChartBuildState } from './chart-build-state
 import type { AppDb } from './db-types.js';
 import type { CaseFraming } from './case-framing.js';
 import type { CaseViability } from './case-viability.js';
+// Type-only import (erased at compile) — no runtime cycle even though ai-viability-plan-stamp imports
+// DrafterBundle back. Mirrors how CaseFraming/CaseViability live beside their producers.
+import type { AiViabilityPlanBlock } from './ai-viability-plan-stamp.js';
 
 /**
  * Architect QA F1: drafter materialization bundle.
@@ -103,6 +106,15 @@ export interface DrafterBundle {
    * wrapper reads bundle.caseViability if present; absence = legacy.
    */
   readonly caseViability?: CaseViability;
+  /**
+   * Persisted route-picker PLAN (Ryan 2026-06-25, "honor the SOAP theory on redraft") — the SAME
+   * Case.aiViabilityPlanJson the SOAP note + Overview viability card render. Stamped at ROUTE level by
+   * ai-viability-plan-stamp.ts (read-only; never mutates the Case row), so the FRN drafter's framingGate
+   * can FOLLOW the persisted lead theory instead of re-running the route-picker fresh and diverging from
+   * what the RN already saw. Optional + fail-open: absence = the drafter derives fresh (today's behavior).
+   * Worker copy-through: drafter-worker materializeChart pipes it to chart.index.json.aiViabilityPlan.
+   */
+  readonly aiViabilityPlan?: AiViabilityPlanBlock;
 }
 
 /**

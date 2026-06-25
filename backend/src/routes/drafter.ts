@@ -10,6 +10,7 @@ import { autoRemediateChartForDraft } from '../services/chart-auto-remediate.js'
 import { getDraftReadiness } from '../services/draft-readiness.js';
 import { stampCaseFraming } from '../services/case-framing-stamp.js';
 import { caseViabilityEnabled, stampCaseViability } from '../services/case-viability-stamp.js';
+import { stampAiViabilityPlan } from '../services/ai-viability-plan-stamp.js';
 import { publishDraftJobQueued } from '../services/draft-job-queue.js';
 import { getDraftConcurrency, type DraftConcurrency } from '../services/draft-concurrency.js';
 import {
@@ -363,6 +364,9 @@ export function createDrafterClientRouter(db: AppDb): Router {
       if (caseViabilityEnabled()) {
         stamped = await stampCaseViability(db, caseId, stamped, { persist: false });
       }
+      // Persisted route-picker PLAN stamp (Ryan 2026-06-25, "honor the SOAP theory on redraft") — read-only
+      // by nature (the plan was already persisted by ai-viability.ts). Fail-open: no ready plan ⇒ unstamped.
+      stamped = await stampAiViabilityPlan(db, caseId, stamped);
 
       const s3Key = buildManualBundleS3Key(caseId);
       const upload = await writeBundleToS3(bucket, s3Key, stamped, 'manual');
@@ -587,6 +591,12 @@ export function createDrafterClientRouter(db: AppDb): Router {
       if (caseViabilityEnabled()) {
         stamped = await stampCaseViability(db, caseId, stamped, { persist: true });
       }
+      // Persisted route-picker PLAN stamp (Ryan 2026-06-25, "honor the SOAP theory on redraft"). Threads the
+      // SAME Case.aiViabilityPlanJson the SOAP/Overview render INTO the bundle so the drafter (initial draft
+      // AND redraft) FOLLOWS the persisted lead theory instead of re-running the route-picker fresh and
+      // diverging from what the RN saw. Read-only (the plan was persisted at card-compute time); fail-open:
+      // no ready/on-condition plan ⇒ unstamped ⇒ the drafter derives fresh, byte-identical to today.
+      stamped = await stampAiViabilityPlan(db, caseId, stamped);
       const bundleS3Key = buildJobBundleS3Key(caseId, jobId);
       const upload = await writeBundleToS3(bucket, bundleS3Key, stamped, 'job');
       // F1c bundle-size CloudWatch signal (Ryan 2026-05-26): structured log per /draft so

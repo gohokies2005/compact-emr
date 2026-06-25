@@ -140,6 +140,13 @@ export function PhysicianMobileReviewPage() {
   const veteranName = formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId);
   const canAct = readyForPhysician;
 
+  // Considerations before signing (Dr. Kasky 2026-06-25): the grader's substantive argument hints are
+  // physician-judgment items — surfaced here OPTIONAL, mirroring the desktop PhysicianLetterReadyPanel.
+  // They never block approve/sign. Guard the untrusted worker payload + drop blank issues; cap at 3.
+  const considerations = (latestDraftJob?.gradeSidecarJson?.targeted_revision_hints ?? [])
+    .filter((h) => typeof h.issue === 'string' && h.issue.trim().length > 0)
+    .slice(0, 3);
+
   return (
     <AppShell>
       {/* Bottom padding so the last content clears the sticky action bar. */}
@@ -233,6 +240,25 @@ export function PhysicianMobileReviewPage() {
                   Editing the letter happens on a computer. If it needs changes, use “Save for computer” or “Send back to RN” below.
                 </p>
               </div>
+
+              {/* Considerations before signing (Dr. Kasky 2026-06-25): optional, physician-judgment
+                  argument hints. Never block approve/sign — informational only, mirroring the desktop
+                  PhysicianLetterReadyPanel. Hidden when there are none. */}
+              {considerations.length > 0 ? (
+                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <h3 className="text-sm font-semibold text-slate-900">Considerations before signing</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">Not required — consider before you sign.</p>
+                  <ul className="mt-2 space-y-2">
+                    {considerations.map((hint, index) => (
+                      <li key={`${hint.section ?? 'section'}-${index}`} className="text-sm text-slate-600">
+                        <span className="text-slate-400">{'• '}</span>
+                        <span className="font-medium">Section {hint.section ?? 'review'} — </span>
+                        <span className="whitespace-pre-wrap">{hint.issue ?? ''}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </section>
           </div>
         )}

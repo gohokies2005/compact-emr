@@ -29,7 +29,7 @@ import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
 import { joinCaseLabel } from '../../components/messaging/caseLabel';
 import { EmailLogPanel } from '../../components/EmailLogPanel';
 import { ChartNotesPanel } from '../veterans/ChartNotesPanel';
-import { getLatestQuickNote } from '../../api/chart-notes';
+import { getLatestQuickNote, createChartNote, patchChartNote } from '../../api/chart-notes';
 import { ConditionsPanel, MedicationsPanel, ProblemsPanel } from '../../components/ClinicalChartPanels';
 import { listCaseEmails } from '../../api/emails';
 import { getArtifactPdfUrl, postDraft, cancelDraftJob, getDraftConcurrency, uploadAndImportLetter, type DraftConcurrencyResult } from '../../api/drafter';
@@ -449,14 +449,14 @@ export function CaseDetailPage() {
               </>
             ) : null;
           })()}
-          <p className="mt-1 text-xs text-harbor">Case {c.id} · {c.claimType} · <Link className="text-navy" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>chart</Link> · updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
-          {/* Latest QUICK NOTE at the TOP OF CHART (Ryan 2026-06-21). Replaces the retired overwritable
-              scratchpad: the surfaced note is now the most-recent PERSISTENT quick note from the
-              chart-notes stream (add new ones from the chart Staff Notes panel; prior ones stay as
-              history). Self-hides when the veteran has no quick note. */}
-          <div className="mt-3">
+          {/* Latest QUICK NOTE in the customer heading (Dr. Kasky 2026-06-24, restored): it sits BELOW
+              the email/DOB/phone line and ABOVE the "Case CLM-… · chart · updated" line. The latest
+              PERSISTENT quick note (chart-notes stream) is viewable AND addable/editable right here;
+              older quick notes stay in the Staff Notes tab as history. */}
+          <div className="mt-2">
             <LatestQuickNoteLine veteranId={c.veteranId} />
           </div>
+          <p className="mt-1 text-xs text-harbor">Case {c.id} · {c.claimType} · <Link className="text-navy" to={`/veterans/${encodeURIComponent(c.veteranId)}`}>chart</Link> · updated {formatRelativeTime(c.updatedAt)} · row v{c.version}</p>
         </div>
         <div className="flex flex-wrap items-start gap-2">
           {isArchived ? (
@@ -953,23 +953,87 @@ function InlineEditRow({ label, value, multiline = false, saving, onSave }: { re
   </div>;
 }
 
-// Latest QUICK NOTE surfaced on the case Overview (Ryan 2026-06-21). Reads the most-recent flagged quick
-// note from the chart-notes stream via the dedicated latest-quick endpoint. Renders nothing when there is
-// no quick note yet, so the Overview stays clean for cases without one.
+// Latest QUICK NOTE in the chart header (Dr. Kasky 2026-06-24, restored add/edit). Reads the most-recent
+// flagged quick note from the chart-notes stream via the dedicated latest-quick endpoint. It is viewable
+// AND addable/editable right here: when none exists it shows a quiet "+ quick note" affordance; when one
+// exists it shows the note with an Edit pencil. Add POSTs a new persistent quick note (isQuickNote: true);
+// edit PATCHes the existing note (version-checked). Older quick notes stay in the Staff Notes tab.
 function LatestQuickNoteLine({ veteranId }: { readonly veteranId: string }) {
+  const qc = useQueryClient();
+  const [mode, setMode] = useState<'view' | 'add' | 'edit'>('view');
   const q = useQuery({
     queryKey: ['chart-notes-latest-quick', veteranId],
     queryFn: () => getLatestQuickNote(veteranId),
     enabled: veteranId.length > 0,
   });
   const note = q.data?.data;
-  if (!note) return null;
+  const refresh = (): void => {
+    void qc.invalidateQueries({ queryKey: ['chart-notes-latest-quick', veteranId] });
+    void qc.invalidateQueries({ queryKey: ['chart-notes', veteranId] }); // Staff Notes history list
+    void qc.invalidateQueries({ queryKey: ['cases'] }); // Cases-list Note column
+  };
+  const addMut = useMutation({
+    mutationFn: (body: string) => createChartNote(veteranId, body, true),
+    onSuccess: () => { refresh(); setMode('view'); },
+    onError: (e: unknown) => window.alert(`Could not save the quick note — ${describeApiError(e)}`),
+  });
+  const editMut = useMutation({
+    mutationFn: ({ id, version, body }: { id: string; version: number; body: string }) => patchChartNote(id, { version, body }),
+    onSuccess: () => { refresh(); setMode('view'); },
+    onError: (e: unknown) => window.alert(`Could not update the quick note — ${describeApiError(e)}`),
+  });
+
+  if (mode === 'add' || (mode === 'edit' && note)) {
+    const editing = mode === 'edit' ? note : undefined;
+    return (
+      <QuickNoteHeaderEditor
+        initial={editing?.body ?? ''}
+        saving={addMut.isPending || editMut.isPending}
+        onCancel={() => setMode('view')}
+        onSave={(body) => editing ? editMut.mutate({ id: editing.id, version: editing.version, body }) : addMut.mutate(body)}
+      />
+    );
+  }
+
+  if (!note) {
+    return (
+      <button type="button" className="text-xs font-medium text-amber-700 hover:text-amber-900" onClick={() => setMode('add')}>+ quick note</button>
+    );
+  }
   return (
     <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
       <span className="mt-px rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800">Quick note</span>
       <span className="whitespace-pre-wrap">{note.body}
         <span className="ml-1 text-xs text-amber-700/70">— {note.createdByName ?? note.createdBy} · {formatRelativeTime(note.createdAt)}</span>
       </span>
+      <button type="button" className="ml-auto shrink-0 text-xs font-medium text-amber-700 hover:text-amber-900" aria-label="Edit quick note" onClick={() => setMode('edit')}>Edit</button>
+    </div>
+  );
+}
+
+// Inline editor for the chart-header quick note — used for both add and edit (Dr. Kasky 2026-06-24).
+function QuickNoteHeaderEditor({ initial, saving, onCancel, onSave }: {
+  readonly initial: string;
+  readonly saving: boolean;
+  readonly onCancel: () => void;
+  readonly onSave: (body: string) => void;
+}) {
+  const [body, setBody] = useState(initial);
+  const submit = (): void => { const t = body.trim(); if (t.length > 0) onSave(t); };
+  return (
+    <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+      <input
+        autoFocus
+        className="input h-8 flex-1 px-2 py-1 text-sm"
+        aria-label="Quick note"
+        placeholder="Quick note…"
+        value={body}
+        disabled={saving}
+        onChange={(e) => setBody(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') submit(); else if (e.key === 'Escape') onCancel(); }}
+      />
+      <button type="button" className="text-sm font-medium text-amber-800 hover:text-amber-900 disabled:opacity-50" disabled={saving || body.trim().length === 0} onClick={submit}>Save</button>
+      <button type="button" className="text-sm text-slate-400 hover:text-slate-600" aria-label="Cancel quick note" disabled={saving} onClick={onCancel}>✕</button>
     </div>
   );
 }

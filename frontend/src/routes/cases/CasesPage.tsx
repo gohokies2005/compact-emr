@@ -7,6 +7,7 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { CASE_STATUS_LABELS, caseDisplayLabel, lifecycleBucket, LIFECYCLE_BUCKET_ORDER, LIFECYCLE_BUCKET_LABELS, type LifecycleBucket } from '../../lib/caseStatus';
 import { formatAbsoluteDate, formatRelativeTime } from '../../lib/date';
 import { listCases, deleteCase, restoreCase, assignCaseRn, type CaseLite } from '../../api/cases';
+import { createChartNote } from '../../api/chart-notes';
 import { describeApiError } from '../../api/client';
 import { listVeterans } from '../../api/veterans';
 import { getMe, listUsers, type StaffUser } from '../../api/users';
@@ -277,8 +278,16 @@ export function CasesPage() {
     onError: (e: unknown) => window.alert(`Could not restore this claim — ${describeApiError(e)}`),
   });
 
-  // (Retired 2026-06-21: the overwritable quick-note popup + mutation lived here. The Note column now
-  // shows the latest PERSISTENT quick note read-only; adding/editing happens in the chart Staff Notes.)
+  // NOTE-column inline quick-note add (Dr. Kasky 2026-06-24, restored): the '+' opens a small inline
+  // input on that row; saving POSTs a PERSISTENT quick note to the veteran's chart-notes stream
+  // (isQuickNote: true) — the SAME stream the chart header + Staff Notes read. A row with a note shows
+  // a quiet note icon instead. On success we refetch the list so the new note surfaces immediately.
+  const [noteEditCaseId, setNoteEditCaseId] = useState<string | null>(null);
+  const addQuickNoteMut = useMutation({
+    mutationFn: ({ veteranId, body }: { veteranId: string; body: string }) => createChartNote(veteranId, body, true),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['cases'] }); setNoteEditCaseId(null); },
+    onError: (e: unknown) => window.alert(`Could not save the quick note — ${describeApiError(e)}`),
+  });
 
   // RN-column '+' assign popup (P3.4): REAL assignment on the claim — same version-checked wiring
   // as the chart's CaseAssignmentPanel. The 409 stale-version cause must surface verbatim.
@@ -396,23 +405,34 @@ export function CasesPage() {
                 delivery to invoiced, keeping the same format"). */}
             <td className="px-4 py-3 text-center"><span className="text-xs font-medium text-slate-600" title={c.invoiced && c.status === 'delivered' ? 'The invoice email has been sent — awaiting the veteran’s payment.' : undefined}>{caseDisplayLabel(c.status, { invoiced: c.invoiced })}</span></td>
             <td className="px-4 py-3 text-center"><RecordsChip recordsUploaded={c.recordsUploaded} /></td>
-            {/* NOTE column: the latest PERSISTENT quick note from the chart-notes stream (Ryan
-                2026-06-21, replaces the retired overwritable scratchpad). Read-only here — adding a
-                quick note happens in the chart Staff Notes panel; the newest one surfaces here. The
-                veteran link opens the chart where notes are written. Truncated with a full-text title. */}
+            {/* NOTE column (Dr. Kasky 2026-06-24, restored inline add): a quiet note ICON when a quick
+                note exists (full text in the tooltip; click opens the chart), else a '+' that opens a
+                small inline input to add one. The note is the latest PERSISTENT quick note from the
+                chart-notes stream — the SAME one the chart header + Staff Notes show. */}
             <td className="max-w-[16rem] px-4 py-3" onClick={(e) => e.stopPropagation()}>
-              {c.latestQuickNote ? (
+              {noteEditCaseId === c.id ? (
+                <QuickNoteInlineInput
+                  saving={addQuickNoteMut.isPending}
+                  onCancel={() => setNoteEditCaseId(null)}
+                  onSave={(body) => addQuickNoteMut.mutate({ veteranId: c.veteranId, body })}
+                />
+              ) : c.latestQuickNote ? (
                 <Link
                   to={`/veterans/${encodeURIComponent(c.veteranId)}`}
                   title={`${c.latestQuickNote.body} · ${formatRelativeTime(c.latestQuickNote.createdAt)}`}
-                  aria-label={`Latest quick note: ${c.latestQuickNote.body}`}
-                  className="block truncate text-xs text-amber-700 hover:text-amber-900"
+                  aria-label={`Quick note: ${c.latestQuickNote.body}`}
+                  className="inline-flex items-center text-amber-600 hover:text-amber-800"
                 >
-                  <span className="mr-1 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700">Quick</span>
-                  {c.latestQuickNote.body}
+                  <span aria-hidden="true" className="text-base leading-none">🗒️</span>
                 </Link>
               ) : (
-                <span className="text-slate-300" title="No quick note — add one from the chart Staff Notes panel">—</span>
+                <button
+                  type="button"
+                  aria-label="Add quick note"
+                  title="Add a quick note"
+                  className="text-base leading-none text-slate-300 hover:text-indigo-600"
+                  onClick={() => setNoteEditCaseId(c.id)}
+                >+</button>
               )}
             </td>
             <td className="px-4 py-3 text-slate-600">{c.assignedPhysician?.fullName ?? '—'}</td>
@@ -555,6 +575,31 @@ function RecordsChip({ recordsUploaded }: { readonly recordsUploaded: boolean | 
     : <span className="text-xs font-medium text-slate-500" title="No uploaded records yet — waiting on the veteran's files (Stage-1 only).">Pending</span>;
 }
 
-// (Retired 2026-06-21: QuickNotePopup — the overwritable scratchpad editor — was removed. Quick notes
-// are now persistent entries in the chart-notes stream, added from the chart Staff Notes panel; the
-// Cases-list Note column shows the latest one read-only.)
+// Inline quick-note input shown in the Note column when the row's '+' is clicked (Dr. Kasky
+// 2026-06-24, restored). Saves a PERSISTENT quick note to the veteran's chart-notes stream — NOT the
+// retired overwritable scratchpad. Enter or Save submits; Escape or Cancel dismisses. Trimmed-empty
+// bodies don't submit. stopPropagation on the cell keeps the row's navigate-to-case click from firing.
+function QuickNoteInlineInput({ saving, onCancel, onSave }: {
+  readonly saving: boolean;
+  readonly onCancel: () => void;
+  readonly onSave: (body: string) => void;
+}) {
+  const [body, setBody] = useState('');
+  const submit = (): void => { const t = body.trim(); if (t.length > 0) onSave(t); };
+  return (
+    <div className="flex items-center gap-1">
+      <input
+        autoFocus
+        className="input h-7 w-40 px-2 py-1 text-xs"
+        aria-label="Quick note"
+        placeholder="Quick note…"
+        value={body}
+        disabled={saving}
+        onChange={(e) => setBody(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') submit(); else if (e.key === 'Escape') onCancel(); }}
+      />
+      <button type="button" className="text-xs font-medium text-indigo-600 hover:text-indigo-700 disabled:opacity-50" disabled={saving || body.trim().length === 0} onClick={submit}>Save</button>
+      <button type="button" className="text-xs text-slate-400 hover:text-slate-600" aria-label="Cancel quick note" disabled={saving} onClick={onCancel}>✕</button>
+    </div>
+  );
+}

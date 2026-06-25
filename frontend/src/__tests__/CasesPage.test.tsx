@@ -7,11 +7,12 @@ import { CasesPage } from '../routes/cases/CasesPage';
 import type { Role } from '../types/prisma';
 
 // vi.mock factories are hoisted above const initializers — hoist the spies they close over.
-const { listCasesMock, assignCaseRnMock, getMeMock, listUsersMock } = vi.hoisted(() => ({
+const { listCasesMock, assignCaseRnMock, getMeMock, listUsersMock, createChartNoteMock } = vi.hoisted(() => ({
   listCasesMock: vi.fn(),
   assignCaseRnMock: vi.fn(),
   getMeMock: vi.fn(),
   listUsersMock: vi.fn(),
+  createChartNoteMock: vi.fn(),
 }));
 
 let mockRole: Role = 'ops_staff';
@@ -29,6 +30,7 @@ vi.mock('../api/users', () => ({
   listUsers: listUsersMock,
   getMe: getMeMock,
 }));
+vi.mock('../api/chart-notes', () => ({ createChartNote: createChartNoteMock }));
 vi.mock('../api/veterans', () => ({ listVeterans: vi.fn(async () => ({ data: [] })) }));
 vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 
@@ -65,6 +67,7 @@ beforeEach(() => {
   assignCaseRnMock.mockReset().mockResolvedValue({ data: {} });
   getMeMock.mockReset().mockResolvedValue({ data: ME });
   listUsersMock.mockReset().mockResolvedValue({ data: ROSTER });
+  createChartNoteMock.mockReset().mockResolvedValue({ data: {} });
 });
 
 function renderPage() {
@@ -102,15 +105,27 @@ describe('CasesPage', () => {
     expect(screen.queryAllByText('Invoiced').filter((el) => el.tagName === 'SPAN' && el.className.includes('text-slate-600'))).toHaveLength(0);
   });
 
-  it('Note column shows the latest PERSISTENT quick note read-only (no editable scratchpad popup)', async () => {
+  // === Note column: restored quiet ICON + inline '+' add (Dr. Kasky 2026-06-24) ===
+
+  it('Note column shows a note ICON (full text in the title) when a quick note exists, and a + when none', async () => {
     renderPage();
-    // The surfaced latest quick note body renders in the row (truncated, but full text is present).
-    expect(await screen.findByText(/Awaiting records — C-file requested 6\/8/)).toBeInTheDocument();
-    // The retired overwritable scratchpad affordances must be gone: no "Add quick note" +, no popup.
-    expect(screen.queryByLabelText('Add quick note')).toBeNull();
-    expect(screen.queryByText(/At-a-glance status\. For the official record/)).toBeNull();
-    // VET-2 has no quick note → its Note cell shows the em-dash placeholder.
-    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+    await screen.findByText('CASE-001');
+    // CASE-001 HAS a quick note → a quiet icon link whose aria-label carries the full text (no "Quick" badge).
+    const icon = screen.getByLabelText('Quick note: Awaiting records — C-file requested 6/8');
+    expect(icon).toBeInTheDocument();
+    expect(icon).toHaveAttribute('title', expect.stringContaining('Awaiting records — C-file requested 6/8'));
+    // CASE-002 has NO quick note → its Note cell shows the '+' add button.
+    expect(screen.getByLabelText('Add quick note')).toBeInTheDocument();
+  });
+
+  it("clicking '+' opens an inline input and Save POSTs a persistent quick note, then refetches", async () => {
+    renderPage();
+    await screen.findByText('CASE-002');
+    fireEvent.click(screen.getByLabelText('Add quick note')); // CASE-002 (VET-2) has no note
+    const input = screen.getByLabelText('Quick note') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'Called veteran, awaiting STRs' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(createChartNoteMock).toHaveBeenCalledWith('VET-2', 'Called veteran, awaiting STRs', true));
   });
 
   it('invoiced delivered case: the STATUS LABEL ITSELF reads "Invoiced", same neutral format, no chip (Ryan 2026-06-12)', async () => {

@@ -4,7 +4,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AxiosError, AxiosHeaders } from 'axios';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CaseDetailPage } from '../routes/cases/CaseDetailPage';
 import { archiveCase, getCase, restoreCase } from '../api/cases';
 import { getLetter } from '../api/letter';
@@ -43,9 +43,15 @@ vi.mock('../api/veterans', () => ({
   uploadToPresignedUrl: vi.fn(async () => undefined),
   recordDocument: vi.fn(async () => ({ data: { id: 'DOC-1' } })),
 }));
+const { getLatestQuickNoteMock, createChartNoteMock, patchChartNoteMock } = vi.hoisted(() => ({
+  getLatestQuickNoteMock: vi.fn(),
+  createChartNoteMock: vi.fn(),
+  patchChartNoteMock: vi.fn(),
+}));
 vi.mock('../api/chart-notes', () => ({
   listChartNotes: vi.fn(async () => ({ data: [] })),
-  createChartNote: vi.fn(), deleteChartNote: vi.fn(), patchChartNote: vi.fn(),
+  getLatestQuickNote: getLatestQuickNoteMock,
+  createChartNote: createChartNoteMock, deleteChartNote: vi.fn(), patchChartNote: patchChartNoteMock,
 }));
 // The letter-open path (View letter -> GET /cases/:id/letter) — mocked so the dead-end-fix tests
 // can drive a structured 404 through describeApiError without a network.
@@ -70,6 +76,14 @@ function renderPage() {
 }
 
 describe('CaseDetailPage', () => {
+  // Header quick-note mocks default to "no note" so unrelated tests render the inert "+ quick note"
+  // affordance; the dedicated quick-note tests override per case. Reset so resolved values don't leak.
+  beforeEach(() => {
+    getLatestQuickNoteMock.mockReset().mockResolvedValue({ data: null });
+    createChartNoteMock.mockReset().mockResolvedValue({ data: {} });
+    patchChartNoteMock.mockReset().mockResolvedValue({ data: {} });
+  });
+
   it('renders the case header and admin transition controls', async () => {
     renderPage();
     expect(await screen.findByText('Hypertension')).toBeInTheDocument();
@@ -78,6 +92,30 @@ describe('CaseDetailPage', () => {
     // The 'delivered' enum displays as "Ready for delivery" (post-approve, pre-payment).
     expect(screen.getByRole('button', { name: /move to ready for delivery/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /reject \+ soft delete/i })).toBeInTheDocument();
+  });
+
+  // === Chart-header quick note: restored view + add/edit (Dr. Kasky 2026-06-24) ===
+
+  it('renders the latest quick note in the chart header with an Edit affordance', async () => {
+    getLatestQuickNoteMock.mockResolvedValue({ data: { id: 'QN-1', veteranId: 'VET-1', body: 'C-file requested 6/8', isQuickNote: true, createdBy: 's', createdByName: 'Sarah Jones', createdAt: '2026-06-20T12:00:00Z', updatedAt: '2026-06-20T12:00:00Z', version: 1 } });
+    renderPage();
+    await screen.findByText('Hypertension');
+    // The latest quick note body + author surface in the header, with an Edit button.
+    expect(await screen.findByText('C-file requested 6/8')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit quick note' })).toBeInTheDocument();
+  });
+
+  it('shows a "+ quick note" add affordance in the header when the veteran has none, and Save POSTs a quick note', async () => {
+    getLatestQuickNoteMock.mockResolvedValue({ data: null });
+    createChartNoteMock.mockResolvedValue({ data: {} });
+    renderPage();
+    await screen.findByText('Hypertension');
+    const add = await screen.findByRole('button', { name: '+ quick note' });
+    await userEvent.click(add);
+    const input = screen.getByLabelText('Quick note');
+    await userEvent.type(input, 'Awaiting STRs');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(createChartNoteMock).toHaveBeenCalledWith('VET-1', 'Awaiting STRs', true));
   });
 
   // UI sweep P2 (Ryan item 12): the claim-page tab order is locked, Clarifications is gone (tab +

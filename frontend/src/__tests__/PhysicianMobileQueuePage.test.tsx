@@ -90,11 +90,28 @@ describe('PhysicianMobileQueuePage', () => {
     expect(call).not.toHaveProperty('assignedPhysicianId');
   });
 
-  it('shows a clear empty state when nothing is waiting', async () => {
+  it('shows a clear empty state when nothing is waiting (assigned AND open queue empty)', async () => {
     listCasesMock.mockResolvedValue({ data: [], page: 1, pageSize: 50, total: 0 });
     renderQueue();
 
     expect(await screen.findByText('Queue is clear')).toBeInTheDocument();
     expect(screen.getByText('No letters waiting for you.')).toBeInTheDocument();
+  });
+
+  it('SF-1: when assigned queue is empty but open physician_review work exists, falls back to the open queue (never a false "0 waiting")', async () => {
+    // Assigned filter (assignedPhysicianId present) -> empty; unfiltered open queue -> has work.
+    listCasesMock.mockImplementation((params) =>
+      Promise.resolve(
+        'assignedPhysicianId' in (params ?? {})
+          ? { data: [], page: 1, pageSize: 50, total: 0 }
+          : { data: [row], page: 1, pageSize: 50, total: 1 },
+      ),
+    );
+    renderQueue();
+
+    // The waiting case from the OPEN queue is shown (the doctor is not blinded by the assignment filter).
+    expect(await screen.findByText('Obstructive sleep apnea')).toBeInTheDocument();
+    expect(screen.getByText('1 letter is in the review queue.')).toBeInTheDocument();
+    expect(screen.getByText(/None assigned to you specifically/)).toBeInTheDocument();
   });
 });

@@ -20,6 +20,12 @@ import { timeOfDayGreeting } from '../../lib/greeting';
 // "their cases": when the caller has a Physician row (/physicians/me) we filter the queue to the cases
 // assigned to them (assignedPhysicianId). If /me 404s (no mapping) or the id is absent we fall back to
 // the full physician_review queue (admin/coverage) — never an empty screen from a missing mapping.
+//
+// SF-1 (QA 2026-06-25): the assigned filter must NEVER blind a doctor to waiting work. The desktop
+// console shows the whole physician_review queue (shared model, assignment is advisory). So when the
+// assigned filter resolves EMPTY but open physician_review cases exist, we fall back to that open queue
+// (badged "not assigned to you specifically"). A doctor opening the app must never see a false "0
+// waiting" while letters sit unassigned in the shared queue.
 
 export function PhysicianMobileQueuePage() {
   // retry:false — a 404 (no Physician mapping) must fall back gracefully, never block the queue.
@@ -41,7 +47,18 @@ export function PhysicianMobileQueuePage() {
     enabled: meSettled,
   });
 
-  const rows = queueQuery.data?.data ?? [];
+  const assignedRows = queueQuery.data?.data ?? [];
+  // SF-1 fallback: only when we actually filtered (physicianId set) AND the assigned queue is empty.
+  const needsOpenFallback = !!physicianId && queueQuery.isSuccess && assignedRows.length === 0;
+  const openQueueQuery = useQuery({
+    queryKey: ['physician', 'mobile-queue', 'open-fallback'],
+    queryFn: () => listCases({ status: 'physician_review', page: 1, pageSize: 50 }),
+    enabled: needsOpenFallback,
+  });
+
+  const showingOpenQueue = needsOpenFallback && (openQueueQuery.data?.data.length ?? 0) > 0;
+  const rows = showingOpenQueue ? openQueueQuery.data!.data : assignedRows;
+  const isLoading = queueQuery.isLoading || (needsOpenFallback && openQueueQuery.isLoading);
   const greeting = timeOfDayGreeting();
   const lastName = formatPhysicianLastName(meQuery.data?.data.fullName);
   const waiting = rows.length;
@@ -55,15 +72,22 @@ export function PhysicianMobileQueuePage() {
             {lastName ? `${greeting}, Dr. ${lastName}` : greeting}
           </h1>
           <p className="mt-1 text-sm text-white/75">
-            {queueQuery.isLoading
+            {isLoading
               ? 'Loading your queue…'
               : waiting === 0
                 ? 'No letters waiting for you.'
-                : `${waiting} ${waiting === 1 ? 'letter is' : 'letters are'} waiting for you.`}
+                : showingOpenQueue
+                  ? `${waiting} ${waiting === 1 ? 'letter is' : 'letters are'} in the review queue.`
+                  : `${waiting} ${waiting === 1 ? 'letter is' : 'letters are'} waiting for you.`}
           </p>
+          {showingOpenQueue && (
+            <p className="mt-1 text-xs text-brassSoft/90">
+              None assigned to you specifically — showing the open review queue.
+            </p>
+          )}
         </section>
 
-        {queueQuery.isLoading ? (
+        {isLoading ? (
           <div className="rounded-xl border border-slate-200 bg-white p-6">
             <Spinner label="Loading queue" />
           </div>

@@ -37,10 +37,33 @@ const MODEL = process.env['SOAP_NOTE_MODEL'] || 'claude-sonnet-4-6';
 // ungrounded notes, and the coverage note is now computed from the real file-read-status rows (FIX C),
 // so the rendered context (hence the fingerprint) differs from any pre-fix stored note. Bumped so every
 // pre-fix stored note invalidates cleanly on deploy (a v25 blob would never match the v26 fingerprint).
-export const SOAP_NOTE_SCHEMA_VERSION = 26;
+// v27 (2026-06-25, #63 objective measurements): the SoapNote gains a `measurements[]` field (grounded
+// objective hard data — AHI/RDI/CPAP/BP/A1c/PHQ-9/…) that the SOAP tool now also fills, and the Objective
+// prose now carries an "Objective measurements:" line. The note SHAPE changed → bump so every pre-#63
+// stored note (which has no measurements + a measurement-free Objective) invalidates and recomputes cleanly.
+export const SOAP_NOTE_SCHEMA_VERSION = 27;
 
 export type SoapConfidence = 'high' | 'moderate' | 'low';
 // SoapAction + RoutePickerViability are imported+re-exported from ./soap-action-map.js (top of file).
+
+/**
+ * OBJECTIVE MEASUREMENT (#63, Dr. Kasky) — a single hard clinical NUMBER for the SOAP Objective: AHI/RDI,
+ * CPAP nightly usage + adherence %, BP, A1c/glucose, audiometric thresholds, PHQ-9/PCL-5, BMI, eGFR, etc.
+ * Condition-aware: the MODEL picks the measurements pertinent to THIS claim out of the chart it is already
+ * fed (the same single SOAP call), into this structured field. Grounded ($0, deterministic): the numeric
+ * value MUST appear in the source context or the row is dropped — a fabricated AHI is the nightmare. Shape
+ * mirrors the chart-extract MeasurementResult (ceb7fbd) but is filled by the SOAP synthesizer, not a second
+ * extraction pass. `display` is the FE-ready label+value+unit string (e.g. "AHI 28.4 events/hr (diagnostic,
+ * 4/2024)") so the card/Objective render one clean token.
+ */
+export interface SoapMeasurement {
+  readonly label: string;          // "AHI", "CPAP nightly usage", "Blood pressure", "PHQ-9"
+  readonly value: string;          // the numeric value as written: "28.4", "6.2", "142/88", "7.1"
+  readonly unit: string | null;    // "events/hr", "hours/night", "%", "mmHg", "%", null if dimensionless
+  readonly qualifier: string | null; // "diagnostic" / "on CPAP" / "REM" / "supine" — the condition, if stated
+  readonly date: string | null;    // study/measurement date if written (else null)
+  readonly display: string;        // FE-ready one-liner assembled deterministically from the above
+}
 
 export interface SoapNote {
   readonly subjective: string;
@@ -49,6 +72,12 @@ export interface SoapNote {
   readonly plan: string;
   readonly confidence: SoapConfidence;
   readonly action: SoapAction;
+  /**
+   * Condition-relevant OBJECTIVE MEASUREMENTS pulled from the chart for THIS claim (#63). Empty array = none
+   * found in the chart (graceful — the Objective prose simply omits a measurements line). Grounded: every
+   * surfaced value appears in the source context. The FE renders these as a labeled list under the Objective.
+   */
+  readonly measurements?: readonly SoapMeasurement[];
   /** Deterministic grounding guard: a clinical measurement (AHI/BMI/%/mg/dB) stated in the note that does
    *  NOT appear in the source facts → likely fabricated. Null = clean. The FE shows it as a verify caveat. */
   readonly caveat: string | null;
@@ -85,6 +114,86 @@ function checkGrounding(note: { subjective: string; objective: string; assessmen
   }
   if (flagged.length === 0) return null;
   return `Verify these values — they are not in the chart facts provided: ${[...new Set(flagged)].slice(0, 4).join('; ')}.`;
+}
+
+// Hard cap on surfaced measurements so a noisy chart cannot spam the Objective. The model is told to pick
+// the few pertinent to the claim; this is the deterministic backstop.
+const MAX_MEASUREMENTS = 8;
+
+/** The numeric runs in a measurement value, each of which must be present in the source for the value to be
+ *  grounded. "142/88" → ["142","88"]; "28.4" → ["28.4"]; "7.1%" → ["7.1"]. A run is matched against the same
+ *  digit-run set the prose grounding uses (see isRunGrounded), so a value the chart does not contain is
+ *  dropped (anti-fabrication — a value the model invented for THIS condition cannot reach the Objective). Pure. */
+function valueNumericRuns(value: string): string[] {
+  return value.match(/\d{1,4}(?:\.\d+)?/g) ?? [];
+}
+
+/** A numeric run is grounded if its EXACT form is in the chart's digit-run set OR (for a decimal) its integer
+ *  part is — so "28.4" grounds against a chart that wrote "28.4" and "3.0" grounds against a chart that wrote
+ *  "3". Conservative: never the reverse (an integer value does not ground against a decimal-only chart match). */
+function isRunGrounded(run: string, ctxDigits: ReadonlySet<string>): boolean {
+  if (ctxDigits.has(run)) return true;
+  return run.includes('.') && ctxDigits.has(run.replace(/\.\d+$/, ''));
+}
+
+/** Assemble the FE-ready one-liner from the structured fields (label value unit (qualifier, date)). Pure. */
+function measurementDisplay(m: { label: string; value: string; unit: string | null; qualifier: string | null; date: string | null }): string {
+  const head = `${m.label} ${m.value}${m.unit ? ` ${m.unit}` : ''}`.trim();
+  const paren = [m.qualifier, m.date].filter((s): s is string => !!s && s.trim().length > 0).join(', ');
+  return paren ? `${head} (${paren})` : head;
+}
+
+/**
+ * Coerce + GROUND the model's `measurements` tool output (#63). Pure, deterministic, $0 — and the
+ * anti-fabrication guard for objective hard data:
+ *   - drop a row missing a label or a value (malformed → dropped, never crash);
+ *   - GROUND it: every numeric token of the value MUST appear in the source context (the same digit-run set
+ *     prose grounding uses) — a value the chart does not contain is dropped (never surface an invented AHI);
+ *   - null a `date`/`qualifier` that does not appear in the source context (date anti-fabrication, mirrors the
+ *     chart-extract scrubUnquotedDates rule — a real value can't carry an off-chart invented date);
+ *   - dedup on (label, value, qualifier); cap at MAX_MEASUREMENTS.
+ * `contextText` is the exact rendered SOAP context (renderContext) — the only source of truth. Returns []
+ * for null/missing/all-dropped (graceful empty → the Objective omits the measurements line). */
+export function coerceMeasurements(raw: unknown, contextText: string): SoapMeasurement[] {
+  if (!Array.isArray(raw)) return [];
+  const ctxDigits = new Set(contextText.match(/\d{1,4}(?:\.\d+)?/g) ?? []);
+  const ctxLower = contextText.toLowerCase();
+  const seen = new Set<string>();
+  const out: SoapMeasurement[] = [];
+  for (const r0 of raw) {
+    if (!r0 || typeof r0 !== 'object') continue;
+    const r = r0 as Record<string, unknown>;
+    const label = typeof r['label'] === 'string' ? r['label'].trim() : '';
+    // value may arrive as a number (28.4) or a string ("142/88") — normalize to a trimmed string.
+    const value = typeof r['value'] === 'string' ? r['value'].trim()
+      : typeof r['value'] === 'number' && Number.isFinite(r['value']) ? String(r['value']) : '';
+    if (!label || !value) continue; // malformed → dropped
+    const runs = valueNumericRuns(value);
+    if (runs.length === 0) continue; // no number to ground → dropped (never surface a bare/invented label)
+    // GROUNDING: every numeric run of the value must be present in the source context.
+    if (!runs.every((r) => isRunGrounded(r, ctxDigits))) continue;
+    const unit = typeof r['unit'] === 'string' && r['unit'].trim().length > 0 ? r['unit'].trim() : null;
+    let qualifier = typeof r['qualifier'] === 'string' && r['qualifier'].trim().length > 0 ? r['qualifier'].trim() : null;
+    let date = typeof r['date'] === 'string' && r['date'].trim().length > 0 ? r['date'].trim() : null;
+    // Date/qualifier anti-fabrication: keep only if the string actually appears in the source context.
+    if (date && !ctxLower.includes(date.toLowerCase())) date = null;
+    if (qualifier && !ctxLower.includes(qualifier.toLowerCase())) qualifier = null;
+    const key = `${label.toLowerCase()}::${value.toLowerCase()}::${(qualifier ?? '').toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ label, value, unit, qualifier, date, display: measurementDisplay({ label, value, unit, qualifier, date }) });
+    if (out.length >= MAX_MEASUREMENTS) break;
+  }
+  return out;
+}
+
+/** Thread grounded measurements into the Objective prose. Appends ONE labeled sentence so the physician sees
+ *  the real numbers alongside the prose (Dr. Kasky #63). No-op when there are none (graceful). Pure. */
+export function withMeasurementsInObjective(objective: string, measurements: readonly SoapMeasurement[]): string {
+  if (measurements.length === 0) return objective;
+  const line = `Objective measurements: ${measurements.map((m) => m.display).join('; ')}.`;
+  const base = objective.trim();
+  return base ? `${base} ${line}` : line;
 }
 
 export interface SoapContext {
@@ -242,7 +351,23 @@ const SOAP_TOOL: Anthropic.Tool = {
     required: ['subjective', 'objective', 'assessment', 'plan', 'confidence', 'action'],
     properties: {
       subjective: { type: 'string', description: 'PERTINENT patient-reported information only, in flowing prose (2-4 sentences). What the veteran reports about onset, symptoms, in-service experience, and their own theory — distilled and readable, NOT a verbatim copy of their statement. No headers, no lists.' },
-      objective: { type: 'string', description: 'A short, readable overview of the PERTINENT objective findings: the confirmed diagnosis, the relevant service-connected conditions (only those that matter to this claim — NOT every rated condition), and any key diagnostics provided (e.g. AHI, imaging excerpts, sleep study, labs). End with the records-capture status (e.g. "All records were reviewed."). 2-4 sentences of prose, no lists.' },
+      objective: { type: 'string', description: 'A short, readable overview of the PERTINENT objective findings: the confirmed diagnosis, the relevant service-connected conditions (only those that matter to this claim — NOT every rated condition), and any key diagnostics provided (e.g. AHI, imaging excerpts, sleep study, labs). End with the records-capture status (e.g. "All records were reviewed."). 2-4 sentences of prose, no lists. Do NOT also restate the hard numbers from the `measurements` field as prose — those are surfaced separately; the prose is the narrative around them.' },
+      measurements: {
+        type: 'array',
+        description: 'The OBJECTIVE HARD-DATA MEASUREMENTS pertinent to THIS claimed condition, pulled VERBATIM from the chart facts / extracted records you were given. CONDITION-AWARE — surface the few numbers a physician needs for the claimed condition: sleep apnea → AHI/RDI (capture diagnostic AND on-CPAP separately), CPAP nightly usage hours + adherence %, oxygen nadir; hypertension → blood-pressure readings; diabetes → HbA1c, fasting glucose; hearing loss → audiometric thresholds (dB) / speech discrimination %; mental health → PHQ-9 / PCL-5 / GAD-7 scores; plus BMI, FEV1, eGFR, ejection fraction when relevant. GROUND STRICTLY: only include a measurement whose numeric VALUE appears verbatim in the facts/records provided — NEVER invent, estimate, average, or compute a value (do not derive BMI from height+weight). Omit the whole array (or return []) when no objective measurement for this condition is present in the chart. At most ~6 — the most pertinent.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['label', 'value'],
+          properties: {
+            label: { type: 'string', description: 'The measurement label as written: "AHI", "RDI", "CPAP nightly usage", "CPAP adherence", "Blood pressure", "HbA1c", "PHQ-9", "Audiometric threshold (right)". No value in the label.' },
+            value: { type: 'string', description: 'The numeric value EXACTLY as written, no unit, no words: "28.4", "6.2", "88", "142/88", "7.1". Must appear verbatim in the provided facts/records.' },
+            unit: { type: 'string', description: 'The unit as written: "events/hr", "hours/night", "%", "mmHg", "dB", "mg/dL", "kg/m2". Omit if dimensionless (e.g. a PHQ-9 score).' },
+            qualifier: { type: 'string', description: 'The measurement condition if stated: "diagnostic", "on CPAP", "REM", "supine". Omit if none.' },
+            date: { type: 'string', description: 'The study/measurement date if written verbatim (e.g. "4/2024"). Omit if not stated.' },
+          },
+        },
+      },
       assessment: { type: 'string', description: 'Tie it together as a clinician + VA-claims expert would: the medical mechanism linking the claim to the service-connected condition(s), how it fits VA theory and language (secondary causation/aggravation under 38 CFR 3.310, direct under 3.303, etc., as applicable), the strongest counterpoint, and an honest overall read of how strong what we have is. 3-5 sentences of smooth prose. No internal jargon (no M-tiers, no BVA percentages, no "pair-atlas").' },
       plan: { type: 'string', description: 'The concrete next step in plain language: draft the letter, get specific records, clarify a specific point with the veteran, route to a physician, or decline — and WHY, in one or two sentences.' },
       confidence: { type: 'string', enum: ['high', 'moderate', 'low'], description: 'Overall confidence in what we have to support this claim as filed.' },
@@ -273,6 +398,12 @@ const SYSTEM =
   'Draw pertinent objective findings (diagnoses, diagnostics, dates, in-service events) from it; never invent ' +
   'an AHI, an imaging finding, a date, or a diagnosis that is not given. If a useful objective datum (like an ' +
   'AHI) was not provided, simply do not mention it. ' +
+  'OBJECTIVE HARD DATA: also fill the `measurements` field with the few quantified study/test values pertinent ' +
+  'to the CLAIMED CONDITION that are actually in the chart (sleep apnea → AHI/RDI, CPAP usage hours + ' +
+  'adherence %; hypertension → BP; diabetes → HbA1c/glucose; hearing → audiometric thresholds/discrimination; ' +
+  'mental health → PHQ-9/PCL-5). Copy each numeric value VERBATIM from the facts/records — never estimate, ' +
+  'average, or compute one. Return an empty array when none is present. Do NOT also restate those numbers as ' +
+  'prose inside Objective — they are surfaced from `measurements`. ' +
   'No internal jargon (no M-tiers, no BVA/win-rate percentages, no "pair-atlas"), no markdown, no headers ' +
   'inside a section. Write it with write_soap_note.';
 
@@ -388,6 +519,13 @@ export async function buildSoapNote(ctx: SoapContext, opts?: { timeoutMs?: numbe
     const conf = inp['confidence'];
     const action = inp['action'];
     if (!assessment || !plan) return buildExplanatoryNote(ctx, 'empty_model');
+    // OBJECTIVE HARD DATA (#63): coerce + GROUND the model's measurements against the EXACT context it was
+    // given (renderContext). The structured `measurements[]` is the SSOT the FE renders as a labeled list
+    // under the Objective; the prose Objective stays measurement-free so the two never duplicate. A plain-text
+    // consumer (physician SOAP text/PDF) can fold them in via withMeasurementsInObjective. Fail-open:
+    // malformed/ungrounded rows are silently dropped → [] (no measurements line). Never blocks the note.
+    const ctxText = renderContext(ctx);
+    const measurements = coerceMeasurements(inp['measurements'], ctxText);
     const base = { subjective, objective, assessment, plan };
     // One-brain at the action layer: when a route-picker plan is grounding the note, the Plan's action +
     // confidence are DERIVED DETERMINISTICALLY from the plan's viability band + confidence — NOT the model's
@@ -400,7 +538,8 @@ export async function buildSoapNote(ctx: SoapContext, opts?: { timeoutMs?: numbe
       ...base,
       confidence: rp ? planConfidenceToSoap(rp.confidence) : modelConfidence,
       action: rp ? planViabilityToAction(rp.viability) : modelAction,
-      caveat: checkGrounding(base, renderContext(ctx)),
+      caveat: checkGrounding(base, ctxText),
+      measurements,
       fallback: false,
     };
     _cache.set(key, note);

@@ -341,7 +341,24 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
             </div>
           ) : null}
           {note.subjective ? <Section label="Subjective">{note.subjective}</Section> : null}
-          {note.objective ? <Section label="Objective">{note.objective}</Section> : null}
+          {note.objective || (note.measurements && note.measurements.length > 0) ? (
+            <Section label="Objective">
+              {note.objective ? <span>{note.objective}</span> : null}
+              {/* OBJECTIVE HARD DATA (#63, Dr. Kasky): the real clinical NUMBERS for this condition (AHI/RDI/
+                  CPAP usage/BP/A1c/PHQ-9/…), grounded in the chart, as a clean labeled list so the physician
+                  sees the measurements — not just prose. Absent/empty → nothing renders here. */}
+              {note.measurements && note.measurements.length > 0 ? (
+                <ul className="mt-1.5 space-y-0.5">
+                  {note.measurements.map((m, i) => (
+                    <li key={`${m.label}-${m.value}-${i}`} className="flex gap-2 text-[14px] leading-snug text-slate-700">
+                      <span className="text-slate-400">•</span>
+                      <span><span className="font-medium text-slate-900">{m.label}:</span> {m.value}{m.unit ? ` ${m.unit}` : ''}{(m.qualifier || m.date) ? ` (${[m.qualifier, m.date].filter(Boolean).join(', ')})` : ''}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </Section>
+          ) : null}
           {note.assessment ? <Section label="Assessment">{note.assessment}</Section> : null}
           {note.caveat ? (
             <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-sm text-amber-800">

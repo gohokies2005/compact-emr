@@ -166,6 +166,18 @@ export function computeCaseViability(caseId: string): Promise<{ aiViabilityState
  * Assessment / Plan note from the context the Overview assembled. null = fail-open (the card falls back to
  * the deterministic verdict line). The FE POSTs the context (like the sanity-impression).
  */
+/** An objective hard-data MEASUREMENT for the SOAP Objective (#63): AHI/RDI, CPAP usage/adherence, BP,
+ *  A1c, audiometric thresholds, PHQ-9/PCL-5, etc. Grounded (the value appears in the chart). `display` is
+ *  the FE-ready one-liner (e.g. "AHI 28.4 events/hr (diagnostic, 4/2024)"). */
+export interface SoapMeasurement {
+  readonly label: string;
+  readonly value: string;
+  readonly unit: string | null;
+  readonly qualifier: string | null;
+  readonly date: string | null;
+  readonly display: string;
+}
+
 export interface SoapNote {
   readonly subjective: string;
   readonly objective: string;
@@ -175,6 +187,8 @@ export interface SoapNote {
   readonly action: 'draft' | 'get_records' | 'clarify' | 'physician_review' | 'reject';
   /** Deterministic grounding guard: a clinical value in the note not found in the source facts (verify). */
   readonly caveat?: string | null;
+  /** Condition-relevant objective hard data pulled from the chart (#63). Absent/empty → no measurements line. */
+  readonly measurements?: readonly SoapMeasurement[];
   /** True when this note is the deterministic EXPLANATORY fallback (the model truncated/failed/returned
    *  nothing on this open) rather than a full model-written summary. The card shows a subtle hint; the note
    *  still renders (never blank) and its decision/action still match the verdict (Zimmelman 2026-06-22). */

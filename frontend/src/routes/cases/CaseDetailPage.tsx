@@ -732,18 +732,29 @@ export function CaseDetailPage() {
                   {/* RN letter-edit entry. The physician/admin reach the editor via the ready panel
                       above; an RN (ops_staff) otherwise has no entry to it. Shown when a letter
                       exists, the run is not in flight, and the status is RN-editable: drafting /
-                      correction_review ONLY — physician_review is LOCKED for ops_staff (Ryan
-                      2026-06-11; backend mirrors this). Editing creates a NEW version; the
-                      version-safety in /draft + currentVersion pointer ensure the doctor always
-                      reviews the newest version. */}
+                      correction_requested / correction_review — physician_review is LOCKED for
+                      ops_staff (Ryan 2026-06-11; backend mirrors this). correction_requested is the
+                      doctor's "send back to RN" (decline) — the RN must be able to HAND-FIX it in the
+                      full editor, not just Redraft (Dr. Kasky 2026-06-24). Editing creates a NEW
+                      version; the version-safety in /draft + currentVersion pointer ensure the doctor
+                      always reviews the newest version. */}
                   {/* Suppress this RN-editor-entry when OpsHeldPanel is showing — that panel already
                       carries "Open letter editor" + "Send to doctor", so rendering both produced TWO
                       "Open letter editor" buttons on one page (Ryan 2026-06-23). Keep it for the
-                      no-ops-panel RN-editable states (e.g. correction_review). */}
+                      no-ops-panel RN-editable states (correction_requested / correction_review). */}
                   {p.canShowRnEditorEntry && !p.canSeeOpsHeldPanel ? (
                     <div key="rn-editor-entry" className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
                       <h2 className="text-base font-semibold text-slate-900">Edit {letterFilename(c.veteran?.lastName, c.veteran?.firstName, c.claimedCondition, c.currentVersion ?? c.version)}</h2>
-                      <p className="mt-1 text-sm text-slate-600">
+                      {/* The doctor's correction note (the /letter/decline reason, stored on
+                          Case.operatorMessage) — surfaced so the RN sees WHAT to fix, not just that the
+                          letter came back. Shown only on the send-back state with a note present. */}
+                      {c.status === 'correction_requested' && typeof c.operatorMessage === 'string' && c.operatorMessage.trim().length > 0 ? (
+                        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                          <div className="text-sm font-semibold text-amber-900">The doctor sent this back with a correction note</div>
+                          <p className="mt-1 whitespace-pre-wrap text-sm text-amber-800">{c.operatorMessage.trim()}</p>
+                        </div>
+                      ) : null}
+                      <p className="mt-2 text-sm text-slate-600">
                         If a change is needed, you can revise the letter — by hand or with an AI surgical
                         edit, the same tools the physician has. Saving creates a new version, and the doctor
                         always reviews the newest version.

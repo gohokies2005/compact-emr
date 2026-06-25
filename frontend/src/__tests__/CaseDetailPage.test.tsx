@@ -482,6 +482,63 @@ describe('CaseDetailPage — Redraft lock (G1, ratified 2026-06-12)', () => {
   });
 });
 
+// ── RN can EDIT a sent-back ('correction_requested') letter in the full editor (Dr. Kasky 2026-06-24) ──
+// When the physician declines a letter (/letter/decline), the case lands in 'correction_requested' and
+// sits there for the RN. The RN must be able to HAND-FIX it in the full editor — not be forced to
+// Redraft. The backend already allows the edit (EDITABLE_STATUSES includes correction_requested); this
+// pins the FRONTEND surfacing of the "Open letter editor" action + the doctor's correction note.
+describe('CaseDetailPage — RN edit on correction_requested (Dr. Kasky 2026-06-24)', () => {
+  afterEach(() => { mockRole = 'admin'; vi.restoreAllMocks(); });
+
+  // A terminal done job with a sane .pdf key → the letter is viewable, so the RN editor-entry card's
+  // hasViewableLetterJob precondition holds; only the new status×role rule decides.
+  const doneJob = { id: 'JOB-1', state: 'done', version: 1, artifactPdfS3Key: 'letter-revisions/CASE-1/v1/letter.pdf' };
+
+  // Local render harness that registers the letter-editor route so the navigate() target is real and
+  // we can assert the click lands there (the shared renderPage only knows /cases/:id + /veterans/:id).
+  function renderWithEditorRoute() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/cases/CASE-1']}>
+          <Routes>
+            <Route path="/cases/:id" element={<CaseDetailPage />} />
+            <Route path="/cases/:id/letter" element={<div>LETTER EDITOR PAGE</div>} />
+            <Route path="/veterans/:id" element={<div>VETERAN CHART</div>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('ops_staff on a correction_requested case sees "Open letter editor" (not just View/Redraft); clicking it navigates to the editor', async () => {
+    mockRole = 'ops_staff';
+    mockCase({ status: 'correction_requested', draftJobs: [doneJob], operatorMessage: 'Tighten the §VII opinion sentence.' });
+    renderWithEditorRoute();
+    await screen.findByText('Hypertension');
+
+    // The editor-entry card + its primary action surface.
+    const openEditor = await screen.findByRole('button', { name: 'Open letter editor' });
+    expect(openEditor).toBeInTheDocument();
+    // The doctor's correction note (Case.operatorMessage) is surfaced so the RN knows WHAT to fix.
+    expect(screen.getByText('Tighten the §VII opinion sentence.')).toBeInTheDocument();
+    // Redraft stays available too (a done job + not physician_review).
+    expect(screen.getByRole('button', { name: 'Redraft' })).toBeInTheDocument();
+
+    // Clicking Open letter editor navigates to the full editor route.
+    await userEvent.click(openEditor);
+    expect(await screen.findByText('LETTER EDITOR PAGE')).toBeInTheDocument();
+  });
+
+  it('does NOT surface the RN editor-entry to a physician (they reach the editor via the ready panel)', async () => {
+    mockRole = 'physician';
+    mockCase({ status: 'correction_requested', draftJobs: [doneJob], operatorMessage: 'note' });
+    renderWithEditorRoute();
+    await screen.findByText('Hypertension');
+    expect(screen.queryByRole('button', { name: 'Open letter editor' })).not.toBeInTheDocument();
+  });
+});
+
 // ── C6 lifecycle (2026-06-13): Archive / Reopen buttons on the claim page ──────────────────────
 describe('CaseDetailPage — Archive / Reopen (C6 lifecycle, 2026-06-13)', () => {
   afterEach(() => { mockRole = 'admin'; vi.restoreAllMocks(); });

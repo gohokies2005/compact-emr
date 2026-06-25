@@ -84,11 +84,16 @@ describe('resolveCaseTopPanels', () => {
     expect(resolveCaseTopPanels(inputs({ status: 'physician_review', role: 'physician' })).isRnLockBanner).toBe(false);
   });
 
-  it('the RN editor-entry card needs ops_staff + a viewable letter + drafting/correction_review + nothing in flight', () => {
+  it('the RN editor-entry card needs ops_staff + a viewable letter + drafting/correction_requested/correction_review + nothing in flight', () => {
     expect(resolveCaseTopPanels(inputs({ status: 'drafting', role: 'ops_staff', hasViewableLetterJob: true })).canShowRnEditorEntry).toBe(true);
+    // correction_requested = the doctor declined + sent the letter BACK to the RN; the RN must be able
+    // to HAND-FIX it in the editor, not just View/Redraft (Dr. Kasky 2026-06-24; backend
+    // EDITABLE_STATUSES already accepts it). This was the bug — correction_requested was missing here.
+    expect(resolveCaseTopPanels(inputs({ status: 'correction_requested', role: 'ops_staff', hasViewableLetterJob: true })).canShowRnEditorEntry).toBe(true);
     expect(resolveCaseTopPanels(inputs({ status: 'correction_review', role: 'ops_staff', hasViewableLetterJob: true })).canShowRnEditorEntry).toBe(true);
     // no letter → no card
     expect(resolveCaseTopPanels(inputs({ status: 'drafting', role: 'ops_staff', hasViewableLetterJob: false })).canShowRnEditorEntry).toBe(false);
+    expect(resolveCaseTopPanels(inputs({ status: 'correction_requested', role: 'ops_staff', hasViewableLetterJob: false })).canShowRnEditorEntry).toBe(false);
     // in flight → no card
     expect(resolveCaseTopPanels(inputs({ status: 'drafting', role: 'ops_staff', hasViewableLetterJob: true, latestDraftState: 'running', hasLatestDraftJob: true })).canShowRnEditorEntry).toBe(false);
     // admin/physician aren't the audience (they reach the editor via the ready panel)

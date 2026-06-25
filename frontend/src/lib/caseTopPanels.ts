@@ -50,7 +50,8 @@ export interface CaseTopPanels {
   readonly hasHaltedJob: boolean;
   // ops_staff RN-lock notice while the doctor has the case (physician_review)
   readonly isRnLockBanner: boolean;
-  // ops_staff letter-edit entry card (drafting / correction_review, letter present, nothing in flight)
+  // ops_staff letter-edit entry card (drafting / correction_requested / correction_review, letter
+  // present, nothing in flight)
   readonly canShowRnEditorEntry: boolean;
   // Extraction-coverage report — visible across the WHOLE staff working window (pre-draft, drafting, a
   // Gate-2 halt, rn_review), not just the narrow Send-to-Drafter moment, so the RN can always check how
@@ -108,11 +109,16 @@ export function resolveCaseTopPanels(input: CaseTopPanelInputs): CaseTopPanels {
 
   const isRnLockBanner = role === 'ops_staff' && status === 'physician_review';
 
+  // 'correction_requested' = the physician DECLINED the letter and sent it back to the RN (the
+  // /letter/decline path; the case SITS here until the RN acts). The RN must be able to hand-fix it
+  // in the full editor, not be forced to Redraft (Dr. Kasky 2026-06-24; backend EDITABLE_STATUSES
+  // already accepts it — see letter.ts). 'correction_review' = the RN is actively reworking before
+  // sending back to the doctor. Both are RN-editable post-draft states.
   const canShowRnEditorEntry =
     !inFlightDraft &&
     role === 'ops_staff' &&
     input.hasViewableLetterJob &&
-    (status === 'drafting' || status === 'correction_review');
+    (status === 'drafting' || status === 'correction_requested' || status === 'correction_review');
 
   return {
     inFlightDraft,

@@ -6,6 +6,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
+import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { letterFilename } from '../services/letterFilename.js';
 import { isSignOffAffirmative } from '../services/sign-off-validation.js';
 import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
@@ -330,9 +331,23 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
   interface EditableLetter { letter: CurrentLetter; recovered: boolean; }
   async function resolveCurrentForEdit(caseId: string, currentVersion: number): Promise<EditableLetter | null> {
     const strict = await resolveCurrent(caseId, currentVersion);
-    // Strict hit: trust it when its TXT object actually exists (a dangling key must not block recovery).
-    if (strict !== null && await headObjectExists(s3(), bucket() as string, strict.txtKey)) {
-      return { letter: strict, recovered: false };
+    if (strict !== null) {
+      // Strict hit. Probe S3 to confirm the TXT object actually exists (a dangling key must not block
+      // recovery). TRANSIENT-TOLERANCE (QA SHOULD-FIX, 2026-06-25): headObjectExists RE-THROWS any error
+      // that is not NoSuchKey/NotFound, so a transient S3 Throttling/Timeout/5xx during this probe would
+      // throw out of the edit handler → 500 on an edit that pre-fix succeeded (the old strict path did NO
+      // HeadObject). Wrap the probe: only a DEFINITIVE NotFound (artifact provably absent) drops to
+      // recovery; on ANY transient/non-NotFound error TRUST the strict letter and proceed (recovered=false),
+      // exactly as the pre-fix strict path did. Net: a healthy edit never 500s on a transient S3 blip; a
+      // provably-stranded pointer still recovers below.
+      let strictTxtPresent: boolean;
+      try {
+        strictTxtPresent = await headObjectExists(s3(), bucket() as string, strict.txtKey);
+      } catch {
+        // Transient/non-NotFound probe failure: do NOT propagate, do NOT trigger recovery — trust strict.
+        return { letter: strict, recovered: false };
+      }
+      if (strictTxtPresent) return { letter: strict, recovered: false };
     }
     // Stranded (or dangling-key) pointer: recover the last good letter exactly as the read path does.
     const recovered = await resolveCurrentForRead(caseId, currentVersion);
@@ -340,7 +355,25 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
     // If recovery landed on the SAME version the strict resolver claimed (a pure dangling-key edge), it is
     // not a re-pin; treat as non-recovered so the version chain is unchanged. Otherwise it IS a stranded
     // recovery: the caller rebases onto `recovered.version` and re-pins currentVersion.
-    return { letter: recovered, recovered: recovered.version !== currentVersion };
+    const isRecovery = recovered.version !== currentVersion;
+    // OBSERVABILITY (QA NIT, 2026-06-25): mirror the read path's stranded-recovery log so a live self-heal
+    // on the MUTATING path is visible too. Best-effort — an activityLog write must never block the edit.
+    if (isRecovery) {
+      console.warn(`[letter] stranded-recovery (edit): case ${caseId} currentVersion=${currentVersion} had no resolvable artifact; rebasing edit onto prior good letter v${recovered.version}`);
+      try {
+        await db.activityLog.create({
+          data: {
+            actorUserId: SERVICE_ACTORS.DRAFTER,
+            caseId,
+            action: 'letter_stranded_recovery',
+            detailsJson: { strandedCurrentVersion: currentVersion, recoveredVersion: recovered.version, path: 'edit' },
+          },
+        });
+      } catch (e: unknown) {
+        console.warn(`[letter] stranded-recovery breadcrumb write failed for case ${caseId}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return { letter: recovered, recovered: isRecovery };
   }
 
   async function enforcePhysicianAssignment(caseId: string, role: string, sub: string, assignedPhysicianId: string | null): Promise<void> {

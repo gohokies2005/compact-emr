@@ -390,9 +390,9 @@ describe('POST /complete — stranded-pointer guard (FIX B)', () => {
     expect(cr.status).toBe('rn_review');
   });
 
-  it('runComplete with a MISSING txt artifact does NOT advance currentVersion (no stranding) + logs', async () => {
+  it('runComplete with a MISSING txt artifact does NOT advance currentVersion (no stranding) + logs + writes NO phantom revision but DOES update the DraftJob row', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const { db, job, caseRow: cr } = makeDb(jobRow({ state: 'running', version: 15 }), caseRow({ currentVersion: 14, status: 'drafting' }));
+    const { db, tx, job, caseRow: cr } = makeDb(jobRow({ state: 'running', version: 15 }), caseRow({ currentVersion: 14, status: 'drafting' }));
     const { app } = appWithS3(db, { txtPresent: false });
     const res = await request(app)
       .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
@@ -401,6 +401,11 @@ describe('POST /complete — stranded-pointer guard (FIX B)', () => {
     expect(job.state).toBe('done');
     // THE FIX: currentVersion was NOT advanced onto the dead version — the prior good letter is not stranded.
     expect(cr.currentVersion).toBe(14);
+    // FIX 2 (timeline hygiene): a proven-absent artifact writes NEITHER the pointer NOR the revision row…
+    expect(tx.letterRevision.create).not.toHaveBeenCalled();
+    // …but the DraftJob row update IS unconditional (the attempt must still be recorded for the operator UI).
+    expect(tx.draftJob.update).toHaveBeenCalledTimes(1);
+    expect(job.completedAt).not.toBeNull();
     // Logged loudly so the absent-artifact completion leaves a CloudWatch trace.
     const logged = warnSpy.mock.calls.map((c) => String(c[0]));
     expect(logged.some((l) => l.includes('complete_txt_artifact_absent_pointer_not_advanced'))).toBe(true);

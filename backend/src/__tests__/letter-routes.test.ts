@@ -565,6 +565,82 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
       expect(res.body.data.preview).toContain('documented lumbosacral strain');
     });
 
+    // ── FIX 1 (QA SHOULD-FIX, 2026-06-25): transient-S3 tolerance on the strict-branch HeadObject probe ──
+    // resolveCurrentForEdit now HeadObject-probes the strict-resolved letter. headObjectExists RE-THROWS any
+    // non-NotFound error, so a transient S3 Throttling/Timeout/5xx during that probe would 500 a HEALTHY edit
+    // that pre-fix succeeded (the old strict path did NO HeadObject). The fix: trust the strict letter on a
+    // transient probe error (proceed, recovered=false); only a DEFINITIVE NotFound drops to recovery.
+    it('FIX 1: a healthy strict case whose HeadObject probe THROWS a TRANSIENT (non-NotFound) error still edits on the strict letter (no 500, no recovery)', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      // A NORMAL case: currentVersion=40, the strict v40 row resolves. Build a db like strandedDb but with
+      // the strict findFirst returning the good row AT currentVersion (so resolveCurrent hits).
+      const v40row: LetterRevisionRecord = {
+        ...currentRevision(40), id: 'LR-40', parentVersion: 39, source: 'drafter_run',
+        artifactTxtS3Key: 'letter-revisions/CASE-1/v40/letter.txt',
+        artifactPdfS3Key: 'letter-revisions/CASE-1/v40/letter.pdf',
+        artifactDocxS3Key: 'letter-revisions/CASE-1/v40/letter.docx',
+      };
+      const created: Array<Record<string, unknown>> = [];
+      const caseRow = baseCase({ currentVersion: 40, status: 'physician_review' });
+      const caseUpdates: Array<Record<string, unknown>> = [];
+      const recoveryWalk = vi.fn(async () => [v40row]); // would be consulted ONLY if recovery fired
+      const tx = {
+        case: {
+          findFirst: vi.fn(async () => caseRow), findUnique: vi.fn(async () => caseRow),
+          update: vi.fn(async (a: { data: Record<string, unknown> }) => { caseUpdates.push(a.data); return caseRow; }),
+        },
+        veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
+        letterRevision: {
+          findFirst: vi.fn(async (a: { where?: { version?: number } }) => (a.where?.version === 40 ? v40row : null)),
+          findMany: recoveryWalk,
+          create: vi.fn(async (a: { data: Record<string, unknown> }) => { created.push(a.data); return { id: 'LR-NEW', ...a.data }; }),
+          update: vi.fn(),
+        },
+        draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
+        activityLog: { create: vi.fn(async () => ({})) },
+        signOff: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null), findUnique: vi.fn(), create: vi.fn() },
+        physician: {
+          findUnique: vi.fn(async (a: { where?: { cognitoSub?: string } }) => (a.where?.cognitoSub === 'PHYS-SUB' ? physician() : null)),
+          findFirst: vi.fn(async (a: { where?: { id?: string } }) => (a.where?.id === 'PHYS-001' ? physician() : null)),
+          findMany: vi.fn(async () => [physician()]),
+        },
+      };
+      const db = { ...tx, $transaction: vi.fn(async (fn: (t: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
+      // s3 that THROWS a transient (Throttling, NOT NotFound) error on HeadObject but serves a Body on GetObject.
+      const throttling = Object.assign(new Error('Please reduce your request rate.'), { name: 'ThrottlingException' });
+      const s3 = {
+        send: vi.fn(async (cmd: { constructor: { name: string } }) => {
+          if ((cmd?.constructor?.name ?? '') === 'HeadObjectCommand') throw throttling;
+          return { Body: { transformToString: async () => STRANDED_TXT } };
+        }),
+      } as unknown as LetterRouterDeps['s3'];
+      const res = await request(appFor(db, deps({ s3 }))).put('/api/v1/cases/CASE-1/letter')
+        .send({ base_version: 40, txt: STRANDED_TXT.replace('It is documented.', 'It is well documented.') });
+      expect(res.status).toBe(200); // healthy edit proceeds — a transient probe blip must NOT 500
+      expect(res.body.data.version).toBe(41); // built over the STRICT v40 (no recovery)
+      expect(created[0]?.parentVersion).toBe(40);
+      // No spurious recovery: the recovery walk (findMany) was never consulted…
+      expect(recoveryWalk).not.toHaveBeenCalled();
+      // …and no stranded-recovery breadcrumb was written (recovered=false).
+      expect(tx.activityLog.create).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'letter_stranded_recovery' }) }));
+    });
+
+    it('FIX 3: a stranded-pointer RECOVERY emits a letter_stranded_recovery breadcrumb (best-effort)', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      const { db } = strandedDb();
+      // Capture the activityLog spy off the underlying tx through a fresh recovery run.
+      const res = await request(appFor(db, strandedDeps())).put('/api/v1/cases/CASE-1/letter')
+        .send({ base_version: 40, txt: STRANDED_TXT.replace('It is documented.', 'It is well documented.') });
+      expect(res.status).toBe(200);
+      // The breadcrumb mirrors the read-path stranded-recovery log: action + stranded & recovered versions.
+      const calls = ((db as unknown as { activityLog: { create: ReturnType<typeof vi.fn> } }).activityLog.create).mock.calls;
+      const crumb = calls.find((c) => (c[0] as { data?: { action?: string } })?.data?.action === 'letter_stranded_recovery');
+      expect(crumb).toBeDefined();
+      const details = (crumb?.[0] as { data?: { detailsJson?: Record<string, unknown> } })?.data?.detailsJson;
+      expect(details?.strandedCurrentVersion).toBe(39);
+      expect(details?.recoveredVersion).toBe(40);
+    });
+
     it('a GENUINELY no-letter case (no resolvable version anywhere) still 409s no_letter', async () => {
       mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
       const caseRow = baseCase({ currentVersion: 5, status: 'physician_review' });

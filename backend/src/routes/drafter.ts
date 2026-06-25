@@ -1659,7 +1659,17 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
         // transaction, mirroring here would create a revision pointing at artifacts that don't exist, which
         // resolveCurrent() would surface as the "current" letter → a 404 in the editor. A failed run still
         // bumps currentVersion on the DraftJob (operator UI shows "vN failed, retry") but writes NO revision.
-        if (parsed.runComplete) {
+        //
+        // TIMELINE HYGIENE (QA SHOULD-FIX, 2026-06-25): gate the mirror on `advanceCurrentVersion` — the
+        // SAME HeadObject-confirmed result that gates the pointer — not on runComplete alone. The FIX-B
+        // partial-upload case (runComplete=true but the txt was never written to S3) correctly does NOT
+        // advance currentVersion; mirroring a LetterRevision there would write a PHANTOM row pointing at the
+        // never-written artifact (inert — reads/edits HeadObject-skip it — but still timeline noise). So a
+        // proven-absent artifact now writes NEITHER the pointer NOR the revision row. The DraftJob row update
+        // above stays unconditional (the attempt is always recorded for the operator UI). The unconfigured-S3
+        // legacy-advance branch sets advanceCurrentVersion=true, so it still mirrors (it can't hit the
+        // partial-upload mode — there is no S3 to upload to).
+        if (advanceCurrentVersion) {
           const existingRev = await tx.letterRevision.findFirst({ where: { caseId: existing.caseId, version: existing.version } });
           if (existingRev === null) {
             await tx.letterRevision.create({

@@ -339,7 +339,7 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
             startDate: { type: 'string', description: 'active_medication only: the START/ISSUE date, verbatim, ONLY if a field labeled Start Date/Issued/Issue Date appears for THIS drug. NOT the note date, NOT the fill date. Else omit.' },
             lastSeenDate: { type: 'string', description: 'active_medication only: the Last Filled/Last Release date if labeled, OR — for a drug named inside a dated progress note — that note\'s date (when the drug was REFERENCED, not when it started/stopped). Else omit.' },
             score: { type: 'string', description: 'screening only: the score as written (e.g. "18", "2/5", "moderate").' },
-            screenDate: { type: 'string', description: 'screening only: the administration/collection date of THIS screen, copied EXACTLY as written in the doc (e.g. "04/12/2026", "April 12, 2026", "2026-04-12", or a "Date of visit/administration" / header / column date next to the score). Omit if no date is shown for this screen — never invent one. The date must appear somewhere on this same [p.N] page.' },
+            screenDate: { type: 'string', description: 'screening only: the administration/collection date of THIS screen, copied EXACTLY as written in the doc (e.g. "04/12/2026", "April 12, 2026", "2026-04-12", or a "Date of visit/administration" / header / column date next to the score). If several dates appear on the page (a DOB, a print/visit date, or a neighboring screen\'s date), use ONLY the one administering THIS screen; if you cannot tell which date is this screen\'s, omit it — never guess. Omit if no date is shown for this screen — never invent one. The date must belong to this screen on this same [p.N] page.' },
             sourcePage: { type: 'integer', description: 'The [p.N] page number this item appears on.' },
             sourceQuote: { type: 'string', description: 'A short VERBATIM substring from that page proving the item (copy exactly).' },
             confidence: { type: 'number', description: '0..1 — how clearly this is an explicit charted item (not a prose mention).' },
@@ -442,14 +442,16 @@ export function combinedSystemPrompt(): string {
     '  "[p.88] 06/14/2022 Progress Note ... Patient reports starting sertraline last month, tolerating well." → {category:active_medication, name:"sertraline", medStatus:"historical", lastSeenDate:"06/14/2022", sourceQuote:"06/14/2022 Progress Note ... starting sertraline"} (startDate omitted — "last month" is not a written date).',
     // PRECISION GUARD (Ryan standing rule: a screen is NOT a diagnosis): keep screening instruments
     // out of the problem/condition rows so a positive score never becomes a fabricated dx.
-    // SCREENING DATE CAPTURE (Dr. Kasky #70, 2026-06-25): the read works but dates came back empty. The
-    // administration date almost always IS on the page — in a header ("Date: 04/12/2026"), a row label, a
-    // "Date of visit/administration" field, or a column beside the score — just not always on the same
-    // line as the score. Always capture it into screenDate (verbatim) when it is anywhere on the page;
-    // prefer a sourceQuote that also contains the date when you can. Common formats: MM/DD/YYYY, "Month DD,
-    // YYYY", YYYY-MM-DD. Copy it exactly — do NOT reformat. Omit screenDate only when no date for the screen
-    // appears on the page; never invent one.
-    'SCREENS ARE NOT DIAGNOSES: PHQ-9, GAD-7, PC-PTSD-5, AUDIT-C and similar screening scores are DATA POINTS, not conditions. Capture each as category "screening" with name=instrument, score, and screenDate — the administration/collection date copied EXACTLY as written, whenever a date for that screen appears anywhere on the page (header, "Date of visit/administration" field, row label, or column beside the score). Common formats: MM/DD/YYYY, "Month DD, YYYY", YYYY-MM-DD. Omit screenDate only if no date is shown for the screen; never invent one. NEVER emit a screen as an active_problem or sc_condition, and never turn a positive screen into a diagnosis — only an actual charted diagnosis or a VA service-connection determination is a condition.',
+    // SCREENING DATE CAPTURE (Dr. Kasky #70, 2026-06-25; QA-tightened): the read works but dates came back
+    // empty. The administration date almost always IS on the page — in a header ("Date: 04/12/2026"), a row
+    // label, a "Date of visit/administration" field, or a column beside the score — just not always on the
+    // same line as the score. Capture THIS screen's own date into screenDate (verbatim) — prefer a
+    // sourceQuote that also contains it. A bundled mental-health page can show several dates (a DOB, a
+    // print/visit date, another screen's date): use ONLY the one administering THIS screen; if you cannot
+    // tell which date is this screen's, omit it — never guess (the grounding gate also requires the date to
+    // be in this screen's quote OR near its instrument/score, so a far-off neighbor date is dropped anyway).
+    // Common formats: MM/DD/YYYY, "Month DD, YYYY", YYYY-MM-DD. Copy it exactly — do NOT reformat.
+    'SCREENS ARE NOT DIAGNOSES: PHQ-9, GAD-7, PC-PTSD-5, AUDIT-C and similar screening scores are DATA POINTS, not conditions. Capture each as category "screening" with name=instrument, score, and screenDate — the administration/collection date copied EXACTLY as written, whenever a date for that screen appears anywhere on the page (header, "Date of visit/administration" field, row label, or column beside the score). Common formats: MM/DD/YYYY, "Month DD, YYYY", YYYY-MM-DD. If several dates appear on the page (a DOB, a print/visit date, or another screen\'s date), use ONLY the date administering THIS screen; if you cannot tell which date belongs to this screen, omit it (null) — never guess. Omit screenDate only if no date is shown for the screen; never invent one. NEVER emit a screen as an active_problem or sc_condition, and never turn a positive screen into a diagnosis — only an actual charted diagnosis or a VA service-connection determination is a condition.',
     'This chunk may contain none, some, or all three categories. Return every item you find; return an empty items array if there are none.',
   ].join('\n');
 }
@@ -519,29 +521,72 @@ export function coerceScreenings(toolInput: unknown, documentId: string): Screen
 }
 
 /**
- * Date anti-fabrication for a screening (Dr. Kasky #70, 2026-06-25). The recurring miss was NOT the
- * read — the model captures the score — it was the DATE coming back empty. Root cause: the old gate
- * required the date to be a RAW substring of the short proving-quote (`sourceQuote.includes(date)`).
- * A screening's administration date sits on the SAME page as the score but routinely on a different
- * line (a header "Date: 04/12/2026", a row label, a separate column), so the short score-quote rarely
- * contains it — and OCR whitespace/case noise breaks even a raw match when it does. The date was
- * therefore nulled despite being plainly in the document.
+ * Date anti-fabrication for a screening (Dr. Kasky #70, 2026-06-25; tightened by QA 2-agent pass).
+ * The recurring miss was NOT the read — the model captures the score — it was the DATE coming back
+ * empty. Root cause: the old gate required the date to be a RAW substring of the short proving-quote
+ * (`sourceQuote.includes(date)`). A screening's administration date sits on the SAME page as the score
+ * but routinely on a different line (a header "Date: 04/12/2026", a row label, a separate column), so
+ * the short score-quote rarely contains it — and OCR whitespace/case noise breaks even a raw match.
  *
- * Fix: keep the anti-fabrication contract (a date must genuinely appear in the source) but prove it
- * the SAME tolerant way groundExtractedItem already proves the quote — normalized (lowercase, collapsed
- * whitespace) — and against the whole CITED PAGE, not just the short quote. Quote-on-page + date-on-
- * SAME-cited-page = the date is in the document; an invented date present nowhere on the page is still
- * nulled. Substring match only — never parse/normalize the date value itself (that is where the
- * Jotform-TZ class of date-format bugs creep in); we surface the date verbatim as the model copied it.
+ * The first relaxation (date anywhere on the cited page) over-corrected: a bundled VA mental-health
+ * page can carry a PHQ-9 + a GAD-7 + a DOB + a visit/print date all at once. A page-scope match proves
+ * "the date is ON the page" but NOT "the date belongs to THIS screen" — so the model could emit a
+ * neighboring screen's date (or a DOB) and it would ground, surfacing a WRONG administration date
+ * (medico-legal: a wrong date can reach the doctor's read / the letter). Same gap the SOAP measurement
+ * label-proximity fix closed.
+ *
+ * Fix (quote-first, then proximity — mirrors isGroundedNearLabel in soap-overview):
+ *   1. Prefer the screen's OWN proving-quote — if sourceQuote contains the date (tolerant/normalized),
+ *      accept it. The quote is label-adjacent by construction, so this is the tightest, surest path.
+ *   2. Only when the quote lacks the date, FALL BACK to the page — and require PROXIMITY: the date must
+ *      appear within DATE_PROXIMITY_WINDOW chars of THIS screen's instrument NAME or score on the page.
+ *      A date near "PHQ-9"/"Score: 18" is this screen's date; a DOB or a different screen's date sitting
+ *      far away does NOT borrow this screen's label.
+ * Ambiguity → drop: if neither the quote nor a near-anchor occurrence proves the date belongs to this
+ * screen, we return false (the date is nulled → "date not documented"). Conservative: prefer dropping
+ * a guessed date over surfacing a wrong one. Substring match only — never parse/normalize the date
+ * value itself (that is where the Jotform-TZ class of date-format bugs creep in); we surface the date
+ * verbatim as the model copied it. Fail-open: no/ambiguous date → false → null, never a crash.
  */
+// Proximity window (chars) on EACH side of a date occurrence within which the screen's instrument name
+// or score must appear for the date to be accepted as THIS screen's date (page-fallback only). ~70
+// comfortably spans a header sitting a line or two above the score ("Date: 04/12/2026\nPHQ-9 Depression
+// Screen\nScore: 18"), while being tight enough that a neighboring screen's date or a DOB elsewhere on a
+// bundled mental-health page does not borrow this screen's label.
+const DATE_PROXIMITY_WINDOW = 70;
+
 function dateGroundedOnPage(documents: BundleDocument[], s: ScreeningResult): boolean {
   if (!s.date) return false;
+  const needle = normalizeForQuoteMatch(s.date);
+  if (needle.length === 0) return false;
+
+  // 1. QUOTE-FIRST: the screen's own proving-quote is label-adjacent. A date inside it is unambiguously
+  //    this screen's date — accept (tolerant/normalized, OCR-noise safe).
+  if (normalizeForQuoteMatch(s.sourceQuote).includes(needle)) return true;
+
+  // 2. PAGE FALLBACK with PROXIMITY: the quote lacks the date, so look on the cited page — but only
+  //    accept a date occurrence that sits within the window of this screen's instrument NAME or score.
   const doc = documents.find((d) => d.id === s.sourceDocumentId);
   const page = doc?.pages.find((p) => p.pageNumber === s.sourcePage);
   if (!page) return false;
-  const needle = normalizeForQuoteMatch(s.date);
-  if (needle.length === 0) return false;
-  return normalizeForQuoteMatch(page.text).includes(needle);
+  const ctx = normalizeForQuoteMatch(page.text);
+
+  // The anchors that mark THIS screen on the page: its instrument name and (if present) its score.
+  const anchors = [normalizeForQuoteMatch(s.instrument), normalizeForQuoteMatch(s.score)]
+    .filter((a) => a.length > 0);
+  if (anchors.length === 0) return false; // nothing to anchor to → can't prove ownership → drop
+
+  let from = 0;
+  for (;;) {
+    const at = ctx.indexOf(needle, from);
+    if (at < 0) break;
+    const winStart = Math.max(0, at - DATE_PROXIMITY_WINDOW);
+    const winEnd = Math.min(ctx.length, at + needle.length + DATE_PROXIMITY_WINDOW);
+    const win = ctx.slice(winStart, winEnd);
+    if (anchors.some((a) => win.includes(a))) return true; // a date occurrence near this screen = its date
+    from = at + needle.length;
+  }
+  return false; // date present on the page but never near THIS screen → ambiguous → drop (null)
 }
 
 /** Pure: ground screenings (verbatim quote on the cited page) + dedup on (instrument, date, score). */

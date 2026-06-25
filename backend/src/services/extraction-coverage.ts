@@ -362,18 +362,29 @@ export function docTypeLabel(docType: string | null): string {
  * back to the honest raw %. Invents no relevance: a doc is "key" iff its existing classification is high_signal.
  *
  * Reads:
- *   • inputs  — the chart-INPUT docs (already filtered) with their read/gap state derived the same way the
- *               headline does (effectively-read via the gaps list: a doc with NO whole-file gap was read).
+ *   • inputs  — the chart-INPUT docs (already filtered).
  *   • gaps    — the whole-file gaps already computed (documentId-bearing). A key doc that is gapped → keyDocGap.
  *   • classByPath — KeyDoc rows keyed by s3Key (== filePath).
+ *   • readDocIds — documentIds with a readiness row indicating the file was PROCESSED/READ (isEffectivelyRead).
+ *               A doc is READ iff it is in this set AND not gapped; a doc that is NEITHER read NOR gapped is
+ *               still in OCR (no row yet) → in-progress, excluded from BOTH keyDocsRead and keyDocGaps so a
+ *               mid-pipeline key doc can never produce a false all-clear. (Omitted by legacy callers → the old
+ *               "read iff not gapped" behavior, fail-open.)
  *
  * HONESTY: a high_signal doc that was NOT read lands in keyDocGaps (surfaced prominently). allKeyDocsRead is
- * true ONLY when ≥1 key doc was read AND zero key docs were missed — reassurance is earned, never assumed.
+ * true ONLY when ≥1 key doc was read AND zero key docs were missed — reassurance is earned, never assumed,
+ * and a key doc still mid-pipeline keeps allKeyDocsRead false (it is not yet a read, and never silently one).
  */
 export function computeRelevanceSummary(
   inputs: readonly CoverageDocInput[],
   gaps: readonly CoverageGap[],
   classByPath: ReadonlyMap<string, KeyDocClassInput>,
+  // documentIds with a readiness row indicating the file was PROCESSED/READ (isEffectivelyRead). A doc
+  // that is NEITHER in this set NOR gapped is still in the OCR pipeline (no row yet) — in-progress, which
+  // is neither read nor a gap. REQUIRED for `wasRead` to be honest: without it a mid-pipeline key doc was
+  // mis-counted as read (false all-clear). Optional ONLY so legacy callers compile; when omitted we fall
+  // back to "read iff not gapped" — the prior (looser) behavior — never a crash.
+  readDocIds?: ReadonlySet<string>,
 ): RelevanceSummary | null {
   // Fail-open: no classification data for ANY input doc → no relevance read (UI shows the honest %).
   const anyClassified = inputs.some((d) => classByPath.has(d.s3Key));
@@ -389,13 +400,25 @@ export function computeRelevanceSummary(
   const skippableGaps: RelevanceDocRef[] = [];
   let keyPagesRead = 0;
   let keyPagesApproximate = false;
+  // Count key docs that are still mid-pipeline (no read row yet, not gapped). They are surfaced in NEITHER
+  // list, but they MUST suppress allKeyDocsRead — an all-clear cannot be earned while a key doc is unread
+  // because it hasn't finished processing (only when readDocIds is supplied; legacy path has no in-progress).
+  let keyDocsInProgress = 0;
 
   for (const doc of inputs) {
     const cls = classByPath.get(doc.s3Key) ?? null;
     const classification: RelevanceClassification | null = cls?.classification ?? null;
     const docType = cls?.docType ?? null;
     const key = classification !== null && isKeyClassification(classification);
-    const wasRead = !gappedDocIds.has(doc.id);
+    const gapped = gappedDocIds.has(doc.id);
+    // wasRead requires a readiness row that says the file was PROCESSED/READ — not merely "absent from
+    // the gaps list". A key doc still in OCR (no row yet) is in-progress: NEITHER read NOR a gap. The old
+    // `!gappedDocIds.has(doc.id)` counted that mid-pipeline doc as read, letting allKeyDocsRead report a
+    // FALSE all-clear on a partially-processed chart. When readDocIds is supplied (live path), a doc is
+    // read iff it has a read row AND is not gapped; when omitted (legacy caller), preserve the old
+    // not-gapped behavior. inProgress = neither read nor gapped → excluded from keyDocsRead AND keyDocGaps.
+    const wasRead = readDocIds ? (readDocIds.has(doc.id) && !gapped) : !gapped;
+    const inProgress = !wasRead && !gapped;
     const ref: RelevanceDocRef = {
       documentId: doc.id,
       fileName: displayName(doc),
@@ -414,12 +437,22 @@ export function computeRelevanceSummary(
       // a read non-key doc needs no surfacing — it's covered and not claim-load-bearing
       continue;
     }
-    // Unread document. KEY → a gap that MATTERS (prominent). Non-key → safely skippable (quiet).
+    // In-progress (still mid-pipeline): neither read nor a gap. Exclude from both lists — it would be wrong
+    // to call it a gap (it may yet read) or to count it read (it hasn't). It resolves on the next poll. A
+    // KEY in-progress doc still suppresses the all-clear below (it is unread, just not yet a gap).
+    if (inProgress) {
+      if (key) keyDocsInProgress += 1;
+      continue;
+    }
+    // Unread document (has a row, not effectively read). KEY → a gap that MATTERS (prominent). Non-key →
+    // safely skippable (quiet).
     if (key) keyDocGaps.push(ref);
     else skippableGaps.push(ref);
   }
 
-  const allKeyDocsRead = keyDocsRead.length > 0 && keyDocGaps.length === 0;
+  // All-clear is EARNED: ≥1 key doc read, zero key gaps, AND no key doc still mid-pipeline. The last clause
+  // is the #76 QA fix — a key doc with no readiness row yet can no longer be silently counted as read.
+  const allKeyDocsRead = keyDocsRead.length > 0 && keyDocGaps.length === 0 && keyDocsInProgress === 0;
   return { keyDocsRead, keyDocGaps, skippableGaps, allKeyDocsRead, keyPagesRead, keyPagesApproximate };
 }
 
@@ -493,6 +526,10 @@ export function computeExtractionCoverage(
   let unknownPageFiles = 0;
   let inProgress = false;
   const gaps: CoverageGap[] = [];
+  // documentIds that actually have a readiness row indicating the file was PROCESSED/READ (the same
+  // isEffectivelyRead predicate the headline uses). A doc with NO row yet (still in OCR) is in-progress
+  // and is deliberately NOT in this set — so relevance never counts a mid-pipeline doc as read.
+  const readDocIds = new Set<string>();
 
   for (const doc of inputs) {
     const units = pageUnits(doc);
@@ -508,6 +545,7 @@ export function computeExtractionCoverage(
     }
     if (isEffectivelyRead(row)) {
       extractedPages += units;
+      readDocIds.add(doc.id);
       continue;
     }
     // Not effectively read → a whole-file gap (we can't know which specific pages failed; OCR failed
@@ -638,7 +676,7 @@ export function computeExtractionCoverage(
   const classByPath = new Map<string, KeyDocClassInput>(
     keyDocClasses.filter((k) => inputs.some((d) => d.s3Key === k.filePath)).map((k) => [k.filePath, k] as const),
   );
-  const relevance = computeRelevanceSummary(inputs, gaps, classByPath);
+  const relevance = computeRelevanceSummary(inputs, gaps, classByPath, readDocIds);
 
   return {
     totalPages,

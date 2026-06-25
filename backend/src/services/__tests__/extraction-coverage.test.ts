@@ -500,4 +500,47 @@ describe('computeExtractionCoverage — relevance wiring + fail-open', () => {
     const cov = computeExtractionCoverage(docs, rows, { status: 'complete' });
     expect(cov.relevance).toBeNull();
   });
+
+  // #76 QA FIX (in-progress wasRead hole): a key doc still mid-OCR (NO readiness row yet) was being
+  // counted as READ (wasRead = !gapped), so allKeyDocsRead could falsely report an all-clear on a
+  // partially-processed chart. It must be counted as NEITHER read NOR a gap until it has a read row.
+  it('a key doc still in OCR (no readiness row) is NOT counted as read → allKeyDocsRead FALSE mid-pipeline', () => {
+    const docs = [
+      doc({ id: 'DR', s3Key: RATING, pageCount: 12, filename: 'Rating Decision.pdf' }),
+      doc({ id: 'DS', s3Key: STR, pageCount: 40, filename: 'STR.pdf' }),
+    ];
+    // STR is read; the RATING decision has NO readiness row yet (still being OCR'd) — in-progress.
+    const rows = [frs({ filePath: STR, terminalStatus: 'read' })];
+    const classes: KeyDocClassInput[] = [
+      keyDoc({ filePath: RATING, docType: 'rating_decision' }),
+      keyDoc({ filePath: STR, docType: 'service_treatment_record_summary', importance: 80 }),
+    ];
+    // run still running so the no-row doc is honestly in-progress (not a failed all-clear)
+    const cov = computeExtractionCoverage(docs, rows, { status: 'running' }, [], classes);
+    expect(cov.relevance).not.toBeNull();
+    expect(cov.relevance!.allKeyDocsRead).toBe(false); // the in-progress key doc suppresses the all-clear
+    // the in-progress doc is in NEITHER list (not read, not a gap)
+    expect(cov.relevance!.keyDocsRead.map((d) => d.fileName)).toEqual(['STR.pdf']);
+    expect(cov.relevance!.keyDocGaps).toHaveLength(0);
+    expect(cov.relevance!.skippableGaps).toHaveLength(0);
+  });
+
+  it('a truly-read key doc still counts; allKeyDocsRead TRUE once every key doc has a read row', () => {
+    const docs = [
+      doc({ id: 'DR', s3Key: RATING, pageCount: 12, filename: 'Rating Decision.pdf' }),
+      doc({ id: 'DS', s3Key: STR, pageCount: 40, filename: 'STR.pdf' }),
+    ];
+    const rows = [
+      frs({ filePath: RATING, terminalStatus: 'read' }),
+      frs({ filePath: STR, terminalStatus: 'read' }),
+    ];
+    const classes: KeyDocClassInput[] = [
+      keyDoc({ filePath: RATING, docType: 'rating_decision' }),
+      keyDoc({ filePath: STR, docType: 'service_treatment_record_summary', importance: 80 }),
+    ];
+    const cov = computeExtractionCoverage(docs, rows, { status: 'complete' }, [], classes);
+    expect(cov.relevance!.allKeyDocsRead).toBe(true);
+    expect(cov.relevance!.keyDocsRead.map((d) => d.fileName)).toEqual(['Rating Decision.pdf', 'STR.pdf']);
+    expect(cov.relevance!.keyDocGaps).toHaveLength(0);
+  });
 });

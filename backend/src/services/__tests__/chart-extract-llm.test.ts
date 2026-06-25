@@ -253,6 +253,40 @@ describe('groundScreenings — grounded + deduped screening data points', () => 
     expect(r).toHaveLength(1);
     expect(r[0]!.date).toBeNull();
   });
+
+  // #70 QA HARDENING (2-agent pass, 2026-06-25): "date on the page" ≠ "date belongs to THIS screen".
+  // A bundled VA mental-health page carries several dates (a DOB, a print/visit date, a neighboring
+  // screen's date). Page-scope grounding could borrow the wrong one — medico-legal: a wrong admin date
+  // reaches the doctor's read / the letter. Quote-first; page fallback requires PROXIMITY to the screen.
+  it('accepts a date in the screen OWN quote outright (tightest path, label-adjacent)', () => {
+    // The date is NOT elsewhere on the page text at all — only the quote carries it — yet it grounds.
+    const qDocs: BundleDocument[] = [{ id: 'd', filename: 'bb.pdf', pages: [{ pageNumber: 7, text: 'PHQ-9 administered 03/01/2024 score 18' }] }];
+    const r = groundScreenings(qDocs, [{ ...base, sourcePage: 7, date: '03/01/2024', sourceQuote: 'PHQ-9 administered 03/01/2024 score 18' }]);
+    expect(r[0]!.date).toBe('03/01/2024');
+  });
+
+  it('DROPS a date that is on the page but belongs to a FAR-AWAY different screen (proximity required)', () => {
+    // PHQ-9 at the top; GAD-7 + ITS date 200+ chars away at the bottom. The model emits the GAD-7 date
+    // for the PHQ-9 row — it grounds page-wide but is NOT near the PHQ-9 anchor → must be nulled.
+    const filler = ' clinical narrative continues with unrelated progress-note prose '.repeat(4);
+    const bundled: BundleDocument[] = [{
+      id: 'd', filename: 'bb.pdf',
+      pages: [{ pageNumber: 7, text: `PHQ-9 Depression Screen Score 18 (moderately severe)${filler}GAD-7 Anxiety Screen administered 09/30/2025 score 11` }],
+    }];
+    const r = groundScreenings(bundled, [{ ...base, sourcePage: 7, date: '09/30/2025', sourceQuote: 'PHQ-9 Depression Screen Score 18' }]);
+    expect(r).toHaveLength(1);
+    expect(r[0]!.date).toBeNull(); // the 09/30/2025 belongs to the GAD-7, not this PHQ-9
+  });
+
+  it('DROPS a DOB sitting far from the screen (a date on the page is not automatically the admin date)', () => {
+    const filler = ' demographics header and address block and contact information '.repeat(3);
+    const dobDocs: BundleDocument[] = [{
+      id: 'd', filename: 'bb.pdf',
+      pages: [{ pageNumber: 7, text: `DOB: 07/04/1980${filler}PHQ-9 Depression Screen Score: 18` }],
+    }];
+    const r = groundScreenings(dobDocs, [{ ...base, sourcePage: 7, date: '07/04/1980', sourceQuote: 'PHQ-9 Depression Screen Score: 18' }]);
+    expect(r[0]!.date).toBeNull(); // the DOB is not this screen's administration date
+  });
 });
 
 describe('groundAndDispose', () => {

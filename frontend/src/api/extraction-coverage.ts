@@ -70,6 +70,30 @@ export interface PageCoverageBreakdown {
   readonly reviewPages: readonly PageReviewRef[];
 }
 
+// RELEVANCE-AWARE framing (Dr. Kasky #76) — mirrors backend/src/services/extraction-coverage.ts. Reframes a
+// scary raw "38%" by relevance, using the existing Doctor-Pack KeyDoc classification (NO new relevance model):
+// "we read the documents relevant to this claim; here's what we skipped and why." HONEST — a missed KEY doc is
+// surfaced PROMINENTLY (never softened). null (fail-open) when no KeyDoc classification exists → show raw %.
+export type RelevanceClassification = 'high_signal' | 'bulk' | 'normal';
+
+export interface RelevanceDocRef {
+  readonly documentId: string | null;
+  readonly fileName: string;
+  readonly docType: string | null;
+  readonly classification: RelevanceClassification | null;
+  readonly pageLabel: string;
+  readonly key: boolean; // true = a high_signal claim-relevant doc (rating decision / STR / DBQ / nexus …)
+}
+
+export interface RelevanceSummary {
+  readonly keyDocsRead: readonly RelevanceDocRef[]; // the claim-relevant docs we DID read (earns reassurance)
+  readonly keyDocGaps: readonly RelevanceDocRef[]; // KEY docs NOT read — the gaps that MATTER (prominent)
+  readonly skippableGaps: readonly RelevanceDocRef[]; // unread bulk/normal/unclassified — safely skippable
+  readonly allKeyDocsRead: boolean; // ≥1 key doc read AND none missed → reassurance is earned
+  readonly keyPagesRead: number;
+  readonly keyPagesApproximate: boolean;
+}
+
 export interface ExtractionCoverage {
   readonly totalPages: number;
   readonly extractedPages: number;
@@ -83,6 +107,8 @@ export interface ExtractionCoverage {
   // Two-stage SSOT: the card renders these two lines; the SOAP banner reads chartAnalysis.state.
   readonly pagesRead: PagesReadStage;
   readonly chartAnalysis: ChartAnalysisStage;
+  // RELEVANCE-AWARE framing (Dr. Kasky #76). null (fail-open) → the card shows the honest raw %.
+  readonly relevance: RelevanceSummary | null;
 }
 
 export async function getExtractionCoverage(caseId: string): Promise<{ data: ExtractionCoverage }> {

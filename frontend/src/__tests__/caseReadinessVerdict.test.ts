@@ -51,6 +51,8 @@ function coverage(status: CoverageStatus, coveragePct = 100, analysisState?: Ext
     totalPages: 10, extractedPages, coveragePct, gaps: [], status, unknownPageFiles: 0, totalFiles: 1, pageBreakdown: null,
     pagesRead: { pct: coveragePct, readUnits: extractedPages, totalUnits: 10, approximate: false, label: `${coveragePct}% (${extractedPages} of 10)` },
     chartAnalysis: { state, label: minorGap ? '✓ Mostly complete — 99% analyzed' : '✓ Complete', reason: minorGap ? '16 pages were not folded into the chart (99% of 3029 pages analyzed). The chart is nearly complete.' : null, likelyCauseFile: null, findings: null, minorGap },
+    // Relevance-aware framing (Dr. Kasky #76): null (fail-open) — the readiness verdict does not depend on it.
+    relevance: null,
   };
 }
 

@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { SectionCard } from './ui/SectionCard';
 import { PdfViewerModal, type ViewableDoc } from './PdfViewerModal';
-import { getExtractionCoverage, type CoverageGap, type ChartAnalysisStage, type PageReviewRef } from '../api/extraction-coverage';
+import { getExtractionCoverage, type CoverageGap, type ChartAnalysisStage, type PageReviewRef, type RelevanceSummary, type RelevanceDocRef } from '../api/extraction-coverage';
 
 /**
  * Chart Extraction Coverage — per-case TRANSPARENCY report (Ryan 2026-06-14).
@@ -41,6 +41,122 @@ const REVIEW_REASON_TEXT: Record<PageReviewRef['reason'], string> = {
   handwriting_uncertain: 'Handwriting — read with low confidence',
   unreadable: 'Couldn’t be read — needs a look',
 };
+
+// Short human labels for KeyDocType groups in the relevance read (mirrors backend docTypeLabel). Display
+// only — never changes which docs are "key". Unknown/null types fall back to a generic "records".
+const DOC_TYPE_LABEL: Record<string, string> = {
+  rating_decision: 'rating decision',
+  denial_letter: 'denial letter',
+  supplemental_decision: 'supplemental decision',
+  rated_disabilities_view: 'rated-disabilities list',
+  benefit_summary: 'benefit summary',
+  sc_conditions_list: 'service-connected conditions list',
+  dbq: 'DBQ',
+  c_and_p_exam: 'C&P exam',
+  tera_memo: 'TERA memo',
+  individual_exposure_summary: 'exposure summary',
+  nexus_letter_prior: 'prior nexus letter',
+  medical_opinion: 'medical opinion',
+  audiogram: 'audiogram',
+  sleep_study: 'sleep study',
+  pulmonary_function_test: 'pulmonary function test',
+  service_treatment_record_summary: 'service treatment records',
+  separation_exam: 'separation exam',
+  entrance_exam: 'entrance exam',
+  personnel_record: 'personnel record',
+  statement_in_support: 'statement in support',
+  lay_statement: 'lay statement',
+  buddy_statement: 'buddy statement',
+  blue_button: 'health-record export',
+  progress_notes: 'progress notes',
+  imaging: 'imaging report',
+  dd_214: 'DD-214',
+  intake_summary: 'intake summary',
+};
+function docTypeLabel(docType: string | null): string {
+  if (docType === null) return 'records';
+  return DOC_TYPE_LABEL[docType] ?? 'records';
+}
+
+// De-duped, comma-joined list of the doc-type labels in a set of refs ("rating decision, service treatment
+// records, and the prior nexus letter"). Stable order = first-seen. Pure display helper.
+function joinDocTypes(refs: readonly RelevanceDocRef[]): string {
+  const seen: string[] = [];
+  for (const r of refs) {
+    const l = docTypeLabel(r.docType);
+    if (!seen.includes(l)) seen.push(l);
+  }
+  if (seen.length === 0) return 'records';
+  if (seen.length === 1) return seen[0]!;
+  if (seen.length === 2) return `${seen[0]} and ${seen[1]}`;
+  return `${seen.slice(0, -1).join(', ')}, and ${seen[seen.length - 1]}`;
+}
+
+/**
+ * Relevance-aware coverage read (Dr. Kasky #76). Reframes a scary raw "38%" by RELEVANCE using the existing
+ * Doctor-Pack classification: "we read the documents relevant to this claim; here's what we skipped and why."
+ *
+ * HONESTY (Ryan HARD RULE): a missed KEY doc is surfaced PROMINENTLY (amber, "review before drafting") and the
+ * reassurance is WITHHELD whenever any key doc was missed. The reframe distinguishes "we skipped irrelevant
+ * pages (fine)" from "we missed relevant pages (act)" — it never hides a real gap behind reassurance.
+ */
+function RelevanceRead({ rel }: { rel: RelevanceSummary }) {
+  const hasKeyGap = rel.keyDocGaps.length > 0;
+  const keyPages = rel.keyPagesRead;
+  const keyPagesText = keyPages > 0 ? `${keyPages}${rel.keyPagesApproximate ? '+' : ''} ${keyPages === 1 ? 'page' : 'pages'}` : null;
+  const skippedCount = rel.skippableGaps.length;
+
+  return (
+    <div className="mb-2">
+      {/* The honest GAP-THAT-MATTERS warning leads when a KEY doc was not read. Never softened away. */}
+      {hasKeyGap ? (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-3">
+          <p className="text-[13px] font-semibold text-amber-900">
+            ⚠ {rel.keyDocGaps.length} claim-relevant {rel.keyDocGaps.length === 1 ? 'document was' : 'documents were'} not read — review before drafting
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {rel.keyDocGaps.map((g, i) => (
+              <li key={`kg-${g.documentId ?? i}`} className="text-[13px] text-amber-900">
+                <span className="font-medium">{docTypeLabel(g.docType)}</span>
+                {` — ${g.fileName} (${g.pageLabel})`}
+              </li>
+            ))}
+          </ul>
+          {rel.keyDocsRead.length > 0 ? (
+            <p className="mt-1.5 text-xs text-amber-800">
+              We did read {joinDocTypes(rel.keyDocsRead)}
+              {keyPagesText ? ` (${keyPagesText})` : ''}, but the {rel.keyDocGaps.length === 1 ? 'document' : 'documents'} above {rel.keyDocGaps.length === 1 ? 'was' : 'were'} not extracted — open {rel.keyDocGaps.length === 1 ? 'it' : 'them'} and confirm what {rel.keyDocGaps.length === 1 ? 'it contains' : 'they contain'} before relying on this chart.
+            </p>
+          ) : null}
+        </div>
+      ) : rel.allKeyDocsRead ? (
+        // Reassurance is EARNED: every claim-relevant doc was read. Reframe the scary % accordingly.
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+          <p className="text-[13px] text-emerald-900">
+            We read the documents relevant to this claim — <span className="font-medium">{joinDocTypes(rel.keyDocsRead)}</span>
+            {keyPagesText ? ` (${keyPagesText})` : ''}.
+            {skippedCount > 0
+              ? ` ${skippedCount} other ${skippedCount === 1 ? 'document was' : 'documents were'} not extracted (duplicate, unrelated, or illegible records) — usually safe to skip.`
+              : ''}
+          </p>
+        </div>
+      ) : (
+        // Some key docs read, none MISSED-as-key, but reassurance not fully earned (e.g. no key doc read yet,
+        // only skippable gaps). Neutral, honest framing — no false all-clear, no false alarm.
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-[13px] text-slate-700">
+            {rel.keyDocsRead.length > 0
+              ? `We read ${joinDocTypes(rel.keyDocsRead)}${keyPagesText ? ` (${keyPagesText})` : ''}. `
+              : ''}
+            {skippedCount > 0
+              ? `${skippedCount} ${skippedCount === 1 ? 'document was' : 'documents were'} not extracted (duplicate, unrelated, or illegible records) — usually safe to skip.`
+              : 'No claim-relevant documents were missed.'}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps) {
   const [expanded, setExpanded] = useState(false);
@@ -130,9 +246,18 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
     >
       <div className="flex flex-wrap items-start justify-between gap-3 text-sm text-slate-800">
         <div className="max-w-2xl">
+          {/* RELEVANCE-AWARE read (Dr. Kasky #76). LEADS when present + coverage is partial — a bare "38%"
+              scares an RN off a fine case, so we reframe by relevance using the existing Doctor-Pack
+              classification: "we read the documents relevant to this claim; here's what we skipped and why."
+              HONEST: a missed KEY doc is surfaced PROMINENTLY inside RelevanceRead (never softened). When the
+              chart is fully complete (isComplete) there is nothing to reframe, so we skip it. Fail-open:
+              cov.relevance is null when no classification exists → this renders nothing and the raw stages
+              below carry the report exactly as before. */}
+          {cov.relevance && !isComplete ? <RelevanceRead rel={cov.relevance} /> : null}
           {/* TWO clearly-labeled, plain-English stages (Ryan 2026-06-23). Never one "100% Complete" that
               hides a failed analysis. Stage 1 = Pages read (OCR). Stage 2 = Chart analysis (the structured
-              chart the SOAP/verdict is built on). */}
+              chart the SOAP/verdict is built on). When the relevance read leads above, these become the
+              SECONDARY transparency detail (the raw % is still shown, just no longer the headline). */}
           <dl className="space-y-1.5">
             <div className="flex flex-wrap items-baseline gap-x-2">
               <dt className="text-[13px] font-semibold text-slate-800">Pages read</dt>

@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeExtractionCoverage,
+  computeRelevanceSummary,
   isChartInputKey,
   isRenderedOutputKey,
   type CoverageDocInput,
+  type CoverageGap,
+  type KeyDocClassInput,
 } from '../extraction-coverage.js';
 import type { FileReadAttempt, FileReadStatusRecord, FileTerminalStatus } from '../db-types.js';
 
@@ -378,5 +381,123 @@ describe('computeExtractionCoverage — in_progress + unknown page counts', () =
     expect(cov.coveragePct).toBe(100);
     expect(cov.status).toBe('complete');
     expect(cov.totalFiles).toBe(0);
+  });
+});
+
+// ---- RELEVANCE-AWARE framing (Dr. Kasky #76) ---------------------------------
+// A bare "38% extracted" scares an RN off a fine case. We reframe by RELEVANCE using the EXISTING Doctor-Pack
+// KeyDoc classification (high_signal = claim-relevant). HONEST: a missed KEY doc is surfaced as a gap that
+// MATTERS (never softened); only bulk/normal/unclassified unread is "safely skippable". Fail-open (null) when
+// no classification exists. No new relevance model is invented.
+
+const RATING = 'cases/CASE-1/uuid-rating-decision.pdf';
+const STR = 'cases/CASE-1/uuid-str.pdf';
+const BLUE = 'cases/CASE-1/uuid-blue-button.pdf';
+const DUP = 'cases/CASE-1/uuid-duplicate-scan.pdf';
+
+function keyDoc(over: Partial<KeyDocClassInput> & { filePath: string }): KeyDocClassInput {
+  return { docType: 'rating_decision', classification: 'high_signal', importance: 100, ...over };
+}
+
+describe('computeRelevanceSummary (pure)', () => {
+  it('relevant docs READ + irrelevant pages skipped → reassuring, gap NOT flagged as a key gap', () => {
+    const inputs = [
+      doc({ id: 'DR', s3Key: RATING, pageCount: 12, filename: 'Rating Decision.pdf' }),
+      doc({ id: 'DS', s3Key: STR, pageCount: 40, filename: 'STR.pdf' }),
+      doc({ id: 'DB', s3Key: BLUE, pageCount: 80, filename: 'Blue Button.pdf' }),
+    ];
+    // Only the Blue Button bulk dump is gapped (unread); both KEY docs were read.
+    const gaps: CoverageGap[] = [
+      { documentId: 'DB', fileName: 'Blue Button.pdf', reason: 'needs_manual_summary', pageLabel: '80 pages', isImage: false, terminalStatus: 'manual_summary_required' },
+    ];
+    const classes = new Map<string, KeyDocClassInput>([
+      [RATING, keyDoc({ filePath: RATING, docType: 'rating_decision' })],
+      [STR, keyDoc({ filePath: STR, docType: 'service_treatment_record_summary', importance: 80 })],
+      [BLUE, keyDoc({ filePath: BLUE, docType: 'blue_button', classification: 'bulk', importance: 30 })],
+    ]);
+    const rel = computeRelevanceSummary(inputs, gaps, classes)!;
+    expect(rel).not.toBeNull();
+    expect(rel.allKeyDocsRead).toBe(true); // earns the reassurance
+    expect(rel.keyDocGaps).toHaveLength(0); // NO key gap — the unread doc is bulk, not key
+    expect(rel.keyDocsRead.map((d) => d.docType)).toEqual(['rating_decision', 'service_treatment_record_summary']);
+    expect(rel.keyPagesRead).toBe(52); // 12 + 40
+    expect(rel.keyPagesApproximate).toBe(false);
+    expect(rel.skippableGaps).toHaveLength(1);
+    expect(rel.skippableGaps[0]!.fileName).toBe('Blue Button.pdf');
+  });
+
+  it('a RELEVANT/key doc UNREAD → flagged as a key gap, allKeyDocsRead FALSE (gap NOT hidden)', () => {
+    const inputs = [
+      doc({ id: 'DR', s3Key: RATING, pageCount: 12, filename: 'Rating Decision.pdf' }),
+      doc({ id: 'DS', s3Key: STR, pageCount: 40, filename: 'STR.pdf' }),
+    ];
+    // The rating decision (a KEY doc) is gapped — this MUST surface prominently.
+    const gaps: CoverageGap[] = [
+      { documentId: 'DR', fileName: 'Rating Decision.pdf', reason: 'unread', pageLabel: '12 pages', isImage: false, terminalStatus: 'manual_summary_required' },
+    ];
+    const classes = new Map<string, KeyDocClassInput>([
+      [RATING, keyDoc({ filePath: RATING, docType: 'rating_decision' })],
+      [STR, keyDoc({ filePath: STR, docType: 'service_treatment_record_summary', importance: 80 })],
+    ]);
+    const rel = computeRelevanceSummary(inputs, gaps, classes)!;
+    expect(rel.allKeyDocsRead).toBe(false); // reassurance WITHHELD
+    expect(rel.keyDocGaps).toHaveLength(1);
+    expect(rel.keyDocGaps[0]!.docType).toBe('rating_decision');
+    expect(rel.keyDocGaps[0]!.fileName).toBe('Rating Decision.pdf');
+    expect(rel.keyDocGaps[0]!.key).toBe(true);
+    expect(rel.keyDocsRead.map((d) => d.docType)).toEqual(['service_treatment_record_summary']);
+  });
+
+  it('NO classification for any input → null (fail-open to the honest %)', () => {
+    const inputs = [doc({ id: 'DX', s3Key: DUP, pageCount: 80, filename: 'scan.pdf' })];
+    const rel = computeRelevanceSummary(inputs, [], new Map());
+    expect(rel).toBeNull();
+  });
+
+  it('a read KEY doc with an UNKNOWN page count → keyPagesApproximate true, never inflates the count', () => {
+    const inputs = [doc({ id: 'DR', s3Key: RATING, pageCount: null, filename: 'Rating Decision.pdf' })];
+    const classes = new Map<string, KeyDocClassInput>([[RATING, keyDoc({ filePath: RATING })]]);
+    const rel = computeRelevanceSummary(inputs, [], classes)!;
+    expect(rel.allKeyDocsRead).toBe(true);
+    expect(rel.keyPagesRead).toBe(0); // unknown count contributes 0, not a fabricated total
+    expect(rel.keyPagesApproximate).toBe(true);
+  });
+
+  it('only skippable docs (no key doc present at all) → allKeyDocsRead FALSE (reassurance not earned)', () => {
+    const inputs = [doc({ id: 'DB', s3Key: BLUE, pageCount: 80, filename: 'Blue Button.pdf' })];
+    const classes = new Map<string, KeyDocClassInput>([[BLUE, keyDoc({ filePath: BLUE, docType: 'blue_button', classification: 'bulk', importance: 30 })]]);
+    const rel = computeRelevanceSummary(inputs, [], classes)!;
+    expect(rel.allKeyDocsRead).toBe(false); // no key doc was read → can't claim "we read what matters"
+    expect(rel.keyDocsRead).toHaveLength(0);
+    expect(rel.keyDocGaps).toHaveLength(0);
+  });
+});
+
+describe('computeExtractionCoverage — relevance wiring + fail-open', () => {
+  it('passes KeyDoc classes through to a relevance summary on the coverage object', () => {
+    const docs = [
+      doc({ id: 'DR', s3Key: RATING, pageCount: 12, filename: 'Rating Decision.pdf' }),
+      doc({ id: 'DB', s3Key: BLUE, pageCount: 80, filename: 'Blue Button.pdf' }),
+    ];
+    const rows = [
+      frs({ filePath: RATING, terminalStatus: 'read' }),
+      frs({ filePath: BLUE, terminalStatus: 'manual_summary_required' }), // bulk unread → skippable
+    ];
+    const classes: KeyDocClassInput[] = [
+      keyDoc({ filePath: RATING, docType: 'rating_decision' }),
+      keyDoc({ filePath: BLUE, docType: 'blue_button', classification: 'bulk', importance: 30 }),
+    ];
+    const cov = computeExtractionCoverage(docs, rows, { status: 'complete' }, [], classes);
+    expect(cov.relevance).not.toBeNull();
+    expect(cov.relevance!.allKeyDocsRead).toBe(true);
+    expect(cov.relevance!.keyDocGaps).toHaveLength(0);
+    expect(cov.relevance!.skippableGaps.map((d) => d.fileName)).toEqual(['Blue Button.pdf']);
+  });
+
+  it('no KeyDoc classes (default arg) → relevance is null, existing behavior unchanged', () => {
+    const docs = [doc({ id: 'D1', s3Key: KEY1, pageCount: 5 })];
+    const rows = [frs({ filePath: KEY1, terminalStatus: 'read' })];
+    const cov = computeExtractionCoverage(docs, rows, { status: 'complete' });
+    expect(cov.relevance).toBeNull();
   });
 });

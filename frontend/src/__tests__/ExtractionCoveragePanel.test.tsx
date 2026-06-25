@@ -35,6 +35,9 @@ function cov(over: Partial<ExtractionCoverage> = {}): ExtractionCoverage {
     ...base,
     pagesRead: over.pagesRead ?? { pct: base.coveragePct, readUnits: base.extractedPages, totalUnits: base.totalPages, approximate, label: pagesReadLabel },
     chartAnalysis: over.chartAnalysis ?? { state: 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: null, minorGap: false },
+    // Relevance-aware framing (Dr. Kasky #76): default null (fail-open — no classification) so existing tests
+    // are unchanged. A test that wants the relevance read overrides `relevance` explicitly.
+    relevance: over.relevance ?? null,
   };
 }
 
@@ -200,5 +203,85 @@ describe('ExtractionCoveragePanel', () => {
     expect(screen.queryByRole('button', { name: 'Request AI description' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'record.pdf' }));
     await waitFor(() => expect(viewDocumentMock).toHaveBeenCalledWith('DOC-PDF'));
+  });
+
+  // ===== RELEVANCE-AWARE framing (Dr. Kasky #76) =====
+  // A bare "38% extracted" is reframed by relevance: "we read the documents relevant to this claim" with the
+  // skipped (irrelevant) pages explained. HONEST: a missed KEY doc is flagged PROMINENTLY, never softened.
+
+  it('partial chart, all KEY docs read + irrelevant pages skipped → reassuring relevance read, raw % still shown, NO key-gap warning', async () => {
+    coverageMock.mockResolvedValue({
+      data: cov({
+        totalPages: 132,
+        extractedPages: 52,
+        coveragePct: 39, // the scary bare number
+        status: 'complete_with_gaps',
+        gaps: [{ documentId: 'DB', fileName: 'Blue Button.pdf', reason: 'needs_manual_summary', pageLabel: '80 pages', isImage: false, terminalStatus: 'manual_summary_required' }],
+        relevance: {
+          keyDocsRead: [
+            { documentId: 'DR', fileName: 'Rating Decision.pdf', docType: 'rating_decision', classification: 'high_signal', pageLabel: '12 pages', key: true },
+            { documentId: 'DS', fileName: 'STR.pdf', docType: 'service_treatment_record_summary', classification: 'high_signal', pageLabel: '40 pages', key: true },
+          ],
+          keyDocGaps: [],
+          skippableGaps: [{ documentId: 'DB', fileName: 'Blue Button.pdf', docType: 'blue_button', classification: 'bulk', pageLabel: '80 pages', key: false }],
+          allKeyDocsRead: true,
+          keyPagesRead: 52,
+          keyPagesApproximate: false,
+        },
+      }),
+    });
+    renderPanel();
+    // Leads with the reassuring relevance read naming the relevant doc types + page count.
+    expect(await screen.findByText(/We read the documents relevant to this claim/)).toBeInTheDocument();
+    expect(screen.getByText(/rating decision and service treatment records/)).toBeInTheDocument();
+    expect(screen.getByText(/usually safe to skip/)).toBeInTheDocument();
+    // Raw % is STILL shown (secondary transparency), not hidden.
+    expect(screen.getByText(/39% \(52 of 132\)/)).toBeInTheDocument();
+    // No key-gap warning copy.
+    expect(screen.queryByText(/review before drafting/)).not.toBeInTheDocument();
+  });
+
+  it('partial chart with a KEY doc UNREAD → prominent "review before drafting" warning, gap NOT hidden', async () => {
+    coverageMock.mockResolvedValue({
+      data: cov({
+        totalPages: 52,
+        extractedPages: 40,
+        coveragePct: 77,
+        status: 'complete_with_gaps',
+        gaps: [{ documentId: 'DR', fileName: 'Rating Decision.pdf', reason: 'unread', pageLabel: '12 pages', isImage: false, terminalStatus: 'manual_summary_required' }],
+        relevance: {
+          keyDocsRead: [{ documentId: 'DS', fileName: 'STR.pdf', docType: 'service_treatment_record_summary', classification: 'high_signal', pageLabel: '40 pages', key: true }],
+          keyDocGaps: [{ documentId: 'DR', fileName: 'Rating Decision.pdf', docType: 'rating_decision', classification: 'high_signal', pageLabel: '12 pages', key: true }],
+          skippableGaps: [],
+          allKeyDocsRead: false,
+          keyPagesRead: 40,
+          keyPagesApproximate: false,
+        },
+      }),
+    });
+    renderPanel();
+    // The gap that MATTERS leads, prominently — reassurance is withheld.
+    expect(await screen.findByText(/claim-relevant documents? (was|were) not read — review before drafting/)).toBeInTheDocument();
+    expect(screen.getByText(/Rating Decision\.pdf/)).toBeInTheDocument();
+    // It must NOT have rendered the reassuring all-clear copy.
+    expect(screen.queryByText(/We read the documents relevant to this claim/)).not.toBeInTheDocument();
+  });
+
+  it('no relevance data (null) → fail-open: no relevance read, the honest stage lines carry the report', async () => {
+    coverageMock.mockResolvedValue({
+      data: cov({
+        totalPages: 100,
+        extractedPages: 38,
+        coveragePct: 38,
+        status: 'complete_with_gaps',
+        gaps: [{ documentId: 'DX', fileName: 'scan.pdf', reason: 'needs_manual_summary', pageLabel: '62 pages', isImage: false, terminalStatus: 'manual_summary_required' }],
+        relevance: null,
+      }),
+    });
+    renderPanel();
+    // No relevance copy at all; the honest raw % stage line is present exactly as before.
+    expect(await screen.findByText(/38% \(38 of 100\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/We read the documents relevant to this claim/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/review before drafting/)).not.toBeInTheDocument();
   });
 });

@@ -173,6 +173,62 @@ export interface PageCoverageBreakdown {
   readonly reviewPages: readonly PageReviewRef[];
 }
 
+// ===== RELEVANCE-AWARE coverage framing (Dr. Kasky, case #76, 2026-06-25) =====
+// THE PROBLEM: a bare "38% of pages extracted" scares an RN off a case that is actually fine — the pages
+// that MATTER to the claim (the rating decisions, the STRs, the nexus evidence) may ALL have been read, and
+// the unread remainder is duplicates / unrelated / illegible bulk. The scary number conflates "we skipped
+// irrelevant pages" (fine) with "we missed relevant pages" (act). This layer reframes coverage by RELEVANCE,
+// using ONLY classification that ALREADY exists — the Doctor-Pack KeyDoc rows (caseId+filePath → docType +
+// classification + importance). It invents NO new relevance model.
+//
+// HONESTY (Ryan HARD RULE — coverage must NEVER overstate): the reframe must NOT hide a real gap. A whole
+// KEY document (high_signal: rating decision / STR / DBQ / C&P / nexus / etc.) that was NOT read is surfaced
+// PROMINENTLY as a gap that matters. Only bulk (Blue Button)/normal/unclassified unread docs are framed as
+// "safely skipped". Reassurance is EARNED — it is shown only when every key doc was actually read.
+//
+// FAIL-OPEN: when there is no KeyDoc classification for the case (relevance data absent), this returns null
+// and the UI falls back to the honest raw %/stage lines exactly as before. Never crash, never invent.
+
+// KeyDoc classification tier — the existing Doctor-Pack signal tier. Mirrors KeyDocClassification in
+// db-types.ts (kept as a local minimal shape so this pure module has no DB dependency).
+export type RelevanceClassification = 'high_signal' | 'bulk' | 'normal';
+
+// The minimal per-document classification this layer needs, keyed by the document's s3Key (== KeyDoc.filePath).
+export interface KeyDocClassInput {
+  readonly filePath: string; // == Document.s3Key
+  readonly docType: string; // KeyDocType (free VarChar in the DB; we only display/group it)
+  readonly classification: RelevanceClassification;
+  readonly importance: number; // 0–100
+}
+
+// One read/unread document in the relevance summary, carrying its classification so the UI can group it.
+export interface RelevanceDocRef {
+  readonly documentId: string | null; // null only for run-level entries (never used here — docs only)
+  readonly fileName: string;
+  readonly docType: string | null; // KeyDocType when classified, else null (group as "other records")
+  readonly classification: RelevanceClassification | null; // null when the doc has no KeyDoc row
+  readonly pageLabel: string; // "12 pages" / "whole file"
+  readonly key: boolean; // true = a high_signal claim-relevant doc (rating decision / STR / DBQ / nexus …)
+}
+
+export interface RelevanceSummary {
+  // The KEY (claim-relevant) documents that WERE read — what earns the reassuring framing.
+  readonly keyDocsRead: readonly RelevanceDocRef[];
+  // KEY documents that were NOT read — the gaps that MATTER. Non-empty → the UI flags PROMINENTLY and the
+  // reassurance is withheld. This is the honesty core: a missed key doc is never softened away.
+  readonly keyDocGaps: readonly RelevanceDocRef[];
+  // Unread documents that are NOT claim-key (bulk Blue Button / normal / unclassified) — safely skippable.
+  // Surfaced quietly ("N pages of duplicate/unrelated records were not extracted — usually fine").
+  readonly skippableGaps: readonly RelevanceDocRef[];
+  // true when at least one KEY doc was read AND no KEY doc was missed → the reframe may reassure. When a key
+  // doc IS missed this is false and the UI leads with the warning, never the reassurance.
+  readonly allKeyDocsRead: boolean;
+  // Page totals for the read KEY docs (the "we read the N pages that matter" number). Honest: unknown counts
+  // contribute 0 here (and `keyPagesApproximate` is set) rather than inflating the figure.
+  readonly keyPagesRead: number;
+  readonly keyPagesApproximate: boolean;
+}
+
 export interface ExtractionCoverage {
   readonly totalPages: number;
   readonly extractedPages: number;
@@ -192,6 +248,10 @@ export interface ExtractionCoverage {
   // reads chartAnalysis.state. pagesRead is the OCR phase; chartAnalysis is the semantic-extract phase.
   readonly pagesRead: PagesReadStage;
   readonly chartAnalysis: ChartAnalysisStage;
+  // RELEVANCE-AWARE framing (Dr. Kasky #76). null when no KeyDoc classification exists for the case
+  // (fail-open → the UI shows the honest raw %). When present, the card LEADS with this relevance read and
+  // demotes the raw % to a secondary line — UNLESS a key doc was missed, in which case the gap is prominent.
+  readonly relevance: RelevanceSummary | null;
 }
 
 const REVIEW_PAGES_CAP = 200; // never enumerate more than this in the UI list (a 2000-page chart)
@@ -245,6 +305,122 @@ export function computePageCoverageBreakdown(
     }
   }
   return { pagesWithSignal: signal.length, clean, handwritingUncertain, blank, unreadable, reviewPages };
+}
+
+// ===== Relevance-aware framing (Dr. Kasky #76) =====
+
+// A high_signal KeyDoc IS the claim-relevant evidence (rating decisions, STRs, DBQs, C&P exams, nexus
+// letters, sleep studies, audiograms, etc. — see key-docs-classifier.ts PATTERNS). A bulk doc is a giant
+// Blue Button / full-records dump (skimmable, rarely load-bearing in full); normal is everything else.
+// "key" for the honesty gap = high_signal ONLY: a missed high_signal doc is a gap that MATTERS and must be
+// surfaced prominently. bulk/normal/unclassified unread is framed as safely skippable. We deliberately do
+// NOT invent a new relevance model — we read the existing Doctor-Pack tier.
+function isKeyClassification(c: RelevanceClassification): boolean {
+  return c === 'high_signal';
+}
+
+// Map a KeyDocType to a short human group label for the read/unread lists ("rating decisions", "service
+// treatment records", "the nexus evidence", …). Unknown/unmapped types fall back to a generic "records".
+// Pure display; never changes the gap logic.
+const DOC_TYPE_LABEL: Record<string, string> = {
+  rating_decision: 'rating decision',
+  denial_letter: 'denial letter',
+  supplemental_decision: 'supplemental decision',
+  rated_disabilities_view: 'rated-disabilities list',
+  benefit_summary: 'benefit summary',
+  sc_conditions_list: 'service-connected conditions list',
+  dbq: 'DBQ',
+  c_and_p_exam: 'C&P exam',
+  tera_memo: 'TERA memo',
+  individual_exposure_summary: 'exposure summary',
+  nexus_letter_prior: 'prior nexus letter',
+  medical_opinion: 'medical opinion',
+  audiogram: 'audiogram',
+  sleep_study: 'sleep study',
+  pulmonary_function_test: 'pulmonary function test',
+  service_treatment_record_summary: 'service treatment records',
+  separation_exam: 'separation exam',
+  entrance_exam: 'entrance exam',
+  personnel_record: 'personnel record',
+  statement_in_support: 'statement in support',
+  lay_statement: 'lay statement',
+  buddy_statement: 'buddy statement',
+  blue_button: 'health-record export',
+  progress_notes: 'progress notes',
+  imaging: 'imaging report',
+  dd_214: 'DD-214',
+  intake_summary: 'intake summary',
+};
+export function docTypeLabel(docType: string | null): string {
+  if (docType === null) return 'records';
+  return DOC_TYPE_LABEL[docType] ?? 'records';
+}
+
+/**
+ * Build the relevance-aware coverage summary from the Doctor-Pack KeyDoc classification that ALREADY exists.
+ * PURE — no DB. Returns null (fail-open) when NO chart-input document carries a KeyDoc row, so the UI falls
+ * back to the honest raw %. Invents no relevance: a doc is "key" iff its existing classification is high_signal.
+ *
+ * Reads:
+ *   • inputs  — the chart-INPUT docs (already filtered) with their read/gap state derived the same way the
+ *               headline does (effectively-read via the gaps list: a doc with NO whole-file gap was read).
+ *   • gaps    — the whole-file gaps already computed (documentId-bearing). A key doc that is gapped → keyDocGap.
+ *   • classByPath — KeyDoc rows keyed by s3Key (== filePath).
+ *
+ * HONESTY: a high_signal doc that was NOT read lands in keyDocGaps (surfaced prominently). allKeyDocsRead is
+ * true ONLY when ≥1 key doc was read AND zero key docs were missed — reassurance is earned, never assumed.
+ */
+export function computeRelevanceSummary(
+  inputs: readonly CoverageDocInput[],
+  gaps: readonly CoverageGap[],
+  classByPath: ReadonlyMap<string, KeyDocClassInput>,
+): RelevanceSummary | null {
+  // Fail-open: no classification data for ANY input doc → no relevance read (UI shows the honest %).
+  const anyClassified = inputs.some((d) => classByPath.has(d.s3Key));
+  if (!anyClassified) return null;
+
+  // The set of documentIds that are gapped at the FILE level (whole file not read). Run-level gaps
+  // (documentId null) are not per-document and don't bear on relevance.
+  const gappedDocIds = new Set<string>();
+  for (const g of gaps) if (g.documentId !== null) gappedDocIds.add(g.documentId);
+
+  const keyDocsRead: RelevanceDocRef[] = [];
+  const keyDocGaps: RelevanceDocRef[] = [];
+  const skippableGaps: RelevanceDocRef[] = [];
+  let keyPagesRead = 0;
+  let keyPagesApproximate = false;
+
+  for (const doc of inputs) {
+    const cls = classByPath.get(doc.s3Key) ?? null;
+    const classification: RelevanceClassification | null = cls?.classification ?? null;
+    const docType = cls?.docType ?? null;
+    const key = classification !== null && isKeyClassification(classification);
+    const wasRead = !gappedDocIds.has(doc.id);
+    const ref: RelevanceDocRef = {
+      documentId: doc.id,
+      fileName: displayName(doc),
+      docType,
+      classification,
+      pageLabel: wholeFileLabel(doc),
+      key,
+    };
+
+    if (wasRead) {
+      if (key) {
+        keyDocsRead.push(ref);
+        if (typeof doc.pageCount === 'number' && doc.pageCount > 0) keyPagesRead += doc.pageCount;
+        else keyPagesApproximate = true; // a read key doc with an unknown count → say "approximate"
+      }
+      // a read non-key doc needs no surfacing — it's covered and not claim-load-bearing
+      continue;
+    }
+    // Unread document. KEY → a gap that MATTERS (prominent). Non-key → safely skippable (quiet).
+    if (key) keyDocGaps.push(ref);
+    else skippableGaps.push(ref);
+  }
+
+  const allKeyDocsRead = keyDocsRead.length > 0 && keyDocGaps.length === 0;
+  return { keyDocsRead, keyDocGaps, skippableGaps, allKeyDocsRead, keyPagesRead, keyPagesApproximate };
 }
 
 // Image content-type / extension recognition for the "request AI description" affordance.
@@ -305,6 +481,9 @@ export function computeExtractionCoverage(
   // Per-page provenance rows (document_pages). Optional + defaults to [] so every existing caller/test
   // is unchanged and pageBreakdown is null until the vision path stamps pages.
   pages: readonly PageProvenanceInput[] = [],
+  // KeyDoc classification rows keyed by s3Key (== KeyDoc.filePath). Optional + defaults to [] so existing
+  // callers/tests are unchanged and `relevance` is null (fail-open) until classification exists.
+  keyDocClasses: readonly KeyDocClassInput[] = [],
 ): ExtractionCoverage {
   const inputs = docs.filter((d) => isChartInputKey(d.s3Key));
   const statusByPath = new Map(fileReadStatuses.map((r) => [r.filePath, r] as const));
@@ -454,6 +633,13 @@ export function computeExtractionCoverage(
     throw new Error(`extraction-coverage SSOT invariant violated: status='complete' but chartAnalysis.state='${chartAnalysis.state}'`);
   }
 
+  // RELEVANCE-AWARE framing (Dr. Kasky #76). Built from the existing Doctor-Pack KeyDoc classification +
+  // the gaps we already computed. null (fail-open) when no chart-input doc is classified → UI shows raw %.
+  const classByPath = new Map<string, KeyDocClassInput>(
+    keyDocClasses.filter((k) => inputs.some((d) => d.s3Key === k.filePath)).map((k) => [k.filePath, k] as const),
+  );
+  const relevance = computeRelevanceSummary(inputs, gaps, classByPath);
+
   return {
     totalPages,
     extractedPages,
@@ -465,6 +651,7 @@ export function computeExtractionCoverage(
     pageBreakdown: computePageCoverageBreakdown(docs, pages),
     pagesRead,
     chartAnalysis,
+    relevance,
   };
 }
 
@@ -608,5 +795,12 @@ export async function loadExtractionCoverageForCase(db: AppDb, caseId: string): 
     where: { document: { caseId } },
     select: { documentId: true, pageNumber: true, extractionCoverage: true, handwritingPresent: true },
   })) as unknown as readonly PageProvenanceInput[];
-  return computeExtractionCoverage(docs, rows, latestRun, pageRows);
+  // KeyDoc classification (Doctor-Pack tier) for the relevance-aware framing (Dr. Kasky #76). Keyed by
+  // filePath (== Document.s3Key). When a case has no KeyDoc rows yet, this is [] → relevance is null
+  // (fail-open) and the card shows the honest raw %. Existing data; no re-classification here.
+  const keyDocRows = (await db.keyDoc.findMany({
+    where: { caseId },
+    select: { filePath: true, docType: true, classification: true, importance: true },
+  })) as unknown as readonly KeyDocClassInput[];
+  return computeExtractionCoverage(docs, rows, latestRun, pageRows, keyDocRows);
 }

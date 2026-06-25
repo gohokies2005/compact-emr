@@ -13,7 +13,7 @@ import { buildLetterRevisionKey } from '../services/s3-key-safety.js';
 import { cleanProseForSave, sanityCheckLetterText, computeLockedRanges, type SanityFinding } from '../services/letter-sanity.js';
 import { applyStructuredEdit, type EditProposal } from '../services/letter-edit-apply.js';
 import { diffCitations, describeToken, type CitationDiff } from '../services/letter-citation-integrity.js';
-import { holdingChanged } from '../services/letter-opinion-excerpt.js';
+import { holdingConclusionWeakened, sectionViiChanged } from '../services/letter-opinion-excerpt.js';
 import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from '../services/case-status-transitions.js';
 import { resolveRateCents } from '../services/pay-earnings.js';
 import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../services/chart-readiness.js';
@@ -380,6 +380,13 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
 
       const oldText = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
       const cleaned = cleanProseForSave(body.txt);
+      // PHYSICIAN-ONLY §VII GATE (Puller, 2026-06-24): the Section VII medical opinion is the
+      // physician's own legal determination — an RN (ops_staff) must not edit it through ANY door.
+      // Only fires when §VII ACTUALLY changed, so an RN editing §I/§III/etc. still saves freely.
+      // In addition to (not replacing) the existing ops_staff && physician_review lock above.
+      if (sectionViiChanged(oldText, cleaned) && user.role !== 'physician' && user.role !== 'admin') {
+        throw new HttpError(403, 'forbidden', 'Section VII (the medical opinion) can only be edited by a physician. If edits are required, please pass them in a message when submitting for review.', { reason: 'section_vii_physician_only', caseId });
+      }
       const warnings: SanityFinding[] = sanityCheckLetterText(oldText, cleaned);
 
       const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
@@ -505,11 +512,17 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         if (body.proposal === undefined) throw new HttpError(400, 'bad_request', 'apply:true requires proposal', { caseId });
         const applied = applyStructuredEdit(oldText, body.proposal);
         if (!applied.ok) throw new HttpError(422, 'conflict', `surgical edit no longer applies: ${applied.error}`, { reason: 'edit_unappliable', caseId });
-        // §VII HOLDING LOCK at APPLY (defense-in-depth, Guided Revision 2026-06-13): the holding can
-        // never change through ANY structured-edit door, even a hand-crafted apply payload that
-        // bypassed the propose-time guard. Cheap deterministic re-check on the would-be letter.
-        if (holdingChanged(oldText, applied.newText)) {
-          throw new HttpError(422, 'conflict', 'This edit would alter the Section VII opinion / legal holding, which is locked. Edit cannot be applied.', { reason: 'holding_changed', caseId });
+        // §VII HOLDING-CONCLUSION LOCK at APPLY (NARROWED — Puller, 2026-06-24): the probability
+        // conclusion ("more likely than not (>50%)") can never weaken/vanish through ANY structured-
+        // edit door, even a hand-crafted apply payload that bypassed propose. The CAUSAL THEORY wording
+        // (caused by <-> aggravated by) MAY change — only the >50% holding is locked. Cheap re-check.
+        if (holdingConclusionWeakened(oldText, applied.newText)) {
+          throw new HttpError(422, 'conflict', "This edit would weaken or remove the 'more likely than not (>50%)' opinion, which is locked. You may change the causal theory wording, but the >50% conclusion must remain.", { reason: 'holding_changed', caseId });
+        }
+        // PHYSICIAN-ONLY §VII GATE (Puller, 2026-06-24): an RN (ops_staff) may not change Section VII
+        // through the surgical-AI door either. Only fires when §VII actually changed.
+        if (sectionViiChanged(oldText, applied.newText) && user.role !== 'physician' && user.role !== 'admin') {
+          throw new HttpError(403, 'forbidden', 'Section VII (the medical opinion) can only be edited by a physician. If edits are required, please pass them in a message when submitting for review.', { reason: 'section_vii_physician_only', caseId });
         }
         const warnings: SanityFinding[] = sanityCheckLetterText(oldText, applied.newText);
         const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
@@ -577,23 +590,35 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         // DROPPED citation/stat => return WITH a warning the physician must see before accepting.
         const citationDiff: CitationDiff = diffCitations(passage, out.proposal.new_text);
 
-        // §VII HOLDING LOCK: even if the highlighted passage overlaps Section VII, the legal holding
-        // ("at least as likely as not" / CFR cite) can NEVER change. Computed on the would-be letter.
-        const holdingWouldChange = dry.ok ? holdingChanged(oldText, dry.newText) : false;
+        // §VII HOLDING-CONCLUSION LOCK (NARROWED — Puller, 2026-06-24): even if the highlighted
+        // passage overlaps Section VII, the PROBABILITY conclusion ("more likely than not (>50%)")
+        // can NEVER weaken or vanish. The CAUSAL THEORY wording (caused by <-> aggravated by) MAY
+        // change. Computed on the would-be letter.
+        const holdingWouldChange = dry.ok ? holdingConclusionWeakened(oldText, dry.newText) : false;
+        // PHYSICIAN-ONLY §VII GATE (Puller, 2026-06-24): an RN (ops_staff) must not be able to even
+        // PROPOSE a §VII change. Block here before returning the proposal (no write happens, but the
+        // RN cannot generate a §VII edit). Only fires when §VII actually changed.
+        const sectionViiWouldChange = dry.ok ? sectionViiChanged(oldText, dry.newText) : false;
 
         // Log the propose (cost recorded here — the spend happens at propose, like surgical).
         await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_guided_revision_proposed', caseId, veteranId: c.veteranId, detailsJson: { instruction: body.instruction.slice(0, 500), model: out.model, costUsd: out.costUsd, appliable: dry.ok, addedCitations: citationDiff.added.length, removedCitations: citationDiff.removed.length, holdingWouldChange } } });
 
+        // PHYSICIAN-ONLY §VII GATE (Puller, 2026-06-24): an RN (ops_staff) cannot even GENERATE a §VII
+        // change through guided revision. Block the proposal before any other handling.
+        if (sectionViiWouldChange && user.role !== 'physician' && user.role !== 'admin') {
+          throw new HttpError(403, 'forbidden', 'Section VII (the medical opinion) can only be edited by a physician. If edits are required, please pass them in a message when submitting for review.', { reason: 'section_vii_physician_only', caseId });
+        }
+
         // REJECTIONS (medico-legal, bias to BLOCK) — never return an applyable proposal:
         //  1) the model invented a citation/stat;
-        //  2) the revision would change the §VII holding;
+        //  2) the revision would weaken/remove the §VII >50% holding conclusion;
         //  3) the edit does not deterministically apply.
         if (citationDiff.added.length > 0) {
           res.status(422).json({ error: { code: 'conflict', message: `Guided revision rejected: the revised passage introduces ${citationDiff.added.length} citation/statistic not present in the original (${citationDiff.added.map(describeToken).join(', ')}). A revision may reword prose around the cited facts but must never add a new citation or statistic.`, details: { reason: 'citation_invented', caseId, proposal: out.proposal, citationDiff, costUsd: out.costUsd } } });
           return;
         }
         if (holdingWouldChange) {
-          res.status(422).json({ error: { code: 'conflict', message: 'Guided revision rejected: the revision would alter the Section VII opinion / legal holding. The holding is locked and cannot be changed by an edit.', details: { reason: 'holding_changed', caseId, proposal: out.proposal, costUsd: out.costUsd } } });
+          res.status(422).json({ error: { code: 'conflict', message: "This edit would weaken or remove the 'more likely than not (>50%)' opinion, which is locked. You may change the causal theory wording, but the >50% conclusion must remain.", details: { reason: 'holding_changed', caseId, proposal: out.proposal, costUsd: out.costUsd } } });
           return;
         }
         if (!dry.ok) {

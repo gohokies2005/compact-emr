@@ -135,9 +135,90 @@ export function hasHoldingConclusion(text: string): boolean {
   return typeof text === 'string' && HOLDING_CONCLUSION_RE.test(text);
 }
 
+/**
+ * Holding STRENGTH tiers, so a downgrade is detectable even when both before/after still "have a
+ * conclusion" per hasHoldingConclusion. The FRN house standard is the STRONG one,
+ * "more likely than not (>50%)" — deliberately a notch above the bare "at least as likely as not"
+ * equipoise (see delivery-templates.ts comment). Ordinal: STRONG(2) > EQUIPOISE(1) > BELOW/NONE(0).
+ *
+ *   - STRONG    "more likely than not", ">50%", "greater than 50%", "a fifty percent or greater"
+ *   - EQUIPOISE "at least as likely as not", "50 percent or greater", "fifty percent or greater"
+ *   - BELOW     "less likely than not" / below-50% — NOT a grantable conclusion
+ *
+ * The lock blocks ANY decrease in this ordinal (STRONG->EQUIPOISE, STRONG->BELOW, EQUIPOISE->BELOW).
+ */
+const STRONG_STANDARD_RE = /\b(?:more likely than not|>=?\s*50\s*%|greater than\s*50\s*%|(?:at least )?a fifty percent or greater)\b/i;
+const EQUIPOISE_STANDARD_RE = /\b(?:at least as likely as not|fifty percent or greater|50\s*percent or greater)\b/i;
+const BELOW_FIFTY_RE = /\b(?:less likely than not|not at least as likely as not)\b/i;
+/** 2=strong, 1=equipoise, 0=below/none. A pure ordinal so downgrades are a simple comparison. */
+function holdingStrength(text: string): number {
+  if (typeof text !== 'string') return 0;
+  // BELOW must win even if a "50%" fragment lingers — "less likely than not" is the conclusion.
+  if (BELOW_FIFTY_RE.test(text) && !STRONG_STANDARD_RE.test(text)) return 0;
+  if (STRONG_STANDARD_RE.test(text)) return 2;
+  if (EQUIPOISE_STANDARD_RE.test(text)) return 1;
+  return 0;
+}
+
 /** Collapse whitespace + lowercase so trivial reflow is not treated as a holding change. */
 function normalizeHolding(s: string): string {
   return s.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * §VII HOLDING-CONCLUSION LOCK — NARROWED (Puller, 2026-06-24).
+ *
+ * Replaces holdingChanged() at the route call sites. Dr. Kasky's intent: a physician (or the AI on
+ * the physician's behalf) MAY change the CAUSAL THEORY wording of the opinion — e.g. "caused by"
+ * (3.310(a) causation) -> "aggravated by" (3.310(b) secondary aggravation), or which condition is
+ * primary/secondary. But the AI must NEVER change, weaken, or remove the probability conclusion: the
+ * "more likely than not (>50%)" determination is the load-bearing legal holding and is locked.
+ *
+ * Unlike holdingChanged (which froze the ENTIRE opinion sentence, so even a pure causation->
+ * aggravation rephrase was rejected — the Puller bug), this protects ONLY the probability clause.
+ *
+ * Returns true (BLOCK) iff the OLD letter HAD a holding conclusion AND the NEW letter no longer
+ * carries an equally-strong ">=50% / more likely than not" conclusion. Specifically blocks when:
+ *   - the new §VII opinion sentence is gone (extractOpinionSentence(new) === null) — destroyed/obscured;
+ *   - the new opinion no longer has ANY >=50% / "as likely as not" conclusion (the clause was removed);
+ *   - the standard was DOWNGRADED: the old opinion used the strong FRN "more likely than not (>50%)"
+ *     phrasing but the new one does not (e.g. dropped to the weaker "at least as likely as not", or to
+ *     "less likely than not" / below-50%).
+ *
+ * Returns false (ALLOW) when the >=50% conclusion survives intact at the SAME strength, even though
+ * the causal verb (caused by <-> aggravated by) or other surrounding wording changed.
+ *
+ * Conservatism (bias to block, medico-legal): when the OLD letter has no detectable holding (a
+ * non-canonical letter), there is nothing to protect and we return false.
+ */
+export function holdingConclusionWeakened(oldLetter: string, newLetter: string): boolean {
+  const before = extractOpinionSentence(oldLetter);
+  if (before === null || !hasHoldingConclusion(before)) return false; // nothing to protect
+  const after = extractOpinionSentence(newLetter);
+  if (after === null) return true; // the holding sentence was destroyed/obscured — refuse
+  if (!hasHoldingConclusion(after)) return true; // the >=50% / as-likely-as-not clause was removed
+  // Strength downgrade: ANY decrease in the holding ordinal (STRONG->EQUIPOISE, ->BELOW, EQUIPOISE->
+  // BELOW) is a weakening and is refused. An equal or higher strength survives (the causal verb may
+  // still have changed — that is allowed).
+  if (holdingStrength(after) < holdingStrength(before)) return true;
+  return false; // the >=50% conclusion survives at >= the same strength — causal-verb changes are allowed
+}
+
+/**
+ * PHYSICIAN-ONLY §VII GATE helper (Puller, 2026-06-24).
+ *
+ * Did the Section VII medical opinion change at all between two letter texts? Compares the FULL §VII
+ * prose (extractOpinionFull) normalized (whitespace-collapsed, trimmed, lowercased — same style as
+ * normalizeHolding). Used by the routes to gate ANY §VII edit behind the physician/admin role, while
+ * still letting an RN edit non-§VII sections (§I/§III…). A null<->non-null transition, or any content
+ * difference, counts as changed; both-null (no §VII in either) returns false.
+ */
+export function sectionViiChanged(oldLetter: string, newLetter: string): boolean {
+  const before = extractOpinionFull(oldLetter);
+  const after = extractOpinionFull(newLetter);
+  if (before === null && after === null) return false;
+  if (before === null || after === null) return true;
+  return normalizeHolding(before) !== normalizeHolding(after);
 }
 
 /** Extract the Section VIII reference lines (numbered or bulleted), in order. */

@@ -342,6 +342,141 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
       expect(res.status).toBe(422);
       expect(res.body.error.details.reason).toBe('holding_changed');
     });
+
+    // ── NARROWED holding lock + physician-only §VII gate (Puller, 2026-06-24) ───────────────────
+    // A letter whose §VII uses the STRONG FRN standard so a causation->aggravation rephrase that keeps
+    // ">50%" is ALLOWED, but a weakening to "at least as likely as not" is BLOCKED.
+    const MLTN_LETTER = [
+      '**I. Physician Qualifications**',
+      'I, Ryan J. Kasky, DO, am board-certified in Family Medicine.',
+      '',
+      '**III. History**',
+      'The veteran served on active duty from 2003 to 2009.',
+      '',
+      '**VII. Opinion**',
+      "**It is my opinion that the veteran's hypertension is more likely than not (greater than 50% probability) proximately caused by his service-connected PTSD, under 38 CFR 3.310(a).**",
+      '',
+      '**VIII. References**',
+      '1. Smith 2019.',
+    ].join('\n');
+    const MLTN_HOLDING = "**It is my opinion that the veteran's hypertension is more likely than not (greater than 50% probability) proximately caused by his service-connected PTSD, under 38 CFR 3.310(a).**";
+    function mltnDeps(over: Partial<LetterRouterDeps> = {}): LetterRouterDeps {
+      return deps({
+        s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => MLTN_LETTER } })) } as unknown as LetterRouterDeps['s3'],
+        ...over,
+      });
+    }
+
+    it('APPLY: a physician causation->aggravation rephrase that KEEPS >50% is ALLOWED (the Puller fix)', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      const aggravated = MLTN_HOLDING.replace('proximately caused by', 'aggravated by').replace('3.310(a)', '3.310(b)');
+      const d = mltnDeps();
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ apply: true, proposal: { operation: 'replace', anchor_text: MLTN_HOLDING, new_text: aggravated } });
+      expect(res.status).toBe(200);
+      expect(res.body.data.version).toBe(2);
+    });
+
+    it('APPLY: weakening >50% to "at least as likely as not" is BLOCKED (422 holding_changed) even for a physician', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      const weakened = MLTN_HOLDING.replace('more likely than not (greater than 50% probability)', 'at least as likely as not');
+      const d = mltnDeps();
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ apply: true, proposal: { operation: 'replace', anchor_text: MLTN_HOLDING, new_text: weakened } });
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('holding_changed');
+    });
+
+    it('APPLY: ops_staff editing §VII is BLOCKED (403 section_vii_physician_only)', async () => {
+      // ops_staff on a NON-physician_review status (drafting) — the older 409 lock does not fire, so
+      // the new physician-only §VII gate is what blocks. The edit keeps >50% (so it is not holding_changed).
+      mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+      const aggravated = MLTN_HOLDING.replace('proximately caused by', 'aggravated by').replace('3.310(a)', '3.310(b)');
+      const d = mltnDeps();
+      const res = await request(appFor(makeDb(baseCase({ status: 'drafting' })).db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ apply: true, proposal: { operation: 'replace', anchor_text: MLTN_HOLDING, new_text: aggravated } });
+      expect(res.status).toBe(403);
+      expect(res.body.error.details.reason).toBe('section_vii_physician_only');
+    });
+
+    it('APPLY: ops_staff editing a NON-§VII section is ALLOWED (the gate is §VII-scoped)', async () => {
+      mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+      const d = mltnDeps();
+      const res = await request(appFor(makeDb(baseCase({ status: 'drafting' })).db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ apply: true, proposal: { operation: 'replace', anchor_text: 'The veteran served on active duty from 2003 to 2009.', new_text: 'The veteran served on active duty from 2003 to 2010.' } });
+      expect(res.status).toBe(200);
+      expect(res.body.data.version).toBe(2);
+    });
+
+    it('PROPOSE (guided): ops_staff cannot even GENERATE a §VII change (403 section_vii_physician_only)', async () => {
+      mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+      const aggravated = MLTN_HOLDING.replace('proximately caused by', 'aggravated by').replace('3.310(a)', '3.310(b)');
+      const d = mltnDeps({ proposeSurgicalEdit: vi.fn(async (i: { passage?: string }) => ({ proposal: { operation: 'replace' as const, anchor_text: i.passage ?? MLTN_HOLDING, new_text: aggravated }, costUsd: 0.03, model: 'claude-opus-4-8' })) });
+      const res = await request(appFor(makeDb(baseCase({ status: 'drafting' })).db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: MLTN_HOLDING, instruction: 'switch to aggravation' });
+      expect(res.status).toBe(403);
+      expect(res.body.error.details.reason).toBe('section_vii_physician_only');
+    });
+
+    it('PROPOSE (guided): a physician causation->aggravation rephrase keeping >50% is ACCEPTED', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      const aggravated = MLTN_HOLDING.replace('proximately caused by', 'aggravated by').replace('3.310(a)', '3.310(b)');
+      const d = mltnDeps({ proposeSurgicalEdit: vi.fn(async (i: { passage?: string }) => ({ proposal: { operation: 'replace' as const, anchor_text: i.passage ?? MLTN_HOLDING, new_text: aggravated }, costUsd: 0.03, model: 'claude-opus-4-8' })) });
+      const res = await request(appFor(makeDb(baseCase({ status: 'drafting' })).db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: MLTN_HOLDING, instruction: 'switch to aggravation' });
+      expect(res.status).toBe(200);
+      expect(res.body.data.preview).toContain('aggravated by');
+    });
+  });
+
+  // ── PUT save — physician-only §VII gate (Puller, 2026-06-24) ─────────────────────────────────
+  describe('PUT save — §VII physician-only gate', () => {
+    const PUT_LETTER = [
+      '**I. Physician Qualifications**',
+      'I, Ryan J. Kasky, DO, am board-certified in Family Medicine.',
+      '',
+      '**III. History**',
+      'The veteran served on active duty from 2003 to 2009.',
+      '',
+      '**VII. Opinion**',
+      "**It is my opinion that the veteran's hypertension is more likely than not (greater than 50% probability) proximately caused by his service-connected PTSD, under 38 CFR 3.310(a).**",
+      '',
+      '**VIII. References**',
+      '1. Smith 2019.',
+    ].join('\n');
+    function putDeps(over: Partial<LetterRouterDeps> = {}): LetterRouterDeps {
+      return deps({
+        s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => PUT_LETTER } })) } as unknown as LetterRouterDeps['s3'],
+        ...over,
+      });
+    }
+
+    it('ops_staff saving a §VII change is BLOCKED (403 section_vii_physician_only)', async () => {
+      mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+      const edited = PUT_LETTER.replace('proximately caused by', 'aggravated by');
+      const res = await request(appFor(makeDb(baseCase({ status: 'drafting' })).db, putDeps())).put('/api/v1/cases/CASE-1/letter')
+        .send({ base_version: 1, txt: edited });
+      expect(res.status).toBe(403);
+      expect(res.body.error.details.reason).toBe('section_vii_physician_only');
+    });
+
+    it('ops_staff saving a NON-§VII change is ALLOWED', async () => {
+      mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+      const edited = PUT_LETTER.replace('2003 to 2009', '2003 to 2010');
+      const res = await request(appFor(makeDb(baseCase({ status: 'drafting' })).db, putDeps())).put('/api/v1/cases/CASE-1/letter')
+        .send({ base_version: 1, txt: edited });
+      expect(res.status).toBe(200);
+      expect(res.body.data.version).toBe(2);
+    });
+
+    it('physician saving a §VII causation->aggravation change keeping >50% is ALLOWED', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      const edited = PUT_LETTER.replace('proximately caused by', 'aggravated by').replace('3.310(a)', '3.310(b)');
+      const res = await request(appFor(makeDb().db, putDeps())).put('/api/v1/cases/CASE-1/letter')
+        .send({ base_version: 1, txt: edited });
+      expect(res.status).toBe(200);
+      expect(res.body.data.version).toBe(2);
+    });
   });
 
   it('approve is BLOCKED (409) when no sign-off exists', async () => {

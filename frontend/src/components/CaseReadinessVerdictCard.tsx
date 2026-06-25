@@ -2,18 +2,19 @@ import { useQuery } from '@tanstack/react-query';
 import { getStrategyPreview } from '../api/strategy-preview';
 import { getCaseViability } from '../api/case-viability';
 import { getExtractionCoverage } from '../api/extraction-coverage';
-import { getSanityImpression, type SanityContextInput } from '../api/sanity-impression';
 import { computeReadinessVerdict, type ReadinessVerdict, type Confidence } from '../lib/caseReadinessVerdict';
 import { SectionCard } from './ui/SectionCard';
 
 // Case Readiness Verdict (2026-06-18, Cluster 3) — the ONE top-line go/no-go that reconciles the
-// Overview's four engines so an RN doesn't have to read four contradictory chips. Pure PRESENTATION
+// Overview's engines so an RN doesn't have to read several contradictory chips. Pure PRESENTATION
 // of computeReadinessVerdict (the one brain); it makes no decision of its own and fires NO model call:
 //  • strategy-preview + viability-card + extraction-coverage: shared React-Query keys (RQ dedupes →
 //    no extra requests; same data the cards below already fetch).
-//  • sanity-impression: read from the cache ONLY (enabled:false) — the AI Sanity Check card owns the
-//    one Opus call; this never triggers a second one. Absent cache → 'unavailable' (NOT 'clear'), so
-//    the verdict stays honest until the gut-check lands, then re-renders to fold it in (add-caution-only).
+// ONE-BRAIN (Ryan #68/#72, 2026-06-25): the divergent PRE-DRAFT sanity-impression brain is retired.
+// This card NO LONGER reads it (the cache read is gone) — the verdict defers to the route-picker plan
+// (the single LLM brain) via the viability band. sanity is passed null → the asymmetric add-caution-only
+// overlay is inert (it never relaxed a caution anyway). The POST-draft letter check still runs on the
+// finished draft elsewhere (PostDraftSanityImpression), a separate concern.
 // Advisory — does not block drafting; Gate-2 supersedes. Sits ABOVE the detailed cards as the headline.
 
 const VERDICT_TONE: Record<ReadinessVerdict, string> = {
@@ -50,13 +51,8 @@ export function CaseReadinessVerdictCard({ caseId, claimedCondition, hasUnreadPa
   const strategyQ = useQuery({ queryKey: ['case', caseId, 'strategy-preview'], queryFn: () => getStrategyPreview(caseId), enabled });
   const viabilityQ = useQuery({ queryKey: ['case', caseId, 'viability-card'], queryFn: () => getCaseViability(caseId), enabled });
   const coverageQ = useQuery({ queryKey: ['case', caseId, 'extraction-coverage'], queryFn: () => getExtractionCoverage(caseId), enabled });
-  // READ-ONLY cache read of the pre-draft sanity impression (the AI Sanity Check card owns the call).
-  // enabled:false → never fetches; same key the card uses (stage 'pre_draft', draftText length 0).
-  const sanityQ = useQuery({
-    queryKey: ['case', caseId, 'sanity-impression', 'pre_draft', 0],
-    queryFn: () => getSanityImpression(caseId, { stage: 'pre_draft', claimedCondition } as SanityContextInput),
-    enabled: false,
-  });
+  // PRE-DRAFT sanity-impression RETIRED (Ryan #68/#72, 2026-06-25): the divergent second LLM brain is gone.
+  // The verdict defers to the route-picker plan; sanity is null below (inert add-caution-only overlay).
 
   // CHART-ANALYSIS SAFETY (Ryan 2026-06-23): feed Stage-2 analysis state into the verdict; fail SAFE while the
   // coverage query is loading/errored (state unknown → never a confident verdict). A resolved-but-null coverage
@@ -66,7 +62,7 @@ export function CaseReadinessVerdictCard({ caseId, claimedCondition, hasUnreadPa
     viability: viabilityQ.data?.data ?? null,
     hasUnreadPages: hasUnreadPages ?? null,
     extraction: coverageQ.data?.data ?? null,
-    sanity: sanityQ.data?.data?.impression ?? null,
+    sanity: null, // pre-draft sanity brain retired (one-brain) — defer to the route-picker plan
     chartAnalysisState: coverageQ.data?.data?.chartAnalysis?.state ?? null,
     chartAnalysisUnknown: coverageQ.isLoading || coverageQ.isError,
   });

@@ -3,7 +3,6 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getStrategyPreview } from '../api/strategy-preview';
 import { getCaseViability, computeCaseViability, getSoapNote, type SoapContextInput, type SoapNoteResult } from '../api/case-viability';
 import { getExtractionCoverage } from '../api/extraction-coverage';
-import { getSanityImpression, type SanityContextInput } from '../api/sanity-impression';
 import { computeReadinessVerdict, type ReadinessVerdict } from '../lib/caseReadinessVerdict';
 import { soapHeadline } from '../lib/soapHeadline';
 
@@ -79,11 +78,8 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
       return inFlight && polls < 60 ? 5000 : false;
     },
   });
-  const sanityQ = useQuery({
-    queryKey: ['case', caseId, 'sanity-impression', 'pre_draft', 0],
-    queryFn: () => getSanityImpression(caseId, { stage: 'pre_draft', claimedCondition } as SanityContextInput),
-    enabled: false,
-  });
+  // PRE-DRAFT sanity-impression RETIRED (Ryan #68/#72, 2026-06-25): the divergent second LLM brain is gone.
+  // This card defers to the route-picker plan (the one brain); sanity is passed null to computeReadinessVerdict.
 
   const strategy = strategyQ.data?.data ?? null;
   const v = viabilityQ.data?.data ?? null;
@@ -104,7 +100,7 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
     strategy, viability: v,
     hasUnreadPages: hasUnreadPages ?? null,
     extraction: covData,
-    sanity: sanityQ.data?.data?.impression ?? null,
+    sanity: null, // pre-draft sanity brain retired (one-brain) — defer to the route-picker plan
     routePickerViability: aiStateForChip?.status === 'ready' ? aiStateForChip.card.viability : null,
     chartAnalysisState,
     chartAnalysisUnknown,

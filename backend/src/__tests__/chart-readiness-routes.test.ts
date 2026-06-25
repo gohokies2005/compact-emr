@@ -180,7 +180,9 @@ describe('chart-readiness routes', () => {
   beforeEach(() => { mockUser = { sub: 'OPS-SUB', roles: ['ops_staff'] }; });
 
   describe('POST /cases/:id/sanity-impression — Opus cache dedup (cost-safety 2026-06-18)', () => {
-    const body = { stage: 'pre_draft', claimedCondition: 'OSA', theory: 'secondary to PTSD', scConditions: ['PTSD 70%'], keyFacts: ['CPAP in chart'] };
+    // POST-DRAFT only (the surviving check). The pre-draft second brain is retired (Ryan #68/#72, 2026-06-25).
+    const draftText = 'This is a drafted nexus letter. '.repeat(20); // >=200 chars so it's a real post-draft context
+    const body = { stage: 'post_draft', claimedCondition: 'OSA', theory: 'secondary to PTSD', scConditions: ['PTSD 70%'], keyFacts: ['CPAP in chart'], draftText };
     it('an identical re-fire is served from cache — Opus runs ONCE, not on every page open', async () => {
       vi.mocked(buildSanityImpression).mockClear();
       const { db } = makeDb();
@@ -197,6 +199,31 @@ describe('chart-readiness routes', () => {
       await request(app).post('/api/v1/cases/CASE-1/sanity-impression').send(body).expect(200);
       await request(app).post('/api/v1/cases/CASE-1/sanity-impression').send({ ...body, theory: 'DIFFERENT theory' }).expect(200);
       expect(buildSanityImpression).toHaveBeenCalledTimes(2); // changed inputs → fresh Opus call (correct)
+    });
+  });
+
+  describe('POST /cases/:id/sanity-impression — pre-draft second brain RETIRED (one-brain, Ryan #68/#72)', () => {
+    it('refuses stage=pre_draft at the seam: returns {data:null} and NEVER fires the Opus call', async () => {
+      vi.mocked(buildSanityImpression).mockClear();
+      const { db } = makeDb();
+      const app = appFor(db);
+      const r = await request(app)
+        .post('/api/v1/cases/CASE-1/sanity-impression')
+        .send({ stage: 'pre_draft', claimedCondition: 'OSA', theory: 'secondary to PTSD' })
+        .expect(200);
+      expect(r.body.data).toBeNull();
+      expect(buildSanityImpression).not.toHaveBeenCalled(); // the divergent pre-draft brain never runs
+    });
+    it('refuses a missing/absent stage (defaults are NOT pre_draft-evaluated): returns {data:null}, no Opus call', async () => {
+      vi.mocked(buildSanityImpression).mockClear();
+      const { db } = makeDb();
+      const app = appFor(db);
+      const r = await request(app)
+        .post('/api/v1/cases/CASE-1/sanity-impression')
+        .send({ claimedCondition: 'OSA', theory: 'secondary to PTSD' })
+        .expect(200);
+      expect(r.body.data).toBeNull();
+      expect(buildSanityImpression).not.toHaveBeenCalled();
     });
   });
 

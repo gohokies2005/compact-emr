@@ -330,11 +330,14 @@ export function createChartReadinessRouter(db: AppDb): Router {
    * conditions, a one-line coverage note, and POST-DRAFT the draft text + grade); the server runs the
    * Opus check and returns the impression, or null (fail-open — never blocks). admin/ops_staff/physician.
    *
-   * RETIREMENT NOTE (2026-06-25, Ryan, item #68): the PRE-DRAFT "AI Sanity Check" card was retired from
-   * the UI (CaseDetailPage). It re-derived the theory skeptically and produced a misleading wrong-theory
-   * note that contradicted the SOAP overview's holistic read. This route + buildSanityImpression + the
-   * sanity-impression service/table are LEFT IN PLACE (unused for pre_draft) so the change is reversible
-   * without touching the DB/migrations. The POST-draft impression line still calls this with stage=post_draft.
+   * RETIREMENT NOTE (2026-06-25, Ryan, items #68/#72 — one-brain): the PRE-DRAFT "AI Sanity Check" was a
+   * SECOND LLM brain that re-derived the theory independently and could contradict the route-picker plan
+   * (the Wickel "tinnitus note" divergence). It is RETIRED. The UI callers no longer assemble or read a
+   * pre_draft impression, and THIS ROUTE now hard-refuses stage='pre_draft' at the seam (returns the
+   * fail-open {data:null} WITHOUT calling buildSanityImpression) so no pre-draft Opus call can fire even
+   * from a stale client. buildSanityImpression + the sanity-impression service/table are LEFT IN PLACE so
+   * the change is reversible without touching the DB/migrations. The POST-draft check (a read of the
+   * FINISHED letter, not a pre-draft theory re-derivation) still calls this with stage='post_draft'.
    *
    * Accepting client-assembled context is intentional: this is an internal staff tool with no security
    * boundary on these fields (the same data the client already renders), and it avoids re-plumbing five
@@ -352,6 +355,11 @@ export function createChartReadinessRouter(db: AppDb): Router {
       const str = (v: unknown, cap: number): string | null => (typeof v === 'string' && v.trim().length > 0 ? v.trim().slice(0, cap) : null);
       const claimedCondition = str(b['claimedCondition'], 200);
       if (claimedCondition === null) { res.json({ data: null }); return; } // nothing to judge → no spend
+      // ONE-BRAIN SEAM GUARD (Ryan #68/#72, 2026-06-25): the PRE-DRAFT sanity-impression is a retired
+      // second brain. Refuse it here so no pre_draft Opus call can fire even from a stale client/cache —
+      // return the fail-open contract ({data:null}) WITHOUT calling buildSanityImpression. POST-draft (a
+      // check on the finished letter) is unaffected.
+      if (b['stage'] !== 'post_draft') { res.json({ data: null }); return; }
       const arr = (v: unknown, n: number, cap: number): string[] =>
         Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, n).map((s) => s.slice(0, cap)) : [];
 

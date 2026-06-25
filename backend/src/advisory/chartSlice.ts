@@ -10,6 +10,7 @@ import type { AppDb } from '../services/db-types.js';
 import { redactPhi } from './phiRedactor.js';
 import { listVeteranCorrespondence } from '../services/gmail-readonly.js';
 import { deriveCaseFramingForCase } from '../services/case-framing-stamp.js';
+import { reconcileScConditions } from '../services/sc-reconcile.js';
 import type { CaseFraming } from '../services/case-framing.js';
 import {
   buildDocumentDigest,
@@ -70,7 +71,8 @@ export function formatChartSlice(d: ChartSliceData): { text: string; conditions:
   lines.push('Service-connected conditions of record:');
   if (d.scConditions.length === 0) lines.push('  (none recorded)');
   for (const s of d.scConditions) {
-    lines.push(`  - ${s.condition}${s.ratingPct != null ? ` (${s.ratingPct}%)` : ''}${s.dcCode ? ` [DC ${s.dcCode}]` : ''} — ${s.status}`);
+    const conflict = (s as { statusConflict?: boolean }).statusConflict ? ' (CONFLICTING status on file — service-connected AND denied; verify before relying on it)' : '';
+    lines.push(`  - ${s.condition}${s.ratingPct != null ? ` (${s.ratingPct}%)` : ''}${s.dcCode ? ` [DC ${s.dcCode}]` : ''} — ${s.status}${conflict}`);
   }
   lines.push('');
   lines.push('Active problem list:');
@@ -296,7 +298,10 @@ export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartS
     claimedCondition: c.claimedCondition,
     claimedConditions: c.claimedConditions ?? [],
     upstreamScCondition: c.upstreamScCondition,
-    scConditions: c.veteran?.scConditions ?? [],
+    // Reconcile so Ask Aegis sees the SAME collapsed SC list the chart UI + drafter do —
+    // otherwise the "PTSD shown SC and pending" contradiction just moves into the AI answer
+    // (QA finding, 2026-06-20). Same read-time helper; statusConflict rides along when relevant.
+    scConditions: reconcileScConditions(c.veteran?.scConditions ?? []),
     activeProblems: c.veteran?.activeProblems ?? [],
     activeMedications: c.veteran?.activeMedications ?? [],
     veteranStatement: c.veteranStatement,

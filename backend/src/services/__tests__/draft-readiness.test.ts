@@ -152,6 +152,26 @@ describe('evaluateDraftReadiness — same-brain (route-picker plan + chart facts
     expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(true);
   });
 
+  // #65 (Ryan 2026-06-20): the dx was on file as an SC condition but NOT in the problem list →
+  // the old problem-list-only check falsely said "missing". A granted SC condition now counts as
+  // the dx, synonym-folded (PTSD ≡ post-traumatic stress disorder via normalizeName).
+  it('#65 treats a granted SC condition as the current diagnosis even when NOT in the problem list (synonym-folded)', () => {
+    const r = evaluateDraftReadiness(base({
+      claimedCondition: 'PTSD', problemNames: ['Tinnitus'],
+      scConditionNames: ['Post-traumatic stress disorder'],
+    }));
+    expect(r.items.find((i) => i.key === 'current_diagnosis')!.present).toBe(true);
+  });
+
+  it('#65 still flags missing when the claim is in NEITHER the problem list NOR the SC list', () => {
+    const r = evaluateDraftReadiness(base({
+      claimedCondition: 'GERD', problemNames: ['Tinnitus'], scConditionNames: [], routePlan: null,
+    }));
+    const dx = r.missing.find((m) => m.key === 'current_diagnosis')!;
+    expect(dx).toBeDefined();
+    expect(dx.message).toContain('A current diagnosis for GERD is not on file');
+  });
+
   it('canonicalizer match: claim "OSA" is documented by an on-file "Obstructive sleep apnea" via the vendored canonicalizer', () => {
     // normalizeName already folds this synonym; this also exercises the canonical path on a problem-list entry.
     const r = evaluateDraftReadiness(base({ claimedCondition: 'OSA', problemNames: ['Obstructive sleep apnea'], scConditionNames: [] }));
@@ -325,6 +345,24 @@ describe('getDraftReadiness (db gather)', () => {
     });
     const r = await getDraftReadiness(db, 'CLM-1');
     expect(r!.ready).toBe(true);
+  });
+
+  // #65 loader-level: the dx is satisfied by a GRANTED SC condition even when absent from the
+  // problem list. getDraftReadiness threads the granted-SC condition names into scConditionNames,
+  // and getDraftReadiness queries ONLY status='service_connected' rows (pending/denied never reach
+  // the dx check — the query is the enforcement of "a claim/denial is not a diagnosis").
+  it('#65 loader: current_diagnosis present via a granted SC condition not in the problem list', async () => {
+    const db = mockDb({
+      caseRow: { veteranId: 'v1', claimType: 'initial', framingChoice: 'secondary', claimedCondition: 'PTSD', claimedConditions: [], inServiceEvent: 'in-service stressor' },
+      // The loader reads scConditionNames from scCondition.findMany (status='service_connected' only);
+      // give it the dx by name (folds to the PTSD claim via normalizeName) — NOT in the problem list.
+      granted: [{ condition: 'Post-traumatic stress disorder', status: 'service_connected' }],
+      problems: [{ problem: 'Tinnitus' }], // claimed dx NOT in the problem list
+      docs: [{ filename: 'DD-214.pdf', docTag: null }],
+    });
+    const r = await getDraftReadiness(db, 'CLM-1');
+    const dx = r!.items.find((i) => i.key === 'current_diagnosis')!;
+    expect(dx.present).toBe(true);
   });
 
   it('blocks when there are zero granted SC rows (the Armand case as it stands today)', async () => {

@@ -1,6 +1,7 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { reconcileChartReadiness } from './chart-readiness.js';
+import { reconcileScConditions } from './sc-reconcile.js';
 import { deriveChartBuildState, type ChartBuildState } from './chart-build-state.js';
 import type { AppDb } from './db-types.js';
 import type { CaseFraming } from './case-framing.js';
@@ -245,7 +246,12 @@ export async function buildDrafterBundle(db: AppDb, caseId: string, opts: BuildD
       cdsRationale: process.env['CDS_ENABLED'] === 'on' ? c.cdsRationale : null,
     },
     veteran,
-    scConditions,
+    // Reconcile same-condition SC rows to the authoritative status (service_connected >
+    // pending > denied) + fold synonyms, so the drafter sees ONE clean anchor per condition
+    // and the granted-SC count isn't inflated by dupes. Matches the UI reconcile. (2026-06-20)
+    scConditions: reconcileScConditions(
+      scConditions as ReadonlyArray<{ condition: string; status?: string | null; ratingPct?: number | null }>,
+    ),
     activeProblems,
     activeMedications,
     chartNotes,

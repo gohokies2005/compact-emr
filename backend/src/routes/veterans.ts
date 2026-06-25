@@ -13,6 +13,7 @@ import type {
   VeteranRecord,
 } from '../services/db-types.js';
 import { assertPatchAllowedForRoles, parseVeteranCreate, parseVeteranPatch } from '../services/veteran-validation.js';
+import { reconcileScConditions } from '../services/sc-reconcile.js';
 import {
   parseActiveMedicationCreate,
   parseActiveMedicationPatch,
@@ -204,7 +205,11 @@ export function createVeteransRouter(db: AppDb): Router {
         },
       });
       if (!veteran) throw new HttpError(404, 'not_found', 'Veteran was not found.');
-      res.json({ data: veteran });
+      // Collapse same-condition SC rows to the authoritative status before the UI sees them
+      // — "PTSD listed as both SC and pending" confused RNs (Ryan 2026-06-20). Read-time only;
+      // DB rows untouched (provenance preserved), so existing cases are fixed instantly.
+      const scRows = (veteran as unknown as { scConditions?: ReadonlyArray<{ condition: string; status?: string | null; ratingPct?: number | null }> }).scConditions ?? [];
+      res.json({ data: { ...veteran, scConditions: reconcileScConditions(scRows) } });
     }),
   );
 

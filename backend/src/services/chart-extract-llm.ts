@@ -22,6 +22,7 @@ import {
   dedupeIdenticalDocuments,
   splitChunkText,
   groundExtractedItem,
+  normalizeForQuoteMatch,
   chartDedupKey,
   normalizeName,
   dispositionForConfidence,
@@ -338,7 +339,7 @@ const EXTRACT_TOOL_COMBINED: Anthropic.Tool = {
             startDate: { type: 'string', description: 'active_medication only: the START/ISSUE date, verbatim, ONLY if a field labeled Start Date/Issued/Issue Date appears for THIS drug. NOT the note date, NOT the fill date. Else omit.' },
             lastSeenDate: { type: 'string', description: 'active_medication only: the Last Filled/Last Release date if labeled, OR — for a drug named inside a dated progress note — that note\'s date (when the drug was REFERENCED, not when it started/stopped). Else omit.' },
             score: { type: 'string', description: 'screening only: the score as written (e.g. "18", "2/5", "moderate").' },
-            screenDate: { type: 'string', description: 'screening only: the date the screen was administered, if stated.' },
+            screenDate: { type: 'string', description: 'screening only: the administration/collection date of THIS screen, copied EXACTLY as written in the doc (e.g. "04/12/2026", "April 12, 2026", "2026-04-12", or a "Date of visit/administration" / header / column date next to the score). Omit if no date is shown for this screen — never invent one. The date must appear somewhere on this same [p.N] page.' },
             sourcePage: { type: 'integer', description: 'The [p.N] page number this item appears on.' },
             sourceQuote: { type: 'string', description: 'A short VERBATIM substring from that page proving the item (copy exactly).' },
             confidence: { type: 'number', description: '0..1 — how clearly this is an explicit charted item (not a prose mention).' },
@@ -441,7 +442,14 @@ export function combinedSystemPrompt(): string {
     '  "[p.88] 06/14/2022 Progress Note ... Patient reports starting sertraline last month, tolerating well." → {category:active_medication, name:"sertraline", medStatus:"historical", lastSeenDate:"06/14/2022", sourceQuote:"06/14/2022 Progress Note ... starting sertraline"} (startDate omitted — "last month" is not a written date).',
     // PRECISION GUARD (Ryan standing rule: a screen is NOT a diagnosis): keep screening instruments
     // out of the problem/condition rows so a positive score never becomes a fabricated dx.
-    'SCREENS ARE NOT DIAGNOSES: PHQ-9, GAD-7, PC-PTSD-5, AUDIT-C and similar screening scores are DATA POINTS, not conditions. Capture each as category "screening" with name=instrument, score, and screenDate if stated (the screenDate MUST appear inside the sourceQuote — quote the line containing it — or omit it). NEVER emit a screen as an active_problem or sc_condition, and never turn a positive screen into a diagnosis — only an actual charted diagnosis or a VA service-connection determination is a condition.',
+    // SCREENING DATE CAPTURE (Dr. Kasky #70, 2026-06-25): the read works but dates came back empty. The
+    // administration date almost always IS on the page — in a header ("Date: 04/12/2026"), a row label, a
+    // "Date of visit/administration" field, or a column beside the score — just not always on the same
+    // line as the score. Always capture it into screenDate (verbatim) when it is anywhere on the page;
+    // prefer a sourceQuote that also contains the date when you can. Common formats: MM/DD/YYYY, "Month DD,
+    // YYYY", YYYY-MM-DD. Copy it exactly — do NOT reformat. Omit screenDate only when no date for the screen
+    // appears on the page; never invent one.
+    'SCREENS ARE NOT DIAGNOSES: PHQ-9, GAD-7, PC-PTSD-5, AUDIT-C and similar screening scores are DATA POINTS, not conditions. Capture each as category "screening" with name=instrument, score, and screenDate — the administration/collection date copied EXACTLY as written, whenever a date for that screen appears anywhere on the page (header, "Date of visit/administration" field, row label, or column beside the score). Common formats: MM/DD/YYYY, "Month DD, YYYY", YYYY-MM-DD. Omit screenDate only if no date is shown for the screen; never invent one. NEVER emit a screen as an active_problem or sc_condition, and never turn a positive screen into a diagnosis — only an actual charted diagnosis or a VA service-connection determination is a condition.',
     'This chunk may contain none, some, or all three categories. Return every item you find; return an empty items array if there are none.',
   ].join('\n');
 }
@@ -510,15 +518,41 @@ export function coerceScreenings(toolInput: unknown, documentId: string): Screen
   return out;
 }
 
+/**
+ * Date anti-fabrication for a screening (Dr. Kasky #70, 2026-06-25). The recurring miss was NOT the
+ * read — the model captures the score — it was the DATE coming back empty. Root cause: the old gate
+ * required the date to be a RAW substring of the short proving-quote (`sourceQuote.includes(date)`).
+ * A screening's administration date sits on the SAME page as the score but routinely on a different
+ * line (a header "Date: 04/12/2026", a row label, a separate column), so the short score-quote rarely
+ * contains it — and OCR whitespace/case noise breaks even a raw match when it does. The date was
+ * therefore nulled despite being plainly in the document.
+ *
+ * Fix: keep the anti-fabrication contract (a date must genuinely appear in the source) but prove it
+ * the SAME tolerant way groundExtractedItem already proves the quote — normalized (lowercase, collapsed
+ * whitespace) — and against the whole CITED PAGE, not just the short quote. Quote-on-page + date-on-
+ * SAME-cited-page = the date is in the document; an invented date present nowhere on the page is still
+ * nulled. Substring match only — never parse/normalize the date value itself (that is where the
+ * Jotform-TZ class of date-format bugs creep in); we surface the date verbatim as the model copied it.
+ */
+function dateGroundedOnPage(documents: BundleDocument[], s: ScreeningResult): boolean {
+  if (!s.date) return false;
+  const doc = documents.find((d) => d.id === s.sourceDocumentId);
+  const page = doc?.pages.find((p) => p.pageNumber === s.sourcePage);
+  if (!page) return false;
+  const needle = normalizeForQuoteMatch(s.date);
+  if (needle.length === 0) return false;
+  return normalizeForQuoteMatch(page.text).includes(needle);
+}
+
 /** Pure: ground screenings (verbatim quote on the cited page) + dedup on (instrument, date, score). */
 export function groundScreenings(documents: BundleDocument[], raw: ScreeningResult[]): ScreeningResult[] {
   const seen = new Set<string>();
   const out: ScreeningResult[] = [];
   for (const s0 of raw) {
     if (!groundExtractedItem(documents, s0)) continue;
-    // Same date anti-fabrication as meds: the gate proves the quote is on-page; require the date to
-    // be IN the quote or null it, so a screening date can't be off-page-invented and still pass.
-    const s: ScreeningResult = s0.date && !s0.sourceQuote.includes(s0.date) ? { ...s0, date: null } : s0;
+    // Keep the date only if it genuinely appears on the cited page (tolerant, normalized match — see
+    // dateGroundedOnPage). A date present nowhere on the page is fabricated → null it (fail-open).
+    const s: ScreeningResult = s0.date && !dateGroundedOnPage(documents, s0) ? { ...s0, date: null } : s0;
     const key = `${s.instrument.toLowerCase()}::${s.date ?? ''}::${s.score.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);

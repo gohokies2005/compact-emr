@@ -216,8 +216,42 @@ describe('groundScreenings — grounded + deduped screening data points', () => 
   it('keeps a screening date only when it is in the quote; nulls an unquoted date (anti-fabrication)', () => {
     const dated = { ...base, score: '18', sourceQuote: 'PHQ-9 score 18 administered 2024-03-01' }; // date IS in quote
     expect(groundScreenings(sdocs, [dated])[0]!.date).toBe('2024-03-01');
-    const unquoted = { ...base, score: '9', date: '01/01/2099', sourceQuote: 'PHQ-9 score 18' }; // 2099 not in quote
+    const unquoted = { ...base, score: '9', date: '01/01/2099', sourceQuote: 'PHQ-9 score 18' }; // 2099 not on page at all
     expect(groundScreenings(sdocs, [unquoted])[0]!.date).toBeNull();
+  });
+
+  // #70 ROOT FIX (Dr. Kasky 2026-06-25): the date sits on the SAME page as the score but on a
+  // DIFFERENT line than the short proving-quote. The old gate (date must be in the short quote) nulled
+  // a real on-page date; the new gate grounds the date against the whole cited page.
+  it('keeps a date that is on the cited page even when the short score-quote does NOT contain it', () => {
+    const hdrDocs: BundleDocument[] = [{ id: 'd', filename: 'bb.pdf', pages: [{ pageNumber: 7, text: 'Date: 04/12/2026\nPHQ-9 Depression Screen\nScore: 18 (moderately severe)' }] }];
+    const r = groundScreenings(hdrDocs, [{ ...base, sourcePage: 7, date: '04/12/2026', sourceQuote: 'Score: 18 (moderately severe)' }]);
+    expect(r[0]!.date).toBe('04/12/2026'); // recovered from the page header, not the quote
+  });
+
+  it('tolerates OCR whitespace/case noise between the date field value and the page text', () => {
+    const noisyDocs: BundleDocument[] = [{ id: 'd', filename: 'bb.pdf', pages: [{ pageNumber: 7, text: 'Administered  on   APRIL 12, 2026\nPHQ-9 18' }] }];
+    const r = groundScreenings(noisyDocs, [{ ...base, sourcePage: 7, date: 'April 12, 2026', sourceQuote: 'PHQ-9 18' }]);
+    expect(r[0]!.date).toBe('April 12, 2026'); // normalized substring match across the doubled spaces + case
+  });
+
+  it('grounds the common date formats (MM/DD/YYYY, Month DD YYYY, YYYY-MM-DD) when present on the page', () => {
+    const cases = [
+      { date: '04/12/2026', page: 'Visit date 04/12/2026 - GAD-7 score 11' },
+      { date: 'April 12, 2026', page: 'Date of administration: April 12, 2026 GAD-7 11' },
+      { date: '2026-04-12', page: 'collected 2026-04-12 GAD-7 11' },
+    ];
+    for (const c of cases) {
+      const d: BundleDocument[] = [{ id: 'd', filename: 'bb.pdf', pages: [{ pageNumber: 7, text: c.page }] }];
+      const r = groundScreenings(d, [{ ...base, instrument: 'GAD-7', score: '11', sourcePage: 7, date: c.date, sourceQuote: 'GAD-7' }]);
+      expect(r[0]!.date).toBe(c.date);
+    }
+  });
+
+  it('nulls a date that appears NOWHERE on the cited page (no crash, fail-open)', () => {
+    const r = groundScreenings(sdocs, [{ ...base, date: '12/31/1999', sourceQuote: 'PHQ-9 score 18' }]); // page 7 has no 1999
+    expect(r).toHaveLength(1);
+    expect(r[0]!.date).toBeNull();
   });
 });
 

@@ -37,6 +37,12 @@ describe('formatScreeningSummary', () => {
     expect(out).toContain('CLM-1');
   });
 
+  it('renders "date not documented" (not silently empty) for a screening with no date', () => {
+    const out = formatScreeningSummary([s('PCL-5', '72', null)], meta);
+    expect(out).toContain('date not documented - PCL-5 72');
+    expect(out).not.toContain('(undated)');
+  });
+
   it('routes an unknown instrument to OTHER SCREENS', () => {
     const out = formatScreeningSummary([s('Epworth Sleepiness Scale', '11', '2020-10-15'), s('Mystery Screen', 'pos', '2021-01-01')], meta);
     expect(out).toContain('SLEEP (Epworth / STOP-BANG)'); // Epworth matched

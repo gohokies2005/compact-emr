@@ -73,7 +73,7 @@ export function formatScreeningSummary(screenings: readonly ScreeningResult[], m
     rows.sort((a, b) => dateSortKey(a.date) - dateSortKey(b.date) || a.instrument.localeCompare(b.instrument));
     lines.push(title);
     for (const r of rows) {
-      lines.push(`  ${r.date ?? '(undated)'} - ${r.instrument} ${r.score} [p.${r.sourcePage}]`);
+      lines.push(`  ${r.date ?? 'date not documented'} - ${r.instrument} ${r.score} [p.${r.sourcePage}]`);
     }
     lines.push('');
   }

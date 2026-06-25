@@ -130,10 +130,129 @@ function valueNumericRuns(value: string): string[] {
 
 /** A numeric run is grounded if its EXACT form is in the chart's digit-run set OR (for a decimal) its integer
  *  part is — so "28.4" grounds against a chart that wrote "28.4" and "3.0" grounds against a chart that wrote
- *  "3". Conservative: never the reverse (an integer value does not ground against a decimal-only chart match). */
-function isRunGrounded(run: string, ctxDigits: ReadonlySet<string>): boolean {
+ *  "3". Conservative: never the reverse (an integer value does not ground against a decimal-only chart match).
+ *
+ *  TIGHTENED (QA AI-SME, 2026-06-25): the integer-for-decimal fallback now fires ONLY when NO decimal form of
+ *  that number appears ANYWHERE in the context — so "3.0"↔"3" still grounds (no "3.x" in the chart), but
+ *  "28.4" no longer grounds on a lone "28" when the chart's "28.x" reading is a DIFFERENT measurement (e.g.
+ *  the 28 is a count and 28.4 was the model's invention). `ctxDecimalIntParts` is the set of integer parts of
+ *  every DECIMAL run in the chart ("28.7"→"28"); if the run's integer part is in it, a competing decimal
+ *  exists → do NOT fall back. */
+function isRunGrounded(run: string, ctxDigits: ReadonlySet<string>, ctxDecimalIntParts?: ReadonlySet<string>): boolean {
   if (ctxDigits.has(run)) return true;
-  return run.includes('.') && ctxDigits.has(run.replace(/\.\d+$/, ''));
+  if (!run.includes('.')) return false;
+  const intPart = run.replace(/\.\d+$/, '');
+  if (!ctxDigits.has(intPart)) return false;
+  // Only fall back to the bare integer when the chart has NO competing decimal sharing that integer part.
+  if (ctxDecimalIntParts && ctxDecimalIntParts.has(intPart)) return false;
+  return true;
+}
+
+/** The set of integer parts of every DECIMAL numeric run in the context ("28.4"→"28", "3.1"→"3"). Used to
+ *  suppress the integer-for-decimal grounding fallback when a competing decimal reading exists (see
+ *  isRunGrounded). Pure. */
+function contextDecimalIntParts(ctxDigits: ReadonlySet<string>): Set<string> {
+  const s = new Set<string>();
+  for (const d of ctxDigits) {
+    if (d.includes('.')) s.add(d.replace(/\.\d+$/, ''));
+  }
+  return s;
+}
+
+// Label/unit synonym expansion for label-proximity grounding (QA AI-SME, 2026-06-25). A measurement's value
+// must appear NEAR a token of its label OR unit OR a recognized synonym/abbrev — not just anywhere in the
+// chart — so a real-but-MISLABELED number (model emits {label:"AHI", value:"28.4"} when 28.4 was the ejection
+// fraction) is DROPPED. Keys are matched against the lowercased label; the listed tokens (plus the label's own
+// words and the unit) form the accept-set searched within the proximity window. Deliberately generous on
+// genuine synonyms (so legitimate AHI/BP/A1c/PHQ-9 still ground) and silent on unknown labels (then only the
+// label's own word-tokens + unit must be near — still far stronger than "anywhere").
+const LABEL_SYNONYMS: ReadonlyArray<{ readonly test: RegExp; readonly tokens: readonly string[] }> = [
+  { test: /\bahi\b|apnea[- ]?hypopnea/i, tokens: ['ahi', 'apnea', 'hypopnea', 'apnea-hypopnea'] },
+  { test: /\brdi\b|respiratory disturbance/i, tokens: ['rdi', 'respiratory', 'disturbance'] },
+  { test: /cpap|nightly usage|adherence|compliance/i, tokens: ['cpap', 'usage', 'adherence', 'compliance', 'use', 'nightly'] },
+  { test: /blood pressure|(^|\b)bp\b/i, tokens: ['bp', 'blood', 'pressure', 'mmhg', 'systolic', 'diastolic'] },
+  { test: /hba1c|a1c|glycated|glycosylated/i, tokens: ['a1c', 'hba1c', 'hemoglobin', 'glycated', 'glycosylated'] },
+  { test: /glucose|fasting/i, tokens: ['glucose', 'fasting', 'fbg', 'sugar'] },
+  { test: /phq[- ]?9/i, tokens: ['phq', 'phq-9', 'phq9', 'depression'] },
+  { test: /pcl[- ]?5/i, tokens: ['pcl', 'pcl-5', 'pcl5', 'ptsd'] },
+  { test: /gad[- ]?7/i, tokens: ['gad', 'gad-7', 'gad7', 'anxiety'] },
+  { test: /\bbmi\b|body mass/i, tokens: ['bmi', 'body', 'mass'] },
+  { test: /spo2|oxygen|o2 sat|saturation|nadir/i, tokens: ['spo2', 'oxygen', 'o2', 'saturation', 'sat', 'nadir'] },
+  { test: /audiom|hearing|decibel|\bdb\b|threshold/i, tokens: ['audiometric', 'hearing', 'db', 'decibel', 'threshold'] },
+  { test: /ejection fraction|\bef\b/i, tokens: ['ejection', 'fraction', 'ef'] },
+  { test: /egfr|creatinine|renal/i, tokens: ['egfr', 'creatinine', 'renal', 'gfr'] },
+  { test: /fev1|spiromet/i, tokens: ['fev1', 'spirometry', 'fvc'] },
+];
+
+/** The lowercased accept-set of tokens that, appearing near the value, count as grounding it to THIS label:
+ *  the label's own alphabetic word-tokens (len ≥ 2), the unit's word-tokens, plus any matched synonym group.
+ *  Pure. */
+function labelAcceptTokens(label: string, unit: string | null): string[] {
+  const out = new Set<string>();
+  const add = (s: string): void => {
+    for (const w of s.toLowerCase().match(/[a-z][a-z0-9-]{1,}/g) ?? []) out.add(w);
+  };
+  add(label);
+  if (unit) add(unit);
+  const lab = `${label} ${unit ?? ''}`;
+  for (const grp of LABEL_SYNONYMS) {
+    if (grp.test.test(lab)) for (const t of grp.tokens) out.add(t);
+  }
+  return [...out];
+}
+
+// Proximity window (chars) on EACH side of a value occurrence within which a label/unit token must appear.
+// ~50 comfortably spans real chart phrasings ("AHI 28.4 events/hr", "blood pressure 142/88 mmHg",
+// "average use 6.2 hours/night", "HbA1c 7.1%") while being tight enough that a distant unrelated number
+// (the ejection fraction 28.4 in a different sentence) does NOT borrow the AHI label.
+const LABEL_PROXIMITY_WINDOW = 50;
+
+/** LABEL-PROXIMITY grounding (QA AI-SME, 2026-06-25). A measurement's numeric value is grounded ONLY when its
+ *  number appears in the context within LABEL_PROXIMITY_WINDOW chars of a token of its label/unit/synonym — so
+ *  "AHI 28.4" requires 28.4 NEAR "AHI"/"apnea"/"hypopnea", not merely somewhere in the chart. This catches the
+ *  mislabeled-but-real value (a 28.4 that was actually an ejection fraction). For a COMPOUND value (BP
+ *  "142/88") at least ONE of its runs must be near the label (then the whole reading is accepted — the two
+ *  numbers travel together). Fail-open by construction: an empty accept-set (no usable label/unit tokens)
+ *  cannot match → the row drops (caller treats false as ungrounded). Pure; case-insensitive. */
+function isGroundedNearLabel(value: string, label: string, unit: string | null, contextLower: string): boolean {
+  const tokens = labelAcceptTokens(label, unit);
+  if (tokens.length === 0) return false; // nothing to anchor to → not grounded (drop, never crash)
+  const runs = valueNumericRuns(value);
+  if (runs.length === 0) return false;
+  for (const run of runs) {
+    // Search the exact run; for a decimal whose exact form is absent, also try its integer part (mirrors the
+    // existence fallback in isRunGrounded — "3.0" grounds near a chart that wrote "3"). The existence guard
+    // (isRunGrounded with ctxDecimalIntParts) has already ensured this fallback is legitimate before we get
+    // here, so proximity only needs to confirm the integer form is NEAR the label.
+    const needles = run.includes('.') ? [run, run.replace(/\.\d+$/, '')] : [run];
+    for (const needleRaw of needles) {
+      const needle = needleRaw.toLowerCase();
+      let from = 0;
+      for (;;) {
+        const at = contextLower.indexOf(needle, from);
+        if (at < 0) break;
+        // Guard against matching a longer number's substring: the char before must not be a digit or '.'
+        // (so "8" inside "88"/"3.8" is rejected), and the char after must not be a digit (so "28" inside
+        // "284" is rejected). A following '.' breaks the boundary ONLY when it precedes a digit ("28" inside
+        // "28.4") — a sentence-ending period ("score 18.") is fine, so legitimate end-of-sentence values still
+        // ground.
+        const before = at > 0 ? contextLower[at - 1]! : '';
+        const after = contextLower[at + needle.length] ?? '';
+        const after2 = contextLower[at + needle.length + 1] ?? '';
+        const beforeOk = !/[\d.]/.test(before);
+        const afterOk = !/\d/.test(after) && !(after === '.' && /\d/.test(after2));
+        const isBoundary = beforeOk && afterOk;
+        if (isBoundary) {
+          const winStart = Math.max(0, at - LABEL_PROXIMITY_WINDOW);
+          const winEnd = Math.min(contextLower.length, at + needle.length + LABEL_PROXIMITY_WINDOW);
+          const win = contextLower.slice(winStart, winEnd);
+          if (tokens.some((t) => win.includes(t))) return true; // a run near the label = grounded
+        }
+        from = at + needle.length;
+      }
+    }
+  }
+  return false;
 }
 
 /** Assemble the FE-ready one-liner from the structured fields (label value unit (qualifier, date)). Pure. */
@@ -157,6 +276,7 @@ function measurementDisplay(m: { label: string; value: string; unit: string | nu
 export function coerceMeasurements(raw: unknown, contextText: string): SoapMeasurement[] {
   if (!Array.isArray(raw)) return [];
   const ctxDigits = new Set(contextText.match(/\d{1,4}(?:\.\d+)?/g) ?? []);
+  const ctxDecimalIntParts = contextDecimalIntParts(ctxDigits);
   const ctxLower = contextText.toLowerCase();
   const seen = new Set<string>();
   const out: SoapMeasurement[] = [];
@@ -170,9 +290,15 @@ export function coerceMeasurements(raw: unknown, contextText: string): SoapMeasu
     if (!label || !value) continue; // malformed → dropped
     const runs = valueNumericRuns(value);
     if (runs.length === 0) continue; // no number to ground → dropped (never surface a bare/invented label)
-    // GROUNDING: every numeric run of the value must be present in the source context.
-    if (!runs.every((r) => isRunGrounded(r, ctxDigits))) continue;
-    const unit = typeof r['unit'] === 'string' && r['unit'].trim().length > 0 ? r['unit'].trim() : null;
+    const unitRaw = typeof r['unit'] === 'string' && r['unit'].trim().length > 0 ? r['unit'].trim() : null;
+    // GROUNDING (existence): every numeric run of the value must be present in the source context. The
+    // integer-for-decimal fallback only fires when no competing decimal shares the integer part (tightened).
+    if (!runs.every((run) => isRunGrounded(run, ctxDigits, ctxDecimalIntParts))) continue;
+    // GROUNDING (label-proximity, QA AI-SME 2026-06-25): the value's number must appear NEAR a token of its
+    // label/unit/synonym — not merely anywhere — so a real-but-MISLABELED value (28.4 that was actually an
+    // ejection fraction, surfaced as {label:"AHI"}) is DROPPED. Fail-open: a malformed/unanchorable row drops.
+    if (!isGroundedNearLabel(value, label, unitRaw, ctxLower)) continue;
+    const unit = unitRaw;
     let qualifier = typeof r['qualifier'] === 'string' && r['qualifier'].trim().length > 0 ? r['qualifier'].trim() : null;
     let date = typeof r['date'] === 'string' && r['date'].trim().length > 0 ? r['date'].trim() : null;
     // Date/qualifier anti-fabrication: keep only if the string actually appears in the source context.

@@ -104,6 +104,83 @@ describe('coerceMeasurements — coerce + ground', () => {
   });
 });
 
+// ── LABEL-PROXIMITY grounding (QA AI-SME, 2026-06-25) ──
+// "The number exists somewhere" is not "the number belongs to THIS label." A real-but-MISLABELED value must
+// be DROPPED, and an integer must not stand in for a competing decimal.
+describe('coerceMeasurements — label-proximity grounding (anti-transposition)', () => {
+  it('grounds AHI 28.4 when 28.4 sits next to "AHI" in the chart', () => {
+    const ctx = 'Polysomnogram 4/2024: AHI 28.4 events/hr (diagnostic).';
+    const out = coerceMeasurements([{ label: 'AHI', value: '28.4', unit: 'events/hr', qualifier: 'diagnostic' }], ctx);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.value).toBe('28.4');
+  });
+
+  // THE transposition the AI-SME flagged: the chart's 28.4 is the EJECTION FRACTION, and the model mislabels
+  // it as AHI. The number exists, but NOT near "AHI"/"apnea"/"hypopnea" → it must be DROPPED.
+  it('DROPS the AHI-vs-EF transposition (28.4 is the ejection fraction, far from any apnea token)', () => {
+    const ctx = [
+      'Echocardiogram 2/2024: left ventricular ejection fraction 28.4%, mildly reduced.',
+      'Sleep history: snoring reported; no formal sleep study on file.',
+    ].join(' ');
+    const out = coerceMeasurements([{ label: 'AHI', value: '28.4', unit: 'events/hr', qualifier: 'diagnostic' }], ctx);
+    expect(out).toHaveLength(0);
+  });
+
+  // ...but the SAME 28.4, correctly labeled as the ejection fraction, DOES ground (proves we did not just
+  // hard-ban the value — the label match is what matters).
+  it('grounds the SAME 28.4 when correctly labeled as ejection fraction', () => {
+    const ctx = 'Echocardiogram 2/2024: left ventricular ejection fraction 28.4%, mildly reduced.';
+    const out = coerceMeasurements([{ label: 'Ejection fraction', value: '28.4', unit: '%' }], ctx);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.value).toBe('28.4');
+  });
+
+  it('"3.0" still grounds against a chart that wrote a lone "3" near the label (fallback preserved)', () => {
+    const ctx = 'CPAP residual AHI 3 events/hr.';
+    const out = coerceMeasurements([{ label: 'AHI', value: '3.0', unit: 'events/hr', qualifier: 'on CPAP' }], ctx);
+    expect(out).toHaveLength(1);
+  });
+
+  // TIGHTENED integer fallback: "28.4" must NOT ground on a lone "28" when a COMPETING decimal (28.7) is the
+  // chart's real reading for that integer — the model's 28.4 is then an invention, not the chart's 28.7.
+  it('"28.4" does NOT ground when the chart only has a lone "28" with a competing decimal (28.7)', () => {
+    const ctx = 'AHI 28.7 events/hr on the diagnostic study; 28 nights of CPAP data reviewed.';
+    const out = coerceMeasurements([{ label: 'AHI', value: '28.4', unit: 'events/hr' }], ctx);
+    expect(out).toHaveLength(0);
+  });
+
+  it('blood pressure 142/88 grounds near "blood pressure"; a fabricated 142/90 still drops', () => {
+    const ctx = 'Vitals on 5/2024: blood pressure 142/88 mmHg, heart rate 72.';
+    expect(coerceMeasurements([{ label: 'Blood pressure', value: '142/88', unit: 'mmHg' }], ctx)).toHaveLength(1);
+    expect(coerceMeasurements([{ label: 'Blood pressure', value: '142/90', unit: 'mmHg' }], ctx)).toHaveLength(0);
+  });
+
+  it('HbA1c 7.1% grounds via the a1c synonym group', () => {
+    const ctx = 'Labs 3/2024: HbA1c 7.1%, fasting glucose 138 mg/dL.';
+    const out = coerceMeasurements([{ label: 'A1c', value: '7.1', unit: '%' }], ctx);
+    expect(out).toHaveLength(1);
+  });
+
+  it('PHQ-9 score grounds even when the number is a few words from the label', () => {
+    const ctx = 'PHQ-9 administered 3/2024: total score 18 (moderately severe).';
+    const out = coerceMeasurements([{ label: 'PHQ-9', value: '18' }], ctx);
+    expect(out).toHaveLength(1);
+  });
+
+  it('fail-open: a label with no anchorable tokens drops rather than crashing', () => {
+    const ctx = 'AHI 28.4 events/hr.';
+    // value exists in ctx but the label has no usable letters and there is no unit → cannot anchor → drop.
+    const out = coerceMeasurements([{ label: '42', value: '28.4' }], ctx);
+    expect(out).toHaveLength(0);
+  });
+
+  it('a measurement far (>window) from its label is dropped even though the value exists', () => {
+    const ctx = `AHI is discussed here. ${'x'.repeat(200)} The figure 28.4 appears in an unrelated paragraph.`;
+    const out = coerceMeasurements([{ label: 'AHI', value: '28.4', unit: 'events/hr' }], ctx);
+    expect(out).toHaveLength(0);
+  });
+});
+
 describe('withMeasurementsInObjective — threading into prose (plain-text consumers)', () => {
   it('appends a labeled measurements sentence when present', () => {
     const ms = coerceMeasurements(

@@ -18,6 +18,7 @@ import {
   type CaseFraming,
   type ProducerClaimType,
 } from './case-framing.js';
+import { reconcileScConditions } from './sc-reconcile.js';
 import type { DrafterBundle } from './drafter-bundle.js';
 import type { AppDb } from './db-types.js';
 
@@ -183,6 +184,15 @@ async function fetchCaseRowForFraming(db: AppDb, caseId: string): Promise<CaseRo
 }
 
 function deriveForRow(c: CaseRowForFraming): CaseFraming {
+  // QA 4th read site (2026-06-25): reconcile the SC rows BEFORE deriving framing — the same read-time
+  // collapse the other 3 sites use (veterans GET, drafter-bundle, advisory chartSlice). Without this the
+  // stamp's grantedScAnchors derive from RAW rows: buildGrantedScAnchors dedups via its own normCond
+  // (trim+lowercase only, NO synonym fold), so "PTSD" + "Post-traumatic stress disorder" would yield TWO
+  // granted anchors here while bundle.scConditions (reconciled) carries ONE row — a cross-field
+  // inconsistency within one bundle. reconcileScConditions folds synonyms (chart-extractor.normalizeName)
+  // and resolves status precedence (service_connected > pending > denied), so a pending dup of a real
+  // grant correctly surfaces as one service_connected row. Pure/read-time; DB rows untouched.
+  const reconciled = reconcileScConditions(c.veteran?.scConditions ?? []);
   return deriveCaseFraming(
     {
       claimedCondition: c.claimedCondition,
@@ -191,9 +201,9 @@ function deriveForRow(c: CaseRowForFraming): CaseFraming {
       upstreamScCondition: c.upstreamScCondition,
       veteranStatement: c.veteranStatement,
     },
-    (c.veteran?.scConditions ?? []).map((s) => ({
+    reconciled.map((s) => ({
       condition: s.condition,
-      ratingPct: s.ratingPct,
+      ratingPct: s.ratingPct ?? null,
       status: String(s.status),
     })),
     new Date(),

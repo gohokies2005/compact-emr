@@ -463,6 +463,135 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     });
   });
 
+  // ── FIX A (Puller, CLM-CCFDA1BCC3, 2026-06-25): mutating edit paths self-heal a STRANDED pointer ─
+  // Case.currentVersion=39 but v39 has NO artifact (a failed re-draft advanced the pointer onto a dead
+  // version). The read path recovers (serves v40), but the mutating paths used the STRICT resolver →
+  // null at v39 → 409 no_letter BEFORE any §VII gate ran (25+ live surgical-ai 409s). The fix: an edit
+  // recovers the last good version (v40), builds v41 over it, and RE-PINS currentVersion=41.
+  describe('stranded-pointer self-heal (FIX A)', () => {
+    const STRANDED_TXT = [
+      '**I. Physician Qualifications**',
+      'I, Ryan J. Kasky, DO, am board-certified in Family Medicine.',
+      '',
+      '**VII. Opinion**',
+      "**It is my opinion that the veteran's hypertension is more likely than not (greater than 50% probability) proximately caused by his service-connected PTSD, under 38 CFR 3.310(a).**",
+      '',
+      'The veteran has lumbosacral strain. It is documented.',
+    ].join('\n');
+
+    // currentVersion=39 (dead). A good letter exists at v40. findFirst({v39}) → null (no row/job);
+    // findFirst({v40}) → the good row; findMany(DESC) surfaces v40 for the recovery walk. HeadObject
+    // (s3.send) returns OK so the recovered v40 txt is confirmed present.
+    function strandedDb(status: CaseRecord['status'] = 'physician_review') {
+      const v40row: LetterRevisionRecord = {
+        ...currentRevision(40), id: 'LR-40', parentVersion: 39, source: 'drafter_run',
+        artifactTxtS3Key: 'letter-revisions/CASE-1/v40/letter.txt',
+        artifactPdfS3Key: 'letter-revisions/CASE-1/v40/letter.pdf',
+        artifactDocxS3Key: 'letter-revisions/CASE-1/v40/letter.docx',
+      };
+      const created: Array<Record<string, unknown>> = [];
+      const caseRow = baseCase({ currentVersion: 39, status });
+      const caseUpdates: Array<Record<string, unknown>> = [];
+      const tx = {
+        case: {
+          findFirst: vi.fn(async () => caseRow), findUnique: vi.fn(async () => caseRow),
+          update: vi.fn(async (a: { data: Record<string, unknown> }) => { caseUpdates.push(a.data); return caseRow; }),
+        },
+        veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
+        letterRevision: {
+          // STRICT resolve at v39 → null (stranded); the recovery winner v40 → the good row.
+          findFirst: vi.fn(async (a: { where?: { version?: number } }) => (a.where?.version === 40 ? v40row : null)),
+          findMany: vi.fn(async () => [v40row]), // DESC walk surfaces v40
+          create: vi.fn(async (a: { data: Record<string, unknown> }) => { created.push(a.data); return { id: 'LR-NEW', ...a.data }; }),
+          update: vi.fn(),
+        },
+        draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
+        activityLog: { create: vi.fn(async () => ({})) },
+        signOff: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null), findUnique: vi.fn(), create: vi.fn() },
+        // PHYS-SUB resolves to the assigned PHYS-001 so enforcePhysicianAssignment passes.
+        physician: {
+          findUnique: vi.fn(async (a: { where?: { cognitoSub?: string } }) => (a.where?.cognitoSub === 'PHYS-SUB' ? physician() : null)),
+          findFirst: vi.fn(async (a: { where?: { id?: string } }) => (a.where?.id === 'PHYS-001' ? physician() : null)),
+          findMany: vi.fn(async () => [physician()]),
+        },
+      };
+      const db = { ...tx, $transaction: vi.fn(async (fn: (t: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
+      return { db, created, caseUpdates };
+    }
+    // s3 that resolves a Body for GetObject AND succeeds HeadObject (object present) — the recovered
+    // v40 txt is confirmed present, so the edit rebases onto it.
+    function strandedDeps() {
+      return deps({ s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => STRANDED_TXT } })) } as unknown as LetterRouterDeps['s3'] });
+    }
+
+    it('surgical-ai APPLY on a stranded v39 pointer RECOVERS: builds v41 over v40, re-pins currentVersion=41 (not 409 no_letter)', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      const { db, created, caseUpdates } = strandedDb();
+      const res = await request(appFor(db, strandedDeps())).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ apply: true, proposal: { operation: 'replace', anchor_text: 'lumbosacral strain', new_text: 'lumbosacral strain (DC 5237)' } });
+      expect(res.status).toBe(200);
+      expect(res.body.data.version).toBe(41); // v40 (recovered) + 1
+      expect(created[0]?.version).toBe(41);
+      expect(created[0]?.parentVersion).toBe(40); // parent = the recovered version it was built from
+      // currentVersion re-pinned to 41 so the next edit resolves strictly again.
+      expect(caseUpdates.some((u) => u.currentVersion === 41)).toBe(true);
+    });
+
+    it('PUT save on a stranded pointer RECOVERS (base_version=40, the recovered version the editor loaded)', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      const { db, created, caseUpdates } = strandedDb();
+      const res = await request(appFor(db, strandedDeps())).put('/api/v1/cases/CASE-1/letter')
+        .send({ base_version: 40, txt: STRANDED_TXT.replace('It is documented.', 'It is well documented.') });
+      expect(res.status).toBe(200);
+      expect(res.body.data.version).toBe(41);
+      expect(created[0]?.parentVersion).toBe(40);
+      expect(caseUpdates.some((u) => u.currentVersion === 41)).toBe(true);
+    });
+
+    it('guided-revision PROPOSE on a stranded pointer recovers (no 409 no_letter; returns a preview)', async () => {
+      process.env.GUIDED_REVISION_ENABLED = 'true';
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      const passage = 'The veteran has lumbosacral strain. It is documented.';
+      const newText = 'The veteran has a documented lumbosacral strain.';
+      const { db } = strandedDb();
+      const d = deps({
+        s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => STRANDED_TXT } })) } as unknown as LetterRouterDeps['s3'],
+        proposeSurgicalEdit: vi.fn(async (i: { passage?: string }) => ({ proposal: { operation: 'replace' as const, anchor_text: i.passage ?? passage, new_text: newText }, costUsd: 0.03, model: 'claude-opus-4-8' })),
+      });
+      const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage, instruction: 'tighten' });
+      delete process.env.GUIDED_REVISION_ENABLED;
+      expect(res.status).toBe(200);
+      expect(res.body.data.preview).toContain('documented lumbosacral strain');
+    });
+
+    it('a GENUINELY no-letter case (no resolvable version anywhere) still 409s no_letter', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      const caseRow = baseCase({ currentVersion: 5, status: 'physician_review' });
+      const tx = {
+        case: { findFirst: vi.fn(async () => caseRow), findUnique: vi.fn(async () => caseRow), update: vi.fn(async () => caseRow) },
+        veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'R', lastName: 'T' })) },
+        letterRevision: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), create: vi.fn(), update: vi.fn() },
+        draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
+        activityLog: { create: vi.fn(async () => ({})) },
+        signOff: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
+        physician: {
+          findUnique: vi.fn(async (a: { where?: { cognitoSub?: string } }) => (a.where?.cognitoSub === 'PHYS-SUB' ? physician() : null)),
+          findFirst: vi.fn(async (a: { where?: { id?: string } }) => (a.where?.id === 'PHYS-001' ? physician() : null)),
+          findMany: vi.fn(async () => [physician()]),
+        },
+      };
+      const db = { ...tx, $transaction: vi.fn(async (fn: (t: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
+      // s3 HeadObject + ListObjectsV2 both miss → no S3-truth fallback either.
+      const notFound = Object.assign(new Error('not found'), { name: 'NotFound' });
+      const d = deps({ s3: { send: vi.fn(async () => { throw notFound; }) } as unknown as LetterRouterDeps['s3'] });
+      const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ apply: true, proposal: { operation: 'replace', anchor_text: 'x', new_text: 'y' } });
+      expect(res.status).toBe(409);
+      expect(res.body.error.details.reason).toBe('no_letter');
+    });
+  });
+
   // ── PUT save — physician-only §VII gate (Puller, 2026-06-24) ─────────────────────────────────
   describe('PUT save — §VII physician-only gate', () => {
     const PUT_LETTER = [

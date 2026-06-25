@@ -344,3 +344,79 @@ describe('POST /internal/drafter/jobs/:id/complete — late-artifact recovery', 
     expect(res.status).toBe(404);
   });
 });
+
+// ── FIX B (Puller, CLM-CCFDA1BCC3, 2026-06-25): stranded-pointer guard at the SOURCE ─────────────
+// A terminal /complete must only advance Case.currentVersion onto a version whose txt artifact
+// ACTUALLY exists in S3. A failed/partial run that wrote no txt must NOT advance the pointer (that
+// is what stranded Puller's prior good letter behind a dead version → the editor's STRICT resolver
+// 409'd `no_letter` before any §VII gate ran). Mirrors the /halt receiver's HeadObject guard.
+describe('POST /complete — stranded-pointer guard (FIX B)', () => {
+  function appWithS3(db: AppDb, opts: { txtPresent: boolean }) {
+    const noSuchKey = Object.assign(new Error('The specified key does not exist.'), { name: 'NotFound' });
+    // HeadObject succeeds when the txt is present; throws NotFound otherwise. The DOCX backfill
+    // (GetObject) is only reached on runComplete and is non-fatal — return a body so it succeeds.
+    const s3 = {
+      send: vi.fn(async (cmd: { constructor: { name: string } }) => {
+        const cmdName = cmd?.constructor?.name ?? '';
+        if (cmdName === 'HeadObjectCommand') {
+          if (opts.txtPresent) return {};
+          throw noSuchKey;
+        }
+        // GetObjectCommand (docx backfill): a present txt body so the backfill renders cleanly.
+        return { Body: { transformToString: async () => 'letter text' } };
+      }),
+    } as unknown as import('@aws-sdk/client-s3').S3Client;
+    const app = express();
+    app.use(express.json({ limit: '10mb' }));
+    // No renderLetter dep → resolveDocxKeyForMirror returns null (non-fatal), keeping the focus on
+    // the currentVersion guard.
+    app.use('/api/v1', createDrafterWorkerRouter(db, { s3, bucketName: 'phi-test' }));
+    app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      if (isHttpError(error)) return sendError(res, error.status, error.code, error.message, error.details);
+      return sendError(res, 500, 'internal_error', 'Unexpected server error.');
+    });
+    return { app, s3 };
+  }
+
+  it('runComplete with a PRESENT txt artifact ADVANCES currentVersion (normal happy path)', async () => {
+    const { db, job, caseRow: cr } = makeDb(jobRow({ state: 'running', version: 15 }), caseRow({ currentVersion: 14, status: 'drafting' }));
+    const { app } = appWithS3(db, { txtPresent: true });
+    const res = await request(app)
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send(completeBody({ runComplete: true, operatorState: 'ready', gradeSidecar: { probative_score: 9, grade: 'A', ship_recommendation: 'ship' } }));
+    expect(res.status).toBe(200);
+    expect(job.state).toBe('done');
+    expect(cr.currentVersion).toBe(15); // advanced — the artifact was proven present
+    expect(cr.status).toBe('rn_review');
+  });
+
+  it('runComplete with a MISSING txt artifact does NOT advance currentVersion (no stranding) + logs', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { db, job, caseRow: cr } = makeDb(jobRow({ state: 'running', version: 15 }), caseRow({ currentVersion: 14, status: 'drafting' }));
+    const { app } = appWithS3(db, { txtPresent: false });
+    const res = await request(app)
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send(completeBody({ runComplete: true, operatorState: 'ready', gradeSidecar: { probative_score: 9, grade: 'A', ship_recommendation: 'ship' } }));
+    expect(res.status).toBe(200); // still completes (job row records it) — only the pointer is held
+    expect(job.state).toBe('done');
+    // THE FIX: currentVersion was NOT advanced onto the dead version — the prior good letter is not stranded.
+    expect(cr.currentVersion).toBe(14);
+    // Logged loudly so the absent-artifact completion leaves a CloudWatch trace.
+    const logged = warnSpy.mock.calls.map((c) => String(c[0]));
+    expect(logged.some((l) => l.includes('complete_txt_artifact_absent_pointer_not_advanced'))).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it('a FAILED run does NOT advance currentVersion and never calls S3 (failed runs wrote no letter)', async () => {
+    const { db, job, caseRow: cr } = makeDb(jobRow({ state: 'running', version: 15 }), caseRow({ currentVersion: 14, status: 'drafting' }));
+    const { app, s3 } = appWithS3(db, { txtPresent: true });
+    const res = await request(app)
+      .post('/api/v1/internal/drafter/jobs/JOB-1/complete')
+      .send(completeBody({ runComplete: false }));
+    expect(res.status).toBe(200);
+    expect(job.state).toBe('failed');
+    expect(cr.currentVersion).toBe(14); // not advanced
+    expect(cr.status).toBe('drafting');
+    expect(s3.send).not.toHaveBeenCalled(); // failed run touches no S3 (drafting-freeze hotfix invariant)
+  });
+});

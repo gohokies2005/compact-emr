@@ -309,6 +309,40 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
     return null;
   }
 
+  // MUTATING-PATH resolution with STRANDED-POINTER SELF-HEAL (Puller, CLM-CCFDA1BCC3, 2026-06-25).
+  //
+  // The mutating edit paths (PUT save, surgical-AI apply, guided-revision propose) used the STRICT
+  // `resolveCurrent`, which returns null when Case.currentVersion points at a dead version (a failed
+  // re-draft advanced the pointer onto a version with no artifact). That null became a 409 `no_letter`
+  // BEFORE any §VII gate / holding-lock / proposer ran — so an edit on a stranded pointer was simply
+  // impossible (Puller: 25+ surgical-ai → 409 no_letter). The READ path already recovers (it serves the
+  // last good letter), so the editor opens fine but every SAVE/APPLY/PROPOSE 409'd.
+  //
+  // This mirrors the read path's recovery for the mutating paths: when the strict resolve fails, fall
+  // back to the SAME recovery the read path uses (resolveCurrentForRead → resolveLatestResolvableTxt /
+  // the S3-truth walk) and report the RECOVERED version as the base to build N+1 over. The caller then
+  // builds version (recoveredVersion + 1) with parentVersion = recoveredVersion, and RE-PINS
+  // Case.currentVersion to the new version — so the next edit resolves strictly again. A genuinely
+  // no-letter case (no resolvable version anywhere) still returns null → the caller 409s `no_letter`.
+  //
+  // `recovered` is true ONLY when we fell back off a stranded pointer (resolved.version !== currentVersion);
+  // the normal (non-stranded) path returns the strict letter with recovered=false and identical semantics.
+  interface EditableLetter { letter: CurrentLetter; recovered: boolean; }
+  async function resolveCurrentForEdit(caseId: string, currentVersion: number): Promise<EditableLetter | null> {
+    const strict = await resolveCurrent(caseId, currentVersion);
+    // Strict hit: trust it when its TXT object actually exists (a dangling key must not block recovery).
+    if (strict !== null && await headObjectExists(s3(), bucket() as string, strict.txtKey)) {
+      return { letter: strict, recovered: false };
+    }
+    // Stranded (or dangling-key) pointer: recover the last good letter exactly as the read path does.
+    const recovered = await resolveCurrentForRead(caseId, currentVersion);
+    if (recovered === null) return null; // nothing resolvable anywhere → genuine no-letter
+    // If recovery landed on the SAME version the strict resolver claimed (a pure dangling-key edge), it is
+    // not a re-pin; treat as non-recovered so the version chain is unchanged. Otherwise it IS a stranded
+    // recovery: the caller rebases onto `recovered.version` and re-pins currentVersion.
+    return { letter: recovered, recovered: recovered.version !== currentVersion };
+  }
+
   async function enforcePhysicianAssignment(caseId: string, role: string, sub: string, assignedPhysicianId: string | null): Promise<void> {
     if (role === 'physician' && !(await isAssignedPhysicianForCase(db, sub, assignedPhysicianId))) {
       throw new HttpError(403, 'forbidden', 'Physician is not assigned to this case.', { caseId });
@@ -413,15 +447,22 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       if (user.role === 'ops_staff' && c.status === 'physician_review') {
         throw new HttpError(409, 'conflict', 'Letter is locked while in physician review.', { reason: 'locked_physician_review', caseId });
       }
-      // Optimistic concurrency: the editor must be saving against the version it loaded.
-      if (baseVersion !== c.currentVersion) {
-        throw new HttpError(409, 'conflict', `base_version ${baseVersion} is stale; current is v${c.currentVersion}. Reload and reapply your edits.`, { reason: 'stale_version', caseId, currentVersion: c.currentVersion });
-      }
-
       const bucketName = bucket();
       if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
-      const cur = await resolveCurrent(caseId, c.currentVersion);
-      if (cur === null) throw new HttpError(409, 'conflict', 'No current letter to edit.', { reason: 'no_letter', caseId });
+      // STRANDED-POINTER SELF-HEAL (Puller, CLM-CCFDA1BCC3): resolve the editable letter, recovering the
+      // last good version when Case.currentVersion points at a dead version. `editable.letter.version` is
+      // the REAL base we build N+1 over (= currentVersion in the normal case; the recovered version when
+      // stranded). A genuine no-letter case → null → 409 no_letter (unchanged).
+      const editable = await resolveCurrentForEdit(caseId, c.currentVersion);
+      if (editable === null) throw new HttpError(409, 'conflict', 'No current letter to edit.', { reason: 'no_letter', caseId });
+      const cur = editable.letter;
+      const baseLetterVersion = cur.version;
+      // Optimistic concurrency: the editor must be saving against the version it LOADED. The read path
+      // serves the recovered version on a stranded pointer, so accept base_version === the resolved base
+      // (recovered or strict), not only Case.currentVersion (which is the stale/dead pointer when stranded).
+      if (baseVersion !== c.currentVersion && baseVersion !== baseLetterVersion) {
+        throw new HttpError(409, 'conflict', `base_version ${baseVersion} is stale; current is v${baseLetterVersion}. Reload and reapply your edits.`, { reason: 'stale_version', caseId, currentVersion: baseLetterVersion });
+      }
 
       const oldText = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
       const cleaned = cleanProseForSave(body.txt);
@@ -439,10 +480,11 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
 
       // G4: does a SignOff bind to the version we are about to edit over? (signedVersion is null
       // on legacy sign-offs predating byte-binding — those carry no hash, nothing goes stale.)
-      const staleSignOff = (await db.signOff.findFirst({ where: { caseId, signedVersion: c.currentVersion } })) ?? null;
+      // Keyed on the REAL base we built over (baseLetterVersion), not the stale/dead pointer.
+      const staleSignOff = (await db.signOff.findFirst({ where: { caseId, signedVersion: baseLetterVersion } })) ?? null;
       const stale = staleSignOff !== null ? staleSignOffOutcome(c.status) : null;
 
-      const newVersion = c.currentVersion + 1;
+      const newVersion = baseLetterVersion + 1;
       const keys = {
         txtKey: buildLetterRevisionKey(caseId, newVersion, 'txt'),
         pdfKey: buildLetterRevisionKey(caseId, newVersion, 'pdf'),
@@ -468,7 +510,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
             data: {
               caseId,
               version: newVersion,
-              parentVersion: c.currentVersion,
+              parentVersion: baseLetterVersion,
               source: 'editor_save',
               artifactTxtS3Key: keys.txtKey,
               artifactPdfS3Key: keys.pdfKey,
@@ -497,7 +539,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
                 action: stale.logAction,
                 caseId,
                 veteranId: c.veteranId,
-                detailsJson: { staleSignedVersion: c.currentVersion, newVersion, fromStatus: c.status, source: 'editor_save' },
+                detailsJson: { staleSignedVersion: baseLetterVersion, newVersion, fromStatus: c.status, source: 'editor_save' },
               },
             });
           }
@@ -548,8 +590,14 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
 
       const bucketName = bucket();
       if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
-      const cur = await resolveCurrent(caseId, c.currentVersion);
-      if (cur === null) throw new HttpError(409, 'conflict', 'No current letter to edit.', { reason: 'no_letter', caseId });
+      // STRANDED-POINTER SELF-HEAL (Puller, CLM-CCFDA1BCC3): same recovery as PUT save. The surgical-AI
+      // door (APPLY + guided-revision PROPOSE) was the LIVE failure surface — 25+ surgical-ai → 409
+      // no_letter on Puller's stranded v39 pointer. Resolve the editable letter (recovering the last good
+      // version when stranded); `baseLetterVersion` is the real base APPLY builds N+1 over and re-pins.
+      const editable = await resolveCurrentForEdit(caseId, c.currentVersion);
+      if (editable === null) throw new HttpError(409, 'conflict', 'No current letter to edit.', { reason: 'no_letter', caseId });
+      const cur = editable.letter;
+      const baseLetterVersion = cur.version;
       const oldText = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
 
       // ── APPLY a previewed proposal (deterministic, no LLM) ──
@@ -574,9 +622,9 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         if (veteran === null) throw new HttpError(409, 'conflict', 'Veteran not found for case.', { caseId });
         // G4: same stale-signature detection as the PUT save — the surgical-AI door must not be
         // a way around the re-sign rule (the edit still creates version N+1 over signed version N).
-        const staleSignOff = (await db.signOff.findFirst({ where: { caseId, signedVersion: c.currentVersion } })) ?? null;
+        const staleSignOff = (await db.signOff.findFirst({ where: { caseId, signedVersion: baseLetterVersion } })) ?? null;
         const stale = staleSignOff !== null ? staleSignOffOutcome(c.status) : null;
-        const newVersion = c.currentVersion + 1;
+        const newVersion = baseLetterVersion + 1;
         const keys = {
           txtKey: buildLetterRevisionKey(caseId, newVersion, 'txt'),
           pdfKey: buildLetterRevisionKey(caseId, newVersion, 'pdf'),
@@ -589,12 +637,13 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         assertTripleArtifacts(keys, { caseId, version: newVersion });
         try {
           await db.$transaction(async (tx) => {
-            await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: c.currentVersion, source: 'surgical_ai', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: warnings } });
+            await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: baseLetterVersion, source: 'surgical_ai', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: warnings } });
             // G4: stale-signature edit on a delivered case returns it to physician_review in-transaction.
+            // currentVersion: newVersion re-pins the pointer (heals a stranded pointer when we recovered).
             await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, version: { increment: 1 }, ...(stale?.returnToPhysicianReview ? { status: 'physician_review' } : {}) } });
             await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_surgical_ai_applied', caseId, veteranId: c.veteranId, detailsJson: { version: newVersion, anchor_fallback: applied.anchor_fallback, warnings: warnings.map((w) => w.rule) } } });
             if (stale !== null) {
-              await tx.activityLog.create({ data: { actorUserId: user.sub, action: stale.logAction, caseId, veteranId: c.veteranId, detailsJson: { staleSignedVersion: c.currentVersion, newVersion, fromStatus: c.status, source: 'surgical_ai' } } });
+              await tx.activityLog.create({ data: { actorUserId: user.sub, action: stale.logAction, caseId, veteranId: c.veteranId, detailsJson: { staleSignedVersion: baseLetterVersion, newVersion, fromStatus: c.status, source: 'surgical_ai' } } });
             }
           });
         } catch (e: unknown) {

@@ -39,6 +39,31 @@ export interface OpinionExcerpt {
 const SECTION_VII_RE = /(?:\*\*\s*)?(?:Section\s+)?VII\.\s*Opinion/i;
 // Section VIII header: "VIII. References" (also "Section VIII" / bolded).
 const SECTION_VIII_RE = /(?:\*\*\s*)?(?:Section\s+)?VIII\.\s*(?:References|Bibliography)/i;
+// §VIII BOUNDARY regex — anchored at the "VIII" token itself, with NO leading `**` consumption
+// (Puller, 2026-06-25). When we slice the §VII region to bound it BEFORE §VIII, the greedy
+// `(?:\*\*\s*)?` prefix of SECTION_VIII_RE would swallow the opinion sentence's CLOSING `**`
+// (which, in the canonical drafter shape, sits on the line immediately above "VIII. References"
+// with only a blank line between). Cutting at that prefix index left the opinion with an ODD
+// number of `**` markers → the bold-pair extractor matched nothing → null → the §VII holding lock
+// went silently dead (holdingConclusionWeakened could never see a holding). Bounding at the bare
+// VIII token keeps the opinion's closing `**` inside the sliced region.
+const SECTION_VIII_BOUNDARY_RE = /(?:Section\s+)?VIII\.\s*(?:References|Bibliography)/i;
+
+/**
+ * Strip the matched §VII header off the front of the post-header slice (Puller, 2026-06-25).
+ *
+ * Slices off EXACTLY the matched header (`m7match`), then trims leading WHITESPACE only. A leading
+ * `**` is removed ONLY when the matched header ITSELF was bolded (i.e. `m7match` began with `**`,
+ * meaning the header carried its own opening `**` that the bold-pair extractor must not mistake for
+ * the opinion's). On the canonical drafter shape (an UNbolded "VII. Opinion" header followed by a
+ * blank line and a **bolded** opinion sentence), `m7match` does NOT start with `**`, so the opinion
+ * sentence's own opening `**` is preserved — fixing the old `replace(/^\s*\*{0,2}/, '')` that ate it.
+ */
+function stripSectionViiHeader(after: string, m7match: string): string {
+  let body = after.slice(m7match.length).replace(/^\s+/, '');
+  if (/^\*\*/.test(m7match)) body = body.replace(/^\*\*\s*/, '');
+  return body;
+}
 
 /** Extract the Section VII bolded opinion sentence. Returns null if not found. */
 export function extractOpinionSentence(letterText: string): string | null {
@@ -49,9 +74,9 @@ export function extractOpinionSentence(letterText: string): string | null {
   // `**` that closed a bolded header) so the FIRST **...** pair we find is the opinion, not the
   // header. Bound the search to before Section VIII if present (defensive).
   let after = letterText.slice(m7.index);
-  const m8inAfter = SECTION_VIII_RE.exec(after);
+  const m8inAfter = SECTION_VIII_BOUNDARY_RE.exec(after);
   if (m8inAfter !== null) after = after.slice(0, m8inAfter.index);
-  after = after.replace(SECTION_VII_RE, '').replace(/^\s*\*{0,2}/, '');
+  after = stripSectionViiHeader(after, m7[0]);
   const bold = /\*\*([\s\S]+?)\*\*/.exec(after);
   if (bold === null) return null;
   const opinion = bold[1].replace(/\s+/g, ' ').trim();
@@ -73,7 +98,7 @@ export function extractOpinionFull(letterText: string): string | null {
   // Same anchor-past-the-header slice as extractOpinionSentence (lines above): slice at the VII
   // header, bound at the VIII header, then strip the header + any trailing bold marker it carried.
   let after = letterText.slice(m7.index);
-  const m8inAfter = SECTION_VIII_RE.exec(after);
+  const m8inAfter = SECTION_VIII_BOUNDARY_RE.exec(after);
   if (m8inAfter !== null) {
     after = after.slice(0, m8inAfter.index);
   } else {
@@ -83,7 +108,7 @@ export function extractOpinionFull(letterText: string): string | null {
     const stop = /\n\s*(?:Respectfully submitted|Sincerely|\[SIGNATURE)/i.exec(after);
     if (stop !== null) after = after.slice(0, stop.index);
   }
-  after = after.replace(SECTION_VII_RE, '').replace(/^\s*\*{0,2}/, '');
+  after = stripSectionViiHeader(after, m7[0]);
   // Strip bold markers, then normalize whitespace PER PARAGRAPH (blank-line-separated) so the
   // prose reflows cleanly in a plain-text email while keeping its paragraph structure.
   const paragraphs = after

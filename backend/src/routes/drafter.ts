@@ -1531,6 +1531,59 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
           })
         : (parsed.artifactDocxS3Key ?? null);
 
+      // ── STRANDED-POINTER GUARD AT THE SOURCE (Puller, CLM-CCFDA1BCC3, 2026-06-25) ──
+      // The F4 invariant historically advanced Case.currentVersion on ANY terminal /complete (ship OR
+      // fail) so the operator UI could show "vN failed; retry as vN+1". But a failed/partial run writes
+      // NO txt artifact, so advancing currentVersion onto that dead version STRANDED the prior good
+      // letter: the editor's mutating paths (resolveCurrent, STRICT) returned null at the dead version
+      // and 409'd `no_letter` BEFORE any §VII gate/holding-lock ever ran (Puller: 25+ surgical-ai 409s).
+      // FIX B mirrors the /halt receiver's guard: HeadObject-verify the run's txt artifact ACTUALLY
+      // exists in S3 before advancing the pointer. When it does NOT exist (failed run, or a run whose
+      // wrapper never uploaded), we DO NOT advance currentVersion — the DraftJob row still records the
+      // attempt (state, version, errorMessage) so the operator UI's "vN failed, retry" is unaffected.
+      // Fail-SAFE default: never advance onto an artifact we cannot prove exists. The DOCX-backfill above
+      // does a GetObject on the same txt, but it is non-fatal + may be skipped (unconfigured deps), so we
+      // verify independently here. Done BEFORE the transaction (HeadObject is a network call).
+      let advanceCurrentVersion = false;
+      if (!parsed.runComplete) {
+        // A FAILED run wrote no letter — the worker still sends the canonical (never-uploaded) txt key.
+        // This is the PRIMARY stranding source the Puller incident traced: a failed re-draft advancing
+        // currentVersion onto a dead version. Never advance for a failed run; never touch S3 (the
+        // drafting-freeze hotfix test pins that a failed run does NOT call S3). The DraftJob row still
+        // records the failure (state/version/errorMessage) so the operator "vN failed, retry" UI works.
+        console.warn(JSON.stringify({
+          msg: 'complete_failed_run_pointer_not_advanced',
+          jobId, caseId: existing.caseId, version: existing.version,
+          note: 'failed run wrote no letter; left Case.currentVersion at the last good version to avoid stranding the prior letter',
+        }));
+      } else {
+        // A SUCCESSFUL run: HeadObject-verify the txt artifact ACTUALLY exists before advancing the
+        // pointer (mirrors the /halt receiver's guard). A run that claims success but never uploaded its
+        // txt (a partial/aborted upload) must not strand the prior good letter behind a dead pointer.
+        const bucketName = deps.bucketName ?? process.env.PHI_BUCKET_NAME;
+        const s3 = deps.s3;
+        if (s3 !== undefined && typeof bucketName === 'string' && bucketName.length > 0) {
+          try {
+            await s3.send(new HeadObjectCommand({ Bucket: bucketName, Key: parsed.artifactTxtS3Key }));
+            advanceCurrentVersion = true; // object confirmed present → safe to advance
+          } catch {
+            advanceCurrentVersion = false;
+            console.warn(JSON.stringify({
+              msg: 'complete_txt_artifact_absent_pointer_not_advanced',
+              jobId, caseId: existing.caseId, version: existing.version,
+              txtKeyBasename: parsed.artifactTxtS3Key.split('/').pop(),
+              note: 'runComplete /complete had no resolvable txt artifact in S3; left Case.currentVersion at the last good version to avoid stranding the prior letter',
+            }));
+          }
+        } else {
+          // Unconfigured S3 (local dev / render-less env): cannot HeadObject. Preserve the legacy
+          // happy-path behavior (advance) — the verification is a cloud-side safety net, and a render-
+          // less env never produced the partial-upload failure mode this guards against.
+          advanceCurrentVersion = true;
+          console.warn(JSON.stringify({ msg: 'complete_artifact_check_skipped_unconfigured', jobId, caseId: existing.caseId, version: existing.version }));
+        }
+      }
+
       const updated = await db.$transaction(async (tx) => {
         const job = await tx.draftJob.update({
           where: { id: jobId },
@@ -1561,15 +1614,15 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
             // summarizeForOperator()'s message verbatim without rebuilding from state.
             operatorMessage: parsed.operatorMessage,
             runComplete: parsed.runComplete,
-            // F4 semantics (Ryan, 2026-05-26): currentVersion = last *attempted* version,
-            // advances on ANY terminal /complete call — ship or fail. The "current" pointer
-            // is "what's the newest artifact set we produced" (regardless of whether it was
-            // shippable). The physician-routing gate is enforced separately via
-            // (runComplete && shipRecommendation==='ship') at write time + read time, NOT
-            // via currentVersion. Failed runs still bump currentVersion so the operator UI
-            // can show "v3 failed; you can retry as v4" rather than mysteriously still
-            // showing v2.
-            currentVersion: existing.version,
+            // F4 semantics (Ryan, 2026-05-26): currentVersion = last *attempted* version with a
+            // PROVEN artifact. NARROWED (Puller, CLM-CCFDA1BCC3, 2026-06-25): we advance the pointer
+            // ONLY when this run's txt artifact was HeadObject-confirmed present in S3 (advanceCurrentVersion).
+            // A failed/partial run that wrote no txt leaves currentVersion at the last good version so it
+            // can never strand the prior good letter behind a dead pointer (the editor's mutating paths
+            // would 409 `no_letter` on a stranded version). The operator "vN failed, retry" UI is driven by
+            // the DraftJob row (state/version/errorMessage), not currentVersion, so it is unaffected.
+            // The physician-routing gate stays separate (runComplete && shipRecommendation==='ship').
+            ...(advanceCurrentVersion ? { currentVersion: existing.version } : {}),
             status: nextCaseStatus,
             version: { increment: 1 },
           },

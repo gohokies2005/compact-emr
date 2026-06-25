@@ -4,6 +4,8 @@ import {
   extractOpinionFull,
   extractOpinionSentence,
   extractReferences,
+  hasHoldingConclusion,
+  holdingConclusionWeakened,
 } from '../services/letter-opinion-excerpt.js';
 
 // A representative FRN nexus letter: a BOLDED Section I header (the "anchor gotcha" trap), the
@@ -143,5 +145,68 @@ describe('letter-opinion-excerpt', () => {
     const { block } = buildOpinionExcerpt(LETTER);
     const label = block!.split('\n')[0];
     expect(label).not.toMatch(/[—–]/);
+  });
+
+  // ── FIX C regression (Puller, 2026-06-25): the CANONICAL drafter §VII shape ─────────────────────
+  // The drafter emits an UNbolded "VII. Opinion" header, a blank line, then a **bolded** opinion
+  // sentence. The opinion's CLOSING `**` sits on the line directly above "VIII. References" (one
+  // blank line between). Two bugs combined to return null on this shape:
+  //   1) SECTION_VIII_RE's greedy `(?:\*\*\s*)?` prefix swallowed the opinion's CLOSING `**` when the
+  //      §VII region was bounded before §VIII, leaving an ODD number of `**` markers;
+  //   2) the old header strip `replace(/^\s*\*{0,2}/, '')` ate the opinion's OPENING `**`.
+  // Either left the bold-pair extractor matching nothing → extractOpinionSentence === null → the
+  // §VII holding lock (holdingConclusionWeakened) silently returned false (the lock was DEAD).
+  const CANONICAL_DRAFTER_LETTER = [
+    'RE: Independent Medical Opinion',
+    '',
+    'I. Physician Qualifications',
+    'I, Ryan J. Kasky, DO, am board-certified in Family Medicine.',
+    '',
+    'VII. Opinion',
+    '',
+    "**It is my opinion that the veteran's hypertension is more likely than not (greater than 50% probability) proximately caused by his service-connected PTSD, under 38 CFR 3.310(a).**",
+    '',
+    'VIII. References',
+    '1. Smith 2019.',
+  ].join('\n');
+
+  describe('canonical drafter §VII shape (unbolded header + bolded opinion) — FIX C', () => {
+    it('extractOpinionSentence returns the FULL opinion sentence (was null pre-fix)', () => {
+      const op = extractOpinionSentence(CANONICAL_DRAFTER_LETTER);
+      expect(op).not.toBeNull();
+      expect(op).toContain('more likely than not (greater than 50% probability)');
+      expect(op).toContain('38 CFR 3.310(a)');
+      // The closing ** was being eaten by the §VIII boundary prefix — the sentence must be COMPLETE.
+      expect(op!.endsWith('3.310(a).')).toBe(true);
+      expect(op).not.toContain('**');
+    });
+
+    it('hasHoldingConclusion is true on the extracted opinion (lock has material to act on)', () => {
+      const op = extractOpinionSentence(CANONICAL_DRAFTER_LETTER)!;
+      expect(hasHoldingConclusion(op)).toBe(true);
+    });
+
+    it('holdingConclusionWeakened ALLOWS a causation->aggravation rewrite that keeps >50%', () => {
+      const aggravated = CANONICAL_DRAFTER_LETTER
+        .replace('proximately caused by', 'aggravated by')
+        .replace('38 CFR 3.310(a)', '38 CFR 3.310(b)');
+      // The lock is alive now (was dead → always false pre-fix), and it correctly ALLOWS the rewrite.
+      expect(holdingConclusionWeakened(CANONICAL_DRAFTER_LETTER, aggravated)).toBe(false);
+    });
+
+    it('holdingConclusionWeakened BLOCKS a downgrade to "at least as likely as not"', () => {
+      const downgraded = CANONICAL_DRAFTER_LETTER
+        .replace('more likely than not (greater than 50% probability)', 'at least as likely as not');
+      expect(holdingConclusionWeakened(CANONICAL_DRAFTER_LETTER, downgraded)).toBe(true);
+    });
+
+    it('extractOpinionFull also returns the bolded opinion (not null) on this shape', () => {
+      const full = extractOpinionFull(CANONICAL_DRAFTER_LETTER);
+      expect(full).not.toBeNull();
+      expect(full).toContain('more likely than not (greater than 50% probability)');
+      expect(full).not.toContain('**');
+      expect(full).not.toContain('Gupta');
+      expect(full).not.toContain('References');
+    });
   });
 });

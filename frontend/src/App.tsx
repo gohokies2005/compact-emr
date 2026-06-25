@@ -23,6 +23,8 @@ import { MetricsPage } from './routes/stubs/MetricsPage';
 import { CostsPage } from './routes/CostsPage';
 import { PhysicianQueuePage } from './routes/physician/PhysicianQueuePage';
 import { PhysicianReviewPage } from './routes/physician/PhysicianReviewPage';
+import { PhysicianMobileQueuePage } from './routes/physician/PhysicianMobileQueuePage';
+import { PhysicianMobileReviewPage } from './routes/physician/PhysicianMobileReviewPage';
 import { PhysicianLettersPage } from './routes/physician/PhysicianLettersPage';
 import { PhysicianPayPage } from './routes/physician/PhysicianPayPage';
 import { RnQueuePage } from './routes/rn/RnQueuePage';
@@ -54,6 +56,11 @@ export function App() {
     <Route path="/costs" element={<ProtectedRoute requiredRole={['admin']}><CostsPage /></ProtectedRoute>} />
     <Route path="/p/queue" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianQueuePage /></ProtectedRoute>} />
     <Route path="/p/review/:caseId" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianReviewPage /></ProtectedRoute>} />
+    {/* Physician MOBILE review/approve flow (foundation slice #80, Dr. Kasky 2026-06-25): a focused,
+        mobile-first queue → SOAP → abridged docs → letter → Approve/Save-for-computer/Send-back. Same
+        role gate + data as the desktop /p/* pages; read-only (no mobile editing). */}
+    <Route path="/p/m/queue" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianMobileQueuePage /></ProtectedRoute>} />
+    <Route path="/p/m/review/:caseId" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianMobileReviewPage /></ProtectedRoute>} />
     <Route path="/p/letters" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianLettersPage /></ProtectedRoute>} />
     <Route path="/p/pay" element={<ProtectedRoute requiredRole={['physician', 'admin']}><PhysicianPayPage /></ProtectedRoute>} />
     <Route path="/rn" element={<ProtectedRoute requiredRole={['admin', 'ops_staff']}><RnQueuePage /></ProtectedRoute>} />

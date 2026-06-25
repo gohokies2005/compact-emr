@@ -33,8 +33,13 @@ vi.mock('../api/veterans', () => ({
   presignDocument: vi.fn(), uploadToPresignedUrl: vi.fn(), recordDocument: vi.fn(), viewDocument: vi.fn(),
 }));
 vi.mock('../api/chart-notes', () => ({ listChartNotes: vi.fn(async () => ({ data: [] })), createChartNote: vi.fn(), deleteChartNote: vi.fn(), patchChartNote: vi.fn() }));
-// The auto-fired sanity line fires this; mock it (null = no impression) so the test makes no network call.
-vi.mock('../api/sanity-impression', () => ({ getSanityImpression: vi.fn(async () => ({ data: null })) }));
+// The pre-draft "AI Sanity Check" card was RETIRED 2026-06-25 (Ryan #68) — the page no longer fires the
+// pre_draft impression. The post-draft line still uses this API (not exercised in this pre-draft case).
+// Return a NON-NULL impression so that IF the card were still mounted it WOULD render — the test below
+// asserts it does not, proving the retirement holds.
+vi.mock('../api/sanity-impression', () => ({
+  getSanityImpression: vi.fn(async () => ({ data: { stage: 'pre_draft', impression: 'concern', summary: 'should not render', missed: null } })),
+}));
 vi.mock('../api/letter', () => ({ getLetter: vi.fn() }));
 vi.mock('../api/lookup', () => ({ getConditions: vi.fn(async () => ({ groups: [] })) }));
 vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
@@ -90,6 +95,10 @@ describe('CaseDetailPage — pre-draft Action-tab story order (locked)', () => {
     const send = screen.getByRole('heading', { name: 'Send to Drafter' });
     // The erased M/E card must NOT render anywhere on the page.
     expect(screen.queryByRole('heading', { name: 'Anchor viability' })).not.toBeInTheDocument();
+    // The retired pre-draft "AI Sanity Check" card must NOT render (Ryan #68, 2026-06-25) even though the
+    // sanity-impression API is mocked to return a non-null impression — the card was unmounted.
+    expect(screen.queryByRole('heading', { name: 'AI Sanity Check' })).not.toBeInTheDocument();
+    expect(screen.queryByText('should not render')).not.toBeInTheDocument();
 
     const ordered = [extraction, background, plan, assignments, send];
     // each heading must precede the next in document order

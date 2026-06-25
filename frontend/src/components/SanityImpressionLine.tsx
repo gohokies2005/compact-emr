@@ -86,34 +86,12 @@ export function SanityImpressionLine({ caseId, context }: {
   );
 }
 
-/**
- * Pre-draft wrapper — assembles the context from data the Overview already fetches (the strategy's
- * primaryArgument as the "theory", and the extraction coverage as the honest "were the records really
- * read?" note), via React-Query keys SHARED with the cards (so it adds no extra fetch). Renders the
- * impression as a quiet footer line under the story. Hidden until there's a real (evaluable) strategy.
- */
-export function PreDraftSanityImpression({ caseId, claimedCondition }: {
-  readonly caseId: string;
-  readonly claimedCondition: string;
-}) {
-  const strategy = useQuery({ queryKey: ['case', caseId, 'strategy-preview'], queryFn: () => getStrategyPreview(caseId), enabled: caseId.length > 0 });
-  const coverage = useQuery({ queryKey: ['case', caseId, 'extraction-coverage'], queryFn: () => getExtractionCoverage(caseId), enabled: caseId.length > 0 });
-
-  const p = strategy.data?.data;
-  if (!p || !p.evaluable || claimedCondition.trim().length === 0) return null;
-
-  const chart = chartContextFrom(p);
-  const context: SanityContextInput = {
-    stage: 'pre_draft',
-    claimedCondition,
-    veteranTheory: p.proposedMechanism ?? null, // the veteran's own words — weighed over the engine label
-    theory: p.primaryArgument ?? null,
-    scConditions: chart.scConditions,
-    keyFacts: chart.keyFacts,
-    coverageNote: coverageNoteFrom(coverage.data?.data),
-  };
-  return <SanityImpressionLine caseId={caseId} context={context} />;
-}
+// PreDraftSanityImpression was RETIRED 2026-06-25 (Ryan, item #68). It assembled a pre_draft context and
+// fired the skeptical Opus gut-check on the Overview, but it re-derived the theory and produced a
+// misleading wrong-theory note (argued a strong DIRECT case as secondary-to-tinnitus), contradicting the
+// SOAP overview's holistic read. The card was removed from CaseDetailPage; the backend
+// POST /cases/:id/sanity-impression route + buildSanityImpression remain in place (unused by the UI) so
+// this is reversible. SanityImpressionLine + the POST-draft wrapper below are unchanged.
 
 /**
  * Post-draft wrapper — reads the drafted letter (getLetter.txt) and assembles the post_draft context

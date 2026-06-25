@@ -52,7 +52,11 @@ import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 // + import are gone here.
 import { RecommendedPlanCard } from '../../components/RecommendedPlanCard';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
-import { PreDraftSanityImpression, PostDraftSanityImpression } from '../../components/SanityImpressionLine';
+// PreDraftSanityImpression was RETIRED 2026-06-25 (Ryan, item #68): the pre-draft AI Sanity Check card
+// was a separate skeptical Opus call that re-derived the theory and produced a misleading wrong-theory
+// note (argued a strong DIRECT case as secondary). The SOAP overview already does the holistic read, so
+// the card was redundant noise that contradicted it. Only the POST-draft impression line remains.
+import { PostDraftSanityImpression } from '../../components/SanityImpressionLine';
 import { useChartReadiness, type UseChartReadiness } from '../../hooks/useChartReadiness';
 import { formatRelativeTime } from '../../lib/date';
 import { formatFileSize, formatPageCount } from '../../lib/fileMeta';
@@ -624,7 +628,7 @@ export function CaseDetailPage() {
                       <div className="space-y-4 px-2 pb-3">
                         <StrategyPreviewCard key="strategy" caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
                         <RecommendedPlanCard key="recommended-plan" caseId={caseId} hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0} />
-                        <PreDraftSanityImpression key="sanity" caseId={caseId} claimedCondition={c.claimedCondition} />
+                        {/* PreDraftSanityImpression (the "AI Sanity Check" card) retired 2026-06-25 (Ryan #68) — redundant with the SOAP overview's holistic read; removed to stop the misleading note + the per-mount Opus call. */}
                       </div>
                     </details>
                   ) : null}

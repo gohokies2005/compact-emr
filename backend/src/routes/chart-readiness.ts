@@ -330,6 +330,12 @@ export function createChartReadinessRouter(db: AppDb): Router {
    * conditions, a one-line coverage note, and POST-DRAFT the draft text + grade); the server runs the
    * Opus check and returns the impression, or null (fail-open — never blocks). admin/ops_staff/physician.
    *
+   * RETIREMENT NOTE (2026-06-25, Ryan, item #68): the PRE-DRAFT "AI Sanity Check" card was retired from
+   * the UI (CaseDetailPage). It re-derived the theory skeptically and produced a misleading wrong-theory
+   * note that contradicted the SOAP overview's holistic read. This route + buildSanityImpression + the
+   * sanity-impression service/table are LEFT IN PLACE (unused for pre_draft) so the change is reversible
+   * without touching the DB/migrations. The POST-draft impression line still calls this with stage=post_draft.
+   *
    * Accepting client-assembled context is intentional: this is an internal staff tool with no security
    * boundary on these fields (the same data the client already renders), and it avoids re-plumbing five
    * data sources server-side. The server CAPS every field so a runaway input can't blow the token cost.

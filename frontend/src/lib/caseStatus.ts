@@ -91,6 +91,70 @@ export function statusDisplayGroup(status: CaseStatus, opts?: { archived?: boole
   return STATUS_DISPLAY_GROUP[status];
 }
 
+// === FIXED lifecycle GROUPING for the Cases page (Dr. Kasky 2026-06-24) ===
+// A SECOND, coarser axis than statusDisplayGroup: six FIXED, ORDERED lifecycle buckets the Cases
+// page renders as section headers, always in this top->bottom order. The point is that a case never
+// jumps buckets when you change the sort column — sorting only reorders rows WITHIN its bucket. The
+// per-row status chip is unchanged; this only decides which header a row sits under.
+//
+//   Pre-draft -> Drafting -> RN review -> Physician review -> Ready for delivery -> Invoiced
+//
+// Note this is intentionally distinct from CaseStatusDisplayGroup (which has 9 finer "whose ball is
+// it" buckets incl. Awaiting records / Paid / Rejected / Archived); the lifecycle axis collapses the
+// pre-drafting statuses into one "Pre-draft" header and treats paid as the terminal "Invoiced" rung.
+export type LifecycleBucket =
+  | 'pre_draft'
+  | 'drafting'
+  | 'rn_review'
+  | 'physician_review'
+  | 'ready_for_delivery'
+  | 'invoiced';
+
+// The locked top->bottom order. The Cases page iterates THIS, never first-seen order, so the six
+// rows always appear in lifecycle sequence (empty buckets included).
+export const LIFECYCLE_BUCKET_ORDER: readonly LifecycleBucket[] = [
+  'pre_draft', 'drafting', 'rn_review', 'physician_review', 'ready_for_delivery', 'invoiced',
+];
+
+export const LIFECYCLE_BUCKET_LABELS: Record<LifecycleBucket, string> = {
+  pre_draft: 'Pre-draft',
+  drafting: 'Drafting',
+  rn_review: 'RN review',
+  physician_review: 'Physician review',
+  ready_for_delivery: 'Ready for delivery',
+  invoiced: 'Invoiced',
+};
+
+// Exhaustive status -> bucket map. Typed as a full Record so a NEW CaseStatus enum value fails the
+// build here rather than silently falling through — no console.warn default needed.
+//   - Pre-draft: everything BEFORE drafting starts (intake/records/viability + the two pre-draft
+//     parks needs_records & needs_rn_decision). The Gate-2 'needs_rn_decision' park lands here, not
+//     under RN review, because no draft exists yet — it's still pre-draft work.
+//   - RN review: rn_review + the correction-round statuses (RN's ball before it goes back to the MD).
+//   - Ready for delivery: 'delivered' (physician-approved, pre-payment / invoice-out).
+//   - Invoiced: 'paid' is the terminal billed rung. 'rejected' is also terminal/closed and has no
+//     lifecycle rung of its own, so it folds into the terminal Invoiced bucket (it only ever shows
+//     under the Closed toggle anyway, alongside paid).
+const STATUS_LIFECYCLE_BUCKET: Record<CaseStatus, LifecycleBucket> = {
+  intake: 'pre_draft',
+  records: 'pre_draft',
+  viability: 'pre_draft',
+  needs_records: 'pre_draft',
+  needs_rn_decision: 'pre_draft',
+  drafting: 'drafting',
+  rn_review: 'rn_review',
+  correction_requested: 'rn_review',
+  correction_review: 'rn_review',
+  physician_review: 'physician_review',
+  delivered: 'ready_for_delivery',
+  paid: 'invoiced',
+  rejected: 'invoiced',
+};
+
+export function lifecycleBucket(status: CaseStatus): LifecycleBucket {
+  return STATUS_LIFECYCLE_BUCKET[status];
+}
+
 export function validNextStatuses(from: CaseStatus): readonly CaseStatus[] {
   return CASE_STATUS_TRANSITIONS[from];
 }

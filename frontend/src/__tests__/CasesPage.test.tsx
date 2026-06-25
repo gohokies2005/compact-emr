@@ -77,6 +77,13 @@ function openRnDropdown() {
   fireEvent.click(screen.getByRole('button', { name: /All active|Me|Unassigned/ }));
 }
 
+// Lifecycle section headers are <th scope="colgroup"> rows; return their text in DOM order.
+function lifecycleHeaders(): string[] {
+  return screen.getAllByRole('columnheader')
+    .filter((el) => el.getAttribute('scope') === 'colgroup')
+    .map((el) => (el.textContent ?? '').trim());
+}
+
 describe('CasesPage', () => {
   it('renders filters and a case row with status badge', async () => {
     renderPage();
@@ -89,8 +96,10 @@ describe('CasesPage', () => {
     expect(screen.getAllByText('Drafting').some((el) => el.className.includes('text-slate-600') && !el.className.includes('bg-'))).toBe(true);
     // Records column renders the neutral one-word "Pending" label (mock rows have no recordsUploaded).
     expect(screen.getAllByText('Pending').length).toBeGreaterThan(0);
-    // No mock row carries invoiced:true → the Invoiced chip must be absent by default.
-    expect(screen.queryByText('Invoiced')).toBeNull();
+    // No mock row carries invoiced:true → the Invoiced ROW label must be absent by default. (The
+    // fixed "Invoiced" lifecycle SECTION HEADER — a <th> — always renders, even empty, so scope this
+    // to the row status <span>, not the header.)
+    expect(screen.queryAllByText('Invoiced').filter((el) => el.tagName === 'SPAN' && el.className.includes('text-slate-600'))).toHaveLength(0);
   });
 
   it('Note column shows the latest PERSISTENT quick note read-only (no editable scratchpad popup)', async () => {
@@ -112,38 +121,45 @@ describe('CasesPage', () => {
     });
     renderPage();
     expect(await screen.findByText('CASE-001')).toBeInTheDocument();
-    const label = screen.getByText('Invoiced');
+    // "Invoiced" now also names the fixed lifecycle SECTION HEADER (<th>); the row status label is a
+    // <span>. Scope to the row span.
+    const label = screen.getAllByText('Invoiced').find((el) => el.tagName === 'SPAN') as HTMLElement;
+    expect(label).toBeDefined();
     // Same neutral slate row format as every other status — never the green decoration.
     expect(label.className).toContain('text-slate-600');
     expect(label.className).not.toContain('emerald');
-    // The ROW must not say "Ready for delivery" (the filter dropdown option legitimately still does).
-    const rowMentions = screen.getAllByText('Ready for delivery').filter((el) => el.tagName !== 'OPTION');
+    // The ROW status <span> must not say "Ready for delivery" (the filter dropdown <option> and the
+    // empty lifecycle section <th> legitimately still do — exclude both, keep only row spans).
+    const rowMentions = screen.getAllByText('Ready for delivery').filter((el) => el.tagName === 'SPAN');
     expect(rowMentions).toHaveLength(0);
   });
 
-  it('sorts by a column header: default -> asc -> desc (3-state) with aria-sort + indicator', async () => {
+  it('header sort cycles default -> asc -> desc (3-state) with aria-sort + indicator', async () => {
     renderPage();
     await screen.findByText('CASE-001');
     const order = () => screen.getAllByText(/^CASE-00\d$/).map((el) => el.textContent);
     const vetHeader = () => screen.getByRole('button', { name: /Veteran/ });
 
-    // default = Submitted newest-first (timeline), NOT raw server order (2026-06-11 sticky sort)
+    // With fixed lifecycle grouping, CASE-002 (intake → Pre-draft) always renders above CASE-001
+    // (drafting → Drafting): a case never leaves its bucket, so the cross-bucket ROW order is constant
+    // regardless of the sort. The sort cycle is verified via aria-sort + the indicator here; the
+    // WITHIN-bucket reorder behavior has its own dedicated test below.
     expect(order()).toEqual(['CASE-002', 'CASE-001']);
     expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('none');
 
-    // 1st click = ascending by veteran name (Aaron Adams < Matthew Young)
+    // 1st click = ascending
     fireEvent.click(vetHeader());
-    expect(order()).toEqual(['CASE-002', 'CASE-001']);
     expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('ascending');
     expect(vetHeader().textContent).toContain('▲');
+    expect(order()).toEqual(['CASE-002', 'CASE-001']);
 
     // 2nd click = descending
     fireEvent.click(vetHeader());
-    expect(order()).toEqual(['CASE-001', 'CASE-002']);
     expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('descending');
     expect(vetHeader().textContent).toContain('▼');
+    expect(order()).toEqual(['CASE-002', 'CASE-001']); // still bucket-ordered
 
-    // 3rd click = back to default (Submitted newest-first)
+    // 3rd click = back to default
     fireEvent.click(vetHeader());
     expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('none');
     expect(order()).toEqual(['CASE-002', 'CASE-001']);
@@ -297,15 +313,18 @@ describe('CasesPage', () => {
     await screen.findByText('CASE-001');
     const vetHeader = () => screen.getByRole('button', { name: /Veteran/ });
     fireEvent.click(vetHeader()); // asc
-    fireEvent.click(vetHeader()); // desc → Young (CASE-001) before Adams (CASE-002)
+    fireEvent.click(vetHeader()); // desc
     expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('descending');
     first.unmount();
 
     renderPage(); // simulates navigating to a claim and back (CasesPage remounts)
     await screen.findByText('CASE-001');
+    // The persisted Veteran-DESC sort survives the remount (aria-sort restored, NOT the default
+    // Submitted sort). Cross-bucket row order is fixed by the lifecycle grouping (CASE-002 Pre-draft
+    // above CASE-001 Drafting), so the assertion that bites here is the restored aria-sort state.
     expect(vetHeader().closest('th')?.getAttribute('aria-sort')).toBe('descending');
-    // Veteran desc, NOT the default Submitted-desc order (which would put CASE-002 first).
-    expect(screen.getAllByText(/^CASE-00\d$/).map((el) => el.textContent)).toEqual(['CASE-001', 'CASE-002']);
+    // Row order follows the fixed lifecycle buckets (Pre-draft CASE-002 above Drafting CASE-001).
+    expect(screen.getAllByText(/^CASE-00\d$/).map((el) => el.textContent)).toEqual(['CASE-002', 'CASE-001']);
   });
 
   it('status filter persists across unmount/remount (sessionStorage)', async () => {
@@ -351,7 +370,7 @@ describe('CasesPage', () => {
     });
   });
 
-  it('groups rows under display-group headers; an archived row falls under the Archived group', async () => {
+  it('closed cases (paid + archived rejected) fall under the terminal Invoiced lifecycle bucket', async () => {
     mockRole = 'admin';
     listCasesMock.mockResolvedValue({
       data: [
@@ -363,16 +382,64 @@ describe('CasesPage', () => {
     renderPage();
     fireEvent.click(await screen.findByRole('tab', { name: 'Closed' }));
     await screen.findByText('CASE-PAID');
-    // Group header rows are <th scope="colgroup">; the same words appear in the status <option>s,
-    // so scope the assertion to the colgroup headers (role=columnheader carries scope=colgroup).
-    const groupHeaders = screen.getAllByRole('columnheader')
-      .filter((el) => el.getAttribute('scope') === 'colgroup')
-      .map((el) => el.textContent ?? '');
-    // statusDisplayGroup(paid)='Paid'; an archived case folds into 'Archived' regardless of status.
-    expect(groupHeaders.some((t) => t.startsWith('Paid'))).toBe(true);
-    expect(groupHeaders.some((t) => t.startsWith('Archived'))).toBe(true);
-    // The archived row shows Restore (keyed on archivedAt), the paid row shows Archive.
+    // Both paid and rejected fold into the terminal 'Invoiced' lifecycle bucket; that header carries
+    // a count of 2. The archived row still shows Restore (keyed on archivedAt), the paid row Archive.
+    const invoicedHeader = lifecycleHeaders().find((t) => t.startsWith('Invoiced'));
+    expect(invoicedHeader).toBe('Invoiced (2)');
     expect(screen.getByRole('button', { name: 'Restore' })).toBeInTheDocument();
+  });
+
+  // === Fixed lifecycle grouping (Dr. Kasky 2026-06-24) ===
+
+  it('renders all six lifecycle headers in the FIXED locked order, even when buckets are empty', async () => {
+    mockRole = 'admin';
+    // Two rows: one drafting, one physician_review. The other four buckets are empty.
+    listCasesMock.mockResolvedValue({
+      data: [
+        { ...CASES_RESULT.data[0], id: 'CASE-DRAFT', status: 'drafting' },
+        { ...CASES_RESULT.data[1], id: 'CASE-MD', status: 'physician_review' },
+      ],
+      page: 1, pageSize: 25, total: 2,
+    });
+    renderPage();
+    await screen.findByText('CASE-DRAFT');
+    // Strip the trailing "(n)" count and assert the exact locked order, empties included.
+    const labels = lifecycleHeaders().map((t) => t.replace(/\s*\(\d+\)\s*$/, ''));
+    expect(labels).toEqual(['Pre-draft', 'Drafting', 'RN review', 'Physician review', 'Ready for delivery', 'Invoiced']);
+    // Empty buckets show the "— none —" placeholder; the two populated ones show their count.
+    expect(lifecycleHeaders().find((t) => t.startsWith('Drafting'))).toBe('Drafting (1)');
+    expect(lifecycleHeaders().find((t) => t.startsWith('Physician review'))).toBe('Physician review (1)');
+    expect(screen.getAllByText('— none —').length).toBe(4);
+  });
+
+  it('sorting reorders rows WITHIN a bucket but never moves a case across buckets', async () => {
+    mockRole = 'admin';
+    // Two drafting rows (Young, Adams) + one physician_review row. Sorting by Veteran must reorder
+    // the two drafting rows among themselves while every row stays under its own lifecycle header.
+    listCasesMock.mockResolvedValue({
+      data: [
+        { ...CASES_RESULT.data[0], id: 'CASE-YOUNG', status: 'drafting', createdAt: '2026-05-01T12:00:00Z', veteran: { id: 'V-Y', firstName: 'Matthew', lastName: 'Young', email: 'y@x.test' } },
+        { ...CASES_RESULT.data[0], id: 'CASE-ADAMS', status: 'drafting', createdAt: '2026-05-02T12:00:00Z', veteran: { id: 'V-A', firstName: 'Aaron', lastName: 'Adams', email: 'a@x.test' } },
+        { ...CASES_RESULT.data[0], id: 'CASE-MD', status: 'physician_review', createdAt: '2026-05-03T12:00:00Z', veteran: { id: 'V-Z', firstName: 'Zed', lastName: 'Zimmer', email: 'z@x.test' } },
+      ],
+      page: 1, pageSize: 25, total: 3,
+    });
+    renderPage();
+    await screen.findByText('CASE-YOUNG');
+    const order = () => screen.getAllByText(/^CASE-(YOUNG|ADAMS|MD)$/).map((el) => el.textContent);
+
+    // Default = Submitted newest-first WITHIN each bucket: drafting bucket [Adams(5/2), Young(5/1)],
+    // then physician_review bucket [MD]. MD never floats above the drafting rows despite being newest.
+    expect(order()).toEqual(['CASE-ADAMS', 'CASE-YOUNG', 'CASE-MD']);
+
+    // Sort by Veteran ascending: the two DRAFTING rows swap (Adams < Young), MD stays last in its own
+    // bucket — a case never leaves its lifecycle bucket regardless of the sort.
+    fireEvent.click(screen.getByRole('button', { name: /Veteran/ }));
+    expect(order()).toEqual(['CASE-ADAMS', 'CASE-YOUNG', 'CASE-MD']);
+
+    // Veteran descending: drafting rows reverse to [Young, Adams]; MD still alone, still last.
+    fireEvent.click(screen.getByRole('button', { name: /Veteran/ }));
+    expect(order()).toEqual(['CASE-YOUNG', 'CASE-ADAMS', 'CASE-MD']);
   });
 
   it('legacy stored archived=true blob maps to the Closed toggle on remount (back-compat)', async () => {

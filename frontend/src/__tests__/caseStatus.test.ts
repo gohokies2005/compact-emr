@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CASE_STATUS_LABELS, CASE_STATUS_TRANSITIONS, statusDisplayGroup } from '../lib/caseStatus';
+import { CASE_STATUS_LABELS, CASE_STATUS_TRANSITIONS, statusDisplayGroup, lifecycleBucket, LIFECYCLE_BUCKET_ORDER, LIFECYCLE_BUCKET_LABELS, type LifecycleBucket } from '../lib/caseStatus';
 import type { CaseStatus } from '../types/prisma';
 
 describe('caseStatus maps', () => {
@@ -59,6 +59,49 @@ describe('caseStatus maps', () => {
       expect(statusDisplayGroup('paid', { archived: true })).toBe('Archived');
       expect(statusDisplayGroup('rn_review', { archived: true })).toBe('Archived');
       expect(statusDisplayGroup('rn_review', { archived: false })).toBe('RN review');
+    });
+  });
+
+  // === FIXED lifecycle grouping for the Cases page (Dr. Kasky 2026-06-24) ===
+  describe('lifecycleBucket', () => {
+    it('exposes the six buckets in the LOCKED top->bottom order', () => {
+      expect(LIFECYCLE_BUCKET_ORDER).toEqual([
+        'pre_draft', 'drafting', 'rn_review', 'physician_review', 'ready_for_delivery', 'invoiced',
+      ]);
+      // The human labels render in the same locked order.
+      expect(LIFECYCLE_BUCKET_ORDER.map((b) => LIFECYCLE_BUCKET_LABELS[b])).toEqual([
+        'Pre-draft', 'Drafting', 'RN review', 'Physician review', 'Ready for delivery', 'Invoiced',
+      ]);
+    });
+
+    it('maps EVERY CaseStatus enum value to one of the six buckets (no orphan falls through)', () => {
+      const validBuckets = new Set<LifecycleBucket>(LIFECYCLE_BUCKET_ORDER);
+      for (const status of labelKeys) {
+        const b = lifecycleBucket(status);
+        expect(validBuckets.has(b)).toBe(true);
+      }
+    });
+
+    it('maps each status to the expected lifecycle bucket', () => {
+      // Pre-draft = everything before drafting starts (incl. the two pre-draft parks).
+      expect(lifecycleBucket('intake')).toBe('pre_draft');
+      expect(lifecycleBucket('records')).toBe('pre_draft');
+      expect(lifecycleBucket('viability')).toBe('pre_draft');
+      expect(lifecycleBucket('needs_records')).toBe('pre_draft');
+      expect(lifecycleBucket('needs_rn_decision')).toBe('pre_draft');
+      // Drafting = the pipeline is running.
+      expect(lifecycleBucket('drafting')).toBe('drafting');
+      // RN review = rn_review + the correction round.
+      expect(lifecycleBucket('rn_review')).toBe('rn_review');
+      expect(lifecycleBucket('correction_requested')).toBe('rn_review');
+      expect(lifecycleBucket('correction_review')).toBe('rn_review');
+      // Physician review.
+      expect(lifecycleBucket('physician_review')).toBe('physician_review');
+      // Ready for delivery = physician-approved, pre-payment / invoice-out.
+      expect(lifecycleBucket('delivered')).toBe('ready_for_delivery');
+      // Invoiced = the terminal billed/closed rung (paid + rejected fold here).
+      expect(lifecycleBucket('paid')).toBe('invoiced');
+      expect(lifecycleBucket('rejected')).toBe('invoiced');
     });
   });
 });

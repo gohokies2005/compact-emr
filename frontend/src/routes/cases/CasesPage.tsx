@@ -4,7 +4,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { CASE_STATUS_LABELS, caseDisplayLabel, statusDisplayGroup, type CaseStatusDisplayGroup } from '../../lib/caseStatus';
+import { CASE_STATUS_LABELS, caseDisplayLabel, lifecycleBucket, LIFECYCLE_BUCKET_ORDER, LIFECYCLE_BUCKET_LABELS, type LifecycleBucket } from '../../lib/caseStatus';
 import { formatAbsoluteDate, formatRelativeTime } from '../../lib/date';
 import { listCases, deleteCase, restoreCase, assignCaseRn, type CaseLite } from '../../api/cases';
 import { describeApiError } from '../../api/client';
@@ -304,21 +304,16 @@ export function CasesPage() {
   const pageRows = cases.data?.data ?? [];
   const rows = sortCases(pageRows, sort);
   const pageTruncated = total > pageRows.length;
-  // Status grouping (C5 lifecycle, 2026-06-13): collapse the fine-grained workflow statuses into the
-  // coarse display BUCKETS the RN thinks in ("whose ball is it"), via the shared statusDisplayGroup()
-  // SSOT. An archived case (archivedAt set) folds into the 'Archived' bucket regardless of status.
-  // We preserve the active sort WITHIN each group: walk the already-sorted rows once, bucketing in
-  // first-seen order, so the table stays sorted and every row appears exactly once.
-  const groupedRows: readonly { readonly group: CaseStatusDisplayGroup; readonly rows: readonly CaseLite[] }[] = (() => {
-    const order: CaseStatusDisplayGroup[] = [];
-    const byGroup = new Map<CaseStatusDisplayGroup, CaseLite[]>();
-    for (const c of rows) {
-      const g = statusDisplayGroup(c.status, { archived: c.archivedAt != null });
-      let bucket = byGroup.get(g);
-      if (bucket === undefined) { bucket = []; byGroup.set(g, bucket); order.push(g); }
-      bucket.push(c);
-    }
-    return order.map((g) => ({ group: g, rows: byGroup.get(g) as CaseLite[] }));
+  // FIXED lifecycle grouping (Dr. Kasky 2026-06-24): every case sits under one of six FIXED, ORDERED
+  // section headers — Pre-draft → Drafting → RN review → Physician review → Ready for delivery →
+  // Invoiced — and the six rows ALWAYS render in that order (empty buckets included), so a case never
+  // jumps headers when the sort column changes. Sorting reorders rows WITHIN a bucket only: we bucket
+  // the ALREADY-sorted rows, so each bucket inherits the active sort, then emit buckets in the locked
+  // LIFECYCLE_BUCKET_ORDER. The per-row status chip + every column are unchanged.
+  const groupedRows: readonly { readonly bucket: LifecycleBucket; readonly rows: readonly CaseLite[] }[] = (() => {
+    const byBucket = new Map<LifecycleBucket, CaseLite[]>(LIFECYCLE_BUCKET_ORDER.map((b) => [b, []]));
+    for (const c of rows) (byBucket.get(lifecycleBucket(c.status)) as CaseLite[]).push(c);
+    return LIFECYCLE_BUCKET_ORDER.map((bucket) => ({ bucket, rows: byBucket.get(bucket) as CaseLite[] }));
   })();
   const COLUMN_COUNT = CASE_COLUMNS.length + 1; // +1 for the trailing actions column
   function exportCsv() {
@@ -381,12 +376,16 @@ export function CasesPage() {
           <th className="px-4 py-3" />
         </tr></thead>
         <tbody className="divide-y divide-slate-100">
-          {groupedRows.map(({ group, rows: groupRows }) => <Fragment key={group}>
+          {groupedRows.map(({ bucket, rows: groupRows }) => <Fragment key={bucket}>
+            {/* FIXED lifecycle header — all six render, always in order; empty buckets show "— none —". */}
             <tr className="bg-slate-100/70">
               <th colSpan={COLUMN_COUNT} scope="colgroup" className="px-4 py-1.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                {group} <span className="ml-1 font-normal text-slate-400">({groupRows.length})</span>
+                {LIFECYCLE_BUCKET_LABELS[bucket]} <span className="ml-1 font-normal text-slate-400">({groupRows.length})</span>
               </th>
             </tr>
+            {groupRows.length === 0 ? (
+              <tr><td colSpan={COLUMN_COUNT} className="px-4 py-2 text-xs italic text-slate-300">— none —</td></tr>
+            ) : null}
             {groupRows.map((c) => <tr key={c.id} className="cursor-pointer hover:bg-slate-50" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}`)}>
             <td className="px-4 py-3 font-medium"><Link className="text-indigo-600" to={`/cases/${encodeURIComponent(c.id)}`} onClick={(e) => e.stopPropagation()}>{c.id}</Link></td>
             <td className="px-4 py-3 text-slate-600"><Link className="hover:text-indigo-600" to={`/veterans/${encodeURIComponent(c.veteranId)}`} onClick={(e) => e.stopPropagation()}>{formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}</Link></td>

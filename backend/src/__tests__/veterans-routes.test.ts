@@ -68,9 +68,23 @@ class MockDb {
   };
 
   public veteran = {
-    findMany: async (): Promise<Array<VeteranRecord & { _count: { cases: number } }>> =>
-      [...this.veterans.values()].filter((v) => !v.inactive).map((v) => ({ ...v, _count: { cases: 0 } })),
-    count: async (): Promise<number> => [...this.veterans.values()].filter((v) => !v.inactive).length,
+    // Honors the real route's args: `where` (active + OR contains/insensitive search across
+    // lastName/firstName/email/id), `orderBy` (lastName→firstName→id asc), `skip`, `take`.
+    // The earlier stub ignored all of these, so search + page-2 could never be proven.
+    findMany: async (args?: {
+      where?: Record<string, unknown>;
+      orderBy?: Array<Record<string, 'asc' | 'desc'>>;
+      skip?: number;
+      take?: number;
+    }): Promise<Array<VeteranRecord & { _count: { cases: number } }>> => {
+      let rows = this.filterVeterans(args?.where);
+      rows = MockDb.orderVeterans(rows);
+      const skip = typeof args?.skip === 'number' ? args.skip : 0;
+      const take = typeof args?.take === 'number' ? args.take : rows.length;
+      return rows.slice(skip, skip + take).map((v) => ({ ...v, _count: { cases: 0 } }));
+    },
+    count: async (args?: { where?: Record<string, unknown> }): Promise<number> =>
+      this.filterVeterans(args?.where).length,
     findUnique: async (args: unknown): Promise<VeteranRecord | null> => {
       const id = this.extractId(args);
       return this.veterans.get(id) ?? null;
@@ -227,6 +241,34 @@ class MockDb {
     return fn(this as unknown as AppDbTransaction);
   }
 
+  // Mirrors buildVeteranListWhere(): { inactive:false } optionally AND'd with an OR of
+  // {lastName|firstName|email|id} contains/insensitive. Enough to prove search end-to-end.
+  private filterVeterans(where: Record<string, unknown> | undefined): VeteranRecord[] {
+    const all = [...this.veterans.values()].filter((v) => !v.inactive);
+    if (!where) return all;
+    const and = where.AND as Array<Record<string, unknown>> | undefined;
+    if (!Array.isArray(and)) return all; // base where is just { inactive:false }
+    const orClause = (and.find((c) => Array.isArray((c as { OR?: unknown }).OR)) as { OR?: Array<Record<string, { contains?: string }>> } | undefined)?.OR;
+    if (!orClause) return all;
+    const term = (orClause[0]?.lastName?.contains ?? '').toLowerCase();
+    if (!term) return all;
+    return all.filter((v) =>
+      v.lastName.toLowerCase().includes(term) ||
+      v.firstName.toLowerCase().includes(term) ||
+      (v.email ?? '').toLowerCase().includes(term) ||
+      v.id.toLowerCase().includes(term),
+    );
+  }
+
+  private static orderVeterans(rows: VeteranRecord[]): VeteranRecord[] {
+    return [...rows].sort(
+      (a, b) =>
+        a.lastName.localeCompare(b.lastName) ||
+        a.firstName.localeCompare(b.firstName) ||
+        a.id.localeCompare(b.id),
+    );
+  }
+
   private extractId(args: unknown): string {
     if (typeof args !== 'object' || args === null) return '';
     const maybeWhere = (args as { where?: unknown }).where;
@@ -292,6 +334,65 @@ describe('Phase 3A-1 veteran routes', () => {
     const res = await request(createApp({ db: db as unknown as AppDb })).get('/api/v1/veterans').set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.data)).toBe(true);
+  });
+
+  it('GET /api/v1/veterans returns a page + pagination envelope (default limit 25)', async () => {
+    const db = new MockDb();
+    // 30 veterans → more than one default page, so the cap-without-pagination bug would hide 5.
+    for (let i = 0; i < 30; i++) {
+      const n = String(i).padStart(3, '0');
+      db.veterans.set(`V-${n}`, sampleVeteran({ id: `V-${n}`, lastName: `Vet${n}`, firstName: 'A' }));
+    }
+    const token = await makeJwt(['admin']);
+    const res = await request(createApp({ db: db as unknown as AppDb })).get('/api/v1/veterans').set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(25); // default page size
+    expect(res.body.pagination).toMatchObject({ page: 1, limit: 25, total: 30, hasMore: true });
+  });
+
+  it('GET /api/v1/veterans?page=2 returns the SECOND page (the vets the 25-cap used to hide)', async () => {
+    const db = new MockDb();
+    for (let i = 0; i < 30; i++) {
+      const n = String(i).padStart(3, '0');
+      db.veterans.set(`V-${n}`, sampleVeteran({ id: `V-${n}`, lastName: `Vet${n}`, firstName: 'A' }));
+    }
+    const token = await makeJwt(['admin']);
+    const res = await request(createApp({ db: db as unknown as AppDb }))
+      .get('/api/v1/veterans?page=2&limit=25')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(5); // 30 - 25
+    expect(res.body.pagination).toMatchObject({ page: 2, limit: 25, total: 30, hasMore: false });
+    // ordered by lastName asc → page 2 begins at Vet025, which page 1 never showed.
+    expect(res.body.data[0].id).toBe('V-025');
+  });
+
+  it('GET /api/v1/veterans?q= finds a veteran NOT on page 1 (server-side search over the FULL set — "Warren is invisible" fix)', async () => {
+    const db = new MockDb();
+    // 30 "Aaa" vets fill page 1; Warren sorts last and would be UNREACHABLE without search.
+    for (let i = 0; i < 30; i++) {
+      const n = String(i).padStart(3, '0');
+      db.veterans.set(`V-${n}`, sampleVeteran({ id: `V-${n}`, lastName: `Aaa${n}`, firstName: 'Filler' }));
+    }
+    db.veterans.set('WARREN-1', sampleVeteran({ id: 'WARREN-1', lastName: 'Zylinski', firstName: 'Warren' }));
+    const token = await makeJwt(['admin']);
+
+    // Partial, case-insensitive name search reaches him from anywhere in the set.
+    const byName = await request(createApp({ db: db as unknown as AppDb }))
+      .get('/api/v1/veterans?q=warr')
+      .set('Authorization', `Bearer ${token}`);
+    expect(byName.status).toBe(200);
+    expect(byName.body.data).toHaveLength(1);
+    expect(byName.body.data[0].id).toBe('WARREN-1');
+    expect(byName.body.pagination.total).toBe(1);
+
+    // ...and by partial veteran id.
+    const byId = await request(createApp({ db: db as unknown as AppDb }))
+      .get('/api/v1/veterans?q=WARREN')
+      .set('Authorization', `Bearer ${token}`);
+    expect(byId.body.data[0].lastName).toBe('Zylinski');
   });
 
   it('PATCH /api/v1/veterans/:id increments version and writes fields-only activity details', async () => {

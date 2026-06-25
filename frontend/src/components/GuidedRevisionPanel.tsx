@@ -42,6 +42,16 @@ function rejectionCopy(r: Rejection): string {
   return 'Rejected: the revision could not be applied. Refine your instruction and try again.';
 }
 
+// proposal_unavailable (Guided-revision robustness, 2026-06-24): the LLM proposer failed transiently
+// or returned an empty/truncated edit. EVERY case gets a specific, actionable message — never the
+// generic "could not be generated". `detail` discriminates the cause.
+function proposalUnavailableMessage(detail: string | undefined): string {
+  if (detail === 'model_unavailable') return 'The AI service was briefly unavailable. Click Propose revision again in a moment.';
+  if (detail === 'passage_too_complex') return 'The AI couldn’t shape a clean edit for this passage — it may be too long. Try a single sentence, or hand-edit it directly in the letter.';
+  // no_change_proposed (or any unrecognized detail)
+  return 'The AI didn’t return an edit for this passage. Try rephrasing the instruction, narrow the selection to a single sentence, or hand-edit it directly in the letter.';
+}
+
 export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, onFlagDisabled }: GuidedRevisionPanelProps) {
   const [instruction, setInstruction] = useState('');
   const [result, setResult] = useState<GuidedRevisionResult | null>(null);
@@ -66,9 +76,13 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
     } catch (err: unknown) {
       // 503 → the feature flag is off; disable the entry point (no point retrying this session).
       if (err instanceof ServiceUnavailableError) { onFlagDisabled(); setError('Guided Revision isn’t enabled yet.'); return; }
-      // 422 → a guard tripped. details.reason names which; citation_invented carries citationDiff.
+      // 422 → a guard tripped OR the proposer was unavailable/returned nothing usable.
       if (err instanceof SurgicalEditUnappliableError) {
         const reason = typeof err.details?.reason === 'string' ? err.details.reason : 'edit_unappliable';
+        // proposal_unavailable is NOT a medico-legal rejection — it's a transient/too-complex
+        // failure with a SPECIFIC, actionable message. Surface it in the neutral error slot (not the
+        // red rejection block) so the physician knows exactly what to do, never the generic fallback.
+        if (reason === 'proposal_unavailable') { setError(proposalUnavailableMessage(err.details?.detail)); return; }
         const added = (err.details?.citationDiff?.added ?? [])
           .map((t) => (typeof t?.raw === 'string' ? t.raw : ''))
           .filter((s) => s.length > 0);

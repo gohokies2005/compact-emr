@@ -8,6 +8,7 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import { LetterEditor } from '../../components/LetterEditor';
 import { GuidedRevisionPanel } from '../../components/GuidedRevisionPanel';
+import { CitationEnricherPanel } from '../../components/CitationEnricherPanel';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { getCase } from '../../api/cases';
 import { letterFilename } from '../../lib/letterFilename';
@@ -354,6 +355,20 @@ export function LetterEditorPage() {
                   onFlagDisabled={() => setGuidedRevisionDisabled(true)}
                   onApply={(p) => applyMutation.mutateAsync(p).then(() => undefined)}
                 />
+
+                {/* Citation Enricher — PHYSICIAN-ONLY (Feature B, 2026-06-24). Add real, verified
+                    PubMed citations to the letter. Hidden for ops_staff (the backend also 403s them).
+                    On apply it refetches the letter (mirrors the surgical/guided apply success). */}
+                {canPhysicianAct ? (
+                  <CitationEnricherPanel
+                    caseId={caseId}
+                    passage={selectedPassage}
+                    onApplied={() => {
+                      setMessage('Verified citations added as a new version.');
+                      void letterQuery.refetch();
+                    }}
+                  />
+                ) : null}
 
                 {/* Approve / Decline — physician (or admin) only; an RN never signs off a letter.
                     Approve OPENS the sign-off popup first (the backend /approve 409s with

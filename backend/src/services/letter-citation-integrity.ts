@@ -149,3 +149,65 @@ export function diffCitations(before: string, after: string): CitationDiff {
 export function describeToken(t: CitationToken): string {
   return t.raw;
 }
+
+/**
+ * SANCTIONED citation diff — the Feature B (Citation Enricher, 2026-06-24) apply-time variant of
+ * diffCitations. This is the ONE place a NET-NEW citation is permitted, and ONLY because the apply
+ * endpoint just SERVER-SIDE RE-VERIFIED each selected PMID against NCBI (verifyPmidById re-fetches
+ * the PMID, confirms it is real + non-retracted + on-topic, and extracts a verbatim killer stat).
+ *
+ * THE CONTRACT — a net-new citation token in `after` (absent from `before`) is ALLOWED iff:
+ *   - it is a PMID token, AND
+ *   - its bare numeric id is in `sanctionedPmids` (the server-re-verified set for THIS apply).
+ * EVERY other net-new token is still REJECTED (returned in `added`), exactly as diffCitations does:
+ *   - a net-new PMID NOT in the sanctioned set (the client tried to slip in an unverified cite);
+ *   - a net-new author-year (e.g. "Smith 2019") — the enricher inserts PMIDs only, never an
+ *     author-year, so any net-new author-year is model/operator invention;
+ *   - a net-new statistic (percentage, OR/RR/HR, n=, CI). The deterministic insertion adds only a
+ *     numbered reference line + an optional PMID-anchored sentence with NO embedded statistic, so a
+ *     net-new stat can never come from a sanctioned insertion; it would be fabrication.
+ * REMOVED tokens are reported (caller may warn) but never block — same as diffCitations.
+ *
+ * ANTI-BYPASS (why this cannot weaken the guard):
+ *   (i)   the sanctioned set is built SERVER-SIDE from verifyPmidById results at apply time — never
+ *         from a client-supplied "verified" boolean (the route passes only re-verified PMIDs here);
+ *   (ii)  the set is keyed on the BARE NUMERIC id (leading zeros stripped) so a reformatted "PMID
+ *         012345" cannot dodge membership, and a non-PMID net-new token is unconditionally added;
+ *   (iii) insertion is deterministic, so by construction the citation delta equals the sanctioned
+ *         set — this function PROVES that property and fails closed if anything else slipped in.
+ *
+ * `sanctionedPmids` accepts any iterable of pmid-ish strings ("12345678", "PMID: 12345678",
+ * "012345"); each is normalized to its bare-digits identity (same normalization extractCitationTokenMap
+ * uses for a PMID token). An empty set makes this behave EXACTLY like diffCitations (no net-new
+ * allowed) — the safe default, so a mis-wired caller cannot accidentally sanction anything.
+ *
+ * Pure; never throws. Does NOT replace diffCitations — the normal surgical/guided paths keep calling
+ * diffCitations (zero sanctioned set), so the guard there is unchanged.
+ */
+export function diffCitationsSanctioned(
+  before: string,
+  after: string,
+  sanctionedPmids: Iterable<string>,
+): CitationDiff {
+  // Normalize the sanctioned PMIDs to the SAME bare-digit identity the PMID token key uses, so a
+  // reformatted/zero-padded id can neither sneak past membership nor be falsely rejected.
+  const sanctioned = new Set<string>();
+  for (const p of sanctionedPmids) {
+    const digits = String(p ?? '').replace(/\D/g, '').replace(/^0+/, '') || '';
+    if (digits.length > 0) sanctioned.add(`pmid:${digits}`);
+  }
+
+  const b = extractCitationTokenMap(before);
+  const a = extractCitationTokenMap(after);
+  const added: CitationToken[] = [];
+  const removed: CitationToken[] = [];
+  for (const [key, tok] of a) {
+    if (b.has(key)) continue;
+    // A net-new token. Allow it ONLY if it is a PMID in the server-re-verified sanctioned set.
+    // Any other net-new token (unsanctioned PMID, author-year, or statistic) is fabrication → reject.
+    if (tok.kind === 'pmid' && sanctioned.has(key)) continue;
+    added.push(tok);
+  }
+  for (const [key, tok] of b) if (!a.has(key)) removed.push(tok);
+  return { added, removed };
+}

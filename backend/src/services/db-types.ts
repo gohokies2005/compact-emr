@@ -350,6 +350,7 @@ export interface AppDbTransaction {
   document: DocumentDelegate;
   documentPage: DocumentPageDelegate;
   letterRevision: LetterRevisionDelegate;
+  citationEnrichJob: CitationEnrichJobDelegate;
   caseMessage: CaseMessageDelegate;
   staffMessage: StaffMessageDelegate;
   staffMessageRecipient: StaffMessageRecipientDelegate;
@@ -462,6 +463,31 @@ export interface DraftJobDelegate {
   count(args: unknown): Promise<number>;
   create(args: unknown): Promise<DraftJobRecord>;
   update(args: unknown): Promise<DraftJobRecord>;
+}
+
+// CitationEnrichJob — Feature B (Citation Enricher, 2026-06-24) async-poll scratchpad. PROPOSE
+// creates it 'pending' + runs the grounded NCBI retrieval to fill candidatesJson; GET polls it;
+// APPLY reads the selected PMIDs out to re-verify them server-side. Short-TTL, never a billable
+// artifact. See schema.prisma model CitationEnrichJob.
+export interface CitationEnrichJobRecord {
+  id: string;
+  caseId: string;
+  status: string; // 'pending' | 'ready' | 'error'
+  condition: string | null;
+  claim: string | null;
+  mechanismHints: string[];
+  candidatesJson: unknown;
+  errorMessage: string | null;
+  requestedBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CitationEnrichJobDelegate {
+  findFirst(args: unknown): Promise<CitationEnrichJobRecord | null>;
+  findUnique(args: unknown): Promise<CitationEnrichJobRecord | null>;
+  create(args: unknown): Promise<CitationEnrichJobRecord>;
+  update(args: unknown): Promise<CitationEnrichJobRecord>;
 }
 
 // LetterRevision — the UNIFIED letter-version timeline (the single source of truth, alongside

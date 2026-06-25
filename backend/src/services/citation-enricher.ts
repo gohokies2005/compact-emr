@@ -1,0 +1,320 @@
+/**
+ * Citation Enricher service — Feature B (2026-06-24). The physician requests grounded medical
+ * citations (real, verified PubMed PMIDs) for an existing letter, previews candidates, and on
+ * approval the verified citations are deterministically inserted into Section VIII (and an optional
+ * grounding sentence into Section VI) as a new letter version.
+ *
+ * SAFETY KEYSTONE: every PMID and every "killer stat" comes from NCBI via the vendored
+ * citationFallback module (backend/src/vendor/citationFallback.cjs, vendored verbatim from FRN), which
+ * holds the anti-fabrication invariants (PMID from esearch, killer_finding a verbatim abstract
+ * substring, retraction reject, never throws). This module is the THIN typed adapter around it plus:
+ *   - a STRICT-SCHEMA Haiku call that maps a highlighted claim sentence to SEARCH TERMS ONLY (the
+ *     schema has NO citation/pmid field, so the model cannot invent a cite — it can only steer the
+ *     NCBI search); and
+ *   - the DETERMINISTIC insertion (no LLM weave) that adds a numbered §VIII reference + an optional
+ *     PMID-anchored §VI sentence. The insertion adds ONLY the verified PMIDs (no embedded statistic),
+ *     so the apply-side diffCitationsSanctioned can prove the citation delta equals the sanctioned set.
+ *
+ * The retrieval is several serial NCBI round-trips → the route runs it ASYNC and the physician polls.
+ */
+
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
+import Anthropic from '@anthropic-ai/sdk';
+import { resolveAnthropicApiKey } from './letter-surgical-propose.js';
+
+// ── Vendored citationFallback loader (createRequire from the anchor-vendor tree) ───────────────
+// Identical pattern to case-viability.ts: the CJS module is loaded at RUNTIME from disk (api-stack
+// copies backend/src/vendor → <task>/anchor-vendor; the same dir holds anchorMechanism.cjs etc.).
+// citationFallback is pure Node `https` with no data files, so it would also bundle — but the
+// runtime-load keeps it consistent with the rest of the vendor tree and needs no esbuild config.
+const VENDOR_DIR = process.env['ANCHOR_VENDOR_DIR'] ?? 'anchor-vendor';
+
+/** One grounded anchor the vendored module returns. */
+export interface GroundedAnchor {
+  slot: 'A1' | 'A2' | 'A3';
+  slot_label: string;
+  pmid: string;
+  title: string;
+  journal: string;
+  year: string;
+  full_citation: string;
+  killer_finding: string;
+  source: string;
+  title_match: boolean;
+}
+export interface RetrieveResult {
+  condition: string;
+  status: 'grounded' | 'no_data' | 'invalid_condition' | 'network_error';
+  anchors: GroundedAnchor[];
+  trace: unknown[];
+  retrieved_at: string;
+}
+/** The shape of a single-PMID re-verify (verifyPmidById). `verified` gates everything downstream. */
+export interface VerifyResult {
+  verified: boolean;
+  pmid: string;
+  title: string;
+  journal: string;
+  year: string;
+  killer_finding: string;
+  reason?: string;
+  error?: string;
+}
+interface CitationFallbackModule {
+  retrieveGroundedAnchors(condition: string, opts?: { mechanismHints?: string[] }): Promise<RetrieveResult>;
+  verifyPmidById(pmid: string, claimedCondition?: string): Promise<VerifyResult>;
+}
+
+let _fallback: CitationFallbackModule | null = null;
+function loadCitationFallback(): CitationFallbackModule {
+  if (_fallback !== null) return _fallback;
+  const candidates = [
+    path.join(process.cwd(), VENDOR_DIR, 'citationFallback.cjs'), // Lambda runtime (anchor-vendor copy)
+    path.join(process.cwd(), 'src', 'vendor', 'citationFallback.cjs'), // backend/ cwd (vitest, tsx dev)
+    path.join(process.cwd(), 'backend', 'src', 'vendor', 'citationFallback.cjs'), // repo-root cwd
+  ];
+  const entry = candidates.find((c) => existsSync(c));
+  if (entry === undefined) {
+    throw new Error(`citationFallback vendor module not found (tried: ${candidates.join(' | ')})`);
+  }
+  const req = createRequire(path.join(process.cwd(), '_anchor_require_base.cjs'));
+  _fallback = req(entry) as CitationFallbackModule;
+  return _fallback;
+}
+
+/** Grounded NCBI retrieval. Never throws (the vendored module catches all network/parse errors). */
+export async function retrieveGroundedAnchors(condition: string, mechanismHints?: string[]): Promise<RetrieveResult> {
+  return loadCitationFallback().retrieveGroundedAnchors(condition, mechanismHints && mechanismHints.length > 0 ? { mechanismHints } : {});
+}
+
+/**
+ * Apply-time SERVER-SIDE re-verify of a single PMID against NCBI (re-fetch + confirm real,
+ * non-retracted, on-topic, with a verbatim killer stat). NEVER trust a client 'verified' flag —
+ * this is the authoritative check the apply endpoint runs on every selected PMID. Never throws.
+ */
+export async function verifyPmidById(pmid: string, condition?: string): Promise<VerifyResult> {
+  return loadCitationFallback().verifyPmidById(pmid, condition);
+}
+
+// ── Claim → SEARCH TERMS (strict-schema Haiku) ─────────────────────────────────────────────────
+const TERMS_MODEL = 'claude-3-5-haiku-latest';
+
+// The tool schema extracts SEARCH TERMS ONLY. There is deliberately NO pmid / citation / author /
+// year field — the model literally cannot emit a citation, only a condition string + optional
+// mechanism phrases that steer the grounded NCBI search. This is the anti-fabrication guarantee at
+// the term-mapping step: the model never names a paper; NCBI returns every PMID.
+const EXTRACT_TERMS_TOOL: Anthropic.Tool = {
+  name: 'search_terms',
+  description: 'Extract the medical search terms (condition + optional mechanism phrases) from a clinical claim sentence. Output search terms ONLY — never a citation, author, year, or PMID.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      condition: { type: 'string', description: 'the single core medical condition or relationship to search PubMed for (e.g. "obstructive sleep apnea" or "PTSD hypertension")' },
+      mechanismHints: { type: 'array', items: { type: 'string' }, description: 'optional short mechanism phrases that focus the search (e.g. "sympathetic activation", "intermittent hypoxia"). 0-3 items.' },
+    },
+    required: ['condition'],
+  },
+};
+
+const EXTRACT_TERMS_SYSTEM = [
+  'You map a highlighted sentence from a VA nexus letter (a medical opinion) to PubMed SEARCH TERMS.',
+  'Return ONLY the search_terms tool: a single core condition/relationship string + up to 3 optional mechanism phrases.',
+  'You are NOT citing or recalling any paper. Do not output an author, a year, a PMID, or a study name — only the terms a librarian would type into PubMed. The actual citations come from a grounded NCBI search downstream.',
+].join('\n');
+
+export interface ExtractedTerms { condition: string; mechanismHints: string[]; }
+
+/** Build a Haiku-backed claim→terms extractor from an API key. Injected for test stubbing. */
+export type TermsExtractor = (claim: string) => Promise<ExtractedTerms>;
+
+export function makeTermsExtractor(apiKey: string): TermsExtractor {
+  const anthropic = new Anthropic({ apiKey });
+  return async (claim: string): Promise<ExtractedTerms> => {
+    const resp = await anthropic.messages.create({
+      model: TERMS_MODEL,
+      max_tokens: 300,
+      system: EXTRACT_TERMS_SYSTEM,
+      tools: [EXTRACT_TERMS_TOOL],
+      tool_choice: { type: 'tool', name: 'search_terms' },
+      messages: [{ role: 'user', content: `HIGHLIGHTED CLAIM:\n${claim}` }],
+    });
+    // Forced tool_choice means a well-formed call ends with stop_reason 'tool_use'. Treat anything
+    // else (end_turn with no tool block, max_tokens, refusal) as a failure to extract — the caller
+    // falls back to using the raw claim/condition as the search term (still grounded by NCBI).
+    if (resp.stop_reason !== 'tool_use' && resp.stop_reason !== 'end_turn') {
+      throw new Error(`terms extractor: unexpected stop_reason ${String(resp.stop_reason)}`);
+    }
+    const toolUse = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+    if (toolUse === undefined) throw new Error('terms extractor: model returned no structured terms');
+    const raw = toolUse.input as { condition?: unknown; mechanismHints?: unknown };
+    if (typeof raw.condition !== 'string' || raw.condition.trim() === '') {
+      throw new Error('terms extractor: malformed tool input (no condition)');
+    }
+    const hints = Array.isArray(raw.mechanismHints)
+      ? raw.mechanismHints.map((h) => String(h ?? '').trim()).filter((h) => h.length > 0).slice(0, 3)
+      : [];
+    return { condition: raw.condition.trim(), mechanismHints: hints };
+  };
+}
+
+/**
+ * Lazily-resolved terms extractor for production — the Anthropic key is fetched on first use and
+ * cached (mirrors makeSurgicalProposerFromEnv). Mount whenever ANTHROPIC_API_KEY or
+ * API_ANTHROPIC_KEY_SECRET_ARN is set; absent → the route never offers the claim-mapping step and
+ * uses the operator-supplied condition directly.
+ */
+export function makeTermsExtractorFromEnv(): TermsExtractor {
+  let delegate: TermsExtractor | null = null;
+  let resolving: Promise<TermsExtractor> | null = null;
+  async function ensure(): Promise<TermsExtractor> {
+    if (delegate) return delegate;
+    if (!resolving) {
+      resolving = resolveAnthropicApiKey()
+        .then((key) => { delegate = makeTermsExtractor(key); return delegate; })
+        .catch((e: unknown) => { resolving = null; throw e; });
+    }
+    return resolving;
+  }
+  return async (claim: string): Promise<ExtractedTerms> => (await ensure())(claim);
+}
+
+// ── Candidate shape the poll returns (preview) ─────────────────────────────────────────────────
+export interface EnrichCandidate {
+  pmid: string;
+  title: string;
+  journal: string;
+  year: string;
+  killer_finding: string;
+  pubmedUrl: string;
+  slot: 'A1' | 'A2' | 'A3';
+}
+
+export function pubmedUrl(pmid: string): string {
+  return `https://pubmed.ncbi.nlm.nih.gov/${String(pmid).replace(/\D/g, '')}/`;
+}
+
+/** Map grounded anchors to preview candidates (preview-only; never trusted at apply). */
+export function anchorsToCandidates(anchors: readonly GroundedAnchor[]): EnrichCandidate[] {
+  return anchors.map((a) => ({
+    pmid: a.pmid,
+    title: a.title,
+    journal: a.journal,
+    year: a.year,
+    killer_finding: a.killer_finding,
+    pubmedUrl: pubmedUrl(a.pmid),
+    slot: a.slot,
+  }));
+}
+
+// ── DETERMINISTIC insertion (no LLM weave) ─────────────────────────────────────────────────────
+// Build the §VIII reference line for a verified citation in the house numbered format
+// (`<N>. Author. Title. Journal. Year;...` is the canonical FRN entry, but the grounded module
+// already produced a `full_citation`; here we just NUMBER it). We add ONLY the citation — never a
+// statistic — so the citation delta the sanctioned-diff sees is exactly the inserted PMIDs.
+export interface VerifiedCitationForInsert {
+  pmid: string;
+  title: string;
+  journal: string;
+  year: string;
+  killer_finding: string;
+}
+
+function buildReferenceLine(n: number, c: VerifiedCitationForInsert): string {
+  const title = c.title.replace(/\.+$/, '');
+  const yr = c.year ? ` ${c.year}` : '';
+  // PMID is appended so §VIII carries the verifiable identifier; the diff treats it as the sanctioned token.
+  return `${n}. ${title}. ${c.journal}.${yr} PMID: ${c.pmid}.`;
+}
+
+/** Find the highest leading "<N>." number already in the references block so we append, not collide. */
+function maxRefNumber(referencesBlock: string): number {
+  let max = 0;
+  for (const m of referencesBlock.matchAll(/^\s*(\d+)\.\s/gm)) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return max;
+}
+
+export interface InsertResult {
+  /** The new full letter text with the citations appended to §VIII (+ optional §VI sentence). */
+  newText: string;
+  /** The PMIDs actually inserted (bare digits) — the SANCTIONED set the diff is checked against. */
+  insertedPmids: string[];
+}
+
+// Section VIII header forms we anchor on. The FRN house letter uses "VIII. References" (sometimes
+// bolded markdown). We match the first such header and append numbered lines under that block.
+const SECTION_VIII_RE = /(^|\n)(\*{0,2}\s*(?:VIII\.|Section\s+VIII\b)[^\n]*References[^\n]*\*{0,2})\s*\n/i;
+// Section VI header (for the optional grounding sentence). NOTE: the roman-numeral form must be
+// "VI." with the literal dot (no trailing \b — a dot→space transition is non-word to non-word, so a
+// \b there NEVER matches, which silently skipped the §VI insertion); the \b applies only to the
+// spelled "Section VI" form.
+const SECTION_VI_RE = /(^|\n)(\*{0,2}\s*(?:VI\.|Section\s+VI\b)[^\n]*\*{0,2})\s*\n/i;
+
+/**
+ * Deterministically insert the verified citations.
+ *   - §VIII: append a numbered reference line per citation (continuing the existing numbering). If no
+ *     §VIII header is found we append a new "VIII. References" block at the end of the letter.
+ *   - §VI: when `groundInSectionVi` is true AND a §VI header exists, append ONE plain grounding
+ *     sentence at the end of the §VI block that names the citation(s) by author-less PMID anchor — NO
+ *     embedded statistic (so no net-new stat token), just "This is further supported by the
+ *     peer-reviewed literature added to the references (PMID 123, PMID 456)." The physician can then
+ *     weave the actual finding via the existing guided-revision tools if desired.
+ * Pure string assembly; never an LLM. Returns the new text + the bare-digit PMIDs inserted.
+ */
+export function insertVerifiedCitations(
+  letterText: string,
+  citations: readonly VerifiedCitationForInsert[],
+  opts: { groundInSectionVi: boolean } = { groundInSectionVi: false },
+): InsertResult {
+  const insertedPmids = citations.map((c) => String(c.pmid).replace(/\D/g, '').replace(/^0+/, '')).filter((p) => p.length > 0);
+  if (citations.length === 0) return { newText: letterText, insertedPmids: [] };
+
+  let text = letterText;
+
+  // ── §VIII references ──
+  const vMatch = SECTION_VIII_RE.exec(text);
+  if (vMatch !== null) {
+    // Find the end of the §VIII block: from the header to the next blank-line-separated section or EOF.
+    const headerEnd = (vMatch.index ?? 0) + vMatch[0].length;
+    // The references block runs to the next double-newline that precedes a non-reference line, or EOF.
+    const rest = text.slice(headerEnd);
+    // Conservatively treat everything from headerEnd to EOF as the references block (refs are last in
+    // the canonical letter). Count existing numbers there to continue the sequence.
+    const startNum = maxRefNumber(rest) + 1 || 1;
+    const lines = citations.map((c, i) => buildReferenceLine(startNum + i, c));
+    // Append after the existing references, ensuring exactly one trailing newline separation.
+    const trimmedRest = rest.replace(/\s*$/, '');
+    const joiner = trimmedRest.length > 0 ? '\n' : '';
+    text = text.slice(0, headerEnd) + trimmedRest + joiner + lines.join('\n') + '\n';
+  } else {
+    // No §VIII — append a fresh references block at the end.
+    const lines = citations.map((c, i) => buildReferenceLine(i + 1, c));
+    text = text.replace(/\s*$/, '') + '\n\nVIII. References\n' + lines.join('\n') + '\n';
+  }
+
+  // ── §VI grounding sentence (optional, deterministic, NO statistic) ──
+  if (opts.groundInSectionVi) {
+    const viMatch = SECTION_VI_RE.exec(text);
+    if (viMatch !== null) {
+      const pmidList = insertedPmids.map((p) => `PMID ${p}`).join(', ');
+      const sentence = ` The opinion is further supported by additional peer-reviewed literature now included in the references (${pmidList}).`;
+      // Insert at the END of the §VI block: find the start of the NEXT section header after §VI, or EOF.
+      const viStart = (viMatch.index ?? 0) + viMatch[0].length;
+      const after = text.slice(viStart);
+      // Next section header (VII/Section VII, or §VIII) terminates §VI. Same \b caveat as above:
+      // the dot forms ("VII." / "VIII.") carry the literal dot and NO trailing \b.
+      const nextHeader = /\n\*{0,2}\s*(?:VII\.|Section\s+VII\b|VIII\.|Section\s+VIII\b)/i.exec(after);
+      const insertAt = nextHeader !== null ? viStart + (nextHeader.index ?? 0) : text.length;
+      // Place the sentence just before the next header (trim any trailing whitespace in the §VI body first).
+      const head = text.slice(0, insertAt).replace(/\s*$/, '');
+      const tail = text.slice(insertAt);
+      text = head + sentence + (tail.startsWith('\n') ? '' : '\n') + tail;
+    }
+  }
+
+  return { newText: text, insertedPmids };
+}

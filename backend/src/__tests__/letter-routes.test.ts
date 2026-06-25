@@ -332,6 +332,40 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
       expect(res.body.error.details.reason).toBe('locked_physician_review');
     });
 
+    // Guided-revision robustness (2026-06-24): a proposer that fails after the SDK's transient
+    // retries OR returns nothing usable throws a typed ProposerUnavailableError; the route turns it
+    // into a SPECIFIC 422 'proposal_unavailable' (+ detail) — never the generic could-not-be-generated.
+    function unavailableProposer(detail: string, passageTooLong = false) {
+      return vi.fn(async () => { throw Object.assign(new Error(`proposer unavailable: ${detail}`), { isProposerUnavailable: true, detail, passageTooLong }); });
+    }
+    it('422 proposal_unavailable (model_unavailable) when the proposer is transiently down', async () => {
+      const d = grDeps({ proposeSurgicalEdit: unavailableProposer('model_unavailable') });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'edit it' });
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('proposal_unavailable');
+      expect(res.body.error.details.detail).toBe('model_unavailable');
+      expect(res.body.error.message).toMatch(/briefly unavailable.*Propose/i);
+    });
+    it('422 proposal_unavailable (passage_too_complex) carries passageTooLong + a too-long message', async () => {
+      const d = grDeps({ proposeSurgicalEdit: unavailableProposer('passage_too_complex', true) });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'edit it' });
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('proposal_unavailable');
+      expect(res.body.error.details.detail).toBe('passage_too_complex');
+      expect(res.body.error.details.passageTooLong).toBe(true);
+      expect(res.body.error.message).toMatch(/too long/i);
+    });
+    it('SURGICAL (non-guided) propose also maps a ProposerUnavailableError to 422 proposal_unavailable', async () => {
+      const d = deps({ proposeSurgicalEdit: unavailableProposer('no_change_proposed') });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ instruction: 'add the DC code' });
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('proposal_unavailable');
+      expect(res.body.error.details.detail).toBe('no_change_proposed');
+    });
+
     it('APPLY of a guided-revision proposal that changes the holding is BLOCKED (422 holding_changed) defense-in-depth', async () => {
       // Even a hand-crafted apply payload that bypassed propose cannot change the holding.
       const holding = "**It is my opinion that the veteran's condition is at least as likely as not (50 percent or greater probability) caused by service, under 38 CFR 3.310.**";

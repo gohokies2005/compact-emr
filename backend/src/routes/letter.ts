@@ -12,7 +12,16 @@ import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services
 import { buildLetterRevisionKey } from '../services/s3-key-safety.js';
 import { cleanProseForSave, sanityCheckLetterText, computeLockedRanges, type SanityFinding } from '../services/letter-sanity.js';
 import { applyStructuredEdit, type EditProposal } from '../services/letter-edit-apply.js';
-import { diffCitations, describeToken, type CitationDiff } from '../services/letter-citation-integrity.js';
+import { diffCitations, diffCitationsSanctioned, describeToken, type CitationDiff } from '../services/letter-citation-integrity.js';
+import {
+  anchorsToCandidates,
+  insertVerifiedCitations,
+  type EnrichCandidate,
+  type ExtractedTerms,
+  type RetrieveResult,
+  type VerifyResult,
+  type VerifiedCitationForInsert,
+} from '../services/citation-enricher.js';
 import { holdingConclusionWeakened, sectionViiChanged } from '../services/letter-opinion-excerpt.js';
 import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from '../services/case-status-transitions.js';
 import { resolveRateCents } from '../services/pay-earnings.js';
@@ -144,9 +153,45 @@ export interface SurgicalProposeInput {
 export interface SurgicalProposeOutput { proposal: EditProposal; costUsd: number; model: string; }
 export type SurgicalProposer = (input: SurgicalProposeInput) => Promise<SurgicalProposeOutput>;
 
+// Guided-revision robustness (2026-06-24): the proposer (letter-surgical-propose) throws a typed
+// ProposerUnavailableError when the LLM call still fails after the SDK's transient retries OR the
+// model returns an empty/truncated/malformed structured edit. The router is decoupled from the
+// concrete proposer (it's an injected dep), so we DUCK-TYPE the error here rather than import the
+// service. This becomes a SPECIFIC 422 ('proposal_unavailable' + sub-detail) so the UI never shows
+// the generic "could not be generated" — every failure path gets an actionable reason. The detail
+// also carries passageTooLong so the message can accurately say "it may be too long".
+type ProposerFailureDetail = 'model_unavailable' | 'passage_too_complex' | 'no_change_proposed';
+interface ProposerUnavailableShape { isProposerUnavailable: true; detail: ProposerFailureDetail; passageTooLong?: boolean; }
+function asProposerUnavailable(err: unknown): ProposerUnavailableShape | null {
+  if (err !== null && typeof err === 'object' && (err as { isProposerUnavailable?: unknown }).isProposerUnavailable === true) {
+    const e = err as ProposerUnavailableShape;
+    return { isProposerUnavailable: true, detail: e.detail, passageTooLong: e.passageTooLong === true };
+  }
+  return null;
+}
+function proposalUnavailableMessage(pu: ProposerUnavailableShape): string {
+  if (pu.detail === 'model_unavailable') return 'The AI service was briefly unavailable. Click Propose again in a moment.';
+  if (pu.detail === 'passage_too_complex') return 'The AI could not shape a clean edit for this passage, likely because it is too long. Try a single sentence, or hand-edit it directly in the letter.';
+  return 'The AI did not return an edit for this passage. Try rephrasing the instruction, narrow the passage to a single sentence, or hand-edit it directly in the letter.';
+}
+
+// ── Citation Enricher (Feature B, 2026-06-24) injected dependencies ──────────────────────────────
+// All three are injected so the router is stub-testable and carries no NCBI/Anthropic dependency at
+// type-check time (mirrors proposeSurgicalEdit). The concrete impls (vendored citationFallback + a
+// strict-schema Haiku call) are wired at mount in server.ts.
+//   - enrichRetrieve: PROPOSE-time grounded NCBI retrieval (several serial round-trips, run async).
+//   - enrichVerify:   APPLY-time SERVER-SIDE re-verify of ONE selected PMID (re-fetch + confirm).
+//   - extractTerms:   optional claim-sentence → search-terms mapping (strict-schema Haiku, no cite field).
+export type EnrichRetriever = (condition: string, mechanismHints?: string[]) => Promise<RetrieveResult>;
+export type EnrichVerifier = (pmid: string, condition?: string) => Promise<VerifyResult>;
+export type TermsExtractor = (claim: string) => Promise<ExtractedTerms>;
+
 export interface LetterRouterDeps {
   renderLetter: RenderInvoker;
   proposeSurgicalEdit?: SurgicalProposer;
+  enrichRetrieve?: EnrichRetriever;
+  enrichVerify?: EnrichVerifier;
+  extractTerms?: TermsExtractor;
   s3?: S3Client;
   bucketName?: string;
 }
@@ -579,7 +624,16 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           throw new HttpError(422, 'conflict', 'The highlighted passage was not found verbatim in the current letter. Reload the letter and re-highlight.', { reason: 'passage_not_found', caseId });
         }
 
-        const out = await deps.proposeSurgicalEdit({ instruction: body.instruction, letterText: oldText, mode: 'guided_revision', passage });
+        let out: SurgicalProposeOutput;
+        try {
+          out = await deps.proposeSurgicalEdit({ instruction: body.instruction, letterText: oldText, mode: 'guided_revision', passage });
+        } catch (err: unknown) {
+          const pu = asProposerUnavailable(err);
+          if (pu === null) throw err;
+          // SPECIFIC, actionable 422 instead of the generic could-not-be-generated. The frontend
+          // maps detail -> the right message (retry-now vs too-complex vs no-change).
+          throw new HttpError(422, 'conflict', proposalUnavailableMessage(pu), { reason: 'proposal_unavailable', detail: pu.detail, passageTooLong: pu.passageTooLong === true, caseId });
+        }
         // The proposer pins anchor_text=passage + operation=replace; dry-run so we preview a
         // deterministically-appliable edit and so all downstream guards see the EXACT revised letter.
         const dry = applyStructuredEdit(oldText, out.proposal);
@@ -642,7 +696,14 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // ── PROPOSE (LLM runs here; metered) ──
       if (typeof body.instruction !== 'string' || body.instruction.trim() === '') throw new HttpError(400, 'bad_request', 'instruction (non-empty string) is required to propose', { caseId });
       if (deps.proposeSurgicalEdit === undefined) throw new HttpError(503, 'internal_error', 'Surgical-AI is not configured (no proposer wired).', { reason: 'surgical_ai_not_configured', caseId });
-      const out = await deps.proposeSurgicalEdit({ instruction: body.instruction, letterText: oldText });
+      let out: SurgicalProposeOutput;
+      try {
+        out = await deps.proposeSurgicalEdit({ instruction: body.instruction, letterText: oldText });
+      } catch (err: unknown) {
+        const pu = asProposerUnavailable(err);
+        if (pu === null) throw err;
+        throw new HttpError(422, 'conflict', proposalUnavailableMessage(pu), { reason: 'proposal_unavailable', detail: pu.detail, passageTooLong: pu.passageTooLong === true, caseId });
+      }
       // Dry-run the proposal so the physician previews a deterministically-appliable edit.
       const dry = applyStructuredEdit(oldText, out.proposal);
       await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_surgical_ai_proposed', caseId, veteranId: c.veteranId, detailsJson: { instruction: body.instruction.slice(0, 500), model: out.model, costUsd: out.costUsd, appliable: dry.ok } } });
@@ -993,6 +1054,237 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         }
       });
       res.json({ data: { status: 'correction_requested' } });
+    }),
+  );
+
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+  // Citation Enricher (Feature B, 2026-06-24) — PHYSICIAN-ONLY. Add grounded, verified PubMed
+  // citations to an existing letter. Two-phase like surgical-AI, but ASYNC (the grounded NCBI
+  // retrieval is several serial round-trips that won't finish under the API Gateway 30s ceiling):
+  //   1. POST  .../citations/enrich        → PROPOSE: create a job, run the retrieval, return 202 {jobId}
+  //   2. GET   .../citations/enrich/:jobId  → POLL:    return {status, candidates?}
+  //   3. POST  .../citations/apply          → APPLY:   re-verify each selected PMID SERVER-SIDE, then
+  //                                            deterministically insert + persist a new version.
+  // SAFETY: the apply re-verifies every selected PMID against NCBI (never a client flag) and the
+  // citation-integrity guard is diffCitationsSanctioned(before, after, verifiedPmids) — a net-new
+  // citation is allowed ONLY if its PMID is in the server-re-verified set; anything else is rejected.
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+
+  // Physician-only gate shared by all three enricher routes. ops_staff (RN) → 403. (Mirrors the
+  // §VII physician-only reasoning: adding citations to a signed-able medical opinion is the
+  // physician's act.) Admin may act. Distinct from the surgical/guided edit parity (RN-allowed).
+  function assertPhysicianOnly(role: string, caseId: string): void {
+    if (role !== 'physician' && role !== 'admin') {
+      throw new HttpError(403, 'forbidden', 'Citation enrichment is a physician action.', { reason: 'physician_only', caseId });
+    }
+  }
+
+  // ── POST citations/enrich — PROPOSE (async): create a job + run grounded NCBI retrieval ──
+  router.post(
+    '/cases/:id/letter/citations/enrich',
+    requireRole(['admin', 'physician', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      assertPhysicianOnly(user.role, caseId);
+      const body = (req.body ?? {}) as { claim?: unknown; condition?: unknown; mechanismHints?: unknown };
+
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      await enforcePhysicianAssignment(caseId, user.role, user.sub, c.assignedPhysicianId);
+      if (!EDITABLE_STATUSES.has(c.status)) throw new HttpError(409, 'conflict', `Letter is not editable in status '${c.status}'.`, { reason: 'not_editable', caseId, status: c.status });
+      if (deps.enrichRetrieve === undefined) throw new HttpError(503, 'internal_error', 'Citation enrichment is not configured in this environment.', { reason: 'enricher_not_configured', caseId });
+
+      const claim = typeof body.claim === 'string' && body.claim.trim() !== '' ? body.claim.trim() : null;
+      const explicitCondition = typeof body.condition === 'string' && body.condition.trim() !== '' ? body.condition.trim() : null;
+      const explicitHints = Array.isArray(body.mechanismHints)
+        ? body.mechanismHints.map((h) => String(h ?? '').trim()).filter((h) => h.length > 0).slice(0, 5)
+        : [];
+      if (claim === null && explicitCondition === null) {
+        throw new HttpError(400, 'bad_request', 'Provide a claim sentence or a condition to search for.', { reason: 'no_query', caseId });
+      }
+
+      // Create the pending job row up front (the poll target). Condition resolves below.
+      const job = await db.citationEnrichJob.create({
+        data: {
+          caseId,
+          status: 'pending',
+          claim,
+          condition: explicitCondition,
+          mechanismHints: explicitHints,
+          requestedBy: user.sub,
+        },
+      });
+      await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_citation_enrich_proposed', caseId, veteranId: c.veteranId, detailsJson: { jobId: job.id, hasClaim: claim !== null } } });
+
+      // Return 202 immediately; the retrieval continues below (the handler awaits it, but the client
+      // is expected to POLL — for very long retrievals the await may exceed the gateway timeout, in
+      // which case the row is already 'pending' and the poll will catch the eventual 'ready'/'error').
+      res.status(202).json({ data: { jobId: job.id, status: 'pending' } });
+
+      // ── Async retrieval (best-effort; failure flips the job to 'error', never throws to the client). ──
+      void (async () => {
+        try {
+          // Resolve the search condition: an explicit condition wins; else map the claim sentence to
+          // SEARCH TERMS via the strict-schema Haiku call (no cite field → cannot invent a citation).
+          let condition = explicitCondition ?? '';
+          let mechanismHints = explicitHints;
+          if (condition === '' && claim !== null) {
+            if (deps.extractTerms !== undefined) {
+              try {
+                const terms = await deps.extractTerms(claim);
+                condition = terms.condition;
+                if (mechanismHints.length === 0) mechanismHints = terms.mechanismHints;
+              } catch {
+                // Term extraction failed — fall back to the raw claim as the search string (still
+                // fully grounded by NCBI; we just lose the focused condition phrasing).
+                condition = claim;
+              }
+            } else {
+              condition = claim;
+            }
+          }
+          const result = await (deps.enrichRetrieve as EnrichRetriever)(condition, mechanismHints);
+          const candidates: EnrichCandidate[] = anchorsToCandidates(result.anchors);
+          await db.citationEnrichJob.update({
+            where: { id: job.id },
+            data: {
+              status: result.status === 'grounded' && candidates.length > 0 ? 'ready' : 'error',
+              condition,
+              mechanismHints,
+              candidatesJson: candidates,
+              errorMessage: candidates.length === 0 ? `No grounded citations found (status: ${result.status}).` : null,
+            },
+          });
+        } catch (e: unknown) {
+          await db.citationEnrichJob.update({
+            where: { id: job.id },
+            data: { status: 'error', errorMessage: e instanceof Error ? e.message.slice(0, 500) : 'retrieval failed' },
+          }).catch(() => { /* swallow — the poll will surface a stuck 'pending' row */ });
+        }
+      })();
+    }),
+  );
+
+  // ── GET citations/enrich/:jobId — POLL: return {status, candidates?} (preview-only, no write) ──
+  router.get(
+    '/cases/:id/letter/citations/enrich/:jobId',
+    requireRole(['admin', 'physician', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      assertPhysicianOnly(user.role, caseId);
+      const jobId = String(req.params.jobId);
+      const job = await db.citationEnrichJob.findFirst({ where: { id: jobId, caseId } });
+      if (job === null) throw new HttpError(404, 'not_found', 'Enrichment job not found for this case.', { caseId, jobId });
+      const candidates = Array.isArray(job.candidatesJson) ? (job.candidatesJson as EnrichCandidate[]) : undefined;
+      res.json({
+        data: {
+          status: job.status,
+          ...(job.status === 'ready' && candidates ? { candidates } : {}),
+          ...(job.status === 'error' ? { error: job.errorMessage ?? 'Citation retrieval failed.' } : {}),
+        },
+      });
+    }),
+  );
+
+  // ── POST citations/apply — APPLY: re-verify selected PMIDs server-side, insert, persist v<N+1> ──
+  router.post(
+    '/cases/:id/letter/citations/apply',
+    requireRole(['admin', 'physician', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      assertPhysicianOnly(user.role, caseId);
+      const body = (req.body ?? {}) as { jobId?: unknown; selectedPmids?: unknown; groundInSectionVi?: unknown };
+      const jobId = typeof body.jobId === 'string' ? body.jobId : '';
+      const selectedPmids = Array.isArray(body.selectedPmids)
+        ? body.selectedPmids.map((p) => String(p ?? '').replace(/\D/g, '')).filter((p) => p.length > 0)
+        : [];
+      if (jobId === '') throw new HttpError(400, 'bad_request', 'jobId is required.', { caseId });
+      if (selectedPmids.length === 0) throw new HttpError(400, 'bad_request', 'Select at least one citation to add.', { reason: 'no_selection', caseId });
+      if (deps.enrichVerify === undefined) throw new HttpError(503, 'internal_error', 'Citation enrichment is not configured in this environment.', { reason: 'enricher_not_configured', caseId });
+
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      await enforcePhysicianAssignment(caseId, user.role, user.sub, c.assignedPhysicianId);
+      if (!EDITABLE_STATUSES.has(c.status)) throw new HttpError(409, 'conflict', `Letter is not editable in status '${c.status}'.`, { reason: 'not_editable', caseId, status: c.status });
+
+      const job = await db.citationEnrichJob.findFirst({ where: { id: jobId, caseId } });
+      if (job === null) throw new HttpError(404, 'not_found', 'Enrichment job not found for this case.', { caseId, jobId });
+      const condition = job.condition ?? c.claimedCondition;
+
+      const bucketName = bucket();
+      if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
+      const cur = await resolveCurrent(caseId, c.currentVersion);
+      if (cur === null) throw new HttpError(409, 'conflict', 'No current letter to edit.', { reason: 'no_letter', caseId });
+      const oldText = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
+
+      // ── SERVER-SIDE RE-VERIFY every selected PMID against NCBI (never trust the client/poll). ──
+      // A PMID that is not real, retracted, off-topic, or has no extractable killer stat is REFUSED —
+      // we never insert an unverified citation. The verified set becomes the SANCTIONED set the guard
+      // checks the citation delta against.
+      const verifiedCitations: VerifiedCitationForInsert[] = [];
+      const rejected: Array<{ pmid: string; reason: string }> = [];
+      for (const pmid of selectedPmids) {
+        const v: VerifyResult = await (deps.enrichVerify as EnrichVerifier)(pmid, condition);
+        if (v.verified) {
+          verifiedCitations.push({ pmid: v.pmid, title: v.title, journal: v.journal, year: v.year, killer_finding: v.killer_finding });
+        } else {
+          rejected.push({ pmid, reason: v.reason ?? 'unverified' });
+        }
+      }
+      // If ANY selected PMID failed re-verification, REFUSE the whole apply (bias to block — a
+      // medico-legal letter must not ship a citation we could not confirm at apply time).
+      if (rejected.length > 0) {
+        throw new HttpError(422, 'conflict', `Citation apply rejected: ${rejected.length} selected citation(s) could not be re-verified against PubMed at apply time (${rejected.map((r) => `PMID ${r.pmid}: ${r.reason}`).join('; ')}). Nothing was changed.`, { reason: 'citation_unverified', caseId, rejected });
+      }
+
+      // ── DETERMINISTIC insertion (no LLM). Adds only the verified PMIDs (no embedded stats). ──
+      const groundInSectionVi = body.groundInSectionVi === true;
+      const { newText, insertedPmids } = insertVerifiedCitations(oldText, verifiedCitations, { groundInSectionVi });
+
+      // ── SANCTIONED citation-integrity guard. The ONLY allowed net-new citations are the
+      // server-re-verified PMIDs; ANY other added citation/stat is rejected. By construction the
+      // deterministic insertion adds exactly the sanctioned PMIDs, so this proves that invariant
+      // and fails closed if anything else slipped in (defense in depth on the string assembly).
+      const sanctionedDiff = diffCitationsSanctioned(oldText, newText, insertedPmids);
+      if (sanctionedDiff.added.length > 0) {
+        throw new HttpError(422, 'conflict', `Citation apply rejected: the insertion would introduce ${sanctionedDiff.added.length} citation/statistic that is not in the server-verified set (${sanctionedDiff.added.map(describeToken).join(', ')}). Nothing was changed.`, { reason: 'citation_invented', caseId, added: sanctionedDiff.added });
+      }
+
+      // ── Persist via the EXISTING new-version path (render → assert artifacts → transactional row). ──
+      const warnings: SanityFinding[] = sanityCheckLetterText(oldText, newText);
+      const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
+      if (veteran === null) throw new HttpError(409, 'conflict', 'Veteran not found for case.', { caseId });
+      const staleSignOff = (await db.signOff.findFirst({ where: { caseId, signedVersion: c.currentVersion } })) ?? null;
+      const stale = staleSignOff !== null ? staleSignOffOutcome(c.status) : null;
+      const newVersion = c.currentVersion + 1;
+      const keys = {
+        txtKey: buildLetterRevisionKey(caseId, newVersion, 'txt'),
+        pdfKey: buildLetterRevisionKey(caseId, newVersion, 'pdf'),
+        docxKey: buildLetterRevisionKey(caseId, newVersion, 'docx'),
+      };
+      const caseData = { id: caseId, veteran_name: `${veteran.firstName} ${veteran.lastName}`.trim(), veteran_last: veteran.lastName, claimed_condition: c.claimedCondition };
+      const rendered = await deps.renderLetter({ caseData, letterText: newText, version: newVersion, draft: true, bucket: bucketName, keys });
+      if (!rendered.ok) throw new HttpError(502, 'internal_error', 'Render failed; nothing saved.', { reason: 'render_failed', caseId });
+      assertTripleArtifacts(keys, { caseId, version: newVersion });
+      try {
+        await db.$transaction(async (tx) => {
+          // source='surgical_ai' (the existing in-editor edit source; the enricher is an in-editor
+          // physician edit). The activity log records the citation-specific action + the PMIDs.
+          await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: c.currentVersion, source: 'surgical_ai', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: warnings } });
+          await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, version: { increment: 1 }, ...(stale?.returnToPhysicianReview ? { status: 'physician_review' } : {}) } });
+          await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_citation_enrich_applied', caseId, veteranId: c.veteranId, detailsJson: { version: newVersion, jobId, insertedPmids, groundInSectionVi } } });
+          if (stale !== null) {
+            await tx.activityLog.create({ data: { actorUserId: user.sub, action: stale.logAction, caseId, veteranId: c.veteranId, detailsJson: { staleSignedVersion: c.currentVersion, newVersion, fromStatus: c.status, source: 'citation_enrich' } } });
+          }
+        });
+      } catch (e: unknown) {
+        if ((e as { code?: string }).code === 'P2002') throw new HttpError(409, 'conflict', 'Another change advanced the version; reload and re-apply.', { reason: 'concurrent_save', caseId });
+        throw e;
+      }
+      res.json({ data: { version: newVersion, txt: newText, insertedPmids, warnings, notice: stale?.notice ?? null } });
     }),
   );
 

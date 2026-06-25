@@ -472,6 +472,7 @@ model Case {
   caseMessages      CaseMessage[]
   staffMessages     StaffMessage[]
   draftDecisions    DraftDecision[]
+  enrichJobs        CitationEnrichJob[]
 
   @@index([veteranId])
   @@index([assignedPhysicianId])
@@ -738,6 +739,38 @@ model DraftJob {
   @@index([caseId, version])
   @@index([lastHeartbeatAt])
   @@map("draft_jobs")
+}
+
+// Feature B — Citation Enricher (2026-06-24). A physician PROPOSE kicks off a grounded NCBI
+// retrieval (several serial eutils round-trips) that cannot finish under the API Gateway 30s ceiling,
+// so the work is done ASYNC and the physician POLLs this row for the preview. The row is a short-TTL
+// scratchpad (no new infra): PROPOSE creates it 'pending', the same request runs the retrieval and
+// fills candidatesJson + flips to 'ready' (or 'error'), GET polls it, and APPLY reads the SELECTED
+// PMIDs back out to SERVER-SIDE re-verify them. Candidates carry pmid/title/journal/year/killer_finding
+// (every PMID + killer stat already grounded by the vendored citationFallback module); APPLY never
+// trusts these — it re-verifies each selected PMID against NCBI before insertion. Cascade-deletes with
+// the case; a sweep can prune rows older than the TTL (none of this is a billable artifact).
+model CitationEnrichJob {
+  id             String   @id @default(uuid())
+  caseId         String   @map("case_id")
+  status         String   @default("pending") @db.VarChar(12) // pending | ready | error
+  // The physician's request inputs (audit + the on-topic condition the apply-time re-verify uses).
+  condition      String?                                       // the resolved search condition
+  claim          String?                                       // the highlighted sentence, if given
+  mechanismHints String[] @default([]) @map("mechanism_hints")
+  // The grounded candidates the poll returns (array of { pmid, title, journal, year, killer_finding,
+  // pubmedUrl, slot }). Null until the retrieval completes. NEVER the source of truth at apply — the
+  // selected PMIDs are re-verified server-side from NCBI before any insertion.
+  candidatesJson Json?    @map("candidates_json")
+  errorMessage   String?  @map("error_message")
+  requestedBy    String   @map("requested_by")  // cognito sub of the requesting physician
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  case           Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+  @@index([createdAt])
+  @@map("citation_enrich_jobs")
 }
 
 model Correction {

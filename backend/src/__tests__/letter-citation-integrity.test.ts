@@ -3,6 +3,7 @@ import {
   extractCitationTokens,
   extractCitationTokenMap,
   diffCitations,
+  diffCitationsSanctioned,
 } from '../services/letter-citation-integrity.js';
 
 // Guided Revision, 2026-06-13 — the citation-integrity guard is the key new safety. Hard unit tests:
@@ -83,5 +84,70 @@ describe('letter-citation-integrity — diffCitations', () => {
     const diff = diffCitations(before, after);
     expect(diff.added).toHaveLength(0);
     expect(diff.removed).toHaveLength(0);
+  });
+});
+
+// Feature B (Citation Enricher, 2026-06-24) — the SANCTIONED variant is the safety keystone. A
+// net-new citation is allowed ONLY if its PMID is in the server-re-verified sanctioned set; anything
+// else is still rejected, and the NORMAL surgical/guided path (diffCitations, no sanctioned set) is
+// UNCHANGED. These tests pin all three properties.
+describe('letter-citation-integrity — diffCitationsSanctioned (Feature B keystone)', () => {
+  // The reference lines below carry ONLY a PMID token (no "Word Year" author-year surface form), so
+  // the tests isolate the PMID-sanctioning behavior — exactly what buildReferenceLine emits
+  // ("<N>. <title>. <journal>. <year> PMID: <id>." — the deterministic insertion is PMID-anchored).
+  it('ALLOWS a verified net-new PMID (its id is in the sanctioned set)', () => {
+    const before = 'References. See PMID: 11111111.';
+    const after = 'References. See PMID: 11111111. See also PMID: 22222222.';
+    const diff = diffCitationsSanctioned(before, after, ['22222222']);
+    expect(diff.added).toHaveLength(0); // sanctioned → not flagged
+    expect(diff.removed).toHaveLength(0);
+  });
+
+  it('REJECTS a net-new PMID that is NOT in the sanctioned set (the client tried to slip one in)', () => {
+    const before = 'References. See PMID: 11111111.';
+    const after = 'References. See PMID: 11111111. See also PMID: 99999999.';
+    // The verified set only sanctions 22222222 — 99999999 was never re-verified.
+    const diff = diffCitationsSanctioned(before, after, ['22222222']);
+    expect(diff.added.map((t) => t.key)).toEqual(['pmid:99999999']);
+  });
+
+  it('REJECTS a net-new statistic even when a PMID is sanctioned (insertion never adds a bare stat)', () => {
+    const before = 'References. See PMID: 11111111.';
+    const after = 'The risk was OR 5.7. See PMID: 22222222.';
+    const diff = diffCitationsSanctioned(before, after, ['22222222']);
+    // The PMID is sanctioned (not flagged) but the net-new OR 5.7 is fabrication → rejected.
+    expect(diff.added.map((t) => t.key)).toContain('ratio:or:5.7');
+    expect(diff.added.map((t) => t.key)).not.toContain('pmid:22222222');
+  });
+
+  it('REJECTS a net-new author-year even with a sanctioned PMID (enricher inserts PMIDs only)', () => {
+    const before = 'References. See PMID: 11111111.';
+    const after = 'As Jones 2021 found. See PMID: 22222222.';
+    const diff = diffCitationsSanctioned(before, after, ['22222222']);
+    expect(diff.added.map((t) => t.key)).toContain('ay:jones:2021');
+  });
+
+  it('an EMPTY sanctioned set behaves exactly like diffCitations (no net-new allowed)', () => {
+    const before = 'The mechanism is established.';
+    const after = 'The mechanism is established (PMID: 33333333).';
+    expect(diffCitationsSanctioned(before, after, []).added.map((t) => t.key)).toEqual(['pmid:33333333']);
+    // identical to the un-sanctioned guard:
+    expect(diffCitations(before, after).added.map((t) => t.key)).toEqual(['pmid:33333333']);
+  });
+
+  it('normalizes zero-padded / "PMID:"-prefixed sanctioned ids to the bare-digit identity', () => {
+    const before = 'References. See PMID: 11111111.';
+    const after = 'References. See PMID: 11111111. See also PMID: 22222222.';
+    // Sanctioned set given as a formatted/padded form must still match.
+    expect(diffCitationsSanctioned(before, after, ['PMID: 022222222']).added).toHaveLength(0);
+  });
+
+  it('GUARD INTACT: the normal surgical/guided path (diffCitations) still rejects a net-new cite', () => {
+    // diffCitationsSanctioned does NOT replace diffCitations — the normal paths keep using
+    // diffCitations with no sanctioned set, so their guard is unchanged. (Belt-and-suspenders pin.)
+    const before = 'No citations here.';
+    const after = 'Now with Smith 2019 and PMID: 44444444.';
+    const normal = diffCitations(before, after);
+    expect(normal.added.map((t) => t.key)).toEqual(expect.arrayContaining(['ay:smith:2019', 'pmid:44444444']));
   });
 });

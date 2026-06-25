@@ -35,6 +35,7 @@ import { createLetterRouter } from './routes/letter.js';
 import { createDeliveryRouter } from './routes/delivery.js';
 import { makeRenderInvoker } from './services/letter-render-invoke.js';
 import { makeSurgicalProposerFromEnv } from './services/letter-surgical-propose.js';
+import { retrieveGroundedAnchors, verifyPmidById, makeTermsExtractorFromEnv } from './services/citation-enricher.js';
 import { createPhysiciansRouter } from './routes/physicians.js';
 import { createCaseMessagesRouter } from './routes/case-messages.js';
 import { createStaffMessagesRouter } from './routes/staff-messages.js';
@@ -198,6 +199,14 @@ export function createApp(options: CreateAppOptions = {}) {
       ? makeRenderInvoker(renderLambdaName)
       : async () => { throw new HttpError(503, 'internal_error', 'Letter render is not configured in this environment.', { reason: 'render_unavailable' }); },
     ...(surgicalAiAvailable ? { proposeSurgicalEdit: makeSurgicalProposerFromEnv() } : {}),
+    // Citation Enricher (Feature B, 2026-06-24): the grounded NCBI retrieve + apply-time re-verify are
+    // always wired (they need only outbound HTTPS to eutils, available via the existing NAT — no
+    // Anthropic key). The claim→terms Haiku step is wired only when an Anthropic key is available;
+    // absent, the enricher uses the operator-supplied condition directly. The route still 503s the
+    // whole feature when enrichRetrieve is absent (it never is here) — so the feature is on by default.
+    enrichRetrieve: retrieveGroundedAnchors,
+    enrichVerify: verifyPmidById,
+    ...(surgicalAiAvailable ? { extractTerms: makeTermsExtractorFromEnv() } : {}),
     s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
     bucketName: process.env.PHI_BUCKET_NAME,
   }));

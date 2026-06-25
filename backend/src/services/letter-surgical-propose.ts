@@ -16,6 +16,51 @@ import type { EditProposal, EditOperation } from './letter-edit-apply.js';
 
 const MODEL = 'claude-opus-4-8';
 const MAX_TOKENS = 1500;
+// Transient-resilience (Guided-revision robustness, 2026-06-24): the SDK's own retry already
+// handles 429 / 5xx / 529-overloaded / timeouts / connection errors with exponential backoff +
+// jitter and honors retry-after, so we just RAISE its budget (default 2 -> 4) rather than hand-roll
+// a loop. A wedged socket otherwise burns the whole budget on one attempt, so cap each attempt with
+// an explicit timeout. This is the "it works after waiting" fix: a brief Anthropic overload no longer
+// surfaces as the generic "could not be generated."
+const MAX_RETRIES = 4;
+const REQUEST_TIMEOUT_MS = 60_000;
+// A passage this long is the empirical cause of a truncated (max_tokens) structured edit; the route
+// surfaces this in the failure detail so the message is accurate ("it may be too long").
+const LONG_PASSAGE_CHARS = 1500;
+
+/**
+ * A proposer failure the route can turn into a SPECIFIC, actionable 422 (never the generic
+ * "could not be generated"). `detail` discriminates the cause so the UI can say the right thing:
+ *  - 'model_unavailable'   : Anthropic was transiently down even after retries -> "click Propose again"
+ *  - 'passage_too_complex' : the model truncated (max_tokens) -> the edit couldn't be shaped cleanly
+ *  - 'no_change_proposed'  : the model returned no/empty/malformed structured edit
+ */
+export type ProposerFailureDetail = 'model_unavailable' | 'passage_too_complex' | 'no_change_proposed';
+export class ProposerUnavailableError extends Error {
+  readonly isProposerUnavailable = true;
+  constructor(readonly detail: ProposerFailureDetail, readonly passageTooLong = false, message?: string) {
+    super(message ?? `proposer unavailable: ${detail}`);
+    this.name = 'ProposerUnavailableError';
+  }
+}
+
+/**
+ * Classify a thrown Anthropic error as transient (worth surfacing as a retry-now message) vs a
+ * 4xx/validation we should NOT dress up as transient. The SDK has already retried the transient
+ * classes by the time it throws, so reaching here means they were EXHAUSTED — still transient from
+ * the user's view ("the service was briefly unavailable, try again"). Connection/timeout errors
+ * carry no .status, so test them first. Non-Anthropic errors are treated as non-transient.
+ */
+export function isTransientAnthropicError(err: unknown): boolean {
+  if (err instanceof Anthropic.APIConnectionError) return true; // incl. APIConnectionTimeoutError
+  if (err instanceof Anthropic.APIError) {
+    const s = err.status;
+    if (s === 429 || s === 529) return true;
+    if (typeof s === 'number' && s >= 500 && s <= 599) return true;
+    return false; // 400/401/403/404/413/422 — a real request problem, not a blip
+  }
+  return false;
+}
 // Opus per-MTok pricing (input $15 / output $75). Update if pricing changes.
 const INPUT_USD_PER_TOKEN = 15 / 1_000_000;
 const OUTPUT_USD_PER_TOKEN = 75 / 1_000_000;
@@ -130,7 +175,9 @@ export function makeSurgicalProposerFromEnv(): SurgicalProposer {
 }
 
 export function makeSurgicalProposer(apiKey: string): SurgicalProposer {
-  const anthropic = new Anthropic({ apiKey });
+  // maxRetries here gives the SDK its own exponential-backoff-with-jitter retry on the transient
+  // classes (429/5xx/529/timeouts/connection) — the robust transient fix, no hand-rolled loop.
+  const anthropic = new Anthropic({ apiKey, maxRetries: MAX_RETRIES });
   return async ({ instruction, letterText, mode, passage }: SurgicalProposeInput): Promise<SurgicalProposeOutput> => {
     const isGuided = mode === 'guided_revision';
     // Guided revision (Guided Revision, 2026-06-13): the user message frames the highlighted passage
@@ -139,23 +186,43 @@ export function makeSurgicalProposer(apiKey: string): SurgicalProposer {
     const userContent = isGuided
       ? `CURRENT LETTER:\n${letterText}\n\nHIGHLIGHTED PASSAGE (reshape ONLY this, return it as anchor_text verbatim):\n${passage ?? ''}\n\nINSTRUCTION:\n${instruction}`
       : `CURRENT LETTER:\n${letterText}\n\nINSTRUCTION:\n${instruction}`;
-    const resp = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      // NOTE: Opus 4.8 (claude-opus-4-8) DEPRECATED the `temperature` param — sending it returns a
-      // 400 invalid_request_error and the edit fails ("could not be done"). Determinism here comes
-      // from forced tool_choice + the strict system prompt, not sampling temperature. Do NOT re-add.
-      system: isGuided ? GUIDED_REVISION_SYSTEM_PROMPT : SYSTEM_PROMPT,
-      tools: [PROPOSE_TOOL],
-      tool_choice: { type: 'tool', name: 'propose_edit' },
-      messages: [{ role: 'user', content: userContent }],
-    });
+    const passageTooLong = typeof passage === 'string' && passage.length > LONG_PASSAGE_CHARS;
+    let resp: Anthropic.Message;
+    try {
+      resp = await anthropic.messages.create(
+        {
+          model: MODEL,
+          max_tokens: MAX_TOKENS,
+          // NOTE: Opus 4.8 (claude-opus-4-8) DEPRECATED the `temperature` param — sending it returns a
+          // 400 invalid_request_error and the edit fails ("could not be done"). Determinism here comes
+          // from forced tool_choice + the strict system prompt, not sampling temperature. Do NOT re-add.
+          system: isGuided ? GUIDED_REVISION_SYSTEM_PROMPT : SYSTEM_PROMPT,
+          tools: [PROPOSE_TOOL],
+          tool_choice: { type: 'tool', name: 'propose_edit' },
+          messages: [{ role: 'user', content: userContent }],
+        },
+        { timeout: REQUEST_TIMEOUT_MS },
+      );
+    } catch (err: unknown) {
+      // The SDK has already retried the transient classes; reaching here means they were exhausted
+      // (or it's a non-retryable error). Surface transient as 'model_unavailable' so the route can
+      // tell the physician to simply click Propose again — NOT the generic could-not-be-generated.
+      if (isTransientAnthropicError(err)) throw new ProposerUnavailableError('model_unavailable', passageTooLong);
+      throw err;
+    }
+
+    // TRUNCATION GUARD: a forced tool_use that hit the token cap ends with stop_reason 'max_tokens'
+    // and yields an INCOMPLETE/empty tool input (the SDK parses partial JSON to {}). This is the
+    // long/dense-passage failure mode — flag it distinctly so the message is "too long, try a sentence".
+    if (resp.stop_reason === 'max_tokens') {
+      throw new ProposerUnavailableError('passage_too_complex', passageTooLong);
+    }
 
     const toolUse = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
-    if (toolUse === undefined) throw new Error('surgical proposer: model returned no structured edit');
+    if (toolUse === undefined) throw new ProposerUnavailableError('no_change_proposed', passageTooLong, 'model returned no structured edit');
     const raw = toolUse.input as { operation?: unknown; anchor_text?: unknown; new_text?: unknown };
-    if (typeof raw.new_text !== 'string') {
-      throw new Error('surgical proposer: malformed tool input');
+    if (typeof raw.new_text !== 'string' || raw.new_text.length === 0) {
+      throw new ProposerUnavailableError('no_change_proposed', passageTooLong, 'malformed or empty tool input');
     }
     // Guided revision is a passage-scoped REPLACE by construction: the route guarantees `passage`
     // is a verbatim substring, so we PIN operation='replace' + anchor_text=passage server-side. This
@@ -169,7 +236,7 @@ export function makeSurgicalProposer(apiKey: string): SurgicalProposer {
       proposal = { operation: 'replace', anchor_text: passage, new_text: raw.new_text };
     } else {
       if (typeof raw.operation !== 'string' || typeof raw.anchor_text !== 'string') {
-        throw new Error('surgical proposer: malformed tool input');
+        throw new ProposerUnavailableError('no_change_proposed', passageTooLong, 'malformed tool input');
       }
       proposal = { operation: raw.operation as EditOperation, anchor_text: raw.anchor_text, new_text: raw.new_text };
     }

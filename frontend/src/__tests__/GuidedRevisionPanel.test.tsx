@@ -109,6 +109,33 @@ describe('GuidedRevisionPanel', () => {
     expect(await screen.findByText(/re-select the text and try again/i, undefined, FIND)).toBeInTheDocument();
   });
 
+  // Guided-revision robustness (2026-06-24): proposal_unavailable is a transient/too-complex failure
+  // — it must show a SPECIFIC, actionable message (never the generic "could not be generated") and
+  // surface in the neutral slot, NOT the red medico-legal rejection block.
+  it('shows a retry-now message (not generic) on proposal_unavailable / model_unavailable', async () => {
+    proposeMock.mockRejectedValue(new SurgicalEditUnappliableError({ reason: 'proposal_unavailable', detail: 'model_unavailable' }));
+    renderPanel();
+    await fillAndPropose();
+    expect(await screen.findByText(/briefly unavailable.*Propose revision again/i, undefined, FIND)).toBeInTheDocument();
+    expect(screen.queryByText(/could not be generated/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument(); // not the red rejection block
+  });
+
+  it('shows a too-long / try-a-sentence message on proposal_unavailable / passage_too_complex', async () => {
+    proposeMock.mockRejectedValue(new SurgicalEditUnappliableError({ reason: 'proposal_unavailable', detail: 'passage_too_complex', passageTooLong: true }));
+    renderPanel();
+    await fillAndPropose();
+    expect(await screen.findByText(/it may be too long.*single sentence|single sentence.*hand-edit/i, undefined, FIND)).toBeInTheDocument();
+    expect(screen.queryByText(/could not be generated/i)).not.toBeInTheDocument();
+  });
+
+  it('shows a rephrase/narrow message on proposal_unavailable / no_change_proposed', async () => {
+    proposeMock.mockRejectedValue(new SurgicalEditUnappliableError({ reason: 'proposal_unavailable', detail: 'no_change_proposed' }));
+    renderPanel();
+    await fillAndPropose();
+    expect(await screen.findByText(/didn’t return an edit|narrow the selection/i, undefined, FIND)).toBeInTheDocument();
+  });
+
   it('on a 503 disables the entry point (calls onFlagDisabled) and shows the not-enabled copy', async () => {
     proposeMock.mockRejectedValue(new ServiceUnavailableError());
     const { onFlagDisabled } = renderPanel();

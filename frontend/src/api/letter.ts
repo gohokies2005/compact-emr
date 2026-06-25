@@ -176,3 +176,59 @@ export function finalizeImportLetter(
 export function declineLetter(caseId: string, input: { reason: string }): Promise<{ data: { status: string } }> {
   return apiPost<{ data: { status: string } }, typeof input>(caseLetterPath(caseId, '/decline'), input);
 }
+
+// ── Citation Enricher (Feature B, 2026-06-24) ────────────────────────────────────────────────────
+// PHYSICIAN-ONLY. Add grounded, verified PubMed citations to an existing letter. Async/poll shape
+// (the grounded NCBI retrieval is several serial round-trips): PROPOSE returns a jobId, the client
+// POLLS for the preview, then APPLY re-verifies + inserts as a new letter version. The apply
+// SERVER-SIDE re-verifies every selected PMID — the client 'verified' flag is never trusted.
+
+/** A grounded candidate the poll returns. Every field is from NCBI (the killer_finding is a verbatim
+ *  abstract sentence). pubmedUrl links to the live record so the physician can confirm. */
+export interface EnrichCandidate {
+  readonly pmid: string;
+  readonly title: string;
+  readonly journal: string;
+  readonly year: string;
+  readonly killer_finding: string;
+  readonly pubmedUrl: string;
+  readonly slot: 'A1' | 'A2' | 'A3';
+}
+
+export interface EnrichProposeResult {
+  readonly jobId: string;
+  readonly status: 'pending';
+}
+export interface EnrichPollResult {
+  readonly status: 'pending' | 'ready' | 'error';
+  readonly candidates?: readonly EnrichCandidate[];
+  readonly error?: string;
+}
+export interface EnrichApplyResult {
+  readonly version: number;
+  readonly txt: string;
+  readonly insertedPmids: readonly string[];
+  readonly warnings: readonly LetterWarning[];
+}
+
+/** PROPOSE: kick off a grounded retrieval. Returns 202 { jobId } — then poll. */
+export function proposeCitationEnrich(
+  caseId: string,
+  input: { claim?: string; condition?: string; mechanismHints?: string[] },
+): Promise<{ data: EnrichProposeResult }> {
+  return apiPost<{ data: EnrichProposeResult }, typeof input>(caseLetterPath(caseId, '/citations/enrich'), input);
+}
+
+/** POLL: fetch the job status + candidates (preview-only; no write). */
+export function pollCitationEnrich(caseId: string, jobId: string): Promise<{ data: EnrichPollResult }> {
+  return apiGet<{ data: EnrichPollResult }>(caseLetterPath(caseId, `/citations/enrich/${encodeURIComponent(jobId)}`));
+}
+
+/** APPLY: the backend RE-VERIFIES each selected PMID server-side, inserts deterministically, and
+ *  persists a new letter version. On a re-verify/guard failure the API 422s and NOTHING is changed. */
+export function applyCitationEnrich(
+  caseId: string,
+  input: { jobId: string; selectedPmids: string[]; groundInSectionVi?: boolean },
+): Promise<{ data: EnrichApplyResult }> {
+  return apiPost<{ data: EnrichApplyResult }, typeof input>(caseLetterPath(caseId, '/citations/apply'), input);
+}

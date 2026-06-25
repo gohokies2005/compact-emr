@@ -35,6 +35,12 @@ export interface SurgicalEditErrorDetails {
   costUsd?: number;
   proposal?: unknown;
   citationDiff?: { added?: ReadonlyArray<{ raw?: string }>; removed?: ReadonlyArray<{ raw?: string }> };
+  // proposal_unavailable (Guided-revision robustness, 2026-06-24): the LLM proposer failed
+  // transiently or returned an empty/truncated edit. `detail` says which so the UI shows an
+  // actionable message instead of the generic "could not be generated". `passageTooLong` lets the
+  // copy accurately mention length when the passage was very long.
+  detail?: 'model_unavailable' | 'passage_too_complex' | 'no_change_proposed';
+  passageTooLong?: boolean;
 }
 export class SurgicalEditUnappliableError extends Error {
   readonly status = 422;

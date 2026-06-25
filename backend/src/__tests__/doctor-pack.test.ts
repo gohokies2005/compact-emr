@@ -5,7 +5,9 @@ import {
   buildManifest,
   DOCTOR_PACK_ENGINE_VERSION,
   PACK_PAGE_BUDGET,
+  PACK_PAGE_HARD_CAP,
   PACK_PAGE_TARGET,
+  PASSTHROUGH_BOUNDED_PAGES,
   selectKeyDocs,
   type BudgetEntry,
   type SelectedKeyDoc,
@@ -255,11 +257,13 @@ describe('applyPackPageBudget', () => {
     expect(r.trimNotes.join(' ')).toContain('notes.pdf: dropped (10');
   });
 
-  // Architect QA IMPORTANT-1 (2026-06-11): a legacy whole-doc entry (no per-page OCR + null
-  // Document.pageCount -> pageRanges []) has pageCount 0, so the take===0 branch used to DROP it
-  // from any over-budget pack - silently losing an entire document the assembler would otherwise
-  // ship whole. It must pass through untrimmed instead.
-  it('over budget: an incoming empty-ranges whole-doc entry survives untrimmed (passthrough)', () => {
+  // HUNDREDS-OF-PAGES KILL (Dr. Kasky 2026-06-25): a legacy whole-doc entry (no per-page OCR + null
+  // Document.pageCount -> pageRanges []) has pageCount 0, so the budget couldn't see its size and
+  // used to re-emit it untrimmed — the assembler then shipped the WHOLE (possibly 300-page) PDF,
+  // escaping the budget. It now SURVIVES (never silently dropped) but is BOUNDED to its first
+  // PASSTHROUGH_BOUNDED_PAGES, with a loud trim note. (We still don't drop it — its size is unknown
+  // and it may carry a decisive document.)
+  it('over budget: an incoming empty-ranges whole-doc entry survives but is BOUNDED (not shipped whole)', () => {
     const entries = [
       be('legacy_va_letter.pdf', 'denial_letter', 'high_signal', 100, 0), // pageRanges [] via be()
       be('dbq.pdf', 'dbq', 'high_signal', 90, 15),
@@ -269,9 +273,45 @@ describe('applyPackPageBudget', () => {
     expect(r.trimmed).toBe(true);
     const survivor = r.entries.find((e) => e.filePath === 'legacy_va_letter.pdf');
     expect(survivor).toBeDefined();
-    expect(survivor?.pageRanges).toEqual([]); // still the whole-doc shape for the assembler
-    expect(r.trimmedFilePaths).not.toContain('legacy_va_letter.pdf');
+    // BOUNDED, not the open-ended whole-doc [] shape that made the assembler ship every page.
+    expect(survivor?.pageRanges).toEqual([{ from: 1, to: PASSTHROUGH_BOUNDED_PAGES }]);
+    expect(survivor?.pageCount).toBe(PASSTHROUGH_BOUNDED_PAGES);
+    expect(r.trimmedFilePaths).toContain('legacy_va_letter.pdf');
     expect(r.trimNotes.join(' ')).toContain('legacy_va_letter.pdf: whole-doc passthrough');
+    expect(r.trimNotes.join(' ')).toContain(`first ${PASSTHROUGH_BOUNDED_PAGES} pages`);
+  });
+
+  // The early no-trim return must NOT fire while a passthrough is present: a passthrough's pageCount
+  // is 0, so a pack of small sized content + an unsized bundle sums under the budget and (pre-fix)
+  // returned early, shipping the bundle in FULL. This is the precise hundreds-of-pages path when
+  // there is little other content. The passthrough must still be bounded.
+  it('passthrough present but sized content is under budget: still bounds the passthrough (no early-return escape)', () => {
+    const entries = [
+      be('dd214.pdf', 'dd_214', 'high_signal', 95, 2), // 2 sized pages, well under budget
+      be('huge_blue_button.pdf', 'denial_letter', 'high_signal', 100, 0), // unsized passthrough
+    ];
+    const r = applyPackPageBudget(entries);
+    expect(r.trimmed).toBe(true); // a passthrough was bounded
+    // The sized doc is untouched.
+    expect(r.entries.find((e) => e.filePath === 'dd214.pdf')?.pageRanges).toEqual([{ from: 1, to: 2 }]);
+    // The passthrough is bounded, NOT shipped whole.
+    const bb = r.entries.find((e) => e.filePath === 'huge_blue_button.pdf');
+    expect(bb?.pageRanges).toEqual([{ from: 1, to: PASSTHROUGH_BOUNDED_PAGES }]);
+    expect(r.entries.some((e) => e.pageRanges.length === 0)).toBe(false);
+  });
+
+  // ABSOLUTE backstop: even if the per-doc/passthrough math somehow sums above the hard cap, the
+  // returned pack never exceeds PACK_PAGE_HARD_CAP content pages — hundreds of pages can never ship.
+  it('hard cap: a contrived oversized set is trimmed to PACK_PAGE_HARD_CAP, dropping trailing entries', () => {
+    // Many bounded passthroughs would sum well over the cap if all kept (8 each * 12 = 96).
+    const entries = Array.from({ length: 12 }, (_v, i) =>
+      be(`bundle_${String(i).padStart(2, '0')}.pdf`, 'denial_letter', 'high_signal', 100, 0),
+    );
+    const r = applyPackPageBudget(entries);
+    expect(r.postTrimPageCount).toBeLessThanOrEqual(PACK_PAGE_HARD_CAP);
+    const total = r.entries.reduce((sum, e) => sum + e.pageCount, 0);
+    expect(total).toBeLessThanOrEqual(PACK_PAGE_HARD_CAP);
+    expect(r.trimNotes.join(' ')).toContain(`${PACK_PAGE_HARD_CAP}-page pack hard cap`);
   });
 
   it('NEVER trims the SC-decision docs first, even against higher-importance non-protected docs', () => {

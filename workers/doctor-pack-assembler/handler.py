@@ -91,6 +91,15 @@ def _fetch_doctor_pack_manifest(doctor_pack_id: str) -> dict[str, Any]:
     raise NotImplementedError("worker pulls manifest via SQS payload, not API GET (until /internal GET added)")
 
 
+# Belt-and-suspenders page caps (Dr. Kasky 2026-06-25 — "one recently came back with HUNDREDS of
+# pages"). The page SELECTION + budget live in the TS service (doctor-pack.ts applyPackPageBudget),
+# which is the real fix; these are the LAST-LINE physical guards so a legacy manifest, a stale queued
+# message, or any future path that still ships empty/huge pageRanges can never put hundreds of pages
+# in front of a physician. Mirror the TS PASSTHROUGH_BOUNDED_PAGES / PACK_PAGE_HARD_CAP values.
+WHOLE_DOC_FALLBACK_MAX_PAGES = 8
+PACK_HARD_PAGE_CAP = 60
+
+
 def _select_pages(source_pdf_bytes: bytes, page_ranges: list[dict[str, int]]) -> list:
     """Pull the specified page ranges from a source PDF, return PyPDF pages."""
     reader = PdfReader(io.BytesIO(source_pdf_bytes))
@@ -266,6 +275,11 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
                     except Exception as toc_err:
                         print(f"TOC render failed (continuing without): {toc_err}")
 
+            # Framing pages (chart-summary cover + TOC) added above don't count against the content
+            # hard cap — the cap protects the doctor from hundreds of SOURCE pages, not the 0-2 page
+            # index. Snapshot the count now so the cap below measures content only.
+            _non_content_page_count = len(writer.pages)
+
             # Source-doc page extraction
             skipped_non_pdf = 0
             for entry in entries:
@@ -293,9 +307,26 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
                     # H2 (audit 2026-05-27): per the route contract (doctor-pack.ts),
                     # empty pageRanges = include the WHOLE source PDF. The prior `continue`
                     # silently dropped every such entry, yielding a cover+TOC-only pack.
+                    # HUNDREDS-OF-PAGES GUARD (Dr. Kasky 2026-06-25): "the WHOLE PDF" for a 300-page
+                    # bundle is the exact failure mode. The TS budget now bounds passthroughs, but
+                    # cap here too so a legacy/stale manifest with empty ranges can't ship in full.
                     reader = PdfReader(io.BytesIO(pdf_bytes))
-                    pages = list(reader.pages)
+                    all_pages = list(reader.pages)
+                    pages = all_pages[:WHOLE_DOC_FALLBACK_MAX_PAGES]
+                    if len(all_pages) > WHOLE_DOC_FALLBACK_MAX_PAGES:
+                        print(
+                            f"whole-doc passthrough {file_path}: bounded {len(all_pages)} -> "
+                            f"{WHOLE_DOC_FALLBACK_MAX_PAGES} pages (empty pageRanges fallback cap)"
+                        )
+                # Absolute pack cap: never add a page once the writer is at the hard cap. The
+                # earliest (highest-priority) entries are added first, so trailing pages drop.
                 for page in pages:
+                    if len(writer.pages) >= PACK_HARD_PAGE_CAP + _non_content_page_count:
+                        print(
+                            f"pack hard cap {PACK_HARD_PAGE_CAP} reached; dropping remaining pages "
+                            f"of {file_path} and any later entries"
+                        )
+                        break
                     writer.add_page(page)
 
             if skipped_non_pdf:

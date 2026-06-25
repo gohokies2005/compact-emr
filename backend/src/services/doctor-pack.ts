@@ -51,6 +51,25 @@ export const PACK_PAGE_TARGET = 250;
 // trimmable, not whole-shipped). Caps below re-sum to 15 to match.
 export const PACK_PAGE_BUDGET = 15;
 
+// HUNDREDS-OF-PAGES KILL (Dr. Kasky 2026-06-25): the whole-doc passthrough exemption below was the
+// silent escape hatch — an entry that ARRIVES with empty pageRanges (no per-page OCR + null
+// Document.pageCount) had pageCount 0, so the budget couldn't see its size and re-emitted it
+// untrimmed; the assembler then read empty ranges as "ship the WHOLE source PDF" (handler.py H2).
+// A 300-page rating bundle whose page-text never populated therefore shipped IN FULL, blowing
+// straight past the 15-page budget. The passthrough still survives (we never DROP a doc whose size
+// we can't see — that would silently lose a possibly-decisive document), but it is now BOUNDED to
+// its first PASSTHROUGH_BOUNDED_PAGES whenever the pack is over budget, and the trim logs loudly so
+// a silent over-inclusion can never recur unnoticed.
+export const PASSTHROUGH_BOUNDED_PAGES = 8;
+
+// ABSOLUTE backstop. No matter how the per-doc allocation/passthrough math lands, the budget never
+// returns more than this many CONTENT pages (the cover index is added on top afterward, outside the
+// budget). The category caps sum to PACK_PAGE_BUDGET; this guard exists for the pathological case
+// where multiple bounded passthroughs (or a future allocation bug) push the total higher than any
+// single category phase intended. Set comfortably above the 15-page target but far below "hundreds"
+// so a doctor packet stays a doctor packet. Crossing it logs loudly + hard-trims by reading order.
+export const PACK_PAGE_HARD_CAP = 60;
+
 // Assessment 2026-06-12 §1c (category budget): docType -> pack category. Soft caps + floors
 // replace the old flat "protected docTypes fill first" rule, which let a rating decision eat
 // all 20 pages before any clinical note was reached (the live failure).
@@ -409,7 +428,14 @@ export function applyPackPageBudget(
   budget: number = PACK_PAGE_BUDGET,
 ): PackBudgetResult {
   const preTrimPageCount = entries.reduce((sum, e) => sum + e.pageCount, 0);
-  if (preTrimPageCount <= budget) {
+  // A whole-doc passthrough (empty pageRanges) has pageCount 0, so it contributes NOTHING to
+  // preTrimPageCount even though the assembler would ship its entire (possibly 300-page) PDF. The
+  // early no-trim return must therefore NOT fire while any passthrough is present — otherwise a
+  // pack of small sized content + one unsized bundle slips under `budget` and ships the bundle in
+  // full (the hundreds-of-pages path, Dr. Kasky 2026-06-25). When passthroughs exist we fall
+  // through so the kept loop bounds them. With no passthroughs this is byte-identical to before.
+  const hasPassthrough = entries.some((e) => e.pageRanges.length === 0);
+  if (preTrimPageCount <= budget && !hasPassthrough) {
     return { entries, trimmed: false, preTrimPageCount, postTrimPageCount: preTrimPageCount, trimNotes: [], trimmedFilePaths: [] };
   }
 
@@ -558,9 +584,23 @@ export function applyPackPageBudget(
   const kept: BudgetEntry[] = [];
   for (const entry of entries) {
     if (entry.pageRanges.length === 0) {
-      // Whole-doc passthrough: survives the budget untrimmed (assembler ships the whole PDF).
-      kept.push(entry);
-      trimNotes.push(`${entry.filePath}: whole-doc passthrough (no per-page selection) - not counted against the budget`);
+      // Whole-doc passthrough: an entry with no per-page selection (the assembler ships empty
+      // pageRanges as the WHOLE source PDF — handler.py H2). We never DROP it (its size is unknown,
+      // so dropping could silently lose a decisive document), but we no longer let it ship in full
+      // and escape the budget. BOUND it to its first PASSTHROUGH_BOUNDED_PAGES so a 300-page bundle
+      // with no page-text contributes a sane prefix, not hundreds of pages. Log loudly — a silent
+      // over-inclusion is exactly the failure this kills (Dr. Kasky 2026-06-25).
+      const boundedRanges: readonly KeyDocPageRange[] = [{ from: 1, to: PASSTHROUGH_BOUNDED_PAGES }];
+      console.warn(JSON.stringify({
+        msg: 'doctor_pack_passthrough_bounded',
+        filePath: entry.filePath,
+        docType: entry.docType,
+        boundedToPages: PASSTHROUGH_BOUNDED_PAGES,
+        reason: 'whole-doc passthrough (no per-page selection) bounded so an unsized doc cannot ship in full and escape the page budget',
+      }));
+      kept.push({ ...entry, pageRanges: boundedRanges, pageCount: PASSTHROUGH_BOUNDED_PAGES });
+      trimNotes.push(`${entry.filePath}: whole-doc passthrough (no per-page selection) bounded to the first ${PASSTHROUGH_BOUNDED_PAGES} pages (no page count available to budget against)`);
+      trimmedFilePaths.push(entry.filePath);
       continue;
     }
     const ranges = keptRangesByPath.get(entry.filePath);
@@ -568,8 +608,57 @@ export function applyPackPageBudget(
     const pageCount = ranges.reduce((sum, r) => sum + Math.max(0, r.to - r.from + 1), 0);
     kept.push({ ...entry, pageRanges: ranges, pageCount });
   }
-  const postTrimPageCount = kept.reduce((sum, e) => sum + e.pageCount, 0);
-  return { entries: kept, trimmed: true, preTrimPageCount, postTrimPageCount, trimNotes, trimmedFilePaths };
+
+  // ABSOLUTE hard-cap backstop (Dr. Kasky 2026-06-25): whatever the allocation + bounded
+  // passthroughs sum to, the pack never ships more than PACK_PAGE_HARD_CAP content pages. Trim from
+  // the END of the reading order (kept entries are already in the pack's reading order) so the
+  // earliest, highest-priority pages survive. This is the catch-all that guarantees "hundreds of
+  // pages" can never reach a physician regardless of how the size accounting failed upstream.
+  const cappedKept = enforceHardPageCap(kept, trimNotes, trimmedFilePaths);
+
+  const postTrimPageCount = cappedKept.reduce((sum, e) => sum + e.pageCount, 0);
+  return { entries: cappedKept, trimmed: true, preTrimPageCount, postTrimPageCount, trimNotes, trimmedFilePaths };
+}
+
+// ABSOLUTE page-count guard. Walks the kept entries in reading order, accumulating pages, and once
+// the running total would cross PACK_PAGE_HARD_CAP, trims the crossing entry to fit and drops every
+// entry after it. Logs loudly the first time it fires. A no-op (returns the input array) when the
+// total is already at or under the cap — so a normal in-budget pack is byte-identical.
+function enforceHardPageCap(
+  kept: readonly BudgetEntry[],
+  trimNotes: string[],
+  trimmedFilePaths: string[],
+): BudgetEntry[] {
+  const total = kept.reduce((sum, e) => sum + e.pageCount, 0);
+  if (total <= PACK_PAGE_HARD_CAP) return [...kept];
+  console.warn(JSON.stringify({
+    msg: 'doctor_pack_hard_cap_enforced',
+    totalPagesBeforeCap: total,
+    hardCap: PACK_PAGE_HARD_CAP,
+    reason: 'assembled content exceeded the absolute page cap; trimming to protect the physician from an over-large packet',
+  }));
+  const out: BudgetEntry[] = [];
+  let running = 0;
+  for (const entry of kept) {
+    if (running >= PACK_PAGE_HARD_CAP) {
+      trimNotes.push(`${entry.filePath}: dropped (over the ${PACK_PAGE_HARD_CAP}-page pack hard cap)`);
+      trimmedFilePaths.push(entry.filePath);
+      continue;
+    }
+    const room = PACK_PAGE_HARD_CAP - running;
+    if (entry.pageCount <= room) {
+      out.push(entry);
+      running += entry.pageCount;
+      continue;
+    }
+    const trimmed = takeFirstPages(entry.pageRanges, room);
+    const trimmedCount = trimmed.reduce((sum, r) => sum + Math.max(0, r.to - r.from + 1), 0);
+    out.push({ ...entry, pageRanges: trimmed, pageCount: trimmedCount });
+    running += trimmedCount;
+    trimNotes.push(`${entry.filePath}: kept ${trimmedCount} of ${entry.pageCount} pages (${PACK_PAGE_HARD_CAP}-page pack hard cap)`);
+    if (!trimmedFilePaths.includes(entry.filePath)) trimmedFilePaths.push(entry.filePath);
+  }
+  return out;
 }
 
 export type { DoctorPackState };

@@ -16,6 +16,7 @@ import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { refreshDerivedStamps } from '../services/case-stamp-refresh.js';
 import { deriveIntakeFields } from '../services/intake-derive.js';
 import { deriveFramingFromEvidence } from '../services/case-framing.js';
+import { buildScProvenanceDryrun, mutationForRow, type ScDryrunRowInput, type ScDryrunDoc } from '../services/sc-provenance-dryrun.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
 import { candidateAddresses, decideVeteranMatch, deriveEmailId, makeSnippet, normalizeEmailAddress } from '../services/email-matching.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
@@ -985,6 +986,123 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       }
     }
     res.json({ data: { scanned, updated: changes.length, changes } });
+  }));
+
+  /**
+   * GET /api/v1/internal/admin/sc-provenance-dryrun?limit=5  (DRY-RUN, read-only, default)
+   *     ...?caseIds=CLM-A,CLM-B&apply=true                   (APPLY — guarded mutation)
+   *
+   * SC-PROVENANCE re-validation (Woodley follow-on). DETERMINISTIC (no LLM): re-derives each EXTRACTED SC
+   * row's source-document authority (filename + docTag + a text sample of its first 2 pages) using the
+   * SAME SSOT classifier the writer/gate use. The needed cleaning path because planMerge protects
+   * prior-extracted rows, so re-extraction never re-classifies them.
+   *
+   * DRY-RUN (default): SELECT-only. Returns a per-row report + an OVER-FILTER WATCH list (rows that WOULD
+   * demote but whose source text still looks like a real VA decision — the exact false-positive to eyeball,
+   * Dr. Kasky's "make sure it's not filtering out stuff it shouldn't").
+   * APPLY (apply=true): requires an EXPLICIT caseIds list (NEVER fleet-wide via limit). Mirrors the writer —
+   * a non-authoritative service_connected → status='pending' + ratingPct=null + stamp the tier. Idempotent.
+   * Service-principal token gated (whole router). NO Cognito.
+   */
+  router.get('/internal/admin/sc-provenance-dryrun', asyncHandler(async (req: Request, res: Response) => {
+    const applyRaw = String(req.query.apply ?? '');
+    const apply = applyRaw === 'true' || applyRaw === '1';
+    const caseIdsRaw = String(req.query.caseIds ?? '').trim();
+    const caseIds = caseIdsRaw ? caseIdsRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '5'), 10) || 5, 1), 25);
+
+    // APPLY is a mutation → require an EXPLICIT case list (no fleet-wide apply via limit). Bounded + idempotent.
+    if (apply && caseIds.length === 0) {
+      throw new HttpError(400, 'bad_request', 'apply=true requires an explicit caseIds list (no fleet-wide apply).');
+    }
+
+    const caseDelegate = db.case as unknown as {
+      findMany: (a: Record<string, unknown>) => Promise<Array<{ id: string; veteranId: string; claimedCondition: string | null; status: string | null }>>;
+    };
+    const cases = caseIds.length
+      ? await caseDelegate.findMany({ where: { id: { in: caseIds } }, select: { id: true, veteranId: true, claimedCondition: true, status: true } })
+      : await caseDelegate.findMany({ orderBy: { updatedAt: 'desc' }, take: limit, select: { id: true, veteranId: true, claimedCondition: true, status: true } });
+
+    // veteranId → caseId (most-recent case for that veteran), for row tagging in the report.
+    const caseByVet = new Map<string, string>();
+    for (const c of cases) if (!caseByVet.has(c.veteranId)) caseByVet.set(c.veteranId, c.id);
+    const vetIds = Array.from(caseByVet.keys());
+
+    const scDelegate = (db as unknown as {
+      scCondition: { findMany: (a: Record<string, unknown>) => Promise<Array<{ id: string; veteranId: string; condition: string; status: string; ratingPct: number | null; dcCode: string | null; source: string | null; sourceDocumentId: string | null; sourceAuthorityTier: string | null; scStatusAuthoritative: boolean | null }>>; update: (a: Record<string, unknown>) => Promise<unknown> };
+    }).scCondition;
+    const scRows = vetIds.length === 0 ? [] : await scDelegate.findMany({
+      where: { veteranId: { in: vetIds } },
+      select: { id: true, veteranId: true, condition: true, status: true, ratingPct: true, dcCode: true, source: true, sourceDocumentId: true, sourceAuthorityTier: true, scStatusAuthoritative: true },
+    });
+
+    const inputs: ScDryrunRowInput[] = scRows.map((r) => ({
+      id: r.id, caseId: caseByVet.get(r.veteranId) ?? '', veteranId: r.veteranId, condition: r.condition,
+      status: r.status, ratingPct: r.ratingPct ?? null, dcCode: r.dcCode ?? null, source: r.source ?? null,
+      sourceDocumentId: r.sourceDocumentId ?? null, sourceAuthorityTier: r.sourceAuthorityTier ?? null, scStatusAuthoritative: r.scStatusAuthoritative ?? null,
+    }));
+
+    // Source docs + first-2-page text samples (the over-filter rescue input).
+    const docIds = Array.from(new Set(inputs.map((i) => i.sourceDocumentId).filter((x): x is string => !!x)));
+    const docsById = new Map<string, ScDryrunDoc>();
+    if (docIds.length > 0) {
+      const docDelegate = (db as unknown as { document: { findMany: (a: Record<string, unknown>) => Promise<Array<{ id: string; filename: string | null; docTag: string | null }>> } }).document;
+      const pageDelegate = (db as unknown as { documentPage: { findMany: (a: Record<string, unknown>) => Promise<Array<{ documentId: string; pageNumber: number; text: string }>> } }).documentPage;
+      const [docs, pages] = await Promise.all([
+        docDelegate.findMany({ where: { id: { in: docIds } }, select: { id: true, filename: true, docTag: true } }),
+        pageDelegate.findMany({ where: { documentId: { in: docIds }, pageNumber: { lte: 2 } }, select: { documentId: true, pageNumber: true, text: true }, orderBy: { pageNumber: 'asc' } }),
+      ]);
+      const sampleByDoc = new Map<string, string>();
+      for (const p of pages) {
+        const prev = sampleByDoc.get(p.documentId) ?? '';
+        if (prev.length < 4000) sampleByDoc.set(p.documentId, `${prev}\n${p.text ?? ''}`.slice(0, 4000));
+      }
+      for (const d of docs) docsById.set(d.id, { filename: d.filename ?? null, docTag: d.docTag ?? null, textSample: sampleByDoc.get(d.id) ?? null });
+    }
+
+    const report = buildScProvenanceDryrun(inputs, docsById);
+
+    let applied: { downgraded: number; stamped: number; skippedNoop: number; casesRefreshed: number } | null = null;
+    if (apply) {
+      const storedById = new Map(inputs.map((i) => [i.id, i] as const));
+      let downgraded = 0;
+      let stamped = 0;
+      let skippedNoop = 0;
+      // One transaction for the row writes (atomic, idempotent). refreshDerivedStamps runs AFTER, outside
+      // the txn (it is fail-open per case and must not roll the writes back).
+      await db.$transaction(async (tx) => {
+        const txSc = (tx as unknown as { scCondition: { update: (a: Record<string, unknown>) => Promise<unknown> } }).scCondition;
+        for (const r of report.rows) {
+          if (!caseIds.includes(r.caseId)) continue; // belt: only the explicitly-named cases
+          const m = mutationForRow(r);
+          if (!m) continue;
+          // TRUE IDEMPOTENCY: a pure re-stamp whose tier+authoritative already match storage is a no-op —
+          // skip it so a re-run doesn't bump version (and spuriously 409 an RN editing the row).
+          if (!m.newStatus) {
+            const prior = storedById.get(m.id);
+            if (prior && prior.sourceAuthorityTier === m.sourceAuthorityTier && prior.scStatusAuthoritative === m.scStatusAuthoritative) { skippedNoop++; continue; }
+          }
+          const data: Record<string, unknown> = { sourceAuthorityTier: m.sourceAuthorityTier, scStatusAuthoritative: m.scStatusAuthoritative, version: { increment: 1 } };
+          if (m.newStatus) {
+            data.status = m.newStatus;
+            if (m.dropRatingPct) { data.ratingPct = null; data.grantedDate = null; }
+            downgraded++;
+            console.warn(JSON.stringify({ event: 'sc_status_backfill_downgraded', caseId: r.caseId, veteranId: r.veteranId, condition: r.condition, from: r.status, to: 'pending', tier: r.computedTier, sourceDocumentId: r.sourceDocumentId }));
+          } else {
+            stamped++;
+          }
+          await txSc.update({ where: { id: m.id }, data: data as never });
+        }
+      }, { timeout: 30_000, maxWait: 10_000 });
+      // Refresh derived framing/viability/cds stamps for each touched case (fail-open per case).
+      let casesRefreshed = 0;
+      for (const cid of caseIds) {
+        try { await refreshDerivedStamps(db, cid); casesRefreshed++; } catch { /* fail-open: stamps recompute at consume time */ }
+      }
+      applied = { downgraded, stamped, skippedNoop, casesRefreshed };
+    }
+
+    res.json({ data: { mode: apply ? 'apply' : 'dryrun', cases: cases.map((c) => ({ caseId: c.id, claimedCondition: c.claimedCondition, status: c.status })), summary: report.summary, overFilterWatch: report.overFilterWatch, rows: report.rows, applied } });
   }));
 
   /**

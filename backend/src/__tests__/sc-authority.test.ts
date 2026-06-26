@@ -81,8 +81,8 @@ describe('sc-authority — source-authority classification (Woodley fix)', () =>
     it('ENFORCED: a MANUAL (RN-typed) grant is always trusted', () => {
       expect(effectiveScStatus({ status: 'service_connected', source: 'manual', scStatusAuthoritative: null }, { enforce: true })).toBe('service_connected');
     });
-    it('ENFORCED: a legacy extracted grant with NULL authority demotes (fail-safe)', () => {
-      expect(effectiveScStatus({ status: 'service_connected', source: 'extracted', scStatusAuthoritative: null }, { enforce: true })).toBe('claimed_unverified');
+    it('ENFORCED: a legacy extracted grant with NULL authority is TRUSTED until re-extracted (safe incremental flip — only an AFFIRMATIVE non-authoritative tag demotes)', () => {
+      expect(effectiveScStatus({ status: 'service_connected', source: 'extracted', scStatusAuthoritative: null }, { enforce: true })).toBe('service_connected');
     });
     it('pending / denied are untouched in both modes', () => {
       for (const enforce of [true, false]) {

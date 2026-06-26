@@ -13,9 +13,21 @@
 //
 // DARK BY DEFAULT: the master flag SC_PROVENANCE_ENFORCED gates the DEMOTION (not the classification). With
 // the flag off, `effectiveScStatus` returns the raw status (byte-identical legacy behavior) while tiers are
-// still stamped + logged; with it on, a non-authoritative or legacy-unverified extracted grant demotes to
-// 'claimed_unverified' (treated as pending for anchoring, surfaced for RN confirmation). Manual (RN-typed)
-// rows are ALWAYS trusted. See ARCHITECTURE.md + the 3-agent scope.
+// still stamped + logged; with it on, a row we have AFFIRMATIVELY classified non-authoritative
+// (scStatusAuthoritative===false, set when the chart re-extracts under this contract) demotes to
+// 'claimed_unverified' (treated as pending for anchoring, surfaced for RN confirmation).
+//
+// SAFE INCREMENTAL FLIP: a legacy/pre-fix extracted grant carries scStatusAuthoritative===null (never
+// classified under this contract) → it is TRUSTED until it is affirmatively re-classified. So turning the
+// flag on does NOT strip granted anchors fleet-wide from not-yet-classified cases.
+//
+// CLEANING EXISTING ROWS NEEDS THE DETERMINISTIC BACKFILL, NOT RE-EXTRACTION: applyExtractionMerge's
+// planMerge PROTECTS prior-extracted rows (skippedPriorExtracted), so re-running the extractor SKIPS an
+// existing SC row and never re-classifies it — the merge's WRITE-time downgrade only fires on genuinely-new
+// inserts. To re-validate/clean existing cases (Woodley included) use the deterministic re-classification
+// (sc-provenance-dryrun.ts via GET /internal/admin/sc-provenance-dryrun), which re-derives the tier from
+// each row's source Document and (apply-mode) mirrors the writer. Manual (RN-typed) rows are ALWAYS
+// trusted. See ARCHITECTURE.md.
 
 import type { KeyDocType } from './db-types.js';
 
@@ -113,6 +125,15 @@ export function authorityTierForDocument(input: {
   return 'unknown'; // fail-safe: don't trust an unidentified source to grant SC
 }
 
+// Does a text sample LOOK like a genuine VA decision (letterhead + a decision/grant/denial recital)?
+// SSOT for the dry-run's OVER-FILTER WATCH: a row that WOULD demote but whose source text looks like a real
+// VA decision is the exact false-positive to eyeball before applying (a real grant mis-tiered because its
+// docTag was 'unspecified' / its filename was generic). Reuses the same regexes the classifier trusts.
+export function looksLikeVaDecisionText(textSample: string | null | undefined): boolean {
+  const text = String(textSample || '').slice(0, 4000);
+  return RE_VA_HEADER.test(text) && RE_DECISION_SECTION.test(text);
+}
+
 // ── The trust gate every consumer calls. Returns the EFFECTIVE status for anchoring / grounding. ────────
 // 'claimed_unverified' is a DERIVED presentation value (never stored): "the source asserts a grant we
 // cannot verify against an authoritative VA document — treat as pending for anchoring, surface for
@@ -127,7 +148,11 @@ export function effectiveScStatus(
   if (!opts.enforce) return 'service_connected'; // DARK: no demotion
   // Manual rows = an RN typed the grant deliberately → always trusted (the extractor never touches manual).
   if (row.source == null || row.source === 'manual') return 'service_connected';
-  if (row.scStatusAuthoritative === true) return 'service_connected'; // authoritative VA source
-  // Extracted + (explicitly non-authoritative OR legacy-null pre-fix) → demote.
-  return 'claimed_unverified';
+  // DEMOTE ONLY ON AN AFFIRMATIVE NON-AUTHORITATIVE CLASSIFICATION. A legacy/pre-fix extracted row carries
+  // scStatusAuthoritative===null (never re-extracted under the provenance contract) → TRUST it until it is
+  // re-extracted, so flipping the flag on does NOT strip anchors fleet-wide from not-yet-re-extracted cases.
+  // The fleet cleans incrementally as charts re-extract; only a row we have AFFIRMATIVELY tagged
+  // non-authoritative (scStatusAuthoritative===false) demotes.
+  if (row.scStatusAuthoritative === false) return 'claimed_unverified';
+  return 'service_connected'; // authoritative VA source OR legacy-null (not yet re-extracted) → trust
 }

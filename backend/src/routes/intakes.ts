@@ -345,7 +345,21 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     // "why connected" narrative) reaches the chart, even when the submission carried no file uploads.
     // Same row-first-then-write discipline as the file copies so ocr-start resolves it by s3-key.
     const rawAnswers = (intake as { rawAnswersJson?: unknown }).rawAnswersJson;
-    if (rawAnswers && typeof rawAnswers === 'object') {
+    // IDEMPOTENCY GUARD (Dick/Mittge stuck-gate, 2026-06-26). This handler ALWAYS minted a fresh
+    // Intake_Summary.pdf (new random s3Key). If it ran twice for the SAME case (re-assign / retry /
+    // two operators), a SECOND Intake_Summary.pdf was created; its ObjectCreated→ocr-start added a new
+    // `read` file_read_status row AFTER extraction had completed, drifting the chart-build trigger
+    // hash so the readiness gate stuck on `extracting` forever (no run matched the new hash). Skip the
+    // mint when this case already has an Intake_Summary.pdf — one summary per case, stable hash.
+    const existingSummary = rawAnswers && typeof rawAnswers === 'object'
+      ? await (docDb.document as unknown as {
+          findFirst: (a: { where: { caseId: string; filename: string }; select: { id: true } }) => Promise<{ id: string } | null>;
+        }).findFirst({ where: { caseId, filename: 'Intake_Summary.pdf' }, select: { id: true } })
+      : null;
+    if (existingSummary) {
+      console.info(`[intake-summary] case ${caseId} already has an Intake_Summary.pdf (${existingSummary.id}); skipping duplicate mint (hash-drift guard).`);
+    }
+    if (rawAnswers && typeof rawAnswers === 'object' && !existingSummary) {
       // Fixed, distinctive name (no veteran lastname) so the chart-readiness exclusion can match the
       // GENERATED summary precisely (key ends '-Intake_Summary.pdf') and never a real uploaded record
       // that happens to be a "Nursing Intake Summary". (Architect QA finding #5.)

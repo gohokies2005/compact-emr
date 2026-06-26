@@ -282,10 +282,10 @@ export function CasesPage() {
   // input on that row; saving POSTs a PERSISTENT quick note to the veteran's chart-notes stream
   // (isQuickNote: true) — the SAME stream the chart header + Staff Notes read. A row with a note shows
   // a quiet note icon instead. On success we refetch the list so the new note surfaces immediately.
-  const [noteEditCaseId, setNoteEditCaseId] = useState<string | null>(null);
+  const [noteCase, setNoteCase] = useState<CaseLite | null>(null);
   const addQuickNoteMut = useMutation({
     mutationFn: ({ veteranId, body }: { veteranId: string; body: string }) => createChartNote(veteranId, body, true),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['cases'] }); setNoteEditCaseId(null); },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['cases'] }); setNoteCase(null); },
     onError: (e: unknown) => window.alert(`Could not save the quick note — ${describeApiError(e)}`),
   });
 
@@ -406,38 +406,27 @@ export function CasesPage() {
                 delivery to invoiced, keeping the same format"). */}
             <td className="px-4 py-3 text-center"><span className="text-xs font-medium text-slate-600" title={c.invoiced && c.status === 'delivered' ? 'The invoice email has been sent — awaiting the veteran’s payment.' : undefined}>{caseDisplayLabel(c.status, { invoiced: c.invoiced })}</span></td>
             <td className="px-4 py-3 text-center"><RecordsChip recordsUploaded={c.recordsUploaded} /></td>
-            {/* NOTE column (Dr. Kasky 2026-06-24 inline add; 2026-06-25 edit-in-place + bigger box):
-                a quiet note when a quick note exists — clicking it opens the inline editor RIGHT HERE
-                (pre-filled), it does NOT navigate to the chart anymore. The '+' opens an empty inline
-                editor. Saving an edit APPENDS a new chart-note (createChartNote) so the edited text
-                becomes the latest note while the prior one stays in the chart's Staff-Notes history.
-                Wider column so the textarea is readable. */}
-            <td className="w-72 max-w-xs px-4 py-3" onClick={(e) => e.stopPropagation()}>
-              {noteEditCaseId === c.id ? (
-                <QuickNoteInlineInput
-                  initialBody={c.latestQuickNote?.body ?? ''}
-                  saving={addQuickNoteMut.isPending}
-                  onCancel={() => setNoteEditCaseId(null)}
-                  onSave={(body) => addQuickNoteMut.mutate({ veteranId: c.veteranId, body })}
-                />
-              ) : c.latestQuickNote ? (
+            {/* NOTE column (Dr. Kasky 2026-06-25 — icon-only): just the note icon. The body text is
+                NOT shown beside it (it was cluttering the row); hover the icon for the full note via
+                the tooltip, click to open a real popup editor (QuickNoteEditPopup) with a proper-width
+                textarea. The prior inline-textarea-in-the-cell collapsed to ~1 char wide when the table
+                squeezed the column — the popup fixes that. 🗒️ amber = a note exists; faint '+' = none. */}
+            <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
+              {c.latestQuickNote ? (
                 <button
                   type="button"
                   title={`${c.latestQuickNote.body} · ${formatRelativeTime(c.latestQuickNote.createdAt)} · click to edit`}
                   aria-label={`Quick note: ${c.latestQuickNote.body}`}
-                  className="flex w-full items-start gap-1.5 text-left text-amber-700 hover:text-amber-900"
-                  onClick={() => setNoteEditCaseId(c.id)}
-                >
-                  <span aria-hidden="true" className="shrink-0 text-base leading-none">🗒️</span>
-                  <span className="line-clamp-2 text-xs leading-snug">{c.latestQuickNote.body}</span>
-                </button>
+                  className="text-base leading-none text-amber-600 hover:text-amber-800"
+                  onClick={() => setNoteCase(c)}
+                >🗒️</button>
               ) : (
                 <button
                   type="button"
                   aria-label="Add quick note"
                   title="Add a quick note"
                   className="text-base leading-none text-slate-300 hover:text-indigo-600"
-                  onClick={() => setNoteEditCaseId(c.id)}
+                  onClick={() => setNoteCase(c)}
                 >+</button>
               )}
             </td>
@@ -480,6 +469,15 @@ export function CasesPage() {
         <Button variant="secondary" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>Next</Button>
       </div>
     </div>
+
+    {noteCase ? (
+      <QuickNoteEditPopup
+        c={noteCase}
+        saving={addQuickNoteMut.isPending}
+        onClose={() => setNoteCase(null)}
+        onSave={(body) => addQuickNoteMut.mutate({ veteranId: noteCase.veteranId, body })}
+      />
+    ) : null}
 
     {assignCase ? (
       <AssignRnPopup
@@ -581,43 +579,48 @@ function RecordsChip({ recordsUploaded }: { readonly recordsUploaded: boolean | 
     : <span className="text-xs font-medium text-slate-500" title="No uploaded records yet — waiting on the veteran's files (Stage-1 only).">Pending</span>;
 }
 
-// Inline quick-note editor shown in the Note column (Dr. Kasky 2026-06-24, enlarged + edit-in-place
-// 2026-06-25). Opened by the '+' (new note) OR by clicking an EXISTING note (pre-filled with its
-// text — clicking a note now EDITS it inline, never navigates to the chart). Saving POSTs a NEW
-// PERSISTENT quick note to the veteran's chart-notes stream (createChartNote, append — NOT an
-// overwrite), so the edited text becomes the latest note in the Cases column while the PRIOR note
-// stays in the chart's Staff-Notes history. Enter saves; Shift+Enter inserts a newline; Escape or
-// Cancel dismisses. Trimmed-empty bodies don't submit. The box is a multi-line textarea sized so the
-// RN can read what they type. stopPropagation on the cell keeps the row's navigate-to-case click from
-// firing while editing.
-function QuickNoteInlineInput({ initialBody = '', saving, onCancel, onSave }: {
-  readonly initialBody?: string;
+// Quick-note POPUP editor (Dr. Kasky 2026-06-25 — replaces the cramped in-cell textarea). Opened from
+// the Note column's icon ('+' for a new note, 🗒️ to edit the existing one, pre-filled). A real modal
+// with a full-width multi-line textarea, so it never collapses to a 1-char-wide column the way the
+// in-cell editor did when the table squeezed the Note column. Saving POSTs a NEW persistent quick note
+// to the veteran's chart-notes stream (createChartNote, append — NOT an overwrite): the edited text
+// becomes the latest note shown in the Cases column while the prior note stays in the chart's
+// Staff-Notes history. Enter saves; Shift+Enter inserts a newline; Escape / Cancel / backdrop dismiss.
+// Trimmed-empty bodies don't submit. Backdrop + stopPropagation mirror AssignRnPopup.
+function QuickNoteEditPopup({ c, saving, onClose, onSave }: {
+  readonly c: CaseLite;
   readonly saving: boolean;
-  readonly onCancel: () => void;
+  readonly onClose: () => void;
   readonly onSave: (body: string) => void;
 }) {
-  const [body, setBody] = useState(initialBody);
+  const [body, setBody] = useState(c.latestQuickNote?.body ?? '');
   const submit = (): void => { const t = body.trim(); if (t.length > 0) onSave(t); };
   return (
-    <div className="flex w-full items-start gap-1">
-      <textarea
-        autoFocus
-        rows={2}
-        className="input min-h-[3.5rem] w-full resize-y px-2 py-1 text-xs leading-snug"
-        aria-label="Quick note"
-        placeholder="Quick note… (Enter to save, Shift+Enter for a new line)"
-        value={body}
-        disabled={saving}
-        onChange={(e) => setBody(e.target.value)}
-        onKeyDown={(e) => {
-          // Enter saves; Shift+Enter falls through to insert a newline; Escape cancels.
-          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
-          else if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
-        }}
-      />
-      <div className="flex shrink-0 flex-col items-center gap-1 pt-0.5">
-        <button type="button" className="text-xs font-medium text-indigo-600 hover:text-indigo-700 disabled:opacity-50" disabled={saving || body.trim().length === 0} onClick={submit}>Save</button>
-        <button type="button" className="text-xs text-slate-400 hover:text-slate-600" aria-label="Cancel quick note" disabled={saving} onClick={onCancel}>✕</button>
+    <div className="fixed inset-0 z-50 bg-slate-900/40 p-6" onClick={onClose}>
+      <div className="mx-auto mt-32 max-w-md rounded-lg bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-slate-900">Quick note · {c.id}</h2>
+          <button type="button" className="text-slate-400 hover:text-slate-600" aria-label="Close" onClick={onClose}>✕</button>
+        </div>
+        <p className="mt-0.5 text-xs text-slate-500">{formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)} · saves to the chart’s Staff Notes. Enter saves, Shift+Enter for a new line.</p>
+        <textarea
+          autoFocus
+          rows={4}
+          className="input mt-3 w-full resize-y px-3 py-2 text-sm leading-snug"
+          aria-label="Quick note"
+          placeholder="Type a quick note…"
+          value={body}
+          disabled={saving}
+          onChange={(e) => setBody(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+            else if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+          }}
+        />
+        <div className="mt-3 flex items-center justify-end gap-2">
+          <button type="button" className="text-sm text-slate-500 hover:text-slate-700 disabled:opacity-50" disabled={saving} onClick={onClose}>Cancel</button>
+          <Button size="sm" disabled={saving || body.trim().length === 0} onClick={submit}>{saving ? 'Saving…' : 'Save note'}</Button>
+        </div>
       </div>
     </div>
   );

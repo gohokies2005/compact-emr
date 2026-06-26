@@ -16,6 +16,7 @@ import {
   parseReadAttempt,
 } from '../services/file-read-validation.js';
 import { computeTriggerHash, deriveChartBuildState, isScreeningSummaryKey, runMatchesHash } from '../services/chart-build-state.js';
+import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { loadExtractionCoverageForCase } from '../services/extraction-coverage.js';
 import { buildSanityImpression, type SanityContext } from '../services/sanity-impression.js';
 import { AUTO_REMEDIATE_ACTION } from '../services/chart-auto-remediate.js';
@@ -215,6 +216,24 @@ export function createChartReadinessRouter(db: AppDb): Router {
         rows.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })),
         recentRuns.map((r) => ({ triggerHash: r.triggerHash, status: r.status })),
       );
+      // SELF-HEAL the hash-drift wedge (Dick CLM-29FCC3F1AB / Mittge CLM-E13B746273, 2026-06-26).
+      // deriveChartBuildState returns 'extracting' as a DEAD-END (chart-build-state.ts:168) when all
+      // docs are OCR-terminal but NO extraction run matches the CURRENT trigger hash — e.g. a duplicate
+      // Intake_Summary.pdf drifted the hash AFTER the prior run completed. Nothing re-enqueues, so the
+      // Send-to-Drafter gate spins forever (Ryan: "stuck 15-20 min, cannot draft at this rate"). When we
+      // detect that exact state, fire maybeEnqueueChartExtract (its own rate-guard makes this idempotent)
+      // so the gate converges itself, and log LOUD as `chart_build_stalled` so a CloudWatch metric-filter
+      // alarm can catch a stall the stuck-run watcher is blind to (it only sees runs that EXIST).
+      if (build.state === 'extracting' && build.currentHash
+          && !recentRuns.some((r) => runMatchesHash(r.triggerHash, build.currentHash))) {
+        console.warn(`[chart_build_stalled] case ${caseId} is 'extracting' with NO run matching current hash ${build.currentHash.slice(0, 12)} (hash-drift wedge) — auto-enqueuing extraction to self-heal.`);
+        try {
+          const enq = await maybeEnqueueChartExtract(db as Parameters<typeof maybeEnqueueChartExtract>[0], caseId);
+          console.warn(`[chart_build_stalled] case ${caseId} self-heal enqueue: enqueued=${enq.enqueued}${enq.reason ? ` reason=${enq.reason}` : ''}`);
+        } catch (healErr) {
+          console.error(`[chart_build_stalled] case ${caseId} self-heal enqueue FAILED: ${healErr instanceof Error ? healErr.message : String(healErr)}`);
+        }
+      }
       // Surface extraction gaps (audit 2026-06-13): complete_with_gaps opens the draft door (a 3-page gap
       // on a 2,000-page bundle shouldn't block) but the RN sees a banner. Pull the worker-recorded counts.
       // CRITICAL (Ewell 2026-06-14): read gaps from the COMPLETED run that made the chart ready — NOT the

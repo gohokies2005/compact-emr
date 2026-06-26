@@ -161,7 +161,7 @@ describe('intakes assign', () => {
         { name: 'photo.heic', s3Key: 'intake/i1/photo.heic', contentType: 'image/heic', sizeBytes: 1000 },
       ]), update: intakeUpdate },
       $transaction: txWithExisting(),
-      document: { create: docCreate, delete: docDelete },
+      document: { create: docCreate, delete: docDelete, findFirst: vi.fn().mockResolvedValue(null) },
     };
     const res = await request(assignApp(db, copy)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
     expect(res.body.data.assigned).toBe(true);
@@ -183,7 +183,7 @@ describe('intakes assign', () => {
     const db = {
       intake: { findUnique: async () => readyIntake([{ name: 'rec.pdf', s3Key: 'intake/i1/rec.pdf', contentType: 'application/pdf', sizeBytes: 1000 }]), update: intakeUpdate },
       $transaction: txWithExisting(),
-      document: { create: docCreate, delete: docDelete },
+      document: { create: docCreate, delete: docDelete, findFirst: vi.fn().mockResolvedValue(null) },
     };
     const res = await request(assignApp(db, copy)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
     expect(res.body.data.assigned).toBe(false);
@@ -201,7 +201,7 @@ describe('intakes assign', () => {
     const db = {
       intake: { findUnique: async () => readyIntake([]), update: intakeUpdate },
       $transaction: txWithExisting(),
-      document: { create: docCreate, delete: vi.fn() },
+      document: { create: docCreate, delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) },
     };
     const res = await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({
       newVeteran: { id: 'MRN-0123456789', firstName: 'Jane', lastName: 'Doe', dob: '1980-01-01', email: 'jane@e.com' },
@@ -230,7 +230,7 @@ describe('intakes assign', () => {
         update: intakeUpdate,
       },
       $transaction: txWithExisting(),
-      document: { create: docCreate, delete: vi.fn() },
+      document: { create: docCreate, delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) },
     };
     const res = await request(assignApp(db, s3send)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
     const calls = docCreate.mock.calls as unknown as Array<[{ data: { filename: string; contentType: string } }]>;
@@ -241,13 +241,38 @@ describe('intakes assign', () => {
     expect(s3send).toHaveBeenCalled(); // PutObject of the PDF bytes
   });
 
+  it('does NOT mint a second Intake_Summary.pdf when one already exists (hash-drift idempotency)', async () => {
+    // Dick/Mittge stuck-gate, 2026-06-26: a duplicate Intake_Summary.pdf drifted the chart-build
+    // trigger hash → readiness wedged on 'extracting'. The mint must be skipped when one exists.
+    const docCreate = vi.fn(async () => ({ id: 'doc-s' }));
+    const s3send = vi.fn(async () => ({}));
+    const intakeUpdate = vi.fn(async () => ({}));
+    const db = {
+      intake: {
+        findUnique: async () => ({
+          id: 'i1', status: 'ready', fileManifestJson: [], submittedName: 'Marcus Justice',
+          rawAnswersJson: { q1: { type: 'control_textbox', name: 's2_dob_s1', text: 'Date of Birth', answer: '08/13/1985' } },
+        }),
+        update: intakeUpdate,
+      },
+      $transaction: txWithExisting(),
+      // An Intake_Summary.pdf ALREADY exists on this case → the mint must be skipped.
+      document: { create: docCreate, delete: vi.fn(), findFirst: vi.fn().mockResolvedValue({ id: 'existing-summary' }) },
+    };
+    const res = await request(assignApp(db, s3send)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    const calls = docCreate.mock.calls as unknown as Array<[{ data: { filename: string } }]>;
+    expect(calls.find((c) => c[0].data.filename === 'Intake_Summary.pdf')).toBeFalsy(); // NO second mint
+    expect(res.body.data.attached.some((a: { name: string }) => a.name === 'Intake_Summary.pdf')).toBe(false);
+    expect(res.body.data.assigned).toBe(true); // still assigns
+  });
+
   it('409s when the intake is not ready', async () => {
-    const db = { intake: { findUnique: async () => ({ id: 'i1', status: 'pending' }) }, $transaction: txWithExisting(), document: { create: vi.fn(), delete: vi.fn() } };
+    const db = { intake: { findUnique: async () => ({ id: 'i1', status: 'pending' }) }, $transaction: txWithExisting(), document: { create: vi.fn(), delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) } };
     await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(409);
   });
 
   it('400s when neither veteranId nor newVeteran is provided', async () => {
-    const db = { intake: { findUnique: async () => readyIntake([]) }, $transaction: txWithExisting(), document: { create: vi.fn(), delete: vi.fn() } };
+    const db = { intake: { findUnique: async () => readyIntake([]) }, $transaction: txWithExisting(), document: { create: vi.fn(), delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) } };
     await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ caseId: 'CLM-1' }).expect(400);
   });
 });

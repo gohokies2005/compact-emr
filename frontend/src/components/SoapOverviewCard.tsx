@@ -333,7 +333,7 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
         <>
           {note.fallback ? (
             <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-600">
-              A full written summary couldn’t be generated automatically on this open, so this is a brief explanation derived from the case verdict. It refreshes on the next open (the full summary is computed in the background).
+              This is a brief read derived from the case verdict. The full written summary is being prepared in the background and will appear once it’s ready — reopening the chart in a minute usually shows it. The brief is accurate; it’s just shorter than the full note.
             </div>
           ) : null}
           {note.subjective ? <Section label="Subjective">{note.subjective}</Section> : null}

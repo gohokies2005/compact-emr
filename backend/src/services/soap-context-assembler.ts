@@ -181,7 +181,13 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
     const framing = routePickerFramingFromCard(card, card?.inputClaimed ?? '');
     const ctx = await assembleSoapContextForCase(db, caseId, framing);
     if (!ctx.claimedCondition) return false; // nothing to write about (no claimed condition) → genuinely skip
-    await getOrBuildSoapNote(db as unknown as SoapOverviewCacheDb, caseId, ctx, { forceRegenerate: true, timeoutMs });
+    const built = await getOrBuildSoapNote(db as unknown as SoapOverviewCacheDb, caseId, ctx, { forceRegenerate: true, timeoutMs });
+    // Observability (Bays SOAP banner, 2026-06-26): log the PERSISTED outcome, not just "didn't throw".
+    // fallback:true = a truncated/error brief was served and NOT persisted (the heal did NOT happen this
+    // run — a perpetual-fallback case is otherwise invisible); fallback:false = a real grounded note was
+    // persisted ($0 on the next open). `grounded` = the plan matched (framing non-null).
+    const fb = (built as { data?: { fallback?: boolean } } | null | undefined)?.data?.fallback;
+    console.warn(JSON.stringify({ msg: 'soap precompute outcome', caseId, grounded: framing !== null, fallback: fb === true, persisted: fb === false }));
     return true;
   } catch {
     return false;

@@ -220,6 +220,13 @@ model ScCondition {
   needsReview      Boolean   @default(false) @map("needs_review")
   extractedAt      DateTime? @map("extracted_at") @db.Timestamptz(6)
   extractionRunId  String?   @map("extraction_run_id")
+  // SC-STATUS PROVENANCE (Woodley fix, 2026-06-26): the AUTHORITY of the source document over service-
+  // connection. sourceAuthorityTier = ScAuthorityTier (sc-authority.ts); scStatusAuthoritative = the
+  // derived trust bit (true only for a VA rating decision / benefit summary), computed once at write. Both
+  // NULLABLE so the migration is additive (no table rewrite); legacy/manual rows stay NULL = "unknown",
+  // which consumers fail-safe on. service_connected is NEVER set from a non-authoritative source.
+  sourceAuthorityTier   String?  @map("source_authority_tier")
+  scStatusAuthoritative Boolean? @map("sc_status_authoritative")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version     Int      @default(1)

@@ -13,6 +13,7 @@
 // PURE module: no Prisma, no routes, no env. The impure adapter (db reads + bundle stamp + persist)
 // lives in case-framing-stamp.ts.
 
+import { effectiveScStatus, isScProvenanceEnforced } from './sc-authority.js';
 import { bestGrantedScPair } from './strategy-preview.js';
 import { findPair } from './cdsEngine.js';
 import { isRecognizedSecondaryAnchor, parseSecondaryFraming } from './intake-derive.js';
@@ -55,6 +56,11 @@ export interface ScConditionInput {
   readonly condition: string;
   readonly ratingPct: number | null;
   readonly status: string;
+  // SC-provenance (Woodley fix): a 'service_connected' row only anchors a secondary/aggravation theory
+  // when it came from an authoritative VA decision (or an RN typed it). source/scStatusAuthoritative are
+  // optional so legacy callers compile; absence + extracted = treated as unverified WHEN enforcing.
+  readonly source?: string | null;
+  readonly scStatusAuthoritative?: boolean | null;
 }
 
 /** trim + lowercase + collapse whitespace — the §2.6 dedupe/exclusion KEY (never the stored value). */
@@ -84,11 +90,18 @@ export function normalizeFramingChoice(framingChoice: string | null): RnFramingC
 export function buildGrantedScAnchors(
   scConditions: readonly ScConditionInput[],
   claimedCondition: string,
+  opts?: { enforce?: boolean },
 ): GrantedScAnchor[] {
+  // SC-provenance gate (Woodley): a non-authoritative extracted 'service_connected' (a veteran goal-doc,
+  // an intake field, a clinical-note mention) must NOT become a granted secondary primary — else the
+  // drafter argues a nexus off a fake grant. DARK by default (flag off → effectiveScStatus is a pass-
+  // through, byte-identical to the old strict filter). The demoted row is EXCLUDED from anchors but is
+  // NOT dropped from the chart (it still surfaces as claimed/unverified for RN confirmation).
+  const enforce = opts?.enforce ?? isScProvenanceEnforced();
   const claimedNorm = normCond(claimedCondition);
   const byKey = new Map<string, GrantedScAnchor>();
   for (const s of scConditions) {
-    if (s.status.toLowerCase() !== 'service_connected') continue; // strict filter (§2.3)
+    if (effectiveScStatus(s, { enforce }) !== 'service_connected') continue; // provenance-gated strict filter (§2.3)
     if (s.condition.trim().length === 0) continue; // schema requires non-empty condition
     const key = normCond(s.condition);
     if (key === claimedNorm) continue; // self-anchor exclusion (§2.6)

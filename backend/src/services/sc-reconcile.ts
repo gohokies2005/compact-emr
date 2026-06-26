@@ -40,6 +40,11 @@ export interface ReconcilableSc {
   readonly ratingPct?: number | null;
   readonly dcCode?: string | null;
   readonly needsReview?: boolean | null;
+  // SC-provenance (Woodley fix): carried through the generic spread so the keystone anchor gate
+  // (buildGrantedScAnchors → effectiveScStatus) sees whether a 'service_connected' row came from an
+  // authoritative VA decision. Optional — legacy/untyped callers compile unchanged.
+  readonly source?: string | null;
+  readonly scStatusAuthoritative?: boolean | null;
 }
 
 // The winner carries a statusConflict flag when its group mixed service_connected

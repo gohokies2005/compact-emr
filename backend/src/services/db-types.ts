@@ -600,6 +600,10 @@ export interface ScConditionRecord {
   ratingPct: number | null;
   status: ScConditionStatus;
   grantedDate: Date | null;
+  // SC-provenance (Woodley fix, 2026-06-26): the source document's authority over SC status.
+  source?: string | null;
+  sourceAuthorityTier?: string | null;
+  scStatusAuthoritative?: boolean | null;
   createdAt: Date;
   updatedAt: Date;
   version: number;

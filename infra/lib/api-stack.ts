@@ -206,6 +206,11 @@ export class ApiStack extends Stack {
         // _PRESUMPTIVE map, not the exposure class). Verified through the EMR vendored copy: Pichette
         // (OSA + Tinnitus SC + burn-pit + TERA) = weak, no anchor, no presumptive redirect.
         DIRECT_SC_VIABILITY_ENABLED: (this.node.tryGetContext('direct_sc_viability_enabled') as string | undefined) ?? 'true',
+        // SC-STATUS PROVENANCE (Woodley fix, 2026-06-26). The consumer trust gate (buildGrantedScAnchors →
+        // effectiveScStatus) runs in the API; this flag gates the DEMOTION of a non-authoritative extracted
+        // grant to claimed_unverified. DARK by default ('off' = byte-identical pass-through). Must match the
+        // worker's SC_PROVENANCE_ENFORCED; flip both together AFTER validating on Woodley. Context-overridable.
+        SC_PROVENANCE_ENFORCED: (this.node.tryGetContext('sc_provenance_enforced') as string | undefined) ?? 'off',
         // BRIDGE-ANCHOR pathway (2026-06-16, FRN 859d2eb). The presumptive two-hop suggestion (exposure
         // → PACT-presumptive intermediate dx → claimed secondary; burn-pit → chronic sinusitis/rhinitis/
         // asthma → OSA). ADDITIVE: only attaches on the v2 (direct-axis) shape, so it's meaningful only

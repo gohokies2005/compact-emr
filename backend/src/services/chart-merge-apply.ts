@@ -12,7 +12,8 @@
 import { planMerge, type ExistingChartRow } from './chart-merge.js';
 import { EXTRACTED_SOURCE, EXTRACTOR_VERSION } from './chart-build-state.js';
 import type { FinalExtractedItem } from './chart-extract-llm.js';
-import type { AppDb } from './db-types.js';
+import type { AppDb, KeyDocType } from './db-types.js';
+import { authorityTierForDocument, scStatusAuthoritativeFor, isScProvenanceEnforced, type ScAuthorityTier } from './sc-authority.js';
 
 export interface ApplyExtractionInput {
   caseId: string;
@@ -75,6 +76,24 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
 
   const plan = planMerge(existing, input.items);
 
+  // SC-PROVENANCE (Woodley fix): classify the AUTHORITY of each SC row's source document over service-
+  // connection (a VA rating decision is authoritative; a veteran goal-doc / lay statement / clinical note
+  // is not). Computed deterministically from the Document (filename + docTag) — NEVER the model's judgment.
+  // Build a documentId → tier map for the SC inserts; fail-open to 'unknown' (non-authoritative) on any
+  // lookup miss. The DOWNGRADE (a non-authoritative service_connected → pending) only bites when
+  // SC_PROVENANCE_ENFORCED is on; the tier is ALWAYS stamped so the flip is data-ready.
+  const enforceProvenance = isScProvenanceEnforced();
+  const scDocIds = Array.from(new Set(plan.toInsert.filter((i) => i.category === 'sc_condition' && i.sourceDocumentId).map((i) => i.sourceDocumentId as string)));
+  const tierByDocId = new Map<string, ScAuthorityTier>();
+  if (scDocIds.length > 0) {
+    try {
+      const docDelegate = (db as unknown as { document: { findMany: (a: { where: { id: { in: string[] } }; select: { id: true; filename: true; docTag: true } }) => Promise<{ id: string; filename: string | null; docTag: string | null }[]> } }).document;
+      const docs = await docDelegate.findMany({ where: { id: { in: scDocIds } }, select: { id: true, filename: true, docTag: true } });
+      for (const d of docs) tierByDocId.set(d.id, authorityTierForDocument({ docType: (d.docTag as KeyDocType | null) ?? undefined, filename: d.filename }));
+    } catch { /* fail-open: leave the map empty → 'unknown' (non-authoritative) for every SC row */ }
+  }
+  const scTierFor = (docId: string | null | undefined): ScAuthorityTier => (docId && tierByDocId.get(docId)) || 'unknown';
+
   await db.$transaction(async (tx) => {
     if (autofill) {
       const txAny = tx as unknown as {
@@ -99,7 +118,18 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
           // GRANTED SC the records don't support, which then becomes a framing anchor (case-framing builds
           // grantedScAnchors from status==='service_connected'). `pending` can't anchor a theory and surfaces
           // for RN confirmation. Matches the existing "deferred/claimed → pending, never SC" sanitizer intent.
-          await txAny.scCondition.create({ data: { veteranId: input.veteranId, condition: it.name, status: it.status ?? 'pending', ...(it.ratingPct != null ? { ratingPct: it.ratingPct } : {}), ...(it.dcCode ? { dcCode: it.dcCode } : {}), ...prov } });
+          // SC-PROVENANCE (Woodley): stamp the source-document authority tier. When enforcing, a
+          // service_connected from a NON-authoritative source (veteran goal-doc / lay statement / clinical
+          // note) is WRITTEN as `pending` — the grant is unsettable from a non-VA-decision source. The
+          // condition name is kept (real + useful); only the unverifiable grant is demoted.
+          const tier = scTierFor(it.sourceDocumentId);
+          const authoritative = scStatusAuthoritativeFor(tier);
+          let scStatus = it.status ?? 'pending';
+          if (enforceProvenance && scStatus === 'service_connected' && !authoritative) {
+            scStatus = 'pending';
+            console.warn(JSON.stringify({ event: 'sc_status_downgraded_on_extract', veteranId: input.veteranId, condition: it.name, from: 'service_connected', to: 'pending', tier, sourceDocumentId: it.sourceDocumentId }));
+          }
+          await txAny.scCondition.create({ data: { veteranId: input.veteranId, condition: it.name, status: scStatus, ...(scStatus === 'service_connected' && it.ratingPct != null ? { ratingPct: it.ratingPct } : {}), ...(it.dcCode ? { dcCode: it.dcCode } : {}), ...prov, sourceAuthorityTier: tier, scStatusAuthoritative: authoritative } });
         } else if (it.category === 'active_problem') {
           await txAny.activeProblem.create({ data: { veteranId: input.veteranId, problem: it.name, ...(it.icd10 ? { icd10: it.icd10 } : {}), ...prov } });
         } else {

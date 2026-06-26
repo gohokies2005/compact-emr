@@ -230,11 +230,20 @@ export class WorkersStack extends Stack {
       // greater so SQS can't re-deliver mid-run and double-process.
       timeout: Duration.minutes(15),
       memorySize: 1024,
+      // SC-provenance re-extraction wave guard (aws-sme, 2026-06-26): unlike ocr-start (capped at 10, the
+      // "$231 incident" circuit-breaker), this worker had NO concurrency cap — a backfill of active cases
+      // (after the SC_PROVENANCE flip) would fan out unbounded Sonnet calls. Cap at 8 so a wave QUEUES
+      // instead of running away. The per-case 5-min rate cap + FIFO MessageGroupId=caseId are the other fences.
+      reservedConcurrentExecutions: 8,
       environment: {
         COMPACT_EMR_API_URL: apiBaseUrl,
         INTERNAL_WORKER_TOKEN: workerTokenSecret.secretValue.unsafeUnwrap(),
         ANTHROPIC_SECRET_ARN: anthropicKeySecret.secretArn,
         CHART_EXTRACT_MAX_RECEIVE: '3',
+        // SC-status provenance (Woodley fix). DARK by default: 'off' = the tier is computed + stamped +
+        // logged but NO downgrade happens (byte-identical). Flip to 'on' (with an EXTRACTOR_VERSION bump +
+        // the throttled active-case backfill) AFTER validating on Woodley. Context-overridable.
+        SC_PROVENANCE_ENFORCED: (this.node.tryGetContext('sc_provenance_enforced') as string | undefined) ?? 'off',
         // Full-read chunker gate (PR-1). PRODUCTION as of 2026-06-13: validated live on a real-veteran
         // cohort (Porter/Bonnewitz/Thomas/Stocks — up to 58 items / 35 chunks, truncatedWindows 0 and
         // uncoveredPages 0 on every run, screening-doc loop confirmed) AFTER the icd10/status/ratingPct

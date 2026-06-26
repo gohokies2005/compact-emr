@@ -34,7 +34,6 @@ export function CitationEnricherPanel({ caseId, passage, onApplied }: CitationEn
   const [status, setStatus] = useState<'idle' | 'searching' | 'ready' | 'error'>('idle');
   const [candidates, setCandidates] = useState<readonly EnrichCandidate[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [groundInVi, setGroundInVi] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -117,7 +116,7 @@ export function CitationEnricherPanel({ caseId, passage, onApplied }: CitationEn
     try {
       // The backend RE-VERIFIES every selected PMID against NCBI before inserting — a client flag is
       // never trusted. On a re-verify or guard failure the API 422s and nothing is changed.
-      await applyCitationEnrich(caseId, { jobId, selectedPmids: [...selected], groundInSectionVi: groundInVi });
+      await applyCitationEnrich(caseId, { jobId, selectedPmids: [...selected] });
       reset();
       setClaim('');
       setCondition('');
@@ -227,10 +226,9 @@ export function CitationEnricherPanel({ caseId, passage, onApplied }: CitationEn
             ))}
           </ul>
 
-          <label className="mt-3 flex items-center gap-2 text-xs text-slate-700">
-            <input type="checkbox" checked={groundInVi} onChange={(e) => setGroundInVi(e.target.checked)} />
-            Also add a brief grounding sentence to Section VI
-          </label>
+          <p className="mt-3 text-xs text-slate-500">
+            Selected citations are added as numbered references in Section VIII. To weave a finding into the Section VI prose, use Guided Revision and reference the new reference number or PMID.
+          </p>
 
           <div className="mt-3 flex gap-2">
             <Button

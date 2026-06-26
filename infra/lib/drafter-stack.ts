@@ -91,6 +91,23 @@ export class DrafterStack extends Stack {
     });
     this.anthropicKeySecret = anthropicKeySecret;
 
+    // ===== NCBI E-utilities API key (post-draft §VIII citation backfill) =====
+    // PRE-EXISTING secret created out-of-band (NOT CDK-owned): friendly name 'frn/ncbi-api-key',
+    // full ARN ...-c8E88t. The post-draft citation backfill (run-letter-pipeline.js §VIII safety
+    // net → citationFallback.js) reads process.env.NCBI_API_KEY PER-REQUEST; the key raises the
+    // NCBI rate limit 3/s -> 10/s + improves reliability (keyless still works, so this is a
+    // reliability/speed upgrade, not a correctness dependency).
+    // Import by the FULL COMPLETE ARN (fromSecretCompleteArn) — NOT fromSecretNameV2: the latter
+    // emits a PARTIAL ARN ('frn/ncbi-api-key' without the -c8E88t suffix) that resolves as a
+    // SecretId Secrets Manager can't find → masquerades as AccessDenied (the partial-ARN footgun,
+    // INCIDENTS 2026-06-05). fromSecretCompleteArn pins the exact resource so grantRead writes an
+    // IAM policy on the real ARN and the ecs.Secret.fromSecretsManager injection resolves cleanly.
+    const ncbiApiKeySecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this,
+      'NcbiApiKeySecret',
+      'arn:aws:secretsmanager:us-east-1:676591241787:secret:frn/ncbi-api-key-c8E88t',
+    );
+
     // ===== ECS cluster =====
     const cluster = new ecs.Cluster(this, 'DrafterCluster', {
       clusterName: `compact-emr-${config.envName}-drafter`,
@@ -128,6 +145,10 @@ export class DrafterStack extends Stack {
     documentsKey.grantEncryptDecrypt(taskRole);
     drafterInvokeTokenSecret.grantRead(taskRole);
     anthropicKeySecret.grantRead(taskRole);
+    // NCBI key: task role reads it at runtime (injected as the NCBI_API_KEY env var via the
+    // secrets: block below). grantRead on the COMPLETE-ARN-imported secret writes the
+    // secretsmanager:GetSecretValue policy on the exact ...-c8E88t ARN.
+    ncbiApiKeySecret.grantRead(taskRole);
     // Task scale-in PROTECTION (2026-06-18): the worker self-protects via the agent endpoint
     // ($ECS_AGENT_URI/task-protection/v1/state) so the autoscaler can't reap a still-drafting task (the
     // ">1 draft dies" root cause). The agent endpoint authorizes with the TASK ROLE — without these
@@ -226,6 +247,11 @@ export class DrafterStack extends Stack {
         // via the task role's grantRead on each Secret.
         DRAFTER_INVOKE_TOKEN: ecs.Secret.fromSecretsManager(drafterInvokeTokenSecret),
         ANTHROPIC_API_KEY: ecs.Secret.fromSecretsManager(anthropicKeySecret),
+        // NCBI E-utilities key for the post-draft §VIII citation backfill (raises NCBI rate
+        // 3/s -> 10/s). The worker reads process.env.NCBI_API_KEY per-request; keyless still
+        // works, so an empty/absent secret value degrades gracefully (no crash). This injects
+        // the secret value into the task env at task START (not baked into the task-def JSON).
+        NCBI_API_KEY: ecs.Secret.fromSecretsManager(ncbiApiKeySecret),
       },
       essential: true,
     });

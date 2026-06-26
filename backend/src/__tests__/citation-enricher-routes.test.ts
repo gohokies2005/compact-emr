@@ -122,7 +122,7 @@ function deps(over: Partial<LetterRouterDeps> = {}): LetterRouterDeps {
     })),
     enrichVerify: vi.fn(async (pmid: string) => (
       pmid === '22222222'
-        ? { verified: true, pmid: '22222222', title: 'OSA and PTSD', journal: 'J Sleep', year: '2020', killer_finding: 'OSA prevalence was elevated.' }
+        ? { verified: true, pmid: '22222222', title: 'OSA and PTSD', journal: 'J Sleep', year: '2020', killer_finding: 'OSA prevalence was elevated.', full_citation: 'Gupta MA, Simpson FC. OSA and PTSD. J Sleep. 2020;11(2):165-175' }
         : { verified: false, pmid, title: '', journal: '', year: '', killer_finding: '', reason: 'no_summary' }
     )),
     extractTerms: vi.fn(async () => ({ condition: 'obstructive sleep apnea', mechanismHints: [] })),
@@ -171,7 +171,8 @@ describe('Citation Enricher routes (Feature B)', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.version).toBe(2);
     expect(res.body.data.insertedPmids).toEqual(['22222222']);
-    expect(res.body.data.txt).toContain('PMID: 22222222');
+    // BUG 1: the §VIII entry is in the HOUSE numbered format built from full_citation.
+    expect(res.body.data.txt).toMatch(/2\. Gupta MA, Simpson FC\. OSA and PTSD\. J Sleep\. 2020;11\(2\):165-175\. PMID: 22222222\./);
     expect(tx.letterRevision.create).toHaveBeenCalled();
     const arg = (tx.letterRevision.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as { data: { source: string } };
     expect(arg.data.source).toBe('surgical_ai');
@@ -195,6 +196,21 @@ describe('Citation Enricher routes (Feature B)', () => {
     expect(d.enrichVerify).toHaveBeenCalledWith('22222222', expect.any(String));
   });
 
+  it('BUG 2: condition-search APPLY adds a numbered §VIII reference, NOT a generic §VI sentence', async () => {
+    const { db } = makeDb({ job: { condition: 'obstructive sleep apnea', claim: null } });
+    // groundInSectionVi:true is sent (old client) but is now IGNORED — no §VI sentence is added.
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/citations/apply')
+      .send({ jobId: 'JOB-1', selectedPmids: ['22222222'], groundInSectionVi: true });
+    expect(res.status).toBe(200);
+    const txt: string = res.body.data.txt;
+    // A real numbered §VIII reference in house format:
+    expect(txt).toMatch(/2\. Gupta MA, Simpson FC\. OSA and PTSD\. J Sleep\. 2020;11\(2\):165-175\. PMID: 22222222\./);
+    // NO generic throwaway §VI sentence:
+    expect(txt).not.toMatch(/further supported by additional peer-reviewed literature/i);
+    // §VI body untouched:
+    expect(txt).toContain('VI. Medical Reasoning\nThe mechanism is established.');
+  });
+
   it('ops_staff (RN) → 403 on PROPOSE, POLL, and APPLY (physician-only)', async () => {
     mockUser = { sub: 'RN-SUB', roles: ['ops_staff'] };
     const { db } = makeDb();
@@ -216,18 +232,32 @@ describe('Citation Enricher routes (Feature B)', () => {
 
 describe('insertVerifiedCitations (deterministic insertion)', () => {
   const CITE = { pmid: '22222222', title: 'OSA and PTSD', journal: 'J Sleep', year: '2020', killer_finding: 'elevated.' };
+  // BUG 1: a verified citation now carries a HOUSE-FORMAT full_citation (Author. Title. Journal. Year;Vol(Issue):Pages).
+  const CITE_HOUSE = {
+    pmid: '31393195', title: 'OSA and PTSD', journal: 'J Sleep', year: '2019', killer_finding: 'elevated.',
+    full_citation: 'Spring B, Krakow B, et al. OSA and PTSD among veterans. J Sleep. 2019;5(2):100-110',
+  };
 
-  it('appends a numbered §VIII reference continuing the existing numbering', () => {
+  it('appends a numbered §VIII reference continuing the existing numbering (fallback form, no full_citation)', () => {
     const { newText, insertedPmids } = insertVerifiedCitations(LETTER_TXT, [CITE]);
     expect(insertedPmids).toEqual(['22222222']);
     expect(newText).toMatch(/2\. OSA and PTSD\. J Sleep\. 2020 PMID: 22222222\./);
   });
 
-  it('optionally adds a §VI grounding sentence with NO embedded statistic', () => {
+  it('BUG 1: inserts the §VIII entry in the HOUSE numbered format using full_citation', () => {
+    const { newText } = insertVerifiedCitations(LETTER_TXT, [CITE_HOUSE]);
+    // House format: "<N>. Author(s). Title. Journal. Year;Vol(Issue):Pages. PMID: NNNN." — matches the
+    // existing numbered §VIII entries (author block + volume(issue):pages), not the degraded shape.
+    expect(newText).toMatch(/2\. Spring B, Krakow B, et al\. OSA and PTSD among veterans\. J Sleep\. 2019;5\(2\):100-110\. PMID: 31393195\./);
+  });
+
+  it('BUG 2: NEVER adds a generic Section VI grounding sentence (even if the flag is passed)', () => {
     const { newText } = insertVerifiedCitations(LETTER_TXT, [CITE], { groundInSectionVi: true });
-    expect(newText).toContain('PMID 22222222');
-    // The grounding sentence carries the PMID but never a fabricated statistic.
-    expect(newText).not.toMatch(/grounding[\s\S]*\d+%/i);
+    // The generic §VI sentence was removed; only the §VIII reference is added.
+    expect(newText).not.toMatch(/further supported by additional peer-reviewed literature/i);
+    expect(newText).toContain('PMID: 22222222'); // the §VIII reference IS present
+    // The §VI body is unchanged (no appended sentence).
+    expect(newText).toContain('VI. Medical Reasoning\nThe mechanism is established.');
   });
 
   it('creates a §VIII block if the letter has none', () => {

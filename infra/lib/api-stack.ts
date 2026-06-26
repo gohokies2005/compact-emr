@@ -115,6 +115,21 @@ export class ApiStack extends Stack {
       secretName: `compact-emr-${props.config.envName}/gmail-oauth`,
     });
 
+    // NCBI E-utilities API key (Citation Enricher / grounded retrieval in routes/letter.ts →
+    // citationFallback.cjs). PRE-EXISTING secret created out-of-band (NOT CDK-owned): friendly
+    // name 'frn/ncbi-api-key', full ARN ...-c8E88t. The vendored citationFallback.cjs reads
+    // process.env.NCBI_API_KEY PER-REQUEST; the key raises the NCBI rate 3/s -> 10/s + improves
+    // reliability (keyless already works today, so this is a speed/reliability upgrade). Imported
+    // by COMPLETE ARN (fromSecretCompleteArn) for the grantRead IAM symmetry — NOT fromSecretNameV2
+    // (partial-ARN footgun, INCIDENTS 2026-06-05). The env-var INJECTION below uses the friendly-name
+    // {{resolve}} CFN dynamic reference (same idiom as JOTFORM_WEBHOOK_SECRET above) because the
+    // consumer reads it as a plain process.env value, not via a runtime GetSecretValue call.
+    const ncbiApiKeySecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this,
+      'NcbiApiKeySecret',
+      'arn:aws:secretsmanager:us-east-1:676591241787:secret:frn/ncbi-api-key-c8E88t',
+    );
+
     const handler = new nodejs.NodejsFunction(this, 'PlaceholderApiLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: path.resolve(__dirname, '../../backend/src/placeholder-lambda.ts'),
@@ -150,6 +165,12 @@ export class ApiStack extends Stack {
         // a partial-ARN form that CloudFormation failed to resolve ("ResourceNotFound") for this
         // secret on deploy; the friendly-name form resolves reliably + is env-portable. (2026-06-04.)
         JOTFORM_WEBHOOK_SECRET: `{{resolve:secretsmanager:compact-emr-${props.config.envName}/jotform-webhook-secret:SecretString}}`,
+        // NCBI E-utilities API key for the Citation Enricher / grounded retrieval (citationFallback.cjs
+        // reads process.env.NCBI_API_KEY per-request). Plain-string secret (the bare key, no JSON), so
+        // the {{resolve}} form has no JSON key — identical idiom to JOTFORM_WEBHOOK_SECRET above. Raises
+        // NCBI rate 3/s -> 10/s; keyless still works, so a missing value degrades gracefully (the
+        // enricher reaches NCBI keyless today). Friendly-name resolve avoids the partial-ARN footgun.
+        NCBI_API_KEY: '{{resolve:secretsmanager:frn/ncbi-api-key:SecretString}}',
         // Chart auto-extract: 'on' makes the merge endpoint WRITE extracted rows into the chart
         // (non-destructive: planMerge protects manual + prior-extracted rows; the keystone pkg-6
         // dedup guard in normalizeName collapses the PTSD-variant explosion). DEFAULT IS NOW 'on'
@@ -336,6 +357,12 @@ export class ApiStack extends Stack {
     // Gmail transport: read the OAuth grant at runtime (friendly name; CDK-created so the full ARN
     // grant resolves — not the fromSecretNameV2 partial-ARN footgun).
     gmailOauthSecret.grantRead(handler);
+    // NCBI key: the env var above is resolved by CloudFormation at deploy time (a {{resolve}} dynamic
+    // reference, NOT a runtime GetSecretValue), so the Lambda role does NOT strictly need GetSecretValue
+    // to READ it. This grant is kept for IAM symmetry + forward-compat if the enricher ever switches to a
+    // runtime fetch; it writes secretsmanager:GetSecretValue on the exact ...-c8E88t ARN (complete-ARN
+    // import → no partial-ARN footgun). Harmless if unused.
+    ncbiApiKeySecret.grantRead(handler);
     handler.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['ses:SendEmail', 'ses:SendRawEmail'],

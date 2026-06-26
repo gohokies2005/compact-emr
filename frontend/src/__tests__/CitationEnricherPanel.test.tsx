@@ -50,7 +50,8 @@ describe('CitationEnricherPanel', () => {
     fireEvent.click(screen.getByLabelText('Add citation PMID 22222222'));
     fireEvent.click(screen.getByRole('button', { name: 'Add selected' }));
 
-    await waitFor(() => expect(applyMock).toHaveBeenCalledWith('CASE-1', { jobId: 'JOB-1', selectedPmids: ['22222222'], groundInSectionVi: false }));
+    // BUG 2 (Spring): no groundInSectionVi — citations always go to §VIII, never a generic §VI sentence.
+    await waitFor(() => expect(applyMock).toHaveBeenCalledWith('CASE-1', { jobId: 'JOB-1', selectedPmids: ['22222222'] }));
     await waitFor(() => expect(onApplied).toHaveBeenCalled());
   });
 

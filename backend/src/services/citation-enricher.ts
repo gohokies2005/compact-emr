@@ -59,6 +59,10 @@ export interface VerifyResult {
   journal: string;
   year: string;
   killer_finding: string;
+  /** House-format reference line (Author. Title. Journal. Year;Vol(Issue):Pages) built from the SAME
+   * esummary metadata as a grounded anchor. Present on a verified result; used to insert a §VIII
+   * reference that matches the existing numbered entries exactly (Spring §VIII formatting fix). */
+  full_citation?: string;
   reason?: string;
   error?: string;
 }
@@ -219,12 +223,27 @@ export interface VerifiedCitationForInsert {
   journal: string;
   year: string;
   killer_finding: string;
+  /** House-format reference body (Author. Title. Journal. Year;Vol(Issue):Pages) from the grounded
+   * module. When present, buildReferenceLine uses it verbatim so the inserted §VIII entry matches the
+   * existing numbered references exactly. Absent → fall back to the degraded title/journal/year form. */
+  full_citation?: string;
 }
 
+// Build a §VIII reference line in the FRN HOUSE FORMAT (Spring §VIII formatting fix, 2026-06-25):
+//   N. Author(s). Title. Journal. Year;Volume(Issue):Pages. PMID: NNNN.
+// The grounded module's `full_citation` already carries "Author. Title. Journal. Year;Vol(Issue):Pages"
+// (built by buildCitation from NCBI esummary — the SAME shape as the existing numbered entries), so we
+// number it and append the PMID. Only when full_citation is missing (older verify result) do we fall
+// back to the prior degraded title/journal/year line. We add ONLY the citation — never a statistic —
+// so the apply-side diffCitationsSanctioned sees a citation delta equal to exactly the inserted PMIDs.
 function buildReferenceLine(n: number, c: VerifiedCitationForInsert): string {
+  const fc = (c.full_citation ?? '').trim().replace(/\.+$/, '');
+  if (fc.length > 0) {
+    return `${n}. ${fc}. PMID: ${c.pmid}.`;
+  }
+  // Fallback (no full_citation): the prior shape, still numbered + PMID-tagged.
   const title = c.title.replace(/\.+$/, '');
   const yr = c.year ? ` ${c.year}` : '';
-  // PMID is appended so §VIII carries the verifiable identifier; the diff treats it as the sanctioned token.
   return `${n}. ${title}. ${c.journal}.${yr} PMID: ${c.pmid}.`;
 }
 
@@ -239,7 +258,7 @@ function maxRefNumber(referencesBlock: string): number {
 }
 
 export interface InsertResult {
-  /** The new full letter text with the citations appended to §VIII (+ optional §VI sentence). */
+  /** The new full letter text with the citations appended to §VIII as numbered references. */
   newText: string;
   /** The PMIDs actually inserted (bare digits) — the SANCTIONED set the diff is checked against. */
   insertedPmids: string[];
@@ -248,27 +267,31 @@ export interface InsertResult {
 // Section VIII header forms we anchor on. The FRN house letter uses "VIII. References" (sometimes
 // bolded markdown). We match the first such header and append numbered lines under that block.
 const SECTION_VIII_RE = /(^|\n)(\*{0,2}\s*(?:VIII\.|Section\s+VIII\b)[^\n]*References[^\n]*\*{0,2})\s*\n/i;
-// Section VI header (for the optional grounding sentence). NOTE: the roman-numeral form must be
-// "VI." with the literal dot (no trailing \b — a dot→space transition is non-word to non-word, so a
-// \b there NEVER matches, which silently skipped the §VI insertion); the \b applies only to the
-// spelled "Section VI" form.
-const SECTION_VI_RE = /(^|\n)(\*{0,2}\s*(?:VI\.|Section\s+VI\b)[^\n]*\*{0,2})\s*\n/i;
 
 /**
- * Deterministically insert the verified citations.
+ * Deterministically insert the verified citations as numbered §VIII references.
+ *
+ * BUG 2 FIX (Spring, 2026-06-25): the enricher NO LONGER appends a generic "the opinion is further
+ * supported by additional peer-reviewed literature" sentence to Section VI. Whether the physician
+ * searched by a HIGHLIGHTED PASSAGE or by a CONDITION, the result is the SAME: real, numbered §VIII
+ * references in the house format (Bug 1). A throwaway §VI sentence was worthless (Dr. Kasky on
+ * Spring's letter) — it added no specific finding and read as filler. If the physician wants the
+ * actual finding woven into §VI prose, they use the Guided Revision tool to reference the now-present
+ * §VIII PMID (which the Bug 4 cross-reference allowance now permits).
+ *
  *   - §VIII: append a numbered reference line per citation (continuing the existing numbering). If no
  *     §VIII header is found we append a new "VIII. References" block at the end of the letter.
- *   - §VI: when `groundInSectionVi` is true AND a §VI header exists, append ONE plain grounding
- *     sentence at the end of the §VI block that names the citation(s) by author-less PMID anchor — NO
- *     embedded statistic (so no net-new stat token), just "This is further supported by the
- *     peer-reviewed literature added to the references (PMID 123, PMID 456)." The physician can then
- *     weave the actual finding via the existing guided-revision tools if desired.
+ *
  * Pure string assembly; never an LLM. Returns the new text + the bare-digit PMIDs inserted.
+ *
+ * `opts.groundInSectionVi` is accepted for call-site backward compatibility but is now a NO-OP — the
+ * generic §VI grounding sentence was removed (Bug 2). It is retained so existing callers/tests do not
+ * break; it can be deleted once the route + frontend stop passing it.
  */
 export function insertVerifiedCitations(
   letterText: string,
   citations: readonly VerifiedCitationForInsert[],
-  opts: { groundInSectionVi: boolean } = { groundInSectionVi: false },
+  _opts: { groundInSectionVi?: boolean } = {},
 ): InsertResult {
   const insertedPmids = citations.map((c) => String(c.pmid).replace(/\D/g, '').replace(/^0+/, '')).filter((p) => p.length > 0);
   if (citations.length === 0) return { newText: letterText, insertedPmids: [] };
@@ -294,26 +317,6 @@ export function insertVerifiedCitations(
     // No §VIII — append a fresh references block at the end.
     const lines = citations.map((c, i) => buildReferenceLine(i + 1, c));
     text = text.replace(/\s*$/, '') + '\n\nVIII. References\n' + lines.join('\n') + '\n';
-  }
-
-  // ── §VI grounding sentence (optional, deterministic, NO statistic) ──
-  if (opts.groundInSectionVi) {
-    const viMatch = SECTION_VI_RE.exec(text);
-    if (viMatch !== null) {
-      const pmidList = insertedPmids.map((p) => `PMID ${p}`).join(', ');
-      const sentence = ` The opinion is further supported by additional peer-reviewed literature now included in the references (${pmidList}).`;
-      // Insert at the END of the §VI block: find the start of the NEXT section header after §VI, or EOF.
-      const viStart = (viMatch.index ?? 0) + viMatch[0].length;
-      const after = text.slice(viStart);
-      // Next section header (VII/Section VII, or §VIII) terminates §VI. Same \b caveat as above:
-      // the dot forms ("VII." / "VIII.") carry the literal dot and NO trailing \b.
-      const nextHeader = /\n\*{0,2}\s*(?:VII\.|Section\s+VII\b|VIII\.|Section\s+VIII\b)/i.exec(after);
-      const insertAt = nextHeader !== null ? viStart + (nextHeader.index ?? 0) : text.length;
-      // Place the sentence just before the next header (trim any trailing whitespace in the §VI body first).
-      const head = text.slice(0, insertAt).replace(/\s*$/, '');
-      const tail = text.slice(insertAt);
-      text = head + sentence + (tail.startsWith('\n') ? '' : '\n') + tail;
-    }
   }
 
   return { newText: text, insertedPmids };

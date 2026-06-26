@@ -13,7 +13,7 @@ import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services
 import { buildLetterRevisionKey } from '../services/s3-key-safety.js';
 import { cleanProseForSave, sanityCheckLetterText, computeLockedRanges, type SanityFinding } from '../services/letter-sanity.js';
 import { applyStructuredEdit, type EditProposal } from '../services/letter-edit-apply.js';
-import { diffCitations, diffCitationsSanctioned, describeToken, type CitationDiff } from '../services/letter-citation-integrity.js';
+import { diffCitationsSanctioned, describeToken, extractCitationTokenMap, type CitationDiff } from '../services/letter-citation-integrity.js';
 import {
   anchorsToCandidates,
   insertVerifiedCitations,
@@ -724,7 +724,20 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         // passage (before) vs the model's revised passage (after = out.proposal.new_text). A NET-NEW
         // citation/stat => REJECT (the model invented a fact to prop up a reworded argument). A
         // DROPPED citation/stat => return WITH a warning the physician must see before accepting.
-        const citationDiff: CitationDiff = diffCitations(passage, out.proposal.new_text);
+        //
+        // CROSS-REFERENCE ALLOWANCE (Spring, 2026-06-25): a PMID that is NEW to the highlighted
+        // PASSAGE but ALREADY PRESENT ELSEWHERE in the current letter (typically a numbered §VIII
+        // reference the physician just added via the Citation Enricher) is a LEGITIMATE internal
+        // cross-reference, NOT a fabrication — "use one of our new §VIII citations as a reference for
+        // this passage" must be allowed. We build the allowed-PMID set from EVERY PMID already in the
+        // full current letter (oldText) and pass it to diffCitationsSanctioned so those PMIDs are not
+        // flagged as net-new. The real fabrication guard is UNCHANGED: a PMID that appears NOWHERE in
+        // the letter is still rejected, and any net-new author-year or statistic still rejects (the
+        // sanctioned set only ever whitelists PMID tokens already in the letter).
+        const letterPmids = [...extractCitationTokenMap(oldText).values()]
+          .filter((t) => t.kind === 'pmid')
+          .map((t) => t.key.replace(/^pmid:/, ''));
+        const citationDiff: CitationDiff = diffCitationsSanctioned(passage, out.proposal.new_text, letterPmids);
 
         // §VII HOLDING-CONCLUSION LOCK (NARROWED — Puller, 2026-06-24): even if the highlighted
         // passage overlaps Section VII, the PROBABILITY conclusion ("more likely than not (>50%)")
@@ -1228,6 +1241,16 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           }
           const result = await (deps.enrichRetrieve as EnrichRetriever)(condition, mechanismHints);
           const candidates: EnrichCandidate[] = anchorsToCandidates(result.anchors);
+          // BUG 3 FIX (Spring, 2026-06-25): a CLEAR, ACTIONABLE empty message instead of a bare
+          // "no grounded citations found". The grounded retrieval distinguishes WHY nothing came back
+          // (NCBI unreachable/rate-limited vs a genuinely empty/over-narrow search vs a blank
+          // condition), so the physician knows whether to retry now or broaden/reword the search.
+          const emptyMessage =
+            result.status === 'network_error'
+              ? 'PubMed could not be reached just now (network or rate limit). Wait a moment and try again — nothing was changed.'
+              : result.status === 'invalid_condition'
+                ? 'No searchable condition was found in that input. Enter a condition (e.g. "obstructive sleep apnea") or highlight a clearer claim sentence.'
+                : `No grounded PubMed citations matched "${condition}". Try a broader condition, drop the mechanism hints, or reword the claim, then search again.`;
           await db.citationEnrichJob.update({
             where: { id: job.id },
             data: {
@@ -1235,7 +1258,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
               condition,
               mechanismHints,
               candidatesJson: candidates,
-              errorMessage: candidates.length === 0 ? `No grounded citations found (status: ${result.status}).` : null,
+              errorMessage: candidates.length === 0 ? emptyMessage : null,
             },
           });
         } catch (e: unknown) {
@@ -1278,7 +1301,9 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       const user = currentActor(req);
       const caseId = String(req.params.id);
       assertPhysicianOnly(user.role, caseId);
-      const body = (req.body ?? {}) as { jobId?: unknown; selectedPmids?: unknown; groundInSectionVi?: unknown };
+      // groundInSectionVi is accepted-but-ignored (Bug 2, Spring 2026-06-25): the generic §VI grounding
+      // sentence was removed; older clients may still send the flag, so we tolerate it without using it.
+      const body = (req.body ?? {}) as { jobId?: unknown; selectedPmids?: unknown };
       const jobId = typeof body.jobId === 'string' ? body.jobId : '';
       const selectedPmids = Array.isArray(body.selectedPmids)
         ? body.selectedPmids.map((p) => String(p ?? '').replace(/\D/g, '')).filter((p) => p.length > 0)
@@ -1311,7 +1336,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       for (const pmid of selectedPmids) {
         const v: VerifyResult = await (deps.enrichVerify as EnrichVerifier)(pmid, condition);
         if (v.verified) {
-          verifiedCitations.push({ pmid: v.pmid, title: v.title, journal: v.journal, year: v.year, killer_finding: v.killer_finding });
+          verifiedCitations.push({ pmid: v.pmid, title: v.title, journal: v.journal, year: v.year, killer_finding: v.killer_finding, full_citation: v.full_citation });
         } else {
           rejected.push({ pmid, reason: v.reason ?? 'unverified' });
         }
@@ -1323,8 +1348,9 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       }
 
       // ── DETERMINISTIC insertion (no LLM). Adds only the verified PMIDs (no embedded stats). ──
-      const groundInSectionVi = body.groundInSectionVi === true;
-      const { newText, insertedPmids } = insertVerifiedCitations(oldText, verifiedCitations, { groundInSectionVi });
+      // BUG 2 FIX (Spring, 2026-06-25): condition-search and passage-search now BOTH insert proper
+      // numbered §VIII references in the house format; the generic §VI grounding sentence was removed.
+      const { newText, insertedPmids } = insertVerifiedCitations(oldText, verifiedCitations);
 
       // ── SANCTIONED citation-integrity guard. The ONLY allowed net-new citations are the
       // server-re-verified PMIDs; ANY other added citation/stat is rejected. By construction the
@@ -1357,7 +1383,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           // physician edit). The activity log records the citation-specific action + the PMIDs.
           await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: c.currentVersion, source: 'surgical_ai', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: warnings } });
           await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, version: { increment: 1 }, ...(stale?.returnToPhysicianReview ? { status: 'physician_review' } : {}) } });
-          await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_citation_enrich_applied', caseId, veteranId: c.veteranId, detailsJson: { version: newVersion, jobId, insertedPmids, groundInSectionVi } } });
+          await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_citation_enrich_applied', caseId, veteranId: c.veteranId, detailsJson: { version: newVersion, jobId, insertedPmids } } });
           if (stale !== null) {
             await tx.activityLog.create({ data: { actorUserId: user.sub, action: stale.logAction, caseId, veteranId: c.veteranId, detailsJson: { staleSignedVersion: c.currentVersion, newVersion, fromStatus: c.status, source: 'citation_enrich' } } });
           }

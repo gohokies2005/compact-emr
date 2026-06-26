@@ -151,3 +151,51 @@ describe('letter-citation-integrity — diffCitationsSanctioned (Feature B keyst
     expect(normal.added.map((t) => t.key)).toEqual(expect.arrayContaining(['ay:smith:2019', 'pmid:44444444']));
   });
 });
+
+// ── BUG 4 (Spring, 2026-06-25): guided-revision CROSS-REFERENCE allowance ─────────────────────────
+// The guided-revision integrity guard (letter.ts) now builds its allowed-PMID set from EVERY PMID
+// already present in the CURRENT FULL LETTER (especially the numbered §VIII references a physician just
+// added via the Citation Enricher) and passes it to diffCitationsSanctioned. A PMID new to the edited
+// PASSAGE but already in §VIII is a legitimate internal cross-reference, NOT a fabrication. A PMID that
+// is NOWHERE in the letter is still rejected. This block models that exact wiring.
+describe('letter-citation-integrity — guided-revision cross-reference (Bug 4)', () => {
+  // The §VIII reference the physician added via the enricher (PMID 31393195 = the Spring case).
+  const FULL_LETTER = [
+    'VI. Medical Reasoning',
+    'The mechanism is established.',
+    '',
+    'VIII. References',
+    '1. Existing A. A study. J Test. 2010. PMID: 11111111.',
+    '2. Spring B, et al. A grounded study. J Sleep. 2019;5(2):100-110. PMID: 31393195.',
+  ].join('\n');
+
+  // Helper mirroring letter.ts: allowed PMIDs = every PMID already in the full current letter.
+  const lettersPmids = (letter: string) =>
+    [...extractCitationTokenMap(letter).values()].filter((t) => t.kind === 'pmid').map((t) => t.key.replace(/^pmid:/, ''));
+
+  it('ALLOWS referencing a PMID already in §VIII into a §VI passage (the Spring case)', () => {
+    const passageBefore = 'The mechanism is established.';
+    const passageAfter = 'The mechanism is established, consistent with the peer-reviewed literature (PMID: 31393195).';
+    const diff = diffCitationsSanctioned(passageBefore, passageAfter, lettersPmids(FULL_LETTER));
+    // 31393195 is already a §VIII reference → not flagged as invented. This is the bug fix.
+    expect(diff.added).toHaveLength(0);
+  });
+
+  it('STILL REJECTS a PMID that is NOWHERE in the letter (real fabrication guard intact)', () => {
+    const passageBefore = 'The mechanism is established.';
+    const passageAfter = 'The mechanism is established (PMID: 87654321).'; // never added anywhere
+    const diff = diffCitationsSanctioned(passageBefore, passageAfter, lettersPmids(FULL_LETTER));
+    expect(diff.added.map((t) => t.key)).toEqual(['pmid:87654321']);
+  });
+
+  it('STILL REJECTS a net-new author-year or statistic even when cross-referencing a §VIII PMID', () => {
+    const passageBefore = 'The mechanism is established.';
+    // Legit cross-ref to §VIII PMID 31393195, but the model also slipped in "Jones 2021" + "OR 4.2".
+    const passageAfter = 'As Jones 2021 found (OR 4.2), this is consistent (PMID: 31393195).';
+    const diff = diffCitationsSanctioned(passageBefore, passageAfter, lettersPmids(FULL_LETTER));
+    const keys = diff.added.map((t) => t.key);
+    expect(keys).toContain('ay:jones:2021');
+    expect(keys).toContain('ratio:or:4.2');
+    expect(keys).not.toContain('pmid:31393195'); // the cross-ref itself is allowed
+  });
+});

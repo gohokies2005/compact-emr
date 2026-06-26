@@ -33,10 +33,13 @@
 const https = require('https');
 
 const EUTILS = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
-const API_KEY = process.env.NCBI_API_KEY || ''; // optional; raises rate limit 3/s -> 10/s
-const THROTTLE_MS = API_KEY ? 120 : 350;        // stay under NCBI rate limit
-const REQ_TIMEOUT_MS = 9000;
-const MAX_RETRIES = 2;
+// NCBI_API_KEY is read PER-REQUEST (apiKey() below), not frozen at module load, so a task-def env
+// entry added after this module is required still takes effect. The key raises the rate limit
+// 3/s -> 10/s and improves reliability (fewer 429s). Keyless still works. (Spring Bug 3, 2026-06-25.)
+function apiKey() { return process.env.NCBI_API_KEY || ''; }
+function throttleMs() { return apiKey() ? 110 : 350; } // stay under NCBI rate limit (keyed=10/s, keyless=3/s)
+const REQ_TIMEOUT_MS = 12000;                   // raised 9s->12s: NCBI efetch is occasionally slow (Spring Bug 3)
+const MAX_RETRIES = 3;                           // raised 2->3: backoff handles transient 429/timeout (Spring Bug 3)
 const CANDIDATES_PER_SLOT = 6;                  // esearch breadth before giving up on a slot
 const CANDIDATES_PER_SLOT_A3 = 10;              // A3 mechanism recall is harder — search wider (C2.iv)
 
@@ -54,12 +57,18 @@ function slotRetmax(slotName) { return slotName === 'A3' ? CANDIDATES_PER_SLOT_A
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── HTTP with timeout + retry. Resolves to body string, or throws after retries. ──
+// On a non-2xx, the thrown Error carries .statusCode and .retryAfterMs so eutil() can do
+// rate-limit-aware backoff (NCBI returns 429 when the per-key/IP rate is exceeded). (Spring Bug 3.)
 function httpGet(url) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, (res) => {
       if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
         res.resume();
-        return reject(new Error(`HTTP ${res.statusCode}`));
+        const err = new Error(`HTTP ${res.statusCode}`);
+        err.statusCode = res.statusCode;
+        const ra = res.headers && res.headers['retry-after'];
+        if (ra) { const secs = parseInt(ra, 10); if (!Number.isNaN(secs)) err.retryAfterMs = secs * 1000; }
+        return reject(err);
       }
       let body = '';
       res.setEncoding('utf8');
@@ -72,12 +81,20 @@ function httpGet(url) {
 }
 
 async function eutil(endpoint, params) {
-  const qp = new URLSearchParams({ ...params, ...(API_KEY ? { api_key: API_KEY } : {}) });
+  const key = apiKey();
+  const qp = new URLSearchParams({ ...params, ...(key ? { api_key: key } : {}) });
   const url = `${EUTILS}/${endpoint}?${qp.toString()}`;
+  const base = throttleMs();
   let lastErr;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      await sleep(THROTTLE_MS * (attempt + 1));
+      // Exponential backoff on retry; on a 429 honor the server's Retry-After if longer. (Spring Bug 3.)
+      let wait = base * (attempt + 1);
+      if (attempt > 0 && lastErr) {
+        wait = base * Math.pow(2, attempt);
+        if (lastErr.statusCode === 429 && lastErr.retryAfterMs) wait = Math.max(wait, lastErr.retryAfterMs);
+      }
+      await sleep(wait);
       return await httpGet(url);
     } catch (e) { lastErr = e; }
   }
@@ -323,6 +340,12 @@ async function verifyPmidById(pmid, claimedCondition) {
       verified: true, pmid: cleanPmid, title: sum.title, journal: sum.source,
       year: (sum.pubdate || '').match(/\d{4}/) ? (sum.pubdate.match(/\d{4}/))[0] : '',
       killer_finding: killer,
+      // full_citation = the HOUSE-FORMAT reference line (Author. Title. Journal. Year;Vol(Issue):Pages),
+      // built from the SAME esummary metadata retrieveGroundedAnchors uses, so the Citation Enricher can
+      // insert a §VIII reference that matches the existing numbered entries exactly (Spring §VIII
+      // formatting fix, 2026-06-25). Grounded: every field is from NCBI esummary, never a model.
+      // NOTE: re-vendor parity — the FRN source app/services/citationFallback.js needs this same line.
+      full_citation: buildCitation(sum),
     };
   } catch (e) {
     return Object.assign(base, { reason: 'verify_error', error: e.message });

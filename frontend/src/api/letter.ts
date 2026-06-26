@@ -228,7 +228,7 @@ export function pollCitationEnrich(caseId: string, jobId: string): Promise<{ dat
  *  persists a new letter version. On a re-verify/guard failure the API 422s and NOTHING is changed. */
 export function applyCitationEnrich(
   caseId: string,
-  input: { jobId: string; selectedPmids: string[]; groundInSectionVi?: boolean },
+  input: { jobId: string; selectedPmids: string[] },
 ): Promise<{ data: EnrichApplyResult }> {
   return apiPost<{ data: EnrichApplyResult }, typeof input>(caseLetterPath(caseId, '/citations/apply'), input);
 }

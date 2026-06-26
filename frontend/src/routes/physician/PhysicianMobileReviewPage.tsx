@@ -9,6 +9,7 @@ import { SendBackToRnModal } from '../../components/SendBackToRnModal';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { PhysicianDocumentsList } from '../../components/PhysicianDocumentsList';
+import { PhysicianHandoffNotes } from '../../components/PhysicianHandoffNotes';
 import { GradeChip } from '../../components/ui/GradeChip';
 import { getCase, type SignOffAnswers } from '../../api/cases';
 import { formatNameLastFirst } from '../../lib/format';
@@ -194,6 +195,12 @@ export function PhysicianMobileReviewPage() {
                 </ul>
               </div>
             ) : null}
+
+            {/* RN→MD handoff note (P0-2, 2026-06-26): the RN's send-to-doctor / correction note lives in
+                case_messages and was rendered ONLY on the desktop review page — a physician reviewing on
+                mobile lost it. Surface it FIRST so the handoff message can't be missed. Fetches + fails
+                open independently (same component the desktop page uses). */}
+            <PhysicianHandoffNotes caseId={c.id} />
 
             {/* 1) THE QUICK STORY — AI SOAP overview (Subjective/Objective/Assessment/Plan + verdict). */}
             <section aria-label="Clinical summary">

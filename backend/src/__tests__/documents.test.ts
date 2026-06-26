@@ -156,7 +156,7 @@ describe('POST /cases/:id/reprocess', () => {
     return { app, s3Send };
   }
 
-  function reprocessPrisma(over: { readStatuses?: { filePath: string; terminalStatus: string }[]; runCreateThrowsP2002?: boolean; recentRuns?: { triggerHash: string; status: string }[] } = {}) {
+  function reprocessPrisma(over: { readStatuses?: { filePath: string; terminalStatus: string }[]; runCreateThrowsP2002?: boolean; recentRuns?: { triggerHash: string; status: string; resultJson?: { extractorVersion?: number } }[] } = {}) {
     const runCreates: Record<string, unknown>[] = [];
     const activityCreates: Record<string, unknown>[] = [];
     const prisma = {
@@ -187,6 +187,9 @@ describe('POST /cases/:id/reprocess', () => {
           const inFilter = args?.where?.status?.in;
           return inFilter ? runs.filter((r) => inFilter.includes(r.status)) : runs;
         }),
+        // The rate-limit/runaway guard in maybeEnqueueChartExtract (chart-extract-trigger.ts, 2026-06-20)
+        // calls findFirst for a recent run; the real PrismaClient has it. null = no recent run → no-op.
+        findFirst: vi.fn(async () => null),
         create: vi.fn(async (args: { data: Record<string, unknown> }) => {
           if (over.runCreateThrowsP2002) { const err = new Error('unique'); (err as Error & { code?: string }).code = 'P2002'; throw err; }
           runCreates.push(args.data);
@@ -270,7 +273,7 @@ describe('POST /cases/:id/reprocess', () => {
     const currentHash = computeTriggerHash(docs, readStatuses);
     const { prisma, runCreates } = reprocessPrisma({
       readStatuses,
-      recentRuns: [{ triggerHash: currentHash, status: 'complete' }], // already extracted this doc set
+      recentRuns: [{ triggerHash: currentHash, status: 'complete', resultJson: { extractorVersion: 2 } }], // already extracted this doc set at the CURRENT extractor version
     });
     const { app, s3Send } = appWithS3(prisma);
     const res = await request(app).post('/api/v1/cases/CASE-1/reprocess').expect(200);

@@ -8,6 +8,7 @@ import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { letterFilename } from '../services/letterFilename.js';
+import { getAiViabilityState } from '../services/ai-viability.js';
 import { isSignOffAffirmative } from '../services/sign-off-validation.js';
 import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { buildLetterRevisionKey } from '../services/s3-key-safety.js';
@@ -428,7 +429,17 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         where: { id: c.veteranId },
         select: { firstName: true, lastName: true },
       })) as { firstName: string | null; lastName: string | null } | null;
-      const baseName = letterFilename(vet?.lastName, vet?.firstName, c.claimedCondition, cur.version);
+      // Filename CONDITION from the route-picker plan (the letter's actual theory), not the broad
+      // intake claim bucket (one-brain #72/#89; an "acne"-theory letter must not download as "…_Skin…").
+      // $0 read-only; fail-open to claimedCondition. (Dr. Kasky 2026-06-26.)
+      let fileCondition = c.claimedCondition;
+      try {
+        const ai = await getAiViabilityState(db, caseId, { compute: false });
+        if (ai.status === 'ready' && typeof ai.card.lead.claimed === 'string' && ai.card.lead.claimed.trim().length > 0) {
+          fileCondition = ai.card.lead.claimed.trim();
+        }
+      } catch { /* fall back to claimedCondition */ }
+      const baseName = letterFilename(vet?.lastName, vet?.firstName, fileCondition, cur.version);
       const pdfUrl = cur.pdfKey !== null
         ? await getSignedUrl(client, new GetObjectCommand({ Bucket: bucketName, Key: cur.pdfKey, ResponseContentDisposition: `inline; filename="${baseName}.pdf"` }), { expiresIn: PRESIGN_TTL_SECONDS })
         : null;

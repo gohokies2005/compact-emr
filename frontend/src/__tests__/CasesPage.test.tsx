@@ -127,7 +127,7 @@ describe('CasesPage', () => {
     fireEvent.click(screen.getByLabelText('Add quick note')); // CASE-002 (VET-2) has no note
     const input = screen.getByLabelText('Quick note') as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: 'Called veteran, awaiting STRs' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save note' }));
     await waitFor(() => expect(createChartNoteMock).toHaveBeenCalledWith('VET-2', 'Called veteran, awaiting STRs', true));
   });
 

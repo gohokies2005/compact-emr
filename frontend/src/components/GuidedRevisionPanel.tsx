@@ -54,9 +54,9 @@ function rejectionCopy(r: Rejection): string {
 // generic "could not be generated". `detail` discriminates the cause.
 function proposalUnavailableMessage(detail: string | undefined): string {
   if (detail === 'model_unavailable') return 'The AI service was briefly unavailable. Click Propose revision again in a moment.';
-  if (detail === 'passage_too_complex') return 'The AI couldn’t shape a clean edit for this passage — it may be too long. Try a single sentence, or hand-edit it directly in the letter.';
+  if (detail === 'passage_too_complex') return 'The AI couldn’t shape a clean edit for this passage — it may be too long. Try a smaller selection (up to about two pages), or hand-edit it directly in the letter.';
   // no_change_proposed (or any unrecognized detail)
-  return 'The AI didn’t return an edit for this passage. Try rephrasing the instruction, narrow the selection to a single sentence, or hand-edit it directly in the letter.';
+  return 'The AI didn’t return an edit for this passage. Try rephrasing the instruction, narrow the selection, or hand-edit it directly in the letter.';
 }
 
 export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, onFlagDisabled }: GuidedRevisionPanelProps) {

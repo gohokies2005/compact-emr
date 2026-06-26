@@ -173,8 +173,8 @@ function asProposerUnavailable(err: unknown): ProposerUnavailableShape | null {
 }
 function proposalUnavailableMessage(pu: ProposerUnavailableShape): string {
   if (pu.detail === 'model_unavailable') return 'The AI service was briefly unavailable. Click Propose again in a moment.';
-  if (pu.detail === 'passage_too_complex') return 'The AI could not shape a clean edit for this passage, likely because it is too long. Try a single sentence, or hand-edit it directly in the letter.';
-  return 'The AI did not return an edit for this passage. Try rephrasing the instruction, narrow the passage to a single sentence, or hand-edit it directly in the letter.';
+  if (pu.detail === 'passage_too_complex') return 'The AI could not shape a clean edit for this passage, likely because it is too long. Try a smaller selection (up to about two pages), or hand-edit it directly in the letter.';
+  return 'The AI did not return an edit for this passage. Try rephrasing the instruction, narrow the selection, or hand-edit it directly in the letter.';
 }
 
 // ── Citation Enricher (Feature B, 2026-06-24) injected dependencies ──────────────────────────────

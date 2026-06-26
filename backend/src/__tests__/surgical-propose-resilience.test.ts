@@ -109,11 +109,22 @@ describe('makeSurgicalProposer — resilience + failure classification', () => {
     expect((err as { status?: number }).status).toBe(400);
   });
 
-  it('classifies a max_tokens truncation as passage_too_complex', async () => {
-    createMock.mockResolvedValueOnce({ stop_reason: 'max_tokens', content: [{ type: 'tool_use', name: 'propose_edit', input: {} }], usage: { input_tokens: 100, output_tokens: 1500 } });
+  const truncatedResp = { stop_reason: 'max_tokens', content: [{ type: 'tool_use', name: 'propose_edit', input: {} }], usage: { input_tokens: 100, output_tokens: 6000 } };
+
+  it('classifies a max_tokens truncation as passage_too_complex ONLY after escalating to the ceiling', async () => {
+    createMock.mockResolvedValueOnce(truncatedResp).mockResolvedValueOnce(truncatedResp); // truncates at BOTH budgets
     const propose = makeSurgicalProposer('sk-ant-test');
     const err = await propose({ instruction: 'x', letterText: 'L', mode: 'guided_revision', passage: 'p' }).catch((e: unknown) => e);
     expect((err as InstanceType<typeof ProposerUnavailableError>).detail).toBe('passage_too_complex');
+    expect(createMock).toHaveBeenCalledTimes(2); // escalated once before giving up
+  });
+
+  it('ESCALATES to the ceiling and SUCCEEDS when the first budget truncates (1-2 page section reshape)', async () => {
+    createMock.mockResolvedValueOnce(truncatedResp).mockResolvedValueOnce(okResponse('the reshaped two-page section'));
+    const propose = makeSurgicalProposer('sk-ant-test');
+    const out = await propose({ instruction: 'rework this section', letterText: 'L', mode: 'guided_revision', passage: 'p' });
+    expect(out.proposal.new_text).toBe('the reshaped two-page section');
+    expect(createMock).toHaveBeenCalledTimes(2); // escalated once, then succeeded
   });
 
   it('classifies a missing tool_use block as no_change_proposed', async () => {
@@ -130,10 +141,10 @@ describe('makeSurgicalProposer — resilience + failure classification', () => {
     expect((err as InstanceType<typeof ProposerUnavailableError>).detail).toBe('no_change_proposed');
   });
 
-  it('flags passageTooLong on the failure detail for a very long passage', async () => {
-    createMock.mockResolvedValueOnce({ stop_reason: 'max_tokens', content: [{ type: 'tool_use', name: 'propose_edit', input: {} }], usage: { input_tokens: 100, output_tokens: 1500 } });
+  it('flags passageTooLong on the failure detail for a passage beyond the long threshold', async () => {
+    createMock.mockResolvedValue(truncatedResp); // truncates at both budgets
     const propose = makeSurgicalProposer('sk-ant-test');
-    const longPassage = 'a'.repeat(2000);
+    const longPassage = 'a'.repeat(10000); // > LONG_PASSAGE_CHARS (9000)
     const err = await propose({ instruction: 'x', letterText: 'L', mode: 'guided_revision', passage: longPassage }).catch((e: unknown) => e);
     expect((err as InstanceType<typeof ProposerUnavailableError>).passageTooLong).toBe(true);
   });

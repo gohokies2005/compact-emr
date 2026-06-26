@@ -15,7 +15,12 @@ import type { SurgicalProposer, SurgicalProposeInput, SurgicalProposeOutput } fr
 import type { EditProposal, EditOperation } from './letter-edit-apply.js';
 
 const MODEL = 'claude-opus-4-8';
-const MAX_TOKENS = 1500;
+// The proposer's output is the RESHAPED passage (new_text). At 1500 a full-section / 1-2 page highlight
+// truncated (stop_reason:max_tokens) → passage_too_complex → "try a single sentence" (Dr. Kasky 2026-06-26:
+// "harden so up to 1-2 pages can be highlighted"). 2 letter pages ≈ ~6000 chars ≈ ~1700 output tokens, so
+// 6000 gives comfortable headroom; an unusually expansive reshape escalates ONCE to the ceiling.
+const MAX_TOKENS = 6000;
+const MAX_TOKENS_CEILING = 12000;
 // Transient-resilience (Guided-revision robustness, 2026-06-24): the SDK's own retry already
 // handles 429 / 5xx / 529-overloaded / timeouts / connection errors with exponential backoff +
 // jitter and honors retry-after, so we just RAISE its budget (default 2 -> 4) rather than hand-roll
@@ -24,9 +29,10 @@ const MAX_TOKENS = 1500;
 // surfaces as the generic "could not be generated."
 const MAX_RETRIES = 4;
 const REQUEST_TIMEOUT_MS = 60_000;
-// A passage this long is the empirical cause of a truncated (max_tokens) structured edit; the route
-// surfaces this in the failure detail so the message is accurate ("it may be too long").
-const LONG_PASSAGE_CHARS = 1500;
+// Beyond ~3 pages even the raised + escalated budget may truncate; the route surfaces this in the
+// failure detail so the message stays accurate ("it may be too long"). Raised with MAX_TOKENS so a
+// normal 1-2 page section no longer trips it.
+const LONG_PASSAGE_CHARS = 9000;
 
 /**
  * A proposer failure the route can turn into a SPECIFIC, actionable 422 (never the generic
@@ -187,34 +193,41 @@ export function makeSurgicalProposer(apiKey: string): SurgicalProposer {
       ? `CURRENT LETTER:\n${letterText}\n\nHIGHLIGHTED PASSAGE (reshape ONLY this, return it as anchor_text verbatim):\n${passage ?? ''}\n\nINSTRUCTION:\n${instruction}`
       : `CURRENT LETTER:\n${letterText}\n\nINSTRUCTION:\n${instruction}`;
     const passageTooLong = typeof passage === 'string' && passage.length > LONG_PASSAGE_CHARS;
-    let resp: Anthropic.Message;
-    try {
-      resp = await anthropic.messages.create(
-        {
-          model: MODEL,
-          max_tokens: MAX_TOKENS,
-          // NOTE: Opus 4.8 (claude-opus-4-8) DEPRECATED the `temperature` param — sending it returns a
-          // 400 invalid_request_error and the edit fails ("could not be done"). Determinism here comes
-          // from forced tool_choice + the strict system prompt, not sampling temperature. Do NOT re-add.
-          system: isGuided ? GUIDED_REVISION_SYSTEM_PROMPT : SYSTEM_PROMPT,
-          tools: [PROPOSE_TOOL],
-          tool_choice: { type: 'tool', name: 'propose_edit' },
-          messages: [{ role: 'user', content: userContent }],
-        },
-        { timeout: REQUEST_TIMEOUT_MS },
-      );
-    } catch (err: unknown) {
-      // The SDK has already retried the transient classes; reaching here means they were exhausted
-      // (or it's a non-retryable error). Surface transient as 'model_unavailable' so the route can
-      // tell the physician to simply click Propose again — NOT the generic could-not-be-generated.
-      if (isTransientAnthropicError(err)) throw new ProposerUnavailableError('model_unavailable', passageTooLong);
-      throw err;
+    // Try at the standard budget; if a forced tool_use TRUNCATES (stop_reason 'max_tokens' → incomplete
+    // tool input), the reshaped passage didn't fit — escalate ONCE to the ceiling so a full 1-2 page
+    // section reshape completes instead of failing (Dr. Kasky 2026-06-26). Cost is bounded + physician-
+    // initiated; the escalation only fires on a genuinely large reshape.
+    let resp: Anthropic.Message | undefined;
+    for (const budget of [MAX_TOKENS, MAX_TOKENS_CEILING]) {
+      try {
+        resp = await anthropic.messages.create(
+          {
+            model: MODEL,
+            max_tokens: budget,
+            // NOTE: Opus 4.8 (claude-opus-4-8) DEPRECATED the `temperature` param — sending it returns a
+            // 400 invalid_request_error and the edit fails ("could not be done"). Determinism here comes
+            // from forced tool_choice + the strict system prompt, not sampling temperature. Do NOT re-add.
+            system: isGuided ? GUIDED_REVISION_SYSTEM_PROMPT : SYSTEM_PROMPT,
+            tools: [PROPOSE_TOOL],
+            tool_choice: { type: 'tool', name: 'propose_edit' },
+            messages: [{ role: 'user', content: userContent }],
+          },
+          { timeout: REQUEST_TIMEOUT_MS },
+        );
+      } catch (err: unknown) {
+        // The SDK has already retried the transient classes; reaching here means they were exhausted
+        // (or it's a non-retryable error). Surface transient as 'model_unavailable' so the route can
+        // tell the physician to simply click Propose again — NOT the generic could-not-be-generated.
+        if (isTransientAnthropicError(err)) throw new ProposerUnavailableError('model_unavailable', passageTooLong);
+        throw err;
+      }
+      if (resp && resp.stop_reason !== 'max_tokens') break; // complete edit — done
+      // truncated at this budget: loop escalates to the ceiling; after the last budget we fall through.
     }
 
-    // TRUNCATION GUARD: a forced tool_use that hit the token cap ends with stop_reason 'max_tokens'
-    // and yields an INCOMPLETE/empty tool input (the SDK parses partial JSON to {}). This is the
-    // long/dense-passage failure mode — flag it distinctly so the message is "too long, try a sentence".
-    if (resp.stop_reason === 'max_tokens') {
+    // TRUNCATION GUARD: still truncated even at the ceiling → the passage is genuinely too large to
+    // reshape in one structured edit. Flag distinctly so the message is "too long, narrow the selection".
+    if (!resp || resp.stop_reason === 'max_tokens') {
       throw new ProposerUnavailableError('passage_too_complex', passageTooLong);
     }
 

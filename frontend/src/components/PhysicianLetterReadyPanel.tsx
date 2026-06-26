@@ -37,10 +37,23 @@ interface PhysicianLetterReadyPanelProps {
 // is an untrusted worker payload persisted wholesale, so guard the shape and drop blank issues.
 // Capped at 3: Ryan wants exactly the grade + the top 3 considerations on this panel, nothing more
 // (2026-06-04 — "just the top 3 things to consider is all I want for now ... not truncated text").
+// A "panel did not run" advisory (P0-1 no-block-draft demotion, 2026-06-26) is a SAFETY caution that a
+// whole pre-draft review was SKIPPED — qualitatively different from a "consider tightening §VI" hint, and
+// it must never be crowded out of the top-3 considerations. Identified by its stable section prefix +
+// "did not complete" issue text (the drafter's writeUnavailablePanelSidecar / deferAdvisory).
+const REVIEW_UNAVAILABLE_SECTION_PREFIX = 'Medical review';
+function isReviewUnavailableHint(hint: TargetedRevisionHint): boolean {
+  return typeof hint.section === 'string' && hint.section.startsWith(REVIEW_UNAVAILABLE_SECTION_PREFIX)
+    && typeof hint.issue === 'string' && /did not complete/i.test(hint.issue);
+}
+function reviewUnavailableNotices(job: ReadyDraftJob): readonly TargetedRevisionHint[] {
+  return (job.gradeSidecarJson?.targeted_revision_hints ?? []).filter(isReviewUnavailableHint);
+}
 function normalizedHints(job: ReadyDraftJob): readonly TargetedRevisionHint[] {
   const hints = job.gradeSidecarJson?.targeted_revision_hints ?? [];
   return hints
     .filter((hint) => typeof hint.issue === 'string' && hint.issue.trim().length > 0)
+    .filter((hint) => !isReviewUnavailableHint(hint)) // safety cautions render separately + prominently
     .slice(0, 3);
 }
 
@@ -61,6 +74,7 @@ export function PhysicianLetterReadyPanel({
   const grade = c.grade ?? null;
   const score = c.probativeScore ?? null;
   const hints = normalizedHints(job);
+  const reviewNotices = reviewUnavailableNotices(job);
   const pdfKey = job.artifactPdfS3Key ?? null;
 
   return (
@@ -113,6 +127,26 @@ export function PhysicianLetterReadyPanel({
           ) : null}
         </div>
       </div>
+
+      {/* SAFETY CAUTION (P0-1 no-block-draft, 2026-06-26): a pre-draft review (adversary panel / specialist
+          gate) did NOT run for this letter — a transient system error after one retry. The draft still
+          completed (no-block-draft) but was NOT machine-reviewed, so this is surfaced PROMINENTLY + above
+          the optional considerations, NOT buried among them. */}
+      {reviewNotices.length > 0 ? (
+        <div className="mt-6 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <h3 className="text-sm font-semibold text-amber-900">A pre-draft review did not run on this letter</h3>
+          <ul className="mt-2 space-y-2">
+            {reviewNotices.map((n, index) => (
+              <li key={`review-unavailable-${index}`} className="text-sm text-amber-900">
+                <span className="whitespace-pre-wrap">{n.issue ?? ''}</span>
+                {typeof n.suggested_fix === 'string' && n.suggested_fix.trim().length > 0 ? (
+                  <span className="mt-1 block text-xs text-amber-700">{n.suggested_fix}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {/* Considerations before signing (Dr. Kasky 2026-06-25): the grader's substantive content/argument
           hints (reframe a citation's direction, add an aggravation baseline sentence, bridge a cohort) are

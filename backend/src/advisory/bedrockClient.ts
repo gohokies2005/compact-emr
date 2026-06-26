@@ -12,10 +12,11 @@ export const ADVISORY_MODEL_ID = 'us.anthropic.claude-opus-4-6-v1';
 // Lambda, which runs Sonnet 4.6 on Bedrock today). Cheaper + faster than Opus; adequate for a small
 // GROUNDED classification call (the strategy-preview dx-match / PACT check). NOT the advisory default.
 export const SONNET_MODEL_ID = 'us.anthropic.claude-sonnet-4-6';
-// Output cap = the cost ceiling on each answer. 1024 tokens (~750 words) keeps a typical question at
-// ~5-10¢ (Ryan target): output 1024 @ $75/M ≈ 7.7¢ + input (cached system prompt) ≈ 1-3¢. Advisory
-// answers should be concise anyway.
-export const ADVISORY_MAX_TOKENS = 1024;
+// Output cap = the cost ceiling on each answer. 1536 tokens (~1100 words) — raised +50% from 1024 on
+// 2026-06-25 (Dr. Kasky: answers were truncating, forcing repeated "ask me to continue" clicks). Cost
+// stays modest: output 1536 @ $75/M ≈ 11.5¢ + input (cached system prompt) ≈ 1-3¢. Answers should
+// still be concise; this just buys headroom so a normal grounded answer finishes in one pass.
+export const ADVISORY_MAX_TOKENS = 1536;
 
 // Bedrock list price for Opus-class, per 1M tokens. VERIFY against the AWS Bedrock pricing page before
 // trusting the cost log for billing — these are cost-attribution rates for the oversight dashboard.

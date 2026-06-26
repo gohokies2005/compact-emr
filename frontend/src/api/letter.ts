@@ -135,10 +135,14 @@ export function previewSurgicalAi(caseId: string, input: { instruction: string }
 // GuidedRevisionRejectReason and may carry `citationDiff`) or 503 (ServiceUnavailableError when the
 // GUIDED_REVISION_ENABLED flag is off). APPLY reuses applySurgicalAi (the shared { apply, proposal }
 // door) unchanged. (Guided Revision UI, 2026-06-13)
+// 70s per-request timeout (over the 45s global default): the backend surgical/guided proposer runs an
+// Anthropic SDK call with a 60s timeout + maxRetries:4, so the client MUST outlast it or it falsely
+// times out before the backend finishes (2026-06-25).
 export function proposeGuidedRevision(caseId: string, input: { passage: string; instruction: string }): Promise<{ data: GuidedRevisionResult }> {
   return apiPost<{ data: GuidedRevisionResult }, { mode: 'guided_revision'; passage: string; instruction: string }>(
     caseLetterPath(caseId, '/surgical-ai'),
     { mode: 'guided_revision', passage: input.passage, instruction: input.instruction },
+    { timeout: 70000 },
   );
 }
 

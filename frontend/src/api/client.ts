@@ -92,7 +92,16 @@ function isLikelyExpiredPresignedUrlError(error: unknown): boolean {
   );
 }
 
-export const apiClient: AxiosInstance = axios.create({ baseURL: env.apiBaseUrl, timeout: 30000 });
+// Global default request timeout (CEILING — fast calls are unaffected; only slow ones use the headroom).
+// Raised 30000 -> 45000 on 2026-06-25 (Dr. Kasky's "+15s"): the Ask-Aegis advisory answers DO complete
+// server-side but the old 30s ceiling falsely tripped first ("could not reach the server (timeout ...)").
+// Genuinely-long synchronous AI ops (askAdvisory, proposeGuidedRevision) override this per-request below.
+export const apiClient: AxiosInstance = axios.create({ baseURL: env.apiBaseUrl, timeout: 45000 });
+
+// Per-request override knob, threaded into the apiGet/apiPost/apiPatch/apiPut wrappers. Optional +
+// backward-compatible — existing callers pass nothing and keep the 45s default; only the long AI ops
+// pass a higher ceiling so the client outlasts the backend instead of falsely timing out.
+export interface ApiRequestOptions { readonly timeout?: number; }
 
 apiClient.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
   // DEV/DEMO ONLY: send the locally minted bypass token, skip Amplify entirely.
@@ -145,20 +154,20 @@ export function describeApiError(error: unknown): string {
   return 'unknown error';
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const response = await apiClient.get<T>(path);
+export async function apiGet<T>(path: string, opts?: ApiRequestOptions): Promise<T> {
+  const response = await apiClient.get<T>(path, opts?.timeout !== undefined ? { timeout: opts.timeout } : undefined);
   return response.data;
 }
-export async function apiPost<TResponse, TBody = unknown>(path: string, body: TBody): Promise<TResponse> {
-  const response = await apiClient.post<TResponse>(path, body);
+export async function apiPost<TResponse, TBody = unknown>(path: string, body: TBody, opts?: ApiRequestOptions): Promise<TResponse> {
+  const response = await apiClient.post<TResponse>(path, body, opts?.timeout !== undefined ? { timeout: opts.timeout } : undefined);
   return response.data;
 }
-export async function apiPatch<TResponse, TBody = unknown>(path: string, body: TBody): Promise<TResponse> {
-  const response = await apiClient.patch<TResponse>(path, body);
+export async function apiPatch<TResponse, TBody = unknown>(path: string, body: TBody, opts?: ApiRequestOptions): Promise<TResponse> {
+  const response = await apiClient.patch<TResponse>(path, body, opts?.timeout !== undefined ? { timeout: opts.timeout } : undefined);
   return response.data;
 }
-export async function apiPut<TResponse, TBody = unknown>(path: string, body: TBody): Promise<TResponse> {
-  const response = await apiClient.put<TResponse>(path, body);
+export async function apiPut<TResponse, TBody = unknown>(path: string, body: TBody, opts?: ApiRequestOptions): Promise<TResponse> {
+  const response = await apiClient.put<TResponse>(path, body, opts?.timeout !== undefined ? { timeout: opts.timeout } : undefined);
   return response.data;
 }
-export async function apiDelete(path: string): Promise<void> { await apiClient.delete(path); }
+export async function apiDelete(path: string, opts?: ApiRequestOptions): Promise<void> { await apiClient.delete(path, opts?.timeout !== undefined ? { timeout: opts.timeout } : undefined); }

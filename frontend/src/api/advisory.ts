@@ -18,8 +18,11 @@ export interface AdvisoryAnswer {
 }
 
 // Ask the case-scoped advisory model a plain-language question. Decision support only.
+// 60s per-request timeout (over the 45s global default): this is a Bedrock/Opus grounded-RAG answer
+// and its output cap was raised +50% (2026-06-25), so it genuinely runs long. The old 30s ceiling
+// falsely timed out before the answer landed (Dr. Kasky: "navigate away, come back, it's done").
 export async function askAdvisory(caseId: string, question: string): Promise<{ data: AdvisoryAnswer }> {
-  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/advisory/ask`, { question });
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/advisory/ask`, { question }, { timeout: 60000 });
 }
 
 export interface AdvisoryThreadItem {

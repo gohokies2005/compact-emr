@@ -3,6 +3,7 @@ import { Button } from './ui/Button';
 import { ServiceUnavailableError, SurgicalEditUnappliableError } from '../api/client';
 import { proposeGuidedRevision, type GuidedRevisionResult, type SurgicalProposal } from '../api/letter';
 import { citationMayBeOffTopic } from '../lib/citationRelevance';
+import { RevisionPreviewModal } from './RevisionPreviewModal';
 
 // Does the instruction look like it's WEAVING IN a citation/finding (vs a pure reword)? Only then do
 // we run the soft relevance check — a "tighten this paragraph" instruction shouldn't get a citation
@@ -65,6 +66,7 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
   const [error, setError] = useState<string | null>(null);
   const [proposing, setProposing] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [expanded, setExpanded] = useState(false); // expand the revised-letter preview into a ~2/3-screen modal
 
   // SOFT relevance advisory (Dr. Kasky 2026-06-25): when the instruction is weaving a citation/finding
   // INTO the highlighted passage, gently flag if that instruction barely overlaps the passage topic —
@@ -221,7 +223,13 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
             </ul>
           ) : null}
 
-          <div className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Revised letter preview</div>
+          <div className="mt-3 flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Revised letter preview</span>
+            <button type="button" className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-indigo-600 hover:bg-indigo-50 hover:text-indigo-800"
+              title="Expand to read full-size" aria-label="Expand the revised letter preview" onClick={() => setExpanded(true)}>
+              <span aria-hidden="true">⤢</span> Expand
+            </button>
+          </div>
           <div className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-white p-3 font-['Times_New_Roman',Times,serif] text-sm text-slate-800">{result.preview}</div>
 
           <div className="mt-3 flex gap-2">
@@ -229,6 +237,20 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
             <Button type="button" variant="secondary" onClick={reset}>Discard</Button>
           </div>
         </div>
+      ) : null}
+
+      {expanded && result ? (
+        <RevisionPreviewModal
+          title="Proposed revision — revised letter preview"
+          subtitle={result.costUsd > 0 ? `$${result.costUsd.toFixed(2)}` : null}
+          preview={result.preview}
+          applying={applying}
+          acceptLabel="Accept revision"
+          declineLabel="Discard"
+          onAccept={() => { setExpanded(false); void onAccept(); }}
+          onDecline={() => { setExpanded(false); reset(); }}
+          onClose={() => setExpanded(false)}
+        />
       ) : null}
     </div>
   );

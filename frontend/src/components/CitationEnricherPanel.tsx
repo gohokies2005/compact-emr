@@ -8,6 +8,7 @@ import {
   type EnrichCandidate,
 } from '../api/letter';
 import { citationMayBeOffTopic } from '../lib/citationRelevance';
+import { RevisionPreviewModal } from './RevisionPreviewModal';
 
 // Citation Enricher (Feature B, 2026-06-24) — PHYSICIAN-ONLY panel, a sibling of Guided Revision.
 // The physician enters a claim sentence (or a condition) + optional mechanism hints, the backend
@@ -40,6 +41,7 @@ export function CitationEnricherPanel({ caseId, passage, claimedCondition, onApp
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
+  const [expandedPmid, setExpandedPmid] = useState<string | null>(null); // expand one candidate into a readable modal
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The jobId of the ready candidates, captured at propose time + carried to apply.
   const jobIdRef = useRef<string | null>(null);
@@ -233,7 +235,13 @@ export function CitationEnricherPanel({ caseId, passage, claimedCondition, onApp
                     <span className="block text-sm font-medium text-slate-900">{c.title}</span>
                     <span className="block text-xs text-slate-500">{c.journal}{c.year ? ` · ${c.year}` : ''} · PMID {c.pmid}</span>
                     <span className="mt-1 block text-xs italic text-slate-700">“{c.killer_finding}”</span>
-                    <a href={c.pubmedUrl} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs font-medium text-blue-700 hover:underline">View on PubMed</a>
+                    <span className="mt-1 flex items-center gap-3">
+                      <a href={c.pubmedUrl} target="_blank" rel="noreferrer" className="inline-block text-xs font-medium text-blue-700 hover:underline">View on PubMed</a>
+                      <button type="button" className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:underline"
+                        title="Expand to read full-size" aria-label={`Expand citation PMID ${c.pmid}`} onClick={() => setExpandedPmid(c.pmid)}>
+                        <span aria-hidden="true">⤢</span> Expand
+                      </button>
+                    </span>
                     {/* SOFT relevance advisory (Dr. Kasky 2026-06-25): if this candidate's subject
                         (title + killer finding) barely overlaps the target the physician is citing
                         for, gently flag it. NEVER blocks — the checkbox + "Add selected" stay live;
@@ -268,6 +276,24 @@ export function CitationEnricherPanel({ caseId, passage, claimedCondition, onApp
           </div>
         </div>
       ) : null}
+
+      {(() => {
+        const c = expandedPmid ? candidates.find((x) => x.pmid === expandedPmid) : null;
+        if (!c) return null;
+        const isSel = selected.has(c.pmid);
+        return (
+          <RevisionPreviewModal
+            title={c.title}
+            subtitle={`${c.journal}${c.year ? ` · ${c.year}` : ''} · PMID ${c.pmid}`}
+            preview={`“${c.killer_finding}”\n\nPubMed: ${c.pubmedUrl}`}
+            acceptLabel={isSel ? 'Selected ✓' : 'Add to references'}
+            declineLabel="Remove"
+            onAccept={isSel ? null : () => { toggle(c.pmid); setExpandedPmid(null); }}
+            onDecline={isSel ? () => { toggle(c.pmid); setExpandedPmid(null); } : null}
+            onClose={() => setExpandedPmid(null)}
+          />
+        );
+      })()}
     </div>
   );
 }

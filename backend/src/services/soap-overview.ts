@@ -582,7 +582,17 @@ export function __renderContextForTest(ctx: SoapContext): string {
 }
 
 function clamp(s: unknown, n: number): string {
-  return typeof s === 'string' ? s.trim().replace(/\s+/g, ' ').slice(0, n) : '';
+  if (typeof s !== 'string') return '';
+  const t = s.trim().replace(/\s+/g, ' ');
+  if (t.length <= n) return t;
+  // Never cut mid-sentence (Carr CKD 2026-06-26: the hard slice cut Objective/Assessment mid-sentence,
+  // "...the case is currently" / "...that could"). Prefer the last sentence boundary at/under n; else the
+  // last word boundary + an ellipsis to signal the trim honestly.
+  const head = t.slice(0, n);
+  const lastSentence = Math.max(head.lastIndexOf('. '), head.lastIndexOf('? '), head.lastIndexOf('! '));
+  if (lastSentence >= n * 0.5) return head.slice(0, lastSentence + 1).trim();
+  const lastSpace = head.lastIndexOf(' ');
+  return (lastSpace >= n * 0.5 ? head.slice(0, lastSpace) : head).replace(/[,;:\s]+$/, '') + '…';
 }
 
 const _cache = new Map<string, SoapNote | null>();
@@ -593,7 +603,7 @@ const _cache = new Map<string, SoapNote | null>();
 // On a truncated/failed call buildSoapNote NO LONGER returns null — it returns a deterministic explanatory
 // note (buildExplanatoryNote) so the Overview always renders a note. The async self-invoke path (110s) is
 // the reliability home for large charts; this larger cap also reduces sync-path truncation.
-const SOAP_MAX_TOKENS = 2400;
+const SOAP_MAX_TOKENS = 3600;
 
 /**
  * Synthesize the SOAP note. NEVER returns null except for a genuinely-empty claimed condition (nothing to
@@ -638,10 +648,12 @@ export async function buildSoapNote(ctx: SoapContext, opts?: { timeoutMs?: numbe
     const block = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'write_soap_note');
     const inp = block?.input as Record<string, unknown> | undefined;
     if (!inp) return buildExplanatoryNote(ctx, 'empty_model');
-    const subjective = clamp(inp['subjective'], 1200);
-    const objective = clamp(inp['objective'], 1200);
-    const assessment = clamp(inp['assessment'], 1600);
-    const plan = clamp(inp['plan'], 800);
+    // Per-field char limits raised (Carr CKD 2026-06-26): a complex, many-SC chart's Objective + Assessment
+    // exceeded 1200/1600 and got cut mid-sentence. Higher limits + the sentence-aware clamp = complete notes.
+    const subjective = clamp(inp['subjective'], 1600);
+    const objective = clamp(inp['objective'], 2200);
+    const assessment = clamp(inp['assessment'], 2800);
+    const plan = clamp(inp['plan'], 1200);
     const conf = inp['confidence'];
     const action = inp['action'];
     if (!assessment || !plan) return buildExplanatoryNote(ctx, 'empty_model');

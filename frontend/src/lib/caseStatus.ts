@@ -131,10 +131,13 @@ export const LIFECYCLE_BUCKET_LABELS: Record<LifecycleBucket, string> = {
 //     parks needs_records & needs_rn_decision). The Gate-2 'needs_rn_decision' park lands here, not
 //     under RN review, because no draft exists yet — it's still pre-draft work.
 //   - RN review: rn_review + the correction-round statuses (RN's ball before it goes back to the MD).
-//   - Ready for delivery: 'delivered' (physician-approved, pre-payment / invoice-out).
+//   - Ready for delivery: 'delivered' AND no invoice out yet (physician-approved, pre-invoice).
 //   - Invoiced: 'paid' is the terminal billed rung. 'rejected' is also terminal/closed and has no
 //     lifecycle rung of its own, so it folds into the terminal Invoiced bucket (it only ever shows
-//     under the Closed toggle anyway, alongside paid).
+//     under the Closed toggle anyway, alongside paid). A 'delivered' case WITH the invoice out
+//     (invoiced flag) also belongs here — its status chip already READS "Invoiced" (caseDisplayLabel),
+//     so leaving it under Ready for delivery left the Invoiced header empty while invoiced rows sat in
+//     the wrong bucket (Dr. Kasky 2026-06-25). The invoiced overlay is routed in lifecycleBucket().
 const STATUS_LIFECYCLE_BUCKET: Record<CaseStatus, LifecycleBucket> = {
   intake: 'pre_draft',
   records: 'pre_draft',
@@ -151,7 +154,11 @@ const STATUS_LIFECYCLE_BUCKET: Record<CaseStatus, LifecycleBucket> = {
   rejected: 'invoiced',
 };
 
-export function lifecycleBucket(status: CaseStatus): LifecycleBucket {
+// The invoiced overlay mirrors caseDisplayLabel: a 'delivered' case whose invoice has gone out reads
+// "Invoiced" in its status chip, so it must sit under the Invoiced lifecycle header — not Ready for
+// delivery. Every other status ignores the flag and uses the static map.
+export function lifecycleBucket(status: CaseStatus, opts?: { invoiced?: boolean | undefined }): LifecycleBucket {
+  if (status === 'delivered' && opts?.invoiced) return 'invoiced';
   return STATUS_LIFECYCLE_BUCKET[status];
 }
 

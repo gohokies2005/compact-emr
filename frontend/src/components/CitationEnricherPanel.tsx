@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './ui/Button';
 import { ServiceUnavailableError, SurgicalEditUnappliableError } from '../api/client';
 import {
@@ -7,6 +7,7 @@ import {
   proposeCitationEnrich,
   type EnrichCandidate,
 } from '../api/letter';
+import { citationMayBeOffTopic } from '../lib/citationRelevance';
 
 // Citation Enricher (Feature B, 2026-06-24) — PHYSICIAN-ONLY panel, a sibling of Guided Revision.
 // The physician enters a claim sentence (or a condition) + optional mechanism hints, the backend
@@ -20,6 +21,9 @@ interface CitationEnricherPanelProps {
   // Optional: the verbatim highlighted passage (a claim sentence) the physician selected. When
   // present it pre-fills the claim box so a highlighted sentence drives the search.
   readonly passage: string | null;
+  // The case's claimed condition — the final fallback target for the soft relevance check when the
+  // physician hasn't typed a claim/condition (so an off-topic citation is still flagged).
+  readonly claimedCondition?: string | null | undefined;
   // Called after a successful apply so the parent can refetch the letter (mirrors Guided Revision).
   readonly onApplied: () => void;
 }
@@ -27,7 +31,7 @@ interface CitationEnricherPanelProps {
 const POLL_INTERVAL_MS = 1500;
 const POLL_TIMEOUT_MS = 90_000; // the grounded retrieval is several serial NCBI round-trips
 
-export function CitationEnricherPanel({ caseId, passage, onApplied }: CitationEnricherPanelProps) {
+export function CitationEnricherPanel({ caseId, passage, claimedCondition, onApplied }: CitationEnricherPanelProps) {
   const [claim, setClaim] = useState('');
   const [condition, setCondition] = useState('');
   const [hints, setHints] = useState('');
@@ -39,6 +43,16 @@ export function CitationEnricherPanel({ caseId, passage, onApplied }: CitationEn
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The jobId of the ready candidates, captured at propose time + carried to apply.
   const jobIdRef = useRef<string | null>(null);
+
+  // The SOFT relevance target: what the physician is searching FOR. Prefer the typed claim, then the
+  // typed condition, then the highlighted passage, then the case's claimed condition. Used only to
+  // surface a non-blocking advisory when a candidate looks off-topic — never gates the add.
+  const relevanceTarget = useMemo(() => {
+    if (claim.trim().length > 0) return claim.trim();
+    if (condition.trim().length > 0) return condition.trim();
+    if (passage !== null && passage.trim().length > 0) return passage.trim();
+    return (claimedCondition ?? '').trim();
+  }, [claim, condition, passage, claimedCondition]);
 
   // Clear any in-flight poll on unmount.
   useEffect(() => () => { if (pollTimer.current) clearTimeout(pollTimer.current); }, []);
@@ -220,6 +234,16 @@ export function CitationEnricherPanel({ caseId, passage, onApplied }: CitationEn
                     <span className="block text-xs text-slate-500">{c.journal}{c.year ? ` · ${c.year}` : ''} · PMID {c.pmid}</span>
                     <span className="mt-1 block text-xs italic text-slate-700">“{c.killer_finding}”</span>
                     <a href={c.pubmedUrl} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs font-medium text-blue-700 hover:underline">View on PubMed</a>
+                    {/* SOFT relevance advisory (Dr. Kasky 2026-06-25): if this candidate's subject
+                        (title + killer finding) barely overlaps the target the physician is citing
+                        for, gently flag it. NEVER blocks — the checkbox + "Add selected" stay live;
+                        this is decision-support only. Shown only when the candidate is selected, so it
+                        speaks to the add decision the physician is about to make. */}
+                    {selected.has(c.pmid) && citationMayBeOffTopic(`${c.title} ${c.killer_finding}`, relevanceTarget) ? (
+                      <span className="mt-1 block rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                        This citation may not support this passage — add anyway if you’ve confirmed it fits.
+                      </span>
+                    ) : null}
                   </span>
                 </label>
               </li>

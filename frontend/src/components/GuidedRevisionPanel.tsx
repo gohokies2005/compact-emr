@@ -1,7 +1,13 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Button } from './ui/Button';
 import { ServiceUnavailableError, SurgicalEditUnappliableError } from '../api/client';
 import { proposeGuidedRevision, type GuidedRevisionResult, type SurgicalProposal } from '../api/letter';
+import { citationMayBeOffTopic } from '../lib/citationRelevance';
+
+// Does the instruction look like it's WEAVING IN a citation/finding (vs a pure reword)? Only then do
+// we run the soft relevance check — a "tighten this paragraph" instruction shouldn't get a citation
+// advisory. Cheap keyword sniff, deterministic.
+const CITATION_INSTRUCTION_RE = /\b(cite|citation|cited|citing|reference|pmid|study|studies|finding|evidence|weave|add)\b/i;
 
 // Guided Revision UI (2026-06-13): the broader physician edit tier, a SIBLING of the surgical-AI
 // card. The physician HIGHLIGHTS a verbatim passage of the letter (captured by LetterEditor's
@@ -59,6 +65,17 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
   const [error, setError] = useState<string | null>(null);
   const [proposing, setProposing] = useState(false);
   const [applying, setApplying] = useState(false);
+
+  // SOFT relevance advisory (Dr. Kasky 2026-06-25): when the instruction is weaving a citation/finding
+  // INTO the highlighted passage, gently flag if that instruction barely overlaps the passage topic —
+  // i.e. the physician may be grafting an off-topic citation onto this claim. NEVER blocks; Propose +
+  // Accept stay live. Quiet for pure rewording instructions and when no passage is selected.
+  const citationMayNotFit = useMemo(() => {
+    if (passage === null) return false;
+    const instr = instruction.trim();
+    if (instr.length === 0 || !CITATION_INSTRUCTION_RE.test(instr)) return false;
+    return citationMayBeOffTopic(instr, passage);
+  }, [instruction, passage]);
 
   function reset() {
     setResult(null);
@@ -149,6 +166,13 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
           placeholder="Example: tighten this paragraph and lead with the mechanism."
         />
       </label>
+      {/* SOFT, NON-BLOCKING relevance advisory — the physician may proceed regardless. */}
+      {citationMayNotFit ? (
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          The citation you’re weaving in may not support this passage — proceed if you’ve confirmed it fits.
+        </div>
+      ) : null}
+
       <Button
         type="button"
         variant="secondary"

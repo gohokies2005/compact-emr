@@ -103,5 +103,17 @@ describe('caseStatus maps', () => {
       expect(lifecycleBucket('paid')).toBe('invoiced');
       expect(lifecycleBucket('rejected')).toBe('invoiced');
     });
+
+    it('routes a delivered case to the bucket matching its display label via the invoiced flag', () => {
+      // No invoice out yet → Ready for delivery (label reads "Ready for delivery").
+      expect(lifecycleBucket('delivered', { invoiced: false })).toBe('ready_for_delivery');
+      expect(lifecycleBucket('delivered', {})).toBe('ready_for_delivery');
+      // Invoice out → Invoiced bucket, mirroring caseDisplayLabel (label reads "Invoiced"), so the
+      // case no longer sits under Ready for delivery while its chip says Invoiced.
+      expect(lifecycleBucket('delivered', { invoiced: true })).toBe('invoiced');
+      // The flag is ignored for every non-delivered status (e.g. paid stays terminal Invoiced).
+      expect(lifecycleBucket('paid', { invoiced: true })).toBe('invoiced');
+      expect(lifecycleBucket('physician_review', { invoiced: true })).toBe('physician_review');
+    });
   });
 });

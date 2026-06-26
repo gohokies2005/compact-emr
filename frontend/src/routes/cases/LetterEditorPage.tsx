@@ -363,6 +363,7 @@ export function LetterEditorPage() {
                   <CitationEnricherPanel
                     caseId={caseId}
                     passage={selectedPassage}
+                    claimedCondition={caseDetail?.claimedCondition ?? null}
                     onApplied={() => {
                       setMessage('Verified citations added as a new version.');
                       void letterQuery.refetch();

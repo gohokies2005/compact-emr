@@ -321,7 +321,7 @@ export function CasesPage() {
   // LIFECYCLE_BUCKET_ORDER. The per-row status chip + every column are unchanged.
   const groupedRows: readonly { readonly bucket: LifecycleBucket; readonly rows: readonly CaseLite[] }[] = (() => {
     const byBucket = new Map<LifecycleBucket, CaseLite[]>(LIFECYCLE_BUCKET_ORDER.map((b) => [b, []]));
-    for (const c of rows) (byBucket.get(lifecycleBucket(c.status)) as CaseLite[]).push(c);
+    for (const c of rows) (byBucket.get(lifecycleBucket(c.status, { invoiced: c.invoiced })) as CaseLite[]).push(c);
     return LIFECYCLE_BUCKET_ORDER.map((bucket) => ({ bucket, rows: byBucket.get(bucket) as CaseLite[] }));
   })();
   const COLUMN_COUNT = CASE_COLUMNS.length + 1; // +1 for the trailing actions column

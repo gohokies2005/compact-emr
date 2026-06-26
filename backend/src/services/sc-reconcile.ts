@@ -45,6 +45,7 @@ export interface ReconcilableSc {
   // authoritative VA decision. Optional — legacy/untyped callers compile unchanged.
   readonly source?: string | null;
   readonly scStatusAuthoritative?: boolean | null;
+  readonly sourceAuthorityTier?: string | null;
 }
 
 // The winner carries a statusConflict flag when its group mixed service_connected

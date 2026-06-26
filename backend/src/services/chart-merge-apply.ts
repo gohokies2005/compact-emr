@@ -13,7 +13,7 @@ import { planMerge, type ExistingChartRow } from './chart-merge.js';
 import { EXTRACTED_SOURCE, EXTRACTOR_VERSION } from './chart-build-state.js';
 import type { FinalExtractedItem } from './chart-extract-llm.js';
 import type { AppDb, KeyDocType } from './db-types.js';
-import { authorityTierForDocument, scStatusAuthoritativeFor, isScProvenanceEnforced, type ScAuthorityTier } from './sc-authority.js';
+import { authorityTierForDocument, scStatusAuthoritativeFor, isProvenNonAuthoritativeTier, isScProvenanceEnforced, type ScAuthorityTier } from './sc-authority.js';
 
 export interface ApplyExtractionInput {
   caseId: string;
@@ -125,7 +125,11 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
           const tier = scTierFor(it.sourceDocumentId);
           const authoritative = scStatusAuthoritativeFor(tier);
           let scStatus = it.status ?? 'pending';
-          if (enforceProvenance && scStatus === 'service_connected' && !authoritative) {
+          // CONSERVATIVE downgrade (Ryan 2026-06-26): demote ONLY a PROVEN-non-authoritative source
+          // (veteran_or_lay goal-doc/lay/intake). An unconfirmed source (unknown/clinical) is KEPT as the
+          // grant + flagged for verification, NOT stripped (the dry-run proved blanket demotion vaporizes
+          // real image-sourced grants). The tier+authoritative bit is still stamped for the verify flag.
+          if (enforceProvenance && scStatus === 'service_connected' && isProvenNonAuthoritativeTier(tier)) {
             scStatus = 'pending';
             console.warn(JSON.stringify({ event: 'sc_status_downgraded_on_extract', veteranId: input.veteranId, condition: it.name, from: 'service_connected', to: 'pending', tier, sourceDocumentId: it.sourceDocumentId }));
           }

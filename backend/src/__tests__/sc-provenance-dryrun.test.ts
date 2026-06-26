@@ -66,25 +66,35 @@ describe('sc-provenance-dryrun — deterministic re-classification', () => {
     expect(r.summary.wouldDemoteCount).toBe(0);
   });
 
-  it('OVER-FILTER WATCH fires when a wouldDemote row STILL looks like a real decision (e.g. docTag clinical but VA decision text) — surfaces for eyeball', () => {
-    // docTag 'progress_notes' is clinical (non-authoritative) and pins the tier (Layer-1 wins over the
-    // fingerprint), so it WOULD demote — but the text looks like a real decision → watch-list it.
+  it('CONSERVATIVE: an UNCONFIRMED grant (clinical/unknown — e.g. an image or Misc file) is KEPT + flagged for verification, NOT demoted', () => {
+    // The over-filter fix: a real-looking grant whose source the classifier cannot confirm (tier
+    // 'unknown' here — a .png image) must NOT be stripped. It is kept and flagged for human verification.
     const r = buildScProvenanceDryrun(
-      [row({ condition: 'Hearing loss', sourceDocumentId: 'doc-3' })],
-      docs({
-        'doc-3': {
-          filename: 'mixed.pdf',
-          docTag: 'progress_notes',
-          textSample: 'DEPARTMENT OF VETERANS AFFAIRS ... DECISION: service connection for hearing loss is granted',
-        },
-      }),
+      [row({ condition: 'Sleep Apnea Syndromes', ratingPct: 50, sourceDocumentId: 'doc-img' })],
+      docs({ 'doc-img': { filename: 'Dorf_OSA_Misc_10.png', docTag: 'unspecified', textSample: 'rated 50 percent' } }),
     );
     const res = r.rows[0]!;
+    expect(res.computedTier).toBe('unknown');
     expect(res.authoritative).toBe(false);
-    expect(res.wouldDemote).toBe(true);
-    expect(res.looksLikeRealDecision).toBe(true);
-    expect(res.overFilterWatch).toBe(true);
-    expect(r.overFilterWatch).toHaveLength(1);
+    expect(res.wouldDemote).toBe(false); // NOT stripped — this is the over-filter fix
+    expect(res.needsVerification).toBe(true);
+    expect(res.action).toBe('keep_flag_unverified');
+    expect(r.summary.wouldDemoteCount).toBe(0);
+    expect(r.summary.needsVerificationCount).toBe(1);
+    // The apply MUST NOT change status (no newStatus) — it only stamps the tier+false for the verify flag.
+    expect(mutationForRow(res)).toEqual({ id: 'r1', sourceAuthorityTier: 'unknown', scStatusAuthoritative: false });
+  });
+
+  it('CONSERVATIVE: a clinical-note grant (C&P/progress note) is also KEPT + flagged, not demoted', () => {
+    const r = buildScProvenanceDryrun(
+      [row({ condition: 'low back pain', ratingPct: 10, sourceDocumentId: 'doc-c' })],
+      docs({ 'doc-c': { filename: 'note.pdf', docTag: 'progress_notes', textSample: 'assessment: low back pain, service-connected per veteran' } }),
+    );
+    const res = r.rows[0]!;
+    expect(res.computedTier).toBe('clinical');
+    expect(res.wouldDemote).toBe(false);
+    expect(res.needsVerification).toBe(true);
+    expect(res.action).toBe('keep_flag_unverified');
   });
 
   it('MANUAL rows are immutable (never demoted, never stamped)', () => {
@@ -102,11 +112,12 @@ describe('sc-provenance-dryrun — deterministic re-classification', () => {
     expect(mutationForRow(r.rows[0]!)).toBeNull();
   });
 
-  it('blindDemoteCount counts a wouldDemote with NO text sample (filename/docTag-only, lower confidence)', () => {
+  it('blindDemoteCount counts a PROVEN-junk wouldDemote with NO text sample (a .docx goal-doc classified by extension alone)', () => {
     const r = buildScProvenanceDryrun(
       [row({ condition: 'X', sourceDocumentId: 'doc-9' })],
-      docs({ 'doc-9': { filename: 'note.pdf', docTag: 'progress_notes', textSample: null } }),
+      docs({ 'doc-9': { filename: 'Veteran_Goals.docx', docTag: 'unspecified', textSample: null } }),
     );
+    expect(r.rows[0]!.computedTier).toBe('veteran_or_lay'); // .docx → veteran_or_lay by extension
     expect(r.rows[0]!.wouldDemote).toBe(true);
     expect(r.rows[0]!.textSampleUsed).toBe(false);
     expect(r.summary.blindDemoteCount).toBe(1);

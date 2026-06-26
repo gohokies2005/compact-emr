@@ -13,9 +13,15 @@
 //
 // DARK BY DEFAULT: the master flag SC_PROVENANCE_ENFORCED gates the DEMOTION (not the classification). With
 // the flag off, `effectiveScStatus` returns the raw status (byte-identical legacy behavior) while tiers are
-// still stamped + logged; with it on, a row we have AFFIRMATIVELY classified non-authoritative
-// (scStatusAuthoritative===false, set when the chart re-extracts under this contract) demotes to
-// 'claimed_unverified' (treated as pending for anchoring, surfaced for RN confirmation).
+// still stamped + logged.
+//
+// CONSERVATIVE DEMOTION (Ryan 2026-06-26, after the live dry-run): with the flag on, a grant demotes ONLY
+// when its source tier is PROVEN-junk (veteran_or_lay — the veteran's own goal-doc / lay statement / intake
+// summary). A grant we merely CAN'T CONFIRM (unknown/clinical — an image/"Misc" file the classifier can't
+// fingerprint) is KEPT and surfaced for verification, NOT stripped — the dry-run proved blanket
+// "demote-unless-authoritative" vaporizes real image-sourced VA grants. See isProvenNonAuthoritativeTier
+// / scStatusNeedsVerification. Demoted → 'claimed_unverified' (pending for anchoring, surfaced for RN
+// confirmation).
 //
 // SAFE INCREMENTAL FLIP: a legacy/pre-fix extracted grant carries scStatusAuthoritative===null (never
 // classified under this contract) → it is TRUSTED until it is affirmatively re-classified. So turning the
@@ -44,6 +50,24 @@ const SC_AUTHORITATIVE_TIERS: ReadonlySet<ScAuthorityTier> = new Set(['va_decisi
 
 export function scStatusAuthoritativeFor(tier: ScAuthorityTier): boolean {
   return SC_AUTHORITATIVE_TIERS.has(tier);
+}
+
+// CONSERVATIVE DEMOTION (Ryan 2026-06-26, after the live dry-run — "make sure it is not filtering out stuff
+// it shouldn't"). The dry-run proved that demoting EVERY not-provably-authoritative grant strips real
+// VA-rated conditions whose source is an image/"Misc" file the classifier can't fingerprint (tier
+// 'unknown'/'clinical'). So enforcement DEMOTES ONLY a source we have AFFIRMATIVELY classified as the
+// veteran's own assertion (veteran_or_lay: goal-doc / lay-buddy statement / intake summary). A source we
+// merely CAN'T CONFIRM (unknown/clinical) is KEPT as service_connected and surfaced for verification
+// ("claimed — verify vs the VA codesheet"), NOT auto-stripped. This still kills the Woodley harm (his .docx
+// goal-doc = veteran_or_lay) without vaporizing the image-sourced real grants.
+const PROVEN_NON_AUTHORITATIVE_TIERS: ReadonlySet<ScAuthorityTier> = new Set(['veteran_or_lay']);
+export function isProvenNonAuthoritativeTier(tier: ScAuthorityTier | string | null | undefined): boolean {
+  return tier != null && PROVEN_NON_AUTHORITATIVE_TIERS.has(tier as ScAuthorityTier);
+}
+// A SC grant that is NEITHER authoritative NOR proven-junk: kept, but flag it for human verification.
+export function scStatusNeedsVerification(tier: ScAuthorityTier | string | null | undefined): boolean {
+  if (tier == null) return false; // legacy/manual null → trusted, no flag
+  return !scStatusAuthoritativeFor(tier as ScAuthorityTier) && !isProvenNonAuthoritativeTier(tier);
 }
 
 // Master flag: enforcement is DARK by default (compute + stamp + log, but do not demote) until validated.
@@ -140,7 +164,7 @@ export function looksLikeVaDecisionText(textSample: string | null | undefined): 
 // confirmation." With `enforce=false` (flag off) this is a pure pass-through (byte-identical).
 export type EffectiveScStatus = 'service_connected' | 'pending' | 'denied' | 'claimed_unverified';
 export function effectiveScStatus(
-  row: { status: string; source?: string | null; scStatusAuthoritative?: boolean | null },
+  row: { status: string; source?: string | null; scStatusAuthoritative?: boolean | null; sourceAuthorityTier?: string | null },
   opts: { enforce: boolean },
 ): EffectiveScStatus {
   const status = String(row.status || '').toLowerCase(); // case-insensitive (mirrors the legacy filter)
@@ -148,11 +172,10 @@ export function effectiveScStatus(
   if (!opts.enforce) return 'service_connected'; // DARK: no demotion
   // Manual rows = an RN typed the grant deliberately → always trusted (the extractor never touches manual).
   if (row.source == null || row.source === 'manual') return 'service_connected';
-  // DEMOTE ONLY ON AN AFFIRMATIVE NON-AUTHORITATIVE CLASSIFICATION. A legacy/pre-fix extracted row carries
-  // scStatusAuthoritative===null (never re-extracted under the provenance contract) → TRUST it until it is
-  // re-extracted, so flipping the flag on does NOT strip anchors fleet-wide from not-yet-re-extracted cases.
-  // The fleet cleans incrementally as charts re-extract; only a row we have AFFIRMATIVELY tagged
-  // non-authoritative (scStatusAuthoritative===false) demotes.
-  if (row.scStatusAuthoritative === false) return 'claimed_unverified';
-  return 'service_connected'; // authoritative VA source OR legacy-null (not yet re-extracted) → trust
+  // CONSERVATIVE: demote ONLY a source AFFIRMATIVELY classified as the veteran's own assertion
+  // (veteran_or_lay). An UNCONFIRMED source (unknown/clinical) or a legacy-null row is KEPT (and flagged
+  // for verification elsewhere), NOT stripped — the live dry-run proved blanket "demote-unless-authoritative"
+  // vaporizes real image-sourced grants. Woodley's .docx goal-doc = veteran_or_lay → still demoted.
+  if (isProvenNonAuthoritativeTier(row.sourceAuthorityTier)) return 'claimed_unverified';
+  return 'service_connected';
 }

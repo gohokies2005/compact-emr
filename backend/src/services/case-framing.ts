@@ -61,6 +61,9 @@ export interface ScConditionInput {
   // optional so legacy callers compile; absence + extracted = treated as unverified WHEN enforcing.
   readonly source?: string | null;
   readonly scStatusAuthoritative?: boolean | null;
+  // The source-document authority TIER (sc-authority.ts). The conservative gate demotes ONLY a
+  // proven-non-authoritative tier (veteran_or_lay); unknown/clinical are kept. Optional for legacy callers.
+  readonly sourceAuthorityTier?: string | null;
 }
 
 /** trim + lowercase + collapse whitespace — the §2.6 dedupe/exclusion KEY (never the stored value). */

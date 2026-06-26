@@ -66,23 +66,28 @@ describe('sc-authority — source-authority classification (Woodley fix)', () =>
     });
   });
 
-  describe('effectiveScStatus trust gate', () => {
-    const woodleyRow = { status: 'service_connected', source: 'extracted', scStatusAuthoritative: false };
+  describe('effectiveScStatus trust gate (CONSERVATIVE — demote only PROVEN-junk tier)', () => {
+    // The .docx goal-doc tier = veteran_or_lay (PROVEN the veteran's own assertion) → demotes.
+    const woodleyRow = { status: 'service_connected', source: 'extracted', scStatusAuthoritative: false, sourceAuthorityTier: 'veteran_or_lay' };
 
     it('DARK (flag off): a non-authoritative extracted grant is NOT demoted (byte-identical)', () => {
       expect(effectiveScStatus(woodleyRow, { enforce: false })).toBe('service_connected');
     });
-    it('ENFORCED: a non-authoritative extracted grant demotes to claimed_unverified', () => {
+    it('ENFORCED: a PROVEN-junk (veteran_or_lay) extracted grant demotes to claimed_unverified', () => {
       expect(effectiveScStatus(woodleyRow, { enforce: true })).toBe('claimed_unverified');
     });
+    it('CONSERVATIVE: an UNCONFIRMED grant (unknown/clinical — e.g. an image/Misc file) is KEPT when enforcing, NOT stripped (the over-filter fix)', () => {
+      expect(effectiveScStatus({ status: 'service_connected', source: 'extracted', scStatusAuthoritative: false, sourceAuthorityTier: 'unknown' }, { enforce: true })).toBe('service_connected');
+      expect(effectiveScStatus({ status: 'service_connected', source: 'extracted', scStatusAuthoritative: false, sourceAuthorityTier: 'clinical' }, { enforce: true })).toBe('service_connected');
+    });
     it('ENFORCED: an AUTHORITATIVE extracted grant stays service_connected', () => {
-      expect(effectiveScStatus({ status: 'service_connected', source: 'extracted', scStatusAuthoritative: true }, { enforce: true })).toBe('service_connected');
+      expect(effectiveScStatus({ status: 'service_connected', source: 'extracted', scStatusAuthoritative: true, sourceAuthorityTier: 'va_decision' }, { enforce: true })).toBe('service_connected');
     });
     it('ENFORCED: a MANUAL (RN-typed) grant is always trusted', () => {
-      expect(effectiveScStatus({ status: 'service_connected', source: 'manual', scStatusAuthoritative: null }, { enforce: true })).toBe('service_connected');
+      expect(effectiveScStatus({ status: 'service_connected', source: 'manual', scStatusAuthoritative: null, sourceAuthorityTier: null }, { enforce: true })).toBe('service_connected');
     });
-    it('ENFORCED: a legacy extracted grant with NULL authority is TRUSTED until re-extracted (safe incremental flip — only an AFFIRMATIVE non-authoritative tag demotes)', () => {
-      expect(effectiveScStatus({ status: 'service_connected', source: 'extracted', scStatusAuthoritative: null }, { enforce: true })).toBe('service_connected');
+    it('ENFORCED: a legacy extracted grant with NULL tier is TRUSTED until re-classified (safe incremental flip)', () => {
+      expect(effectiveScStatus({ status: 'service_connected', source: 'extracted', scStatusAuthoritative: null, sourceAuthorityTier: null }, { enforce: true })).toBe('service_connected');
     });
     it('pending / denied are untouched in both modes', () => {
       for (const enforce of [true, false]) {
@@ -96,8 +101,8 @@ describe('sc-authority — source-authority classification (Woodley fix)', () =>
   // granted secondary primary, so the drafter cannot argue a nexus off a fake grant. ──────────────────
   describe('buildGrantedScAnchors — provenance gate (Woodley)', () => {
     const claimed = 'GERD';
-    const woodleyFakeGrant = { condition: 'Recurrent esophageal stricture', ratingPct: 30, status: 'service_connected', source: 'extracted', scStatusAuthoritative: false };
-    const realGrant = { condition: 'PTSD', ratingPct: 70, status: 'service_connected', source: 'extracted', scStatusAuthoritative: true };
+    const woodleyFakeGrant = { condition: 'Recurrent esophageal stricture', ratingPct: 30, status: 'service_connected', source: 'extracted', scStatusAuthoritative: false, sourceAuthorityTier: 'veteran_or_lay' };
+    const realGrant = { condition: 'PTSD', ratingPct: 70, status: 'service_connected', source: 'extracted', scStatusAuthoritative: true, sourceAuthorityTier: 'va_decision' };
 
     it('ENFORCED: a non-authoritative SC grant (Woodley goal-doc) is EXCLUDED from the anchors', () => {
       const anchors = buildGrantedScAnchors([woodleyFakeGrant, realGrant], claimed, { enforce: true });

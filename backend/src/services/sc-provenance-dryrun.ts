@@ -22,6 +22,7 @@
 import {
   authorityTierForDocument,
   scStatusAuthoritativeFor,
+  isProvenNonAuthoritativeTier,
   looksLikeVaDecisionText,
   type ScAuthorityTier,
 } from './sc-authority.js';
@@ -51,7 +52,8 @@ export interface ScDryrunDoc {
 }
 
 export type ScDryrunAction =
-  | 'downgrade' // non-authoritative service_connected → pending (+ stamp false)
+  | 'downgrade' // PROVEN-junk (veteran_or_lay) service_connected → pending (+ stamp false)
+  | 'keep_flag_unverified' // unconfirmed (unknown/clinical) SC grant → KEPT, stamp tier+false for a verify flag, NO status change
   | 'stamp' // extracted, classifiable, authoritative (or non-SC) → stamp tier/authoritative only
   | 'skip_manual' // source manual/null → immutable, never touched
   | 'skip_no_source' // extracted but no sourceDocumentId → cannot classify, leave scStatusAuthoritative null (trusted)
@@ -73,8 +75,9 @@ export interface ScDryrunRowResult {
   authoritative: boolean;
   textSampleUsed: boolean; // false ⇒ classified on filename/docTag alone (a blind classification)
   looksLikeRealDecision: boolean;
-  wouldDemote: boolean; // status is a SC grant that enforcement would strip
-  overFilterWatch: boolean; // wouldDemote AND the source text looks like a real VA decision → EYEBALL
+  wouldDemote: boolean; // a SC grant from a PROVEN-junk source (veteran_or_lay) that enforcement strips
+  needsVerification: boolean; // a SC grant from an UNCONFIRMED source (unknown/clinical) → kept + flagged, NOT stripped
+  overFilterWatch: boolean; // wouldDemote AND the source text looks like a real VA decision → EYEBALL (should be ~0 under conservative)
   action: ScDryrunAction;
 }
 
@@ -83,7 +86,8 @@ export interface ScDryrunSummary {
   extractedRows: number;
   serviceConnectedExtractedRows: number;
   byTier: Record<string, number>;
-  wouldDemoteCount: number;
+  wouldDemoteCount: number; // PROVEN-junk grants that get stripped
+  needsVerificationCount: number; // unconfirmed grants KEPT + flagged for human verification
   overFilterWatchCount: number;
   blindDemoteCount: number; // wouldDemote with NO text sample (filename/docTag-only) — lower-confidence
   noSourceExtractedCount: number; // extracted grants with no sourceDocumentId (left trusted)
@@ -111,15 +115,19 @@ function classifyRow(row: ScDryrunRowInput, doc: ScDryrunDoc | undefined): ScDry
   const textSampleUsed = typeof textSample === 'string' && textSample.length > 0;
   const looksLikeRealDecision = looksLikeVaDecisionText(textSample);
 
-  // A row demotes only when: extracted (manual/null is immutable), a SC grant, classifiable (has a source
-  // doc), and the source is non-authoritative. A no-source extracted grant cannot be classified → leave
-  // trusted (never demote blind). Mirrors effectiveScStatus' "affirmative non-authoritative only" rule.
-  const wouldDemote = isExtracted && isSc && hasSource && !authoritative;
+  // CONSERVATIVE (Ryan 2026-06-26): a row DEMOTES only when it is extracted, a SC grant, classifiable, and
+  // from a PROVEN-junk source (veteran_or_lay goal-doc/lay/intake). A SC grant from an UNCONFIRMED source
+  // (unknown/clinical) is KEPT and flagged for verification — NOT stripped (the dry-run proved blanket
+  // demotion vaporizes real image-sourced grants). A no-source extracted grant is left trusted.
+  const provenJunk = isProvenNonAuthoritativeTier(computedTier);
+  const wouldDemote = isExtracted && isSc && hasSource && provenJunk;
+  const needsVerification = isExtracted && isSc && hasSource && !authoritative && !provenJunk;
 
   let action: ScDryrunAction;
   if (!isExtracted) action = 'skip_manual';
   else if (!hasSource) action = 'skip_no_source';
   else if (wouldDemote) action = 'downgrade';
+  else if (needsVerification) action = 'keep_flag_unverified';
   else if (!isSc) action = 'skip_not_sc';
   else action = 'stamp';
 
@@ -140,6 +148,7 @@ function classifyRow(row: ScDryrunRowInput, doc: ScDryrunDoc | undefined): ScDry
     textSampleUsed,
     looksLikeRealDecision,
     wouldDemote,
+    needsVerification,
     overFilterWatch: wouldDemote && looksLikeRealDecision,
     action,
   };
@@ -167,6 +176,7 @@ export function buildScProvenanceDryrun(rows: ScDryrunRowInput[], docsById: Map<
       serviceConnectedExtractedRows: scExtracted.length,
       byTier,
       wouldDemoteCount: wouldDemote.length,
+      needsVerificationCount: results.filter((r) => r.needsVerification).length,
       overFilterWatchCount: overFilterWatch.length,
       blindDemoteCount: wouldDemote.filter((r) => !r.textSampleUsed).length,
       noSourceExtractedCount: scExtracted.filter((r) => r.sourceDocumentId == null || r.sourceDocumentId === '').length,

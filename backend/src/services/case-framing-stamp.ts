@@ -70,7 +70,7 @@ interface CaseRowForFraming {
   /** 'derived' | 'manual' | null(legacy/unknown — immutable to auto-refresh). Keystone pkg 5. */
   readonly framingStampSource: string | null;
   readonly veteranStatement: string | null;
-  readonly veteran: { readonly scConditions: ReadonlyArray<{ condition: string; ratingPct: number | null; status: string; source?: string | null; scStatusAuthoritative?: boolean | null }> } | null;
+  readonly veteran: { readonly scConditions: ReadonlyArray<{ condition: string; ratingPct: number | null; status: string; source?: string | null; scStatusAuthoritative?: boolean | null; sourceAuthorityTier?: string | null }> } | null;
 }
 
 /**
@@ -178,7 +178,7 @@ async function fetchCaseRowForFraming(db: AppDb, caseId: string): Promise<CaseRo
       upstreamScCondition: true,
       framingStampSource: true,
       veteranStatement: true,
-      veteran: { select: { scConditions: { select: { condition: true, ratingPct: true, status: true, source: true, scStatusAuthoritative: true } } } },
+      veteran: { select: { scConditions: { select: { condition: true, ratingPct: true, status: true, source: true, scStatusAuthoritative: true, sourceAuthorityTier: true } } } },
     },
   }) as unknown as CaseRowForFraming | null;
 }
@@ -207,6 +207,7 @@ function deriveForRow(c: CaseRowForFraming): CaseFraming {
       status: String(s.status),
       source: s.source ?? null, // SC-provenance: carry authority through to the keystone anchor gate
       scStatusAuthoritative: s.scStatusAuthoritative ?? null,
+      sourceAuthorityTier: s.sourceAuthorityTier ?? null, // conservative gate demotes only veteran_or_lay
     })),
     new Date(),
     loadMechanismFilter(), // Bug C: mechanism-gate the anchor pick (fail-open to undefined)

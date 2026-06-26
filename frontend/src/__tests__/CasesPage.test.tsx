@@ -107,13 +107,16 @@ describe('CasesPage', () => {
 
   // === Note column: restored quiet ICON + inline '+' add (Dr. Kasky 2026-06-24) ===
 
-  it('Note column shows a note ICON (full text in the title) when a quick note exists, and a + when none', async () => {
+  it('Note column shows the quick-note body (full text in the title) when a quick note exists, and a + when none', async () => {
     renderPage();
     await screen.findByText('CASE-001');
-    // CASE-001 HAS a quick note → a quiet icon link whose aria-label carries the full text (no "Quick" badge).
-    const icon = screen.getByLabelText('Quick note: Awaiting records — C-file requested 6/8');
-    expect(icon).toBeInTheDocument();
-    expect(icon).toHaveAttribute('title', expect.stringContaining('Awaiting records — C-file requested 6/8'));
+    // CASE-001 HAS a quick note → a clickable note button whose aria-label carries the full text and
+    // whose visible text shows the body (no "Quick" badge).
+    const note = screen.getByLabelText('Quick note: Awaiting records — C-file requested 6/8');
+    expect(note).toBeInTheDocument();
+    expect(note).toHaveAttribute('title', expect.stringContaining('Awaiting records — C-file requested 6/8'));
+    // It is a BUTTON, not a navigation link (clicking edits inline; it must not route to the chart).
+    expect(note.tagName).toBe('BUTTON');
     // CASE-002 has NO quick note → its Note cell shows the '+' add button.
     expect(screen.getByLabelText('Add quick note')).toBeInTheDocument();
   });
@@ -122,10 +125,44 @@ describe('CasesPage', () => {
     renderPage();
     await screen.findByText('CASE-002');
     fireEvent.click(screen.getByLabelText('Add quick note')); // CASE-002 (VET-2) has no note
-    const input = screen.getByLabelText('Quick note') as HTMLInputElement;
+    const input = screen.getByLabelText('Quick note') as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: 'Called veteran, awaiting STRs' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(createChartNoteMock).toHaveBeenCalledWith('VET-2', 'Called veteran, awaiting STRs', true));
+  });
+
+  it('clicking an EXISTING note opens an inline editor in place (no navigation) pre-filled with the note text', async () => {
+    renderPage();
+    await screen.findByText('CASE-001');
+    // Click the existing CASE-001 quick note. This must NOT navigate — it opens the inline editor.
+    fireEvent.click(screen.getByLabelText('Quick note: Awaiting records — C-file requested 6/8'));
+    // Still on the Cases page (the case row is still rendered) and the editor is pre-filled.
+    expect(screen.getByText('CASE-001')).toBeInTheDocument();
+    const input = screen.getByLabelText('Quick note') as HTMLTextAreaElement;
+    expect(input.value).toBe('Awaiting records — C-file requested 6/8');
+  });
+
+  it('editing an existing note + Enter APPENDS a new chart-note (history preserved), shown as the latest', async () => {
+    renderPage();
+    await screen.findByText('CASE-001');
+    fireEvent.click(screen.getByLabelText('Quick note: Awaiting records — C-file requested 6/8'));
+    const input = screen.getByLabelText('Quick note') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: 'Records received 6/25 — ready for review' } });
+    // Enter saves (Shift+Enter would instead insert a newline).
+    fireEvent.keyDown(input, { key: 'Enter' });
+    // Saving goes through createChartNote (a POST that APPENDS a new note to the chart-notes stream),
+    // NOT an in-place overwrite — so the prior note stays in the chart's history. VET-1 is CASE-001.
+    await waitFor(() => expect(createChartNoteMock).toHaveBeenCalledWith('VET-1', 'Records received 6/25 — ready for review', true));
+  });
+
+  it('Shift+Enter in the note editor inserts a newline and does NOT save', async () => {
+    renderPage();
+    await screen.findByText('CASE-002');
+    fireEvent.click(screen.getByLabelText('Add quick note'));
+    const input = screen.getByLabelText('Quick note') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: 'line one' } });
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    expect(createChartNoteMock).not.toHaveBeenCalled();
   });
 
   it('invoiced delivered case: the STATUS LABEL ITSELF reads "Invoiced", same neutral format, no chip (Ryan 2026-06-12)', async () => {

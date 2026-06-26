@@ -10,6 +10,7 @@ import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { PhysicianDocumentsList } from '../../components/PhysicianDocumentsList';
 import { PhysicianHandoffNotes } from '../../components/PhysicianHandoffNotes';
+import { LetterPdfModal } from '../../components/LetterPdfModal';
 import { GradeChip } from '../../components/ui/GradeChip';
 import { getCase, type SignOffAnswers } from '../../api/cases';
 import { formatNameLastFirst } from '../../lib/format';
@@ -44,6 +45,7 @@ export function PhysicianMobileReviewPage() {
   const qc = useQueryClient();
   const [signOffOpen, setSignOffOpen] = useState(false);
   const [sendBackOpen, setSendBackOpen] = useState(false);
+  const [showLetterPdf, setShowLetterPdf] = useState(false);
 
   const caseQuery = useQuery({
     queryKey: ['case', caseId],
@@ -94,18 +96,11 @@ export function PhysicianMobileReviewPage() {
   const isSignedDelivered = c.status === 'delivered' || c.status === 'paid';
   const approveBlockers = c.approveBlockers ?? [];
 
-  const openLetterPdf = async () => {
-    try {
-      const { data } = await getLetter(c.id);
-      if (!data.rendered.pdfUrl) {
-        window.alert('The letter PDF is not ready yet. If it persists, flag this case to Dr. Ryan.');
-        return;
-      }
-      window.open(data.rendered.pdfUrl, '_blank', 'noopener,noreferrer');
-    } catch (e: unknown) {
-      window.alert(`Could not open the letter PDF — ${describeApiError(e)}. If it keeps failing, flag this case to Dr. Ryan.`);
-    }
-  };
+  // Open the letter PDF in an INLINE modal (iframe), never window.open. A window.open AFTER an
+  // await getLetter() runs outside the click gesture → mobile/PWA popup-blockers silently kill it
+  // ("the doctor app does not open a PDF when clicked unless in edit mode", Dr. Kasky 2026-06-26).
+  // The modal fetches a fresh presigned URL itself.
+  const openLetterPdf = () => setShowLetterPdf(true);
 
   const onChanged = async () => {
     await qc.invalidateQueries({ queryKey: ['case', caseId] });
@@ -326,6 +321,7 @@ export function PhysicianMobileReviewPage() {
         onClose={() => setSendBackOpen(false)}
         onDone={onChanged}
       />
+      <LetterPdfModal caseId={showLetterPdf ? c.id : null} onClose={() => setShowLetterPdf(false)} />
     </AppShell>
   );
 }

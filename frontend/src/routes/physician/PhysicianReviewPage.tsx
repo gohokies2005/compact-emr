@@ -11,6 +11,7 @@ import {
   type ReadyDraftJob,
 } from '../../components/PhysicianLetterReadyPanel';
 import { SignOffPopup } from '../../components/SignOffPopup';
+import { LetterPdfModal } from '../../components/LetterPdfModal';
 import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
@@ -27,6 +28,7 @@ export function PhysicianReviewPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [signOffOpen, setSignOffOpen] = useState(false);
+  const [showLetterPdf, setShowLetterPdf] = useState(false);
 
   const caseQuery = useQuery({
     queryKey: ['case', caseId],
@@ -105,15 +107,11 @@ export function PhysicianReviewPage() {
   // job's version, which goes STALE the moment an editor/surgical save advances currentVersion —
   // a physician could sign a PDF they never saw. Read from GET /cases/:id/letter (resolveCurrent at
   // currentVersion), the SAME source CaseDetailPage and the DOCX use, so all three always agree.
-  const openLetterPdf = async () => {
-    try {
-      const { data } = await getLetter(c.id);
-      if (!data.rendered.pdfUrl) { window.alert('The letter PDF is not ready yet. If it persists, flag this case to Dr. Ryan.'); return; }
-      window.open(data.rendered.pdfUrl, '_blank', 'noopener,noreferrer');
-    } catch (e: unknown) {
-      window.alert(`Could not open the letter PDF — ${describeApiError(e)}. If it keeps failing, flag this case to Dr. Ryan.`);
-    }
-  };
+  // Open the letter PDF in an INLINE modal (iframe), never window.open. A window.open AFTER an
+  // await getLetter() runs outside the click gesture → mobile/PWA popup-blockers silently kill it
+  // ("opens in edit mode but not when clicked", Dr. Kasky 2026-06-26). The modal fetches a fresh
+  // presigned URL itself.
+  const openLetterPdf = () => setShowLetterPdf(true);
 
   const onChanged = async () => {
     await qc.invalidateQueries({ queryKey: ['case', caseId] });
@@ -297,6 +295,7 @@ export function PhysicianReviewPage() {
             onSignedOff={onSignedOff}
           />
         )}
+        <LetterPdfModal caseId={showLetterPdf ? c.id : null} onClose={() => setShowLetterPdf(false)} />
       </div>
     </AppShell>
   );

@@ -195,11 +195,12 @@ describe('PhysicianReviewPage', () => {
 
   // P0a/P0b (Ryan 2026-06-13): the View-PDF resolves the CURRENT version via GET /cases/:id/letter
   // (not a stale job-pinned artifact), and a delivered/signed letter stays viewable here.
-  it('delivered case: shows the finalized panel with a working View-final-PDF (currentVersion source)', async () => {
+  it('delivered case: View-final-PDF opens the INLINE modal (currentVersion source), not a window.open popup', async () => {
     getCaseMock.mockResolvedValue({ data: { ...readyCase, status: 'delivered' } });
     getLetterMock.mockResolvedValue({
       data: { rendered: { pdfUrl: 'https://signed.example/current.pdf' } },
     } as unknown as Awaited<ReturnType<typeof getLetter>>);
+    // window.open after an await is silently blocked on mobile/PWA → the fix renders inline instead.
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
     renderReview();
 
@@ -207,8 +208,11 @@ describe('PhysicianReviewPage', () => {
     expect(screen.queryByText('This case is not ready for physician review.')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'View final letter PDF' }));
-    await waitFor(() => expect(getLetterMock).toHaveBeenCalledWith('CASE-1'));
-    expect(openSpy).toHaveBeenCalledWith('https://signed.example/current.pdf', '_blank', 'noopener,noreferrer');
+    // The inline LetterPdfModal mounts, fetches the current-version PDF, and iframes it — no popup.
+    const iframe = await screen.findByTitle('Nexus letter');
+    expect(iframe).toHaveAttribute('src', 'https://signed.example/current.pdf');
+    expect(getLetterMock).toHaveBeenCalledWith('CASE-1');
+    expect(openSpy).not.toHaveBeenCalled();
     openSpy.mockRestore();
   });
 

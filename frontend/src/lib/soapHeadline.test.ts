@@ -30,6 +30,26 @@ describe('soapHeadline — H1 (grounded) + H4 (stale suppression)', () => {
     expect(soapHeadline({ grounded: false, stale: false, routePickerFraming: null, strategyPrimaryArgument: null, anchorHeadline: null, resultTitle: TITLE })).toBe(TITLE);
   });
 
+  it('OSA fix: an UNGROUNDED note with a READY route-picker card framing uses THAT (not the stale-intake strategy)', () => {
+    // Dr. Kasky 2026-06-26: heading said "OSA secondary to Knee" (strategy = stale intake claim) while the
+    // body argued depression (the route-picker plan). When ungrounded but the card plan is ready, the card
+    // framing — the SAME theory the body argues — beats the static strategy engine.
+    const CARD = 'OSA secondary to service-connected depression (causation)';
+    const h = soapHeadline({ grounded: false, stale: false, routePickerCardFraming: CARD, strategyPrimaryArgument: STRATEGY, anchorHeadline: ANCHOR, resultTitle: TITLE });
+    expect(h).toBe(CARD);
+  });
+
+  it('OSA fix: the route-picker card framing is SUPPRESSED when the note is stale (falls back to strategy)', () => {
+    const CARD = 'OSA secondary to service-connected depression (causation)';
+    const h = soapHeadline({ grounded: false, stale: true, routePickerCardFraming: CARD, strategyPrimaryArgument: STRATEGY, anchorHeadline: ANCHOR, resultTitle: TITLE });
+    expect(h).toBe(STRATEGY);
+  });
+
+  it('grounded framing still wins over the card framing when both present', () => {
+    const CARD = 'card framing';
+    expect(soapHeadline({ grounded: true, stale: false, routePickerFraming: LIVE_FRAMING, routePickerCardFraming: CARD, strategyPrimaryArgument: STRATEGY, anchorHeadline: ANCHOR, resultTitle: TITLE })).toBe(LIVE_FRAMING);
+  });
+
   it('groundedHeadlineFraming: usable only when grounded AND not stale', () => {
     expect(groundedHeadlineFraming({ grounded: true, stale: false, routePickerFraming: LIVE_FRAMING })).toBe(LIVE_FRAMING);
     expect(groundedHeadlineFraming({ grounded: true, stale: true, routePickerFraming: LIVE_FRAMING })).toBeNull();

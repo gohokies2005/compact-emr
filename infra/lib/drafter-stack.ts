@@ -421,6 +421,61 @@ export class DrafterStack extends Stack {
     });
     reapedMidDraftAlarm.addAlarmAction(new cloudwatchActions.SnsAction(costRunawayTopic));
 
+    // ===== Drafter SILENT-FAILURE metric-filter alarms (FRN drafter b2d10e1, 2026-06-26) =====
+    // run-letter-pipeline.js runs INSIDE this Fargate container, so its plain-text console.warn lines land
+    // in THIS log group. Two previously-silent failure lines, matched with quoted-term filters mirroring
+    // the live `"FATAL (exit 4)"` filter. Reliability/ops signals (not cost) → ops-alerts (confirmed sub).
+    const opsTopic = sns.Topic.fromTopicArn(
+      this, 'OpsAlertsTopicRef',
+      `arn:aws:sns:${this.region}:${this.account}:compact-emr-${config.envName}-ops-alerts`,
+    );
+    // (1) §VIII shipped with 0 numbered citations after backfill+strip (Sanderson nephroptosis class).
+    const refsEmptyFilter = new logs.MetricFilter(this, 'DrafterReferencesEmptyFilter', {
+      logGroup,
+      metricNamespace: `compact-emr-${config.envName}/drafter`,
+      metricName: 'ReferencesEmpty',
+      filterPattern: logs.FilterPattern.literal('"[references_empty]"'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const refsEmptyAlarm = new cloudwatch.Alarm(this, 'DrafterReferencesEmptyAlarm', {
+      alarmName: `compact-emr-${config.envName}-drafter-references-empty`,
+      alarmDescription:
+        'A nexus letter shipped with 0 numbered Section VIII references (grounded NCBI fallback found ' +
+        'only off-topic papers and the case-law strip removed the rest). In-app raises a physician ' +
+        'advisory and the letter stays editable (no hard fail); a rare/structural condition is not in ' +
+        'the citation synonym map. Inspect the drafter logs + the case Section VIII.',
+      metric: refsEmptyFilter.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    refsEmptyAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+    // (2) Grounded NCBI fallback retrieved ONLY off-topic papers (status=all_rejected_off_topic).
+    const fallbackOffTopicFilter = new logs.MetricFilter(this, 'DrafterFallbackAllRejectedFilter', {
+      logGroup,
+      metricNamespace: `compact-emr-${config.envName}/drafter`,
+      metricName: 'GroundedFallbackAllRejected',
+      filterPattern: logs.FilterPattern.literal('"all_rejected_off_topic"'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const fallbackOffTopicAlarm = new cloudwatch.Alarm(this, 'DrafterFallbackAllRejectedAlarm', {
+      alarmName: `compact-emr-${config.envName}-drafter-grounded-fallback-all-rejected`,
+      alarmDescription:
+        'The drafter grounded NCBI fallback ran and EVERY retrieved paper scored off-topic ' +
+        '(status=all_rejected_off_topic): no library folder AND the synonym map did not steer NCBI to ' +
+        'on-topic literature. The letter drafts on chart facts + regulation, flagged for backfill. Add ' +
+        'the condition synonyms / a library folder. Inspect the drafter logs.',
+      metric: fallbackOffTopicFilter.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    fallbackOffTopicAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+
     // ===== Outputs the drafter window needs =====
     // ECR repo URI — drafter window runs `docker push <uri>:<git-sha>` against this.
     new CfnOutput(this, 'DrafterImageRepoUri', {

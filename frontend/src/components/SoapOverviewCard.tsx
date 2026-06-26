@@ -274,10 +274,16 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   // LIVE plan, so the live framing would CONTRADICT the stale Assessment; soapHeadline SUPPRESSES the grounded
   // framing when stale and falls back to the neutral strategy/title headline (the "new info — regenerate" hint
   // tells the RN the body is out of date; regenerating re-grounds headline + body together). Pure + unit-tested.
+  // One-brain (#72/#89, Dr. Kasky 2026-06-26 OSA "secondary to Knee" vs depression): when the SOAP read is
+  // ungrounded (inputHash drift) but the route-picker PLAN is ready, use the plan's chosen framing — the SAME
+  // theory the Assessment body argues — for the headline, ABOVE the static strategy engine (which reads the
+  // stale intake claim). Suppressed when stale (soapHeadline guards). card.lead.framing names the anchor.
+  const routePickerCardFraming = aiState?.status === 'ready' ? (aiState.card.lead.framing ?? null) : null;
   const headline = soapHeadline({
     grounded: soapQ.data?.grounded,
     stale: soapQ.data?.stale,
     routePickerFraming: soapQ.data?.routePickerFraming?.framing ?? null,
+    routePickerCardFraming,
     strategyPrimaryArgument: strategy?.primaryArgument ?? null,
     anchorHeadline: v?.best_anchor?.upstream_verbatim
       ? `${v.claimed_canonical ?? claimedCondition} — secondary to ${v.best_anchor.upstream_verbatim}` : null,

@@ -33,6 +33,8 @@ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
     id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'Lumbosacral strain',
     claimedConditions: ['Lumbosacral strain'], claimType: 'initial', framingChoice: 'direct',
     previouslyDenied: false, priorDenialReason: null, priorDecisionDate: null,
+    coverMemoSuppressed: false,
+    coverMemoTextOverride: null,
     upstreamScCondition: null, veteranStatement: null, inServiceEvent: null,
     status: 'physician_review', cdsVerdict: 'accept', cdsOddsPct: 70, cdsRationale: null,
     assignedPhysicianId: 'PHYS-001', assignedRnId: null, refundEligible: false, currentVersion: 1,

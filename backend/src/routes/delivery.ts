@@ -6,6 +6,7 @@ import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { currentActor } from '../services/request-actor.js';
 import { parseCredentialBlock, KASKY_CREDENTIALS } from '../services/credential-block.js';
+import { getAiViabilityState } from '../services/ai-viability.js';
 import { buildOpinionExcerpt } from '../services/letter-opinion-excerpt.js';
 import {
   buildDeliveryEmail,
@@ -88,18 +89,26 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
   // memo.pdf route (E4) so the PDF can never diverge from the preview text — and so the PDF route
   // does not need the letter TXT / S3 at all (the memo is built from the Case + physician rows).
   async function composeMemo(c: {
+    id: string;
     claimType: string;
     previouslyDenied: boolean | null;
     priorDenialReason: string | null;
     priorDecisionDate: Date | null;
     claimedCondition: string;
     assignedPhysicianId: string | null;
+    coverMemoSuppressed?: boolean | null;
+    coverMemoTextOverride?: string | null;
   }, vFirst: string | null, vLast: string): Promise<{
     required: boolean;
     pathway: CoverMemoPathway | null;
     reason: string;
     text: string | null;
   }> {
+    // (C) SUPPRESS (Dr. Kasky 2026-06-26, Spring): staff chose to send ONLY the nexus letter, no cover
+    // memo. Drop the memo out of the preview + confirm gate; the memo.pdf route 404s via its !required guard.
+    if (c.coverMemoSuppressed === true) {
+      return { required: false, pathway: null, reason: 'suppressed_by_staff', text: null };
+    }
     const req = coverMemoRequirement({
       claimType: c.claimType,
       previouslyDenied: c.previouslyDenied,
@@ -113,14 +122,34 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
         const creds = phys ? parseCredentialBlock(phys.credentialBlockJson) : null;
         if (creds !== null) signer = creds;
       }
-      memoText = buildCoverMemoText({
-        pathway: req.pathway,
-        veteranFullName: `${vFirst ?? ''} ${vLast}`.trim(),
-        veteranLastName: vLast,
-        claimedCondition: c.claimedCondition,
-        priorDecisionDate: c.priorDecisionDate ? c.priorDecisionDate.toISOString().slice(0, 10) : null,
-        signer,
-      });
+      // (C) EDIT: a staff text override replaces the composed memo entirely. Guard the signature anchor —
+      // renderMemoPdf throws without [SIGNATURE]; if the editor removed it, re-append the signer block so
+      // the PDF still composites the signature. (Dr. Kasky 2026-06-26 — "i need to be able to edit that file".)
+      const override = typeof c.coverMemoTextOverride === 'string' ? c.coverMemoTextOverride.trim() : '';
+      if (override.length > 0) {
+        memoText = override.includes('[SIGNATURE]')
+          ? override
+          : `${override}\n\nRespectfully submitted,\n\n[SIGNATURE]\n${signer.fullNameWithCredential}`;
+      } else {
+        // (B) condition LABEL from the route-picker plan (the letter's actual theory), NOT the broad intake
+        // claim bucket (Spring: memo said "Skin (eczema, Psoriasis, Dermatitis, Scars)" but the letter was
+        // direct ACNE). Falls back to claimedCondition when no ready plan. $0 read-only.
+        let memoCondition = c.claimedCondition;
+        try {
+          const ai = await getAiViabilityState(db, c.id, { compute: false });
+          if (ai.status === 'ready' && typeof ai.card.lead.claimed === 'string' && ai.card.lead.claimed.trim().length > 0) {
+            memoCondition = ai.card.lead.claimed.trim();
+          }
+        } catch { /* fall back to claimedCondition */ }
+        memoText = buildCoverMemoText({
+          pathway: req.pathway,
+          veteranFullName: `${vFirst ?? ''} ${vLast}`.trim(),
+          veteranLastName: vLast,
+          claimedCondition: memoCondition,
+          priorDecisionDate: c.priorDecisionDate ? c.priorDecisionDate.toISOString().slice(0, 10) : null,
+          signer,
+        });
+      }
     }
     return { required: req.required, pathway: req.pathway, reason: req.reason, text: memoText };
   }
@@ -132,7 +161,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
     version: number;
     excerpt: ReturnType<typeof buildOpinionExcerpt>;
     email: { subject: string; fromAddress: string; body: string };
-    memo: { applies: boolean; pathway: CoverMemoPathway | null; reason: string; text: string | null };
+    memo: { applies: boolean; pathway: CoverMemoPathway | null; reason: string; text: string | null; suppressed: boolean; textOverridden: boolean };
     stripe: { configured: boolean; link: string | null };
     emailTransport: { configured: boolean };
     savedEmail: { id: string; subject: string; body: string; sentAt: Date | null; status: string } | null;
@@ -189,7 +218,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       version: cur.version,
       excerpt,
       email,
-      memo: { applies: memo.required, pathway: memo.pathway, reason: memo.reason, text: memo.text },
+      memo: { applies: memo.required, pathway: memo.pathway, reason: memo.reason, text: memo.text, suppressed: c.coverMemoSuppressed === true, textOverridden: typeof c.coverMemoTextOverride === 'string' && c.coverMemoTextOverride.trim().length > 0 },
       stripe: { configured: stripeConfigured, link: stripeLink },
       emailTransport: { configured: isEmailTransportConfigured() },
       savedEmail: savedEmailRow ? { id: savedEmailRow.id, subject: savedEmailRow.subject, body: savedEmailRow.body, sentAt: savedEmailRow.sentAt, status: savedEmailRow.status } : null,
@@ -206,6 +235,63 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       const caseId = String(req.params.id);
       const out = await composeDelivery(caseId);
       res.json({ data: out });
+    }),
+  );
+
+  // ── Cover-memo staff controls (Dr. Kasky 2026-06-26, Spring) ──────────────
+  // SUPPRESS = send ONLY the nexus letter (no cover memo); EDIT (PUT) = a staff-edited memo body that
+  // replaces the composed text; DELETE = clear the override (back to the composed memo). All three flip
+  // delivery.composeMemo and return the recomposed memo so the panel updates immediately. This unblocks
+  // the case where the memo's auto-derived condition is wrong and the RN couldn't honestly confirm it.
+  async function memoStatePayload(caseId: string): Promise<{ applies: boolean; pathway: CoverMemoPathway | null; reason: string; text: string | null; suppressed: boolean }> {
+    const c = await db.case.findFirst({ where: { id: caseId } });
+    if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+    const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
+    const vFirst = (veteran as { firstName?: string } | null)?.firstName ?? null;
+    const vLast = (veteran as { lastName?: string } | null)?.lastName ?? '';
+    const memo = await composeMemo(c, vFirst, vLast);
+    return { applies: memo.required, pathway: memo.pathway, reason: memo.reason, text: memo.text, suppressed: c.coverMemoSuppressed === true };
+  }
+  router.post(
+    '/cases/:id/delivery/cover-memo/suppress',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      const suppressed = ((req.body ?? {}) as { suppressed?: unknown }).suppressed === true;
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      await db.case.update({ where: { id: caseId }, data: { coverMemoSuppressed: suppressed } });
+      try { await db.activityLog.create({ data: { actorUserId: user.sub, action: 'cover_memo_suppress', caseId, veteranId: c.veteranId, detailsJson: { suppressed } } }); } catch { /* best-effort audit */ }
+      res.json({ data: await memoStatePayload(caseId) });
+    }),
+  );
+  router.put(
+    '/cases/:id/delivery/cover-memo',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      const text = typeof ((req.body ?? {}) as { text?: unknown }).text === 'string' ? ((req.body as { text: string }).text) : '';
+      if (text.trim().length === 0) throw new HttpError(400, 'bad_request', 'Cover memo text is required (use DELETE to clear the override).', { caseId });
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      await db.case.update({ where: { id: caseId }, data: { coverMemoTextOverride: text } });
+      try { await db.activityLog.create({ data: { actorUserId: user.sub, action: 'cover_memo_edit', caseId, veteranId: c.veteranId, detailsJson: { length: text.length } } }); } catch { /* best-effort audit */ }
+      res.json({ data: await memoStatePayload(caseId) });
+    }),
+  );
+  router.delete(
+    '/cases/:id/delivery/cover-memo',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      await db.case.update({ where: { id: caseId }, data: { coverMemoTextOverride: null } });
+      try { await db.activityLog.create({ data: { actorUserId: user.sub, action: 'cover_memo_edit_clear', caseId, veteranId: c.veteranId, detailsJson: {} } }); } catch { /* best-effort audit */ }
+      res.json({ data: await memoStatePayload(caseId) });
     }),
   );
 

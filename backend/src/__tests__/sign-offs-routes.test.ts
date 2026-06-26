@@ -30,6 +30,8 @@ function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
     previouslyDenied: false,
     priorDenialReason: null,
     priorDecisionDate: null,
+    coverMemoSuppressed: false,
+    coverMemoTextOverride: null,
     framingChoice: 'secondary',
     upstreamScCondition: 'PTSD',
     veteranStatement: null,

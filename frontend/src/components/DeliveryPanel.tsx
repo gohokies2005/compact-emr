@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { describeApiError } from '../api/client';
-import { getDelivery, openMemoPdf, resetDeliveryLock, sendDelivery, type DeliveryPreview } from '../api/delivery';
+import { getDelivery, openMemoPdf, resetDeliveryLock, sendDelivery, suppressCoverMemo, editCoverMemo, clearCoverMemoOverride, type DeliveryPreview } from '../api/delivery';
 
 interface DeliveryPanelProps {
   readonly caseId: string;
@@ -31,6 +31,13 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
   // failed (the message carries the REAL error verbatim) → red.
   const [sentMessage, setSentMessage] = useState<{ text: string; ok: boolean } | null>(null);
   const [resetMessage, setResetMessage] = useState<string | null>(null);
+  // Cover-memo staff controls (Dr. Kasky 2026-06-26, Spring): suppress / edit / revert.
+  const [editingMemo, setEditingMemo] = useState(false);
+  const [memoDraft, setMemoDraft] = useState('');
+  const invalidateDelivery = () => { void qc.invalidateQueries({ queryKey: ['case', caseId, 'delivery'] }); };
+  const suppressMut = useMutation({ mutationFn: (suppressed: boolean) => suppressCoverMemo(caseId, suppressed), onSuccess: invalidateDelivery });
+  const editMemoMut = useMutation({ mutationFn: (text: string) => editCoverMemo(caseId, text), onSuccess: () => { setEditingMemo(false); invalidateDelivery(); } });
+  const clearMemoMut = useMutation({ mutationFn: () => clearCoverMemoOverride(caseId), onSuccess: invalidateDelivery });
 
   // E4: "Verify the cover memo" opens a true PDF in a new tab (like the letter verify), rendered
   // server-side by GET /delivery/memo.pdf. Failures surface the REAL reason (standing rule).
@@ -134,8 +141,9 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
 
       {/* P0d (Ryan 2026-06-13): never let "no cover memo" be silent. When the case is classified as
           an original claim, say so + how to fix it — appeals/supplementals must carry a memo, and
-          the only reason one wouldn't generate is the case not being flagged as one. */}
-      {!memoApplies ? (
+          the only reason one wouldn't generate is the case not being flagged as one. NOT shown when
+          the memo was deliberately SUPPRESSED by staff (that has its own note below). */}
+      {!memoApplies && data.memo.suppressed !== true ? (
         <p className="mt-2 text-xs text-slate-500">
           No cover memo applies — this case is classified as an original claim (no prior denial on
           file). If it is an appeal, supplemental, HLR, or TDIU, set the claim type / prior-denial on
@@ -144,6 +152,41 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
       ) : null}
 
       {memoError ? <p className="mt-2 text-sm text-rose-600">{memoError}</p> : null}
+
+      {/* Cover-memo staff controls (Dr. Kasky 2026-06-26, Spring): do-not-send (suppress), edit, revert.
+          When the auto-derived memo is wrong, the RN can fix it or send only the nexus letter — instead
+          of being stuck unable to honestly confirm a wrong memo. */}
+      <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+        <label className="flex items-start gap-2 text-sm text-slate-800">
+          <input type="checkbox" className="mt-0.5" checked={data.memo.suppressed === true} disabled={suppressMut.isPending}
+            onChange={(e) => suppressMut.mutate(e.target.checked)} />
+          <span>Don’t send a cover memo with this case (send only the nexus letter).{data.memo.suppressed === true ? ' — suppressed' : ''}</span>
+        </label>
+        {memoApplies ? (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {!editingMemo ? (
+              <Button type="button" variant="secondary" size="sm" onClick={() => { setMemoDraft(data.memo.text ?? ''); setEditingMemo(true); }}>
+                {data.memo.textOverridden ? 'Edit cover memo (edited)' : 'Edit cover memo'}
+              </Button>
+            ) : null}
+            {data.memo.textOverridden ? (
+              <Button type="button" variant="ghost" size="sm" loading={clearMemoMut.isPending} onClick={() => clearMemoMut.mutate()}>
+                Revert to auto-generated
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+        {editingMemo ? (
+          <div className="mt-2">
+            <textarea className="input w-full font-mono text-xs leading-snug" rows={14} value={memoDraft} onChange={(e) => setMemoDraft(e.target.value)} />
+            <p className="mt-1 text-xs text-slate-500">Keep the <code>[SIGNATURE]</code> marker so the signature renders (if removed, a signature block is appended automatically). Saving replaces the auto-generated memo for this case.</p>
+            <div className="mt-2 flex gap-2">
+              <Button type="button" size="sm" loading={editMemoMut.isPending} disabled={memoDraft.trim().length === 0} onClick={() => editMemoMut.mutate(memoDraft)}>Save memo</Button>
+              <Button type="button" variant="secondary" size="sm" onClick={() => setEditingMemo(false)}>Cancel</Button>
+            </div>
+          </div>
+        ) : null}
+      </div>
 
       {/* Confirm checkboxes */}
       <div className="mt-5 space-y-2">

@@ -20,6 +20,9 @@ import {
   aws_iam as iam,
   aws_sqs as sqs,
   aws_ecr as ecr,
+  aws_cloudwatch as cloudwatch,
+  aws_cloudwatch_actions as cloudwatchActions,
+  aws_sns as sns,
 } from 'aws-cdk-lib';
 import type { CompactEmrConfig } from './config.js';
 import { DRAFTER_MAX_CONCURRENCY } from './drafter-constants.js';
@@ -549,5 +552,38 @@ export class ApiStack extends Stack {
       integration: new integrations.HttpLambdaIntegration('DeliveryPortalIntegration', handler),
       // no authorizer — token + password enforced in-app
     });
+
+    // ===== chart_build_stalled metric-filter alarm (hash-drift "extracting" wedge, 2026-06-26) =====
+    // chart-readiness.ts logs `[chart_build_stalled] case <id> is 'extracting' with NO run matching
+    // current hash ...` (PLAIN-TEXT console.warn — NOT JSON) on every readiness poll while a case is
+    // wedged on the extracting dead-end (Dick/Mittge class). The stuck-RUN watcher is blind to this
+    // (it only sees runs that EXIST). Plain-text quoted-term filter mirrors the live drafter
+    // `"FATAL (exit 4)"` filter. Reliability/ops signal → ops-alerts (confirmed gmail subscriber).
+    const opsTopic = sns.Topic.fromTopicArn(
+      this, 'OpsAlertsTopicRef',
+      `arn:aws:sns:${this.region}:${this.account}:compact-emr-${props.config.envName}-ops-alerts`,
+    );
+    const chartBuildStalledFilter = new logs.MetricFilter(this, 'ChartBuildStalledFilter', {
+      logGroup: apiLogGroup,
+      metricNamespace: `compact-emr-${props.config.envName}`,
+      metricName: 'ChartBuildStalled',
+      filterPattern: logs.FilterPattern.literal('"[chart_build_stalled]"'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const chartBuildStalledAlarm = new cloudwatch.Alarm(this, 'ChartBuildStalledAlarm', {
+      alarmName: `compact-emr-${props.config.envName}-chart-build-stalled`,
+      alarmDescription:
+        'A case is wedged on the chart-extract "extracting" dead-end (hash-drift): chart-readiness ' +
+        'logged [chart_build_stalled] with no extraction run matching the current doc-set hash. The ' +
+        'route auto-enqueues a self-heal extraction; if this stays in ALARM the self-heal is not ' +
+        `converging. Inspect /aws/lambda/compact-emr-${props.config.envName}-api for the caseId.`,
+      metric: chartBuildStalledFilter.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    chartBuildStalledAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
   }
 }

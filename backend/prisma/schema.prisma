@@ -383,6 +383,11 @@ model Case {
   previouslyDenied    Boolean    @default(false) @map("previously_denied")
   priorDenialReason   String?    @map("prior_denial_reason")
   priorDecisionDate   DateTime?  @map("prior_decision_date") @db.Date
+  // Cover-memo staff controls (Dr. Kasky 2026-06-26, Spring): suppress = send ONLY the nexus letter
+  // (no cover memo); textOverride = a staff-edited memo body that replaces the composed text. Both
+  // optional/defaulted → existing rows unaffected. Read by delivery.composeMemo.
+  coverMemoSuppressed    Boolean  @default(false) @map("cover_memo_suppressed")
+  coverMemoTextOverride  String?  @map("cover_memo_text_override")
   framingChoice       String?    @map("framing_choice")
   upstreamScCondition String?    @map("upstream_sc_condition")
   // P4 anchor-viability snapshot (caseViability v1, build plan §3.2): written ONLY-WHEN-NULL by

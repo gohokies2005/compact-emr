@@ -30,6 +30,8 @@ function baseCase(): CaseRecord {
   return {
     id: 'CASE-1', veteranId: 'VET-1', claimedCondition: 'OSA', claimedConditions: ['OSA'], claimType: 'initial',
     previouslyDenied: false, priorDenialReason: null, priorDecisionDate: null,
+    coverMemoSuppressed: false,
+    coverMemoTextOverride: null,
     framingChoice: 'secondary', upstreamScCondition: 'PTSD', veteranStatement: null, inServiceEvent: null,
     status: 'records', cdsVerdict: 'not_yet_run', cdsOddsPct: null, cdsRationale: null,
     assignedPhysicianId: null, assignedRnId: null, refundEligible: false, currentVersion: 0,

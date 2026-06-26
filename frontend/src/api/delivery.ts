@@ -1,4 +1,4 @@
-import { apiGet, apiPost } from './client';
+import { apiGet, apiPost, apiPut, apiDelete } from './client';
 
 // Mirrors the backend delivery route (routes/delivery.ts). The delivery preview is composed
 // server-side from the finalized letter TXT (§VII+§VIII excerpt), the fixed delivery email, the
@@ -29,6 +29,18 @@ export interface DeliveryMemoPreview {
   readonly pathway: CoverMemoPathway | null;
   readonly reason: string;
   readonly text: string | null;
+  // Cover-memo staff controls (Dr. Kasky 2026-06-26): suppressed = staff chose to send only the letter;
+  // textOverridden = a staff-edited memo body is in effect. Older payloads omit these → treated as false.
+  readonly suppressed?: boolean;
+  readonly textOverridden?: boolean;
+}
+
+export interface CoverMemoStateResult {
+  readonly applies: boolean;
+  readonly pathway: CoverMemoPathway | null;
+  readonly reason: string;
+  readonly text: string | null;
+  readonly suppressed: boolean;
 }
 
 export interface DeliverySavedEmail {
@@ -95,6 +107,20 @@ export function sendDelivery(
   input: { emailBody: string; resend?: boolean },
 ): Promise<{ data: DeliverySendResult }> {
   return apiPost<{ data: DeliverySendResult }, typeof input>(deliveryPath(caseId, '/send'), input);
+}
+
+// Cover-memo staff controls (Dr. Kasky 2026-06-26, Spring). Suppress = send ONLY the nexus letter;
+// edit = a staff-written memo body; clear = revert to the auto-composed memo. Each returns the
+// recomposed memo state so the panel updates without a full refetch.
+export function suppressCoverMemo(caseId: string, suppressed: boolean): Promise<{ data: CoverMemoStateResult }> {
+  return apiPost<{ data: CoverMemoStateResult }, { suppressed: boolean }>(deliveryPath(caseId, '/cover-memo/suppress'), { suppressed });
+}
+export function editCoverMemo(caseId: string, text: string): Promise<{ data: CoverMemoStateResult }> {
+  return apiPut<{ data: CoverMemoStateResult }, { text: string }>(deliveryPath(caseId, '/cover-memo'), { text });
+}
+export function clearCoverMemoOverride(caseId: string): Promise<void> {
+  // apiDelete returns void; the caller refetches the delivery preview to pick up the reverted memo.
+  return apiDelete(deliveryPath(caseId, '/cover-memo'));
 }
 
 /**

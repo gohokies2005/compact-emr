@@ -15,6 +15,14 @@ export interface SoapHeadlineInput {
   readonly stale?: boolean | undefined;
   /** The live route-picker plan's framing (only meaningful when grounded). */
   readonly routePickerFraming?: string | null | undefined;
+  /**
+   * The READY route-picker card's chosen framing (one-brain, #72/#89). Used when the note is not
+   * grounded-by-the-SOAP-response but the route-picker PLAN is ready (e.g. inputHash drift made the
+   * SOAP read ungrounded while the card plan is still ready). This is the SAME theory the Assessment
+   * body argues, so it beats the static strategy engine's headline (which reads the stale intake claim
+   * — the OSA "secondary to Knee" vs depression mismatch, Dr. Kasky 2026-06-26). Suppressed when stale.
+   */
+  readonly routePickerCardFraming?: string | null | undefined;
   /** The static strategy engine's primary argument (the legacy/ungrounded headline). */
   readonly strategyPrimaryArgument?: string | null | undefined;
   /** A composed "X — secondary to Y" anchor headline (when a viability best-anchor exists). */
@@ -34,10 +42,16 @@ export function groundedHeadlineFraming(input: Pick<SoapHeadlineInput, 'grounded
   return null;
 }
 
-/** The bold headline string: grounded framing (when usable) → strategy → anchor → deterministic title. */
+/**
+ * The bold headline string: grounded framing (when usable) → the READY route-picker card framing (the
+ * one-brain theory the body argues, when not stale) → static strategy → anchor → deterministic title.
+ * The route-picker card framing is placed ABOVE the static strategy so the heading follows the chosen
+ * theory (e.g. depression) instead of the stale intake claim (e.g. "secondary to Knee").
+ */
 export function soapHeadline(input: SoapHeadlineInput): string {
   return (
     groundedHeadlineFraming(input)
+    || (input.stale !== true ? (input.routePickerCardFraming ?? null) : null)
     || input.strategyPrimaryArgument
     || input.anchorHeadline
     || input.resultTitle

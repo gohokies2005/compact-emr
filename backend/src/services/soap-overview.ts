@@ -810,3 +810,30 @@ export async function getOrBuildSoapNote(
   }
   return { data: note, fingerprint, stale: false, cached: false };
 }
+
+/**
+ * SERVE-STORED-FIRST decision (Bays 2026-06-26, Dr. Kasky "load the REAL thing, not the intermediate;
+ * auto-refresh"). On a plain (non-force) open, decide whether to serve the persisted SOAP note DIRECTLY —
+ * decoupled from route-picker inputHash drift — and whether to fire a background auto-refresh.
+ *
+ * Root: while a case is status='drafting' the drafter rewrites the Case row, so the LIVE route-picker
+ * inputHash drifts off the persisted plan hash → the sync read goes ungrounded → its ctx fingerprint can
+ * never match the fingerprint the async precompute persisted the GROUNDED note under → the real note was
+ * served only as stale (the "regenerate" nag) or, when none existed yet, replaced by a truncated fallback.
+ *
+ * The stored soap_overviews row is, BY CONSTRUCTION, a real note: a transient fallback is never persisted
+ * (see getOrBuildSoapNote), so a current-shape row is a successful precompute's output. Serve it. Returns the
+ * note to serve + whether the live fingerprint drifted (→ caller fires ONE background refresh), or null to
+ * fall through to the assemble/generate path (cold, wrong-shape, or fallback-only stored row). Pure + testable.
+ */
+export function decideServeStored(
+  stored: { inputHash: string; schemaVersion: number; resultJson: unknown } | null,
+  fingerprint: string,
+): { note: SoapNote; refresh: boolean } | null {
+  const storedNote = stored && stored.resultJson && typeof stored.resultJson === 'object'
+    ? (stored.resultJson as SoapNote) : null;
+  if (stored === null || storedNote === null) return null;
+  if (stored.schemaVersion !== SOAP_NOTE_SCHEMA_VERSION) return null; // wrong shape → the shape-stale heal owns it
+  if (storedNote.fallback === true) return null;                      // never serve a transient brief as the durable note
+  return { note: storedNote, refresh: stored.inputHash !== fingerprint };
+}

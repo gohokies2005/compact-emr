@@ -390,6 +390,10 @@ export interface CaseRecord {
   previouslyDenied: boolean;
   priorDenialReason: string | null;
   priorDecisionDate: Date | null;
+  // Cover-memo staff controls (Dr. Kasky 2026-06-26, Spring): suppress = send only the letter;
+  // textOverride = a staff-edited memo body. Read by delivery.composeMemo.
+  coverMemoSuppressed: boolean;
+  coverMemoTextOverride: string | null;
   framingChoice: string | null;
   upstreamScCondition: string | null;
   veteranStatement: string | null;

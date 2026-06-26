@@ -16,7 +16,7 @@ import type { AppDb } from '../services/db-types.js';
 import { caseViabilityEnabled, deriveCaseViabilityForCase } from '../services/case-viability-stamp.js';
 import { getAiViabilityState, aiRoutePickerEnabled } from '../services/ai-viability.js';
 import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
-import { getOrBuildSoapNote, soapNoteFingerprint, SOAP_NOTE_SCHEMA_VERSION, type SoapContext, type SoapOverviewCacheDb } from '../services/soap-overview.js';
+import { getOrBuildSoapNote, soapNoteFingerprint, SOAP_NOTE_SCHEMA_VERSION, decideServeStored, type SoapContext, type SoapOverviewCacheDb } from '../services/soap-overview.js';
 import { assembleSoapContextForCase } from '../services/soap-context-assembler.js';
 import { loadReconciledChartReadiness } from '../services/chart-readiness.js';
 import { buildDigestForCase } from '../advisory/chartSlice.js';
@@ -114,6 +114,30 @@ export function createCaseViabilityRouter(db: AppDb): Router {
         let chartDigest: string | null = null;
         try { chartDigest = await buildDigestForCase(db, caseId); } catch { chartDigest = null; }
         ctx = { claimedCondition, routePickerFraming, chartDigest };
+      }
+      // SERVE-STORED-FIRST (Dr. Kasky 2026-06-26, Bays "load the REAL thing, not the intermediate; auto-refresh").
+      // A plain open MUST serve the persisted current-shape SOAP note regardless of route-picker inputHash drift.
+      // ROOT (hash-drift gate wedge): while a case is status='drafting' the drafter rewrites the Case row every
+      // few seconds, so the LIVE route-picker inputHash drifts off the persisted plan hash → getAiViabilityState
+      // returns 'none' → routePickerFraming is null → the SoapContext is assembled UNGROUNDED → its fingerprint
+      // can never equal the fingerprint the async precompute persisted the GROUNDED note under. getOrBuildSoapNote
+      // then served that real note only as stale=true (the "new info — regenerate" nag) or, when no current-shape
+      // note existed yet, regenerated a truncated fallback on this 25s-capped sync path ("couldn't be generated").
+      // The stored row is BY CONSTRUCTION a real (fallback:false) note from a successful precompute, so SERVE IT
+      // now ($0, NOT stale). If the fingerprint drifted, fire ONE background auto-refresh — but still serve the
+      // real note THIS open. The route-picker VERDICT (GET /viability-card, Gate-1) keeps its strict hash gate;
+      // this decoupling is scoped to the SOAP-note surface. Fail-open: any read error falls through to today's path.
+      if (body.forceRegenerate !== true) {
+        try {
+          const fingerprint = soapNoteFingerprint(ctx);
+          const storedRow = await (db as unknown as SoapOverviewCacheDb).soapOverview.findUnique({ where: { caseId } });
+          const decision = decideServeStored(storedRow, fingerprint);
+          if (decision) {
+            if (decision.refresh && !firedRecompute) void fireRecomputeViability(caseId);
+            res.json({ data: decision.note, fingerprint, stale: false, cached: true, grounded: routePickerFraming !== null, routePickerFraming });
+            return;
+          }
+        } catch { /* fail-open: fall through to the assemble/generate path below */ }
       }
       // SHAPE-STALE SELF-HEAL (Ryan 2026-06-23, Zimmelman "re-renders every open"). A SOAP schema bump
       // (SOAP_NOTE_SCHEMA_VERSION 25→26) strands every pre-deploy stored note: getOrBuildSoapNote treats an

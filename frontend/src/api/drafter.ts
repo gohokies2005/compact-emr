@@ -1,8 +1,7 @@
 import axios from 'axios';
 import { apiGet, apiPost } from './client';
-import { createChartNote } from './chart-notes';
 import { transitionCaseStatus, type TransitionInput } from './cases';
-import type { CaseLite } from './cases';
+import { declineLetter } from './letter';
 
 export interface RnDecisionInput {
   readonly gate2Override?: boolean;
@@ -100,18 +99,26 @@ export interface SendBackToRnInput {
   readonly note?: string;
 }
 
-export async function sendBackToRn(input: SendBackToRnInput): Promise<{ data: CaseLite }> {
+export async function sendBackToRn(input: SendBackToRnInput): Promise<void> {
   const trimmedNote = input.note?.trim();
 
   if (trimmedNote) {
-    await createChartNote(input.veteranId, trimmedNote);
+    // The doctor's note MUST reach the RN on the case ACTION page. /letter/decline is the purpose-built
+    // path: in ONE transaction it sets Case.operatorMessage (the amber "the doctor sent this back with a
+    // correction note" box the RN Action tab reads) AND drops a case-linked StaffMessage into the RN's
+    // inbox AND does the correction_requested transition + activity log. The OLD path wrote the note to a
+    // veteran-scoped chart note (invisible on the Action page) and flipped status with a GENERIC hardcoded
+    // reason, so the RN saw only the status change with NO content (Dr. Kasky 2026-06-26). declineLetter
+    // requires a non-empty reason — which is exactly this note.
+    await declineLetter(input.caseId, { reason: trimmedNote });
+    return;
   }
 
-  return transitionCaseStatus(input.caseId, {
+  // No note → just flip the status; there is no message to deliver.
+  await transitionCaseStatus(input.caseId, {
     from: input.from,
     to: 'correction_requested',
     version: input.version,
-    ...(trimmedNote && { transitionReason: 'physician requested major rework' }),
   });
 }
 

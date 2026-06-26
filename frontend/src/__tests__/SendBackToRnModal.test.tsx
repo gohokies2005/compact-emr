@@ -39,24 +39,8 @@ function renderModal() {
 describe('SendBackToRnModal', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Mock response shape matches our CaseLite contract (currentVersion + assignedPhysicianId
-    // + refundEligible required).
-    sendBackToRnMock.mockResolvedValue({
-      data: {
-        id: 'CASE-3',
-        veteranId: 'VET-3',
-        claimedCondition: 'Sleep apnea',
-        claimType: 'supplemental',
-        status: 'correction_requested',
-        version: 8,
-        currentVersion: 7,
-        assignedPhysicianId: null,
-        assignedRnId: null,
-        refundEligible: false,
-        createdAt: '2026-05-25T12:00:00.000Z',
-        updatedAt: '2026-05-25T12:00:00.000Z',
-      },
-    });
+    // sendBackToRn resolves void (it routes to /letter/decline or a plain status transition).
+    sendBackToRnMock.mockResolvedValue(undefined);
   });
 
   it('submitting calls sendBackToRn with the textarea content', async () => {

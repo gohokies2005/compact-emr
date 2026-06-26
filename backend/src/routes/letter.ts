@@ -1118,7 +1118,12 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
 
       const c = await db.case.findFirst({ where: { id: caseId } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
-      if (user.role === 'physician') {
+      // Enforce assigned-physician ONLY when a physician IS assigned — mirrors the status-route carve-out
+      // (cases.ts roleGuardForStatusTransition, Ryan 2026-06-06): an UNASSIGNED physician_review case
+      // (legacy / claimed-from-queue) must stay actionable by the reviewing physician, else the letter is
+      // stuck with nobody able to send it back. Without the `!== null` guard, send-back-WITH-a-note (which
+      // now routes here) would 403 where the no-note path still succeeds (Dr. Kasky send-back note fix).
+      if (user.role === 'physician' && c.assignedPhysicianId !== null) {
         const physician = await resolveCurrentPhysician(db, user.sub);
         if (physician === null || c.assignedPhysicianId !== physician.id) {
           throw new HttpError(403, 'forbidden', 'Physician is not assigned to this case.', { caseId });

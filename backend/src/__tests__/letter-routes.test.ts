@@ -1117,6 +1117,18 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     expect(upd.data.operatorMessage).toBe(reason);
   });
 
+  // Regression (Dr. Kasky send-back note fix): a physician must be able to decline an UNASSIGNED
+  // physician_review case (legacy / claimed-from-queue). The assignment guard runs ONLY when a physician
+  // IS assigned — without the `assignedPhysicianId !== null` carve-out this 403'd, which would dead-end
+  // send-back-with-a-note (it routes through /decline) while the no-note path still worked.
+  it('decline SUCCEEDS for a physician on an UNASSIGNED case (assignment guard skipped when none assigned)', async () => {
+    mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+    const { db } = makeDb(baseCase({ assignedPhysicianId: null }));
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/decline').send({ reason: 'rework the overall theory' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('correction_requested');
+  });
+
   it('rejects ops_staff on approve with 403', async () => {
     mockUser = { sub: 'OPS', roles: ['ops_staff'] };
     const res = await request(appFor(makeDb().db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});

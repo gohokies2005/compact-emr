@@ -20,6 +20,9 @@ export function LetterPdfModal({ caseId, onClose }: { readonly caseId: string | 
     queryKey: ['letter-pdf', caseId],
     queryFn: () => getLetter(caseId!),
     enabled: caseId !== null,
+    // Presigned PDF URLs expire (~5 min). Always refetch a fresh one on open so a reopen of the
+    // same case never iframes a stale/expired URL from cache.
+    staleTime: 0,
   });
   if (caseId === null) return null;
   const url = q.data?.data.rendered?.pdfUrl;

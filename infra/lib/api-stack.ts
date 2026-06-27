@@ -229,6 +229,12 @@ export class ApiStack extends Stack {
         // rebuild). LIVE SMOKE owed: regenerate a Blue-Button case's pack + confirm the grant/AHI/med pages
         // + cover why-lines appear; physician review is the backstop, revert is one context flip.
         DOCTOR_PACK_GROUNDED_PAGES: (this.node.tryGetContext('doctor_pack_grounded_pages') as string | undefined) ?? 'on',
+        // DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26): the "5 evidence categories" abridged-notes fix — per-
+        // category presence-gated floors (clinical/sc_proof/denial/tests/lay) + 30-page budget + chart-fact
+        // category override so the SC-list/denial/study/statement pages can't be budget-starved, plus the
+        // cover "Required evidence checklist". OFF = byte-identical (clinical-only floor, 15-page budget).
+        // Read at request time in doctor-pack-generate (no image rebuild); revert is one context flip.
+        DOCTOR_PACK_CATEGORY_FLOORS: (this.node.tryGetContext('doctor_pack_category_floors') as string | undefined) ?? 'off',
         // Guided Revision (physician highlight-the-passage broader letter edit, Opus 4.8) — ON (Ryan
         // 2026-06-14: "guided revision looks good, but not available"). Context-overridable to disable.
         GUIDED_REVISION_ENABLED: (this.node.tryGetContext('guided_revision_enabled') as string | undefined) ?? 'true',

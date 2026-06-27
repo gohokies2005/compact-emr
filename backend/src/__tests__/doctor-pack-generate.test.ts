@@ -125,7 +125,7 @@ function makeGenDb(
     // injected as a sc_conditions row with source='extracted' + sourceDocumentId/sourcePage so the
     // back-map (doctor-pack-grounded-pages.ts) maps it to a page. Only consulted when the
     // DOCTOR_PACK_GROUNDED_PAGES flag is on (else the delegates are never called).
-    groundedScRows?: readonly { sourceDocumentId: string; sourcePage: number; sourceQuote: string }[];
+    groundedScRows?: readonly { sourceDocumentId: string; sourcePage: number; sourceQuote: string; status?: string }[];
   } = {},
 ) {
   const caseVersion = opts.caseVersion ?? 6;
@@ -173,7 +173,9 @@ function makeGenDb(
     // reads. Injected SC rows carry source='extracted'; problems/meds default empty here.
     scCondition: {
       findMany: vi.fn(async () =>
-        (opts.groundedScRows ?? []).map((r) => ({ source: 'extracted', sourceDocumentId: r.sourceDocumentId, sourcePage: r.sourcePage, sourceQuote: r.sourceQuote, confidence: null })),
+        // status/condition feed chartFactCategoryByDocument (DOCTOR_PACK_CATEGORY_FLOORS); the
+        // sourcePage/sourceQuote feed the grounded-page back-map. One row shape serves both.
+        (opts.groundedScRows ?? []).map((r) => ({ source: 'extracted', sourceDocumentId: r.sourceDocumentId, sourcePage: r.sourcePage, sourceQuote: r.sourceQuote, confidence: null, status: r.status ?? null, condition: null })),
       ),
     },
     activeProblem: { findMany: vi.fn(async () => []) },
@@ -803,5 +805,101 @@ describe('generateDoctorPackForCase — screening-summary exclusion (P2-2)', () 
     const manifest = created.data?.manifestJson as ManifestShape;
     expect(manifest.entries.some((e) => e.filePath === SCREENING_SUMMARY_S3KEY)).toBe(false);
     expect(manifest.entries.some((e) => e.filePath === 'cases/CASE-1/aaaa9999-Progress_Notes.pdf')).toBe(true);
+  });
+});
+
+// ============================================================================================
+// DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26, dark): chart-fact category override + passthrough credit.
+// Flag ON ⇒ a granted-SC doc the classifier mislabeled is routed to its real category, and a
+// whole-doc passthrough clinical doc credits the no-dx signal. Flag OFF ⇒ unchanged.
+// ============================================================================================
+describe('generateDoctorPackForCase — DOCTOR_PACK_CATEGORY_FLOORS (flag-gated)', () => {
+  const ORIGINAL_FLAG = process.env['DOCTOR_PACK_CATEGORY_FLOORS'];
+  afterEach(() => {
+    if (ORIGINAL_FLAG === undefined) delete process.env['DOCTOR_PACK_CATEGORY_FLOORS'];
+    else process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = ORIGINAL_FLAG;
+  });
+
+  // A doc the classifier labels personnel_record (pack category 'other') whose EXTRACTED chart fact
+  // proves it grounds a GRANTED SC condition → the override routes it to 'sc_proof'.
+  const PERSONNEL_DOC: MockDocument = {
+    id: 'doc-personnel', s3Key: 'cases/CASE-1/pppp0000-Personnel_Record.pdf', pageCount: 2, docTag: null,
+    filename: 'Personnel_Record.pdf', contentType: 'application/pdf',
+  };
+  const DD214_DOC: MockDocument = {
+    id: 'doc-dd', s3Key: 'cases/CASE-1/dddd0000-DD-214.pdf', pageCount: 1, docTag: null,
+    filename: 'DD-214.pdf', contentType: 'application/pdf',
+  };
+  const ORDER_DOCS: readonly MockDocument[] = [DEFAULT_CLINICAL_DOC, PERSONNEL_DOC, DD214_DOC];
+  const ORDER_PAGES: readonly MockPageRow[] = [
+    ...DEFAULT_PAGE_ROWS, // doc-cl clinical note (OSA)
+    pageRow('doc-personnel', 1, 'Service member personnel administrative file. Assignment history.'),
+    pageRow('doc-dd', 1, 'Certificate of Release or Discharge from Active Duty. DD Form 214.'),
+  ];
+
+  it('flag ON: a granted-SC doc the classifier mislabeled is routed to sc_proof and ORDERS ahead of the service doc (override survives)', async () => {
+    process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = 'on';
+    const { db, created } = makeGenDb({
+      caseVersion: 6,
+      documents: ORDER_DOCS,
+      pageRows: ORDER_PAGES,
+      // The personnel doc grounds a GRANTED SC condition → chart-fact override → 'sc_proof'.
+      groundedScRows: [{ sourceDocumentId: 'doc-personnel', sourcePage: 1, sourceQuote: 'PTSD 70% service-connected', status: 'service_connected' }],
+    });
+    await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: vi.fn(async () => ({})) }, recordsBucketName: 'phi-test-bucket' },
+    );
+    const manifest = created.data?.manifestJson as ManifestShape;
+    // Medicine-first order: clinical → ... → sc_proof → ... → service. The override puts the
+    // personnel doc in the sc_proof slot, AHEAD of the DD-214 (service). Both survive.
+    expect(manifest.entries.map((e) => e.docType)).toEqual([
+      'cover_index', 'progress_notes', 'personnel_record', 'dd_214',
+    ]);
+  });
+
+  it('CONTROL (flag ON, no granted-SC fact): the SAME personnel doc stays category "other" and orders AFTER the service doc', async () => {
+    process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = 'on';
+    const { db, created } = makeGenDb({
+      caseVersion: 6,
+      documents: ORDER_DOCS,
+      pageRows: ORDER_PAGES,
+      // No grounded SC fact ⇒ no override ⇒ personnel_record stays 'other' (last).
+    });
+    await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: vi.fn(async () => ({})) }, recordsBucketName: 'phi-test-bucket' },
+    );
+    const manifest = created.data?.manifestJson as ManifestShape;
+    expect(manifest.entries.map((e) => e.docType)).toEqual([
+      'cover_index', 'progress_notes', 'dd_214', 'personnel_record',
+    ]);
+  });
+
+  it('passthrough credit: a whole-doc passthrough CLINICAL doc (no page text, null pageCount) keeps the no-dx signal FALSE', async () => {
+    process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = 'on';
+    // A DBQ (clinical, high_signal) with NO OCR text + null pageCount → arrives as a whole-doc
+    // passthrough (empty pageRanges). It ships bounded and CREDITS the clinical category, so the
+    // no-clinical-dx warning must NOT fire.
+    const DBQ_PASSTHROUGH: MockDocument = {
+      id: 'doc-dbq', s3Key: 'cases/CASE-1/qqqq0000-DBQ.pdf', pageCount: null, docTag: null,
+      filename: 'DBQ.pdf', contentType: 'application/pdf',
+    };
+    const { db, created } = makeGenDb({ caseVersion: 6, documents: [DBQ_PASSTHROUGH], pageRows: [] });
+    const result = await generateDoctorPackForCase(
+      db,
+      { caseId: 'CASE-1', actorSub: 'OPS-1', trigger: 'manual' },
+      { s3: { send: vi.fn(async () => ({})) }, recordsBucketName: 'phi-test-bucket' },
+    );
+    expect(result.outcome).toBe('queued');
+    const manifest = created.data?.manifestJson as ManifestShape;
+    // The passthrough clinical doc shipped (bounded), so the clinical category is represented.
+    const dbq = manifest.entries.find((e) => e.docType === 'dbq');
+    expect(dbq).toBeDefined();
+    expect((dbq?.pageCount ?? 0)).toBeGreaterThan(0);
+    // No NO_CLINICAL_DX_DOCUMENTATION warning — the passthrough credited the no-dx signal.
+    expect(manifest.warnings ?? []).not.toContain('NO_CLINICAL_DX_DOCUMENTATION');
   });
 });

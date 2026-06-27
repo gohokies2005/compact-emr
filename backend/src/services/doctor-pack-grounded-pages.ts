@@ -210,3 +210,104 @@ export async function groundedSourcePagesForCase(
   }
   return out;
 }
+
+// ============ DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26): chart-fact category override ============
+//
+// Maps each of THIS case's source Documents to the pack CATEGORY its extracted chart facts prove it
+// belongs in, REGARDLESS of how the filename/content classifier labeled it. A doc the classifier
+// mislabeled (e.g. a "Misc_5.pdf" the extractor proved grounds a granted SC condition) is routed to
+// 'sc_proof' so the category-floor budget protects it. Precedence denial > sc_proof > clinical (a
+// single doc can ground multiple facts; the strongest category wins).
+//
+//   - scCondition.status === 'service_connected'  → 'sc_proof'
+//   - scCondition.status === 'denied'             → 'denial'
+//   - any extracted activeProblem                 → 'clinical'
+//   - scCondition.status === 'pending' (or other) → contributes NO category
+//
+// Pure read, fail-OPEN (any error ⇒ empty map ⇒ no override ⇒ docType classification stands).
+// Case-document-scoped (veteran chart rows ∩ this case's document set), extracted-source only.
+
+export type ChartFactCategory = 'sc_proof' | 'denial' | 'clinical';
+
+interface CategoryScRow {
+  readonly source: string;
+  readonly sourceDocumentId: string | null;
+  readonly status: string | null;
+  readonly condition: string | null;
+}
+interface CategoryProblemRow {
+  readonly source: string;
+  readonly sourceDocumentId: string | null;
+}
+interface CategoryScFindManyArgs {
+  readonly where: {
+    readonly veteranId: string;
+    readonly source: string;
+    readonly sourceDocumentId: { readonly not: null };
+  };
+  readonly select: { readonly source: true; readonly sourceDocumentId: true; readonly status: true; readonly condition: true };
+}
+interface CategoryProblemFindManyArgs {
+  readonly where: {
+    readonly veteranId: string;
+    readonly source: string;
+    readonly sourceDocumentId: { readonly not: null };
+  };
+  readonly select: { readonly source: true; readonly sourceDocumentId: true };
+}
+
+export interface ChartFactCategoryDb {
+  readonly case: {
+    findFirst(args: {
+      readonly where: { readonly id: string };
+      readonly select: { readonly veteranId: true; readonly documents: { readonly select: { readonly id: true } } };
+    }): Promise<{ readonly veteranId: string; readonly documents: readonly { readonly id: string }[] } | null>;
+  };
+  readonly scCondition: { findMany(args: CategoryScFindManyArgs): Promise<readonly CategoryScRow[]> };
+  readonly activeProblem: { findMany(args: CategoryProblemFindManyArgs): Promise<readonly CategoryProblemRow[]> };
+}
+
+// Higher number = stronger category. Precedence denial > sc_proof > clinical.
+const CATEGORY_RANK: Readonly<Record<ChartFactCategory, number>> = { denial: 3, sc_proof: 2, clinical: 1 };
+
+export async function chartFactCategoryByDocument(
+  db: ChartFactCategoryDb,
+  caseId: string,
+): Promise<Map<string, ChartFactCategory>> {
+  try {
+    const caseRow = await db.case.findFirst({
+      where: { id: caseId },
+      select: { veteranId: true, documents: { select: { id: true } } },
+    });
+    if (caseRow === null) return new Map();
+    const caseDocumentIds = new Set(caseRow.documents.map((d) => d.id));
+    if (caseDocumentIds.size === 0) return new Map();
+
+    const where = { veteranId: caseRow.veteranId, source: EXTRACTED_SOURCE, sourceDocumentId: { not: null } } as const;
+    const [scRows, problemRows] = await Promise.all([
+      db.scCondition.findMany({ where, select: { source: true, sourceDocumentId: true, status: true, condition: true } }),
+      db.activeProblem.findMany({ where, select: { source: true, sourceDocumentId: true } }),
+    ]);
+
+    const out = new Map<string, ChartFactCategory>();
+    const consider = (documentId: string | null, category: ChartFactCategory): void => {
+      if (documentId === null || !caseDocumentIds.has(documentId)) return;
+      const current = out.get(documentId);
+      if (current === undefined || CATEGORY_RANK[category] > CATEGORY_RANK[current]) out.set(documentId, category);
+    };
+
+    for (const r of scRows) {
+      if (r.source !== EXTRACTED_SOURCE) continue; // belt-and-suspenders (the WHERE already filters)
+      if (r.status === 'service_connected') consider(r.sourceDocumentId, 'sc_proof');
+      else if (r.status === 'denied') consider(r.sourceDocumentId, 'denial');
+      // pending / unknown ⇒ no category contribution.
+    }
+    for (const r of problemRows) {
+      if (r.source !== EXTRACTED_SOURCE) continue;
+      consider(r.sourceDocumentId, 'clinical');
+    }
+    return out;
+  } catch {
+    return new Map(); // fail-open: an override that can't be computed never blocks a pack
+  }
+}

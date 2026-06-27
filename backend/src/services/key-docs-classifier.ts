@@ -160,6 +160,10 @@ export interface ContentClassificationHint {
 }
 
 const CONTENT_HINT_MIN_CONFIDENCE = 0.6;
+// At/above this confidence a content guess is "certain" (a phrase that essentially only appears in
+// that artifact — the 0.9 tier in CONTENT_PATTERNS) and OVERRIDES even an explicit filename match.
+// Below it, an explicit high-signal filename wins the tie-break (see classifyFileWithContentHint).
+const CONTENT_HINT_HIGH_CONFIDENCE = 0.9;
 
 // Canonical per-docType importance for CONTENT-classified documents, derived from the filename
 // pattern table (max importance per docType). Chunk D fix: the prior `max(filenameImportance, 50)+5`
@@ -179,6 +183,19 @@ export function classifyFileWithContentHint(
 ): ClassificationResult {
   if (contentHint && contentHint.confidence >= CONTENT_HINT_MIN_CONFIDENCE) {
     const filenameResult = classifyFile(filePath);
+    // Filename tie-break (assessment 2026-06-26 §3): when the FILENAME is an explicit high-signal
+    // match (a specific docType, e.g. "Denial_Letter.pdf") and a MID-confidence content guess
+    // (< 0.9) DISAGREES with it, trust the filename. A veteran who names a file "Denial_Letter.pdf"
+    // is giving a deliberate, high-quality signal; a 0.7 content guess that says otherwise is more
+    // likely an OCR/phrasing artifact (a denial letter's body quotes "...is service-connected...",
+    // a DBQ cites AHI, etc.). A 0.9 content guess (a phrase essentially unique to one artifact)
+    // still wins — those are near-certain. Pinned in key-docs-classifier.test.ts.
+    const filenameIsExplicit =
+      filenameResult.classification === 'high_signal' && filenameResult.docType !== 'unspecified';
+    const disagrees = filenameResult.docType !== contentHint.docType;
+    if (filenameIsExplicit && disagrees && contentHint.confidence < CONTENT_HINT_HIGH_CONFIDENCE) {
+      return filenameResult;
+    }
     // Content-derived classification supersedes filename. Importance: the docType's canonical
     // importance (so "Misc_3.pdf" content-classified as rating_decision ranks like a rating
     // decision, not like a generic upload), never below what the filename already earned,
@@ -235,9 +252,6 @@ const NEXUS_OPINION_SENTENCE = /it is my (independent )?medical opinion/i;
 const C_AND_P_EXAM_MARKERS = /compensation\s*(and|&)\s*pension|c\s*&\s*p\s*examination|disability benefits questionnaire/i;
 
 const CONTENT_PATTERNS: readonly ContentPatternMatcher[] = [
-  // DD-214 - the certificate line is unique to the form.
-  { test: reTest(/certificate of release or discharge from active duty/i), docType: 'dd_214', classification: 'high_signal', confidence: 0.9 },
-
   // Rating decision (grant or mixed). "We have made a decision on your claim" is the canonical
   // VA decision-letter opener; "Reasons for Decision" is its section header; entitlement/
   // evaluation verbs cover the decision-table phrasings.
@@ -251,6 +265,23 @@ const CONTENT_PATTERNS: readonly ContentPatternMatcher[] = [
   { test: reTest(/entitlement to .{0,80}\bis (denied|not established)/i), docType: 'denial_letter', classification: 'high_signal', confidence: 0.9 },
   { test: anyOf(/we (have )?denied your claim/i, /we (are denying|cannot grant) (your claim|service connection)/i), docType: 'denial_letter', classification: 'high_signal', confidence: 0.9 },
   { test: allOf(/service[\s-]?connect/i, /\bis denied\b/i), docType: 'denial_letter', classification: 'high_signal', confidence: 0.7 },
+
+  // DD-214 - the certificate line is unique to the form. MOVED to AFTER the denial block
+  // (assessment 2026-06-26 §3): a combined bundle (a DD-214 stapled in front of a denial letter,
+  // a common veteran upload) carries BOTH the certificate line AND the denial verbs; the denial
+  // is the document the physician needs surfaced as a decision, so the denial matchers must win.
+  // A STANDALONE DD-214 has no decision phrasing, so it still lands here. Pinned both ways in
+  // key-docs-classifier.test.ts.
+  { test: reTest(/certificate of release or discharge from active duty/i), docType: 'dd_214', classification: 'high_signal', confidence: 0.9 },
+
+  // Rated-disabilities view / benefit summary (va.gov self-service pages the veteran prints).
+  // Checked AFTER the rating_decision + denial blocks so a real decision letter (which also lists
+  // rated disabilities and says "service-connected") stays a rating_decision. PHRASE-ANCHORED on
+  // the page chrome ("your rated disabilities", the rated-disabilities table triad, benefit-summary
+  // phrasing) — NEVER on bare "service-connected", which appears on nearly every VA document.
+  { test: reTest(/your rated disabilities/i), docType: 'rated_disabilities_view', classification: 'high_signal', confidence: 0.9 },
+  { test: allOf(/rated disabilities/i, /effective date/i, /combined (?:disability )?rating/i), docType: 'rated_disabilities_view', classification: 'high_signal', confidence: 0.7 },
+  { test: anyOf(/benefit summary/i, /summary of (?:va )?benefits/i, /benefit verification letter/i), docType: 'benefit_summary', classification: 'high_signal', confidence: 0.7 },
 
   // Statement in support / lay-buddy statements - VA form numbers are unambiguous.
   { test: anyOf(/statement in support of claim/i, /VA Form 21[\s-]?4138/i, /VA Form 21[\s-]?10210/i), docType: 'statement_in_support', classification: 'high_signal', confidence: 0.9 },
@@ -278,6 +309,23 @@ const CONTENT_PATTERNS: readonly ContentPatternMatcher[] = [
   { test: reTest(/disability benefits questionnaire/i), docType: 'dbq', classification: 'high_signal', confidence: 0.9 },
   { test: anyOf(/compensation\s*(and|&)\s*pension exam/i, /c\s*&\s*p examination/i), docType: 'c_and_p_exam', classification: 'high_signal', confidence: 0.9 },
 
+  // Objective test results (sleep study / audiogram / PFT). ORDERED AFTER the DBQ + C&P matchers
+  // ON PURPOSE: a sleep-apnea DBQ quotes the AHI, a hearing-loss DBQ quotes puretone thresholds,
+  // a respiratory DBQ quotes FEV1/FVC — those stay a DBQ (the physician wants the DBQ's opinion,
+  // not just the raw values). Only a STANDALONE test report (no DBQ/C&P chrome) reaches here.
+  // Sleep study: polysomnography / "apnea-hypopnea index" / "respiratory disturbance index" are
+  // study-specific on their own (0.9); bare "AHI"/"RDI" also appear in narratives, so they only
+  // fire when GUARDED by a per-hour rate (0.7).
+  { test: anyOf(/polysomnogr/i, /apnea[\s-]?hypopnea index/i, /respiratory disturbance index/i), docType: 'sleep_study', classification: 'high_signal', confidence: 0.9 },
+  { test: reTest(/\b(?:ahi|rdi)\b[\s:=]*\d{1,3}(?:\.\d+)?\s*(?:events?\s*)?(?:per\s*hour|\/\s*hr?|\/\s*hour)/i), docType: 'sleep_study', classification: 'high_signal', confidence: 0.7 },
+  // Audiogram: Maryland CNC + puretone are VA-audiometry-specific (0.9); the air+bone conduction
+  // pair is a strong audiogram triad (0.7).
+  { test: anyOf(/maryland\s*cnc/i, /pure[\s-]?tone (?:threshold|average)/i), docType: 'audiogram', classification: 'high_signal', confidence: 0.9 },
+  { test: allOf(/air conduction/i, /bone conduction/i), docType: 'audiogram', classification: 'high_signal', confidence: 0.7 },
+  // Pulmonary function test: spirometry / DLCO / the FEV1+FVC pair.
+  { test: anyOf(/spirometry/i, /\bDLCO\b/i, /pulmonary function test/i), docType: 'pulmonary_function_test', classification: 'high_signal', confidence: 0.7 },
+  { test: allOf(/\bFEV1\b/i, /\bFVC\b/i), docType: 'pulmonary_function_test', classification: 'high_signal', confidence: 0.7 },
+
   // Service treatment records - SF-600 header ("Chronological Record of Medical Care") is the
   // workhorse marker; "service treatment record" appears on VA-produced STR bundles.
   { test: anyOf(/chronological record of medical care/i, /service treatment records?\b/i), docType: 'service_treatment_record_summary', classification: 'high_signal', confidence: 0.7 },
@@ -290,6 +338,19 @@ const CONTENT_PATTERNS: readonly ContentPatternMatcher[] = [
   // comparison:|exam:) or an explicit modality-report title.
   { test: allOf(/\bimpression\s*:/i, /\b(findings|technique|comparison|exam)\s*:/i), docType: 'imaging', classification: 'high_signal', confidence: 0.7 },
   { test: reTest(/\b(mri|ct|x-?ray|ultrasound|radiology|radiographic) (report|examination|study)\b/i), docType: 'imaging', classification: 'high_signal', confidence: 0.7 },
+
+  // Progress / clinical notes. LAST-BUT-ONE (before blue_button) so every more-specific document
+  // — decision, DBQ, test report, STR — is claimed first; a generic clinical note is the residual.
+  // Classification 'normal' (NOT high_signal): a routine SOAP note is mid-pack context, not a
+  // primary evidence document, and the page-LLM picker trims it to the diagnosis + plan pages.
+  // Signal = the four-part SOAP header quad OR an explicit CPRS / "progress note" marker.
+  {
+    test: (text) =>
+      (/\bsubjective\b/i.test(text) && /\bobjective\b/i.test(text) && /\bassessment\b/i.test(text) && /\bplan\b/i.test(text))
+      || /\bCPRS\b/.test(text)
+      || /progress note/i.test(text),
+    docType: 'progress_notes', classification: 'normal', confidence: 0.7,
+  },
 
   // Blue Button / bulk dumps - content marker so a "Misc_9.pdf" 500-page dump still excludes.
   { test: anyOf(/blue button/i, /my healthevet/i), docType: 'blue_button', classification: 'bulk', confidence: 0.7 },
@@ -395,7 +456,16 @@ export function sortByDoctorPackPriority(filePaths: readonly string[]): readonly
 // (with C&P-marker guard) + bare /nexus/i filename pattern at modest importance 70 + the
 // system-artifact guard (generated Intake_Summary.pdf is stamped intake_summary at the top of
 // classifyDocument, never heuristically classified).
-export const CLASSIFIER_VERSION = 'key-docs-classifier-1.2.0';
+// 1.3.0 (doctor-pack classifier lane 2026-06-26): CONTENT_PATTERNS gain (a) dd_214 MOVED to after
+// the denial block (combined DD-214+denial bundle -> denial_letter; standalone DD-214 still dd_214);
+// (b) rated_disabilities_view + benefit_summary phrase-anchored content patterns (after the
+// rating/denial blocks, never bare "service-connected"); (c) sleep_study / audiogram /
+// pulmonary_function_test content patterns ORDERED AFTER dbq/c_and_p_exam (a DBQ citing AHI/
+// puretone/FEV1 stays a DBQ); (d) progress_notes content pattern (SOAP quad OR CPRS/note header,
+// classification 'normal', last-but-one before blue_button). Plus a filename tie-break in
+// classifyFileWithContentHint: an explicit high-signal filename beats a <0.9 content guess that
+// disagrees; a 0.9 content guess still wins.
+export const CLASSIFIER_VERSION = 'key-docs-classifier-1.3.0';
 
 // Monotonic INTEGER mirror of CLASSIFIER_VERSION, stamped onto key_docs.classifier_version by
 // the doctor-pack-generate KeyDoc upsert. Exists so stored rows can be compared against the
@@ -404,6 +474,8 @@ export const CLASSIFIER_VERSION = 'key-docs-classifier-1.2.0';
 // backfill — classifier upgrades must retrofit the installed base, not just future uploads).
 // History: 0 = legacy/pre-stamping rows (the DB column default — anything written before this
 // column existed); 1 is reserved-unused so "0 vs nonzero" cleanly separates legacy from
-// stamped; 2 = 1.2.0, the first stamped version. BUMP THIS whenever a pattern/order change
-// could alter an existing row's docType.
-export const CLASSIFIER_VERSION_NUM = 2;
+// stamped; 2 = 1.2.0, the first stamped version; 3 = 1.3.0 (the doctor-pack lane: dd_214 reorder +
+// rated/benefit/test/progress_notes content patterns + filename tie-break — these CAN change an
+// existing row's docType, so installed rows at < 3 are reclassify-stale candidates). BUMP THIS
+// whenever a pattern/order change could alter an existing row's docType.
+export const CLASSIFIER_VERSION_NUM = 3;

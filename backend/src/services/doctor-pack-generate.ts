@@ -6,18 +6,30 @@ import { renderRecordTextPdf } from './record-text-render.js';
 import {
   applyPackPageBudget,
   assembleDoctorPackManifest,
+  buildCategoryAssertionLines,
+  categoryFloorsEnabled,
+  computeDroppedCategoryWarnings,
   DOCTOR_PACK_ENGINE_VERSION,
-  PACK_PAGE_BUDGET,
+  effectivePackPageBudget,
+  expectedStudyForCondition,
   PACK_PAGE_TARGET,
   packCategoryOf,
   type BudgetEntry,
+  type ExpectedStudy,
   type PackCategory,
 } from './doctor-pack.js';
 import { classifyDocument, CLASSIFIER_VERSION_NUM } from './key-docs-classifier.js';
 import { selectPages, unionGroundedPagesIntoResult, type PageSelectorInputPage, type PageSelectorResult } from './page-selector.js';
 import { selectPagesLlm, shouldUseLlmPicker, PAGE_LLM_VERSION } from './doctor-pack-page-llm.js';
 // doctor-pack grounded pages, 2026-06-13 (PR-2): facts→pages back-map.
-import { groundedSourcePagesForCase, type GroundedPage, type GroundedPagesDb } from './doctor-pack-grounded-pages.js';
+import {
+  chartFactCategoryByDocument,
+  groundedSourcePagesForCase,
+  type ChartFactCategory,
+  type ChartFactCategoryDb,
+  type GroundedPage,
+  type GroundedPagesDb,
+} from './doctor-pack-grounded-pages.js';
 import { aggregateChartSummary } from './chart-summary-aggregator.js';
 import { publishDoctorPackQueued } from './doctor-pack-queue.js';
 import { isDoctorPackS3Key } from './s3-key-safety.js';
@@ -101,16 +113,20 @@ async function fetchCaseRowForCover(db: AppDb, caseId: string, veteranId: string
   };
 }
 
-// Content-classifier feed contract (Chunk D, hoisted + exported for the reclassify-stale
-// backfill route 2026-06-12): the classifier sees the first 2 OCR'd pages, each capped at
-// 4000 chars. The backfill MUST feed stored rows the exact same way — a different slice could
-// classify the same document differently than generation did and make the backfill lie.
-export const CONTENT_HINT_CHARS_PER_PAGE = 4000;
+// Content-classifier feed contract (Chunk D, hoisted + exported for the reclassify-stale backfill
+// route 2026-06-12). WHOLE-DOC widening (ai-sme spec 2026-06-26): the classifier now sees the first
+// 8 OCR'd pages (was 2), each capped at 1500 chars (was 4000) — same ~12k-char budget but spread
+// across more of the document, so a doc whose decisive content is past page 2 (a study buried in a
+// Misc bundle, a dx note on page 5) classifies correctly. The backfill MUST feed stored rows the
+// exact same way (it imports THESE symbols) — a different slice could classify the same document
+// differently than generation did and make the backfill lie.
+export const CONTENT_HINT_CHARS_PER_PAGE = 1500;
+const CONTENT_HINT_MAX_PAGES = 8;
 export function buildContentHintText(
   pageRows: readonly { readonly pageNumber: number; readonly text: string }[],
 ): string {
   return pageRows
-    .filter((p) => p.pageNumber <= 2)
+    .filter((p) => p.pageNumber <= CONTENT_HINT_MAX_PAGES)
     .map((p) => p.text.slice(0, CONTENT_HINT_CHARS_PER_PAGE))
     .join('\n');
 }
@@ -327,13 +343,16 @@ export const PACK_CATEGORY_ORDER: Readonly<Record<PackCategory, number>> = {
 
 export function orderPackEntriesMedicineFirst<T>(
   entries: readonly T[],
-  key: (e: T) => { docType: DoctorPackManifestEntry['docType']; importance: number; filePath: string },
+  // DOCTOR_PACK_CATEGORY_FLOORS: the key may return an explicit packCategory (the chart-fact
+  // override) — honored over the docType→category map. Absent ⇒ category derives from docType, so a
+  // caller that never sets it is byte-identical to before.
+  key: (e: T) => { docType: DoctorPackManifestEntry['docType']; importance: number; filePath: string; packCategory?: PackCategory },
 ): T[] {
   return [...entries].sort((a, b) => {
     const ka = key(a);
     const kb = key(b);
-    const ca = PACK_CATEGORY_ORDER[packCategoryOf(ka.docType)];
-    const cb = PACK_CATEGORY_ORDER[packCategoryOf(kb.docType)];
+    const ca = PACK_CATEGORY_ORDER[ka.packCategory ?? packCategoryOf(ka.docType)];
+    const cb = PACK_CATEGORY_ORDER[kb.packCategory ?? packCategoryOf(kb.docType)];
     if (ca !== cb) return ca - cb;
     if (ka.importance !== kb.importance) return kb.importance - ka.importance;
     return ka.filePath.localeCompare(kb.filePath);
@@ -441,6 +460,10 @@ export function buildCoverIndexLines(input: {
   readonly upstreamScCondition?: string | null;
   readonly entries: readonly CoverIndexEntryInput[];
   readonly notIncluded: readonly string[];
+  // DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26): the 5-line coverage checklist (built by
+  // doctor-pack.ts buildCategoryAssertionLines). Absent/empty ⇒ no checklist block ⇒ cover body is
+  // byte-identical to the pre-flag cover.
+  readonly categoryAssertions?: readonly string[];
 }): string[] {
   const lines: string[] = [];
   lines.push(`Case ${input.caseId} — claimed condition: ${input.claimedCondition ?? 'not recorded'}`);
@@ -449,6 +472,11 @@ export function buildCoverIndexLines(input: {
     ? ` — upstream service-connected condition: ${input.upstreamScCondition}`
     : '';
   lines.push(`Theory: ${framing}${upstream}`);
+  if (input.categoryAssertions && input.categoryAssertions.length > 0) {
+    lines.push('');
+    lines.push('Coverage checklist:');
+    for (const a of input.categoryAssertions) lines.push(`- ${a}`);
+  }
   lines.push('');
   lines.push('Included documents:');
   input.entries.forEach((e, i) => {
@@ -664,6 +692,9 @@ export async function generateDoctorPackForCase(
     'rating_decision', 'denial_letter', 'supplemental_decision', 'c_and_p_exam', 'dbq',
     'imaging', 'sleep_study', 'personnel_record', 'service_treatment_record_summary',
     'benefit_summary', 'unspecified', 'progress_notes',
+    // 2026-06-26: the other objective-study docTypes also hide their decisive page among
+    // boilerplate (audiogram thresholds, PFT spirometry tables) — let the picker rank them.
+    'audiogram', 'pulmonary_function_test',
   ]);
 
   // doctor-pack grounded pages, 2026-06-13 (PR-2, DARK): pull the EXACT source pages that grounded
@@ -676,6 +707,19 @@ export async function generateDoctorPackForCase(
   const groundedByDocumentId: Map<string, GroundedPage[]> = groundedPagesEnabled
     ? await groundedSourcePagesForCase(db as unknown as GroundedPagesDb, caseId)
     : new Map();
+
+  // ── DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26, dark): wider 30-page budget + per-category floors +
+  // chart-fact category override + defining-study force-include + cover coverage checklist. Flag OFF
+  // ⇒ every derived value below is empty/null and the effective budget is 15 ⇒ byte-identical to
+  // today. The override back-map is a $0 pure read (no LLM), fail-open.
+  const categoryFloorsOn = categoryFloorsEnabled();
+  const packBudget = effectivePackPageBudget(); // 15 (flag off) | 30 (flag on)
+  const chartFactCategoryByDoc: Map<string, ChartFactCategory> = categoryFloorsOn
+    ? await chartFactCategoryByDocument(db as unknown as ChartFactCategoryDb, caseId)
+    : new Map();
+  const expectedStudy: ExpectedStudy | null = categoryFloorsOn
+    ? expectedStudyForCondition(claimedCondition)
+    : null;
 
   let packPickerCostUsd = 0;
   const perFileSelection = await Promise.all(classifiedFiles.map(async (f) => {
@@ -744,6 +788,21 @@ export async function generateDoctorPackForCase(
   }
   const clsByPath = new Map(perFileSelection.map((s) => [s.file.filePath, s.classification]));
 
+  // DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26): raise the progress_notes importance floor so a
+  // content-classified clinical note clears the NORMAL_INCLUSION_THRESHOLD (50) and the budget's
+  // importance-rank tiebreak — the dx note must not lose its slot to boilerplate. Flag OFF ⇒
+  // clsByPathAdjusted === clsByPath ⇒ byte-identical.
+  const PROGRESS_NOTES_IMPORTANCE_FLOOR = 55;
+  const clsByPathAdjusted = categoryFloorsOn
+    ? new Map(
+        [...clsByPath].map(([path, cls]) =>
+          cls.docType === 'progress_notes'
+            ? [path, { ...cls, importance: Math.max(cls.importance, PROGRESS_NOTES_IMPORTANCE_FLOOR) }]
+            : [path, cls],
+        ),
+      )
+    : clsByPath;
+
   // ROUND 2 (A): content-hash dedup BEFORE selection-results enter the manifest/budget. The
   // KeyDoc upsert loop still writes a row for EVERY file (the RN doc list stays complete; the
   // duplicate's rationale says why it's not in the pack), but duplicates never consume budget.
@@ -771,7 +830,7 @@ export async function generateDoctorPackForCase(
   const manifest = assembleDoctorPackManifest({
     classifiedFiles: classifiedFiles
       .filter((f) => !duplicatePaths.has(f.filePath))
-      .map((f) => ({ ...f, cls: clsByPath.get(f.filePath) })),
+      .map((f) => ({ ...f, cls: clsByPathAdjusted.get(f.filePath) })),
     readStatuses,
   });
   // Override the manifest entries' pageRanges with selector output when present.
@@ -820,7 +879,7 @@ export async function generateDoctorPackForCase(
   // happens at applyPackPageBudget(orderedBudgetEntries) below.
   const tierOrder: Record<string, number> = { high_signal: 0, normal: 1, bulk: 2 };
   const combinedEntries: BudgetEntry[] = [...refinedEntries, ...appendedEntries]
-    .map((e) => ({ ...e, importance: clsByPath.get(e.filePath)?.importance ?? 50 }))
+    .map((e) => ({ ...e, importance: clsByPathAdjusted.get(e.filePath)?.importance ?? 50 }))
     .sort((a, b) => {
       if (tierOrder[a.classification] !== tierOrder[b.classification]) {
         return (tierOrder[a.classification] ?? 1) - (tierOrder[b.classification] ?? 1);
@@ -882,7 +941,7 @@ export async function generateDoctorPackForCase(
   const packEntryMetas: PackEntryMeta[] = [];
   for (const entry of labeledEntries) {
     const meta = docMetaByPath.get(entry.filePath);
-    const importance = clsByPath.get(entry.filePath)?.importance ?? 50;
+    const importance = clsByPathAdjusted.get(entry.filePath)?.importance ?? 50;
     const docText = (pagesByDocumentId.get(meta?.id ?? '') ?? []).map((p) => p.text).join('\n');
     const mentionsClaimedCondition = textMentionsCondition(docText, claimedCondition);
     const availablePageCount = meta !== undefined ? (pagesByDocumentId.get(meta.id ?? '') ?? []).length || null : null;
@@ -926,16 +985,9 @@ export async function generateDoctorPackForCase(
     }
   }
 
-  // §1 no-dx gate input: did the clinical category (progress_notes / c_and_p_exam / dbq /
-  // condition-matched blue_button) contribute ZERO pages to the final manifest? Whole-doc
-  // passthrough clinical entries (pageCount 0, empty ranges) count as contributing — the
-  // assembler ships the whole file. Ryan 2026-06-12: this stays a SOFT signal — the pack
-  // generates and delivers either way; the panel renders a calm notice off the manifest warning.
-  const clinicalPageContribution = packEntryMetas
-    .map((m) => m.entry)
-    .filter((e) => CLINICAL_DX_DOC_TYPES.has(e.docType))
-    .reduce((sum, e) => sum + (e.pageRanges.length === 0 ? Math.max(1, e.pageCount) : e.pageCount), 0);
-  const missingClinical = clinicalPageContribution === 0;
+  // §1 no-dx signal is computed AFTER the budget now (over the SURVIVORS, override-aware) — see
+  // the post-budget block below. Computing it here (pre-budget) double-counted a clinical doc the
+  // budget would later evict and ignored the chart-fact override.
 
   // ROUND 2 (C): the veteran's lay/timeline statement (Case.veteranStatement) renders into a
   // one-page LAY-category entry; an empty statement becomes a Not-included note the panel
@@ -977,13 +1029,34 @@ export async function generateDoctorPackForCase(
     }
   }
 
+  // DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26): resolve a meta's OVERRIDE pack category — the
+  // chart-fact category (a granted-SC doc the classifier mislabeled → 'sc_proof') first, else the
+  // defining-study force-include (the study docType for the claimed condition → 'tests'). Keyed off
+  // the ORIGINAL document path (m.entry.filePath may be a rendered key). Returns undefined when the
+  // flag is off OR no override applies ⇒ the docType→category map stands (byte-identical).
+  const overrideCatFor = (m: PackEntryMeta): PackCategory | undefined => {
+    if (!categoryFloorsOn) return undefined;
+    const docId = m.originalFilePath !== null ? docMetaByPath.get(m.originalFilePath)?.id : undefined;
+    if (docId !== undefined) {
+      const chartCat = chartFactCategoryByDoc.get(docId);
+      if (chartCat !== undefined) return chartCat; // 'sc_proof' | 'denial' | 'clinical'
+    }
+    if (expectedStudy !== null && m.entry.docType === expectedStudy.docType) return 'tests';
+    return undefined;
+  };
+
   // ROUND 2 (E): medicine-first order — clinical (dx note first) → lay → denial → sc_proof →
-  // tests → service → other; deterministic within category (importance desc, then path).
-  const orderedMetas = orderPackEntriesMedicineFirst(packEntryMetas, (m) => ({
-    docType: m.entry.docType,
-    importance: m.importance,
-    filePath: m.entry.filePath,
-  }));
+  // tests → service → other; deterministic within category (importance desc, then path). The
+  // override category (when present) drives the order too.
+  const orderedMetas = orderPackEntriesMedicineFirst(packEntryMetas, (m) => {
+    const pc = overrideCatFor(m);
+    return {
+      docType: m.entry.docType,
+      importance: m.importance,
+      filePath: m.entry.filePath,
+      ...(pc !== undefined ? { packCategory: pc } : {}),
+    };
+  });
 
   // ===== doctor-pack grounded pages, 2026-06-13 (E2): THE budget — run LAST, over the COMPLETE set
   // (rendered non-PDF pages + the veteran statement are now INSIDE the budget; the cover index is
@@ -1027,6 +1100,20 @@ export async function generateDoctorPackForCase(
       : (m.availablePageCount !== null ? [{ from: 1, to: m.availablePageCount }] : []);
     const pageCount = ranges.reduce((sum, r) => sum + Math.max(0, r.to - r.from + 1), 0);
     const pinned = pinnedFor(m);
+    let pinnedPages = pinned.pinnedPages;
+    let pinnedFactKindByPage = pinned.pinnedFactKindByPage;
+    // DOCTOR_PACK_CATEGORY_FLOORS: defining-study FORCE-INCLUDE. Pin the study's first selected page
+    // (factKind 'screening' — an objective test) so Phase 0 of the budget protects it ahead of every
+    // ordinary page: the sleep study an OSA letter is built on can never be trimmed out. Flag OFF ⇒
+    // expectedStudy is null ⇒ no pin ⇒ byte-identical.
+    if (categoryFloorsOn && expectedStudy !== null && e.docType === expectedStudy.docType && ranges.length > 0) {
+      const firstPage = ranges[0]!.from;
+      if (!pinnedPages.includes(firstPage)) {
+        pinnedPages = [...pinnedPages, firstPage];
+        pinnedFactKindByPage = { ...pinnedFactKindByPage, [firstPage]: 'screening' };
+      }
+    }
+    const overrideCat = overrideCatFor(m);
     return {
       filePath: e.filePath,
       docType: e.docType,
@@ -1034,14 +1121,17 @@ export async function generateDoctorPackForCase(
       pageRanges: ranges,
       pageCount,
       importance: m.importance,
+      // DOCTOR_PACK_CATEGORY_FLOORS: the chart-fact / study override category. Absent (flag off or no
+      // override) ⇒ the budget derives the category from docType (byte-identical).
+      ...(overrideCat !== undefined ? { packCategory: overrideCat } : {}),
       // PR-3 (POLICY B): only attach pinned fields when there ARE pinned pages — an absent field is
       // the byte-identical flag-off shape the budget's `hasPinned` fast-path keys on.
-      ...(pinned.pinnedPages.length > 0
-        ? { pinnedPages: pinned.pinnedPages, pinnedFactKindByPage: pinned.pinnedFactKindByPage }
+      ...(pinnedPages.length > 0
+        ? { pinnedPages, pinnedFactKindByPage }
         : {}),
     };
   });
-  const budget = applyPackPageBudget(orderedBudgetEntries, PACK_PAGE_BUDGET);
+  const budget = applyPackPageBudget(orderedBudgetEntries, packBudget);
   const budgetByKey = new Map(budget.entries.map((e) => [e.filePath, e]));
   // Re-emit the metas in their ordered sequence, dropping any the budget evicted entirely and
   // applying the budgeted ranges/pageCount to the survivors. The cover is added AFTER this.
@@ -1064,6 +1154,46 @@ export async function generateDoctorPackForCase(
   for (const m of budgetedMetas) {
     if (m.originalFilePath !== null) finalRangesByPath.set(m.originalFilePath, m.entry.pageRanges);
   }
+
+  // §1 no-dx signal — computed POST-budget over the SURVIVORS, override-aware (DOCTOR_PACK_CATEGORY_FLOORS).
+  // A clinical doc the budget evicted no longer counts; a doc the chart-fact override routed INTO
+  // 'clinical' does. A whole-doc passthrough clinical entry (empty ranges) counts as contributing —
+  // the assembler ships it (the "passthrough credit" that keeps missingClinical false when the only
+  // clinical doc is an unsized passthrough). Flag OFF ⇒ overrideCatFor is undefined ⇒ the category
+  // derives from docType exactly as the old CLINICAL_DX_DOC_TYPES set did, and every present clinical
+  // doc survives the clinical floor ⇒ this matches the pre-flag pre-budget result.
+  const clinicalPageContribution = budgetedMetas
+    .filter((m) => (overrideCatFor(m) ?? packCategoryOf(m.entry.docType)) === 'clinical')
+    .reduce((sum, m) => sum + (m.entry.pageRanges.length === 0 ? Math.max(1, m.entry.pageCount) : m.entry.pageCount), 0);
+  const missingClinical = clinicalPageContribution === 0;
+
+  // DOCTOR_PACK_CATEGORY_FLOORS: per-category DROPPED warnings — a category present pre-budget whose
+  // documents were ALL evicted post-budget. Flag-gated (empty when off ⇒ byte-identical).
+  const droppedCategoryWarnings: string[] = [];
+  if (categoryFloorsOn) {
+    const preBudgetCounts = new Map<PackCategory, number>();
+    for (const m of orderedMetas) {
+      const cat = overrideCatFor(m) ?? packCategoryOf(m.entry.docType);
+      preBudgetCounts.set(cat, (preBudgetCounts.get(cat) ?? 0) + 1);
+    }
+    const survivingCategories = new Set<PackCategory>();
+    for (const m of budgetedMetas) survivingCategories.add(overrideCatFor(m) ?? packCategoryOf(m.entry.docType));
+    droppedCategoryWarnings.push(...computeDroppedCategoryWarnings(preBudgetCounts, survivingCategories));
+  }
+
+  // DOCTOR_PACK_CATEGORY_FLOORS: the cover coverage checklist (flag-gated → empty when off ⇒ cover
+  // byte-identical). One line per must-have category: surviving pages or NOT FOUND IN CHART / NONE ON
+  // FILE, plus the defining study for the claimed condition.
+  const categoryAssertions = categoryFloorsOn
+    ? buildCategoryAssertionLines(
+        budgetedMetas.map((m) => ({
+          category: overrideCatFor(m) ?? packCategoryOf(m.entry.docType),
+          displayLabel: m.entry.displayLabel,
+          pageRanges: m.entry.pageRanges,
+        })),
+        expectedStudy,
+      )
+    : [];
 
   // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): per-entry cover "why" lines for the
   // PINNED pages that SURVIVED the budget. Intersect the entry's final (budgeted) pages with the
@@ -1088,7 +1218,9 @@ export async function generateDoctorPackForCase(
 
   // ROUND 2 (D): one-page cover index, rendered + prepended as manifest entry #1. Fail-open:
   // a cover render failure drops only the cover (note in trimNotes), never the pack.
-  const dedupAndBudgetNotes = [...dedup.notes, ...budget.trimNotes];
+  // DOCTOR_PACK_CATEGORY_FLOORS: per-category DROPPED warnings join the Not-included notes (empty
+  // when the flag is off ⇒ byte-identical).
+  const dedupAndBudgetNotes = [...dedup.notes, ...budget.trimNotes, ...droppedCategoryWarnings];
   let coverEntry: LabeledEntry | null = null;
   {
     try {
@@ -1098,6 +1230,7 @@ export async function generateDoctorPackForCase(
         claimType: caseWithDocs.claimType ?? null,
         framingChoice: caseWithDocs.framingChoice ?? null,
         upstreamScCondition: caseWithDocs.upstreamScCondition ?? null,
+        ...(categoryAssertions.length > 0 ? { categoryAssertions } : {}),
         entries: budgetedMetas.map((m) => {
           const pinnedWhyLines = pinnedWhyLinesFor(m);
           return {
@@ -1171,7 +1304,7 @@ export async function generateDoctorPackForCase(
         ? `; duplicate of ${displayNameByPath.get(dupKeptPath) ?? dupKeptPath} (identical content) — omitted from the pack`
         : '';
       const rationaleToWrite = (wasTrimmed
-        ? `${sel.selection.selectorRationale}; pack_page_budget(${PACK_PAGE_BUDGET}) trimmed this file`
+        ? `${sel.selection.selectorRationale}; pack_page_budget(${packBudget}) trimmed this file`
         : sel.selection.selectorRationale) + dupSuffix;
       const freshNeedsRnReview = sel.selection.needsRnReview || wasTrimmed;
 
@@ -1265,7 +1398,7 @@ export async function generateDoctorPackForCase(
           ...(budget.trimmed || packTrimNotes.length > 0
             ? {
                 budgetTrim: {
-                  budget: PACK_PAGE_BUDGET,
+                  budget: packBudget,
                   preTrimPageCount: budget.preTrimPageCount,
                   postTrimPageCount: budget.postTrimPageCount,
                   trimNotes: packTrimNotes,
@@ -1293,7 +1426,7 @@ export async function generateDoctorPackForCase(
           // Chunk D re-key: aboveTarget stays the HARD compression flag (PACK_PAGE_TARGET=250,
           // worker may downsample); the curation budget is the separate budget* fields.
           aboveTarget: refinedTotalPageCount > PACK_PAGE_TARGET,
-          budget: PACK_PAGE_BUDGET,
+          budget: packBudget,
           budgetTrimmed: budget.trimmed,
           budgetPreTrimPageCount: budget.preTrimPageCount,
           engineVersion: DOCTOR_PACK_ENGINE_VERSION,

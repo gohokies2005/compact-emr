@@ -171,13 +171,16 @@ describe('POST /cases/:id/doctor-pack/generate — content-aware classification 
     expect(upsert.create.docType).toBe('rating_decision');
     expect(upsert.create.classification).toBe('high_signal');
 
-    // Manifest entry: decision pages 1-2 selected, appeal-boilerplate page 3 dropped — the
-    // entry is page-SELECTED, not the legacy whole-doc 1..3.
+    // Manifest entry: the page-picker now targets the SUBSTANTIVE decision page — page 2
+    // ("REASONS FOR DECISION ... service connection ... established 50 percent") — and drops
+    // BOTH the content-light VA cover (page 1, "we made a decision on your claim received ...")
+    // AND the appeal-boilerplate (page 3). The granted condition + rating are preserved; only
+    // non-substantive pages are trimmed (2026-06-26 page-picker value-page targeting).
     const manifest = created.data?.manifestJson as { entries: { filePath: string; docType: string; pageRanges: unknown }[] };
     expect(manifest.entries).toHaveLength(1);
     expect(manifest.entries[0]?.docType).toBe('rating_decision');
-    expect(manifest.entries[0]?.pageRanges).toEqual([{ from: 1, to: 2 }]);
-    expect(created.data?.pageCount).toBe(2);
+    expect(manifest.entries[0]?.pageRanges).toEqual([{ from: 2, to: 2 }]);
+    expect(created.data?.pageCount).toBe(1);
   });
 
   it('physician role cannot generate (POST stays admin/ops_staff — D-2 decision)', async () => {

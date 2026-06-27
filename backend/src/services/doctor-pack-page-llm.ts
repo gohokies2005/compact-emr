@@ -19,12 +19,16 @@ import { invokeAdvisory } from '../advisory/bedrockClient.js';
 import { rangesFromIncluded } from './page-selector.js';
 import type { KeyDocPageRange } from './db-types.js';
 
-export const PAGE_LLM_VERSION = 'page-llm-1.0.0';
+export const PAGE_LLM_VERSION = 'page-llm-1.1.0';
 
 // The classifying signal — VA enclosure headers ("Armed Forces Commissary and Exchange", "Your
-// monthly entitlement amount"), "Reasons for Decision", a diagnosis line — sits at the TOP of a
-// page, so the first ~600 chars classify reliably at a fraction of the full-page token cost.
-const PAGE_TEXT_CHARS = 600;
+// monthly entitlement amount"), "Reasons for Decision", a diagnosis line — sits near the TOP of a
+// page. 600 chars caught the page-TYPE signal but cut off the VALUE the physician needs on
+// objective-test pages: a sleep study's AHI/RDI line, an audiogram's puretone/speech table, a
+// PFT's FEV1/FVC, a decision's stated REASON often sit below the first 600 chars. 1200 chars keeps
+// the value on the page the model is judging while staying well under full-page token cost.
+// Exported for the page-llm test (regression guard on the bump).
+export const PAGE_TEXT_CHARS = 1200;
 // Safety cap: docs bigger than this skip the LLM and fall back to regex (keeps cost bounded and
 // avoids dumping a 500-page blue-button export at the model). The real VA decision letter is well
 // under this; its decision pages are early.
@@ -36,9 +40,10 @@ const MAX_OUTPUT_TOKENS = 700;
 // fine"). KEEP = medical/claim substance a nexus-letter physician needs. DROP = administrative /
 // benefit boilerplate. The system prompt is the CACHED prefix (cache_control in bedrockClient) so
 // repeated docs/cases pay almost nothing for it.
-const SYSTEM_PROMPT = `You curate a U.S. veteran's VA disability records into a TIGHT pack for a physician who will write a nexus (medical opinion) letter. For ONE document at a time, you receive its pages (text, truncated). Decide which pages to KEEP and which to DROP. Bias hard toward a SMALL pack — a few pages per document. The physician wants signal, not the whole chart.
+export const SYSTEM_PROMPT = `You curate a U.S. veteran's VA disability records into a TIGHT pack for a physician who will write a nexus (medical opinion) letter. For ONE document at a time, you receive its pages (text, truncated). Decide which pages to KEEP and which to DROP. Bias hard toward a SMALL pack — a few pages per document. The physician wants signal, not the whole chart.
 
 KEEP a page when it carries the substance the physician actually needs:
+- For an objective TEST document, keep the page that shows the actual VALUE the physician needs, not the cover or instructions: a SLEEP STUDY -> the page with the AHI/RDI (apnea-hypopnea / respiratory disturbance index); an AUDIOGRAM -> the puretone-threshold and speech-discrimination (Maryland CNC) table; a PULMONARY FUNCTION TEST -> the FEV1/FVC (and DLCO) results; a RATING or DECISION letter -> the page that NAMES the granted or denied condition AND its stated REASON. One page per value — the page that carries the number/finding.
 - The VA's service-connection decision and its stated REASONS/evidence (what condition was granted, denied, continued, or evaluated, and WHY).
 - The page that NAMES the current DIAGNOSIS of the claimed (or a directly related) condition.
 - For treatment / progress / clinical notes the goal is the DIAGNOSIS. Keep the page(s) where a provider EXPLICITLY names the claimed or a closely-related condition (for an anxiety claim, e.g. "generalized anxiety disorder", "GAD", "anxiety", "adjustment disorder"). A charted symptom or a vague word like "mood" is NOT a diagnosis — never treat it as one. From the most recent note that carries such a diagnosis, keep ONLY the key Subjective page and the Assessment & Plan (A&P) page; DROP pages about UNRELATED comorbidities (e.g. hypertension, amlodipine, medication refills) even inside the same note. Aim for ~2 pages, never a whole multi-page SOAP note.

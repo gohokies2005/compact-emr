@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  chartFactCategoryByDocument,
   groundedSourcePagesForCase,
+  type ChartFactCategoryDb,
   type GroundedPagesDb,
 } from '../services/doctor-pack-grounded-pages.js';
 
@@ -202,5 +204,92 @@ describe('groundedSourcePagesForCase', () => {
       sourceDocumentId: { not: null },
       sourcePage: { not: null },
     });
+  });
+});
+
+// ============ DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26): chartFactCategoryByDocument ============
+interface CatScRow { source?: string; sourceDocumentId: string | null; status: string | null; condition?: string | null }
+interface CatProblemRow { source?: string; sourceDocumentId: string | null }
+
+function catMockDb(opts: {
+  veteranId?: string | null;
+  caseDocumentIds?: string[];
+  sc?: CatScRow[];
+  problems?: CatProblemRow[];
+}): ChartFactCategoryDb {
+  const sc = (opts.sc ?? []).map((r) => ({ source: r.source ?? 'extracted', sourceDocumentId: r.sourceDocumentId, status: r.status, condition: r.condition ?? null }));
+  const problems = (opts.problems ?? []).map((r) => ({ source: r.source ?? 'extracted', sourceDocumentId: r.sourceDocumentId }));
+  const applyWhere = <T extends { source: string; sourceDocumentId: string | null }>(rows: readonly T[], where: { source: string }) =>
+    rows.filter((r) => r.source === where.source && r.sourceDocumentId !== null);
+  return {
+    case: {
+      findFirst: async () =>
+        opts.veteranId === null
+          ? null
+          : { veteranId: opts.veteranId ?? 'VET-1', documents: (opts.caseDocumentIds ?? ['DOC-A', 'DOC-B']).map((id) => ({ id })) },
+    },
+    scCondition: { findMany: async (args: { where: { source: string } }) => applyWhere(sc, args.where) },
+    activeProblem: { findMany: async (args: { where: { source: string } }) => applyWhere(problems, args.where) },
+  };
+}
+
+describe('chartFactCategoryByDocument', () => {
+  it('returns empty when the case is missing or has no documents', async () => {
+    expect((await chartFactCategoryByDocument(catMockDb({ veteranId: null }), 'X')).size).toBe(0);
+    expect((await chartFactCategoryByDocument(catMockDb({ caseDocumentIds: [] }), 'X')).size).toBe(0);
+  });
+
+  it('maps service_connected → sc_proof, denied → denial, an active problem → clinical', async () => {
+    const out = await chartFactCategoryByDocument(
+      catMockDb({
+        caseDocumentIds: ['DOC-SC', 'DOC-DN', 'DOC-CL'],
+        sc: [
+          { sourceDocumentId: 'DOC-SC', status: 'service_connected', condition: 'PTSD' },
+          { sourceDocumentId: 'DOC-DN', status: 'denied', condition: 'knee' },
+        ],
+        problems: [{ sourceDocumentId: 'DOC-CL' }],
+      }),
+      'CASE-1',
+    );
+    expect(out.get('DOC-SC')).toBe('sc_proof');
+    expect(out.get('DOC-DN')).toBe('denial');
+    expect(out.get('DOC-CL')).toBe('clinical');
+  });
+
+  it('a PENDING sc_condition contributes NO category', async () => {
+    const out = await chartFactCategoryByDocument(
+      catMockDb({ caseDocumentIds: ['DOC-A'], sc: [{ sourceDocumentId: 'DOC-A', status: 'pending', condition: 'OSA' }] }),
+      'CASE-1',
+    );
+    expect(out.has('DOC-A')).toBe(false);
+  });
+
+  it('precedence denial > sc_proof > clinical when one doc grounds several facts', async () => {
+    const out = await chartFactCategoryByDocument(
+      catMockDb({
+        caseDocumentIds: ['DOC-A'],
+        sc: [
+          { sourceDocumentId: 'DOC-A', status: 'service_connected', condition: 'PTSD' },
+          { sourceDocumentId: 'DOC-A', status: 'denied', condition: 'sinusitis' },
+        ],
+        problems: [{ sourceDocumentId: 'DOC-A' }],
+      }),
+      'CASE-1',
+    );
+    expect(out.get('DOC-A')).toBe('denial'); // strongest wins
+  });
+
+  it('EXCLUDES rows for documents not on THIS case + non-extracted rows', async () => {
+    const out = await chartFactCategoryByDocument(
+      catMockDb({
+        caseDocumentIds: ['DOC-A'],
+        sc: [
+          { sourceDocumentId: 'DOC-OTHER', status: 'service_connected', condition: 'PTSD' },
+          { source: 'manual', sourceDocumentId: 'DOC-A', status: 'service_connected', condition: 'PTSD' },
+        ],
+      }),
+      'CASE-1',
+    );
+    expect(out.size).toBe(0);
   });
 });

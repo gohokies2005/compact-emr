@@ -1,15 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyPackPageBudget,
   assembleDoctorPackManifest,
+  buildCategoryAssertionLines,
   buildManifest,
+  computeDroppedCategoryWarnings,
   DOCTOR_PACK_ENGINE_VERSION,
+  expectedStudyForCondition,
   PACK_PAGE_BUDGET,
+  PACK_PAGE_BUDGET_CATEGORY_FLOORS,
   PACK_PAGE_HARD_CAP,
   PACK_PAGE_TARGET,
   PASSTHROUGH_BOUNDED_PAGES,
   selectKeyDocs,
   type BudgetEntry,
+  type PackCategory,
   type SelectedKeyDoc,
 } from '../services/doctor-pack.js';
 import type { FileReadStatusRecord } from '../services/db-types.js';
@@ -581,6 +586,161 @@ describe('applyPackPageBudget — category budget (assessment §1c)', () => {
     expect(r.entries.find((e) => e.filePath === 'rating.pdf')?.pageCount).toBe(10);
     expect(r.entries.find((e) => e.filePath === 'personnel.pdf')?.pageCount).toBe(1);
     expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET);
+  });
+});
+
+// ============ DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26, dark): per-category floors + 30pp budget ============
+// Flag ON ⇒ 30-page budget, every REPRESENTED category gets a presence-gated, NOT-back-fillable
+// floor, BudgetEntry.packCategory overrides the docType map. Flag OFF ⇒ byte-identical (15-page
+// budget, clinical-only floor, packCategory IGNORED).
+describe('applyPackPageBudget — DOCTOR_PACK_CATEGORY_FLOORS (flag ON)', () => {
+  const ORIGINAL = process.env['DOCTOR_PACK_CATEGORY_FLOORS'];
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env['DOCTOR_PACK_CATEGORY_FLOORS'];
+    else process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = ORIGINAL;
+  });
+
+  it('per-category floors survive contention: every represented category keeps at least its floor', () => {
+    process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = 'on';
+    const entries = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 40), // sc_proof — wants the whole budget
+      be('notes.pdf', 'progress_notes', 'normal', 60, 10),          // clinical floor 3
+      be('denial.pdf', 'denial_letter', 'high_signal', 100, 10),    // denial floor 2
+      be('sleep.pdf', 'sleep_study', 'high_signal', 85, 10),        // tests floor 2
+      be('lay.pdf', 'lay_statement', 'high_signal', 70, 10),        // lay floor 1
+    ];
+    const r = applyPackPageBudget(entries); // default budget = 30 (flag on)
+    expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET_CATEGORY_FLOORS); // 30
+    const count = (p: string) => r.entries.find((e) => e.filePath === p)?.pageCount ?? 0;
+    // No category starved: each keeps >= its floor even though the rating decision would take all 30.
+    expect(count('notes.pdf')).toBeGreaterThanOrEqual(3);
+    expect(count('denial.pdf')).toBeGreaterThanOrEqual(2);
+    expect(count('rating.pdf')).toBeGreaterThanOrEqual(2);
+    expect(count('sleep.pdf')).toBeGreaterThanOrEqual(2);
+    expect(count('lay.pdf')).toBeGreaterThanOrEqual(1);
+    // All five categories present (none dropped to zero).
+    expect(r.entries).toHaveLength(5);
+  });
+
+  it('presence-gating: an ABSENT denial category reserves NO budget — the full 30 goes to present categories', () => {
+    process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = 'on';
+    const entries = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 40), // sc_proof
+      be('notes.pdf', 'progress_notes', 'normal', 60, 5),          // clinical
+    ];
+    const r = applyPackPageBudget(entries);
+    // If the denial/tests/lay floors were (wrongly) reserved despite absence, the budget would be
+    // under-allocated. Presence-gated ⇒ the full budget lands on the two present categories.
+    expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET_CATEGORY_FLOORS);
+    expect(r.entries.some((e) => e.filePath === 'notes.pdf')).toBe(true);
+    expect(r.entries.some((e) => e.filePath === 'rating.pdf')).toBe(true);
+  });
+
+  it('NOT back-fillable: a clinical floor of 3 with only 1 clinical page keeps 1 (never steals sc_proof pages)', () => {
+    process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = 'on';
+    const entries = [
+      be('notes.pdf', 'progress_notes', 'normal', 60, 1),          // clinical — only 1 page available
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 40), // sc_proof
+    ];
+    const r = applyPackPageBudget(entries);
+    // The clinical floor (3) is NOT satisfied by borrowing sc_proof pages — clinical keeps its 1.
+    expect(r.entries.find((e) => e.filePath === 'notes.pdf')?.pageCount).toBe(1);
+    expect(r.entries.find((e) => e.filePath === 'rating.pdf')?.pageCount).toBe(PACK_PAGE_BUDGET_CATEGORY_FLOORS - 1); // 29
+    expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET_CATEGORY_FLOORS);
+  });
+
+  it('an explicit packCategory OVERRIDES the docType map (a mislabeled doc routes to its real category)', () => {
+    process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = 'on';
+    // personnel_record normally maps to 'other' (no floor) — under heavy contention it would get
+    // nothing. Stamped packCategory 'sc_proof' it earns the sc_proof floor and survives, even as a
+    // giant clinical doc tries to consume the whole budget.
+    const entries = [
+      be('big_clinical.pdf', 'progress_notes', 'high_signal', 100, 40),
+      { ...be('mislabeled.pdf', 'personnel_record', 'high_signal', 75, 10), packCategory: 'sc_proof' as PackCategory },
+    ];
+    const r = applyPackPageBudget(entries);
+    // The override gives the personnel doc the sc_proof floor (2) — it is the only sc_proof doc, so
+    // the floor protects it from the budget-eating clinical doc. Without the override it would be
+    // 'other' (no floor) and get nothing.
+    expect(r.entries.find((e) => e.filePath === 'mislabeled.pdf')?.pageCount).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('applyPackPageBudget — flag OFF is byte-identical (packCategory ignored, 15-page budget)', () => {
+  const ORIGINAL = process.env['DOCTOR_PACK_CATEGORY_FLOORS'];
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env['DOCTOR_PACK_CATEGORY_FLOORS'];
+    else process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = ORIGINAL;
+  });
+
+  it('flag OFF: packCategory is IGNORED and the budget is the legacy 15', () => {
+    delete process.env['DOCTOR_PACK_CATEGORY_FLOORS'];
+    const base = [
+      be('rating.pdf', 'rating_decision', 'high_signal', 100, 8),
+      be('dbq.pdf', 'dbq', 'high_signal', 90, 6),
+      be('audio.pdf', 'audiogram', 'high_signal', 80, 4),
+      be('notes.pdf', 'progress_notes', 'bulk', 35, 10),
+    ];
+    // The SAME entries with a bogus packCategory stamped on every one.
+    const withBogusCat = base.map((e) => ({ ...e, packCategory: 'lay' as PackCategory }));
+    const a = applyPackPageBudget(base);
+    const b = applyPackPageBudget(withBogusCat);
+    // packCategory must make ZERO difference when the flag is off.
+    expect(b.entries.map((e) => [e.filePath, e.pageCount])).toEqual(a.entries.map((e) => [e.filePath, e.pageCount]));
+    // ...and the legacy 15-page budget is what governs (not 30).
+    expect(a.postTrimPageCount).toBeLessThanOrEqual(PACK_PAGE_BUDGET);
+    expect(a.entries.find((e) => e.filePath === 'rating.pdf')?.pageCount).toBe(8);
+    expect(a.entries.find((e) => e.filePath === 'dbq.pdf')?.pageCount).toBe(5);
+    expect(a.entries.find((e) => e.filePath === 'notes.pdf')).toBeUndefined();
+  });
+});
+
+describe('buildCategoryAssertionLines — cover coverage checklist', () => {
+  it('renders surviving pages per category and an explicit NOT-FOUND / NONE-ON-FILE marker when absent', () => {
+    const lines = buildCategoryAssertionLines(
+      [{ category: 'clinical' as PackCategory, displayLabel: 'Clinical notes', pageRanges: [{ from: 2, to: 3 }] }],
+      { docType: 'sleep_study', label: 'Sleep study (polysomnography / AHI)' },
+    );
+    expect(lines[0]).toBe('Clinical diagnosis: Clinical notes (p2-3)');
+    // sc_proof + the defining study are absent ⇒ NOT FOUND IN CHART; denial + lay ⇒ NONE ON FILE.
+    expect(lines[1]).toBe('VA service-connected proof: NOT FOUND IN CHART');
+    expect(lines[2]).toBe('Prior denial: NONE ON FILE');
+    expect(lines[3]).toBe('Defining study (Sleep study (polysomnography / AHI)): NOT FOUND IN CHART');
+    expect(lines[4]).toBe('Lay statement: NONE ON FILE');
+  });
+
+  it('no expected study ⇒ the defining-study line reads "not applicable"', () => {
+    const lines = buildCategoryAssertionLines([], null);
+    expect(lines[3]).toBe('Defining study: not applicable for this claimed condition');
+  });
+});
+
+describe('computeDroppedCategoryWarnings', () => {
+  it('fires for a category present pre-budget but with zero survivors', () => {
+    const warnings = computeDroppedCategoryWarnings(
+      new Map<PackCategory, number>([['sc_proof', 2], ['clinical', 1]]),
+      new Set<PackCategory>(['clinical']),
+    );
+    expect(warnings).toEqual(['category sc_proof: all 2 document(s) dropped by the page budget']);
+  });
+
+  it('emits nothing when every present category survived', () => {
+    const warnings = computeDroppedCategoryWarnings(
+      new Map<PackCategory, number>([['clinical', 1]]),
+      new Set<PackCategory>(['clinical']),
+    );
+    expect(warnings).toEqual([]);
+  });
+});
+
+describe('expectedStudyForCondition', () => {
+  it('maps OSA → sleep_study, tinnitus → audiogram, asthma → PFT; unknown → null', () => {
+    expect(expectedStudyForCondition('obstructive sleep apnea')?.docType).toBe('sleep_study');
+    expect(expectedStudyForCondition('tinnitus')?.docType).toBe('audiogram');
+    expect(expectedStudyForCondition('asthma')?.docType).toBe('pulmonary_function_test');
+    expect(expectedStudyForCondition('lumbar strain')).toBeNull();
+    expect(expectedStudyForCondition('')).toBeNull();
+    expect(expectedStudyForCondition(null)).toBeNull();
   });
 });
 

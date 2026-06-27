@@ -135,6 +135,54 @@ const CATEGORY_CAP_PRIORITY: readonly Exclude<PackCategory, 'other'>[] = [
   'lay',
 ];
 
+// ====================== DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26, dark) ======================
+// Per-category page floors + a wider 30-page budget so a multi-category pack never starves a
+// must-have category (e.g. a giant rating decision eating every page before the defining sleep
+// study or the prior denial is reached). Gated behind DOCTOR_PACK_CATEGORY_FLOORS:
+//   - OFF (default): byte-identical to today — 15-page budget, clinical-only floor (4), the legacy
+//     soft caps, and BudgetEntry.packCategory is IGNORED entirely.
+//   - ON: 30-page budget, every REPRESENTED category gets a small guaranteed floor (presence-gated;
+//     NOT back-fillable across categories), the wider soft caps below, and a BudgetEntry may carry
+//     an explicit packCategory (the chart-fact override) that overrides the docType→category map.
+export function categoryFloorsEnabled(): boolean {
+  return process.env['DOCTOR_PACK_CATEGORY_FLOORS'] === 'on';
+}
+
+// Flag-ON budget. The flag-OFF budget stays PACK_PAGE_BUDGET (15) so every existing caller and test
+// that imports PACK_PAGE_BUDGET — including the non-owned golden-pack-selection suite — is unchanged.
+export const PACK_PAGE_BUDGET_CATEGORY_FLOORS = 30;
+
+// The effective budget for the CURRENT flag state — what generate passes + stamps, and the default
+// argument to applyPackPageBudget. Flag OFF ⇒ 15 (byte-identical); flag ON ⇒ 30.
+export function effectivePackPageBudget(): number {
+  return categoryFloorsEnabled() ? PACK_PAGE_BUDGET_CATEGORY_FLOORS : PACK_PAGE_BUDGET;
+}
+
+// Flag-ON per-category FLOORS. Presence-gated (a category with no sized doc reserves nothing — an
+// absent denial reserves no budget) and NOT back-fillable (a category's floor is satisfied ONLY from
+// that category's own docs, never by borrowing another category's pages). clinical leads — the dx
+// note the PCP refuses to sign without.
+const CATEGORY_FLOORS: Partial<Record<PackCategory, number>> = {
+  clinical: 3,
+  sc_proof: 2,
+  denial: 2,
+  tests: 2,
+  lay: 1,
+};
+// Floor fill order: clinical first, then the decision/proof categories, then tests + lay.
+const CATEGORY_FLOOR_PRIORITY: readonly PackCategory[] = ['clinical', 'denial', 'sc_proof', 'tests', 'lay'];
+
+// Flag-ON soft caps — the legacy caps doubled to re-sum to the 30-page budget
+// (8 + 6 + 8 + 4 + 2 + 2 = 30): under full contention every category lands exactly on its cap.
+const CATEGORY_SOFT_CAPS_WITH_FLOORS: Record<Exclude<PackCategory, 'other'>, number> = {
+  clinical: 8,
+  denial: 6,
+  sc_proof: 8,
+  tests: 4,
+  service: 2,
+  lay: 2,
+};
+
 export interface SelectKeyDocsInput {
   // `cls` (Chunk D): pre-computed content-aware classification from the route (docTag override >
   // content text > filename). Absent -> legacy filename-only classifyFile fallback.
@@ -278,6 +326,12 @@ export interface BudgetEntry extends DoctorPackManifestEntry {
   // (sc_condition > screening > active_problem > active_medication). A page absent from this map
   // ranks last (lowest yield). Only meaningful alongside pinnedPages.
   readonly pinnedFactKindByPage?: Readonly<Record<number, GroundedFactKind>>;
+  // DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26): an explicit pack category that OVERRIDES the
+  // docType→category map for THIS entry (the chart-fact override — e.g. a doc the classifier
+  // mislabeled but whose extracted facts prove it grounds a granted SC condition is stamped
+  // 'sc_proof'). Honored ONLY when DOCTOR_PACK_CATEGORY_FLOORS is on; IGNORED (byte-identical) when
+  // off. Absent ⇒ the category derives from docType via packCategoryOf.
+  readonly packCategory?: PackCategory;
 }
 
 // doctor-pack grounded pages PR-3, 2026-06-13: pinned-page YIELD ranking for the forced-
@@ -425,7 +479,7 @@ function rangesFromSortedPages(sorted: readonly number[]): readonly KeyDocPageRa
  */
 export function applyPackPageBudget(
   entries: readonly BudgetEntry[],
-  budget: number = PACK_PAGE_BUDGET,
+  budget: number = effectivePackPageBudget(),
 ): PackBudgetResult {
   const preTrimPageCount = entries.reduce((sum, e) => sum + e.pageCount, 0);
   // A whole-doc passthrough (empty pageRanges) has pageCount 0, so it contributes NOTHING to
@@ -463,8 +517,14 @@ export function applyPackPageBudget(
     }
     return take;
   };
+  // DOCTOR_PACK_CATEGORY_FLOORS: when ON, an entry's explicit packCategory overrides the docType
+  // map; when OFF, packCategory is ignored (catResolve === packCategoryOf(docType)) so the legacy
+  // allocation is byte-identical.
+  const floorsOn = categoryFloorsEnabled();
+  const catResolve = (e: BudgetEntry): PackCategory =>
+    floorsOn ? (e.packCategory ?? packCategoryOf(e.docType)) : packCategoryOf(e.docType);
   const categoryTaken = (cat: PackCategory): number =>
-    ranked.reduce((sum, e) => sum + (packCategoryOf(e.docType) === cat ? (takenByPath.get(e.filePath) ?? 0) : 0), 0);
+    ranked.reduce((sum, e) => sum + (catResolve(e) === cat ? (takenByPath.get(e.filePath) ?? 0) : 0), 0);
 
   // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B — Phase 0): PINNED pages reserve budget
   // FIRST, ahead of the clinical floor and every regex/LLM-selected page. A pinned page grounded a
@@ -515,22 +575,51 @@ export function applyPackPageBudget(
     }
   }
 
-  // Phase 1 — clinical floor fills first.
-  let clinicalTaken = 0;
-  for (const entry of ranked) {
-    if (clinicalTaken >= CLINICAL_PAGE_FLOOR || remaining <= 0) break;
-    if (packCategoryOf(entry.docType) !== 'clinical') continue;
-    clinicalTaken += takeFor(entry, CLINICAL_PAGE_FLOOR - clinicalTaken);
-  }
-
-  // Phase 2 — category soft caps in priority order.
-  for (const cat of CATEGORY_CAP_PRIORITY) {
-    const cap = CATEGORY_SOFT_CAPS[cat];
-    let catTaken = categoryTaken(cat);
+  if (floorsOn) {
+    // Phase 1 (flag ON) — PER-CATEGORY floors fill first. PRESENCE-GATED: a category with no sized
+    // doc in `ranked` reserves nothing (an absent denial reserves no budget). NOT back-fillable: a
+    // floor pulls ONLY from its own category's docs, so a category short on pages never steals
+    // another category's budget. Whole-doc passthroughs are NOT in `ranked` (they ship bounded in
+    // the kept loop), so a category represented ONLY by a passthrough reserves no floor here yet
+    // still appears in the pack — the "passthrough credit" that keeps a floor from double-reserving.
+    for (const cat of CATEGORY_FLOOR_PRIORITY) {
+      const floor = CATEGORY_FLOORS[cat];
+      if (floor === undefined) continue;
+      const catEntries = ranked.filter((e) => catResolve(e) === cat);
+      if (catEntries.length === 0) continue; // presence-gated
+      let taken = categoryTaken(cat);
+      for (const entry of catEntries) {
+        if (taken >= floor || remaining <= 0) break;
+        taken += takeFor(entry, floor - taken);
+      }
+    }
+    // Phase 2 (flag ON) — wider soft caps (re-summed to the 30-page budget) in priority order.
+    for (const cat of CATEGORY_CAP_PRIORITY) {
+      const cap = CATEGORY_SOFT_CAPS_WITH_FLOORS[cat];
+      let catTaken = categoryTaken(cat);
+      for (const entry of ranked) {
+        if (catTaken >= cap || remaining <= 0) break;
+        if (catResolve(entry) !== cat) continue;
+        catTaken += takeFor(entry, cap - catTaken);
+      }
+    }
+  } else {
+    // Phase 1 (flag OFF, legacy) — clinical floor fills first. BYTE-IDENTICAL to the pre-flag budget.
+    let clinicalTaken = 0;
     for (const entry of ranked) {
-      if (catTaken >= cap || remaining <= 0) break;
-      if (packCategoryOf(entry.docType) !== cat) continue;
-      catTaken += takeFor(entry, cap - catTaken);
+      if (clinicalTaken >= CLINICAL_PAGE_FLOOR || remaining <= 0) break;
+      if (packCategoryOf(entry.docType) !== 'clinical') continue;
+      clinicalTaken += takeFor(entry, CLINICAL_PAGE_FLOOR - clinicalTaken);
+    }
+    // Phase 2 (flag OFF, legacy) — category soft caps in priority order.
+    for (const cat of CATEGORY_CAP_PRIORITY) {
+      const cap = CATEGORY_SOFT_CAPS[cat];
+      let catTaken = categoryTaken(cat);
+      for (const entry of ranked) {
+        if (catTaken >= cap || remaining <= 0) break;
+        if (packCategoryOf(entry.docType) !== cat) continue;
+        catTaken += takeFor(entry, cap - catTaken);
+      }
     }
   }
 
@@ -570,13 +659,21 @@ export function applyPackPageBudget(
   // NOT seeing and why).
   const noted = new Set<PackCategory>();
   for (const entry of ranked) {
-    const cat = packCategoryOf(entry.docType);
+    const cat = catResolve(entry);
     if (noted.has(cat)) continue;
     noted.add(cat);
-    const selected = ranked.reduce((sum, e) => sum + (packCategoryOf(e.docType) === cat ? e.pageCount : 0), 0);
+    const selected = ranked.reduce((sum, e) => sum + (catResolve(e) === cat ? e.pageCount : 0), 0);
     const kept = categoryTaken(cat);
     if (kept < selected) {
-      const capNote = cat === 'other' ? 'global rank only' : `soft cap ${CATEGORY_SOFT_CAPS[cat]}${cat === 'clinical' ? `, floor ${CLINICAL_PAGE_FLOOR}` : ''}`;
+      let capNote: string;
+      if (cat === 'other') {
+        capNote = 'global rank only';
+      } else if (floorsOn) {
+        const floor = CATEGORY_FLOORS[cat];
+        capNote = `soft cap ${CATEGORY_SOFT_CAPS_WITH_FLOORS[cat]}${floor !== undefined ? `, floor ${floor}` : ''}`;
+      } else {
+        capNote = `soft cap ${CATEGORY_SOFT_CAPS[cat]}${cat === 'clinical' ? `, floor ${CLINICAL_PAGE_FLOOR}` : ''}`;
+      }
       trimNotes.push(`category ${cat}: kept ${kept} of ${selected} selected pages (${capNote})`);
     }
   }
@@ -657,6 +754,81 @@ function enforceHardPageCap(
     running += trimmedCount;
     trimNotes.push(`${entry.filePath}: kept ${trimmedCount} of ${entry.pageCount} pages (${PACK_PAGE_HARD_CAP}-page pack hard cap)`);
     if (!trimmedFilePaths.includes(entry.filePath)) trimmedFilePaths.push(entry.filePath);
+  }
+  return out;
+}
+
+// ============ DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26): defining-study + cover checklist ============
+
+export interface ExpectedStudy {
+  readonly docType: KeyDocRecord['docType'];
+  readonly label: string;
+}
+
+// The objective study that DEFINES a claimed condition — the page the physician expects to see (an
+// OSA letter with no sleep study is suspect). Matched on the claimed-condition text; the study
+// docType is force-included + surfaced on the cover checklist when DOCTOR_PACK_CATEGORY_FLOORS is on.
+const CONDITION_STUDY_DOCTYPES: ReadonlyArray<{ readonly pattern: RegExp; readonly study: ExpectedStudy }> = [
+  { pattern: /\b(obstructive sleep apnea|sleep apnea|osa)\b/i, study: { docType: 'sleep_study', label: 'Sleep study (polysomnography / AHI)' } },
+  { pattern: /\b(tinnitus|hearing loss|sensorineural|hearing)\b/i, study: { docType: 'audiogram', label: 'Audiogram' } },
+  { pattern: /\b(asthma|copd|chronic obstructive|emphysema|chronic bronchitis|pulmonary|respiratory)\b/i, study: { docType: 'pulmonary_function_test', label: 'Pulmonary function test (spirometry)' } },
+];
+
+export function expectedStudyForCondition(claimedCondition: string | null | undefined): ExpectedStudy | null {
+  const text = (claimedCondition ?? '').trim();
+  if (text.length === 0) return null;
+  for (const { pattern, study } of CONDITION_STUDY_DOCTYPES) {
+    if (pattern.test(text)) return study;
+  }
+  return null;
+}
+
+export interface CategoryAssertionSurvivor {
+  readonly category: PackCategory;
+  readonly displayLabel: string;
+  readonly pageRanges: readonly KeyDocPageRange[];
+}
+
+// The 5-line cover "coverage checklist": for each must-have category, the surviving pages OR an
+// explicit NOT-FOUND-IN-CHART / NONE-ON-FILE marker so the physician sees at a glance what the pack
+// does and does NOT contain. Pure; rendered into the cover index by doctor-pack-generate when the
+// flag is on. clinical/sc/study read NOT FOUND IN CHART (their absence is a gap); denial/lay read
+// NONE ON FILE (their absence is normal).
+export function buildCategoryAssertionLines(
+  survivors: readonly CategoryAssertionSurvivor[],
+  expectedStudy: ExpectedStudy | null,
+): string[] {
+  const fmt = (ranges: readonly KeyDocPageRange[]): string =>
+    ranges.length === 0
+      ? 'all pages'
+      : ranges.map((r) => (r.from === r.to ? `p${r.from}` : `p${r.from}-${r.to}`)).join(', ');
+  const has = (cat: PackCategory): boolean => survivors.some((s) => s.category === cat);
+  const present = (cat: PackCategory): string =>
+    survivors.filter((s) => s.category === cat).map((s) => `${s.displayLabel} (${fmt(s.pageRanges)})`).join('; ');
+  const lines: string[] = [];
+  lines.push(`Clinical diagnosis: ${has('clinical') ? present('clinical') : 'NOT FOUND IN CHART'}`);
+  lines.push(`VA service-connected proof: ${has('sc_proof') ? present('sc_proof') : 'NOT FOUND IN CHART'}`);
+  lines.push(`Prior denial: ${has('denial') ? present('denial') : 'NONE ON FILE'}`);
+  if (expectedStudy !== null) {
+    lines.push(`Defining study (${expectedStudy.label}): ${has('tests') ? present('tests') : 'NOT FOUND IN CHART'}`);
+  } else {
+    lines.push('Defining study: not applicable for this claimed condition');
+  }
+  lines.push(`Lay statement: ${has('lay') ? present('lay') : 'NONE ON FILE'}`);
+  return lines;
+}
+
+// Per-category DROPPED warning: a category that HAD documents pre-budget but whose docs were ALL
+// evicted post-budget. Deterministic in the input map's insertion order.
+export function computeDroppedCategoryWarnings(
+  preBudgetCounts: ReadonlyMap<PackCategory, number>,
+  survivingCategories: ReadonlySet<PackCategory>,
+): string[] {
+  const out: string[] = [];
+  for (const [cat, n] of preBudgetCounts) {
+    if (n > 0 && !survivingCategories.has(cat)) {
+      out.push(`category ${cat}: all ${n} document(s) dropped by the page budget`);
+    }
   }
   return out;
 }

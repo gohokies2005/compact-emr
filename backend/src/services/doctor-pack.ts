@@ -527,20 +527,28 @@ export function applyPackPageBudget(
     ranked.reduce((sum, e) => sum + (catResolve(e) === cat ? (takenByPath.get(e.filePath) ?? 0) : 0), 0);
 
   // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B — Phase 0): PINNED pages reserve budget
-  // FIRST, ahead of the clinical floor and every regex/LLM-selected page. A pinned page grounded a
-  // granted SC condition / objective test / active problem / med — the back-map's high-yield set —
-  // so it is sorted to the TOP tier and a forced over-budget trim never drops it before an ordinary
-  // page. CAPPED, not uncapped: pinned reservation stops at `remaining` (the budget). If the pinned
-  // SET ITSELF overflows the budget, pinned pages are reserved in global YIELD order (sc_condition >
-  // screening > active_problem > active_medication, then doc rank, then page order) so the LOWEST-
-  // yield pinned page is the one left out. Each reserved pinned page bumps takenByPath, so the
-  // count-based phases below see pinned docs as already partly filled and never double-count them.
-  // When NO entry carries pinned pages this loop reserves nothing ⇒ the three phases + the legacy
-  // prefix-take run byte-identically to the pre-PR-3 budget.
+  // ahead of every regex/LLM-selected page. A pinned page grounded a granted SC condition / objective
+  // test / active problem / med — the back-map's high-yield set — so it is sorted to the TOP tier and
+  // a forced over-budget trim never drops it before an ordinary page. CAPPED, not uncapped: pinned
+  // reservation stops at `remaining` (the budget). If the pinned SET ITSELF overflows the budget,
+  // pinned pages are reserved in global YIELD order (sc_condition > screening > active_problem >
+  // active_medication, then doc rank, then page order) so the LOWEST-yield pinned page is the one
+  // left out. Each reserved pinned page bumps takenByPath, so the count-based phases below see pinned
+  // docs as already partly filled and never double-count them. When NO entry carries pinned pages
+  // this reserves nothing ⇒ the three phases + the legacy prefix-take run byte-identically.
+  //
+  // ORDERING (2026-06-27, DOCTOR_PACK_CATEGORY_FLOORS Fix A): the reservation is extracted into a
+  // closure so the FLAG-ON branch can run it AFTER the per-category floors (floors-before-pinned).
+  // Pre-fix it ran FIRST unconditionally, so a multi-SC Blue Button whose every sc_proof page was
+  // pinned drained the whole budget before the clinical/lay floors were reached → NO_CLINICAL_DX.
+  // The flag-OFF branch keeps it FIRST (byte-identical). The flag take is count-based; emission
+  // reconciles the count vs the specific reserved pinned pages via takePinnedAware, so a floor
+  // satisfied by prefix-count still keeps its doc's pinned page.
   const hasPinned = ranked.some((e) => (e.pinnedPages ?? []).length > 0);
   // Per-doc pinned pages actually RESERVED (so emission keeps exactly these, highest-yield first).
   const reservedPinnedByPath = new Map<string, Set<number>>();
-  if (hasPinned) {
+  const reservePinned = ({ perCategoryCap }: { perCategoryCap: boolean }): void => {
+    if (!hasPinned) return;
     // Flatten every (entry, pinnedPage) into one globally-ranked list: yield kind asc, then doc
     // global-rank (the `ranked` index), then page number asc — fully deterministic.
     const rankIndex = new Map(ranked.map((e, i) => [e.filePath, i]));
@@ -566,6 +574,17 @@ export function applyPackPageBudget(
     });
     for (const slot of slots) {
       if (remaining <= 0) break;
+      // DOCTOR_PACK_CATEGORY_FLOORS Fix B (flag-ON only): cap a single category's pinned share at its
+      // soft cap so one pinned-heavy category (e.g. sc_proof in a multi-SC Blue Button) cannot drain
+      // the whole budget during reservation and starve the other categories. categoryTaken already
+      // reflects the floor pages reserved by Fix A, so pinned tops a category to its cap and no
+      // further here. 'other' has no soft cap ⇒ uncapped (defensive). perCategoryCap is false in the
+      // flag-OFF branch ⇒ the cap check is skipped ⇒ byte-identical to the pre-fix reservation.
+      if (perCategoryCap) {
+        const cat = catResolve(slot.entry);
+        const cap = cat === 'other' ? undefined : CATEGORY_SOFT_CAPS_WITH_FLOORS[cat];
+        if (cap !== undefined && categoryTaken(cat) >= cap) continue;
+      }
       const got = takeFor(slot.entry, 1); // reserve one page of budget for this pinned page
       if (got > 0) {
         const set = reservedPinnedByPath.get(slot.entry.filePath) ?? new Set<number>();
@@ -573,15 +592,16 @@ export function applyPackPageBudget(
         reservedPinnedByPath.set(slot.entry.filePath, set);
       }
     }
-  }
+  };
 
   if (floorsOn) {
-    // Phase 1 (flag ON) — PER-CATEGORY floors fill first. PRESENCE-GATED: a category with no sized
-    // doc in `ranked` reserves nothing (an absent denial reserves no budget). NOT back-fillable: a
-    // floor pulls ONLY from its own category's docs, so a category short on pages never steals
-    // another category's budget. Whole-doc passthroughs are NOT in `ranked` (they ship bounded in
-    // the kept loop), so a category represented ONLY by a passthrough reserves no floor here yet
-    // still appears in the pack — the "passthrough credit" that keeps a floor from double-reserving.
+    // Phase 1 (flag ON) — PER-CATEGORY floors fill FIRST, AHEAD of the pinned reservation (Fix A).
+    // PRESENCE-GATED: a category with no sized doc in `ranked` reserves nothing (an absent denial
+    // reserves no budget). NOT back-fillable: a floor pulls ONLY from its own category's docs, so a
+    // category short on pages never steals another category's budget. Whole-doc passthroughs are NOT
+    // in `ranked` (they ship bounded in the kept loop), so a category represented ONLY by a
+    // passthrough reserves no floor here yet still appears in the pack — the "passthrough credit"
+    // that keeps a floor from double-reserving.
     for (const cat of CATEGORY_FLOOR_PRIORITY) {
       const floor = CATEGORY_FLOORS[cat];
       if (floor === undefined) continue;
@@ -593,6 +613,8 @@ export function applyPackPageBudget(
         taken += takeFor(entry, floor - taken);
       }
     }
+    // Phase 0 (flag ON) — pinned reservation AFTER the floors, capped per-category (Fix A + B).
+    reservePinned({ perCategoryCap: true });
     // Phase 2 (flag ON) — wider soft caps (re-summed to the 30-page budget) in priority order.
     for (const cat of CATEGORY_CAP_PRIORITY) {
       const cap = CATEGORY_SOFT_CAPS_WITH_FLOORS[cat];
@@ -604,6 +626,9 @@ export function applyPackPageBudget(
       }
     }
   } else {
+    // Phase 0 (flag OFF, legacy) — pinned reservation FIRST, uncapped. BYTE-IDENTICAL to the pre-fix
+    // ordering (pinned before the clinical floor).
+    reservePinned({ perCategoryCap: false });
     // Phase 1 (flag OFF, legacy) — clinical floor fills first. BYTE-IDENTICAL to the pre-flag budget.
     let clinicalTaken = 0;
     for (const entry of ranked) {

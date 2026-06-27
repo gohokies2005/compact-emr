@@ -11,6 +11,7 @@ import {
   PACK_PAGE_BUDGET_CATEGORY_FLOORS,
   PACK_PAGE_HARD_CAP,
   PACK_PAGE_TARGET,
+  packCategoryOf,
   PASSTHROUGH_BOUNDED_PAGES,
   selectKeyDocs,
   type BudgetEntry,
@@ -692,6 +693,124 @@ describe('applyPackPageBudget — flag OFF is byte-identical (packCategory ignor
     expect(a.entries.find((e) => e.filePath === 'rating.pdf')?.pageCount).toBe(8);
     expect(a.entries.find((e) => e.filePath === 'dbq.pdf')?.pageCount).toBe(5);
     expect(a.entries.find((e) => e.filePath === 'notes.pdf')).toBeUndefined();
+  });
+});
+
+// ============ DOCTOR_PACK_CATEGORY_FLOORS Fix A + B (2026-06-27): floors-before-pinned + per-cat
+// pinned cap. Pre-fix the Phase-0 pinned reservation ran FIRST and uncapped, so a multi-SC Blue
+// Button whose every sc_proof page was a pinned grounded page drained the whole 30-page budget
+// before the clinical / lay floors were reached → NO_CLINICAL_DX. Floors now run first; the pinned
+// reservation runs after and is capped at each category's soft cap. ============================
+describe('applyPackPageBudget — floors-before-pinned + per-category pinned cap (Fix A + B)', () => {
+  const ORIGINAL = process.env['DOCTOR_PACK_CATEGORY_FLOORS'];
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env['DOCTOR_PACK_CATEGORY_FLOORS'];
+    else process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = ORIGINAL;
+  });
+
+  // Stamp EVERY selected page of a doc as a pinned grounded page (the multi-SC Blue Button shape:
+  // the facts→pages back-map pinned every rating/grant page of the bundle).
+  function bePinnedAll(
+    filePath: string,
+    docType: BudgetEntry['docType'],
+    importance: number,
+    pageCount: number,
+    kind: 'sc_condition' | 'screening' | 'active_problem' | 'active_medication' = 'sc_condition',
+  ): BudgetEntry {
+    const base = be(filePath, docType, 'high_signal', importance, pageCount);
+    const pinnedPages = Array.from({ length: pageCount }, (_v, i) => i + 1);
+    const pinnedFactKindByPage: Record<number, typeof kind> = {};
+    for (const pg of pinnedPages) pinnedFactKindByPage[pg] = kind;
+    return { ...base, pinnedPages, pinnedFactKindByPage };
+  }
+
+  it('multi-SC Blue Button drain: clinical floor 0→>=3, lay floor 0→>=1, sc_proof capped at <=8', () => {
+    process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = 'on';
+    // Three sc_proof grant docs, EVERY page pinned (30 pinned sc_condition pages) — pre-fix these
+    // drained the entire 30-page budget in Phase 0 and the clinical / denial / tests / lay / service
+    // floors got ZERO. The non-sc_proof docs each have enough pages to fill their soft caps so the
+    // remaining budget is fully consumed by the OTHER categories (sc_proof stays at its cap 8).
+    const entries = [
+      bePinnedAll('rating1.pdf', 'rating_decision', 100, 10),
+      bePinnedAll('rating2.pdf', 'supplemental_decision', 99, 10),
+      bePinnedAll('rating3.pdf', 'rated_disabilities_view', 98, 10),
+      be('notes.pdf', 'progress_notes', 'normal', 60, 10),       // clinical floor 3, cap 8
+      be('denial.pdf', 'denial_letter', 'high_signal', 100, 10), // denial floor 2, cap 6
+      be('sleep.pdf', 'sleep_study', 'high_signal', 85, 10),     // tests floor 2, cap 4
+      be('lay.pdf', 'lay_statement', 'high_signal', 70, 10),     // lay floor 1, cap 2
+      be('dd214.pdf', 'dd_214', 'high_signal', 95, 10),          // service cap 2
+    ];
+    const r = applyPackPageBudget(entries); // default budget = 30 (flag on)
+    const count = (p: string) => r.entries.find((e) => e.filePath === p)?.pageCount ?? 0;
+    // Floors restored: clinical (was starved to 0) keeps >= its floor 3; lay (was 0) keeps >= 1.
+    expect(count('notes.pdf')).toBeGreaterThanOrEqual(3);
+    expect(count('lay.pdf')).toBeGreaterThanOrEqual(1);
+    // sc_proof (the pinned grant docs) is capped at 8 during reservation and never grows past it:
+    // the other categories' caps consume the remaining budget so Phase 3 has nothing to add. The cap
+    // is satisfied by one 10-page grant doc, so the lower-ranked sc_proof docs legitimately drop —
+    // the category, not each doc, is capped. At least one grant doc survives.
+    const scProof = ['rating1.pdf', 'rating2.pdf', 'rating3.pdf'].reduce((s, p) => s + count(p), 0);
+    expect(scProof).toBeLessThanOrEqual(8);
+    expect(scProof).toBeGreaterThanOrEqual(2); // sc_proof floor still honored
+    expect(['rating1.pdf', 'rating2.pdf', 'rating3.pdf'].some((p) => count(p) > 0)).toBe(true);
+    // The other categories the bug used to STARVE to zero all survive at >= their floors.
+    expect(count('denial.pdf')).toBeGreaterThanOrEqual(2);
+    expect(count('sleep.pdf')).toBeGreaterThanOrEqual(2);
+    expect(count('dd214.pdf')).toBeGreaterThanOrEqual(1);
+    // The whole 30-page budget is allocated.
+    expect(r.postTrimPageCount).toBe(PACK_PAGE_BUDGET_CATEGORY_FLOORS);
+  });
+
+  // END-phase invariant: with floors ON, every represented floor category's KEPT pages must be at
+  // least its floor, or its full selected page count if that is fewer (the not-back-fillable case).
+  it('END-phase invariant: every represented floor category keeps >= min(floor, selected)', () => {
+    process.env['DOCTOR_PACK_CATEGORY_FLOORS'] = 'on';
+    const FLOORS: Partial<Record<ReturnType<typeof packCategoryOf>, number>> = {
+      clinical: 3, sc_proof: 2, denial: 2, tests: 2, lay: 1,
+    };
+    const fixtures: BudgetEntry[][] = [
+      // The multi-SC drain set, pinned.
+      [
+        bePinnedAll('r1.pdf', 'rating_decision', 100, 10),
+        bePinnedAll('r2.pdf', 'supplemental_decision', 99, 10),
+        be('n.pdf', 'progress_notes', 'normal', 60, 10),
+        be('d.pdf', 'denial_letter', 'high_signal', 100, 10),
+        be('s.pdf', 'sleep_study', 'high_signal', 85, 10),
+        be('l.pdf', 'lay_statement', 'high_signal', 70, 10),
+      ],
+      // Not-back-fillable: clinical has only 1 page available, floor 3 ⇒ keeps exactly 1.
+      [
+        be('n.pdf', 'progress_notes', 'normal', 60, 1),
+        be('r.pdf', 'rating_decision', 'high_signal', 100, 40),
+      ],
+      // Ordinary contention, no pinned pages.
+      [
+        be('r.pdf', 'rating_decision', 'high_signal', 100, 20),
+        be('n.pdf', 'progress_notes', 'normal', 60, 8),
+        be('d.pdf', 'denial_letter', 'high_signal', 100, 6),
+        be('l.pdf', 'lay_statement', 'high_signal', 70, 4),
+      ],
+    ];
+    for (const entries of fixtures) {
+      const r = applyPackPageBudget(entries);
+      const selectedByCat = new Map<string, number>();
+      for (const e of entries) {
+        const c = packCategoryOf(e.docType);
+        selectedByCat.set(c, (selectedByCat.get(c) ?? 0) + e.pageCount);
+      }
+      const keptByCat = new Map<string, number>();
+      for (const e of r.entries) {
+        const c = packCategoryOf(e.docType);
+        keptByCat.set(c, (keptByCat.get(c) ?? 0) + e.pageCount);
+      }
+      for (const [cat, floor] of Object.entries(FLOORS)) {
+        const selected = selectedByCat.get(cat) ?? 0;
+        if (selected === 0) continue; // presence-gated: absent category has no floor obligation
+        const kept = keptByCat.get(cat) ?? 0;
+        const required = Math.min(floor as number, selected);
+        expect(kept, `category ${cat} kept ${kept} < required ${required}`).toBeGreaterThanOrEqual(required);
+      }
+    }
   });
 });
 

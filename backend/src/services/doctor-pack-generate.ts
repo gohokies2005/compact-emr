@@ -749,6 +749,11 @@ export async function generateDoctorPackForCase(
       physicianIncludeAllPages: physicianOverride,
       ...(claimedCondition !== undefined ? { claimedCondition } : {}),
       ...(groundedPages.length > 0 ? { groundedPages } : {}),
+      // DOCTOR_PACK_CATEGORY_FLOORS (2026-06-27, Fix C): A&P-preferred clinical narrowing for the
+      // regex selector (the LLM picker already favors the A&P). Flag OFF ⇒ prop absent ⇒
+      // byte-identical. This is exactly the path narrowOutOfLlmScope (~L764) routes bulk Blue Button
+      // clinical to, so the flag-ON A&P narrowing reaches the high-volume case.
+      ...(categoryFloorsOn ? { preferAssessmentPlan: true } : {}),
     });
     let selection: PageSelectorResult;
     const textPageCount = pagesInput.filter((p) => (p.text ?? '').trim().length > 0).length;

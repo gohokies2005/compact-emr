@@ -341,6 +341,14 @@ export interface PageSelectorInput {
   // fact gets pulled even though the BB as a whole stays excluded). The generator only populates
   // this when DOCTOR_PACK_GROUNDED_PAGES === 'on'; absent ⇒ byte-identical to today.
   readonly groundedPages?: readonly number[];
+  // DOCTOR_PACK_CATEGORY_FLOORS (2026-06-27, Fix C): when true, the progress_notes / blue_button
+  // clinical selector NARROWS the kept pages to the Assessment & Plan section(s) when any selected
+  // page carries an A&P marker — Dr. Kasky: "just the A&P usually". The dx is guaranteed to survive
+  // (a condition-mentioning page is retained even if it is not the A&P page). When NO selected page
+  // has an A&P marker, the selector falls back to the full condition/recent set (never drops the dx).
+  // The module stays PURE: the caller (doctor-pack-generate) sets this from categoryFloorsEnabled();
+  // page-selector never reads the environment. Absent/false ⇒ byte-identical to today.
+  readonly preferAssessmentPlan?: boolean;
 }
 
 export interface PageSelectorResult {
@@ -396,6 +404,23 @@ function pageIsBoilerplate(text: string): boolean {
 
 function pageIsBlank(text: string): boolean {
   return text.replace(/\s+/g, ' ').trim().length < 10;
+}
+
+// DOCTOR_PACK_CATEGORY_FLOORS (2026-06-27, Fix C): Assessment & Plan section markers. A clinical
+// note's A&P is the high-signal slice a physician reads first ("just the A&P usually"). These match
+// the common CPRS / private-practice headers — spelled-out "Assessment and Plan", standalone
+// "Assessment:" / "Plan:" lines, the "A/P" shorthand, and "Impression:". Used ONLY when the caller
+// passes preferAssessmentPlan (the DOCTOR_PACK_CATEGORY_FLOORS flag); absent ⇒ never consulted.
+const ASSESSMENT_PLAN_MARKERS: readonly RegExp[] = [
+  /\bassessment\s*(?:and|&|\/)\s*plan\b/i,
+  /^\s*assessment\s*:/im,
+  /^\s*plan\s*:/im,
+  /\bA\/P\b/,
+  /\bimpression\s*:/i,
+];
+
+function pageHasAssessmentPlan(text: string): boolean {
+  return ASSESSMENT_PLAN_MARKERS.some((re) => re.test(text));
 }
 
 // ---------- Chunk D: progress-notes condition + recent-encounter helpers ----------
@@ -579,6 +604,8 @@ function selectPagesCore(input: PageSelectorInput): PageSelectorResult {
     }
     const includedPages: number[] = [];
     const reasons: string[] = [];
+    const mentionsConditionByPage = new Map<number, boolean>();
+    const textByPage = new Map<number, string>();
     for (const page of input.pages) {
       if (pageIsBlank(page.text)) continue;
       const inRecentEncounter = docMaxDate > 0 && (pageDates.get(page.pageNumber) ?? []).includes(docMaxDate);
@@ -586,6 +613,29 @@ function selectPagesCore(input: PageSelectorInput): PageSelectorResult {
       if (mentionsCondition || inRecentEncounter) {
         includedPages.push(page.pageNumber);
         reasons.push(`p${page.pageNumber}: ${mentionsCondition ? 'mentions_claimed_condition' : `most_recent_encounter(${docMaxDate})`}`);
+        mentionsConditionByPage.set(page.pageNumber, mentionsCondition);
+        textByPage.set(page.pageNumber, page.text);
+      }
+    }
+    // DOCTOR_PACK_CATEGORY_FLOORS (2026-06-27, Fix C): A&P-section-preferred narrowing. When enabled
+    // and ANY selected page carries an Assessment & Plan marker, narrow the kept set to the A&P
+    // page(s) — Dr. Kasky: "just the A&P usually". The dx is guaranteed to survive: if no A&P page
+    // mentions the claimed condition, retain one condition-mentioning page too. When NO selected page
+    // has an A&P marker, leave the set unchanged (fall back — never drop the dx). Flag OFF ⇒
+    // preferAssessmentPlan absent ⇒ this block is skipped ⇒ byte-identical to today.
+    let apNote = '';
+    if (input.preferAssessmentPlan === true && includedPages.length > 0) {
+      const apPages = includedPages.filter((pn) => pageHasAssessmentPlan(textByPage.get(pn) ?? ''));
+      if (apPages.length > 0) {
+        const narrowed = new Set<number>(apPages);
+        const apHasCondition = apPages.some((pn) => mentionsConditionByPage.get(pn) === true);
+        if (!apHasCondition) {
+          const dxPage = includedPages.find((pn) => mentionsConditionByPage.get(pn) === true);
+          if (dxPage !== undefined) narrowed.add(dxPage);
+        }
+        includedPages.length = 0;
+        includedPages.push(...[...narrowed].sort((a, b) => a - b));
+        apNote = `; a&p_preferred(p${includedPages.join(',p')})`;
       }
     }
     // Rationale prefix carries the REAL docType so blue-button exports don't masquerade as
@@ -593,7 +643,7 @@ function selectPagesCore(input: PageSelectorInput): PageSelectorResult {
     return {
       pageRanges: rangesFromIncluded(includedPages),
       selectorRationale: includedPages.length > 0
-        ? `${input.docType}_condition_or_recent: ${reasons.join('; ')}`
+        ? `${input.docType}_condition_or_recent: ${reasons.join('; ')}${apNote}`
         : `${input.docType}_no_condition_or_recent_match (excluded)`,
       needsRnReview: false,
       selectorVersion: PAGE_SELECTOR_VERSION,

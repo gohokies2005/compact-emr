@@ -464,3 +464,78 @@ describe('selectPages — grounded-page union (PR-2)', () => {
     expect(r.selectorRationale).not.toContain('grounded page');
   });
 });
+
+// DOCTOR_PACK_CATEGORY_FLOORS Fix C (2026-06-27): A&P-section-preferred clinical narrowing. When the
+// caller passes preferAssessmentPlan (set from the flag at the generate call site — the module stays
+// pure), the progress_notes / blue_button selector narrows the kept pages to the Assessment & Plan
+// section(s), GUARANTEEING the dx survives. No A&P marker anywhere ⇒ falls back to the full
+// condition/recent set. Absent ⇒ byte-identical to today.
+describe('selectPages — A&P-preferred narrowing (Fix C)', () => {
+  function runNotes(
+    pages: readonly PageSelectorInputPage[],
+    opts: { claimedCondition?: string; preferAssessmentPlan?: boolean; docType?: KeyDocType } = {},
+  ) {
+    return selectPages({
+      filePath: 'records/Notes.pdf',
+      docType: opts.docType ?? 'progress_notes',
+      classification: 'bulk',
+      pageCount: pages.length,
+      pages,
+      ...(opts.claimedCondition !== undefined ? { claimedCondition: opts.claimedCondition } : {}),
+      ...(opts.preferAssessmentPlan !== undefined ? { preferAssessmentPlan: opts.preferAssessmentPlan } : {}),
+    });
+  }
+  function included(r: { pageRanges: readonly { from: number; to: number }[] }): number[] {
+    return r.pageRanges.flatMap((rg) => Array.from({ length: rg.to - rg.from + 1 }, (_v, i) => rg.from + i));
+  }
+
+  // A sectioned recent encounter: HPI page + an Assessment & Plan page + a billing page, all carrying
+  // the doc's most recent date so all three are selected by the condition/recent rule.
+  const sectioned: readonly PageSelectorInputPage[] = [
+    p(1, 'Encounter 01/05/2020. Routine dermatology check, benign nevus monitored, no change.'),
+    p(2, 'Encounter 06/20/2024. HPI: veteran reports worsening obstructive sleep apnea symptoms overnight.'),
+    p(3, 'Encounter 06/20/2024. Assessment and Plan: obstructive sleep apnea, stable on CPAP; continue therapy.'),
+    p(4, 'Encounter 06/20/2024. Billing and administrative notes; copay collected; next visit scheduled.'),
+  ];
+
+  it('narrows a sectioned note to the A&P page (dx survives on the A&P page itself)', () => {
+    const r = runNotes(sectioned, { claimedCondition: 'obstructive sleep apnea', preferAssessmentPlan: true });
+    // p2, p3, p4 are all in the recent encounter; preferAssessmentPlan narrows to the A&P page p3.
+    expect(included(r)).toEqual([3]);
+    expect(r.selectorRationale).toContain('a&p_preferred');
+  });
+
+  it('retains a separate dx page when the A&P page does NOT mention the condition', () => {
+    const pages = [
+      p(1, 'Encounter 06/20/2024. HPI: veteran reports worsening obstructive sleep apnea, poor sleep.'),
+      p(2, 'Encounter 06/20/2024. Assessment and Plan: continue current management; follow up in 3 months.'),
+      p(3, 'Encounter 06/20/2024. Vitals reviewed, routine labs ordered, no acute distress noted today.'),
+    ];
+    const r = runNotes(pages, { claimedCondition: 'obstructive sleep apnea', preferAssessmentPlan: true });
+    // A&P page p2 has no condition mention ⇒ the dx page p1 is retained; the non-A&P non-dx p3 drops.
+    expect(included(r)).toEqual([1, 2]);
+    expect(included(r)).not.toContain(3);
+    expect(r.selectorRationale).toContain('a&p_preferred');
+  });
+
+  it('FALLS BACK to the full condition/recent set when NO page has an A&P marker (never drops the dx)', () => {
+    const unsectioned = [
+      p(1, 'Encounter 01/05/2020. Routine dermatology check, benign nevus monitored, no change.'),
+      p(2, 'Encounter 06/20/2024. Veteran reports worsening obstructive sleep apnea, CPAP reviewed.'),
+      p(3, 'Encounter 06/20/2024. Sleep apnea symptoms persist; nightly use discussed in detail today.'),
+    ];
+    const withFlag = runNotes(unsectioned, { claimedCondition: 'obstructive sleep apnea', preferAssessmentPlan: true });
+    const withoutFlag = runNotes(unsectioned, { claimedCondition: 'obstructive sleep apnea' });
+    // No A&P marker ⇒ identical to the un-flagged behavior; both keep the condition pages.
+    expect(included(withFlag)).toEqual(included(withoutFlag));
+    expect(included(withFlag)).toEqual([2, 3]);
+    expect(withFlag.selectorRationale).not.toContain('a&p_preferred');
+  });
+
+  it('flag absent ⇒ byte-identical (a sectioned note keeps the whole recent encounter)', () => {
+    const r = runNotes(sectioned, { claimedCondition: 'obstructive sleep apnea' });
+    // Without preferAssessmentPlan the A&P narrowing never runs: all recent-encounter pages stay.
+    expect(included(r)).toEqual([2, 3, 4]);
+    expect(r.selectorRationale).not.toContain('a&p_preferred');
+  });
+});

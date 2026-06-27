@@ -120,28 +120,42 @@ export interface PlannedPdfPage {
   readonly items: readonly (string | null)[];
 }
 
-// Pure layout planner — the renderer draws EXACTLY this plan, and previewRecordTextLayout
-// exposes it so tests can assert header presence + verbatim content without a PDF text
-// extractor (pdf-lib encodes drawn text as hex strings; byte-grepping the PDF is not viable).
-function planRecordTextLayout(input: RenderRecordTextInput, font: PDFFont): PlannedPdfPage[] {
+// LINKED COVER (2026-06-27, DOCTOR_PACK_LINKED_COVER): a richer plan item that also carries the
+// SOURCE line index the rendered line came from (null for the provenance-header lines and for
+// paragraph gaps). Used ONLY by previewRecordTextLineRects to map a cover content-row back to its
+// rendered rectangle. The public PlannedPdfPage shape AND the renderer are unchanged — the legacy
+// planRecordTextLayout below is a byte-identical projection of this rich plan.
+interface RichPlanItem {
+  readonly text: string | null; // null = paragraph gap (no glyphs)
+  readonly sourceLineIndex: number | null; // index within the source page's split('\n'); null = header/gap
+}
+interface RichPlannedPage {
+  readonly sourcePageNumber: number;
+  readonly items: RichPlanItem[];
+}
+
+// Pure layout planner (rich) — the single source of truth for page breaking + item order. The
+// renderer draws EXACTLY this plan (via the legacy projection), previewRecordTextLayout exposes the
+// text-only view, and previewRecordTextLineRects replays the same y-walk to derive per-line rects.
+function planRecordTextLayoutRich(input: RenderRecordTextInput, font: PDFFont): RichPlannedPage[] {
   if (input.pages.length === 0) {
     throw new Error('renderRecordTextPdf: no extracted page text to render');
   }
-  const pages: { sourcePageNumber: number; items: (string | null)[] }[] = [];
-  let cur: { sourcePageNumber: number; items: (string | null)[] };
+  const pages: RichPlannedPage[] = [];
+  let cur: RichPlannedPage;
   let y = 0;
   const newPage = (sourcePageNumber: number): void => {
     cur = { sourcePageNumber, items: [] };
     pages.push(cur);
     y = PAGE_HEIGHT - MARGIN;
   };
-  const pushLine = (line: string, sourcePageNumber: number): void => {
+  const pushLine = (line: string, sourcePageNumber: number, sourceLineIndex: number | null): void => {
     if (y - LINE_HEIGHT < MARGIN) newPage(sourcePageNumber);
-    cur.items.push(line);
+    cur.items.push({ text: line, sourceLineIndex });
     y -= LINE_HEIGHT;
   };
   const pushGap = (): void => {
-    cur.items.push(null);
+    cur.items.push({ text: null, sourceLineIndex: null });
     y -= PARAGRAPH_GAP;
   };
 
@@ -153,7 +167,7 @@ function planRecordTextLayout(input: RenderRecordTextInput, font: PDFFont): Plan
   // their own header sentence verbatim instead of the document-conversion one.
   const headerText = input.provenanceHeader ?? buildRecordRenderHeader(input.originalFilename, input.sourceUploadedAt);
   for (const headerLine of wrapLine(toWinAnsi(headerText), font)) {
-    pushLine(headerLine, firstSource);
+    pushLine(headerLine, firstSource, null);
   }
   pushGap();
 
@@ -161,16 +175,68 @@ function planRecordTextLayout(input: RenderRecordTextInput, font: PDFFont): Plan
     // Each source page starts on a fresh PDF page so every PDF page maps to exactly ONE
     // source page (unambiguous 'page N of source' footers). Source page 1 shares the header page.
     if (i > 0) newPage(src.sourcePageNumber);
-    for (const sourceLine of toWinAnsi(src.text).split('\n')) {
+    toWinAnsi(src.text).split('\n').forEach((sourceLine, lineIdx) => {
       if (sourceLine.trim() === '') {
         pushGap();
-        continue;
+        return;
       }
-      for (const line of wrapLine(sourceLine, font)) pushLine(line, src.sourcePageNumber);
-    }
+      for (const line of wrapLine(sourceLine, font)) pushLine(line, src.sourcePageNumber, lineIdx);
+    });
   });
 
   return pages;
+}
+
+// Legacy text-only projection — IDENTICAL output (page breaks + item order) to the pre-2026-06-27
+// planner. The renderer and previewRecordTextLayout consume this; behavior is unchanged.
+function planRecordTextLayout(input: RenderRecordTextInput, font: PDFFont): PlannedPdfPage[] {
+  return planRecordTextLayoutRich(input, font).map((p) => ({
+    sourcePageNumber: p.sourcePageNumber,
+    items: p.items.map((it) => it.text),
+  }));
+}
+
+// LINKED COVER (2026-06-27): one rendered text line + its clickable rectangle in PDF user space
+// (origin bottom-left, points). sourceLineIndex is the index into the source page's split('\n')
+// lines (null for header lines), so a caller that built the source text line-by-line (the cover
+// index) can map a known line back to its on-page rectangle for a PDF link annotation.
+export interface RenderedLineRect {
+  readonly pdfPageIndex: number;
+  readonly sourcePageNumber: number;
+  readonly sourceLineIndex: number | null;
+  readonly text: string;
+  readonly rect: readonly [number, number, number, number]; // [x0, y0, x1, y1]
+}
+
+/**
+ * Replay the renderer's exact per-page y-walk over the rich plan to produce a clickable rectangle
+ * for every rendered (non-gap) line. The rect spans the full text column (MARGIN..PAGE_WIDTH-MARGIN)
+ * and the line's vertical slot, matching where renderRecordTextPdf draws the glyphs. Pure +
+ * deterministic (same constants as the renderer).
+ */
+export async function previewRecordTextLineRects(input: RenderRecordTextInput): Promise<readonly RenderedLineRect[]> {
+  const scratch = await PDFDocument.create();
+  const font = await scratch.embedFont(StandardFonts.TimesRoman);
+  const plan = planRecordTextLayoutRich(input, font);
+  const out: RenderedLineRect[] = [];
+  plan.forEach((page, pdfPageIndex) => {
+    let y = PAGE_HEIGHT - MARGIN;
+    for (const item of page.items) {
+      if (item.text === null) {
+        y -= PARAGRAPH_GAP;
+        continue;
+      }
+      out.push({
+        pdfPageIndex,
+        sourcePageNumber: page.sourcePageNumber,
+        sourceLineIndex: item.sourceLineIndex,
+        text: item.text,
+        rect: [MARGIN, y - LINE_HEIGHT, PAGE_WIDTH - MARGIN, y],
+      });
+      y -= LINE_HEIGHT;
+    }
+  });
+  return out;
 }
 
 /**

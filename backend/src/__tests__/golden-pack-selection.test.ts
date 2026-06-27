@@ -358,7 +358,7 @@ describe('ROUND 2 (E) — medicine-first manifest order', () => {
 });
 
 describe('ROUND 2 (D) — cover-index page body', () => {
-  const lines = buildCoverIndexLines({
+  const { lines } = buildCoverIndexLines({
     caseId: 'CASE-77',
     claimedCondition: 'obstructive sleep apnea',
     claimType: 'secondary',
@@ -396,7 +396,7 @@ describe('ROUND 2 (D) — cover-index page body', () => {
   });
 
   it('falls back to claimType for the theory line and notes when nothing was omitted', () => {
-    const minimal = buildCoverIndexLines({ caseId: 'C2', claimedCondition: 'tinnitus', claimType: 'initial', framingChoice: null, upstreamScCondition: null, entries: [], notIncluded: [] });
+    const minimal = buildCoverIndexLines({ caseId: 'C2', claimedCondition: 'tinnitus', claimType: 'initial', framingChoice: null, upstreamScCondition: null, entries: [], notIncluded: [] }).lines;
     expect(minimal[1]).toBe('Theory: initial');
     expect(minimal.join('\n')).toContain('(nothing was omitted)');
   });
@@ -412,7 +412,7 @@ describe('cover index — pinned-page WHY lines (PR-3)', () => {
   });
 
   it('(c) the cover index emits one indented pinned line per surviving pinned page, carrying the grant quote', () => {
-    const lines = buildCoverIndexLines({
+    const { lines } = buildCoverIndexLines({
       caseId: 'CASE-BB',
       claimedCondition: 'obstructive sleep apnea',
       claimType: 'secondary',
@@ -450,12 +450,12 @@ describe('cover index — pinned-page WHY lines (PR-3)', () => {
       ],
       notIncluded: [],
     };
-    const withoutField = buildCoverIndexLines(args).join('\n');
+    const withoutField = buildCoverIndexLines(args).lines.join('\n');
     // Adding an EMPTY pinnedWhyLines array must not change a single byte (absent === empty).
     const withEmpty = buildCoverIndexLines({
       ...args,
       entries: [{ ...args.entries[0]!, pinnedWhyLines: [] }],
-    }).join('\n');
+    }).lines.join('\n');
     expect(withEmpty).toBe(withoutField);
     expect(withoutField).not.toContain('pinned ');
   });

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { HttpError } from '../http/errors.js';
 import { evaluateChartReadiness, isEffectivelyRead } from './chart-readiness.js';
-import { renderRecordTextPdf } from './record-text-render.js';
+import { renderRecordTextPdf, previewRecordTextLayout, previewRecordTextLineRects } from './record-text-render.js';
 import {
   applyPackPageBudget,
   assembleDoctorPackManifest,
@@ -383,6 +383,107 @@ export function coverWhyLine(category: PackCategory, mentionsClaimedCondition: b
   }
 }
 
+// ====================== DOCTOR_PACK_LINKED_COVER (2026-06-27) ======================
+// Calm clickable table-of-contents cover. Friendly, FILENAME-FREE labels for the cover TOC — NEVER
+// a filename, NEVER a docType code. Unknown/unspecified docTypes derive a calm label from the pack
+// category. Deliberately distinct from keyDocDisplayLabel/DOC_TYPE_HUMAN_LABELS, which the RN review
+// UI keeps using (those carry the original filename on purpose). cover_index has no friendly label
+// (it is the cover itself, never listed in its own contents).
+const COVER_FRIENDLY_BY_DOCTYPE: Readonly<Record<string, string>> = {
+  dd_214: 'DD-214 (service record)',
+  progress_notes: 'Office visit note',
+  blue_button: 'Office visit note',
+  sleep_study: 'Sleep study',
+  rating_decision: 'VA rating decision',
+  denial_letter: 'VA denial',
+  supplemental_decision: 'VA denial',
+  benefit_summary: 'VA benefit summary',
+  rated_disabilities_view: 'VA benefit summary',
+  c_and_p_exam: 'C&P exam',
+  dbq: 'DBQ exam',
+  lay_statement: "Veteran's statement",
+  statement_in_support: "Veteran's statement",
+  buddy_statement: 'Buddy statement',
+  audiogram: 'Hearing test',
+  pulmonary_function_test: 'Lung function test',
+};
+const COVER_FRIENDLY_BY_CATEGORY: Readonly<Record<PackCategory, string>> = {
+  clinical: 'Clinical record',
+  sc_proof: 'Service-connection proof',
+  denial: 'VA denial',
+  tests: 'Test result',
+  service: 'Service record',
+  lay: "Veteran's statement",
+  other: 'Supporting record',
+};
+export function coverFriendlyLabel(docType: string, category: PackCategory): string {
+  const direct = COVER_FRIENDLY_BY_DOCTYPE[docType];
+  if (direct !== undefined) return direct;
+  return COVER_FRIENDLY_BY_CATEGORY[category] ?? 'Supporting record';
+}
+
+// Calm section headers + display order for the linked cover. The five named must-have buckets show
+// even when empty (with a calm "Not found in chart" / "None on file" line, folding the old
+// categoryAssertions checklist); service/other show only when populated.
+const COVER_SECTION_HEADER: Readonly<Record<PackCategory, string>> = {
+  clinical: 'CLINICAL',
+  sc_proof: 'SERVICE-CONNECTION PROOF',
+  denial: 'PRIOR DENIAL',
+  tests: 'DEFINING STUDY',
+  lay: 'LAY EVIDENCE',
+  service: 'SERVICE RECORDS',
+  other: 'OTHER RECORDS',
+};
+const COVER_SECTION_ORDER: readonly PackCategory[] = ['clinical', 'sc_proof', 'denial', 'tests', 'lay', 'service', 'other'];
+const COVER_MUSTHAVE_EMPTY: Partial<Record<PackCategory, string>> = {
+  clinical: 'Not found in chart',
+  sc_proof: 'Not found in chart',
+  tests: 'Not found in chart',
+  denial: 'None on file',
+  lay: 'None on file',
+};
+
+// Plain-language theory line for the cover title block (prose, not the raw framingChoice enum).
+export function plainTheoryLine(framingChoice: string | null, claimType: string | null, upstream: string | null): string {
+  const up = (upstream ?? '').trim();
+  if (up.length > 0) return `Secondary to service-connected ${up}`;
+  const f = (framingChoice ?? claimType ?? '').trim();
+  if (f.length === 0) return 'not set';
+  return f.charAt(0).toUpperCase() + f.slice(1).replace(/_/g, ' ');
+}
+
+function formatScSnapshot(list: readonly { condition: string; ratingPct: number | null }[]): string {
+  if (list.length === 0) return 'none recorded';
+  const shown = list.slice(0, 4).map((s) => (s.ratingPct !== null && s.ratingPct !== undefined ? `${s.condition} ${s.ratingPct}%` : s.condition));
+  const extra = list.length - shown.length;
+  return shown.join(' · ') + (extra > 0 ? ` +${extra} more` : '');
+}
+function formatProblemSnapshot(list: readonly string[]): string {
+  if (list.length === 0) return 'none recorded';
+  const shown = list.slice(0, 6);
+  const extra = list.length - shown.length;
+  return shown.join(' · ') + (extra > 0 ? ` +${extra} more` : '');
+}
+// Shorten coverWhyLine to a calm fragment: first clause, no trailing period, capped length.
+function shortCoverWhy(why: string): string {
+  let s = (why.split('—')[0] ?? why).split(';')[0] ?? why;
+  s = s.replace(/\.$/, '').trim();
+  const CAP = 52;
+  if (s.length > CAP) s = `${s.slice(0, CAP - 1).trimEnd()}…`;
+  return s;
+}
+// Compose ONE content row, kept short enough to render on a single line (so the cover's page count —
+// and therefore the printed page numbers — is independent of label/why length): friendly label —
+// why, a calm dotted leader, then the single page ref.
+function composeCoverRow(friendly: string, why: string, pageRef: number | undefined): string {
+  const left = `  ${friendly} — ${why}`;
+  const LEFT_CAP = 64;
+  const leftTrunc = left.length > LEFT_CAP ? `${left.slice(0, LEFT_CAP - 1).trimEnd()}…` : left;
+  const pr = pageRef !== undefined ? `p. ${pageRef}` : 'p. -';
+  const dotCount = Math.max(3, 74 - leftTrunc.length - pr.length);
+  return `${leftTrunc} ${'.'.repeat(dotCount)} ${pr}`;
+}
+
 // Same condition matcher shape the page-selector uses (full phrase OR any distinctive token
 // >= 5 chars) — local copy because page-selector edits are kill-list-only this round.
 export function textMentionsCondition(text: string, claimedCondition: string | undefined): boolean {
@@ -432,6 +533,41 @@ export interface CoverIndexEntryInput {
   // is byte-identical. FRN style: plain hyphen separators, straight quotes (no em dashes / smart
   // quotes) for the new lines.
   readonly pinnedWhyLines?: readonly string[];
+  // DOCTOR_PACK_LINKED_COVER (2026-06-27): the manifest entry's docType (for the friendly label) and
+  // the predicted 1-indexed page in the FINAL assembled pack where this document starts (printed as
+  // "p. N"). Absent on the legacy flag-off cover. friendlyLabel, when supplied, overrides the
+  // docType→label derivation.
+  readonly docType?: DoctorPackManifestEntry['docType'];
+  readonly friendlyLabel?: string;
+  readonly assembledStartPage?: number;
+}
+
+// DOCTOR_PACK_LINKED_COVER (2026-06-27): buildCoverIndexLines returns the cover's text lines AND
+// (linked-cover mode only) one descriptor per content document row — the index of its line in
+// `lines` (so the caller can map it to a rendered rectangle for a PDF link) plus its manifest-entries
+// index, category, and rendered label.
+export interface CoverIndexBuild {
+  readonly lines: string[];
+  readonly contentRows?: readonly {
+    readonly entriesIndex: number;
+    readonly sourceLineIndex: number;
+    readonly category: PackCategory;
+    readonly label: string;
+  }[];
+}
+
+// DOCTOR_PACK_LINKED_COVER (2026-06-27): the TS→Python link-map contract. TS owns the cover-page
+// rectangles (computed from the deterministic record-text-render layout); the Python assembler owns
+// the merged-pack page offsets (entry_start_page) and stamps a PDF link cover-rect → entry start
+// page + a 2-level outline. entryIndex is the MANIFEST entry index (cover is entry #0). rect is
+// [x0,y0,x1,y1] in PDF user space (origin bottom-left). Travels on manifestJson.coverLinkMap.
+interface CoverLinkMapEntry {
+  readonly entryIndex: number;
+  readonly coverPageIndex: number;
+  readonly rect: readonly number[];
+  readonly category: string;
+  readonly categoryLabel: string;
+  readonly label: string;
 }
 
 // doctor-pack grounded pages PR-3, 2026-06-13 (POLICY B): the per-pinned-page cover "why" line.
@@ -464,7 +600,15 @@ export function buildCoverIndexLines(input: {
   // doctor-pack.ts buildCategoryAssertionLines). Absent/empty ⇒ no checklist block ⇒ cover body is
   // byte-identical to the pre-flag cover.
   readonly categoryAssertions?: readonly string[];
-}): string[] {
+  // DOCTOR_PACK_LINKED_COVER (2026-06-27): when true, emit the calm clickable-TOC layout (title +
+  // case snapshot + grouped contents) and return contentRows. Absent/false ⇒ byte-identical to the
+  // legacy cover.
+  readonly linkedCover?: boolean;
+  readonly veteranName?: string;
+  readonly serviceConnected?: readonly { condition: string; ratingPct: number | null }[];
+  readonly activeProblems?: readonly string[];
+}): CoverIndexBuild {
+  if (input.linkedCover === true) return buildLinkedCoverLines(input);
   const lines: string[] = [];
   lines.push(`Case ${input.caseId} — claimed condition: ${input.claimedCondition ?? 'not recorded'}`);
   const framing = input.framingChoice ?? input.claimType ?? 'not set';
@@ -496,7 +640,81 @@ export function buildCoverIndexLines(input: {
   lines.push('Not included:');
   if (input.notIncluded.length === 0) lines.push('(nothing was omitted)');
   else for (const note of input.notIncluded) lines.push(`- ${note}`);
-  return lines;
+  return { lines };
+}
+
+// DOCTOR_PACK_LINKED_COVER (2026-06-27): the calm clickable table-of-contents cover. A short title
+// block + 2-3 line case snapshot at the top, then contents grouped by the five evidence categories
+// with calm section headers; each document row is `<friendly label> — <short why> ... p. <N>` with
+// ONE page ref (the predicted assembled start page). No filenames, no page-range soup, no pinned
+// dump. contentRows records which `lines` index each document row lands on so the caller can map it
+// to a rendered rectangle for a PDF link.
+function buildLinkedCoverLines(input: {
+  readonly caseId: string;
+  readonly claimedCondition?: string;
+  readonly claimType?: string | null;
+  readonly framingChoice?: string | null;
+  readonly upstreamScCondition?: string | null;
+  readonly entries: readonly CoverIndexEntryInput[];
+  readonly notIncluded: readonly string[];
+  readonly veteranName?: string;
+  readonly serviceConnected?: readonly { condition: string; ratingPct: number | null }[];
+  readonly activeProblems?: readonly string[];
+}): CoverIndexBuild {
+  const lines: string[] = [];
+  const contentRows: { entriesIndex: number; sourceLineIndex: number; category: PackCategory; label: string }[] = [];
+
+  // Title block.
+  lines.push('Doctor Pack');
+  const vet = (input.veteranName ?? '').trim();
+  lines.push(vet.length > 0 ? `${vet} · ${input.caseId}` : `Case ${input.caseId}`);
+  lines.push(`Claimed: ${input.claimedCondition ?? 'not recorded'}`);
+  lines.push(`Theory: ${plainTheoryLine(input.framingChoice ?? null, input.claimType ?? null, input.upstreamScCondition ?? null)}`);
+
+  // Case snapshot (2-3 calm lines).
+  lines.push('');
+  lines.push('Case snapshot');
+  lines.push(`Service-connected: ${formatScSnapshot(input.serviceConnected ?? [])}`);
+  lines.push(`Active problems: ${formatProblemSnapshot(input.activeProblems ?? [])}`);
+
+  // Contents, grouped by category.
+  lines.push('');
+  lines.push('Contents');
+  const byCat = new Map<PackCategory, { e: CoverIndexEntryInput; idx: number }[]>();
+  input.entries.forEach((e, idx) => {
+    const list = byCat.get(e.category) ?? [];
+    list.push({ e, idx });
+    byCat.set(e.category, list);
+  });
+  for (const cat of COVER_SECTION_ORDER) {
+    const rows = byCat.get(cat) ?? [];
+    // service/other are hidden when empty; the five named must-have buckets always show.
+    if (rows.length === 0 && !(cat in COVER_MUSTHAVE_EMPTY)) continue;
+    lines.push('');
+    lines.push(COVER_SECTION_HEADER[cat]);
+    if (rows.length === 0) {
+      lines.push(`  ${COVER_MUSTHAVE_EMPTY[cat]}`);
+      continue;
+    }
+    for (const { e, idx } of rows) {
+      const friendly = e.friendlyLabel ?? coverFriendlyLabel(e.docType ?? 'unspecified', e.category);
+      const why = shortCoverWhy(coverWhyLine(e.category, e.mentionsClaimedCondition));
+      const pageRef = e.assembledStartPage ?? (e.pageRanges.length > 0 ? e.pageRanges[0]!.from : undefined);
+      contentRows.push({ entriesIndex: idx, sourceLineIndex: lines.length, category: e.category, label: friendly });
+      lines.push(composeCoverRow(friendly, why, pageRef));
+    }
+  }
+
+  // Not included — ONE calm line (count + brief), not the per-note list.
+  lines.push('');
+  const n = input.notIncluded.length;
+  if (n > 0) {
+    lines.push(`Not included: ${n} ${n === 1 ? 'record' : 'records'} (omitted as duplicate or lower-priority — see the record list).`);
+  } else {
+    lines.push('Not included: nothing was omitted.');
+  }
+
+  return { lines, contentRows };
 }
 
 // Rendered-artifact uploads go to the RECORDS bucket (PHI_BUCKET_NAME — the same bucket the
@@ -1221,49 +1439,163 @@ export async function generateDoctorPackForCase(
       .map((g) => coverPinnedWhyLine(g.page, g.factKind, g.sourceQuote));
   };
 
-  // ROUND 2 (D): one-page cover index, rendered + prepended as manifest entry #1. Fail-open:
+  // DOCTOR_PACK_LINKED_COVER (2026-06-27): the calm clickable-TOC cover. Read at request time (no
+  // image rebuild). When ON, the cover lists each document with a friendly label + ONE predicted
+  // assembled page ref, and a coverLinkMap travels on the manifest so the Python assembler stamps a
+  // PDF link (cover row → that document's first page) + a 2-level outline. OFF ⇒ byte-identical
+  // legacy cover, no link-map.
+  const linkedCoverOn = process.env['DOCTOR_PACK_LINKED_COVER'] === 'on';
+
+  // Cover-page summary (architect plan: lives in DoctorPack.manifestJson.coverPage). Computed here
+  // (moved up from after the cover) so the linked cover can reuse the veteran name + active problems
+  // for its case-snapshot block — same data, one fetch. Output is identical to the pre-move position.
+  const coverPage = await aggregateChartSummary({
+    db,
+    caseRow: await fetchCaseRowForCover(db, caseId, c.veteranId),
+  });
+
+  // LINKED COVER snapshot inputs: SC conditions WITH rating % (aggregateChartSummary returns names
+  // only) for the "Service-connected:" line. Only queried when the flag is on (OFF ⇒ no extra query
+  // ⇒ byte-identical). Active problems + veteran name reuse the coverPage fetch above.
+  let snapshotSc: { condition: string; ratingPct: number | null }[] = [];
+  if (linkedCoverOn) {
+    const scRows = await db.scCondition.findMany({
+      where: { veteranId: c.veteranId, status: 'service_connected' },
+      orderBy: { condition: 'asc' },
+    });
+    snapshotSc = scRows.map((r) => ({ condition: r.condition, ratingPct: r.ratingPct ?? null }));
+  }
+
+  // ROUND 2 (D): one-page cover index, rendered + prepended as manifest entry #0. Fail-open:
   // a cover render failure drops only the cover (note in trimNotes), never the pack.
   // DOCTOR_PACK_CATEGORY_FLOORS: per-category DROPPED warnings join the Not-included notes (empty
   // when the flag is off ⇒ byte-identical).
   const dedupAndBudgetNotes = [...dedup.notes, ...budget.trimNotes, ...droppedCategoryWarnings];
   let coverEntry: LabeledEntry | null = null;
+  let coverLinkMap: CoverLinkMapEntry[] | null = null;
   {
     try {
-      const coverLines = buildCoverIndexLines({
-        caseId,
-        ...(claimedCondition !== undefined ? { claimedCondition } : {}),
-        claimType: caseWithDocs.claimType ?? null,
-        framingChoice: caseWithDocs.framingChoice ?? null,
-        upstreamScCondition: caseWithDocs.upstreamScCondition ?? null,
-        ...(categoryAssertions.length > 0 ? { categoryAssertions } : {}),
-        entries: budgetedMetas.map((m) => {
-          const pinnedWhyLines = pinnedWhyLinesFor(m);
-          return {
+      const coverNotIncluded = humanizeTrimNotes([...dedupAndBudgetNotes, ...renderNotes], displayNameByPath);
+      if (linkedCoverOn) {
+        // Predicted assembled start page per entry = cover pages + preceding entry pages + 1. The
+        // cover's own page count depends on its line count (rows are length-capped to one rendered
+        // line, so the count is independent of the page-number digits); measure once and the numbers
+        // are stable. The coverLinkMap rects come from the FINAL rendered input, so the clickable link
+        // is always correct regardless of the printed number.
+        const cumPreceding: number[] = [];
+        let acc = 0;
+        for (const m of budgetedMetas) { cumPreceding.push(acc); acc += m.entry.pageCount; }
+        const buildAt = (coverPageCount: number): CoverIndexBuild => buildCoverIndexLines({
+          caseId,
+          ...(claimedCondition !== undefined ? { claimedCondition } : {}),
+          claimType: caseWithDocs.claimType ?? null,
+          framingChoice: caseWithDocs.framingChoice ?? null,
+          upstreamScCondition: caseWithDocs.upstreamScCondition ?? null,
+          linkedCover: true,
+          veteranName: coverPage?.veteran.fullName ?? '',
+          serviceConnected: snapshotSc,
+          activeProblems: coverPage?.activeProblems ?? [],
+          entries: budgetedMetas.map((m, k) => ({
             displayLabel: m.entry.displayLabel,
             category: packCategoryOf(m.entry.docType),
+            docType: m.entry.docType,
             pageRanges: m.entry.pageRanges,
             mentionsClaimedCondition: m.mentionsClaimedCondition,
-            ...(pinnedWhyLines.length > 0 ? { pinnedWhyLines } : {}),
-          };
-        }),
-        notIncluded: humanizeTrimNotes([...dedupAndBudgetNotes, ...renderNotes], displayNameByPath),
-      });
-      const rendered = await renderRecordTextPdf({
-        originalFilename: 'Doctor pack cover index',
-        pages: [{ sourcePageNumber: 1, text: coverLines.join('\n') }],
-        provenanceHeader: 'DOCTOR PACK — COVER INDEX',
-        omitSourceFooters: true,
-      });
-      const coverKey = `cases/${caseId}/_rendered/cover-index-v${c.version}.pdf`;
-      await uploadRenderedPdf(coverKey, rendered.bytes);
-      coverEntry = {
-        filePath: coverKey,
-        docType: 'cover_index',
-        classification: 'high_signal',
-        pageRanges: [{ from: 1, to: rendered.pageCount }],
-        pageCount: rendered.pageCount,
-        displayLabel: 'Cover index',
-      };
+            assembledStartPage: coverPageCount + cumPreceding[k]! + 1,
+          })),
+          notIncluded: coverNotIncluded,
+        });
+        // Resolve the cover's own page count (converges in <=2 iterations; the row count is fixed).
+        let coverPageCount = 1;
+        let built = buildAt(coverPageCount);
+        for (let iter = 0; iter < 3; iter++) {
+          const planned = await previewRecordTextLayout({
+            originalFilename: 'Doctor pack cover index',
+            pages: [{ sourcePageNumber: 1, text: built.lines.join('\n') }],
+            provenanceHeader: 'DOCTOR PACK — COVER INDEX',
+            omitSourceFooters: true,
+          });
+          if (planned.length === coverPageCount) break;
+          coverPageCount = planned.length;
+          built = buildAt(coverPageCount);
+        }
+        const coverInput = {
+          originalFilename: 'Doctor pack cover index',
+          pages: [{ sourcePageNumber: 1, text: built.lines.join('\n') }],
+          provenanceHeader: 'DOCTOR PACK — COVER INDEX',
+          omitSourceFooters: true,
+        };
+        const rendered = await renderRecordTextPdf(coverInput);
+        const coverKey = `cases/${caseId}/_rendered/cover-index-v${c.version}.pdf`;
+        await uploadRenderedPdf(coverKey, rendered.bytes);
+        coverEntry = {
+          filePath: coverKey,
+          docType: 'cover_index',
+          classification: 'high_signal',
+          pageRanges: [{ from: 1, to: rendered.pageCount }],
+          pageCount: rendered.pageCount,
+          displayLabel: 'Cover index',
+        };
+        // Link-map: each content row → the bounding rectangle of its rendered lines on its cover
+        // page. entryIndex is the MANIFEST entry index (cover is #0, so budgetedMetas[k] is k+1).
+        const rects = await previewRecordTextLineRects(coverInput);
+        const map: CoverLinkMapEntry[] = [];
+        for (const row of built.contentRows ?? []) {
+          const lineRects = rects.filter((r) => r.sourceLineIndex === row.sourceLineIndex);
+          if (lineRects.length === 0) continue;
+          const pageIdx = lineRects[0]!.pdfPageIndex;
+          const onPage = lineRects.filter((r) => r.pdfPageIndex === pageIdx);
+          const x0 = Math.min(...onPage.map((r) => r.rect[0]));
+          const y0 = Math.min(...onPage.map((r) => r.rect[1]));
+          const x1 = Math.max(...onPage.map((r) => r.rect[2]));
+          const y1 = Math.max(...onPage.map((r) => r.rect[3]));
+          map.push({
+            entryIndex: row.entriesIndex + 1,
+            coverPageIndex: pageIdx,
+            rect: [x0, y0, x1, y1],
+            category: row.category,
+            categoryLabel: COVER_SECTION_HEADER[row.category],
+            label: row.label,
+          });
+        }
+        if (map.length > 0) coverLinkMap = map;
+      } else {
+        const coverLines = buildCoverIndexLines({
+          caseId,
+          ...(claimedCondition !== undefined ? { claimedCondition } : {}),
+          claimType: caseWithDocs.claimType ?? null,
+          framingChoice: caseWithDocs.framingChoice ?? null,
+          upstreamScCondition: caseWithDocs.upstreamScCondition ?? null,
+          ...(categoryAssertions.length > 0 ? { categoryAssertions } : {}),
+          entries: budgetedMetas.map((m) => {
+            const pinnedWhyLines = pinnedWhyLinesFor(m);
+            return {
+              displayLabel: m.entry.displayLabel,
+              category: packCategoryOf(m.entry.docType),
+              pageRanges: m.entry.pageRanges,
+              mentionsClaimedCondition: m.mentionsClaimedCondition,
+              ...(pinnedWhyLines.length > 0 ? { pinnedWhyLines } : {}),
+            };
+          }),
+          notIncluded: coverNotIncluded,
+        });
+        const rendered = await renderRecordTextPdf({
+          originalFilename: 'Doctor pack cover index',
+          pages: [{ sourcePageNumber: 1, text: coverLines.lines.join('\n') }],
+          provenanceHeader: 'DOCTOR PACK — COVER INDEX',
+          omitSourceFooters: true,
+        });
+        const coverKey = `cases/${caseId}/_rendered/cover-index-v${c.version}.pdf`;
+        await uploadRenderedPdf(coverKey, rendered.bytes);
+        coverEntry = {
+          filePath: coverKey,
+          docType: 'cover_index',
+          classification: 'high_signal',
+          pageRanges: [{ from: 1, to: rendered.pageCount }],
+          pageCount: rendered.pageCount,
+          displayLabel: 'Cover index',
+        };
+      }
     } catch (coverErr) {
       console.warn('doctor-pack: could not render the cover index (pack continues):', coverErr);
       renderNotes.push('could not render the cover index');
@@ -1273,12 +1605,6 @@ export async function generateDoctorPackForCase(
   const packEntries: LabeledEntry[] = [...(coverEntry !== null ? [coverEntry] : []), ...budgetedMetas.map((m) => m.entry)];
   const packTrimNotes = [...dedupAndBudgetNotes, ...renderNotes];
   const refinedTotalPageCount = packEntries.reduce((sum, e) => sum + e.pageCount, 0);
-
-  // Cover-page summary (architect plan: lives in DoctorPack.manifestJson.coverPage).
-  const coverPage = await aggregateChartSummary({
-    db,
-    caseRow: await fetchCaseRowForCover(db, caseId, c.veteranId),
-  });
 
   const result = await db.$transaction(async (tx) => {
     // Architect REVIEW.md b99de30 finding: the prior implementation did
@@ -1397,6 +1723,10 @@ export async function generateDoctorPackForCase(
           entries: packEntries,
           engineVersion: DOCTOR_PACK_ENGINE_VERSION,
           ...(coverPage ? { coverPage } : {}),
+          // DOCTOR_PACK_LINKED_COVER (2026-06-27): the TS→Python link-map (cover rect → assembled
+          // page offset). Absent (flag off, or no content rows) ⇒ the assembler skips link/outline
+          // stamping ⇒ today's behavior.
+          ...(coverLinkMap ? { coverLinkMap } : {}),
           ...(missingClinical ? { warnings: [NO_CLINICAL_DX_WARNING] } : {}),
           // ROUND 2: the budgetTrim block appears whenever ANY Not-included note exists —
           // budget trims, dedup omissions (A), render failures, or the no-lay-statement note (C).

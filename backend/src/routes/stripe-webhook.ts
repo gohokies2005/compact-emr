@@ -76,12 +76,17 @@ export function createStripeWebhookRouter(db: AppDb, deps: StripeWebhookRouterDe
     });
     console.log(`[stripe-webhook] result=${result.status}${result.reason ? ` reason=${result.reason}` : ''} caseId=${caseId}`);
 
-    // Fire-and-forget Google Ads offline conversion upload on $50 review payments.
-    // Never awaited — never blocks the Stripe response. All errors are caught + logged.
+    // Google Ads offline conversion upload on $50 review payments.
+    // AWAITED (not fire-and-forget): on Lambda, a floating promise is frozen when the response
+    // sends and may never complete. The upload is fast (~300-1500ms, abort-guarded at 3s) and
+    // idempotent at Google's side — awaiting is safe and necessary.
     if (amountCents === REVIEW_FEE_CENTS && result.status !== 'duplicate' && result.status !== 'ignored_amount') {
-      uploadReviewConversion(db, caseId, new Date()).catch((err: unknown) => {
+      try {
+        await uploadReviewConversion(db, caseId, new Date());
+      } catch (err: unknown) {
+        // Never rethrow — a failed conversion upload must not fail the payment confirmation.
         console.warn(`[google-ads] conversion upload failed caseId=${caseId}:`, err instanceof Error ? err.message : String(err));
-      });
+      }
     }
 
     res.json({ received: true, result: result.status });

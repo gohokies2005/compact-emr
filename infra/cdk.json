@@ -7,7 +7,7 @@
     "chart_autofill": "on",
     "sc_provenance_enforced": "on",
     "doctor_pack_category_floors": "on",
-    "doctor_pack_linked_cover": "on",
+    "doctor_pack_linked_cover": "off",
     "staging": {
       "domainName": "emr.flatratenexus.com",
       "apiDomainName": "api.emr.flatratenexus.com",

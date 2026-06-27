@@ -4,7 +4,10 @@ import { asyncHandler } from '../http/async-handler.js';
 import { verifyStripeSignature } from '../services/stripe-signature.js';
 import { readSecretByName } from '../services/mailer.js';
 import { parseCaseRef, processStripePayment } from '../services/payment-delivery.js';
+import { uploadReviewConversion } from '../services/google-ads-conversions.js';
 import type { AppDb } from '../services/db-types.js';
+
+const REVIEW_FEE_CENTS = 5000; // $50.00 — the intake review payment that triggers a conversion
 
 // s3 + bucketName feed the delivery-eligibility byte re-hash inside processStripePayment
 // (correction-round SSOT, audit 2026-06-13). OPTIONAL: when absent the byte step fails open (same as
@@ -72,6 +75,15 @@ export function createStripeWebhookRouter(db: AppDb, deps: StripeWebhookRouterDe
       ...(deps.bucketName ? { bucketName: deps.bucketName } : {}),
     });
     console.log(`[stripe-webhook] result=${result.status}${result.reason ? ` reason=${result.reason}` : ''} caseId=${caseId}`);
+
+    // Fire-and-forget Google Ads offline conversion upload on $50 review payments.
+    // Never awaited — never blocks the Stripe response. All errors are caught + logged.
+    if (amountCents === REVIEW_FEE_CENTS && result.status !== 'duplicate' && result.status !== 'ignored_amount') {
+      uploadReviewConversion(db, caseId, new Date()).catch((err: unknown) => {
+        console.warn(`[google-ads] conversion upload failed caseId=${caseId}:`, err instanceof Error ? err.message : String(err));
+      });
+    }
+
     res.json({ received: true, result: result.status });
   }));
   return router;

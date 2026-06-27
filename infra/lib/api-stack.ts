@@ -289,6 +289,7 @@ export class ApiStack extends Stack {
         // else for SES (sandbox until the production-access appeal lands). Flip via cdk.json context.
         EMAIL_TRANSPORT: (this.node.tryGetContext('email_transport') as string | undefined) ?? 'gmail',
         GMAIL_OAUTH_SECRET_NAME: `compact-emr-${props.config.envName}/gmail-oauth`,
+        GOOGLE_ADS_SECRET_NAME: 'frn/google-ads-credentials', // developer_token, client_id, client_secret, refresh_token
         DELIVERY_PORTAL_BASE_URL: `https://${props.config.domainName}`,      // /d/<token> lives on the SPA
         DELIVERY_ADMIN_BCC: 'admin@flatratenexus.com',
         // SES-SANDBOX forwarding mode (Ryan 2026-06-10): all veteran emails delivered to this inbox

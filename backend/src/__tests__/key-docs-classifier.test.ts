@@ -316,7 +316,7 @@ describe('CLASSIFIER_VERSION_NUM (stale-row backfill stamp)', () => {
   it('is an integer >= 2 (0 = legacy DB default, 1 reserved) and tracks the string version', () => {
     expect(Number.isInteger(CLASSIFIER_VERSION_NUM)).toBe(true);
     expect(CLASSIFIER_VERSION_NUM).toBeGreaterThanOrEqual(2);
-    expect(CLASSIFIER_VERSION).toBe('key-docs-classifier-1.2.0');
+    expect(CLASSIFIER_VERSION).toBe('key-docs-classifier-1.3.0');
   });
 });
 

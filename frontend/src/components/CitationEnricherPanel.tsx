@@ -286,6 +286,7 @@ export function CitationEnricherPanel({ caseId, passage, claimedCondition, onApp
             title={c.title}
             subtitle={`${c.journal}${c.year ? ` · ${c.year}` : ''} · PMID ${c.pmid}`}
             preview={`“${c.killer_finding}”\n\nPubMed: ${c.pubmedUrl}`}
+            highlight={c.killer_finding}
             acceptLabel={isSel ? 'Selected ✓' : 'Add to references'}
             declineLabel="Remove"
             onAccept={isSel ? null : () => { toggle(c.pmid); setExpandedPmid(null); }}

@@ -164,9 +164,26 @@ const PRONOUNS: Record<string, { subject: string; object: string }> = {
   'Mx.': { subject: 'their', object: 'them' },
 };
 
+// Sex/salutation is NOT on file for most veterans — there is no Veteran.sex field, and composeMemo
+// passes no salutation — so we must NEVER guess a gendered pronoun. Singular "they" matches the
+// nexus-letter renderer's own neutral default (letter.ts uses neutral "their" when sex is unknown).
+const NEUTRAL_PRONOUNS = { subject: 'their', object: 'them' };
+
+function pronounsFor(input: BuildCoverMemoInput): { subject: string; object: string } {
+  if (input.salutation === undefined) return NEUTRAL_PRONOUNS;
+  return PRONOUNS[input.salutation] ?? NEUTRAL_PRONOUNS;
+}
+
+// When a salutation IS provided we use it ("Ms. Carr"). When sex is UNKNOWN we must NOT guess
+// "Mr."/"Ms." on a legal medical memo — a wrong honorific is worse than none — so we refer to the
+// veteran by last name alone ("Carr's supplemental claim..."), a natural professional-memo voice,
+// or "the veteran" if no last name is on file. Durable follow-up: add a real Veteran.sex field and
+// pass salutation through composeMemo so the memo can say "Ms. Carr" again.
 function honorificLast(input: BuildCoverMemoInput): string {
-  const sal = input.salutation ?? 'Mr.';
-  return input.veteranLastName ? `${sal} ${input.veteranLastName}` : sal;
+  if (input.salutation === undefined) {
+    return input.veteranLastName ? input.veteranLastName : 'the veteran';
+  }
+  return input.veteranLastName ? `${input.salutation} ${input.veteranLastName}` : input.salutation;
 }
 
 function closingParagraphs(skipNieves = false): string[] {
@@ -207,7 +224,7 @@ function bodyForPathway(input: BuildCoverMemoInput): string[] {
   // 2026-06-14: the body first sentence still read lowercase "osa"). The header uses the title-case label.
   const cond = conditionLowercase(formatConditionLabel(input.claimedCondition));
   const priorDate = reliablePriorDate(input);
-  const p = PRONOUNS[input.salutation ?? 'Mr.'] ?? PRONOUNS['Mr.'];
+  const p = pronounsFor(input);
 
   switch (input.pathway) {
     case 'supplemental': {

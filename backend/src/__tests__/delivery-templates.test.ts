@@ -182,3 +182,51 @@ describe('buildCoverMemoText (E4 bug fixes)', () => {
     expect(memo).toContain('Higher-Level Review of the prior decision dated January 15, 2026.');
   });
 });
+
+// ── Defect 1 (2026-06-28): NEVER guess a gendered honorific/pronoun when sex is unknown ───────────
+// There is no Veteran.sex field and composeMemo passes no salutation, so the memo must read
+// naturally WITHOUT a wrong "Mr."/"his" (e.g. Shirley Carr, a female veteran). Neutral default:
+// last name alone + singular "they". An explicit salutation, when present, is still honored.
+describe('buildCoverMemoText (neutral honorific)', () => {
+  const base = {
+    pathway: 'supplemental' as const,
+    veteranFullName: 'Shirley Carr',
+    veteranLastName: 'Carr',
+    claimedCondition: 'ckd',
+    signer: KASKY_CREDENTIALS,
+    letterDate: '2026-06-11',
+    priorDecisionDate: null,
+  };
+
+  it('NEVER emits "Mr."/"Ms."/"Mrs." when no salutation is on file, and refers by last name alone', () => {
+    const memo = buildCoverMemoText(base);
+    expect(memo).not.toMatch(/\bMr\.|\bMs\.|\bMrs\./);
+    expect(memo).toContain("Carr's supplemental claim");
+  });
+
+  it('TDIU with no salutation uses neutral "their"/"them", never gendered pronouns', () => {
+    const memo = buildCoverMemoText({ ...base, pathway: 'tdiu' });
+    expect(memo).toMatch(/their service-connected disabilities/);
+    expect(memo).toMatch(/prevent them from securing/);
+    expect(memo).not.toMatch(/\bhis\b|\bhim\b|\bher\b/);
+  });
+
+  it('honors an explicit salutation when provided (Ms. → "Ms. Carr" + "her")', () => {
+    const memo = buildCoverMemoText({ ...base, pathway: 'tdiu', salutation: 'Ms.' });
+    expect(memo).toContain('Ms. Carr');
+    expect(memo).toMatch(/her service-connected disabilities/);
+    expect(memo).not.toMatch(/\btheir\b|\bhis\b/);
+  });
+
+  it('falls back to "the veteran" when neither salutation nor last name is on file', () => {
+    const memo = buildCoverMemoText({ ...base, veteranFullName: '', veteranLastName: '' });
+    expect(memo).toContain("the veteran's supplemental claim");
+    expect(memo).not.toMatch(/\bMr\.|\bMs\.|\bMrs\./);
+  });
+
+  it('the condition acronym renders uppercase in the memo body (ckd → CKD), not "Ckd"', () => {
+    const memo = buildCoverMemoText(base);
+    expect(memo).toContain('supplemental claim for CKD');
+    expect(memo).not.toMatch(/\bCkd\b/);
+  });
+});

@@ -11,7 +11,13 @@
 const ACRONYMS = new Set([
   'osa', 'ptsd', 'gerd', 'tbi', 'copd', 'ibs', 'gi', 'ed', 'dvt', 'htn', 'dm', 'adhd', 'ocd',
   'tmj', 'va', 'dc', 'imo', 'sc', 'cad', 'afib', 'mst', 'aud', 'mdd',
+  'ckd', 'hld', 'dm2', 'sud', 'als', 'oa', 'djd',
 ]);
+
+// Spinal-level designations (l5-s1 → L5-S1, c5-c6 → C5-C6, t12-l1 → T12-L1): uppercase BOTH vertebra
+// letters. Matched per token BEFORE the generic title-casing, which would otherwise lower-case the
+// second segment ("L5-s1"). Covers C#-T#, T#-L#, L#-S#, L#-L#, etc.
+const SPINAL_LEVEL = /^([clts])(\d{1,2})-([clts])(\d{1,2})$/i;
 
 // Canonical labels for the common conditions (key = punctuation-stripped lowercase). Syncs the
 // OSA / "sleep apnea" variants to ONE label.
@@ -38,6 +44,10 @@ const CANON: Record<string, string> = {
 };
 
 function titleCaseWord(w: string): string {
+  const spinal = SPINAL_LEVEL.exec(w);
+  if (spinal !== null) {
+    return `${spinal[1]!.toUpperCase()}${spinal[2]}-${spinal[3]!.toUpperCase()}${spinal[4]}`;
+  }
   const bare = w.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (ACRONYMS.has(bare)) return w.toUpperCase();
   return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();

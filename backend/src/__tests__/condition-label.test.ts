@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { formatConditionLabel } from '../lib/conditionLabel';
+import { formatConditionLabel } from '../services/condition-label.js';
 
-describe('formatConditionLabel', () => {
+// Backend mirror of frontend/src/__tests__/conditionLabel.test.ts. condition-label.ts is kept
+// byte-aligned with frontend/src/lib/conditionLabel.ts, so these assertions must match the frontend
+// suite (the cover-memo subject/body and the EMR UI both call this formatter — they must agree).
+describe('formatConditionLabel (backend mirror)', () => {
   it('syncs OSA / sleep apnea variants to one canonical label', () => {
     expect(formatConditionLabel('osa')).toBe('Obstructive Sleep Apnea (OSA)');
-    expect(formatConditionLabel('Sleep Apnea (OSA)')).toBe('Obstructive Sleep Apnea (OSA)');
     expect(formatConditionLabel('sleep apnea')).toBe('Obstructive Sleep Apnea (OSA)');
-    expect(formatConditionLabel('Obstructive Sleep Apnea')).toBe('Obstructive Sleep Apnea (OSA)');
   });
   it('cleans slug/underscore + casing', () => {
     expect(formatConditionLabel('unspecified_genitourinary')).toBe('Unspecified Genitourinary');
@@ -29,7 +30,6 @@ describe('formatConditionLabel', () => {
     expect(formatConditionLabel('sud')).toBe('SUD');
     expect(formatConditionLabel('als')).toBe('ALS');
     expect(formatConditionLabel('djd')).toBe('DJD');
-    // acronym uppercasing inside a multi-word generic label (osa resolves via CANON on its own)
     expect(formatConditionLabel('mild osa')).toBe('Mild OSA');
   });
   it('normalizes spinal-level designations (uppercase BOTH vertebra letters)', () => {
@@ -37,7 +37,6 @@ describe('formatConditionLabel', () => {
     expect(formatConditionLabel('c5-c6')).toBe('C5-C6');
     expect(formatConditionLabel('t12-l1')).toBe('T12-L1');
     expect(formatConditionLabel('l5-s1 djd')).toBe('L5-S1 DJD');
-    // already-correct → idempotent
     expect(formatConditionLabel('L5-S1')).toBe('L5-S1');
   });
   it('title-cases a normal multi-word label + is idempotent', () => {

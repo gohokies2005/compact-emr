@@ -61,7 +61,8 @@
     "no_midlevels": "We do not use, and do not intend to hire, nurse practitioners (NPs) or physician assistants (PAs). State this affirmatively (board-certified physicians, with DPT assistance on MSK letters always co-signed by an MD/DO). Never disparage other services for using mid-levels.",
     "never_say": ["Dr. Ryan personally reviews", "Dr. Ryan personally", "Dr. Ryan reviews the full records himself", "Dr. Ryan does everything", "one-man show", "Dr. Ryan writes every letter"],
     "photos_ok": true,
-    "never_publish": ["NPI", "medical license number", "physical address"]
+    "never_publish_in_vet_facing_comms": ["NPI", "physician last name (Kasky)", "medical license number", "physical address"],
+    "nexus_letter_credential_exception": "SCOPE: the items above are kept OUT of emails, the cover memo, and other veteran-facing communications. They are NOT a defect when they appear in the nexus letter itself, where they belong. The nexus letter is a formal, credentialed medical-legal opinion submitted to the VA: the physician's full legal name, credentials, signature, and NPI ARE required and EXPECTED in the letter, and that credentialed identity is what gives the opinion its probative weight. So when reviewing or critiquing a NEXUS LETTER, treat the physician's name and NPI as correct and expected, and NEVER flag them as something to strip. (Medical license number and physical address still do not go on the letter either, because letter credentials are NPI-only, but the NPI and the physician name absolutely belong there.) Only flag the NPI or the physician's last name as a problem when they appear in an EMAIL, the cover memo, or other veteran-facing text, never when they appear in the letter."
   },
   "positioning": {
     "async_online": "A feature, not a flaw. Never disparage our own model.",

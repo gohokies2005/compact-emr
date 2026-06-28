@@ -3,8 +3,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getStrategyPreview } from '../api/strategy-preview';
 import { getCaseViability, computeCaseViability, getSoapNote, type SoapContextInput, type SoapNoteResult } from '../api/case-viability';
 import { getExtractionCoverage } from '../api/extraction-coverage';
-import { computeReadinessVerdict, type ReadinessVerdict } from '../lib/caseReadinessVerdict';
+import { computeReadinessVerdict } from '../lib/caseReadinessVerdict';
 import { soapHeadline } from '../lib/soapHeadline';
+import { soapChipFromNote, type ChipColor } from '../lib/soapChip';
 
 // AI-synthesized SOAP-note Overview (Ryan 2026-06-20). The calm lead on the case: a physician-voice
 // Subjective / Objective / Assessment / Plan note the MODEL writes from the assembled facts — smooth and
@@ -15,18 +16,13 @@ import { soapHeadline } from '../lib/soapHeadline';
 // POSTed the context the Overview already has and folds in when it lands (~10-15s, cached after). If the AI
 // call fails/slow, the card stays useful with the deterministic verdict line. No fragile gate.
 
-type Light = 'green' | 'amber' | 'red';
-const LIGHT: Record<Light, { rule: string; dot: string; tint: string }> = {
+// The chip/card accent palette, keyed by the SOAP-derived chip color (soapChip.ts). `neutral` is the
+// white/neutral default shown BEFORE a SOAP verdict is persisted (no flicker — see soapChipFromNote).
+const LIGHT: Record<ChipColor, { rule: string; dot: string; tint: string }> = {
   green: { rule: 'border-l-[#5E8B7E]', dot: 'bg-[#5E8B7E]', tint: 'bg-[#F1F5F2]' },
   amber: { rule: 'border-l-[#C19A5B]', dot: 'bg-[#C19A5B]', tint: 'bg-[#F7F2E8]' },
   red: { rule: 'border-l-[#B0654F]', dot: 'bg-[#B0654F]', tint: 'bg-[#F6EDE9]' },
-};
-const VERDICT_LIGHT: Record<ReadinessVerdict, Light> = {
-  draft: 'green',
-  draft_confirm_mechanism: 'amber', draft_reconcile: 'amber', draft_with_changes: 'amber',
-  read_chart_first: 'amber', contact_records: 'amber', contact_alternative: 'amber', needs_review: 'amber',
-  analysis_failed: 'red', // chart known-empty — a hard stop, not ambient amber
-  not_supportable: 'red',
+  neutral: { rule: 'border-l-slate-300', dot: 'bg-slate-300', tint: 'bg-white' },
 };
 const CONFIDENCE_LABEL: Record<string, string> = { high: 'High confidence', moderate: 'Moderate confidence', medium: 'Medium confidence', low: 'Low confidence' };
 
@@ -260,9 +256,17 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
 
   if (result === null) return null;
 
-  const light = VERDICT_LIGHT[result.verdict];
-  const L = LIGHT[light];
   const note = soapQ.data?.data ?? null;
+  // CHIP COLOR + LABEL = a PURE projection of the PERSISTED SOAP verdict (Ryan 2026-06-27, "the chip keeps
+  // changing color on its own, amber→green→amber"). The OLD code derived the chip from result.verdict
+  // (computeReadinessVerdict, recomputed EVERY render from the POLLING viability + coverage queries) so the
+  // color flickered across loads and contradicted the stable SOAP body. Now the color/label come ONLY from
+  // the SOAP note's persisted `action` (decided once at generation, stored in soap_overviews.result_json), so
+  // the chip stays LOCKED to the SOAP text — one color until the SOAP is regenerated. Neutral/white when no
+  // SOAP is persisted yet (still generating / transient fallback). `result` still drives the body headline,
+  // the deterministic fallback line, and the chart-analysis provisional banner — but NOT the chip color.
+  const chip = soapChipFromNote(note);
+  const L = LIGHT[chip.color];
   // The stored note's inputs changed since it was written (new info came in). We do NOT auto-spend — we
   // surface a subtle hint and let the RN click Regenerate. Suppressed while a regenerate is in flight.
   const isStale = soapQ.data?.stale === true && !regenerate.isPending;
@@ -321,9 +325,11 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Case overview</span>
         <span className="flex items-center gap-1.5 text-xs font-medium text-slate-700">
+          {/* Chip color + label are LOCKED to the persisted SOAP verdict (soapChipFromNote) so they cannot
+              recompute/flicker across loads. The chart-analysis "provisional" caution stays loud in the banner
+              + the headline below — it is a separate honesty layer, not a chip-color signal. */}
           <span className={`inline-block h-2 w-2 rounded-full ${L.dot}`} />
-          {/* For analysis_failed the title already says "failed — re-run", so don't pile "(provisional)" on it. */}
-          {analysisIncomplete && result.verdict !== 'analysis_failed' ? `${result.title} (provisional)` : result.title}
+          {chip.label}
         </span>
       </div>
       <p className="mt-2 text-lg font-semibold leading-snug text-slate-900">

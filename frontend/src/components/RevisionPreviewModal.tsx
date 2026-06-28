@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { Button } from './ui/Button';
+import { renderProposedPreview } from '../lib/proposedTextHighlight';
 
 // Expand-to-read modal for proposed-revision previews (Dr. Kasky 2026-06-26). A reusable ~2/3-screen
 // window for any revision proposal (surgical / guided revision / citation enricher), in both the RN and
@@ -7,12 +8,16 @@ import { Button } from './ui/Button';
 // act on the SAME handlers the inline panel uses; Close just dismisses without deciding. Backdrop +
 // Escape + stopPropagation mirror the other app modals.
 export function RevisionPreviewModal({
-  title, preview, subtitle, applying = false, acceptLabel = 'Accept', declineLabel = 'Decline',
+  title, preview, subtitle, highlight = null, applying = false, acceptLabel = 'Accept', declineLabel = 'Decline',
   onAccept, onDecline, onClose,
 }: {
   readonly title: string;
   readonly preview: string;
   readonly subtitle?: string | null;
+  // Optional proposed/changed text to HIGHLIGHT within the preview (Item 3, 2026-06-28). When set, the
+  // first verbatim occurrence is marked so the reviewer can spot the edit at a glance; absent/empty/not-
+  // found = the preview renders plain (back-compat for the citation-enricher + any non-diff caller).
+  readonly highlight?: string | null;
   readonly applying?: boolean;
   readonly acceptLabel?: string;
   readonly declineLabel?: string;
@@ -39,7 +44,7 @@ export function RevisionPreviewModal({
           <button type="button" className="text-slate-400 hover:text-slate-600" aria-label="Close" onClick={onClose}>✕</button>
         </div>
         <div className="flex-1 overflow-auto whitespace-pre-wrap px-6 py-5 font-['Times_New_Roman',Times,serif] text-base leading-relaxed text-slate-800">
-          {preview}
+          {renderProposedPreview(preview, highlight)}
         </div>
         <div className="flex items-center gap-2 border-t border-slate-200 px-5 py-3">
           {onAccept ? <Button type="button" variant="primary" loading={applying} disabled={applying} onClick={() => void onAccept()}>{acceptLabel}</Button> : null}

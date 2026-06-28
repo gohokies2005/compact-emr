@@ -18,7 +18,7 @@ import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 import { PhysicianHandoffNotes } from '../../components/PhysicianHandoffNotes';
 import { PhysicianDocumentsList } from '../../components/PhysicianDocumentsList';
 import { getCase, type SignOffAnswers } from '../../api/cases';
-import { formatNameLastFirst } from '../../lib/format';
+import { formatNameLastFirst, formatDateOnly } from '../../lib/format';
 import { approveLetter, finalizeImportLetter, getLetter } from '../../api/letter';
 import { describeApiError } from '../../api/client';
 
@@ -158,6 +158,13 @@ export function PhysicianReviewPage() {
             Case {c.id} ·{' '}
             {formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}
           </p>
+          {/* "Date submitted" (Item 2, 2026-06-28): the STAGE-2 records-received date — when the case's
+              records first arrived (the turnaround clock-start), NOT the intake date. Static: reflects the
+              earliest record and does not move when later records/updates are submitted. Hidden until the
+              first real record lands. */}
+          {c.recordsReceivedAt ? (
+            <p className="mt-1 text-sm text-slate-500">Date submitted: {formatDateOnly(c.recordsReceivedAt)}</p>
+          ) : null}
           <p className="mt-2 text-sm">
             <Link className="text-indigo-600 hover:underline" to="/p/queue">
               Back to queue

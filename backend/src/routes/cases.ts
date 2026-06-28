@@ -106,6 +106,24 @@ function withRecordsSignal(row: Record<string, unknown>): Record<string, unknown
   return { ...rest, recordCount, recordsUploaded: recordCount > 0, invoiced: invoicedCount > 0 };
 }
 
+// "Return to physician" body (Item 1, 2026-06-28): { version, message }. The message is MANDATORY here
+// (unlike the optional send-to-doctor note) — the RN must explain WHY a finalized letter is coming back.
+function parseReturnToPhysician(body: unknown): { version: number; message: string } {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const version = b.version;
+  if (typeof version !== 'number' || !Number.isInteger(version)) {
+    throw new HttpError(400, 'bad_request', 'version is required', { field: 'version' });
+  }
+  const message = typeof b.message === 'string' ? b.message.trim() : '';
+  if (message.length === 0) {
+    throw new HttpError(400, 'bad_request', 'A message explaining why the letter is returned is required.', { field: 'message' });
+  }
+  if (message.length > 4000) {
+    throw new HttpError(400, 'bad_request', 'The return message is too long (4000 character max).', { field: 'message' });
+  }
+  return { version, message };
+}
+
 /** Shape of the latest-quick-note signal attached to each list row. Null when the case's veteran has no quick note. */
 export interface LatestQuickNoteSignal {
   readonly id: string;
@@ -433,6 +451,41 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
       }
       const draftingCostUsd = hasCost ? Math.round((costTotal + Number.EPSILON) * 100) / 100 : null;
 
+      // "Date submitted" (Item 2, 2026-06-28): the STAGE-2 records-received moment — when the case's
+      // records first arrived and the turnaround clock starts. NOT the intake date. STATIC: the EARLIEST
+      // veteran-uploaded record's uploadedAt, EXCLUDING the two auto-generated docs (the generated intake
+      // summary + the physician Doctor Pack) — the SAME filter CASE_LITE_SELECT.recordCount uses. MIN never
+      // moves when MORE records arrive later (uploads only go forward in time), so it reflects the
+      // records-received moment and does NOT change as later records/updates are submitted. Null until the
+      // first real record lands (e.g. a Stage-1-only case). Surfaced on the case detail for the physician
+      // review header.
+      // FAIL-OPEN: the "Date submitted" line is non-critical decoration — a lookup failure must NEVER 500
+      // the whole case detail. On any error we omit the date (null) and log one structured line, exactly
+      // like the approveBlockers fail-open above.
+      let recordsReceivedAt: Date | null = null;
+      try {
+        const firstRecordRows = (await db.document.findMany({
+          where: {
+            caseId: id,
+            NOT: [
+              { s3Key: { endsWith: 'Intake_Summary.pdf' } },
+              { s3Key: { contains: 'Doctor_Pack' } },
+              { s3Key: { contains: 'DoctorPack' } },
+            ],
+          },
+          orderBy: { uploadedAt: 'asc' },
+          take: 1,
+          select: { uploadedAt: true },
+        })) as unknown as ReadonlyArray<{ uploadedAt: Date }>;
+        recordsReceivedAt = firstRecordRows[0]?.uploadedAt ?? null;
+      } catch (error: unknown) {
+        console.warn(JSON.stringify({
+          msg: 'records_received_at_unavailable',
+          caseId: id,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      }
+
       // Pre-flight approve blockers (sign-off incident 2026-06-09): the physician must see WHY
       // approve will 409 BEFORE attesting, not after. Advisory mirror of the POST /letter/approve
       // gates (which stay authoritative); computed ONLY in physician_review — the one status where
@@ -453,7 +506,7 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         }
       }
 
-      res.json({ data: { ...found, draftingCostUsd, ...(approveBlockers !== undefined ? { approveBlockers } : {}) } });
+      res.json({ data: { ...found, draftingCostUsd, recordsReceivedAt, ...(approveBlockers !== undefined ? { approveBlockers } : {}) } });
     }),
   );
 
@@ -773,6 +826,80 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
           }));
         }
       }
+
+      res.json({ data: withRecordsSignal(updated as unknown as Record<string, unknown>) });
+    }),
+  );
+
+  // "Return to physician" (Item 1, 2026-06-28): the RN catches an error on a FINALIZED, physician-signed
+  // letter that is already "Ready for delivery" (status 'delivered') and sends it BACK to the assigned
+  // physician's review queue so the doctor can re-review, edit, and re-sign. Distinct from the generic
+  // /status route's delivered->physician_review edge — that stays ADMIN-ONLY as a bare flip (the G4
+  // stale-signature lifecycle). This route is RN-accessible (admin + ops_staff) AND the explanatory
+  // message is MANDATORY: the status flip and the message are written in ONE transaction, so the physician
+  // ALWAYS sees WHY the letter came back (PhysicianHandoffNotes renders case_messages on the review page).
+  // The signed letter stays the CURRENT version — returning only re-opens the review gate (no re-draft, no
+  // byte change), honoring the no-block-draft rule; when the physician edits + re-signs, the existing
+  // approve/sign byte gates and the G4 stale-signature lifecycle govern the new version. Only 'delivered'
+  // is returnable — a 'paid' (billed/closed) case can never be reopened here. The Doctor Pack is NOT
+  // regenerated: it already exists from the first send-to-doctor, and the review page reads it as-is.
+  router.post(
+    '/cases/:id/return-to-physician',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentUser(req);
+      const id = String(req.params.id);
+      const { version, message } = parseReturnToPhysician(req.body);
+
+      const updated = await db.$transaction(async (tx) => {
+        const existing = await tx.case.findFirst({
+          where: { id },
+          select: { id: true, veteranId: true, status: true, version: true, assignedPhysicianId: true },
+        });
+        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+        if (existing.status !== 'delivered') {
+          throw new HttpError(409, 'conflict', 'Only a finalized letter (Ready for delivery) can be returned to the physician.', {
+            caseId: id,
+            currentStatus: existing.status,
+          });
+        }
+        if (existing.version !== version) {
+          throw new HttpError(409, 'conflict', 'Case status or version is stale', {
+            caseId: id,
+            currentStatus: existing.status,
+            currentVersion: existing.version,
+            receivedVersion: version,
+          });
+        }
+        if (existing.assignedPhysicianId === null) {
+          throw new HttpError(409, 'conflict', 'No physician is assigned to this case to return it to.', { caseId: id });
+        }
+
+        const row = await tx.case.update({
+          where: { id },
+          data: { status: 'physician_review', version: { increment: 1 } },
+          select: CASE_LITE_SELECT,
+        });
+
+        // Mandatory return note → the assigned physician sees it on their review page (PhysicianHandoffNotes
+        // renders case_messages). Written IN-TRANSACTION with the flip so a returned case is never silent.
+        // senderSub = the actor's cognito sub (the same id resolveActorNames maps to a display name).
+        await tx.caseMessage.create({
+          data: { caseId: id, senderSub: user.sub, senderRole: user.role, body: message },
+        });
+
+        await tx.activityLog.create({
+          data: {
+            actorUserId: user.id,
+            action: 'case_returned_to_physician',
+            caseId: id,
+            veteranId: existing.veteranId,
+            detailsJson: { caseId: id, from: existing.status, to: 'physician_review', returned: true },
+          },
+        });
+
+        return row;
+      });
 
       res.json({ data: withRecordsSignal(updated as unknown as Record<string, unknown>) });
     }),

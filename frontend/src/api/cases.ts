@@ -144,6 +144,11 @@ export interface CaseDetail extends Case {
   // Authoritative drafting cost summed over ALL the case's DraftJobs (backend aggregate, not the
   // truncated take:5 draftJobs list). null when no job carries a recorded cost → UI shows "—".
   readonly draftingCostUsd?: number | null;
+  // "Date submitted" (Item 2): the STAGE-2 records-received moment — the earliest veteran-uploaded
+  // record's uploadedAt (excluding the generated intake summary + Doctor Pack), captured once and
+  // STATIC (MIN never moves when later records arrive). null until the first real record lands. Shown
+  // on the physician review header. Computed server-side on GET /cases/:id.
+  readonly recordsReceivedAt?: string | null;
 }
 
 export interface PatchCaseInput {
@@ -172,6 +177,15 @@ export async function patchCase(id: string, input: PatchCaseInput): Promise<{ da
 
 export async function transitionCaseStatus(id: string, input: TransitionInput): Promise<{ data: CaseLite }> {
   return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/status`, input);
+}
+
+// "Return to physician" (Item 1): RN/ops sends a FINALIZED (Ready for delivery) letter BACK to the
+// assigned physician's review queue with a MANDATORY explanatory message. Dedicated route (NOT the
+// generic /status flip, which stays admin-only) — the backend writes the delivered->physician_review
+// transition AND the case message atomically, so the physician always sees why it came back.
+export interface ReturnToPhysicianInput { readonly version: number; readonly message: string }
+export async function returnCaseToPhysician(id: string, input: ReturnToPhysicianInput): Promise<{ data: CaseLite }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/return-to-physician`, input);
 }
 
 export interface AssignPhysicianInput { readonly physicianId: string; readonly version: number }

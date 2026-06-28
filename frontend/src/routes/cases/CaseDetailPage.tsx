@@ -17,6 +17,7 @@ import { ExtractionCoveragePanel } from '../../components/ExtractionCoveragePane
 import { ChartRecoveryBanner } from '../../components/ChartRecoveryBanner';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
 import { SendToDoctorModal } from '../../components/SendToDoctorModal';
+import { ReturnToPhysicianModal } from '../../components/ReturnToPhysicianModal';
 import { DeliveryPanel } from '../../components/DeliveryPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
@@ -63,7 +64,7 @@ import { formatFileSize, formatPageCount } from '../../lib/fileMeta';
 import { documentDisplayName } from '../../lib/docName';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
 import {
-  archiveCase, deleteCase, getCase, listDraftJobs, patchCase, restoreCase, transitionCaseStatus,
+  archiveCase, deleteCase, getCase, listDraftJobs, patchCase, restoreCase, returnCaseToPhysician, transitionCaseStatus,
   type CaseDetail, type PatchCaseInput, type TransitionInput,
 } from '../../api/cases';
 import type { CaseStatus, Role } from '../../types/prisma';
@@ -266,6 +267,26 @@ export function CaseDetailPage() {
     onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
     // Errors are surfaced by SendToDoctorModal (which awaits mutateAsync) — no window.alert here, or
     // the user would get a double error (modal banner + alert).
+  });
+
+  // Return to physician (Item 1, 2026-06-28): the RN catches an error on a FINALIZED (Ready for delivery)
+  // letter and sends it BACK to the assigned physician's review queue with a MANDATORY explanation. The
+  // dedicated route writes the delivered->physician_review flip + the case message atomically. Errors are
+  // surfaced by ReturnToPhysicianModal (which awaits mutateAsync) — no window.alert here.
+  const [returnToPhysicianOpen, setReturnToPhysicianOpen] = useState(false);
+  const returnToPhysician = useMutation({
+    mutationFn: (message: string) => {
+      const cur = caseQuery.data?.data;
+      if (!cur) throw new Error('Case not loaded');
+      return returnCaseToPhysician(caseId, { version: cur.version, message });
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        refetch(),
+        qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }),
+        qc.invalidateQueries({ queryKey: ['case-messages', caseId] }),
+      ]);
+    },
   });
 
   // Import final letter (2026-06-14): drop an already-finished letter PDF (rig-origin draft or
@@ -476,6 +497,12 @@ export function CaseDetailPage() {
               {/* View letter only when the review panel (which has its own "Open PDF") isn't showing —
                   no duplicate view button (Ryan 2026-06-05). */}
               {viewableLetterJob && c.status !== 'rn_review' && c.status !== 'physician_review' ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}
+              {/* Return to physician (Item 1): on a FINALIZED (Ready for delivery) letter, the RN/ops can send
+                  it back to the doctor's review queue with a mandatory note — the recovery path when an error
+                  is caught after signing. Only at 'delivered' (a 'paid' case is closed and never reopens). */}
+              {c.status === 'delivered' && (role === 'admin' || role === 'ops_staff') ? (
+                <Button variant="secondary" size="sm" onClick={() => setReturnToPhysicianOpen(true)}>Return to physician</Button>
+              ) : null}
               {canRedraft ? <Button variant="secondary" size="sm" loading={redraft.isPending} disabled={redraft.isPending} onClick={() => setRedraftGate1Open(true)}>Redraft</Button> : null}
               {canImportLetter ? (
                 <>
@@ -508,6 +535,14 @@ export function CaseDetailPage() {
         </div>
       </div>
     </div>
+
+    {/* Return-to-physician modal (Item 1): mandatory-message handoff back to the doctor for a finalized
+        letter. The transition + message are written atomically by the dedicated route. */}
+    <ReturnToPhysicianModal
+      open={returnToPhysicianOpen}
+      onClose={() => setReturnToPhysicianOpen(false)}
+      onSubmit={async (message) => { await returnToPhysician.mutateAsync(message); }}
+    />
 
     {/* Refund signal moved INTO the chart (UI sweep P2c, Ryan item 13): Refunds left the staff nav,
         so this amber strip is where ops/admin learn a case is refund-relevant. refundEligible is set

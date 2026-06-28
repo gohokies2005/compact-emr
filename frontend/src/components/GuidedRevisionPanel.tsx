@@ -4,6 +4,7 @@ import { ServiceUnavailableError, SurgicalEditUnappliableError } from '../api/cl
 import { proposeGuidedRevision, type GuidedRevisionResult, type SurgicalProposal } from '../api/letter';
 import { citationMayBeOffTopic } from '../lib/citationRelevance';
 import { RevisionPreviewModal } from './RevisionPreviewModal';
+import { renderProposedPreview } from '../lib/proposedTextHighlight';
 
 // Does the instruction look like it's WEAVING IN a citation/finding (vs a pure reword)? Only then do
 // we run the soft relevance check — a "tighten this paragraph" instruction shouldn't get a citation
@@ -230,7 +231,10 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
               <span aria-hidden="true">⤢</span> Expand
             </button>
           </div>
-          <div className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-white p-3 font-['Times_New_Roman',Times,serif] text-sm text-slate-800">{result.preview}</div>
+          {/* The reshaped passage is HIGHLIGHTED in the full-letter preview so the doctor spots exactly
+              what changed (Item 3). Preview-only: applying re-renders the letter body plain (no mark). */}
+          <p className="mt-1 text-xs text-slate-500">The reshaped passage is <mark className="rounded bg-amber-200/70 px-1">highlighted</mark> below.</p>
+          <div className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-white p-3 font-['Times_New_Roman',Times,serif] text-sm text-slate-800">{renderProposedPreview(result.preview, result.proposal.new_text)}</div>
 
           <div className="mt-3 flex gap-2">
             <Button type="button" variant="primary" loading={applying} disabled={applying} onClick={() => void onAccept()}>Accept revision</Button>
@@ -242,8 +246,9 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
       {expanded && result ? (
         <RevisionPreviewModal
           title="Proposed revision — revised letter preview"
-          subtitle={result.costUsd > 0 ? `$${result.costUsd.toFixed(2)}` : null}
+          subtitle={result.costUsd > 0 ? `$${result.costUsd.toFixed(2)}` : 'The reshaped passage is highlighted'}
           preview={result.preview}
+          highlight={result.proposal.new_text}
           applying={applying}
           acceptLabel="Accept revision"
           declineLabel="Discard"

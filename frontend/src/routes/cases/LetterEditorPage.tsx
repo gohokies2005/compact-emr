@@ -9,6 +9,8 @@ import { Spinner } from '../../components/ui/Spinner';
 import { LetterEditor } from '../../components/LetterEditor';
 import { GuidedRevisionPanel } from '../../components/GuidedRevisionPanel';
 import { CitationEnricherPanel } from '../../components/CitationEnricherPanel';
+import { RevisionPreviewModal } from '../../components/RevisionPreviewModal';
+import { renderProposedPreview } from '../../lib/proposedTextHighlight';
 import { SignOffPopup } from '../../components/SignOffPopup';
 import { getCase } from '../../api/cases';
 import { letterFilename } from '../../lib/letterFilename';
@@ -85,6 +87,10 @@ export function LetterEditorPage() {
   const [proposal, setProposal] = useState<SurgicalProposal | null>(null);
   const [preview, setPreview] = useState<string>('');
   const [proposalCostUsd, setProposalCostUsd] = useState<number | null>(null);
+  // Item 3 (2026-06-28): expand the surgical-edit preview (the cramped right-side window) into the big
+  // ~2/3-screen RevisionPreviewModal. Reset whenever the proposal is cleared (apply / discard) so it can't
+  // linger open over a stale proposal.
+  const [previewExpanded, setPreviewExpanded] = useState(false);
   const [declineOpen, setDeclineOpen] = useState(false);
   const [declineReason, setDeclineReason] = useState('');
   const [signOffOpen, setSignOffOpen] = useState(false);
@@ -194,6 +200,7 @@ export function LetterEditorPage() {
       setProposal(null);
       setPreview('');
       setProposalCostUsd(null);
+      setPreviewExpanded(false);
       setInstruction('');
       setSelectedPassage(null);
       setTxt(res.data.txt);
@@ -335,13 +342,40 @@ export function LetterEditorPage() {
 
                 {proposal ? (
                   <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
-                    <div className="text-sm font-semibold text-slate-900">Proposed edit{proposalCostUsd !== null ? ` · $${proposalCostUsd.toFixed(2)}` : ''}</div>
-                    <div className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-white p-3 font-['Times_New_Roman',Times,serif] text-sm text-slate-800">{preview}</div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-semibold text-slate-900">Proposed edit{proposalCostUsd !== null ? ` · $${proposalCostUsd.toFixed(2)}` : ''}</div>
+                      {/* Item 3 (2026-06-28): expand the cramped preview into a readable ~2/3-screen modal. */}
+                      <button type="button" className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-indigo-600 hover:bg-indigo-50 hover:text-indigo-800"
+                        title="Expand to read full-size" aria-label="Expand the proposed edit preview" onClick={() => setPreviewExpanded(true)}>
+                        <span aria-hidden="true">⤢</span> Expand
+                      </button>
+                    </div>
+                    {/* The proposed change is HIGHLIGHTED in the full-letter preview so it's easy to spot.
+                        Preview-only: applying re-renders the letter body plain — the highlight never persists. */}
+                    <p className="mt-1 text-xs text-slate-500">The proposed change is <mark className="rounded bg-amber-200/70 px-1">highlighted</mark> below.</p>
+                    <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-white p-3 font-['Times_New_Roman',Times,serif] text-sm text-slate-800">{renderProposedPreview(preview, proposal.new_text)}</div>
                     <div className="mt-3 flex gap-2">
                       <Button type="button" variant="primary" loading={applyMutation.isPending} disabled={applyMutation.isPending || proposal === null} onClick={() => { if (proposal !== null) applyMutation.mutate(proposal); }}>Apply edit</Button>
-                      <Button type="button" variant="secondary" onClick={() => { setProposal(null); setPreview(''); setProposalCostUsd(null); }}>Discard</Button>
+                      <Button type="button" variant="secondary" onClick={() => { setProposal(null); setPreview(''); setProposalCostUsd(null); setPreviewExpanded(false); }}>Discard</Button>
                     </div>
                   </div>
+                ) : null}
+
+                {/* Expanded surgical-edit preview (Item 3): the same preview + highlight, full-size. Accept
+                    reuses the inline Apply path; Discard/Close mirror the inline Discard. */}
+                {previewExpanded && proposal ? (
+                  <RevisionPreviewModal
+                    title="Proposed edit — letter preview"
+                    subtitle={proposalCostUsd !== null && proposalCostUsd > 0 ? `$${proposalCostUsd.toFixed(2)} · the proposed change is highlighted` : 'The proposed change is highlighted'}
+                    preview={preview}
+                    highlight={proposal.new_text}
+                    applying={applyMutation.isPending}
+                    acceptLabel="Apply edit"
+                    declineLabel="Discard"
+                    onAccept={() => { setPreviewExpanded(false); if (proposal !== null) applyMutation.mutate(proposal); }}
+                    onDecline={() => { setPreviewExpanded(false); setProposal(null); setPreview(''); setProposalCostUsd(null); }}
+                    onClose={() => setPreviewExpanded(false)}
+                  />
                 ) : null}
 
                 {/* Guided Revision — the broader edit tier (highlight a passage → instruction →

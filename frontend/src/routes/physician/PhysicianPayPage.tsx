@@ -36,6 +36,15 @@ function formatCents(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+/** ISO timestamp → 'Jun 15, 2026' in the payroll (Pacific) timezone. The pay row's
+ *  firstApprovedAt IS the physician sign-off/approval moment that completed the letter. */
+function formatSignedDate(iso: string): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: PAY_TIMEZONE }).format(d);
+}
+
 const LETTER_TYPE_LABELS: Record<string, string> = {
   nexus_letter: 'Nexus letter',
   nexus_memo: 'Nexus memo',
@@ -110,6 +119,7 @@ export function PhysicianPayPage() {
                   <th className="px-4 py-3">Veteran name</th>
                   <th className="px-4 py-3">Condition</th>
                   <th className="px-4 py-3">Letter type</th>
+                  <th className="px-4 py-3">Date signed</th>
                   <th className="px-4 py-3 text-right">Pay</th>
                 </tr>
               </thead>
@@ -119,6 +129,7 @@ export function PhysicianPayPage() {
                     <td className="px-4 py-3 font-medium text-slate-900">{r.veteranName || '—'}</td>
                     <td className="px-4 py-3 text-slate-700">{r.condition}</td>
                     <td className="px-4 py-3 text-slate-600">{LETTER_TYPE_LABELS[r.letterType] ?? r.letterType}</td>
+                    <td className="px-4 py-3 text-slate-600">{formatSignedDate(r.firstApprovedAt)}</td>
                     <td className="px-4 py-3 text-right font-medium text-slate-800">{formatCents(r.payCents)}</td>
                   </tr>
                 ))}
@@ -127,7 +138,7 @@ export function PhysicianPayPage() {
                   never a blank screen (adversarial test Z). */}
               <tfoot className="border-t border-slate-200 bg-slate-50 text-sm font-semibold text-slate-900">
                 <tr>
-                  <td className="px-4 py-3" colSpan={3}>{totalLabel}</td>
+                  <td className="px-4 py-3" colSpan={4}>{totalLabel}</td>
                   <td className="px-4 py-3 text-right">{formatCents(totalCents)}</td>
                 </tr>
               </tfoot>

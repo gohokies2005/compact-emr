@@ -49,7 +49,13 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   // changed bytes until the delivery-time signed_bytes_changed 409. Performed by the letter
   // routes in-transaction; role-gated admin-only below as a manual move.
   delivered: ['paid', 'physician_review'],
-  paid: [],
+  // paid -> physician_review is the RETURN-TO-PHYSICIAN recall (2026-06-28, Ryan): the physician/owner
+  // can pull a finalized, BILLED (paid/closed) letter back into the doctor's review queue to correct it.
+  // 'paid' is therefore no longer a dead-end terminal. Performed by the dedicated guarded
+  // /cases/:id/return-to-physician route (which does its own role gating + mandatory message); as a bare
+  // move on the generic /status route it is admin-only below. Billing is NOT auto-reversed by the move —
+  // returning a paid letter does not refund/un-charge; the signed letter stays current until re-signed.
+  paid: ['physician_review'],
   rejected: [],
   // Gate-2 parked states: the RN resumes (drafting via the rnDecision draft) or rejects. needs_records
   // can also drop back to records to gather more, then re-run.
@@ -88,6 +94,12 @@ export function isValidCaseStatusTransition(from: CaseStatus, to: CaseStatus): b
 
 export function requiredRolesForCaseStatusTransition(from: CaseStatus, to: CaseStatus): readonly Role[] {
   if (from === 'delivered' && to === 'paid') return ['admin'];
+  // Return-to-physician recall (2026-06-28): the GENERIC /status route's paid->physician_review bare flip
+  // is admin-only — ops_staff + physician reach this recall through the DEDICATED
+  // /cases/:id/return-to-physician route (which does its own in-handler role gating: paid is admin/
+  // physician-only, ops_staff is rejected there). Keeping the bare /status edge admin-only means an RN
+  // can never silently reopen a billed/closed case by hand outside the guarded, message-mandatory door.
+  if (from === 'paid' && to === 'physician_review') return ['admin'];
   // G4 stale-signature return — system-performed by the letter routes (in-transaction, no role
   // check there); as a HUMAN move it is admin-only so ops_staff can never manually pull a
   // delivered (signed/approved) case back into a mutable status.

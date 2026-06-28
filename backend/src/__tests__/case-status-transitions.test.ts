@@ -8,9 +8,22 @@ import {
 } from '../services/case-status-transitions.js';
 
 describe('case status transitions', () => {
-  it('terminal states accept zero outgoing transitions', () => {
-    expect(CASE_STATUS_TRANSITIONS.paid).toEqual([]);
+  it('rejected is the only zero-out terminal state; paid now carries the physician-recall edge', () => {
     expect(CASE_STATUS_TRANSITIONS.rejected).toEqual([]);
+    // paid is no longer a dead-end (2026-06-28): the physician/owner can RECALL a billed/closed letter to
+    // correct it (return-to-physician door). The move does NOT auto-reverse billing.
+    expect(CASE_STATUS_TRANSITIONS.paid).toEqual(['physician_review']);
+  });
+
+  // ── Return-to-physician recall edge (2026-06-28) ──────────────────────────
+  it('paid -> physician_review is a VALID edge but ADMIN-ONLY on the generic /status route', () => {
+    expect(isValidCaseStatusTransition('paid', 'physician_review')).toBe(true);
+    expect(canRolePerformCaseStatusTransition('admin', 'paid', 'physician_review')).toBe(true);
+    // ops_staff + physician reach the paid recall ONLY through the dedicated, message-mandatory
+    // /cases/:id/return-to-physician route (which does its own role gating) — NEVER via the bare /status
+    // flip. Keeping the generic edge admin-only stops an RN silently reopening a closed/billed case.
+    expect(canRolePerformCaseStatusTransition('ops_staff', 'paid', 'physician_review')).toBe(false);
+    expect(canRolePerformCaseStatusTransition('physician', 'paid', 'physician_review')).toBe(false);
   });
 
   it('matches the full non-terminal transition table', () => {

@@ -6,7 +6,12 @@ import { describeApiError } from '../api/client';
 interface ReturnToPhysicianModalProps {
   readonly open: boolean;
   readonly onClose: () => void;
-  // Performs the delivered -> physician_review return with the MANDATORY message. Resolves on success;
+  // Billing-safety signals (2026-06-28): the letter has already been paid (case 'paid') and/or invoiced
+  // (an invoice email was sent). When either is true the modal shows a warning that returning the letter
+  // does NOT cancel the invoice or refund the payment — billing must be handled separately.
+  readonly isPaid?: boolean;
+  readonly isInvoiced?: boolean;
+  // Performs the delivered/paid -> physician_review return with the MANDATORY message. Resolves on success;
   // rejects (and the modal surfaces the reason) on failure. The case is NOT moved unless this resolves.
   readonly onSubmit: (message: string) => Promise<void>;
 }
@@ -16,9 +21,11 @@ interface ReturnToPhysicianModalProps {
 // re-sign. Unlike the normal send-to-doctor handoff (where the note is OPTIONAL), the message here is
 // MANDATORY — the doctor must know WHY a finalized letter came back. The transition + the message are
 // written atomically server-side, so a network/validation failure leaves the case untouched (no half-move).
-export function ReturnToPhysicianModal({ open, onClose, onSubmit }: ReturnToPhysicianModalProps) {
+export function ReturnToPhysicianModal({ open, onClose, isPaid = false, isInvoiced = false, onSubmit }: ReturnToPhysicianModalProps) {
   const [message, setMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // "paid" takes precedence over "invoiced" in the warning label (a paid letter was invoiced first).
+  const billingState = isPaid ? 'paid' : isInvoiced ? 'invoiced' : null;
 
   const mutation = useMutation({
     mutationFn: async (): Promise<void> => {
@@ -50,6 +57,14 @@ export function ReturnToPhysicianModal({ open, onClose, onSubmit }: ReturnToPhys
           re-sign. The signed letter is kept as-is — returning only re-opens the doctor&apos;s review.
           Explain what needs another look; the physician sees your note when they open the case.
         </p>
+
+        {billingState ? (
+          <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+            This letter has already been {billingState}. Returning it does NOT cancel the invoice or refund
+            the payment — handle billing separately. The signed letter stays current until the physician
+            edits and re-signs.
+          </div>
+        ) : null}
 
         <label className="mt-5 block">
           <span className="text-sm font-medium text-slate-800">Why are you returning it? (required)</span>

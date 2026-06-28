@@ -68,6 +68,7 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
   let current = { ...initialCase };
   const physiciansByCognitoSub = opts.physiciansByCognitoSub ?? {};
   const activityLogCreate = vi.fn(async () => ({}));
+  const caseMessageCreate = vi.fn(async () => ({}));
   const caseFindFirst = vi.fn(async () => current);
   const caseFindMany = vi.fn(async () => [current]);
   const caseCount = vi.fn(async () => 1);
@@ -99,13 +100,14 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
     draftJob: { findMany: draftJobFindMany },
     correction: { findMany: correctionFindMany },
     activityLog: { create: activityLogCreate },
+    caseMessage: { create: caseMessageCreate },
     physician: { findUnique: physicianFindUnique },
     signOff: { findMany: signOffFindMany },
     chartNote: { findMany: chartNoteFindMany },
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
 
-  return { db, tx, spies: { activityLogCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, caseDelete, draftJobFindMany, physicianFindUnique, chartNoteFindMany } };
+  return { db, tx, spies: { activityLogCreate, caseMessageCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, caseDelete, draftJobFindMany, physicianFindUnique, chartNoteFindMany } };
 }
 
 function appFor(db: AppDb) {
@@ -771,5 +773,99 @@ describe('cases routes', () => {
     const findManyWhere = listWhere(spies);
     const countCall = spies.caseCount.mock.calls[0] as unknown as Array<{ where?: Record<string, unknown> }>;
     expect(countCall?.[0]?.where).toEqual(findManyWhere);
+  });
+
+  // ============ Return-to-physician door (2026-06-28): recall a finalized/signed letter to the MD ============
+  // Widened so the physician/owner can recall his OWN signed letter (role 'physician') AND a paid/closed
+  // case is recallable by admin/physician (NOT ops_staff). delivered stays returnable by admin/ops/physician.
+  describe('POST /cases/:id/return-to-physician', () => {
+    const RTP = '/api/v1/cases/CASE-1/return-to-physician';
+    const REASON = 'Service end year is wrong in paragraph two — it should read 2004, not 2014. Please correct and re-sign.';
+
+    it('delivered + PHYSICIAN -> 200 (THE Shirley Carr case: the owner recalls his own signed letter): flips to physician_review, writes the mandatory message + audit', async () => {
+      mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+      const { db, spies } = makeDb(baseCase({ status: 'delivered', version: 4, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db)).post(RTP).send({ version: 4, message: REASON });
+      expect(res.status).toBe(200);
+      expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'physician_review', version: { increment: 1 } }) }));
+      // Mandatory return note written IN-TRANSACTION with the flip.
+      expect(spies.caseMessageCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ body: expect.stringContaining('Service end year'), senderRole: 'physician' }) }));
+      // Audit row carries the billing-safety flags (delivered + not paid).
+      expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+        action: 'case_returned_to_physician',
+        detailsJson: expect.objectContaining({ from: 'delivered', to: 'physician_review', wasPaid: false }),
+      }) }));
+    });
+
+    it('delivered + OPS_STAFF -> 200 (no regression: the RN can still return a delivered letter)', async () => {
+      mockUser = { sub: 'OPS-USER', email: 'ops@example.com', roles: ['ops_staff'] };
+      const { db, spies } = makeDb(baseCase({ status: 'delivered', version: 4, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db)).post(RTP).send({ version: 4, message: REASON });
+      expect(res.status).toBe(200);
+      expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'physician_review' }) }));
+    });
+
+    it('delivered + ADMIN -> 200', async () => {
+      mockUser = { sub: 'USER-1', email: 'a@example.com', roles: ['admin'] };
+      const { db } = makeDb(baseCase({ status: 'delivered', version: 4, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db)).post(RTP).send({ version: 4, message: REASON });
+      expect(res.status).toBe(200);
+    });
+
+    it('paid + PHYSICIAN -> 200 (the owner recalls a closed/paid letter): audit records wasPaid=true', async () => {
+      mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+      const { db, spies } = makeDb(baseCase({ status: 'paid', version: 6, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db)).post(RTP).send({ version: 6, message: REASON });
+      expect(res.status).toBe(200);
+      expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'physician_review' }) }));
+      expect(spies.activityLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+        detailsJson: expect.objectContaining({ from: 'paid', to: 'physician_review', wasPaid: true }),
+      }) }));
+    });
+
+    it('paid + ADMIN -> 200', async () => {
+      mockUser = { sub: 'USER-1', email: 'a@example.com', roles: ['admin'] };
+      const { db } = makeDb(baseCase({ status: 'paid', version: 6, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db)).post(RTP).send({ version: 6, message: REASON });
+      expect(res.status).toBe(200);
+    });
+
+    it('paid + OPS_STAFF -> 403 (an RN can NOT reopen a paid/closed case): no flip, no message', async () => {
+      mockUser = { sub: 'OPS-USER', email: 'ops@example.com', roles: ['ops_staff'] };
+      const { db, spies } = makeDb(baseCase({ status: 'paid', version: 6, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db)).post(RTP).send({ version: 6, message: REASON });
+      expect(res.status).toBe(403);
+      expect(spies.caseUpdate).not.toHaveBeenCalled();
+      expect(spies.caseMessageCreate).not.toHaveBeenCalled();
+    });
+
+    it('empty message -> 400 (the explanation is mandatory): no flip', async () => {
+      mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+      const { db, spies } = makeDb(baseCase({ status: 'delivered', version: 4, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db)).post(RTP).send({ version: 4, message: '   ' });
+      expect(res.status).toBe(400);
+      expect(spies.caseUpdate).not.toHaveBeenCalled();
+    });
+
+    it('stale version -> 409 (optimistic concurrency)', async () => {
+      mockUser = { sub: 'PHYS-USER', email: 'phys@example.com', roles: ['physician'] };
+      const { db } = makeDb(baseCase({ status: 'delivered', version: 5, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db)).post(RTP).send({ version: 4, message: REASON });
+      expect(res.status).toBe(409);
+    });
+
+    it('no assigned physician -> 409 (cannot return to an empty doctor queue)', async () => {
+      mockUser = { sub: 'USER-1', email: 'a@example.com', roles: ['admin'] };
+      const { db } = makeDb(baseCase({ status: 'delivered', version: 4, assignedPhysicianId: null }));
+      const res = await request(appFor(db)).post(RTP).send({ version: 4, message: REASON });
+      expect(res.status).toBe(409);
+    });
+
+    it('a non-returnable status (rn_review) -> 409 (only delivered/paid are recallable)', async () => {
+      mockUser = { sub: 'USER-1', email: 'a@example.com', roles: ['admin'] };
+      const { db } = makeDb(baseCase({ status: 'rn_review', version: 4, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db)).post(RTP).send({ version: 4, message: REASON });
+      expect(res.status).toBe(409);
+    });
   });
 });

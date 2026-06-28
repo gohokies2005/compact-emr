@@ -106,8 +106,13 @@ function withRecordsSignal(row: Record<string, unknown>): Record<string, unknown
   return { ...rest, recordCount, recordsUploaded: recordCount > 0, invoiced: invoicedCount > 0 };
 }
 
+// Source statuses a finalized letter can be recalled FROM via /cases/:id/return-to-physician (2026-06-28).
+// 'delivered' covers Ready-for-delivery + Invoiced (both display overlays of status='delivered'); 'paid' is
+// the billed/closed case the physician/owner can still recall (admin/physician-only — gated in the handler).
+const RETURNABLE_TO_PHYSICIAN: ReadonlySet<CaseStatus> = new Set<CaseStatus>(['delivered', 'paid']);
+
 // "Return to physician" body (Item 1, 2026-06-28): { version, message }. The message is MANDATORY here
-// (unlike the optional send-to-doctor note) — the RN must explain WHY a finalized letter is coming back.
+// (unlike the optional send-to-doctor note) — the actor must explain WHY a finalized letter is coming back.
 function parseReturnToPhysician(body: unknown): { version: number; message: string } {
   const b = (body ?? {}) as Record<string, unknown>;
   const version = b.version;
@@ -831,21 +836,26 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
     }),
   );
 
-  // "Return to physician" (Item 1, 2026-06-28): the RN catches an error on a FINALIZED, physician-signed
-  // letter that is already "Ready for delivery" (status 'delivered') and sends it BACK to the assigned
+  // "Return to physician" (Item 1, 2026-06-28; widened 2026-06-28 for the physician/owner + paid recall):
+  // an error is caught on a FINALIZED, physician-signed letter and it is sent BACK to the assigned
   // physician's review queue so the doctor can re-review, edit, and re-sign. Distinct from the generic
-  // /status route's delivered->physician_review edge — that stays ADMIN-ONLY as a bare flip (the G4
-  // stale-signature lifecycle). This route is RN-accessible (admin + ops_staff) AND the explanatory
-  // message is MANDATORY: the status flip and the message are written in ONE transaction, so the physician
-  // ALWAYS sees WHY the letter came back (PhysicianHandoffNotes renders case_messages on the review page).
-  // The signed letter stays the CURRENT version — returning only re-opens the review gate (no re-draft, no
-  // byte change), honoring the no-block-draft rule; when the physician edits + re-signs, the existing
-  // approve/sign byte gates and the G4 stale-signature lifecycle govern the new version. Only 'delivered'
-  // is returnable — a 'paid' (billed/closed) case can never be reopened here. The Doctor Pack is NOT
-  // regenerated: it already exists from the first send-to-doctor, and the review page reads it as-is.
+  // /status route's delivered/paid -> physician_review edge — those stay ADMIN-ONLY bare flips (the G4
+  // stale-signature lifecycle + the paid recall guard). This dedicated door is the human path and does its
+  // OWN in-handler role gating; the explanatory message is MANDATORY: the status flip and the message are
+  // written in ONE transaction, so the physician ALWAYS sees WHY the letter came back (PhysicianHandoffNotes
+  // renders case_messages on the review page). The signed letter stays the CURRENT version — returning only
+  // re-opens the review gate (no re-draft, no byte change), honoring the no-block-draft rule; when the
+  // physician edits + re-signs, the existing approve/sign byte gates + the G4 lifecycle govern the new
+  // version. RETURNABLE SOURCE STATUSES = {delivered, paid} ('delivered' already covers Ready-for-delivery
+  // + Invoiced — both are display overlays of status='delivered'). ROLE POLICY: from 'delivered' →
+  // {admin, ops_staff, physician}; from 'paid' → {admin, physician} ONLY — ops_staff CANNOT reopen a
+  // billed/closed case (paid is the sensitive one). BILLING SAFETY: returning does NOT auto-un-invoice,
+  // un-charge, or refund — the source status (+ wasPaid/wasInvoiced flags) is recorded in the activity log;
+  // billing is handled separately. The Doctor Pack is NOT regenerated: it already exists from the first
+  // send-to-doctor, and the review page reads it as-is.
   router.post(
     '/cases/:id/return-to-physician',
-    requireRole(['admin', 'ops_staff']),
+    requireRole(['admin', 'ops_staff', 'physician']),
     asyncHandler(async (req: Request, res: Response) => {
       const user = currentUser(req);
       const id = String(req.params.id);
@@ -854,11 +864,29 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
       const updated = await db.$transaction(async (tx) => {
         const existing = await tx.case.findFirst({
           where: { id },
-          select: { id: true, veteranId: true, status: true, version: true, assignedPhysicianId: true },
+          select: {
+            id: true,
+            veteranId: true,
+            status: true,
+            version: true,
+            assignedPhysicianId: true,
+            // wasInvoiced flag (billing-safety audit trail): a letter_500 Payment row at status='invoiced'
+            // means the invoice email was sent. Same filter CASE_LITE_SELECT.invoiced uses. Count>0 = invoiced.
+            _count: { select: { payments: { where: { kind: 'letter_500', status: 'invoiced' } } } },
+          },
         });
         if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
-        if (existing.status !== 'delivered') {
-          throw new HttpError(409, 'conflict', 'Only a finalized letter (Ready for delivery) can be returned to the physician.', {
+        if (!RETURNABLE_TO_PHYSICIAN.has(existing.status)) {
+          throw new HttpError(409, 'conflict', 'Only a finalized (Ready for delivery) or paid letter can be returned to the physician.', {
+            caseId: id,
+            currentStatus: existing.status,
+          });
+        }
+        // Source-status role gate (in-handler, on top of the requireRole gate above): a 'paid' (billed/
+        // closed) case can ONLY be recalled by an admin or a physician — an RN (ops_staff) cannot reopen a
+        // closed case. A 'delivered' case is returnable by all three roles (requireRole already allows them).
+        if (existing.status === 'paid' && user.role !== 'admin' && user.role !== 'physician') {
+          throw new HttpError(403, 'forbidden', 'A paid (closed) case can only be returned to the physician by an admin or a physician.', {
             caseId: id,
             currentStatus: existing.status,
           });
@@ -874,6 +902,9 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         if (existing.assignedPhysicianId === null) {
           throw new HttpError(409, 'conflict', 'No physician is assigned to this case to return it to.', { caseId: id });
         }
+        // NOTE: this guards that AN assigned physician exists, not that the CALLER is that physician. With a
+        // single physician/owner that is sufficient. Before a second physician account is added, add the
+        // caller-is-assigned check (mirror cases.ts:331 isAssignedPhysicianForCase) + its test-mock — tracked.
 
         const row = await tx.case.update({
           where: { id },
@@ -888,13 +919,18 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
           data: { caseId: id, senderSub: user.sub, senderRole: user.role, body: message },
         });
 
+        // BILLING-SAFETY audit trail (2026-06-28): record the SOURCE status + whether the letter was
+        // already paid / invoiced when it was recalled. Returning does NOT auto-un-invoice/refund/un-charge
+        // — these flags make the manual billing follow-up legible in the activity log.
+        const wasPaid = existing.status === 'paid';
+        const wasInvoiced = (((existing as { _count?: { payments?: number } })._count?.payments) ?? 0) > 0;
         await tx.activityLog.create({
           data: {
             actorUserId: user.id,
             action: 'case_returned_to_physician',
             caseId: id,
             veteranId: existing.veteranId,
-            detailsJson: { caseId: id, from: existing.status, to: 'physician_review', returned: true },
+            detailsJson: { caseId: id, from: existing.status, to: 'physician_review', returned: true, wasPaid, wasInvoiced },
           },
         });
 

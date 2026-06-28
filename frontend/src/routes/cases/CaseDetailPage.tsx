@@ -497,10 +497,13 @@ export function CaseDetailPage() {
               {/* View letter only when the review panel (which has its own "Open PDF") isn't showing —
                   no duplicate view button (Ryan 2026-06-05). */}
               {viewableLetterJob && c.status !== 'rn_review' && c.status !== 'physician_review' ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}
-              {/* Return to physician (Item 1): on a FINALIZED (Ready for delivery) letter, the RN/ops can send
-                  it back to the doctor's review queue with a mandatory note — the recovery path when an error
-                  is caught after signing. Only at 'delivered' (a 'paid' case is closed and never reopens). */}
-              {c.status === 'delivered' && (role === 'admin' || role === 'ops_staff') ? (
+              {/* Return to physician (Item 1; widened 2026-06-28): on a FINALIZED letter, send it back to the
+                  doctor's review queue with a mandatory note — the recovery path when an error is caught after
+                  signing. From 'delivered' (Ready-for-delivery / Invoiced) → admin/ops/physician; from 'paid'
+                  (billed/closed) → admin/physician ONLY (an RN can't reopen a paid case). The billing warning
+                  for an invoiced/paid letter lives in the modal. */}
+              {((c.status === 'delivered' && (role === 'admin' || role === 'ops_staff' || role === 'physician'))
+                || (c.status === 'paid' && (role === 'admin' || role === 'physician'))) ? (
                 <Button variant="secondary" size="sm" onClick={() => setReturnToPhysicianOpen(true)}>Return to physician</Button>
               ) : null}
               {canRedraft ? <Button variant="secondary" size="sm" loading={redraft.isPending} disabled={redraft.isPending} onClick={() => setRedraftGate1Open(true)}>Redraft</Button> : null}
@@ -541,6 +544,11 @@ export function CaseDetailPage() {
     <ReturnToPhysicianModal
       open={returnToPhysicianOpen}
       onClose={() => setReturnToPhysicianOpen(false)}
+      // Billing-safety warning inputs (2026-06-28): returning an already-billed letter does NOT cancel the
+      // invoice or refund the payment. isPaid = the case is 'paid' (closed). isInvoiced = an invoice email
+      // was sent (a letter_500 Payment row sits at status='invoiced'); derived from the detail payments list.
+      isPaid={c.status === 'paid'}
+      isInvoiced={(c.payments ?? []).some((p) => p.kind === 'letter_500' && p.status === 'invoiced')}
       onSubmit={async (message) => { await returnToPhysician.mutateAsync(message); }}
     />
 

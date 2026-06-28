@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { askAdvisory, getAdvisoryThread, type AdvisoryThreadItem } from '../api/advisory';
-import { describeApiError } from '../api/client';
+import { askAdvisory, getAdvisoryThread, pollForCompletedAnswer, type AdvisoryThreadItem } from '../api/advisory';
+import { describeAdvisoryError, describeApiError, isAdvisoryAnswerLikelyCompleting } from '../api/client';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 
@@ -38,6 +38,10 @@ export function AdvisoryPanel({ caseId, alwaysOpen = false }: { readonly caseId:
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [question, setQuestion] = useState('');
+  // "Still working" = the synchronous ask 5xx'd at the API-Gateway 30s cap and we're now polling the
+  // queries endpoint for the answer the Lambda is finishing server-side (task #189). Keeps the wait
+  // honest without ever showing the user a failure that didn't really happen.
+  const [stillWorking, setStillWorking] = useState(false);
   const expanded = alwaysOpen || open;
 
   const thread = useQuery({
@@ -46,20 +50,46 @@ export function AdvisoryPanel({ caseId, alwaysOpen = false }: { readonly caseId:
     enabled: expanded && caseId.length > 0,
   });
 
+  const items = thread.data?.data ?? [];
+
   const ask = useMutation({
-    mutationFn: () => askAdvisory(caseId, question.trim()),
+    mutationFn: async () => {
+      const askedQuestion = question.trim();
+      const askedAt = Date.now();
+      // The rows already on screen BEFORE this ask — used to identify the NEW answer if we have to poll.
+      const knownIds = new Set(items.map((it) => it.id));
+      try {
+        await askAdvisory(caseId, askedQuestion);
+        return; // happy path (sub-30s): onSuccess invalidates the thread, which renders the answer.
+      } catch (err) {
+        // A real 4xx refusal (400/404/413/422/429/403/409): nothing is completing — surface it now.
+        if (!isAdvisoryAnswerLikelyCompleting(err)) throw err;
+        // Timeout/5xx: the Lambda likely ran to completion and persisted the answer past the gateway's
+        // 30s cap. Poll the existing GET queries endpoint for it — the user never sees an error.
+        console.debug('[Ask Aegis] ask 5xx/timeout — polling for the completed answer:', describeApiError(err));
+        setStillWorking(true);
+        const found = await pollForCompletedAnswer(caseId, askedQuestion, askedAt, knownIds);
+        if (found) return; // answer landed — onSuccess invalidates the thread and it renders normally.
+        throw err; // poll exhausted (~45s, no answer): re-throw so onError shows the calm message.
+      }
+    },
     onSuccess: async () => {
       setQuestion('');
       await qc.invalidateQueries({ queryKey: ['case', caseId, 'advisory-thread'] });
     },
-    onError: (e: unknown) => window.alert(`Could not get an answer — ${describeApiError(e)}`),
+    onError: (e: unknown) => {
+      // Plain-language only for the user (no codes/jargon); keep the real reason in the console for devs.
+      console.debug('[Ask Aegis] advisory request failed:', describeApiError(e), e);
+      window.alert(describeAdvisoryError(e));
+    },
+    onSettled: () => {
+      setStillWorking(false);
+    },
   });
 
   function submit() {
     if (question.trim().length > 0 && !ask.isPending) ask.mutate();
   }
-
-  const items = thread.data?.data ?? [];
 
   // The Q&A body — shared by both modes.
   const body = (
@@ -76,7 +106,11 @@ export function AdvisoryPanel({ caseId, alwaysOpen = false }: { readonly caseId:
         <div className="text-sm text-slate-400">No questions yet — ask the first one below.</div>
       )}
 
-      {ask.isPending ? <div className="text-sm text-slate-400">Aegis is thinking…</div> : null}
+      {ask.isPending ? (
+        <div className="text-sm text-slate-400">
+          {stillWorking ? 'Still working on it — this one is taking a little longer…' : 'Aegis is thinking…'}
+        </div>
+      ) : null}
 
       <div>
         <textarea

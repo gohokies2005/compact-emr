@@ -154,6 +154,42 @@ export function describeApiError(error: unknown): string {
   return 'unknown error';
 }
 
+// USER-FACING advisory ("Ask Aegis") error copy. Unlike describeApiError (an operator/dev tool that
+// deliberately surfaces raw HTTP status + verbatim server message), this NEVER shows a status code,
+// the word "environment", or any backend string to the veteran-facing RN/physician. Dr. Kasky's
+// standing rule: plain language only, a transient/server failure just says to wait and retry. We map
+// known error shapes on the FRONTEND rather than trusting the backend `message` to be user-safe.
+// Real technical detail still goes to console.debug for the next debugging session.
+export function describeAdvisoryError(error: unknown): string {
+  // Rate-limited: ask-a-lot-in-a-short-time. (Backend may signal 429.)
+  if (axios.isAxiosError(error) && error.response?.status === 429) {
+    return "You've asked a lot in a short time — give it a moment.";
+  }
+  // Everything else the user might hit here — 503 not-configured, 5xx, timeout, network drop, or an
+  // unclassified failure — is transient from their seat: stay calm, retry. Matches the calm
+  // provider-down pattern (task #50). No codes, no jargon.
+  return "Aegis couldn't answer just now — please wait a minute and try again.";
+}
+
+// Should a FAILED Ask-Aegis POST be treated as "the answer is probably still completing server-side"?
+// task #189: the advisory ask runs ~35-39s but API Gateway's hard 30s cap returns a 5xx (504/502/503)
+// to the browser WHILE the Lambda runs to completion and PERSISTS the answer to the DB. In that case
+// the UI should POLL the existing GET queries endpoint for the landed answer instead of erroring.
+//   TRUE  -> timeout / network drop / any 5xx (incl. the typed 503 ServiceUnavailableError door).
+//   FALSE -> a real 4xx refusal (400/404/413/422/429 + the typed 403/409 doors): nothing is
+//            completing, so the calm message should show immediately with no pointless polling.
+export function isAdvisoryAnswerLikelyCompleting(error: unknown): boolean {
+  if (error instanceof ServiceUnavailableError) return true; // typed 503 door
+  // Typed 4xx doors — real refusals, nothing is landing.
+  if (error instanceof ForbiddenError || error instanceof ConflictError || error instanceof SurgicalEditUnappliableError) return false;
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status;
+    if (status === undefined) return true; // timeout (ECONNABORTED) or network drop — no response arrived
+    return status >= 500 && status < 600; // any 5xx polls; every 4xx (incl. 429) does not
+  }
+  return false; // unknown error shape — don't promise an answer that may not be coming
+}
+
 export async function apiGet<T>(path: string, opts?: ApiRequestOptions): Promise<T> {
   const response = await apiClient.get<T>(path, opts?.timeout !== undefined ? { timeout: opts.timeout } : undefined);
   return response.data;

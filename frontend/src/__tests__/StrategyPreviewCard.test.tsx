@@ -1,9 +1,11 @@
-// StrategyPreviewCard — P1 re-source locks (2026-06-11):
-//   (i)   band-driven headline chip on a secondary claim with a viability read (no BVA % / n= anywhere)
+// StrategyPreviewCard — QUIET argument/theory summary locks (verdict surfaces removed 2026-06-29):
+//   (i)   NO redundant band/tier chip; argument body renders; no BVA % / n= anywhere
 //   (ii)  aggravation-only (HTN+PTSD shape) renders the 3.310(b) framing sentence, still no numbers
-//   (iii) viability null → legacy tier chip + criteria copy, no crash (fail-open)
-//   (iv)  amber criterion (P1e stated-only in-service hook) renders △, not a red ✗
+//   (iii) viability null → argument/theory copy, no chip, no crash (fail-open)
 //   (v)   chartReady=false renders the "documents not yet extracted" caution
+// (former (iv) — the amber ✓/△/✗ "Strategy checks" checklist — was REMOVED: the brittle cdsEngine
+//  verdict checklist + tier chip + auto-expand were retired so the SOAP card is the single pre-draft
+//  signal. The card now carries no ✓/⚠ verdict; see CaseDetailPage.storyOrder for the on-page lock.)
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
@@ -130,23 +132,31 @@ describe('StrategyPreviewCard — viability re-source', () => {
     expect(screen.queryByText(/Argue aggravation/)).not.toBeInTheDocument();
   });
 
-  it('(iv) amber criterion renders the △ glyph (distinct from ✗) on a stated-only in-service hook', async () => {
+  it('(iv-removed) renders NO ✓/△/✗ verdict checklist even on a concerning/amber criterion', async () => {
+    // The brittle cdsEngine "Strategy checks" checklist + tier chip + auto-expand were retired
+    // (2026-06-29) so the SOAP card is the single pre-draft signal. A criterion that would previously
+    // have rendered an amber △ (or a red ✗, or the "Strategy checks" toggle) must now render NOTHING —
+    // the card is a quiet argument/theory summary with no verdict glyphs.
     mount(preview({
-      tier: 'Thin', // concerning → checks auto-expand
+      tier: 'Thin', // would previously have auto-expanded the checklist
       anchor: null,
       viability: null,
       criteria: [
         { key: 'anchor', label: 'In-service event documented', pass: false, tone: 'amber', detail: 'Veteran states an in-service exposure — not yet corroborated in the record; verify the DD-214/service records before drafting.' },
       ],
     }));
-    expect(await screen.findByText('△')).toBeInTheDocument();
+    expect(await screen.findByText(/Argument:/)).toBeInTheDocument();
+    expect(screen.queryByText('△')).not.toBeInTheDocument();
     expect(screen.queryByText('✗')).not.toBeInTheDocument();
-    expect(screen.getByText(/not yet corroborated/)).toBeInTheDocument();
+    expect(screen.queryByText(/Strategy checks/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Thin — review')).not.toBeInTheDocument();
+    expect(screen.queryByText('Review needed')).not.toBeInTheDocument();
+    expect(screen.queryByText(/not yet corroborated/)).not.toBeInTheDocument();
   });
 
   it('(v) chartReady=false renders the "documents not yet extracted" caution', async () => {
     mount(preview({ tier: 'Plausible', viability: null }), false);
-    expect(await screen.findByText(/Documents not yet extracted — checks may change once OCR completes\./)).toBeInTheDocument();
+    expect(await screen.findByText(/Documents not yet extracted — this summary may change once OCR completes\./)).toBeInTheDocument();
   });
 });
 

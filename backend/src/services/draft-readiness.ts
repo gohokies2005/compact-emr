@@ -1,4 +1,13 @@
 /**
+ * DEPRECATED-AS-A-GATE 2026-06-29 (Dr. Kasky): the deterministic essential-docs ✓/⚠ evaluation below
+ * (items/missing/ready, conditionDocumented's exact-canonical dx match) NO LONGER drives any UI caution
+ * or the POST /draft gate. It over-fired — a documented clinically-equivalent condition false-flagged as
+ * "diagnosis missing", cautions wrong ~90% — so the pre-draft auto-evaluation was removed and the Gate-1
+ * modal is now a pure human RN attestation. getDraftReadiness is retained ONLY for the caseFraming /
+ * buildState provenance that DecisionsOverridesPanel reads; the essential-docs items are inert output.
+ * Do NOT re-wire items/missing into a draft block — the human attestation is the gate. (Function kept
+ * intact to avoid churning the SSOT framing derivation + its baseline-lock tests.)
+ *
  * Draft readiness — the "no silent deaths" pre-draft gate (Ryan, 2026-06-03).
  *
  * A chart-incomplete halt must NEVER be a silent death or a cryptic code. This check runs the

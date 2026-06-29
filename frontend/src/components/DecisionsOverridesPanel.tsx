@@ -21,6 +21,7 @@ const ITEM_NOUN: Record<string, string> = {
   dx_present: 'a current diagnosis of the claimed condition is documented',
   sc_conditions: "the veteran's service-connected conditions are documented",
   prior_denial: 'the prior denial letter is on file',
+  nexus_judgment: 'a plausible medical nexus to author',
   dx_verification: 'the diagnosis',
   nexus_switch: "the letter's condition",
 };

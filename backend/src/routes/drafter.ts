@@ -401,8 +401,10 @@ export function createDrafterClientRouter(db: AppDb): Router {
    *
    * Versioning: new DraftJob.version = max(existing versions) + 1.
    */
-  // Pre-draft essential-docs readiness, for the RN popup. Same deterministic check the POST /draft
-  // gate enforces — so the popup shows exactly what would block (or be overridden).
+  // DEPRECATED-AS-A-GATE 2026-06-29 (Dr. Kasky): the deterministic essential-docs ✓/⚠ evaluation no
+  // longer drives any UI caution or the POST /draft gate (both retired — the Gate-1 modal is now a pure
+  // human attestation). This route is RETAINED only because DecisionsOverridesPanel reads the SSOT
+  // caseFraming provenance off it; the items/missing/ready it still returns are unconsumed by the UI.
   router.get(
     '/cases/:id/draft-readiness',
     requireRole(['admin', 'ops_staff']),
@@ -502,48 +504,14 @@ export function createDrafterClientRouter(db: AppDb): Router {
         });
       }
 
-      // Essential-docs gate (no silent deaths, Ryan 2026-06-03): catch a missing essential
-      // document BEFORE any draft spend, with a plain RN-actionable message. The RN can override
-      // with a logged reason (block + override). The drafter's own chartCompleteness gate remains
-      // the backstop; this surfaces the same condition synchronously so it can never be a silent
-      // async death or a cryptic code.
-      //
-      // FLAG-GUARDED (default OFF): the blocking behavior activates only when DRAFT_READINESS_GATE
-      // ='on'. Until the EMR override popup ships, leaving it off preserves today's /draft behavior
-      // exactly, so a false-flag can't trap an RN with no override button. The GET
-      // /cases/:id/draft-readiness route is always live (read-only) so the UI can build against it.
-      const gateOn = process.env.DRAFT_READINESS_GATE === 'on';
-      const readiness = gateOn ? await getDraftReadiness(db, caseId) : null;
-      if (readiness !== null && !readiness.ready) {
-        // Distinguish "the chart is still being built from the records" (a wait, not a fault) from
-        // a genuine missing essential. Both block, both overridable (never a dead-end).
-        const stillBuilding = readiness.buildState === 'ocr_in_progress' || readiness.buildState === 'extracting';
-        if (parsed.acknowledgeMissingDocs !== true && parsed.rnDecision === undefined) {
-          throw new HttpError(
-            409,
-            stillBuilding ? 'chart_not_ready' : 'essential_docs_missing',
-            readiness.summary,
-            {
-              caseId,
-              buildState: readiness.buildState,
-              missing: readiness.missing.map((m) => ({ key: m.key, label: m.label, message: m.message })),
-              items: readiness.items.map((i) => ({ key: i.key, label: i.label, present: i.present, message: i.message })),
-              canOverride: true,
-            },
-          );
-        }
-        await db.activityLog.create({
-          data: {
-            actorUserId: actor.sub,
-            caseId,
-            action: 'draft_readiness_overridden',
-            detailsJson: {
-              missing: readiness.missing.map((m) => m.key),
-              reason: parsed.overrideReason ?? null,
-            },
-          },
-        });
-      }
+      // RETIRED 2026-06-29 (Dr. Kasky): the deterministic essential-docs gate (DRAFT_READINESS_GATE +
+      // getDraftReadiness's ✓/⚠ present/missing evaluation) is GONE. It over-fired — the exact-canonical
+      // dx match false-flagged a documented clinically-equivalent condition as "diagnosis missing", and
+      // cautions were wrong ~90% of the time — and a dormant on-flag would have re-introduced exactly that
+      // hidden hard-block. Drafting is now gated by the HUMAN Gate-1 attestation (the RN completes the
+      // checklist, including the nexus judgment, in Gate1ChecklistModal) — not by any machine string-match.
+      // The chart-readiness OCR door above (loadReconciledChartReadiness) is SEPARATE and still enforced.
+      // The LLM SOAP note is the analysis surface. See ARCHITECTURE.md SUPERSEDED log.
 
       const maxVersionRow = await db.draftJob.findFirst({
         where: { caseId },

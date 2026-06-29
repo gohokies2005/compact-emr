@@ -47,11 +47,12 @@ import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
 import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopPanels';
 import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 // CaseViabilityCard mount REMOVED from this page (Ryan 2026-06-20, item #64): the static M/E
-// (mechanism/evidence) "Anchor viability" ratings card is erased from the case UI entirely. The
-// AI route-picker plan (RecommendedPlanCard / the SOAP-note Overview headline) is its replacement.
-// The component file + its standalone tests are kept (it still serves other lanes); only the mount
-// + import are gone here.
-import { RecommendedPlanCard } from '../../components/RecommendedPlanCard';
+// (mechanism/evidence) "Anchor viability" ratings card is erased from the case UI entirely.
+// RecommendedPlanCard mount REMOVED from this page (Ryan 2026-06-29): its deterministic verdict chip
+// ("Draft"/"Contact veteran"/"Not supportable") from recommendedPlan() was a SECOND pre-draft verdict
+// surface that could contradict the SOAP/viability card — the single pre-draft signal now. The
+// component file + its standalone tests are kept (recommendedPlan() still serves other lanes); only
+// the mount + import are gone here.
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 // PreDraftSanityImpression was RETIRED 2026-06-25 (Ryan, item #68): the pre-draft AI Sanity Check card
 // was a separate skeptical Opus call that re-derived the theory and produced a misleading wrong-theory
@@ -657,12 +658,14 @@ export function CaseDetailPage() {
                       the reprocess/re-OCR actions. Wider gate so it shows during drafting / halt / rn_review. */}
                   {p.canSeeExtractionCoverage ? <ExtractionCoveragePanel key="extraction-coverage" caseId={caseId} /> : null}
 
-                  {/* The dense engine panels are kept one click away as raw data + the live fallback if an
+                  {/* The dense engine panel is kept one click away as raw data + the live fallback if an
                       API call is down. Children mount even when collapsed, so the sanity cache + the
                       readiness overlay still warm. The clinical SOAP-note read now lives on the Summary tab.
                       The static M/E "Anchor viability" card (CaseViabilityCard) was REMOVED here entirely
-                      (Ryan 2026-06-20, item #64) — the AI route-picker plan (RecommendedPlanCard) is the
-                      replacement; no M/E ratings render anywhere on this page. */}
+                      (Ryan 2026-06-20, item #64). The deterministic RecommendedPlanCard verdict chip was
+                      REMOVED here too (Ryan 2026-06-29) — it was a second pre-draft verdict that could
+                      contradict the SOAP card; the SOAP/viability card is the single pre-draft signal.
+                      StrategyPreviewCard remains as a QUIET argument/theory summary (no ✓/⚠ verdict). */}
                   {p.canSendFirstDraft ? (
                     <details key="full-analysis" className="mb-4 rounded-lg border border-slate-200 bg-white">
                       <summary className="cursor-pointer select-none px-4 py-2.5 text-sm font-medium text-slate-600 hover:text-slate-800">
@@ -670,7 +673,7 @@ export function CaseDetailPage() {
                       </summary>
                       <div className="space-y-4 px-2 pb-3">
                         <StrategyPreviewCard key="strategy" caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
-                        <RecommendedPlanCard key="recommended-plan" caseId={caseId} hasUnreadPages={chartReadiness.hasGaps || chartReadiness.blockingFiles.length > 0} />
+                        {/* RecommendedPlanCard (deterministic verdict chip) retired from this page 2026-06-29 — redundant/contradictory second verdict; SOAP card owns the pre-draft go/no-go. */}
                         {/* PreDraftSanityImpression (the "AI Sanity Check" card) retired 2026-06-25 (Ryan #68) — redundant with the SOAP overview's holistic read; removed to stop the misleading note + the per-mount Opus call. */}
                       </div>
                     </details>

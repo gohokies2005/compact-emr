@@ -1,23 +1,19 @@
-// Gate-1 pre-fill tests (work order Task 3 — the modal previously "read nothing"). Locks: the seed
-// from the draft-readiness feed, the deliberate absent-evidence-stays-UNSET policy, the RN-edit
-// survival guarantee, the untouched attestation write contract, and full fail-open to today's
-// blank modal when the feed is loading/erroring/still-building.
+// Gate-1 is a PLAIN RN ATTESTATION (Dr. Kasky 2026-06-29). These lock: every radio starts UNSET (no
+// machine-computed ✓/⚠ / no Yes pre-fill), NO "Essential documents missing" caution is ever rendered,
+// the readiness auto-evaluation is no longer consulted, the nexus-judgment item is present + highlighted,
+// the Start-draft gate is the human attestation (all resolved, no "No"), and the attestation write
+// contract posts the four item keys.
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Gate1ChecklistModal } from '../components/Gate1ChecklistModal';
-import { getDraftReadiness, type DraftReadinessResult } from '../api/draft-readiness';
 import { postGate1Attestations } from '../api/drafter';
 
-vi.mock('../api/draft-readiness', () => ({
-  getDraftReadiness: vi.fn(),
-}));
 vi.mock('../api/drafter', () => ({
   postGate1Attestations: vi.fn(),
 }));
 
-const readinessMock = vi.mocked(getDraftReadiness);
 const postMock = vi.mocked(postGate1Attestations);
 
 function renderModal(props: Partial<Parameters<typeof Gate1ChecklistModal>[0]> = {}) {
@@ -39,34 +35,6 @@ function renderModal(props: Partial<Parameters<typeof Gate1ChecklistModal>[0]> =
   );
 }
 
-function readiness(overrides: Partial<DraftReadinessResult> = {}): { data: DraftReadinessResult } {
-  return {
-    data: {
-      ready: true,
-      items: [
-        { key: 'current_diagnosis', label: 'Current diagnosis', present: true, basis: '"Obstructive Sleep Apnea" found in problem list' },
-        { key: 'in_service_event', label: 'In-service event / service record', present: true, basis: 'satisfied by granted SC anchor Anxiety (70%)' },
-        { key: 'sc_conditions', label: 'Service-connected primary', present: true, basis: '1 granted SC condition(s) on file' },
-        { key: 'denial_letter', label: 'VA denial letter (appeal)', present: true, basis: 'denial/decision document on file' },
-      ],
-      missing: [],
-      summary: 'All essential documents are on file.',
-      buildState: 'chart_ready',
-      caseFraming: {
-        version: 1,
-        framing: 'secondary',
-        grantedScAnchors: [{ condition: 'Anxiety', ratingPct: 70, status: 'service_connected' }],
-        upstreamScCondition: 'Anxiety / GAD',
-        framingChoice: null,
-        claimType: 'supplemental',
-        source: 'derived',
-        derivedAt: '2026-06-10T00:00:00.000Z',
-      },
-      ...overrides,
-    },
-  };
-}
-
 /** The radio input for a given item key + option label. */
 function radio(itemKey: string, label: string): HTMLInputElement {
   const inputs = Array.from(document.querySelectorAll<HTMLInputElement>(`input[name="${itemKey}"]`));
@@ -75,125 +43,94 @@ function radio(itemKey: string, label: string): HTMLInputElement {
   return target;
 }
 
+const ITEM_KEYS = ['dx_present', 'sc_conditions', 'prior_denial', 'nexus_judgment'] as const;
+
 beforeEach(() => {
   vi.clearAllMocks();
   postMock.mockResolvedValue({ data: { written: 4 } });
 });
 
-describe('Gate1ChecklistModal pre-fill', () => {
-  it('seeds Yes from present evidence and renders the basis lines + provenance', async () => {
-    readinessMock.mockResolvedValue(readiness());
+describe('Gate1ChecklistModal — human attestation (no auto-evaluation)', () => {
+  it('renders Dr. Kasky\'s four items, every radio UNSET, Start disabled', () => {
     renderModal();
-    await waitFor(() => expect(radio('dx_present', 'Yes').checked).toBe(true));
-    expect(radio('in_service_event', 'Yes').checked).toBe(true);
-    expect(screen.getByText(/satisfied by granted SC anchor Anxiety \(70%\)/)).toBeInTheDocument();
-    expect(screen.getByText(/"Obstructive Sleep Apnea" found in problem list/)).toBeInTheDocument();
-    expect(screen.getByText(/auto-derived from the granted SC conditions/)).toBeInTheDocument();
-    expect(screen.getByText(/anchor: Anxiety \/ GAD/)).toBeInTheDocument();
-  });
-
-  it('does NOT pre-pick No for absent evidence — radio unset, amber message shown, Start disabled', async () => {
-    readinessMock.mockResolvedValue(readiness({
-      items: [
-        { key: 'current_diagnosis', label: 'Current diagnosis', present: false, basis: 'not in problem list', message: 'Essential documents missing: A current diagnosis for Obstructive Sleep Apnea is not on file. Please upload a medical record showing the current diagnosis and redraft.' },
-        { key: 'in_service_event', label: 'In-service event / service record', present: true, basis: 'DD-214 / service record on file' },
-      ],
-    }));
-    renderModal();
-    await waitFor(() => expect(radio('in_service_event', 'Yes').checked).toBe(true));
-    expect(radio('dx_present', 'Yes').checked).toBe(false);
-    expect(radio('dx_present', 'No').checked).toBe(false);
-    expect(screen.getByText(/A current diagnosis for Obstructive Sleep Apnea is not on file/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Start draft' })).toBeDisabled();
-  });
-
-  it('an RN answer survives the seed (prev wins in the merge)', async () => {
-    let resolve!: (v: { data: DraftReadinessResult }) => void;
-    readinessMock.mockReturnValue(new Promise((r) => { resolve = r; }));
-    renderModal();
-    // RN clicks No on dx_present BEFORE the feed lands
-    fireEvent.click(radio('dx_present', 'No'));
-    resolve(readiness());
-    await waitFor(() => expect(radio('in_service_event', 'Yes').checked).toBe(true));
-    expect(radio('dx_present', 'No').checked).toBe(true); // not clobbered by the seed's Yes
-    expect(radio('dx_present', 'Yes').checked).toBe(false);
-  });
-
-  it('the attestation write contract is unchanged — pre-filled answers post the same shape', async () => {
-    readinessMock.mockResolvedValue(readiness());
-    renderModal();
-    const start = screen.getByRole('button', { name: 'Start draft' });
-    await waitFor(() => expect(start).not.toBeDisabled());
-    fireEvent.click(start);
-    await waitFor(() => expect(postMock).toHaveBeenCalledWith('CASE-1', 1, [
-      { item: 'in_service_event', decision: 'yes' },
-      { item: 'dx_present', decision: 'yes' },
-      { item: 'sc_conditions', decision: 'yes' },
-      { item: 'prior_denial', decision: 'yes' },
-    ]));
-  });
-
-  it('fail-open: chart still building → blank modal exactly as today', async () => {
-    readinessMock.mockResolvedValue(readiness({ buildState: 'extracting', items: [], caseFraming: undefined as never }));
-    renderModal();
-    await waitFor(() => expect(readinessMock).toHaveBeenCalled());
-    for (const key of ['dx_present', 'in_service_event', 'sc_conditions', 'prior_denial']) {
+    for (const key of ITEM_KEYS) {
       expect(radio(key, 'Yes').checked).toBe(false);
       expect(radio(key, 'No').checked).toBe(false);
     }
     expect(screen.getByRole('button', { name: 'Start draft' })).toBeDisabled();
   });
 
-  // #6 (2026-06-21): a default-fallback framing source with NO route-picker plan must read "framing not yet
-  // computed", never the misleading "default (direct)".
-  it('#6 shows "framing not yet computed" (NOT "default (direct)") on the no-plan default_direct path', async () => {
-    readinessMock.mockResolvedValue(readiness({
-      routePlan: undefined as never,
-      caseFraming: {
-        version: 1, framing: 'direct', grantedScAnchors: [], upstreamScCondition: null,
-        framingChoice: null, claimType: 'supplemental', source: 'default_direct',
-        derivedAt: '2026-06-10T00:00:00.000Z',
-      } as never,
-    }));
+  it('renders the nexus-judgment question as the highlighted primary call', () => {
     renderModal();
-    await waitFor(() => expect(screen.getByText(/framing not yet computed/)).toBeInTheDocument());
-    expect(screen.queryByText(/default \(direct\)/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Clinical judgment/i)).toBeInTheDocument();
+    expect(screen.getByText(/plausible medical nexus to author/i)).toBeInTheDocument();
   });
 
-  // #7 (2026-06-21): when the route-picker brain feed was unavailable, the degraded (deterministic-only) state
-  // must be VISIBLE.
-  it('#7 shows the degraded note when brainConsulted is false', async () => {
-    readinessMock.mockResolvedValue(readiness({
-      brainConsulted: false,
-      degradedNote: 'Plan unavailable — deterministic check only.',
-    } as never));
-    renderModal();
-    await waitFor(() => expect(screen.getByText(/Plan unavailable — deterministic check only/)).toBeInTheDocument());
+  it('NEVER renders an "Essential documents missing" caution, even with a documented-but-differently-named dx', () => {
+    // The exact false-firing case: chart documents a related foot pathology, claim is "Plantar Fasciitis".
+    renderModal({ claimedCondition: 'Plantar Fasciitis' });
+    expect(screen.queryByText(/Essential documents missing/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not on file/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/diagnosis missing/i)).not.toBeInTheDocument();
+    // no machine ✓/⚠ marks
+    expect(document.body.textContent).not.toContain('✓');
+    expect(document.body.textContent).not.toContain('⚠');
   });
 
-  it('#7 does NOT show the degraded note when the brain was consulted', async () => {
-    readinessMock.mockResolvedValue(readiness({ brainConsulted: true } as never));
-    renderModal();
-    await waitFor(() => expect(readinessMock).toHaveBeenCalled());
-    expect(screen.queryByText(/deterministic check only/)).not.toBeInTheDocument();
+  it('sc_conditions and prior_denial offer Not applicable; dx and nexus do not', () => {
+    renderModal({ claimType: 'initial' });
+    expect(() => radio('sc_conditions', 'Not applicable')).not.toThrow();
+    expect(() => radio('prior_denial', 'Not applicable')).not.toThrow();
+    expect(() => radio('dx_present', 'Not applicable')).toThrow();
+    expect(() => radio('nexus_judgment', 'Not applicable')).toThrow();
   });
 
-  // #2: brain gaps that map to no checklist item are surfaced.
-  it('#2 surfaces unclassifiedGaps to the RN', async () => {
-    readinessMock.mockResolvedValue(readiness({
-      unclassifiedGaps: [{ fact: 'no MRI on file', why: 'imaging would strengthen the claim' }],
-    } as never));
+  it('a "No" on any item blocks the draft and shows the stop message', () => {
     renderModal();
-    await waitFor(() => expect(screen.getByText(/additional gaps to review/)).toBeInTheDocument());
-    expect(screen.getByText(/no MRI on file/)).toBeInTheDocument();
-  });
-
-  it('fail-open: feed error → blank modal, manual fill still works', async () => {
-    readinessMock.mockRejectedValue(new Error('boom'));
-    renderModal();
-    await waitFor(() => expect(readinessMock).toHaveBeenCalled());
-    expect(radio('dx_present', 'Yes').checked).toBe(false);
     fireEvent.click(radio('dx_present', 'Yes'));
-    expect(radio('dx_present', 'Yes').checked).toBe(true);
+    fireEvent.click(radio('sc_conditions', 'Not applicable'));
+    fireEvent.click(radio('prior_denial', 'Not applicable'));
+    fireEvent.click(radio('nexus_judgment', 'No'));
+    expect(screen.getByText(/A "No" stops the draft/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start draft' })).toBeDisabled();
+  });
+
+  it('resolving every item (no "No") enables Start and posts the four attestations', async () => {
+    const onConfirmed = vi.fn();
+    renderModal({ onConfirmed });
+    fireEvent.click(radio('dx_present', 'Yes'));
+    fireEvent.click(radio('sc_conditions', 'Yes'));
+    fireEvent.click(radio('prior_denial', 'Not applicable'));
+    fireEvent.click(radio('nexus_judgment', 'Yes'));
+    const start = screen.getByRole('button', { name: 'Start draft' });
+    expect(start).not.toBeDisabled();
+    fireEvent.click(start);
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('CASE-1', 1, [
+      { item: 'dx_present', decision: 'yes' },
+      { item: 'sc_conditions', decision: 'yes' },
+      { item: 'prior_denial', decision: 'not_applicable' },
+      { item: 'nexus_judgment', decision: 'yes' },
+    ]));
+    await waitFor(() => expect(onConfirmed).toHaveBeenCalled());
+  });
+
+  it('an override requires a reason before the attestation is accepted', async () => {
+    renderModal();
+    fireEvent.click(radio('dx_present', 'Override'));
+    fireEvent.click(radio('sc_conditions', 'Yes'));
+    fireEvent.click(radio('prior_denial', 'Not applicable'));
+    fireEvent.click(radio('nexus_judgment', 'Yes'));
+    // override reason still empty → Start disabled
+    expect(screen.getByRole('button', { name: 'Start draft' })).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText(/Reason \(required for override\)/i), { target: { value: 'records pending upload' } });
+    const start = screen.getByRole('button', { name: 'Start draft' });
+    expect(start).not.toBeDisabled();
+    fireEvent.click(start);
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('CASE-1', 1, [
+      { item: 'dx_present', decision: 'override', reason: 'records pending upload' },
+      { item: 'sc_conditions', decision: 'yes' },
+      { item: 'prior_denial', decision: 'not_applicable' },
+      { item: 'nexus_judgment', decision: 'yes' },
+    ]));
   });
 });

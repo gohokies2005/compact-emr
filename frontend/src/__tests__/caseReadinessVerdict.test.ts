@@ -269,3 +269,24 @@ describe('computeReadinessVerdict — amber is an RN work order, not a physician
     expect(r.nextAction).not.toMatch(/physician review/i); // no "physician review" referral
   });
 });
+
+// ── ASK-AEGIS IS A CONSIDERATION, NOT THE DEFAULT (Dr. Kasky 2026-06-29) ─────────────────────────────────────
+//    "I never want Ask Aegis to be the default answer like they feel like they have to." Every nextAction that
+//    mentions Ask-Aegis must frame it as an OPTIONAL second read ("can help"), never the imperative "run an
+//    Ask-Aegis check" — and the primary RN move (confirm the chart / check the presumptive path) must lead.
+describe('computeReadinessVerdict — Ask-Aegis is offered as optional, never an imperative', () => {
+  const cases: ReadonlyArray<{ name: string; signals: ReadinessSignals; verdict: string }> = [
+    { name: 'draft_confirm_mechanism', signals: SIGNALS({ viability: UNREVIEWED('strong') }), verdict: 'draft_confirm_mechanism' },
+    { name: 'draft_reconcile', signals: SIGNALS({ viability: viability('weak') }), verdict: 'draft_reconcile' },
+    { name: 'not_supportable', signals: SIGNALS({ strategy: strategy('Stop'), viability: viability('abstain', { best_anchor: null, missing_fact: null }) }), verdict: 'not_supportable' },
+  ];
+  for (const c of cases) {
+    it(`${c.name}: Ask-Aegis is "can help", not "run an Ask-Aegis check"`, () => {
+      const r = computeReadinessVerdict(c.signals)!;
+      expect(r.verdict).toBe(c.verdict);
+      expect(r.nextAction).toMatch(/Ask-Aegis/);                 // token preserved
+      expect(r.nextAction).toMatch(/can help/i);                 // framed as optional consideration
+      expect(r.nextAction).not.toMatch(/run an Ask-Aegis check/i); // the old imperative is gone
+    });
+  }
+});

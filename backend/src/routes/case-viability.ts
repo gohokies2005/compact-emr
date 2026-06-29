@@ -125,6 +125,29 @@ export function createCaseViabilityRouter(db: AppDb): Router {
         try { chartDigest = await buildDigestForCase(db, caseId); } catch { chartDigest = null; }
         ctx = { claimedCondition, routePickerFraming, chartDigest };
       }
+      // CHEAP POLL — pollOnly (Dr. Kasky 2026-06-29, "auto-refresh when the SOAP finishes; I shouldn't have to
+      // hard refresh"). The card POLLS this endpoint every ~15s WHILE the served note is a provisional fallback
+      // brief (the model truncated on the 25s sync path; the 110s async precompute is still writing the real
+      // note). A normal getSoapNote poll would re-RUN the model on every tick during that warming window (the
+      // documented re-bill trap: a non-persisted fallback means no stored note → getOrBuildSoapNote generates a
+      // fresh Sonnet call). pollOnly makes the poll a $0 STATUS CHECK: serve the persisted real note the moment
+      // the async precompute lands it (decideServeStored — current-shape, fallback:false), otherwise return
+      // `generating:true` WITHOUT any model call. We do NOT fire a recompute here — the initial open already
+      // fired it (firedRecompute/soapShapeStale below), and re-firing every 15s would re-spawn the precompute
+      // (the recompute-storm the chip-wobble fix just closed). Fail-open: any read error returns generating:true.
+      if ((body as { pollOnly?: unknown }).pollOnly === true) {
+        try {
+          const fingerprint = soapNoteFingerprint(ctx);
+          const storedRow = await (db as unknown as SoapOverviewCacheDb).soapOverview.findUnique({ where: { caseId } });
+          const decision = decideServeStored(storedRow, fingerprint);
+          if (decision) {
+            res.json({ data: decision.note, fingerprint, stale: false, cached: true, grounded: routePickerFraming !== null, routePickerFraming, generating: false });
+            return;
+          }
+        } catch { /* fail-open: report still-generating below */ }
+        res.json({ data: null, generating: true, cached: false, grounded: routePickerFraming !== null, routePickerFraming });
+        return;
+      }
       // SERVE-STORED-FIRST (Dr. Kasky 2026-06-26, Bays "load the REAL thing, not the intermediate; auto-refresh").
       // A plain open MUST serve the persisted current-shape SOAP note regardless of route-picker inputHash drift.
       // ROOT (hash-drift gate wedge): while a case is status='drafting' the drafter rewrites the Case row every

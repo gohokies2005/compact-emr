@@ -52,7 +52,12 @@ const getOrBuildSoapNote = vi.fn(async (_db: unknown, _caseId: string, ctx: unkn
 
 vi.mock('../services/ai-viability.js', () => ({ getAiViabilityState, aiRoutePickerEnabled }));
 vi.mock('../services/recompute-viability-trigger.js', () => ({ fireRecomputeViability }));
-vi.mock('../services/soap-overview.js', () => ({ getOrBuildSoapNote }));
+// soapNoteFingerprint + decideServeStored are stubbed so the route's serve-stored-first AND the new pollOnly
+// ($0 status-check) branches are unit-controllable without renderContext/a real cache row.
+const soapNoteFingerprint = vi.fn(() => 'fp');
+const decideServeStored = vi.fn<(stored: unknown, fp: string) => { note: unknown; refresh: boolean } | null>(() => null);
+const SOAP_NOTE_SCHEMA_VERSION = 28;
+vi.mock('../services/soap-overview.js', () => ({ getOrBuildSoapNote, soapNoteFingerprint, decideServeStored, SOAP_NOTE_SCHEMA_VERSION }));
 // The grounded path now assembles the SoapContext SERVER-SIDE via assembleSoapContextForCase (Zimmelman
 // reliability fix 2026-06-22) so the sync read's fingerprint matches the async precompute's. Mock it (it has
 // its own dedicated test) — it echoes back the framing it is handed so the H1 routePickerFraming assertions
@@ -84,6 +89,15 @@ function makeDb() {
   const caseFindFirst = vi.fn(async () => ({ id: 'CASE-1' }));
   const db = { case: { findFirst: caseFindFirst } } as unknown as AppDb;
   return { db, caseFindFirst };
+}
+
+/** A db whose soap_overviews delegate returns `row` from findUnique — for exercising the pollOnly / serve-
+ *  stored-first branches (which read the persisted note). */
+function makeDbWithSoap(row: unknown) {
+  const caseFindFirst = vi.fn(async () => ({ id: 'CASE-1' }));
+  const soapFindUnique = vi.fn(async () => row);
+  const db = { case: { findFirst: caseFindFirst }, soapOverview: { findUnique: soapFindUnique } } as unknown as AppDb;
+  return { db, caseFindFirst, soapFindUnique };
 }
 
 function appFor(db: AppDb) {
@@ -176,6 +190,49 @@ describe('POST /cases/:id/soap-overview — one-brain QA (H1/H2/H3)', () => {
     expect(res.body.grounded).toBe(false);
     expect(res.body.routePickerFraming).toBeNull();
     expect(fireRecomputeViability).toHaveBeenCalledOnce(); // stale-condition (ready-but-wrong-claim) → refire
+  });
+});
+
+// ── pollOnly: the CHEAP auto-refresh status-check (Dr. Kasky 2026-06-29) ─────────────────────────────────────
+// The card polls with pollOnly:true every ~15s while a provisional fallback brief is showing. It must be $0:
+// serve the persisted real note the instant the precompute lands it, otherwise report generating:true WITHOUT
+// ever running the model (getOrBuildSoapNote) or re-firing the recompute (the storm the chip-fix just closed).
+describe('POST /cases/:id/soap-overview pollOnly — $0 status check, never bills, never re-fires', () => {
+  beforeEach(() => {
+    mockUser = { sub: 'U1', roles: ['ops_staff'] };
+    getAiViabilityState.mockReset();
+    aiRoutePickerEnabled.mockReset(); aiRoutePickerEnabled.mockReturnValue(true);
+    fireRecomputeViability.mockReset(); fireRecomputeViability.mockResolvedValue(true);
+    getOrBuildSoapNote.mockClear();
+    caseViabilityEnabled.mockReset(); caseViabilityEnabled.mockReturnValue(true);
+    soapNoteFingerprint.mockReset(); soapNoteFingerprint.mockReturnValue('fp');
+    decideServeStored.mockReset(); decideServeStored.mockReturnValue(null);
+  });
+
+  it('still generating (no real stored note) → generating:true, NO model call, NO recompute fired', async () => {
+    stateReady(plan()); // warm plan so the EARLIER block does not fire a recompute — isolates pollOnly
+    decideServeStored.mockReturnValue(null); // precompute hasn't landed the real note yet
+    const { db } = makeDbWithSoap(null);
+    const res = await POST(db, { claimedCondition: 'Obstructive sleep apnea', pollOnly: true });
+    expect(res.status).toBe(200);
+    expect(res.body.generating).toBe(true);
+    expect(res.body.data).toBeNull();
+    expect(getOrBuildSoapNote).not.toHaveBeenCalled(); // the cost guard: NEVER bills Sonnet in the warming window
+    expect(fireRecomputeViability).not.toHaveBeenCalled(); // the storm guard: never re-fires on a poll
+  });
+
+  it('precompute landed → serves the persisted real note for $0 (cached:true), generating:false, NO model call', async () => {
+    stateReady(plan());
+    const realNote = { subjective: 's', objective: 'o', assessment: 'a', plan: 'p', confidence: 'high', action: 'draft', fallback: false };
+    decideServeStored.mockReturnValue({ note: realNote, refresh: false });
+    const { db } = makeDbWithSoap({ inputHash: 'fp', schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: realNote });
+    const res = await POST(db, { claimedCondition: 'Obstructive sleep apnea', pollOnly: true });
+    expect(res.status).toBe(200);
+    expect(res.body.generating).toBe(false);
+    expect(res.body.cached).toBe(true);
+    expect(res.body.data).toMatchObject({ assessment: 'a', plan: 'p', fallback: false });
+    expect(getOrBuildSoapNote).not.toHaveBeenCalled(); // a poll NEVER generates, even when it returns a note
+    expect(fireRecomputeViability).not.toHaveBeenCalled();
   });
 });
 

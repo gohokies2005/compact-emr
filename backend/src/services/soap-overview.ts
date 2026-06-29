@@ -392,17 +392,20 @@ function planConfidenceToSoap(conf: string): SoapConfidence {
  *  AMBER = A WORK ORDER, NOT A REFERRAL (Dr. Kasky 2026-06-28): the RN + the engine make the go/no-go and
  *  prep the letter; a physician REVIEWS and SIGNS (~2% of the work). So the amber/physician_review step is
  *  written as a concrete RN next step (confirm the records are actually in the chart — most "missing" facts
- *  are just un-parsed — and run a named Ask-Aegis check on the mechanism), NOT "route to a physician to
- *  decide". The only legitimate escalation is fail-open to the team lead when the engine genuinely can't
- *  resolve it. */
+ *  are just un-parsed), NOT "route to a physician to decide". The only legitimate escalation is fail-open to
+ *  the team lead when the engine genuinely can't resolve it.
+ *  ASK-AEGIS IS A CONSIDERATION, NOT THE DEFAULT (Dr. Kasky 2026-06-29): never phrase Ask-Aegis as a step the
+ *  RN "has to" do. It is an OPTIONAL second read ("an Ask-Aegis check can help if useful") — the primary move
+ *  is confirming the records / checking the presumptive path, with Ask-Aegis offered as one option, never an
+ *  imperative. */
 function actionToPlanSentence(action: SoapAction, claimed: string): string {
   switch (action) {
     case 'draft': return `Proceed to draft the nexus letter for ${claimed} on the theory above.`;
     case 'get_records': return `Obtain the specific records noted above before drafting ${claimed}.`;
     case 'clarify': return `Clarify the open point above with the veteran before drafting ${claimed}.`;
-    case 'reject': return `Do not draft as filed. Check whether another condition or framing is supportable for ${claimed} (run an Ask-Aegis check; check the presumptive path); if it is a no, tell the veteran specifically what is missing.`;
+    case 'reject': return `Do not draft as filed. Check whether another condition or framing is supportable for ${claimed} (check the presumptive path; an Ask-Aegis check can help if useful); if it is a no, tell the veteran specifically what is missing.`;
     case 'physician_review':
-    default: return `Confirm the theory before drafting ${claimed}: verify the records are actually in the chart, then run an Ask-Aegis check on the mechanism (escalate to the team lead only if the engine cannot resolve it).`;
+    default: return `Confirm the theory before drafting ${claimed}: verify the records are actually in the chart (an Ask-Aegis check can help if you want a second read; escalate to the team lead only if the engine cannot resolve it).`;
   }
 }
 
@@ -507,7 +510,7 @@ const SOAP_TOOL: Anthropic.Tool = {
         },
       },
       assessment: { type: 'string', description: 'Tie it together as a clinician + VA-claims expert would: the medical mechanism linking the claim to the service-connected condition(s), how it fits VA theory and language (secondary causation/aggravation under 38 CFR 3.310, direct under 3.303, etc., as applicable), the strongest counterpoint, and an honest overall read of how strong what we have is. 3-5 sentences of smooth prose. No internal jargon (no M-tiers, no BVA percentages, no "pair-atlas").' },
-      plan: { type: 'string', description: 'The concrete next step in plain language, written as an RN WORK ORDER (the RN + the engine make the go/no-go and prep the letter; a physician only REVIEWS and SIGNS): draft now; get ONE specific record (say whether it BLOCKS the build or runs in parallel); ask the veteran ONE targeted question (with the legal reason); run a named Ask-Aegis check on the mechanism / confirm the records are already in the chart (most "missing" facts are just un-parsed); or decline with a specific reason. Never write "route to a physician to decide" or "ask the doctor what he thinks" — that is not the next step. One or two sentences, and WHY.' },
+      plan: { type: 'string', description: 'The concrete next step in plain language, written as an RN WORK ORDER (the RN + the engine make the go/no-go and prep the letter; a physician only REVIEWS and SIGNS): draft now; get ONE specific record (say whether it BLOCKS the build or runs in parallel); ask the veteran ONE targeted question (with the legal reason); confirm the records are already in the chart (most "missing" facts are just un-parsed); or decline with a specific reason. An Ask-Aegis check is an OPTIONAL consideration the RN may use for a second read on the mechanism — offer it as "Ask-Aegis can help if useful", never as a required step the RN must do. Never write "route to a physician to decide" or "ask the doctor what he thinks" — that is not the next step. One or two sentences, and WHY.' },
       confidence: { type: 'string', enum: ['high', 'moderate', 'low'], description: 'Overall confidence in what we have to support this claim as filed.' },
       action: { type: 'string', enum: ['draft', 'get_records', 'clarify', 'physician_review', 'reject'], description: 'The single recommended next action, matching the plan. NOTE: "physician_review" means the case needs a closer RN/Ask-Aegis review before drafting — the RN owns that step; it does NOT mean handing the go/no-go decision to a physician.' },
     },
@@ -526,10 +529,11 @@ const SYSTEM =
   'and regulation (3.310 secondary/aggravation, 3.303 direct, presumptives) + the strongest counterpoint + an ' +
   'honest overall read. Plan = the one concrete RN next step and why, written as a WORK ORDER — draft now; ' +
   'get ONE named record (say whether it BLOCKS the build or runs in parallel); ask the veteran ONE targeted ' +
-  'question; run a named Ask-Aegis check on the mechanism / confirm the records are already in the chart ' +
-  '(most "missing" facts are just un-parsed); or decline with a specific reason. The RN and the engine make ' +
-  'the go/no-go and prep the letter; a physician REVIEWS and SIGNS. Never write "route to a physician to ' +
-  'decide" or "ask the doctor what he thinks" — escalate (to the team lead / Ask-Aegis) only when the engine ' +
+  'question; confirm the records are already in the chart (most "missing" facts are just un-parsed); or ' +
+  'decline with a specific reason. An Ask-Aegis check is an OPTIONAL consideration the RN may use for a second ' +
+  'read — present it as "Ask-Aegis can help if useful", never as a step the RN is obligated to do. The RN and ' +
+  'the engine make the go/no-go and prep the letter; a physician REVIEWS and SIGNS. Never write "route to a ' +
+  'physician to decide" or "ask the doctor what he thinks" — escalate (to the team lead) only when the engine ' +
   'genuinely cannot resolve the case.\n' +
   'IF the context includes a "DECIDED FRAMING" block, that framing decision is GIVEN — it is the team\'s ' +
   'chosen theory for this letter. RENDER it faithfully in the Assessment: explain the GIVEN mechanism, apply ' +

@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getStrategyPreview } from '../api/strategy-preview';
 import { getCaseViability, computeCaseViability, getSoapNote, type SoapContextInput, type SoapNoteResult } from '../api/case-viability';
@@ -160,11 +160,16 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
     queryFn: () => getSoapNote(caseId, ctx),
     enabled: enabled && strategy !== null, // ctx is meaningful once the strategy/inputSet is loaded
     staleTime: 10 * 60 * 1000,
-    // NOTE: do NOT poll this query on note.fallback. A TRANSIENT fallback is deliberately not persisted, so a
-    // non-forced getSoapNote re-RUNS the model (a live Sonnet call) — polling it would re-bill every few seconds
-    // on a large/ungrounded chart (QA cost finding 2026-06-24). The off-request precompute is the reliability
-    // home for the real note; the fallback prose heals on the next open. Only the cheap coverage poll below
-    // self-heals the amber→green VERDICT (which is what the user actually asked for and is a $0 read).
+    // AUTO-REFRESH ON RE-OPEN (Dr. Kasky 2026-06-29, "navigating away and coming back did nothing"). The 10-min
+    // staleTime made react-query serve the CACHED provisional brief on remount, so returning to the chart never
+    // picked up the real note the async precompute had since landed. refetchOnMount:'always' re-fetches on every
+    // mount regardless of staleTime — and that re-fetch is a $0 serve-stored-first cache hit once the real note
+    // is persisted (the common case), so it's cheap. The live auto-poll (soapPollQ below) handles the SAME-tab
+    // "sitting on the page while it finishes" case without a hard refresh.
+    refetchOnMount: 'always',
+    // NOTE: this MAIN query is still NOT polled on note.fallback — a non-forced getSoapNote re-RUNS the model in
+    // the warming window (the documented re-bill trap, QA cost finding 2026-06-24). The auto-refresh poll lives
+    // in soapPollQ below and uses the pollOnly ($0 status-check) path so it never bills Sonnet while generating.
   });
   // "Regenerate with new info" — the ONLY path that re-bills the model on demand. Forces a fresh Sonnet
   // call (forceRegenerate) and writes the new note back into the query cache. On open we always serve the
@@ -174,6 +179,47 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
     mutationFn: () => getSoapNote(caseId, ctx, { forceRegenerate: true }),
     onSuccess: (res: SoapNoteResult) => { qc.setQueryData(soapKey, res); },
   });
+
+  // ── AUTO-REFRESH while the SOAP is still generating (Dr. Kasky 2026-06-29) ────────────────────────────────
+  // The served note is PROVISIONAL when it is a `fallback` brief: the 25s sync open truncated and the 110s
+  // async precompute is still writing the real (fallback:false) grounded note. Dr. Kasky had to HARD REFRESH to
+  // see it land. We now poll a CHEAP pollOnly status-check (~15s) that costs $0 — it serves the real note the
+  // instant the precompute persists it and returns generating:true otherwise (never re-billing Sonnet in the
+  // warming window). When the real note lands we fold it into the MAIN soap query (setQueryData) → the card
+  // re-renders with the full note AND provisional flips false → the poll disables itself. Capped at ~5 min so a
+  // wedged/failed precompute can't poll for the life of an open tab; after the cap we show a manual "check
+  // again" affordance (which fires one more cheap pollOnly).
+  const servedNote = soapQ.data?.data ?? null;
+  const soapProvisional = soapQ.data !== undefined && servedNote !== null && servedNote.fallback === true;
+  const SOAP_POLL_MS = 15_000;
+  const SOAP_MAX_POLLS = 20; // ~5 min at 15s — hygiene cap, not a cost guard (pollOnly is $0)
+  // Count completed polls so we can STOP after the cap (a wedged/failed precompute must not poll for the life of
+  // an open tab) and show the manual "check again" affordance. Reset per case (a fresh card re-arms).
+  const [soapPollCount, setSoapPollCount] = useState(0);
+  useEffect(() => { setSoapPollCount(0); }, [caseId]);
+  const soapPollCapped = soapPollCount >= SOAP_MAX_POLLS;
+  const soapPollKey = ['case', caseId, 'soap-note', 'poll'] as const;
+  const soapPollQ = useQuery({
+    queryKey: soapPollKey,
+    queryFn: () => getSoapNote(caseId, ctx, { pollOnly: true }),
+    // Only poll while a provisional brief is showing and the strategy/ctx is ready; never while regenerating.
+    enabled: enabled && strategy !== null && soapProvisional && !regenerate.isPending,
+    refetchOnMount: 'always',
+    staleTime: 0,
+    gcTime: 0,
+    refetchInterval: () => (soapProvisional && soapPollCount < SOAP_MAX_POLLS ? SOAP_POLL_MS : false),
+  });
+  // On each poll result: a landed real note folds into the MAIN query (card shows it; provisional flips false →
+  // poll disables itself). A still-generating result counts toward the cap. Keyed on dataUpdatedAt so it fires
+  // once per completed fetch (even when the generating payload is reference-equal).
+  useEffect(() => {
+    const res = soapPollQ.data;
+    if (!res) return;
+    if (res.data && res.data.fallback !== true) { qc.setQueryData(soapKey, res); return; }
+    setSoapPollCount((n) => n + 1);
+    // soapKey is a stable per-case tuple; qc is stable. Re-run only when a new poll result lands.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [soapPollQ.dataUpdatedAt]);
 
   // ── Route-picker plan RELIABILITY (Ryan 2026-06-21, Zimmelman) ───────────────────────────────────────
   // The plan compute is the SAME brain the drafter uses. Rather than showing a misleading resting "Not
@@ -345,7 +391,27 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
         <>
           {note.fallback ? (
             <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-600">
-              This is a brief read derived from the case verdict. The full written summary is being prepared in the background and will appear once it’s ready — reopening the chart in a minute usually shows it. The brief is accurate; it’s just shorter than the full note.
+              <p>
+                This is a brief read derived from the case verdict. The full written summary is being prepared in the background and will
+                {soapPollCapped ? ' appear once it’s ready.' : (
+                  <span className="inline-flex items-center gap-1">
+                    {' appear here automatically when it’s ready'}
+                    <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-slate-400 border-t-transparent align-middle" aria-hidden />
+                    .
+                  </span>
+                )}
+                {' '}The brief is accurate; it’s just shorter than the full note.
+              </p>
+              {soapPollCapped ? (
+                <button
+                  type="button"
+                  onClick={() => void soapPollQ.refetch()}
+                  disabled={soapPollQ.isFetching}
+                  className="mt-1 text-[11px] font-medium text-[#B08D3C] hover:underline disabled:cursor-not-allowed disabled:text-slate-300"
+                >
+                  {soapPollQ.isFetching ? 'Checking…' : 'Check for the full summary'}
+                </button>
+              ) : null}
             </div>
           ) : null}
           {note.subjective ? <Section label="Subjective">{note.subjective}</Section> : null}

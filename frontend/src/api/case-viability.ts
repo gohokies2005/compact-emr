@@ -235,10 +235,18 @@ export interface SoapNoteResult {
   readonly cached?: boolean;
   readonly grounded?: boolean;
   readonly routePickerFraming?: SoapRoutePickerFraming | null;
+  /** pollOnly responses only (Dr. Kasky 2026-06-29 auto-refresh): true = the async precompute hasn't landed the
+   *  final note yet (keep polling); false/absent = a real note is in `data`. Never set on a normal open. */
+  readonly generating?: boolean;
 }
 
 /** Fetch the SOAP overview. On open this SERVES THE STORED note for $0; pass { forceRegenerate: true }
- *  (the "Regenerate with new info" button) to force a fresh model call. */
-export function getSoapNote(caseId: string, ctx: SoapContextInput, opts?: { forceRegenerate?: boolean }): Promise<SoapNoteResult> {
-  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/soap-overview`, { ...ctx, forceRegenerate: opts?.forceRegenerate === true });
+ *  (the "Regenerate with new info" button) to force a fresh model call.
+ *
+ *  pollOnly (Dr. Kasky 2026-06-29 auto-refresh): a $0 STATUS CHECK used by the card's auto-refresh poll while
+ *  the served note is a provisional fallback brief. It serves the persisted real note the instant the async
+ *  precompute lands it, otherwise returns `{ data: null, generating: true }` WITHOUT running the model — so the
+ *  ~15s poll never re-bills Sonnet during the warming window. Never combine with forceRegenerate. */
+export function getSoapNote(caseId: string, ctx: SoapContextInput, opts?: { forceRegenerate?: boolean; pollOnly?: boolean }): Promise<SoapNoteResult> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/soap-overview`, { ...ctx, forceRegenerate: opts?.forceRegenerate === true, pollOnly: opts?.pollOnly === true });
 }

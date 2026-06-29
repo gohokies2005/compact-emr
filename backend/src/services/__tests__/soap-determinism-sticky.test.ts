@@ -94,4 +94,13 @@ describe('amber reframe: the SOAP prompt no longer routes the go/no-go to a phys
     expect(src).toContain('REVIEWS and SIGNS');
     expect(src).toMatch(/ask the doctor what he thinks/i); // the explicit forbidden phrasing is named
   });
+  // ASK-AEGIS IS A CONSIDERATION, NOT THE DEFAULT (Dr. Kasky 2026-06-29): the prompt + plan prose must offer
+  // Ask-Aegis as an OPTIONAL second read, never as the imperative "run a named/an Ask-Aegis check" the RN is
+  // obligated to do. The "Ask-Aegis" token stays (it is still one tool among several); only the imperative goes.
+  it('Ask-Aegis is framed as an OPTIONAL consideration, not a mandatory "run an Ask-Aegis check" step', () => {
+    expect(src).toContain('Ask-Aegis');                      // still offered as one option
+    expect(src).toMatch(/OPTIONAL consideration/);           // explicitly optional in the prompt + tool desc
+    expect(src).not.toMatch(/run a named Ask-Aegis check/i); // the old imperative wording is gone
+    expect(src).not.toMatch(/run an Ask-Aegis check on the mechanism/i);
+  });
 });

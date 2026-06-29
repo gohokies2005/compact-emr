@@ -17,7 +17,12 @@ import type { AppDb } from './db-types.js';
 // FRN ad account 3654279964 (where the conversion action lives).
 // The MCC is 9775308437 — the conversion action was created on the CHILD account, not the MCC.
 const AD_ACCOUNT_ID        = '3654279964';
-const CONVERSION_ACTION_ID = '7664449375'; // "Nexus Letter Intake" — created 2026-06-27
+// FIX 2026-06-29: was 7664449375 "Nexus Letter Intake" — that action lives ONLY on the MANAGER (MCC
+// 9775308437), NOT on this child account. The child is conversion_tracking_setting=MANAGED_BY_SELF, so it
+// only counts its OWN actions → every upload to the manager's action landed NOWHERE ($4,281/30d, 0 tracked).
+// Repointed to the child account 3654279964's OWN action (proven working — 11 manual CSV uploads succeeded
+// against it, status EXCELLENT). Do NOT switch to cross-account; the account is already self-managed.
+const CONVERSION_ACTION_ID = '7635957826'; // "Intake Completed" on child 3654279964 (UPLOAD_CLICKS, ENABLED, CONVERTED_LEAD)
 const DATA_MANAGER_BASE    = 'https://datamanager.googleapis.com';
 const FETCH_TIMEOUT_MS     = 3000; // abort a hung Google endpoint before it wedges the Stripe webhook
 

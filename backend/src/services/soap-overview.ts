@@ -41,7 +41,13 @@ const MODEL = process.env['SOAP_NOTE_MODEL'] || 'claude-sonnet-4-6';
 // objective hard data — AHI/RDI/CPAP/BP/A1c/PHQ-9/…) that the SOAP tool now also fills, and the Objective
 // prose now carries an "Objective measurements:" line. The note SHAPE changed → bump so every pre-#63
 // stored note (which has no measurements + a measurement-free Objective) invalidates and recomputes cleanly.
-export const SOAP_NOTE_SCHEMA_VERSION = 27;
+// v28 (2026-06-29, chip-stability + amber reframe): the plan PROSE contract changed — amber/needs-review
+// plans are now RN-owned work-orders (never "route to a physician to decide"), and both decision calls run
+// at temperature 0. The note SHAPE didn't change, but every pre-v28 note was generated under the OLD prompt
+// (and at temp 0.5/1.0), so bump to invalidate those cached plans → each case regenerates its plan with the
+// new prompt on next open. (Without this bump the prompt reframe only reaches NEW cases — the gap Dr. Kasky
+// hit on Sanderson: a hard-refresh re-served the v27 cached "route to a physician" plan.)
+export const SOAP_NOTE_SCHEMA_VERSION = 28;
 
 export type SoapConfidence = 'high' | 'moderate' | 'low';
 // SoapAction + RoutePickerViability are imported+re-exported from ./soap-action-map.js (top of file).
@@ -457,7 +463,7 @@ function buildExplanatoryNote(ctx: SoapContext, reason: 'truncated' | 'error' | 
   } else {
     assessment = ctx.engineVerdict
       ? `${ctx.engineVerdict} A full written summary could not be generated automatically on this open; the deterministic read is shown above.`
-      : `A full written summary could not be generated automatically for ${claimed} on this open. The case still needs a physician read before any letter is drafted.`;
+      : `A full written summary could not be generated automatically for ${claimed} on this open. Re-run the analysis or open the chart to review this case, then decide the path before drafting.`;
     action = (ctx.engineNextAction && /reject|not support/i.test(ctx.engineNextAction)) ? 'reject' : 'physician_review';
     confidence = 'low';
   }

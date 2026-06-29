@@ -176,12 +176,12 @@ function pronounsFor(input: BuildCoverMemoInput): { subject: string; object: str
 
 // When a salutation IS provided we use it ("Ms. Carr"). When sex is UNKNOWN we must NOT guess
 // "Mr."/"Ms." on a legal medical memo — a wrong honorific is worse than none — so we refer to the
-// veteran by last name alone ("Carr's supplemental claim..."), a natural professional-memo voice,
-// or "the veteran" if no last name is on file. Durable follow-up: add a real Veteran.sex field and
-// pass salutation through composeMemo so the memo can say "Ms. Carr" again.
+// veteran by their FULL NAME ("Shirley Carr's supplemental claim...", Ryan 2026-06-28 "just drop
+// gender, put first and last name"), falling back to the last name or "the veteran" if no full
+// name is on file. No gendered honorific is emitted unless an explicit salutation is supplied.
 function honorificLast(input: BuildCoverMemoInput): string {
   if (input.salutation === undefined) {
-    return input.veteranLastName ? input.veteranLastName : 'the veteran';
+    return input.veteranFullName || input.veteranLastName || 'the veteran';
   }
   return input.veteranLastName ? `${input.salutation} ${input.veteranLastName}` : input.salutation;
 }

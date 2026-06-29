@@ -43,17 +43,37 @@ export function groundedHeadlineFraming(input: Pick<SoapHeadlineInput, 'grounded
 }
 
 /**
+ * TITLE HUMANIZER (Dr. Kasky 2026-06-28). The route-picker framing fields can carry a RAW enum token instead
+ * of prose — a lowercase axis word ("direct") or a snake_case event key ("in_service_onset") — which leaked
+ * into the bold headline. humanizeFraming rewrites ONLY a bare enum token (all-lowercase, snake_case, no
+ * spaces or sentence punctuation) into spaced Title Case: "direct" → "Direct", "in_service_onset" → "In
+ * Service Onset". Real framing prose ("OSA secondary to service-connected rhinitis (causation)") already has
+ * spaces/capitals/punctuation, fails the bare-enum guard, and is returned untouched (collapsed whitespace
+ * only) so a human-written headline is never mangled. Pure; null/empty → ''.
+ */
+export function humanizeFraming(s: string | null | undefined): string {
+  const raw = (s ?? '').replace(/\s+/g, ' ').trim();
+  if (raw.length === 0) return raw;
+  // A "bare enum token": starts lowercase, only [a-z0-9] segments joined by single underscores, no spaces or
+  // punctuation. This is precisely the shape an un-rendered enum leaks as; prose never matches it.
+  const isBareEnum = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(raw);
+  if (!isBareEnum) return raw;
+  return raw.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+/**
  * The bold headline string: grounded framing (when usable) → the READY route-picker card framing (the
  * one-brain theory the body argues, when not stale) → static strategy → anchor → deterministic title.
  * The route-picker card framing is placed ABOVE the static strategy so the heading follows the chosen
- * theory (e.g. depression) instead of the stale intake claim (e.g. "secondary to Knee").
+ * theory (e.g. depression) instead of the stale intake claim (e.g. "secondary to Knee"). The selected
+ * candidate is passed through humanizeFraming so a raw enum token never reaches the user as the headline.
  */
 export function soapHeadline(input: SoapHeadlineInput): string {
-  return (
+  return humanizeFraming(
     groundedHeadlineFraming(input)
     || (input.stale !== true ? (input.routePickerCardFraming ?? null) : null)
     || input.strategyPrimaryArgument
     || input.anchorHeadline
-    || input.resultTitle
+    || input.resultTitle,
   );
 }

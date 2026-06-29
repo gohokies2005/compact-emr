@@ -382,15 +382,21 @@ function planConfidenceToSoap(conf: string): SoapConfidence {
   return 'moderate';
 }
 
-/** A plain-language next-step for the Plan line, derived from the route-picker action. */
+/** A plain-language next-step for the Plan line, derived from the route-picker action.
+ *  AMBER = A WORK ORDER, NOT A REFERRAL (Dr. Kasky 2026-06-28): the RN + the engine make the go/no-go and
+ *  prep the letter; a physician REVIEWS and SIGNS (~2% of the work). So the amber/physician_review step is
+ *  written as a concrete RN next step (confirm the records are actually in the chart — most "missing" facts
+ *  are just un-parsed — and run a named Ask-Aegis check on the mechanism), NOT "route to a physician to
+ *  decide". The only legitimate escalation is fail-open to the team lead when the engine genuinely can't
+ *  resolve it. */
 function actionToPlanSentence(action: SoapAction, claimed: string): string {
   switch (action) {
     case 'draft': return `Proceed to draft the nexus letter for ${claimed} on the theory above.`;
     case 'get_records': return `Obtain the specific records noted above before drafting ${claimed}.`;
     case 'clarify': return `Clarify the open point above with the veteran before drafting ${claimed}.`;
-    case 'reject': return `Do not draft as filed. Review whether another condition or framing is supportable, or advise the veteran on what is missing for ${claimed}.`;
+    case 'reject': return `Do not draft as filed. Check whether another condition or framing is supportable for ${claimed} (run an Ask-Aegis check; check the presumptive path); if it is a no, tell the veteran specifically what is missing.`;
     case 'physician_review':
-    default: return `Route to a physician to confirm the theory before drafting ${claimed}.`;
+    default: return `Confirm the theory before drafting ${claimed}: verify the records are actually in the chart, then run an Ask-Aegis check on the mechanism (escalate to the team lead only if the engine cannot resolve it).`;
   }
 }
 
@@ -495,9 +501,9 @@ const SOAP_TOOL: Anthropic.Tool = {
         },
       },
       assessment: { type: 'string', description: 'Tie it together as a clinician + VA-claims expert would: the medical mechanism linking the claim to the service-connected condition(s), how it fits VA theory and language (secondary causation/aggravation under 38 CFR 3.310, direct under 3.303, etc., as applicable), the strongest counterpoint, and an honest overall read of how strong what we have is. 3-5 sentences of smooth prose. No internal jargon (no M-tiers, no BVA percentages, no "pair-atlas").' },
-      plan: { type: 'string', description: 'The concrete next step in plain language: draft the letter, get specific records, clarify a specific point with the veteran, route to a physician, or decline — and WHY, in one or two sentences.' },
+      plan: { type: 'string', description: 'The concrete next step in plain language, written as an RN WORK ORDER (the RN + the engine make the go/no-go and prep the letter; a physician only REVIEWS and SIGNS): draft now; get ONE specific record (say whether it BLOCKS the build or runs in parallel); ask the veteran ONE targeted question (with the legal reason); run a named Ask-Aegis check on the mechanism / confirm the records are already in the chart (most "missing" facts are just un-parsed); or decline with a specific reason. Never write "route to a physician to decide" or "ask the doctor what he thinks" — that is not the next step. One or two sentences, and WHY.' },
       confidence: { type: 'string', enum: ['high', 'moderate', 'low'], description: 'Overall confidence in what we have to support this claim as filed.' },
-      action: { type: 'string', enum: ['draft', 'get_records', 'clarify', 'physician_review', 'reject'], description: 'The single recommended next action, matching the plan.' },
+      action: { type: 'string', enum: ['draft', 'get_records', 'clarify', 'physician_review', 'reject'], description: 'The single recommended next action, matching the plan. NOTE: "physician_review" means the case needs a closer RN/Ask-Aegis review before drafting — the RN owns that step; it does NOT mean handing the go/no-go decision to a physician.' },
     },
   },
 };
@@ -512,8 +518,13 @@ const SYSTEM =
   'diagnostics provided (AHI, imaging, sleep study, labs) + the records-capture status. Do NOT list every ' +
   'rated condition — pick what is pertinent. Assessment = the medical mechanism + how it maps to VA theory ' +
   'and regulation (3.310 secondary/aggravation, 3.303 direct, presumptives) + the strongest counterpoint + an ' +
-  'honest overall read. Plan = the one concrete next step (draft / get records / clarify / physician review / ' +
-  'reject) and why.\n' +
+  'honest overall read. Plan = the one concrete RN next step and why, written as a WORK ORDER — draft now; ' +
+  'get ONE named record (say whether it BLOCKS the build or runs in parallel); ask the veteran ONE targeted ' +
+  'question; run a named Ask-Aegis check on the mechanism / confirm the records are already in the chart ' +
+  '(most "missing" facts are just un-parsed); or decline with a specific reason. The RN and the engine make ' +
+  'the go/no-go and prep the letter; a physician REVIEWS and SIGNS. Never write "route to a physician to ' +
+  'decide" or "ask the doctor what he thinks" — escalate (to the team lead / Ask-Aegis) only when the engine ' +
+  'genuinely cannot resolve the case.\n' +
   'IF the context includes a "DECIDED FRAMING" block, that framing decision is GIVEN — it is the team\'s ' +
   'chosen theory for this letter. RENDER it faithfully in the Assessment: explain the GIVEN mechanism, apply ' +
   'it to THIS veteran\'s facts, map it to the GIVEN regulatory basis, and address the GIVEN counterargument. ' +
@@ -639,6 +650,13 @@ export async function buildSoapNote(ctx: SoapContext, opts?: { timeoutMs?: numbe
     const resp = await anthropic.messages.create({
       model: MODEL,
       max_tokens: SOAP_MAX_TOKENS,
+      // DETERMINISM (Dr. Kasky 2026-06-28, chip-wobble fix). The SDK default sampling temperature is 1.0; on the
+      // UNGROUNDED path the model's free `action` enum is the chip's decision, so a non-zero temperature let the
+      // SOAP chip re-roll (amber↔green) on an unchanged chart. temperature:0 makes the note — and especially that
+      // action — a deterministic function of the context. Prose still reads naturally; it just no longer varies
+      // run-to-run on identical inputs. (On the grounded path the action is already overridden by the route-picker
+      // band below, but the SOAP call is also the decision-bearer when no plan grounds it.)
+      temperature: 0,
       system: SYSTEM,
       tools: [SOAP_TOOL],
       tool_choice: { type: 'tool', name: 'write_soap_note' },
@@ -717,6 +735,34 @@ export function soapNoteFingerprint(ctx: SoapContext): string {
     .digest('hex');
 }
 
+/**
+ * STICKY VERDICT — compare-before-overwrite for the chip-bearing `action` (Dr. Kasky 2026-06-28, "the chip
+ * keeps changing color on its own, amber→green→amber"). The chip color is a pure projection of `note.action`,
+ * so the decision must be decided ONCE and stick across recomputes UNLESS the actual go/no-go genuinely changed.
+ *
+ * Returns the freshly-generated note with its `action` either kept (a real decision change) or REVERTED to the
+ * prior persisted action (no real change), per this rule:
+ *   • No stored note yet, or the fresh note is a TRANSIENT fallback (not persisted anyway) → take fresh as-is.
+ *   • GROUNDED (a route-picker plan drove this note): the action is `planViabilityToAction(band)` — an
+ *     AUTHORITATIVE, deterministic decision. A genuine band change MUST propagate, so never override.
+ *   • UNGROUNDED (no plan this run — e.g. the route-picker inputHash drifted while status='drafting'): the
+ *     fresh action came from the model's OWN (non-authoritative) choice with no new clinical band. The decision
+ *     did NOT genuinely change, so KEEP the prior persisted action — the prose still refreshes, but the chip
+ *     does not wobble on a recompute that had no new verdict to assert. (A previously-stored transient fallback
+ *     is never persisted, so a stored row is always a real decision to stick to.)
+ *
+ * Pure + unit-tested so the stickiness contract is pinned without a DB or the SDK.
+ */
+export function reconcileStickyAction(fresh: SoapNote, stored: SoapNote | null, grounded: boolean): SoapNote {
+  if (stored === null || fresh.fallback === true || stored.fallback === true) return fresh;
+  if (grounded) return fresh; // authoritative band decided this — a real change must propagate
+  if (stored.action === fresh.action) return fresh; // already agree → nothing to stick
+  // Ungrounded recompute with no new band: revert the chip-bearing action to the prior decision. Confidence
+  // is carried with it so the displayed confidence label tracks the (preserved) decision rather than the
+  // model's fresh ungrounded guess. Prose (S/O/A/P) stays the freshly-generated text.
+  return { ...fresh, action: stored.action, confidence: stored.confidence };
+}
+
 /** A minimal Prisma-delegate view of the soap_overviews cache table — cast at the call site (mirrors how
  *  the sanity-impression route accesses its own cache without widening the shared AppDb interface). */
 export interface SoapOverviewCacheDb {
@@ -759,7 +805,19 @@ export async function getOrBuildSoapNote(
   db: SoapOverviewCacheDb,
   caseId: string,
   ctx: SoapContext,
-  opts?: { forceRegenerate?: boolean; noStore?: boolean; timeoutMs?: number; generate?: (c: SoapContext) => Promise<SoapNote | null> },
+  opts?: {
+    forceRegenerate?: boolean;
+    noStore?: boolean;
+    timeoutMs?: number;
+    generate?: (c: SoapContext) => Promise<SoapNote | null>;
+    /**
+     * STICKY VERDICT hook (Dr. Kasky 2026-06-28): called AFTER generate, BEFORE persist, with the fresh note +
+     * the note currently stored for this case. Returns the note to persist/return — the precompute passes
+     * reconcileStickyAction so an ungrounded recompute does not overwrite the chip-bearing action when the
+     * actual decision did not change. Default (undefined) = identity (no reconciliation; today's behavior).
+     */
+    reconcile?: (fresh: SoapNote, stored: SoapNote | null) => SoapNote;
+  },
 ): Promise<SoapOverviewResult> {
   // The async precompute passes a long timeoutMs (it has the 110s Lambda budget) so a large-chart note
   // completes off-request; the default generate threads it into buildSoapNote's Anthropic timeout.
@@ -789,7 +847,11 @@ export async function getOrBuildSoapNote(
   }
 
   // Compute: either forced, or no usable stored note exists. One bounded LLM call.
-  const note = await generate(ctx);
+  const generated = await generate(ctx);
+  // STICKY VERDICT (Dr. Kasky 2026-06-28): reconcile the fresh note's chip-bearing action against the prior
+  // persisted note BEFORE caching/persisting, so an ungrounded recompute (no new band) cannot flip the chip.
+  // No reconcile hook → identity (today's behavior). storedNote is the note we read at the top of this fn.
+  const note = (generated && opts?.reconcile) ? opts.reconcile(generated, storedNote) : generated;
   // H2 (2026-06-21): noStore = serve a fresh note for THIS open but do NOT persist it. The route sets this
   // when it just fired an off-request route-picker recompute because no warm plan existed: persisting this
   // (strategy-grounded, ungrounded-by-the-plan) note would let it be served $0 on later opens and MASK the

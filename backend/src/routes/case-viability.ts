@@ -37,8 +37,18 @@ export function createCaseViabilityRouter(db: AppDb): Router {
     requireRole(['admin', 'ops_staff', 'physician']),
     asyncHandler(async (req: Request, res: Response) => {
       const caseId = String(req.params.id);
-      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
+      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, status: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      // RECOMPUTE-STORM FREEZE (Dr. Kasky 2026-06-28, chip-wobble keystone). While a case is status='drafting'
+      // the drafter rewrites the Case row every few seconds, so the route-picker inputHash (ai-viability.ts:220,
+      // computed over the drafter-mutated claimed/sc/problems/events/guidance/veteranStatement) drifts off the
+      // persisted plan hash → getAiViabilityState reads 'none' → the SOAP rebuilds UNGROUNDED → a re-fired
+      // recompute re-rolls the plan + SOAP and the chip flickers. We SKIP the auto-fired off-request recompute
+      // while drafting (lower-risk than narrowing the hash inputs, which would also stop a REAL clinical change
+      // from invalidating the plan). The serve-stored-first branch below still serves the persisted grounded
+      // note for $0, and once drafting completes (status→rn_review) the next open recomputes normally. The
+      // EXPLICIT compute endpoint (RN clicks Retry) is NOT gated — only these passive auto-fires.
+      const draftingNow = (c as { status?: string }).status === 'drafting';
       const body = (req.body ?? {}) as SoapContext & { forceRegenerate?: unknown };
       const claimedCondition = String(body.claimedCondition ?? '');
       // ONE-BRAIN GROUNDING (2026-06-21): the SOAP Assessment/Plan render the SAME route-picker plan the
@@ -83,7 +93,7 @@ export function createCaseViabilityRouter(db: AppDb): Router {
           // ONLY when cold ('none') or a stale-condition 'ready' (treated like cold); we do NOT re-fire on
           // 'error'/'computing' (that would loop the same failing call — the Zimmelman infinite-loop bug). On
           // 'error' the FE's retry button drives the synchronous compute endpoint instead.
-          if (aiState.status === 'none' || aiState.status === 'ready') {
+          if ((aiState.status === 'none' || aiState.status === 'ready') && !draftingNow) {
             void fireRecomputeViability(caseId);
           }
           firedRecompute = true;
@@ -133,7 +143,7 @@ export function createCaseViabilityRouter(db: AppDb): Router {
           const storedRow = await (db as unknown as SoapOverviewCacheDb).soapOverview.findUnique({ where: { caseId } });
           const decision = decideServeStored(storedRow, fingerprint);
           if (decision) {
-            if (decision.refresh && !firedRecompute) void fireRecomputeViability(caseId);
+            if (decision.refresh && !firedRecompute && !draftingNow) void fireRecomputeViability(caseId);
             res.json({ data: decision.note, fingerprint, stale: false, cached: true, grounded: routePickerFraming !== null, routePickerFraming });
             return;
           }
@@ -160,7 +170,7 @@ export function createCaseViabilityRouter(db: AppDb): Router {
           const currentShapeMatch = storedRow !== null
             && storedRow.schemaVersion === SOAP_NOTE_SCHEMA_VERSION
             && storedRow.inputHash === fingerprint;
-          if (!currentShapeMatch) {
+          if (!currentShapeMatch && !draftingNow) {
             soapShapeStale = true;
             void fireRecomputeViability(caseId); // 110s path re-writes the current-shape note off-request
           }
@@ -193,8 +203,14 @@ export function createCaseViabilityRouter(db: AppDb): Router {
         res.json({ data: null });
         return;
       }
-      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true } });
+      const c = await db.case.findFirst({ where: { id: caseId }, select: { id: true, status: true } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      // RECOMPUTE-STORM FREEZE (Dr. Kasky 2026-06-28): see the POST handler. While status='drafting' the
+      // drafter-mutated Case row drifts the route-picker inputHash → a cold 'none' here would re-fire the
+      // off-request recompute on every poll/open and re-roll the plan → chip flicker. Skip the auto-fire while
+      // drafting; the next open after drafting completes recomputes normally. (The explicit /compute endpoint
+      // is unaffected.)
+      const draftingNow = (c as { status?: string }).status === 'drafting';
       // The card prefers the AI route-picker plan (the SAME brain the drafter uses) when
       // AI_ROUTE_PICKER_ENABLED is on; the card falls back to the static M-tier engine otherwise.
       // READ-ONLY here (compute:false) — NEVER run the ~22-25s picker call on this synchronous 29s-capped
@@ -209,7 +225,7 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       // own window) instead.
       const aiState = await getAiViabilityState(db, caseId, { compute: false });
       const aiViability = aiState.status === 'ready' ? aiState.card : null;
-      if (aiState.status === 'none' && aiRoutePickerEnabled()) {
+      if (aiState.status === 'none' && aiRoutePickerEnabled() && !draftingNow) {
         void fireRecomputeViability(caseId); // fire-and-forget; never blocks/​fails the GET
       }
       // Chart-read state for the SOAP traffic light (I2 fix): the calm light goes green only when the

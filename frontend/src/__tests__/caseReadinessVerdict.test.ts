@@ -235,3 +235,37 @@ describe('computeReadinessVerdict — chart-analysis safety overlay', () => {
     expect(r.verdict).toBe('contact_alternative'); // a presumptive route still stands
   });
 });
+
+// ── AMBER = A WORK ORDER, NOT A REFERRAL (Dr. Kasky 2026-06-28). Every amber/needs-review nextAction must be a
+//    concrete RN-OWNED step (confirm the chart / run an Ask-Aegis check / check the presumptive path) — never
+//    "route to a physician to decide" or "ask the doctor what he thinks". Physicians review + sign; the RN +
+//    engine make the go/no-go. The locked phrases (reconcile the anchor / AI check also flags / more records /
+//    drafter) are preserved — those are pinned above; here we pin the RN-empowering reframe. ──
+describe('computeReadinessVerdict — amber is an RN work order, not a physician referral', () => {
+  it('draft_confirm_mechanism: confirm the mechanism via an Ask-Aegis / chart check (RN-owned), still send to the drafter — NOT "with the physician"', () => {
+    const r = computeReadinessVerdict(SIGNALS({ viability: UNREVIEWED('strong') }))!;
+    expect(r.verdict).toBe('draft_confirm_mechanism');
+    expect(r.nextAction).toMatch(/drafter/i);            // it still ends at the drafter
+    expect(r.nextAction).toMatch(/Ask-Aegis|chart/i);    // RN-owned confirmation step
+    expect(r.nextAction).not.toMatch(/with the physician/i); // the old referral wording is gone
+  });
+
+  it('not_supportable: an RN next-step (Ask-Aegis / presumptive check, then tell the veteran what is missing), no physician referral', () => {
+    const r = computeReadinessVerdict(SIGNALS({
+      strategy: strategy('Stop'),
+      viability: viability('abstain', { best_anchor: null, missing_fact: null }),
+    }))!;
+    expect(r.verdict).toBe('not_supportable');
+    expect(r.nextAction).toMatch(/Ask-Aegis/);
+    expect(r.nextAction).toMatch(/presumptive/i);
+    expect(r.nextAction).not.toMatch(/physician/i);
+  });
+
+  it('draft_reconcile: RN reconciles via chart + Ask-Aegis, escalates to the TEAM LEAD (not a physician) only if it won’t resolve', () => {
+    const r = computeReadinessVerdict(SIGNALS({ viability: viability('weak') }))!;
+    expect(r.verdict).toBe('draft_reconcile');
+    expect(r.nextAction).toMatch(/reconcile the anchor/i); // locked phrase preserved
+    expect(r.nextAction).toMatch(/Ask-Aegis|team lead/i);  // RN-owned reconciliation / escalation
+    expect(r.nextAction).not.toMatch(/physician review/i); // no "physician review" referral
+  });
+});

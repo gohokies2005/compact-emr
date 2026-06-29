@@ -17,7 +17,7 @@
 // Fail-open everywhere: any sub-derivation that throws degrades to a null/empty field, never blocks the note.
 
 import type { AppDb } from './db-types.js';
-import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote } from './soap-overview.js';
+import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote, reconcileStickyAction } from './soap-overview.js';
 import { type AiViabilityCard, getAiViabilityState } from './ai-viability.js';
 import { buildDigestForCase } from '../advisory/chartSlice.js';
 import { loadExtractionCoverageForCase } from './extraction-coverage.js';
@@ -181,7 +181,18 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
     const framing = routePickerFramingFromCard(card, card?.inputClaimed ?? '');
     const ctx = await assembleSoapContextForCase(db, caseId, framing);
     if (!ctx.claimedCondition) return false; // nothing to write about (no claimed condition) → genuinely skip
-    const built = await getOrBuildSoapNote(db as unknown as SoapOverviewCacheDb, caseId, ctx, { forceRegenerate: true, timeoutMs });
+    // STICKY VERDICT (Dr. Kasky 2026-06-28, chip-wobble keystone): this precompute force-REGENERATES the note,
+    // which used to clobber the persisted `action` (hence the chip color) on every recompute — even when the
+    // case had not actually changed. reconcileStickyAction compares the fresh note against the stored one and
+    // only lets the chip-bearing action change when this run is GROUNDED on a route-picker plan (an authoritative
+    // band decided it) — an UNGROUNDED recompute keeps the prior decision so the chip does not flicker. Prose is
+    // still regenerated freely. `framing !== null` is exactly "is this run grounded".
+    const grounded = framing !== null;
+    const built = await getOrBuildSoapNote(db as unknown as SoapOverviewCacheDb, caseId, ctx, {
+      forceRegenerate: true,
+      timeoutMs,
+      reconcile: (fresh, stored) => reconcileStickyAction(fresh, stored, grounded),
+    });
     // Observability (Bays SOAP banner, 2026-06-26): log the PERSISTED outcome, not just "didn't throw".
     // fallback:true = a truncated/error brief was served and NOT persisted (the heal did NOT happen this
     // run — a perpetual-fallback case is otherwise invisible); fallback:false = a real grounded note was

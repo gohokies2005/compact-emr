@@ -324,7 +324,12 @@ export async function getAiViabilityState(
       resp = await anthropic.messages.create({
         model: MODEL,
         max_tokens: MAX_TOKENS,
-        temperature: 0.5,
+        // DETERMINISM (Dr. Kasky 2026-06-28, "the chip keeps changing color on its own"). The viability BAND
+        // this call emits is the go/no-go the Overview chip + the SOAP action derive from — it MUST be stable
+        // across recomputes of an unchanged case, or the chip wobbles amber→green→amber. temperature:0 (was
+        // 0.5) makes the band a deterministic function of the inputs; non-zero sampling let the band re-roll
+        // on identical inputs, which (with the recompute storm during drafting) was a root cause of the flicker.
+        temperature: 0,
         system: pp.SYSTEM,
         tools: [pp.TOOL],
         tool_choice: { type: 'tool', name: pp.TOOL.name },

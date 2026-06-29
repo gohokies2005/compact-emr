@@ -471,19 +471,23 @@ function detailForBandVerdict(verdict: ReadinessVerdict, plan: RecommendedPlan):
 }
 
 function nextActionFor(verdict: ReadinessVerdict, plan: RecommendedPlan, disagreements: readonly Disagreement[], sanity: ImpressionLevel | null): string {
-  // The AI sanity signal nudges the next action ONE WAY ONLY — toward more diligence. A 'concern' that
-  // CORROBORATES an unresolved engine disagreement strengthens the steer to "get more records / a
-  // physician review" (never toward "just draft"). A 'clear' has no say here — it cannot relax the steer.
+  // AMBER = A WORK ORDER, NOT A REFERRAL (Dr. Kasky 2026-06-28). The RN + the engine make the go/no-go and
+  // prep the letter; a physician REVIEWS and SIGNS (~2% of the work). So every amber/needs-review next action
+  // is a concrete RN-OWNED step — confirm the records are actually in the chart (most "missing" facts are just
+  // un-parsed), run a named Ask-Aegis check on the mechanism, check the presumptive path — and the ONLY
+  // legitimate escalation is fail-open to the team lead / Ask-Aegis when the engine genuinely can't resolve it.
+  // Never "ask the doctor what he thinks". The AI sanity signal still nudges ONE WAY ONLY (toward diligence).
   const aiCorroboratesCaution = sanity === 'concern';
   switch (verdict) {
     case 'draft':
       return 'Send to the drafter.';
     case 'draft_confirm_mechanism':
-      return 'Confirm the mechanism with the physician, then send to the drafter.';
+      return 'Confirm the mechanism is supported in the chart — run an Ask-Aegis check on it (or verify the records are already in the chart) — then send to the drafter.';
     case 'draft_reconcile':
+      // Keeps the locked phrases: "Reconcile the anchor" / "AI check also flags" / "more records".
       return aiCorroboratesCaution
-        ? 'The engines disagree and the AI check also flags a concern — get more records or a physician review before drafting.'
-        : 'Reconcile the anchor — get more records or a physician review before drafting.';
+        ? 'The engines disagree and the AI check also flags a concern — get more records or run an Ask-Aegis check on the mechanism before drafting; escalate to the team lead only if it still won’t resolve.'
+        : 'Reconcile the anchor: confirm the records are already in the chart and run an Ask-Aegis check on the mechanism; escalate to the team lead only if it still won’t resolve. Then draft.';
     case 'draft_with_changes':
       return plan.switchToAnchor ? `Draft anchored on ${plan.switchToAnchor}.` : 'Draft with the stronger anchor.';
     case 'analysis_failed':
@@ -495,9 +499,11 @@ function nextActionFor(verdict: ReadinessVerdict, plan: RecommendedPlan, disagre
     case 'contact_alternative':
       return 'Contact the veteran about the alternative (presumptive) route.';
     case 'not_supportable':
-      return 'Discuss other conditions to consider before declining.';
+      return 'Before declining, check whether another condition or framing is supportable — run an Ask-Aegis check and check the presumptive path. If it is still a no, tell the veteran specifically what is missing.';
     case 'needs_review':
     default:
-      return disagreements.length > 0 ? 'Resolve the flagged disagreement before proceeding.' : 'A reviewer should take a look.';
+      return disagreements.length > 0
+        ? 'Resolve the flagged disagreement: confirm the chart is complete and run an Ask-Aegis check on the mechanism; escalate to the team lead only if the engine can’t resolve it.'
+        : 'Decide the path: confirm the chart is complete, run an Ask-Aegis check on the mechanism, and check the presumptive path; escalate to the team lead only if the engine can’t resolve it.';
   }
 }

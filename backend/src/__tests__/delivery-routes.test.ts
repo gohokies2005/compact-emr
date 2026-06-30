@@ -434,6 +434,46 @@ describe('POST /cases/:id/delivery/send — real SES send (E3) + idempotency', (
     expect(res.body.data.savedPayment.kind).toBe('letter_500');
   });
 
+  // ── #198 (delivery scare, 2026-06-30) — saved body frozen against a superseded letter version ──
+  // A re-sign bumps Case.currentVersion but the saved delivery Email row (keyed by case+from+subject,
+  // no version) keeps its old body. GET /delivery must flag savedEmailStale=true so the panel can
+  // refresh to the current letter instead of silently showing (or letting the RN resend) the old §VII
+  // excerpt. The freshly composed email.body must already reflect the re-signed letter.
+  it('#198: GET /delivery flags savedEmailStale=true when the saved body predates a letter re-sign', async () => {
+    const { db, emails } = makeDb();
+    // First send composes + saves the delivery email against the ORIGINAL letter (LETTER_TXT §VII).
+    await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(emails).toHaveLength(1);
+    expect(emails[0].body).toContain('related to service');
+
+    // Re-sign: S3 now serves a letter whose §VII opinion changed (new version). Same DB → the saved
+    // email row persists with its OLD body, but the freshly composed excerpt differs.
+    const RESIGNED_TXT = LETTER_TXT.replace('related to service', 'related to his active service (re-signed correction)');
+    const res = await request(appFor(db, { txt: RESIGNED_TXT })).get('/api/v1/cases/CASE-1/delivery');
+    expect(res.status).toBe(200);
+    expect(res.body.data.savedEmailStale).toBe(true);
+    // The freshly composed body reflects the CURRENT (re-signed) letter; the frozen saved body does not.
+    expect(res.body.data.email.body).toContain('re-signed correction');
+    expect(res.body.data.savedEmail.body).not.toContain('re-signed correction');
+  });
+
+  it('#198: savedEmailStale=false when the saved body still matches the current letter (no regression to first-send)', async () => {
+    const { db } = makeDb();
+    await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/delivery');
+    expect(res.status).toBe(200);
+    expect(res.body.data.savedEmail).not.toBeNull();
+    expect(res.body.data.savedEmailStale).toBe(false);
+  });
+
+  it('#198: savedEmailStale=false when there is no saved email yet (fresh case)', async () => {
+    const { db } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/cases/CASE-1/delivery');
+    expect(res.status).toBe(200);
+    expect(res.body.data.savedEmail).toBeNull();
+    expect(res.body.data.savedEmailStale).toBe(false);
+  });
+
   it('non-deliverable status -> 409 (and nothing transmits)', async () => {
     const { db } = makeDb({ status: 'records' });
     const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});

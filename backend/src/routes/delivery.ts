@@ -165,6 +165,12 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
     stripe: { configured: boolean; link: string | null };
     emailTransport: { configured: boolean };
     savedEmail: { id: string; subject: string; body: string; sentAt: Date | null; status: string } | null;
+    // #198 (delivery scare, 2026-06-30): true when a saved delivery email body was composed against
+    // an EARLIER letter version (its frozen §VII/§VIII excerpt no longer matches the current letter).
+    // A re-sign bumps Case.currentVersion but the saved Email row (keyed by case+from+subject, no
+    // version) keeps its old body — so the preview must refresh to the current body rather than
+    // silently show (or resend) the superseded excerpt.
+    savedEmailStale: boolean;
     savedPayment: { id: string; kind: string; amountCents: number; status: string } | null;
     status: string;
   }> {
@@ -214,6 +220,18 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       orderBy: { createdAt: 'desc' },
     });
 
+    // #198 STALENESS PROBE — the version-bound part of the delivery email is the §VII/§VIII excerpt
+    // block (everything else is fixed boilerplate). The freshly composed `excerpt.block` is built
+    // from the CURRENT letter version; if a saved body exists and does NOT contain that current
+    // block, the saved body was frozen against a superseded version (a re-sign happened after it was
+    // composed/sent). We compare on the trimmed block so trailing-newline differences don't matter.
+    // When the current excerpt is empty (external_import → generic line, version-independent) there
+    // is nothing version-bound to drift, so it can never be stale on this axis.
+    const currentExcerptBlock = (excerpt.block ?? '').trim();
+    const savedEmailStale = savedEmailRow !== null
+      && currentExcerptBlock !== ''
+      && !savedEmailRow.body.includes(currentExcerptBlock);
+
     return {
       version: cur.version,
       excerpt,
@@ -222,6 +240,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       stripe: { configured: stripeConfigured, link: stripeLink },
       emailTransport: { configured: isEmailTransportConfigured() },
       savedEmail: savedEmailRow ? { id: savedEmailRow.id, subject: savedEmailRow.subject, body: savedEmailRow.body, sentAt: savedEmailRow.sentAt, status: savedEmailRow.status } : null,
+      savedEmailStale,
       savedPayment: savedPaymentRow ? { id: savedPaymentRow.id, kind: savedPaymentRow.kind, amountCents: savedPaymentRow.amountCents, status: savedPaymentRow.status } : null,
       status: c.status,
     };

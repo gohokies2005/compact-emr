@@ -68,6 +68,11 @@ export interface DeliveryPreview {
   readonly stripe: { readonly configured: boolean; readonly link: string | null };
   readonly emailTransport: { readonly configured: boolean };
   readonly savedEmail: DeliverySavedEmail | null;
+  // #198 (delivery scare, 2026-06-30): true when savedEmail.body was composed against an EARLIER
+  // letter version (its frozen excerpt no longer matches the current letter). The panel refreshes
+  // the editor to email.body (the current letter) instead of prefilling the stale saved body.
+  // Optional for back-compat with older payloads (treated as false when absent).
+  readonly savedEmailStale?: boolean;
   readonly savedPayment: DeliverySavedPayment | null;
   readonly status: string;
 }

@@ -106,6 +106,34 @@ describe('DeliveryPanel', () => {
     expect(msg.className).toContain('text-rose-600');
   });
 
+  // ── #198 (delivery scare, 2026-06-30): after a re-sign the saved body is stale; the editor must
+  // refresh to the CURRENT letter body (never silently prefill the old excerpt) + warn loudly. ──
+  it('#198: a STALE saved body is NOT prefilled — the editor shows the current letter body + a refresh warning', async () => {
+    getDeliveryMock.mockResolvedValue(preview({
+      email: { subject: 'Your nexus letter is ready, invoice enclosed', fromAddress: 'info@flatratenexus.com', body: 'FRESH current-letter body' },
+      savedEmail: { id: 'EMAIL-1', subject: 'Your nexus letter is ready, invoice enclosed', body: 'STALE old-version body', sentAt: '2026-06-30T00:00:00Z', status: 'sent' },
+      savedEmailStale: true,
+    }));
+    renderPanel();
+    // The editor reflects the CURRENT letter, NOT the frozen saved body.
+    await screen.findByDisplayValue('FRESH current-letter body');
+    expect(screen.queryByDisplayValue('STALE old-version body')).toBeNull();
+    // Loud surfacing of the divergence (already-sent → advises Resend).
+    expect(screen.getByText(/This preview was refreshed/)).toBeInTheDocument();
+    expect(screen.getByText(/earlier version of this letter/)).toBeInTheDocument();
+  });
+
+  it('#198: a non-stale saved body still prefills the editor (no regression to the normal resume flow)', async () => {
+    getDeliveryMock.mockResolvedValue(preview({
+      email: { subject: 'Your nexus letter is ready, invoice enclosed', fromAddress: 'info@flatratenexus.com', body: 'FRESH current-letter body' },
+      savedEmail: { id: 'EMAIL-1', subject: 'Your nexus letter is ready, invoice enclosed', body: 'saved body that matches current', sentAt: null, status: 'queued' },
+      savedEmailStale: false,
+    }));
+    renderPanel();
+    await screen.findByDisplayValue('saved body that matches current');
+    expect(screen.queryByText(/This preview was refreshed/)).toBeNull();
+  });
+
   it('no memo case: the memo verify button and confirm are absent; letter confirm alone enables send', async () => {
     getDeliveryMock.mockResolvedValue(preview({ memo: { applies: false, pathway: null, reason: 'original_claim_no_denial', text: null } }));
     renderPanel();

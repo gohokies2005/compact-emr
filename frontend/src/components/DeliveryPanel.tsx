@@ -56,8 +56,15 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
   const data: DeliveryPreview | undefined = q.data?.data;
 
   // Prefill the editable email from the composed preview (or a previously-saved draft) once loaded.
+  // #198 (delivery scare, 2026-06-30): a saved (queued/sent) delivery email body is FROZEN against
+  // the letter version it was composed on; a re-sign bumps the letter but NOT the saved row. When the
+  // backend flags it stale (its excerpt no longer matches the current letter), never silently prefill
+  // the stale body — refresh the editor to data.email.body (the freshly composed CURRENT letter) so
+  // the preview, and therefore the send, can never carry an excerpt tied to a superseded version.
   useEffect(() => {
-    if (data) setEmailBody(data.savedEmail?.body ?? data.email.body);
+    if (!data) return;
+    const stale = data.savedEmailStale === true;
+    setEmailBody(stale ? data.email.body : (data.savedEmail?.body ?? data.email.body));
   }, [data]);
 
   // Resend cooldown (Ryan 2026-06-12): once the email has been sent, the Send button is replaced
@@ -217,6 +224,17 @@ export function DeliveryPanel({ caseId, onVerifyLetter, hasLetterPdf }: Delivery
           </p>
         ) : null}
       </div>
+
+      {/* #198 (delivery scare, 2026-06-30): a delivery email was composed/sent against an EARLIER
+          version of this letter, which has since been re-signed. The preview below has been refreshed
+          to the CURRENT signed letter — never let a worried staffer see (or resend) the old excerpt. */}
+      {data.savedEmailStale === true ? (
+        <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          <strong>This preview was refreshed.</strong> A delivery email was {actuallySent ? 'already sent' : 'composed'} against
+          an earlier version of this letter, which has since been re-signed. The preview below now reflects the
+          <strong> current signed letter</strong>{actuallySent ? ' — use Resend to veteran so they receive the corrected version.' : '.'}
+        </div>
+      ) : null}
 
       {/* Editable email preview */}
       <div className="mt-5">

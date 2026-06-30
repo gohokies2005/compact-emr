@@ -1,8 +1,16 @@
 import express from 'express';
 import request from 'supertest';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { S3Client } from '@aws-sdk/client-s3';
 import { createIntakesRouter } from '../routes/intakes.js';
+import { uploadReviewConversion } from '../services/google-ads-conversions.js';
+
+// Mock the Google Ads conversion upload so the assign tests can assert call/no-call + that a failure is
+// swallowed — WITHOUT hitting Secrets Manager / OAuth / Data Manager (#219).
+vi.mock('../services/google-ads-conversions.js', () => ({
+  uploadReviewConversion: vi.fn(async () => undefined),
+}));
+const mockUpload = vi.mocked(uploadReviewConversion);
 
 function appFor(intake: unknown, deps: Record<string, unknown> = {}) {
   const app = express();
@@ -274,5 +282,88 @@ describe('intakes assign', () => {
   it('400s when neither veteranId nor newVeteran is provided', async () => {
     const db = { intake: { findUnique: async () => readyIntake([]) }, $transaction: txWithExisting(), document: { create: vi.fn(), delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) } };
     await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ caseId: 'CLM-1' }).expect(400);
+  });
+});
+
+// ───────────────────────── GOOGLE ADS LEAD CONVERSION (#219) ─────────────────────────
+
+const PAID_FORM_ID = '261180463266153';      // first-time $50 intake
+const RETURNING_NOFEE_FORM_ID = '261495407772061'; // returning, no fee — NOT a paid lead
+
+function readyIntakeForm(formId: string | undefined, manifest: unknown[] = []) {
+  return { id: 'i1', status: 'ready', jotformFormId: formId, fileManifestJson: manifest };
+}
+
+describe('intakes assign — Google Ads lead conversion', () => {
+  beforeEach(() => { mockUpload.mockClear(); mockUpload.mockResolvedValue(undefined); });
+
+  it('fires uploadReviewConversion ONCE with the new caseId when a PAID first-time intake is assigned', async () => {
+    const db = {
+      intake: { findUnique: async () => readyIntakeForm(PAID_FORM_ID, []), update: vi.fn(async () => ({})) },
+      $transaction: txWithExisting(),
+      document: { create: vi.fn(async () => ({ id: 'doc' })), delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) },
+    };
+    await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+    const [, caseIdArg, paidAtArg] = mockUpload.mock.calls[0] as unknown as [unknown, string, Date];
+    expect(caseIdArg).toBe('CLM-1');
+    expect(paidAtArg).toBeInstanceOf(Date);
+  });
+
+  it('still completes the assign (200) when the conversion upload THROWS — never rethrows', async () => {
+    mockUpload.mockRejectedValueOnce(new Error('Data Manager API 503: upstream down'));
+    const db = {
+      intake: { findUnique: async () => readyIntakeForm(PAID_FORM_ID, []), update: vi.fn(async () => ({})) },
+      $transaction: txWithExisting(),
+      document: { create: vi.fn(async () => ({ id: 'doc' })), delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) },
+    };
+    const res = await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    expect(res.body.data.assigned).toBe(true); // intake processing completed despite the Google Ads error
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT fire for a returning no-fee intake (not a paid lead)', async () => {
+    const db = {
+      intake: { findUnique: async () => readyIntakeForm(RETURNING_NOFEE_FORM_ID, []), update: vi.fn(async () => ({})) },
+      $transaction: txWithExisting(),
+      document: { create: vi.fn(async () => ({ id: 'doc' })), delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) },
+    };
+    await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    expect(mockUpload).not.toHaveBeenCalled();
+  });
+
+  it('does NOT fire for an intake with no/unknown form id', async () => {
+    const db = {
+      intake: { findUnique: async () => readyIntakeForm(undefined, []), update: vi.fn(async () => ({})) },
+      $transaction: txWithExisting(),
+      document: { create: vi.fn(async () => ({ id: 'doc' })), delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) },
+    };
+    await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    expect(mockUpload).not.toHaveBeenCalled();
+  });
+
+  it('does NOT fire (and 409s) when the intake is already assigned — dedupe via the ready→assigned gate', async () => {
+    // A worker reprocess / repeat-assign cannot double-report: the endpoint only runs from status==='ready'.
+    const db = {
+      intake: { findUnique: async () => ({ id: 'i1', status: 'assigned', jotformFormId: PAID_FORM_ID }), update: vi.fn(async () => ({})) },
+      $transaction: txWithExisting(),
+      document: { create: vi.fn(), delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) },
+    };
+    await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(409);
+    expect(mockUpload).not.toHaveBeenCalled();
+  });
+
+  it('does NOT fire for a PAID intake when nothing assigns (markAssigned false: existing case, all copies fail)', async () => {
+    // markAssigned is false only when real files were selected but EVERY copy failed on an EXISTING
+    // veteran+case. No assignedCaseId transition → no conversion.
+    const db = {
+      intake: { findUnique: async () => readyIntakeForm(PAID_FORM_ID, [{ name: 'rec.pdf', s3Key: 'intake/i1/rec.pdf', contentType: 'application/pdf', sizeBytes: 1000 }]), update: vi.fn(async () => ({})) },
+      $transaction: txWithExisting(),
+      document: { create: vi.fn(async () => ({ id: 'doc' })), delete: vi.fn(async () => ({})), findFirst: vi.fn().mockResolvedValue(null) },
+    };
+    const copyFails = vi.fn(async () => { throw new Error('AccessDenied'); });
+    const res = await request(assignApp(db, copyFails)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    expect(res.body.data.assigned).toBe(false);
+    expect(mockUpload).not.toHaveBeenCalled();
   });
 });

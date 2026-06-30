@@ -13,9 +13,15 @@ import { assignChartFilenames } from '../services/chart-filename.js';
 import { fillIntakeDerived, deriveIntakeFields } from '../services/intake-derive.js';
 import { renderIntakeSummaryPdf } from '../services/intake-summary-pdf.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
+import { uploadReviewConversion } from '../services/google-ads-conversions.js';
 
 const PREVIEW_TTL_SECONDS = 300;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+// The first-time intake form that collects the $50 review fee INSIDE Jotform. ONLY this form is a paid
+// lead: the returning no-fee form (261495407772061) and the stage-2 / additional-docs forms are NOT.
+// Mirrors intake-kind.ts KNOWN_FORMS '261180463266153' = First-time intake (LIVE). The Google Ads lead
+// conversion (#219) fires only for this form's intakes when they're assigned to a case (see /assign).
+const PAID_INTAKE_FORM_ID = '261180463266153';
 // Mirror the manual-upload allow-list (documents.ts). Jotform files can be HEIC/ZIP/etc — those are
 // flagged per-file on assign, never copied into a case as an un-OCR-able Document. (Spec P1-3.)
 const ASSIGN_ALLOWED_CONTENT_TYPES = new Set([
@@ -404,6 +410,27 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
         where: { id: intakeId },
         data: { status: 'assigned', assignedVeteranId: veteranId, assignedCaseId: caseId, assignedAt: new Date(), assignedBy: actor },
       });
+
+      // GOOGLE ADS LEAD CONVERSION (#219, 2026-06-30) — fires HERE, at the paid-intake → case transition,
+      // NOT in the Stripe webhook. The $50 review fee is collected INSIDE Jotform, so the EMR Stripe
+      // webhook only ever sees $500 letter payments and the amount===5000-gated call there never fired
+      // (zero [google-ads] log lines, ever). This is the genuine paid-lead completion point: a NEW case
+      // now exists and the Intake carries the gclid (s1_gclid in rawAnswersJson) the function extracts.
+      //   PAID-LEAD GATE: only the first-time $50 form (returning no-fee + stage-2 are excluded).
+      //   DEDUPE: this endpoint only runs when status==='ready' (it 409s otherwise, line ~205), so the
+      //     ready→assigned transition fires the conversion AT MOST ONCE per intake — a worker reprocess
+      //     or repeat-assign can't double-report.
+      //   FAIL-SAFE: AWAITED (a floating promise is frozen when the Lambda response sends, like the
+      //     stripe-webhook) but fully wrapped — a Google outage/slow/4xx can NEVER throw into or block
+      //     the assign. The function no-ops+logs when there's no gclid (organic intake) and aborts each
+      //     fetch at 3s internally, so it cannot wedge the request.
+      if ((intake as { jotformFormId?: string }).jotformFormId === PAID_INTAKE_FORM_ID) {
+        try {
+          await uploadReviewConversion(db, caseId, new Date());
+        } catch (err) {
+          console.warn(`[google-ads] lead conversion upload failed caseId=${caseId}:`, err instanceof Error ? err.message : String(err));
+        }
+      }
     }
 
     res.json({ data: { veteranId, caseId, assigned: markAssigned, attached, failed } });

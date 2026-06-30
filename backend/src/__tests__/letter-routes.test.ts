@@ -166,6 +166,20 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     warnSpy.mockRestore();
   });
 
+  it('GET /letter on a PRE-DRAFT halt (currentVersion=0, no artifacts) → 404 no_letter + FAIL-LOUD no_artifact warn', async () => {
+    // CLM-A158C00C07 (Michael Dick, 2026-06-29): a Gate-2 dx-verification halt fired pre-draft — no
+    // letter was ever rendered (currentVersion=0, no revisions/jobs, empty S3 prefix). The GET used to
+    // 404 SILENTLY, so the UI's false "View PDF" affordance dead-ended invisibly. Now the no-artifact
+    // read logs `no_artifact caseId=… currentVersion=…` so a missing-letter GET is greppable.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { db } = makeDb(baseCase({ currentVersion: 0, status: 'needs_rn_decision' }));
+    const res = await request(appFor(db, deps())).get('/api/v1/cases/CASE-1/letter');
+    expect(res.status).toBe(404);
+    expect(res.body.error.details.reason).toBe('no_letter');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('no_artifact caseId=CASE-1 currentVersion=0'));
+    warnSpy.mockRestore();
+  });
+
   it('surgical-ai PROPOSE returns a proposal + preview + cost (no save)', async () => {
     const d = deps();
     const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai').send({ instruction: 'add the DC code' });

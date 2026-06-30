@@ -408,7 +408,16 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // version that actually has a letter, so a failed re-draft never strands a good letter behind
       // a 404. Only a case with NO present artifact at ANY version 404s.
       const cur = await resolveCurrentForRead(caseId, c.currentVersion);
-      if (cur === null) throw new HttpError(404, 'not_found', 'No letter has been drafted for this case yet.', { reason: 'no_letter', caseId });
+      if (cur === null) {
+        // FAIL-LOUD (CLM-A158C00C07, Michael Dick 2026-06-29): a GET /letter that resolves NOTHING used
+        // to 404 SILENTLY, so a UI that offered "View PDF / Open editor" off a halted-job STATE (with no
+        // artifact) dead-ended invisibly — the false-affordance bug was un-observable in CloudWatch. Log
+        // the no-artifact read so a missing-letter GET is greppable (no_artifact{caseId,currentVersion}).
+        // The frontend resolveViewableLetterJob now suppresses the affordance; this is the backstop alarm
+        // for any path that still requests a letter that does not exist.
+        console.warn(`[letter] no_artifact caseId=${caseId} currentVersion=${c.currentVersion} — GET /letter resolved no letter (no resolvable artifact at the pointer or anywhere in S3)`);
+        throw new HttpError(404, 'not_found', 'No letter has been drafted for this case yet.', { reason: 'no_letter', caseId });
+      }
       // FAIL-LOUD (CLM-9925837B7B, 2026-06-23): a failed re-draft advanced Case.currentVersion onto a
       // dead (artifact-less) version, stranding the prior good letter behind a 404. The read-path resolver
       // recovered it; log loudly so we can see how often this happens and back it out at the drafter source

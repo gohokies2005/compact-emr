@@ -45,6 +45,7 @@ import { letterFilename } from '../../lib/letterFilename';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
 import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopPanels';
+import { resolveViewableLetterJob } from '../../lib/viewableLetter';
 import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 // CaseViabilityCard mount REMOVED from this page (Ryan 2026-06-20, item #64): the static M/E
 // (mechanism/evidence) "Anchor viability" ratings card is erased from the case UI entirely.
@@ -350,21 +351,14 @@ export function CaseDetailPage() {
     && !draftInFlight
     && c.status !== 'physician_review' && c.status !== 'delivered' && c.status !== 'paid';
 
-  // The newest draft-job that produced (or should have produced) a letter PDF. draftJobs is
-  // version-desc, so the first terminal-or-keyed job is the latest letter. Terminal (done OR a
-  // watcher-flipped 'failed' that still rendered) is included because artifactPdfS3Key can be null
-  // after the stuck-watcher race — the backend derives the key from version + HEAD-checks it. This
-  // is what makes "View letter" reliably available in the EMR, no manual pulls (2026-06-04).
-  const viewableLetterJob = (c.draftJobs ?? []).find((job) => {
-    const j = job as InFlightDraftJob;
-    const key = typeof j.artifactPdfS3Key === 'string' ? j.artifactPdfS3Key : null;
-    // Cheap DB-corruption sanity gate (Seam-B era rows held a .txt key in the PDF field —
-    // CLM-BBFCB3F8CE forensics 2026-06-11): a non-.pdf key in the PDF field means this job's
-    // letter can never open as a PDF — treat it as non-viewable rather than dead-ending a click.
-    if (key !== null && key.length > 0 && !key.toLowerCase().endsWith('.pdf')) return false;
-    const hasKey = key !== null && key.length > 0;
-    return hasKey || j.state === 'done' || j.state === 'failed';
-  }) as InFlightDraftJob | undefined;
+  // The newest draft-job whose letter can ACTUALLY be opened — the single signal that gates every
+  // letter affordance (View PDF / Open editor / Send to doctor / RN editor-entry / Delivery verify).
+  // A letter is viewable only when a real, RESOLVABLE artifact exists (a present .pdf key OR
+  // currentVersion >= 1 — what GET /cases/:id/letter can serve). A PRE-DRAFT halt (Gate-2 dx hold)
+  // leaves currentVersion=0 with null keys → NOT viewable, so the panel never advertises letter
+  // actions that 404 (CLM-A158C00C07, Michael Dick). Logic lives in resolveViewableLetterJob (pure +
+  // unit-tested); the OLD inline `state==='done'||'failed'` fallback was the false-affordance bug.
+  const viewableLetterJob = resolveViewableLetterJob(c.draftJobs, c.currentVersion) as InFlightDraftJob | undefined;
 
   // SOAP-note placement (Ryan 2026-06-21): the SOAP card lives on the ACTION tab while the case is pre-draft /
   // in-review (the RN's go/no-go read BEFORE drafting), and MOVES to the SUMMARY tab once a completed draft /

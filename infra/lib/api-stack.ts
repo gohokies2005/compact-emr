@@ -605,5 +605,29 @@ export class ApiStack extends Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     chartBuildStalledAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+
+    // ===== API-Lambda THROTTLES alarm (drafter scaling hardening 2026-06-29) =====
+    // This one Lambda is the callback SINK for every drafter task: the Fargate worker POSTs job
+    // lifecycle callbacks (/internal/drafter/jobs/:id/{progress,complete,halt}) here. Raising the drafter
+    // concurrency cap fans MANY tasks' callbacks at this single function; if its reserved/account
+    // concurrency (L-B99A9384) is exhausted, AWS THROTTLES the invokes and a /complete callback is
+    // silently dropped — the draft finishes in the container but the EMR never advances the job (the
+    // "progress counter disappeared" failure class). Any throttle at all is abnormal here → page on Sum>0.
+    const apiThrottlesAlarm = new cloudwatch.Alarm(this, 'ApiLambdaThrottlesAlarm', {
+      alarmName: `compact-emr-${props.config.envName}-api-lambda-throttles`,
+      alarmDescription:
+        'The API Lambda (HTTP API nypr790pq7 + the drafter callback sink) was THROTTLED — account/' +
+        'reserved Lambda concurrency (L-B99A9384) is exhausted. Drafter /complete + /progress callbacks ' +
+        'can be silently dropped, leaving jobs stuck "drafting" in the EMR while the container already ' +
+        'finished. Raise the concurrency limit / add reserved concurrency. Inspect ' +
+        `/aws/lambda/compact-emr-${props.config.envName}-api.`,
+      metric: handler.metricThrottles({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 0,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    apiThrottlesAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
   }
 }

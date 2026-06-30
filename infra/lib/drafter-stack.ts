@@ -383,7 +383,9 @@ export class DrafterStack extends Stack {
       alarmDescription:
         'Drafts in-flight (FIFO NotVisible) stayed high for 15 min — many ~$15 drafter runs are processing at once. Expected during a deliberate batch; if you did NOT start a batch, a re-enqueue storm across cases is burning budget. Check the draft-job.fifo queue + recent DraftJob rows.',
       metric: draftsInFlight,
-      threshold: 12, // ~$180 of concurrent drafting sustained — well above normal RN use
+      threshold: 22, // raised 12→22 when the concurrency cap moved to DRAFTER_MAX_CONCURRENCY=20 (was
+      // continuously breaching at 12 once a normal full batch fans out to the cap). 22 = a couple of drafts
+      // ABOVE the cap of in-flight runs sustained — a genuine re-enqueue storm, not an intended full batch.
       evaluationPeriods: 3, // 3 × 5min = 15 min sustained
       datapointsToAlarm: 3,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
@@ -475,6 +477,50 @@ export class DrafterStack extends Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     fallbackOffTopicAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+
+    // ===== Drafter PLACEMENT-STARVATION alarm (FRN_WORKLIST line 81, scaling hardening 2026-06-29) =====
+    // The silent failure when raising the concurrency cap: the autoscaler REQUESTS up to
+    // min(depth, DRAFTER_MAX_CONCURRENCY) tasks, but a Fargate On-Demand vCPU-quota exhaustion
+    // (L-3032A538, 100 vCPU ÷ 4 vCPU/task = 25-task ceiling) leaves the Nth task stuck PENDING. ECS
+    // does NOT surface a placement failure as a metric, and Container Insights is OFF on this cluster
+    // (no `containerInsights` set on `DrafterCluster`), so the precise `ECS/ContainerInsights`
+    // RunningTaskCount<DesiredTaskCount signal is NOT published. The closest FEASIBLE signal off the
+    // always-on AWS/SQS metrics: there is queued work that is NOT being absorbed while the running fleet
+    // is short of capacity — i.e. ApproximateNumberOfMessagesVisible (un-picked backlog) > 0 AND
+    // ApproximateNumberOfMessagesNotVisible (in-flight ≈ tasks holding a message) stays BELOW the cap,
+    // SUSTAINED. A healthy saturated batch pins in-flight AT the cap (condition false → quiet); a brief
+    // scale-out ramp from 0 clears well inside the 30-min window (not sustained → quiet); only a fleet
+    // that cannot reach capacity while work waits for 30 min straight trips it. Reliability/outage signal
+    // → ops-alerts (same topic the chart-build/refs-empty/DLQ alarms use). NOTE: enabling Container
+    // Insights on DrafterCluster would let this be replaced by the exact RunningTaskCount<DesiredTaskCount
+    // alarm — recommended follow-up; this proxy is the no-extra-cost stand-in until then.
+    const starvationFloor = DRAFTER_MAX_CONCURRENCY - 1; // in-flight peak this far below cap = fleet short
+    const placementStarvationSignal = new cloudwatch.MathExpression({
+      expression: `IF(visible > 0 AND inflight < ${starvationFloor}, 1, 0)`,
+      label: 'DrafterPlacementStarvation',
+      usingMetrics: {
+        visible: new cloudwatch.Metric({ namespace: 'AWS/SQS', metricName: 'ApproximateNumberOfMessagesVisible', dimensionsMap: { QueueName: `compact-emr-${config.envName}-draft-job.fifo` }, period: Duration.minutes(5), statistic: 'Maximum' }),
+        inflight: new cloudwatch.Metric({ namespace: 'AWS/SQS', metricName: 'ApproximateNumberOfMessagesNotVisible', dimensionsMap: { QueueName: `compact-emr-${config.envName}-draft-job.fifo` }, period: Duration.minutes(5), statistic: 'Maximum' }),
+      },
+      period: Duration.minutes(5),
+    });
+    const placementStarvationAlarm = new cloudwatch.Alarm(this, 'DrafterPlacementStarvationAlarm', {
+      alarmName: `compact-emr-${config.envName}-drafter-placement-starvation`,
+      alarmDescription:
+        'Drafts are queued (draft-job.fifo has Visible/un-picked messages) but the running drafter fleet ' +
+        `stayed below the concurrency cap (in-flight peak < ${starvationFloor}) for 30 min straight — tasks ` +
+        'are not being PLACED. Most likely the Fargate On-Demand vCPU quota (L-3032A538) is exhausted so ' +
+        'the next task is stuck PENDING; the EMR just shows drafts sitting "in line". Check the ECS service ' +
+        'events (compact-emr-' + config.envName + '-drafter) for "unable to place a task because no ' +
+        'container instance / RESOURCE:VCPU" and the Service Quotas console.',
+      metric: placementStarvationSignal,
+      threshold: 1,
+      evaluationPeriods: 6, // 6 × 5min = 30 min sustained
+      datapointsToAlarm: 6,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    placementStarvationAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
 
     // ===== Outputs the drafter window needs =====
     // ECR repo URI — drafter window runs `docker push <uri>:<git-sha>` against this.

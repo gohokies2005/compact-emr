@@ -1,7 +1,7 @@
 {
   "app": "npx tsx bin/compact-emr.ts",
   "context": {
-    "drafter_image_tag": "b4d840a-routepicker",
+    "drafter_image_tag": "e9e39a9-routepicker",
     "email_redirect_all_to": "",
     "render_image_tag": "0fa7a8b-render-lambda",
     "chart_autofill": "on",

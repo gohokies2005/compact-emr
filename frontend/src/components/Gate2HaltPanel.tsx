@@ -182,6 +182,23 @@ export function Gate2HaltPanel({ c, job, onChanged, onOpenEditor }: { readonly c
   const message = payload.plainEnglish || payload.operatorMessage || c.operatorMessage || 'The pre-draft verification could not confirm the diagnosis and/or in-service event. Decide how to proceed.';
   const sw = payload.switchProposal ?? null;
 
+  // DX-resolution chooser (#218a). ABSENT/null until the FRN drafter image redeploys → the panel must
+  // render exactly as today (the always-present #213 change-dx box). When present:
+  //   'needs_clarification' → show dxResolution.note + a row of CLICKABLE candidate buttons, each of
+  //                           which re-aims the draft through the SAME #213 changeDx flow (patch chart
+  //                           dx → re-draft, reason-gated, ConflictError-retry). The free-type #213 box
+  //                           stays only when allowFreeType !== false.
+  //   'no_dx'              → today's behavior (real reason + re-run); surface the note if present.
+  //   'auto_adopted'       → N/A on the HALT path (auto-adopt PROCEEDS to draft, no halt). The relabel
+  //                           note for the proceed path is #218b — OWED, needs a drafter-side report on
+  //                           the proceed path (not yet built). Do NOT build it here.
+  const dxRes = payload.dxResolution ?? null;
+  const showCandidateChooser = dxRes?.mode === 'needs_clarification' && dxRes.candidates.length > 0;
+  // The #213 free-type box is ALWAYS present today (no-regression baseline). Suppress it ONLY when the
+  // drafter explicitly disallows free typing on a needs_clarification resolution. Every other case —
+  // dxResolution absent, no_dx, or allowFreeType true — keeps the box so the RN is never dead-ended.
+  const showFreeTypeBox = dxRes === null || dxRes.mode !== 'needs_clarification' || dxRes.allowFreeType !== false;
+
   const resume = useMutation({
     mutationFn: (rnDecision: RnDecisionInput) => postDraft(c.id, { rnDecision }),
     onSuccess: () => void onChanged(),
@@ -234,6 +251,16 @@ export function Gate2HaltPanel({ c, job, onChanged, onOpenEditor }: { readonly c
     if (reason === null || reason.trim().length === 0) return; // deliberate confirm before the ~$15 run (audit + intent)
     changeDx.mutate({ newDx, reason: reason.trim() });
   }
+  // Candidate pick (#218a). A one-click on a drafter-surfaced candidate routes through the SAME #213
+  // changeDx flow (patch chart dx → re-draft) so the chart can never go stale, with the same reason
+  // gate + ConflictError retry. This is the only new dx-mutation entry point; it reuses, not forks.
+  function doPickCandidate(candidate: string) {
+    const newDx = candidate.trim();
+    if (newDx.length === 0) return;
+    const reason = window.prompt(`Change the diagnosis to ${newDx} and re-draft? Type a brief reason — it is logged and shown in the chart.`);
+    if (reason === null || reason.trim().length === 0) return; // deliberate confirm before the ~$15 run (audit + intent)
+    changeDx.mutate({ newDx, reason: reason.trim() });
+  }
   function proceed() {
     if (!window.confirm('The diagnosis / records are now present — re-run the draft?')) return;
     resume.mutate({ proceed: true });
@@ -255,6 +282,11 @@ export function Gate2HaltPanel({ c, job, onChanged, onOpenEditor }: { readonly c
         <h2 className="text-base font-semibold text-amber-900">Drafting paused — your decision needed</h2>
       </div>
       <p className="mt-2 text-sm text-amber-900">{message}</p>
+      {/* #218a no_dx: the drafter could resolve no diagnosis at all — surface its plain-English note (if
+          any) as extra context. The actionable behavior is unchanged from today (override / re-run / pause). */}
+      {dxRes?.mode === 'no_dx' && dxRes.note.trim().length > 0 ? (
+        <p className="mt-1 text-sm text-amber-900">{dxRes.note}</p>
+      ) : null}
       {payload.claimedDxFound || payload.inServiceEventFound ? (
         <ul className="mt-3 space-y-1.5 rounded-md border border-amber-200 bg-white p-3 text-sm">
           {payload.claimedDxFound ? (
@@ -277,10 +309,34 @@ export function Gate2HaltPanel({ c, job, onChanged, onOpenEditor }: { readonly c
         <Button variant="secondary" size="sm" className={amberOutline} disabled={busy} onClick={proceed}>Records are in — re-run</Button>
         {c.status !== 'needs_records' ? <Button variant="ghost" size="sm" className="text-amber-800 hover:bg-amber-100" disabled={busy} onClick={() => pause.mutate()}>Pause to get records</Button> : null}
       </div>
+      {/* DX-RESOLUTION CHOOSER (#218a). When the drafter's pre-draft dx-verification returns
+          mode 'needs_clarification' it hands back a short list of plausible diagnoses. Surface them as
+          one-click buttons (format-matched to the #213 box below): the plain-English note, then a row of
+          candidate buttons each re-aiming the draft through the SAME changeDx flow. The RN is never
+          dead-ended — the override / re-run / pause actions above and the free-type box below remain. */}
+      {showCandidateChooser && dxRes !== null ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-white p-3">
+          <p className="block text-sm font-medium text-slate-800">Which diagnosis should the letter argue?</p>
+          {dxRes.note.trim().length > 0 ? (
+            <p className="mt-0.5 text-xs text-slate-500">{dxRes.note}</p>
+          ) : null}
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {dxRes.candidates.map((candidate) => (
+              <Button key={candidate} variant="secondary" size="sm" className={amberOutline} disabled={busy} onClick={() => doPickCandidate(candidate)}>
+                {candidate}
+              </Button>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-slate-500">Picking one updates the chart&apos;s claimed condition and re-aims the draft. You&apos;ll confirm with a brief reason (logged).</p>
+        </div>
+      ) : null}
       {/* ALWAYS-PRESENT inline dx change (Michael Dick 2026-06-29). The drafter sometimes buries the better-fit
           diagnosis in prose with NO switchProposal — leaving the RN no inline way to re-aim the letter (they had
           to leave the page). This box is always here: pre-filled with the suggested dx when present, else
-          free-text. "Change diagnosis & re-draft" patches the chart dx AND re-runs the draft (changeDx). */}
+          free-text. "Change diagnosis & re-draft" patches the chart dx AND re-runs the draft (changeDx). The
+          #218a chooser above does NOT replace it — it stays unless the drafter explicitly disallows free typing
+          (allowFreeType === false on a needs_clarification resolution), so the no-regression default is preserved. */}
+      {showFreeTypeBox ? (
       <div className="mt-4 rounded-md border border-amber-200 bg-white p-3">
         <label htmlFor="gate2-dx-change" className="block text-sm font-medium text-slate-800">Change the diagnosis &amp; re-draft</label>
         <p className="mt-0.5 text-xs text-slate-500">Type the condition the letter should argue (e.g. &ldquo;osteoarthritis&rdquo;). This updates the chart&apos;s claimed condition and re-aims the draft. You&apos;ll confirm with a brief reason (logged).</p>
@@ -297,6 +353,7 @@ export function Gate2HaltPanel({ c, job, onChanged, onOpenEditor }: { readonly c
           <Button variant="secondary" size="sm" className={amberOutline} disabled={busy || dxInput.trim().length === 0} onClick={doChangeDx}>Change diagnosis &amp; re-draft</Button>
         </div>
       </div>
+      ) : null}
       <p className="mt-3 text-xs text-amber-800">Every choice is logged and shown in the chart&apos;s Decisions &amp; overrides panel.</p>
     </Card>
   );

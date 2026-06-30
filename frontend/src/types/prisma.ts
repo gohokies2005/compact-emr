@@ -120,9 +120,31 @@ export interface Gate2HaltPayload {
   // send richer `material` rows. Accept BOTH shapes.
   readonly materialIds?: readonly string[] | null;
   readonly material?: readonly Gate2BodyQualityFinding[] | null;
+  // ── DX-resolution chooser (#218a) ───────────────────────────────────────────────────────────
+  // Emitted by the FRN drafter on a dx-verification HALT (worker forwards verbatim; /halt stores it
+  // in haltPayloadJson). ABSENT/null until the drafter image redeploys — when absent the dx-halt UI
+  // renders exactly as today (the always-present #213 change-dx box). When present with mode
+  // 'needs_clarification', the panel surfaces a candidate chooser. See Gate2DxResolution.
+  readonly dxResolution?: Gate2DxResolution | null;
 }
 /** One body-quality defect row (forthcoming richer FRN park payload: {id, section, detail}). */
 export interface Gate2BodyQualityFinding { readonly id: string; readonly section?: string | null; readonly detail?: string | null }
+
+/**
+ * DX-resolution guidance from the drafter's pre-draft dx-verification (#218a contract, fixed).
+ * - 'auto_adopted'   → the drafter adopted a clear dx and PROCEEDED to draft (no halt). N/A on the
+ *                      halt path; the relabel note for this is #218b (drafter proceed-path report, owed).
+ * - 'needs_clarification' → multiple plausible dx; surface `candidates` as a chooser + (if allowed) free-type.
+ * - 'no_dx'          → no diagnosis could be resolved; today's halt behavior (real reason + re-run).
+ */
+export interface Gate2DxResolution {
+  readonly mode: 'auto_adopted' | 'needs_clarification' | 'no_dx';
+  readonly adoptedDx?: string | null;
+  readonly candidates: readonly string[];
+  readonly allowFreeType: boolean;
+  readonly confidence: 'high' | 'medium' | 'low';
+  readonly note: string;
+}
 
 /**
  * True when a halt payload is a BODY-QUALITY park (letter held for re-draft), not a dx/event

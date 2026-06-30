@@ -241,6 +241,22 @@ export class DrafterStack extends Stack {
         // Emergency revert without a deploy: register a task-def revision with the flag flipped
         // and update the service — the next CDK deploy reconverges to this value.
         AI_ROUTE_PICKER_ENABLED: 'true',
+        // PLAN_VALIDITY_PARK (Ryan 2026-06-30): flip the Stage-0.5a plan-validity gate from
+        // ADVISORY → hard PARK. The gate (FRN app/services/planValidityGate.js, wired at
+        // run-letter-pipeline.js Stage 0.5a) runs AFTER the lead theory is chosen and BEFORE the
+        // draft; it confirms the theory is GROUNDED in THIS veteran's record. With this flag 'on'
+        // the drafter SENDS BACK (fail-3 park, pre-draft) a case ONLY when the gate returns
+        // grounded=false AND confidence=high — the OSA-direct-leak class (a secondary naming a
+        // non-service-connected primary, or a theory leaning on a non-SC problem-list condition /
+        // a fabricated mechanism). The FRN drafter-worker reads process.env.PLAN_VALIDITY_PARK
+        // === 'on' exactly (isPlanValidityParkEnforced()). CONSERVATIVE + FAIL-OPEN: a null/medium/
+        // low verdict or any gate error PROCEEDS (never false-parks a good letter) — validated
+        // 2026-06-30 (2 GOOD cases proceed incl. the lay-onset/empty-event-field trap; 2 BAD-premise
+        // cases park) + a flag-ON c0 smoke on the GOOD TestVet-Lumbar case (proceeds to a graded
+        // letter, no regression). A parked case surfaces a named human-actionable send_back_reason +
+        // SC-grounded alternatives to the RN/physician (pre-draft, so no existing draft is blocked).
+        // Revert: set to 'off' (or remove this line) + redeploy the drafter while the SQS queue is idle.
+        PLAN_VALIDITY_PARK: 'on',
       },
       secrets: {
         // The wrapper reads these from env at startup; AWS injects the actual secret values

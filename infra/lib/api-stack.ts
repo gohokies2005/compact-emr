@@ -629,5 +629,37 @@ export class ApiStack extends Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     apiThrottlesAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+
+    // ===== API-Gateway 5xx alarm (silent server-error catch, 2026-06-30) =====
+    // The HTTP API itself had NO server-error alarm: a 5xx (broken deploy, DB-connection
+    // exhaustion, a downstream 503 like the Ask-Aegis gateway timeout, or an unhandled API-Lambda
+    // 502/504) failed SILENTLY — nobody was paged. metricServerError() is the CDK-native handle on
+    // this API's server-error metric; CloudWatch publishes it as namespace AWS/ApiGateway, metric
+    // "5xx", dimension ApiId=<this api> (nypr790pq7) — NOT AWS/ApiGatewayV2 + ApiName (that's REST
+    // v1; verified live this account: the V2 namespace is empty, HTTP-API metrics live under
+    // AWS/ApiGateway with ApiId). The metric uses the live CDK ref so it always tracks the real
+    // ApiId even if the API is ever replaced. Threshold = >=5 server errors in a single 5-min
+    // window: low-traffic staging sees ~0 5xx when healthy, so one transient 5xx (a cold-start
+    // blip, a single downstream hiccup) will NOT flap the alarm, but a real outage bursts well past
+    // 5 within one window and pages within ~5 min. Unhandled API-Lambda errors are COVERED here —
+    // the handler is invoked ONLY as this API's proxy integration (incl. the drafter /internal
+    // callbacks), so a throw surfaces as a 502 and a >30s timeout as a 504, both counted in 5xx; a
+    // separate Lambda Errors alarm would only double-page the same incident.
+    const api5xxAlarm = new cloudwatch.Alarm(this, 'Api5xxAlarm', {
+      alarmName: `compact-emr-${props.config.envName}-api-5xx`,
+      alarmDescription:
+        'The HTTP API (nypr790pq7 / compact-emr-' + props.config.envName + ') returned >=5 server ' +
+        '5xx responses in a 5-min window — a server-side outage (broken deploy, DB-connection ' +
+        'exhaustion, a downstream 503, or an unhandled API-Lambda 502/504) is failing requests ' +
+        'silently. This is the alarm the Ask-Aegis 503 should have tripped. Inspect ' +
+        `/aws/lambda/compact-emr-${props.config.envName}-api and recent deploys.`,
+      metric: httpApi.metricServerError({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 5,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    api5xxAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
   }
 }

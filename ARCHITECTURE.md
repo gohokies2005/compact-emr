@@ -112,6 +112,7 @@ go/no-go === `soap-action-map.ts planViabilityToAction` go/no-go).
 | `GUIDED_REVISION_ENABLED` | api | `true` | — |
 | `ANCHOR_MECHANISM_GATE` | drafter | `true` | anchor candidates unfiltered |
 | `DRAFTER_GATE2_ENABLED` | drafter | `true` | no pre-draft dx/event halt |
+| `PLAN_VALIDITY_PARK` | drafter | **`on`** (2026-06-30; was advisory) | Stage-0.5a plan-validity gate stays ADVISORY (surface, never park) |
 | `AEGIS_VIABILITY_GROUNDING` | advisory retrieve | **off** (unset) | legacy static viability facts block (off in prod) |
 
 ---

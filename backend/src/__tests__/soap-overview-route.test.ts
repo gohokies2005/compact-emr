@@ -234,6 +234,23 @@ describe('POST /cases/:id/soap-overview pollOnly — $0 status check, never bill
     expect(getOrBuildSoapNote).not.toHaveBeenCalled(); // a poll NEVER generates, even when it returns a note
     expect(fireRecomputeViability).not.toHaveBeenCalled();
   });
+
+  it('DRIFTED stored note (refresh:true) → still generating, does NOT serve the stale note as final (Marcus Bennett 2026-06-29)', async () => {
+    // The incomplete-extraction bug: a REAL (fallback:false) note was written while the chart was still being
+    // analyzed; its prose hedges "…not fully extracted in the available pages". Once extraction completes, the
+    // live ctx fingerprint drifts off that note (decideServeStored → refresh:true). The poll must NOT swap that
+    // stale note in and disable itself — it must report generating:true and keep waiting for the refreshed note.
+    stateReady(plan());
+    const staleNote = { subjective: 's', objective: 'o', assessment: 'the content of those opinions is not fully extracted in the available pages', plan: 'p', confidence: 'low', action: 'get_records', fallback: false };
+    decideServeStored.mockReturnValue({ note: staleNote, refresh: true }); // current-shape + non-fallback BUT fingerprint-drifted
+    const { db } = makeDbWithSoap({ inputHash: 'OLD-fp', schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: staleNote });
+    const res = await POST(db, { claimedCondition: 'Obstructive sleep apnea', pollOnly: true });
+    expect(res.status).toBe(200);
+    expect(res.body.generating).toBe(true);
+    expect(res.body.data).toBeNull();
+    expect(getOrBuildSoapNote).not.toHaveBeenCalled(); // still $0
+    expect(fireRecomputeViability).not.toHaveBeenCalled(); // pollOnly never re-fires (the normal open path does)
+  });
 });
 
 // ── The reliability state plumbing (Ryan 2026-06-21, Zimmelman): the GET surfaces the discriminated state +

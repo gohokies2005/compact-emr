@@ -215,3 +215,60 @@ describe('SoapOverviewCard — honest plan-state surface (Zimmelman)', () => {
     expect(screen.queryByText(/provisional/i)).not.toBeInTheDocument();
   });
 });
+
+// ── AUTO-REFRESH the SOAP poll in the INCOMPLETE-EXTRACTION provisional state (Marcus Bennett 2026-06-29) ──
+// The note shown is a REAL (fallback:false) note written while the chart was still being analyzed; its prose
+// hedges "…not fully extracted in the available pages". The OLD poll gated only on note.fallback, so this state
+// never polled → the note persisted until a HARD REFRESH re-read the note the completed extraction produced.
+// The poll must now fire while the chart is in flight and swap the final note in once it lands, then disable.
+// (Own describe so its getSoapNote mockImplementation can't leak into the honest-surface tests above.)
+describe('SoapOverviewCard — auto-refresh poll covers the incomplete-extraction provisional (Marcus Bennett)', () => {
+  const soapMock = vi.mocked(getSoapNote);
+  const FINAL_NOTE = { subjective: 'S2', objective: 'O2', assessment: 'AHI 28 — the diagnosis is fully documented', plan: 'Draft the nexus letter', confidence: 'high', action: 'draft', fallback: false };
+  const PROVISIONAL_NOTE = { subjective: 'S', objective: 'O', assessment: 'the content of those opinions is not fully extracted in the available pages', plan: 'P', confidence: 'low', action: 'get_records', fallback: false };
+  const READY_STRATEGY = {
+    data: { tier: 'Plausible', primaryArgument: 'OSA secondary to rhinitis', proposedMechanism: null, recommendedPathway: null, inputSet: { scConditions: [], activeProblems: [], keyFacts: [], medications: [] } },
+  } as unknown as Awaited<ReturnType<typeof getStrategyPreview>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    strategyMock.mockResolvedValue(READY_STRATEGY);
+    viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'off' } });
+    computeMock.mockResolvedValue({ aiViabilityState: { status: 'off' } });
+    soapMock.mockReset();
+  });
+
+  it('chart in_progress + a real (fallback:false) note → FIRES pollOnly (today it does NOT) and swaps the final note in', async () => {
+    coverageMock.mockResolvedValue({
+      data: {
+        totalPages: 80, extractedPages: 40, coveragePct: 50, gaps: [], status: 'in_progress',
+        unknownPageFiles: 0, totalFiles: 2, pageBreakdown: null,
+        pagesRead: { pct: 50, readUnits: 40, totalUnits: 80, approximate: false, label: '50% (40 of 80)' },
+        chartAnalysis: { state: 'in_progress', label: 'Analyzing…', reason: null, likelyCauseFile: null, findings: null, minorGap: false },
+      },
+    } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
+    soapMock.mockImplementation(async (_id: string, _ctx: unknown, opts?: { forceRegenerate?: boolean; pollOnly?: boolean }) =>
+      (opts?.pollOnly === true
+        ? { data: FINAL_NOTE, generating: false, grounded: true }
+        : { data: PROVISIONAL_NOTE, grounded: true }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/not fully extracted in the available pages/i)).toBeInTheDocument());
+    await waitFor(() => expect(soapMock).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ pollOnly: true })));
+    await waitFor(() => expect(screen.getByText(/the diagnosis is fully documented/i)).toBeInTheDocument());
+  });
+
+  it('chart complete + a real non-fallback note → does NOT poll (no needless pollOnly churn)', async () => {
+    coverageMock.mockResolvedValue({
+      data: {
+        totalPages: 40, extractedPages: 40, coveragePct: 100, gaps: [], status: 'complete',
+        unknownPageFiles: 0, totalFiles: 2, pageBreakdown: null,
+        pagesRead: { pct: 100, readUnits: 40, totalUnits: 40, approximate: false, label: '100% (40 of 40)' },
+        chartAnalysis: { state: 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: 40, minorGap: false },
+      },
+    } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
+    soapMock.mockImplementation(async () => ({ data: FINAL_NOTE, grounded: true }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/the diagnosis is fully documented/i)).toBeInTheDocument());
+    expect(soapMock).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ pollOnly: true }));
+  });
+});

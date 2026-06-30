@@ -1,9 +1,10 @@
+import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { postDraft, type RnDecisionInput } from '../api/drafter';
-import { transitionCaseStatus, type CaseDetail } from '../api/cases';
-import { describeApiError } from '../api/client';
+import { patchCase, transitionCaseStatus, type CaseDetail } from '../api/cases';
+import { ConflictError, describeApiError } from '../api/client';
 import { isBodyQualityHalt, type DraftJob, type Gate2HaltPayload } from '../types/prisma';
 
 /**
@@ -191,6 +192,28 @@ export function Gate2HaltPanel({ c, job, onChanged, onOpenEditor }: { readonly c
     onSuccess: () => void onChanged(),
     onError: (e: unknown) => window.alert(`Could not pause — ${describeApiError(e)}`),
   });
+  // CHANGE-DX-AND-RE-DRAFT (Michael Dick 2026-06-29). One mutation that, IN ORDER: (a) persists the new dx onto
+  // the CHART via PATCH /cases/:id (the backend syncs claimedConditions[] + invalidates the plan) so the chart
+  // and the letter agree, then (b) re-aims the parked draft via postDraft(rnDecision.switchToCondition) (which
+  // also writes the DraftDecision audit row). Both the recommended "Switch to {dx}" button AND the always-present
+  // free-text input route through here — so neither can leave the chart dx stale (the pre-existing bug: the old
+  // doSwitch re-aimed the letter but never patched the chart, so the chart showed the OLD dx while the letter
+  // drafted the new one). Optimistic-concurrency 409 → reload + ask the RN to retry (the page's existing pattern).
+  const changeDx = useMutation({
+    mutationFn: async (vars: { newDx: string; reason: string }) => {
+      await patchCase(c.id, { version: c.version, claimedCondition: vars.newDx });
+      await postDraft(c.id, { rnDecision: { switchToCondition: vars.newDx, reason: vars.reason } });
+    },
+    onSuccess: () => void onChanged(),
+    onError: async (e: unknown) => {
+      if (e instanceof ConflictError) {
+        await onChanged();
+        window.alert('This case was modified elsewhere — reloaded the latest version. Please retry the diagnosis change.');
+        return;
+      }
+      window.alert(`Could not change the diagnosis & re-draft — ${describeApiError(e)}`);
+    },
+  });
 
   function override() {
     const reason = window.prompt('Draft anyway on the claimed condition? Type a brief reason — it is logged and shown in the chart.');
@@ -200,14 +223,28 @@ export function Gate2HaltPanel({ c, job, onChanged, onOpenEditor }: { readonly c
   function doSwitch() {
     if (sw === null) return;
     const reason = window.prompt(`Switch the letter to ${sw.dx} and re-draft? Type a brief reason (logged).`) ?? '';
-    resume.mutate({ switchToCondition: sw.dx, reason: reason.trim().length > 0 ? reason.trim() : `switch to ${sw.dx}` });
+    // Routes through changeDx so the CHART dx is patched too (was the stale-chart bug). Empty reason keeps the
+    // prior default ("switch to {dx}") — the recommended-fit button is a deliberate one-click, not free-text.
+    changeDx.mutate({ newDx: sw.dx, reason: reason.trim().length > 0 ? reason.trim() : `switch to ${sw.dx}` });
+  }
+  function doChangeDx() {
+    const newDx = dxInput.trim();
+    if (newDx.length === 0) return;
+    const reason = window.prompt(`Change the diagnosis to ${newDx} and re-draft? Type a brief reason — it is logged and shown in the chart.`);
+    if (reason === null || reason.trim().length === 0) return; // deliberate confirm before the ~$15 run (audit + intent)
+    changeDx.mutate({ newDx, reason: reason.trim() });
   }
   function proceed() {
     if (!window.confirm('The diagnosis / records are now present — re-run the draft?')) return;
     resume.mutate({ proceed: true });
   }
 
-  const busy = resume.isPending || pause.isPending;
+  // The free-text dx box is pre-filled with the suggested dx when the gate surfaced one, else empty (the RN
+  // types the better-fit dx — e.g. when the drafter buried it in prose with no switchProposal, the Michael Dick
+  // case). State lives here so the always-present affordance works whether or not `sw` is present.
+  const [dxInput, setDxInput] = useState<string>(sw?.dx ?? '');
+
+  const busy = resume.isPending || pause.isPending || changeDx.isPending;
   // White/outline amber buttons read as clearly-clickable on the amber card (the shared `secondary`
   // gray washes out on amber). The switch (recommended stronger fit) gets the one filled emphasis.
   const amberOutline = 'border border-amber-300 bg-white text-amber-900 shadow-sm hover:bg-amber-50';
@@ -239,6 +276,26 @@ export function Gate2HaltPanel({ c, job, onChanged, onOpenEditor }: { readonly c
         <Button variant="secondary" size="sm" className={amberOutline} disabled={busy} onClick={override}>Draft anyway (override)</Button>
         <Button variant="secondary" size="sm" className={amberOutline} disabled={busy} onClick={proceed}>Records are in — re-run</Button>
         {c.status !== 'needs_records' ? <Button variant="ghost" size="sm" className="text-amber-800 hover:bg-amber-100" disabled={busy} onClick={() => pause.mutate()}>Pause to get records</Button> : null}
+      </div>
+      {/* ALWAYS-PRESENT inline dx change (Michael Dick 2026-06-29). The drafter sometimes buries the better-fit
+          diagnosis in prose with NO switchProposal — leaving the RN no inline way to re-aim the letter (they had
+          to leave the page). This box is always here: pre-filled with the suggested dx when present, else
+          free-text. "Change diagnosis & re-draft" patches the chart dx AND re-runs the draft (changeDx). */}
+      <div className="mt-4 rounded-md border border-amber-200 bg-white p-3">
+        <label htmlFor="gate2-dx-change" className="block text-sm font-medium text-slate-800">Change the diagnosis &amp; re-draft</label>
+        <p className="mt-0.5 text-xs text-slate-500">Type the condition the letter should argue (e.g. &ldquo;osteoarthritis&rdquo;). This updates the chart&apos;s claimed condition and re-aims the draft. You&apos;ll confirm with a brief reason (logged).</p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input
+            id="gate2-dx-change"
+            type="text"
+            value={dxInput}
+            onChange={(e) => setDxInput(e.target.value)}
+            placeholder="New diagnosis"
+            disabled={busy}
+            className="min-w-[14rem] flex-1 rounded-md border border-amber-300 px-2.5 py-1.5 text-sm text-slate-800 placeholder:text-slate-400 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:bg-slate-50"
+          />
+          <Button variant="secondary" size="sm" className={amberOutline} disabled={busy || dxInput.trim().length === 0} onClick={doChangeDx}>Change diagnosis &amp; re-draft</Button>
+        </div>
       </div>
       <p className="mt-3 text-xs text-amber-800">Every choice is logged and shown in the chart&apos;s Decisions &amp; overrides panel.</p>
     </Card>

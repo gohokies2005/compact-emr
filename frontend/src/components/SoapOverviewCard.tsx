@@ -190,7 +190,25 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   // wedged/failed precompute can't poll for the life of an open tab; after the cap we show a manual "check
   // again" affordance (which fires one more cheap pollOnly).
   const servedNote = soapQ.data?.data ?? null;
-  const soapProvisional = soapQ.data !== undefined && servedNote !== null && servedNote.fallback === true;
+  // PROVISIONAL FOR ANY REASON (Dr. Kasky 2026-06-29, Marcus Bennett — 2nd attempt). The served note is NOT
+  // the final, complete, grounded note — and must keep polling — when ANY of:
+  //   (1) it is a `fallback` truncation brief (the 25s sync open truncated; the 110s async precompute is still
+  //       writing the real note) — the original gate, still covered;
+  //   (2) the chart it was built on is STILL being analyzed (chartAnalysis.state / coverage status
+  //       'in_progress') — the missed case: the note is a REAL (fallback:false) note whose prose hedges "…not
+  //       fully extracted in the available pages", written while extraction was mid-flight. The OLD gate only
+  //       checked (1), so this state never polled → the note persisted until a HARD REFRESH re-read the note
+  //       the completed extraction had since produced. We exclude the TERMINAL degraded states (failed /
+  //       'incomplete' / whole-file gap): those will not improve by polling (they need a manual re-extraction),
+  //       so polling them would just spin to the cap. Only the self-resolving in_progress state polls here.
+  //   (3) the served note is `stale` — its inputs drifted since it was written (e.g. the chart finished AFTER
+  //       the note, even once the in_progress banner already healed) — so a refreshed note is owed.
+  const chartAnalysisInFlight = covData?.chartAnalysis?.state === 'in_progress' || covData?.status === 'in_progress';
+  const soapProvisional = soapQ.data !== undefined && (
+    (servedNote !== null && servedNote.fallback === true)
+    || chartAnalysisInFlight
+    || soapQ.data.stale === true
+  );
   const SOAP_POLL_MS = 15_000;
   const SOAP_MAX_POLLS = 20; // ~5 min at 15s — hygiene cap, not a cost guard (pollOnly is $0)
   // Count completed polls so we can STOP after the cap (a wedged/failed precompute must not poll for the life of
@@ -215,11 +233,35 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   useEffect(() => {
     const res = soapPollQ.data;
     if (!res) return;
-    if (res.data && res.data.fallback !== true) { qc.setQueryData(soapKey, res); return; }
+    // The backend pollOnly lands a note ONLY when it is final + fingerprint-CURRENT (a drifted/still-generating
+    // status returns generating:true with data:null). So a non-null, non-fallback `data` here is the complete
+    // grounded note for the now-current chart → fold it into the MAIN query (the card shows it; soapProvisional
+    // flips false → the poll disables itself). Anything else (generating, or a defensive fallback) counts toward
+    // the cap.
+    if (res.generating !== true && res.data && res.data.fallback !== true) { qc.setQueryData(soapKey, res); return; }
     setSoapPollCount((n) => n + 1);
     // soapKey is a stable per-case tuple; qc is stable. Re-run only when a new poll result lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [soapPollQ.dataUpdatedAt]);
+
+  // KICK THE SINGLE DRIFT-RECOMPUTE WHEN THE CHART FINISHES (Dr. Kasky 2026-06-29, Marcus Bennett). The pollOnly
+  // status-check is $0 and deliberately fires NO recompute — so on its own it would wait forever for a refreshed
+  // note that nothing produces. When the chart analysis transitions in_progress -> settled (extraction finished
+  // while the RN sat on the page), we invalidate the MAIN soap query ONCE. That normal (non-poll) re-open hits
+  // serve-stored-first, sees the fingerprint drift (the stored note was built on the pre-completion chart) and
+  // fires the ONE off-request recompute that writes the complete, current-fingerprint note — which the poll then
+  // folds in. The ref guard makes this fire once per in_progress->settled edge, never per coverage tick (no
+  // recompute storm). navigate-away-and-back is separately covered by soapQ's refetchOnMount:'always'.
+  const chartWasInFlight = useRef(false);
+  useEffect(() => {
+    const inFlight = chartAnalysisInFlight;
+    if (chartWasInFlight.current && !inFlight) void qc.invalidateQueries({ queryKey: soapKey });
+    chartWasInFlight.current = inFlight;
+    // soapKey is a stable per-case tuple; qc is stable. Re-run only on the in-flight flag changing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartAnalysisInFlight]);
+  // Reset the edge-detector when the case changes (a fresh card must not inherit the prior case's flag).
+  useEffect(() => { chartWasInFlight.current = false; }, [caseId]);
 
   // ── Route-picker plan RELIABILITY (Ryan 2026-06-21, Zimmelman) ───────────────────────────────────────
   // The plan compute is the SAME brain the drafter uses. Rather than showing a misleading resting "Not

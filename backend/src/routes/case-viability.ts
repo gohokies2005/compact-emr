@@ -140,7 +140,17 @@ export function createCaseViabilityRouter(db: AppDb): Router {
           const fingerprint = soapNoteFingerprint(ctx);
           const storedRow = await (db as unknown as SoapOverviewCacheDb).soapOverview.findUnique({ where: { caseId } });
           const decision = decideServeStored(storedRow, fingerprint);
-          if (decision) {
+          // LAND only on a FINAL, FINGERPRINT-CURRENT note (Marcus Bennett 2026-06-29). decideServeStored
+          // returns a stored note whenever it is current-shape + non-fallback REGARDLESS of fingerprint drift
+          // (refresh flags the drift). For the auto-refresh poll that is not enough: a DRIFTED stored note is
+          // the note written on the PRIOR chart (e.g. while extraction was still in_progress) — its prose
+          // hedges "not fully extracted in the available pages". If the poll served that drifted note as
+          // final, the card would swap the SAME provisional note in and the poll would disable itself (the bug
+          // the widened poll-gate would otherwise expose). So we land ONLY when refresh===false (the stored
+          // note matches the CURRENT, now-complete chart); a drifted note reports generating:true so the poll
+          // keeps waiting for the refreshed note. Still $0: no model call, no recompute fired here (the normal
+          // open path fires the single drift-recompute that produces the current-fingerprint note).
+          if (decision && decision.refresh === false) {
             res.json({ data: decision.note, fingerprint, stale: false, cached: true, grounded: routePickerFraming !== null, routePickerFraming, generating: false });
             return;
           }

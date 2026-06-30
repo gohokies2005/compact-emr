@@ -1,0 +1,27 @@
+-- FIX (version-inflation incident, 2026-06-29): drop the BEFORE-UPDATE touch-version trigger from
+-- draft_jobs.
+--
+-- ROOT CAUSE: migration 20260523030000_phase1_schema attaches compact_emr_touch_version()
+-- (NEW.version = OLD.version + 1) to a hand-listed set of Phase-1 tables, and draft_jobs was
+-- WRONGLY included. For every OTHER table in that list `version` is an optimistic-lock counter and the
+-- auto-increment is correct. But for draft_jobs `version` is the SEMANTIC letter version (v5 = the 5th
+-- nexus-letter draft); it is NOT a lock counter (the job has no separate lock field — its concurrency
+-- is enforced by the draft_jobs_case_id_in_flight_uq partial unique + terminal-state guards).
+--
+-- CONSEQUENCE: every /progress heartbeat issues an UPDATE on the row, so the trigger inflated
+-- draft_jobs.version on each beat (Dick: created v5, ended v27; Case.currentVersion advanced to 26).
+-- Version-derived S3 artifact keys (drafter-artifacts/<caseId>/v<N>/v<N>.txt|pdf) then 404 because the
+-- rendered object lives at the TRUE version, not the inflated one.
+--
+-- FIX: draft_jobs.version must be set ONLY by application code (the drafter version authority is
+-- letter-current.ts's stored keys, never arithmetic), so the row carries no touch-version trigger.
+-- Dropping the trigger is metadata-only and safe live (existing rows are untouched; future UPDATEs
+-- simply stop mutating version).
+--
+-- NOTE: schema.prisma is unchanged — `version` was never modeled as @default(autoincrement()); the
+-- arithmetic lived only in this DB trigger.
+--
+-- NOTE: this DROP does NOT repair the rows already corrupted by the trigger (e.g. Dick's
+-- Case.currentVersion=26). Those survive on the READ path via LetterRevision's stored S3 keys. A
+-- SEPARATE read-only audit + realign of corrupted currentVersion rows is owed (tracked in INCIDENTS.md).
+DROP TRIGGER IF EXISTS draft_jobs_touch_version ON draft_jobs;

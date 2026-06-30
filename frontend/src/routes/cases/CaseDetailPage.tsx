@@ -44,7 +44,7 @@ import { ConflictError, describeApiError } from '../../api/client';
 import { letterFilename } from '../../lib/letterFilename';
 import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseStatus';
 import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
-import { resolveCaseTopPanels, CHART_WORKING_STATUSES } from '../../lib/caseTopPanels';
+import { resolveCaseTopPanels, CHART_WORKING_STATUSES, deriveLatestHaltSignals, type DraftJobHaltShape } from '../../lib/caseTopPanels';
 import { resolveViewableLetterJob } from '../../lib/viewableLetter';
 import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 // CaseViabilityCard mount REMOVED from this page (Ryan 2026-06-20, item #64): the static M/E
@@ -605,14 +605,27 @@ export function CaseDetailPage() {
             {(() => {
               // Phase 8: physician/ops drafter panels. Derived from latest DraftJob + Case state.
               const latestDraftJob = c.draftJobs?.[0] as InFlightDraftJob | undefined;
-              const haltedJob = (c.draftJobs ?? []).find((j) => (j as { state?: string }).state === 'halted');
+              // Halt signals derive from the NEWEST job ONLY (deriveLatestHaltSignals) — NOT a
+              // .some()/.find() over the whole history. A resumed-then-cancelled draft leaves an OLD
+              // halted job + its haltPayloadJson behind; reading those over all jobs made a cancelled
+              // case wrongly render the Gate-2 dx card (the resume→cancel residual bug, 2026-06-30).
+              // c.draftJobs is enqueuedAt DESC (backend cases.ts) so index 0 is the newest.
+              const haltSignals = deriveLatestHaltSignals(c.draftJobs as readonly DraftJobHaltShape[] | undefined);
+              // The CURRENT halt is always the latest job (any newer job moved the case off the halt),
+              // so the Gate-2 panel reads its `job` prop from the latest job when it is halted.
+              const haltedJob = haltSignals.hasHaltedJob ? latestDraftJob : undefined;
               const p = resolveCaseTopPanels({
                 status: c.status,
                 role,
                 latestDraftState: latestDraftJob?.state,
                 hasLatestDraftJob: !!latestDraftJob,
                 hasCompletedDraft: (c.draftJobs ?? []).some((job) => job.state === 'done'),
-                hasHaltedJob: !!haltedJob,
+                hasHaltedJob: haltSignals.hasHaltedJob,
+                // A persisted Gate-2 halt payload / 'halted' state on the NEWEST job = a REAL dx/event
+                // verification halt. Newest-only (see deriveLatestHaltSignals) so a cancelled/watcher-
+                // reconciled draft (needs_rn_decision + paused, latest job failed) stays OFF the dx
+                // card and on the calm OpsHeld panel even when an OLDER job carried a halt payload.
+                hasHaltPayload: haltSignals.hasHaltPayload,
                 hasViewableLetterJob: !!viewableLetterJob,
                 runComplete: c.runComplete,
                 shipRecommendation: c.shipRecommendation,

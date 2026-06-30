@@ -55,6 +55,17 @@ const AUTO_RERUN_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const QUEUE_ABANDON_MS = 120 * 60 * 1000; // 2h — queued job that never got claimed (backstop only)
 const BATCH_LIMIT = 100; // per invocation; lifecycle: 100 * (60/5) = 1200/hr max sweep rate
 
+// RECONCILE staleness floor (Fix, 2026-06-30). The reconcile pass takes a case OFF a stranded
+// status='drafting' once its NEWEST draft job is terminal. Without a time floor it fires on the first
+// sweep after the job goes terminal — safe TODAY only by the cross-repo convention that every failed
+// /complete also sets operatorState='paused' (which the pass excludes). That convention is the only
+// thing standing between this pass and a draft whose /complete callback is still settling. The floor
+// makes the liveness-recompute self-safe: only reconcile a case whose newest job has been terminal for
+// LONGER than this — comfortably past STALE_THRESHOLD_MS (10min). Dick-class strands are long-stuck, so
+// the delay costs nothing. (This is the recurring hash-drift / recompute-liveness class — never let a
+// recompute race a still-settling producer.)
+const RECONCILE_TERMINAL_FLOOR_MS = 15 * 60 * 1000;
+
 let cachedPrisma: PrismaClient | null = null;
 
 function getPrisma(): PrismaClient {
@@ -69,6 +80,10 @@ export interface StuckJobWatcherResult {
   // ADDITION A: count of swept 'running' jobs that were auto-RE-RUN (a fresh full draft, bounded once
   // per case) instead of left at the manual dead-end.
   autoReran: number;
+  // RECONCILE pass (Bug 1, 2026-06-29): count of cases stranded at status='drafting' with NO in-flight
+  // job (newest job terminal) that were taken OFF 'drafting' (→ needs_rn_decision/paused). Heals Dick +
+  // any pre-fix cancels whose terminal job the stale-job sweep never sees.
+  reconciled: number;
   ranAt: string;
 }
 
@@ -77,6 +92,8 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
   const staleBoundary = new Date(now.getTime() - STALE_THRESHOLD_MS);
   const queueAbandonBoundary = new Date(now.getTime() - QUEUE_ABANDON_MS);
   const lifetimeBoundary = new Date(now.getTime() - MAX_LIFETIME_MS);
+  // Only reconcile a stranded drafting case whose NEWEST job has been terminal since before this.
+  const reconcileTerminalBoundary = new Date(now.getTime() - RECONCILE_TERMINAL_FLOOR_MS);
   // The Lambda runtime passes the EVENT as the first arg, so injectedPrisma is the event object (truthy,
   // so `?? getPrisma()` wrongly kept it → `event.draftJob` undefined → crash on every scheduled run, the
   // safety net silently dead since 2026-06-06). Only use it if it's an actual PrismaClient (has draftJob).
@@ -111,8 +128,11 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
   });
 
   if (stuckJobs.length === 0) {
+    // No STALE in-flight job to reap — but still fall through to the RECONCILE pass below: a case can
+    // be stranded at status='drafting' with NO in-flight job (its newest job already went terminal),
+    // which the stale-job sweep never sees. (Bug 1 / Dick: a cancelled job ended terminal but the case
+    // was never taken off 'drafting'.)
     console.log(JSON.stringify({ msg: 'stuck-job-watcher: no stale jobs', scanned: 0, swept: 0, ranAt: now.toISOString() }));
-    return { scanned: 0, swept: 0, autoReran: 0, ranAt: now.toISOString() };
   }
 
   let swept = 0;
@@ -210,7 +230,96 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
     }
   }
 
-  const summary = { scanned: stuckJobs.length, swept, autoReran, ranAt: now.toISOString() };
+  // ───────────────────────────────────────────────────────────────────────────────────────────────
+  // RECONCILE pass (Bug 1, 2026-06-29). A case can be stranded at status='drafting' with NO in-flight
+  // job — the cancel route (pre-fix) flipped its job terminal but never took the case off 'drafting',
+  // so the Cases list read "Drafting" forever (Dick). The stale-job sweep above never sees these (the
+  // job is already terminal, not stale), so we reconcile them here directly off Case.status.
+  //
+  // Predicate: status='drafting' AND it HAS a draft job AND none of them is queued|running (newest job
+  // terminal). EXCLUDE operatorState='paused' — that is exactly the state the stale-job sweep above sets
+  // when it intentionally LEAVES a case at 'drafting' for the OpsHeldPanel "interrupted" affordance; we
+  // must not clobber that deliberate handling. Pre-fix cancels + Dick are NOT paused, so they qualify.
+  // (Prisma `{ not: 'paused' }` also returns NULL operatorState rows.)
+  //
+  // Transition mirrors the cancel route (drafter.ts) so a stranded case and a fresh cancel land in the
+  // SAME state. Idempotent: once moved to needs_rn_decision the row no longer matches status='drafting',
+  // so a re-run never re-touches it (no loop).
+  const reconcileMessage =
+    'This draft didn’t finish. Click Send to Drafter to start a new draft when ready.';
+  let reconciled = 0;
+  try {
+    const strandedDrafting = await prisma.case.findMany({
+      where: {
+        status: 'drafting',
+        operatorState: { not: 'paused' },
+        draftJobs: { some: {}, none: { state: { in: ['queued', 'running'] } } },
+      },
+      select: {
+        id: true,
+        version: true,
+        // The NEWEST job (enqueuedAt DESC, take:1). `none queued/running` above guarantees every job is
+        // terminal, so this is the most-recent terminal job; its completedAt (fallback updatedAt) is when
+        // the case actually went idle — what the staleness floor measures against.
+        draftJobs: {
+          orderBy: { enqueuedAt: 'desc' },
+          take: 1,
+          select: { state: true, completedAt: true, updatedAt: true },
+        },
+      },
+      take: BATCH_LIMIT,
+    });
+    // STALENESS FLOOR (Fix, 2026-06-30): only reconcile a case whose newest job has been terminal for
+    // longer than RECONCILE_TERMINAL_FLOOR_MS (15min). A case whose newest job JUST went terminal is left
+    // for the next sweep so this pass can never reconcile a draft whose /complete callback is still
+    // settling — relying on the cross-repo paused-on-failure convention alone is the corner this closes.
+    const reconcileTargets = strandedDrafting.filter((c) => {
+      const newest = c.draftJobs[0];
+      if (newest === undefined) return false; // some:{} guarantees a job exists, but stay defensive
+      const terminalAt = newest.completedAt ?? newest.updatedAt;
+      return terminalAt.getTime() <= reconcileTerminalBoundary.getTime();
+    });
+    for (const c of reconcileTargets) {
+      try {
+        await prisma.$transaction([
+          prisma.case.update({
+            where: { id: c.id },
+            data: {
+              status: 'needs_rn_decision',
+              operatorState: 'paused',
+              operatorMessage: reconcileMessage,
+              runComplete: false,
+              version: { increment: 1 },
+            },
+          }),
+          prisma.activityLog.create({
+            data: {
+              actorUserId: SERVICE_ACTORS.STUCK_JOB_WATCHER,
+              caseId: c.id,
+              action: 'case_drafting_reconciled',
+              detailsJson: { reason: 'no_in_flight_job', priorStatus: 'drafting' },
+            },
+          }),
+        ]);
+        reconciled += 1;
+        console.log(JSON.stringify({ msg: 'stuck-job-watcher: reconciled stranded drafting case', caseId: c.id }));
+      } catch (err) {
+        console.error(JSON.stringify({
+          msg: 'stuck-job-watcher: reconcile failed',
+          caseId: c.id,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+      }
+    }
+  } catch (err) {
+    // A reconcile-query failure must never fail the whole invocation (the sweep above already succeeded).
+    console.error(JSON.stringify({
+      msg: 'stuck-job-watcher: reconcile query failed',
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+
+  const summary = { scanned: stuckJobs.length, swept, autoReran, reconciled, ranAt: now.toISOString() };
   console.log(JSON.stringify({ msg: 'stuck-job-watcher: summary', ...summary }));
   return summary;
 }

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { resolveCaseTopPanels, type CaseTopPanelInputs } from './caseTopPanels';
+import {
+  resolveCaseTopPanels,
+  deriveLatestHaltSignals,
+  type CaseTopPanelInputs,
+  type DraftJobHaltShape,
+} from './caseTopPanels';
 import type { CaseStatus, Role } from '../types/prisma';
 
 // C8c panel stability, 2026-06-14: pins the status×role→panel matrix the claim page's top region
@@ -14,6 +19,7 @@ function inputs(over: Partial<CaseTopPanelInputs> & { status: CaseStatus; role: 
     hasLatestDraftJob: false,
     hasCompletedDraft: false,
     hasHaltedJob: false,
+    hasHaltPayload: false,
     hasViewableLetterJob: false,
     runComplete: undefined,
     shipRecommendation: undefined,
@@ -78,6 +84,52 @@ describe('resolveCaseTopPanels', () => {
     expect(resolveCaseTopPanels(inputs({ status: 'drafting', role: 'ops_staff' })).isGate2Halt).toBe(false);
   });
 
+  // ── CANCELLED / WATCHER-RECONCILED draft: calm OpsHeld panel, NOT the dx-verification card ──
+  // (Ryan 2026-06-29). A user-cancelled or watcher-reaped draft lands at needs_rn_decision +
+  // operatorState='paused' with NO halt payload and NO halted job. The OLD gate read needs_rn_decision
+  // as a Gate-2 halt and wrongly showed the dx card ("override / records are in / change the dx") whose
+  // buttons are nonsensical for a cancelled case. The discriminator (isParkedWithoutHalt) routes it to
+  // OpsHeld and EXCLUDES it from Gate2HaltPanel.
+  it('cancelled/interrupted (needs_rn_decision + paused, no halt payload, no halted job) → OpsHeld, NOT Gate2', () => {
+    const p = resolveCaseTopPanels(inputs({
+      status: 'needs_rn_decision', role: 'ops_staff', operatorState: 'paused',
+      hasHaltPayload: false, hasHaltedJob: false,
+    }));
+    expect(p.canSeeOpsHeldPanel).toBe(true);   // calm "this draft did not finish — start a new draft" panel
+    expect(p.isGate2Halt).toBe(false);          // dx-verification card suppressed
+    expect(p.canSendFirstDraft).toBe(false);    // OpsHeld's "Re-run full draft" owns the single redraft action
+  });
+
+  it('cancelled/interrupted routes to OpsHeld for admin too', () => {
+    const p = resolveCaseTopPanels(inputs({
+      status: 'needs_rn_decision', role: 'admin', operatorState: 'paused',
+    }));
+    expect(p.canSeeOpsHeldPanel).toBe(true);
+    expect(p.isGate2Halt).toBe(false);
+  });
+
+  it('REAL dx-halt: needs_rn_decision + persisted halt payload STILL shows Gate2HaltPanel (no regression)', () => {
+    // A genuine dx-verification halt carries haltPayloadJson (e.g. reasonCode dx_not_found) — it must
+    // STILL render the Gate-2 card even if operatorState reads 'paused'.
+    const withPayload = resolveCaseTopPanels(inputs({
+      status: 'needs_rn_decision', role: 'ops_staff', operatorState: 'paused', hasHaltPayload: true,
+    }));
+    expect(withPayload.isGate2Halt).toBe(true);
+    expect(withPayload.canSeeOpsHeldPanel).toBe(false);
+    // and via a job in 'halted' state (the other positive halt signal)
+    const withHaltedJob = resolveCaseTopPanels(inputs({
+      status: 'needs_rn_decision', role: 'ops_staff', operatorState: 'paused', hasHaltedJob: true,
+    }));
+    expect(withHaltedJob.isGate2Halt).toBe(true);
+    expect(withHaltedJob.canSeeOpsHeldPanel).toBe(false);
+  });
+
+  it('needs_records is UNCHANGED — still a Gate-2 halt, never the cancelled-draft path', () => {
+    const p = resolveCaseTopPanels(inputs({ status: 'needs_records', role: 'ops_staff', operatorState: 'paused' }));
+    expect(p.isGate2Halt).toBe(true);
+    expect(p.canSeeOpsHeldPanel).toBe(false);
+  });
+
   it('the RN-lock sky banner is ops_staff-only in physician_review', () => {
     expect(resolveCaseTopPanels(inputs({ status: 'physician_review', role: 'ops_staff' })).isRnLockBanner).toBe(true);
     expect(resolveCaseTopPanels(inputs({ status: 'physician_review', role: 'admin' })).isRnLockBanner).toBe(false);
@@ -133,5 +185,52 @@ describe('resolveCaseTopPanels', () => {
     }));
     expect(p.canSeeOpsHeldPanel).toBe(true);
     expect(p.canShowRnEditorEntry).toBe(true);
+  });
+});
+
+// ── deriveLatestHaltSignals: NEWEST-job-only halt derivation (resume→cancel residual, 2026-06-30) ──
+// CaseDetailPage previously read hasHaltPayload via .some() over ALL jobs and the halted job via .find()
+// over ALL jobs. After a draft halted (job1=halted+payload) → RN resumed (job2 queued) → RN cancelled
+// (job2=failed, case→needs_rn_decision+paused), job1's stale payload kept hasHaltPayload/hasHaltedJob
+// true, so the cancelled case wrongly rendered the Gate-2 dx card. The fix derives BOTH signals from the
+// newest job only. (draftJobs is newest-first — enqueuedAt DESC, backend cases.ts.)
+describe('deriveLatestHaltSignals (newest-job-only halt derivation)', () => {
+  it('resume→cancel residual: [failed (newest), halted+payload (older)] → NO halt signals', () => {
+    const jobs: DraftJobHaltShape[] = [
+      { state: 'failed', haltPayloadJson: null },                         // newest (the cancelled resume)
+      { state: 'halted', haltPayloadJson: { reasonCode: 'dx_not_found' } }, // older (the original halt)
+    ];
+    const s = deriveLatestHaltSignals(jobs);
+    expect(s.hasHaltPayload).toBe(false);
+    expect(s.hasHaltedJob).toBe(false);
+
+    // …and end-to-end through the resolver at the live state: it lands on OpsHeld, NOT Gate2.
+    const p = resolveCaseTopPanels(inputs({
+      status: 'needs_rn_decision', role: 'ops_staff', operatorState: 'paused',
+      hasHaltPayload: s.hasHaltPayload, hasHaltedJob: s.hasHaltedJob,
+    }));
+    expect(p.isGate2Halt).toBe(false);
+    expect(p.canSeeOpsHeldPanel).toBe(true);
+  });
+
+  it('a real CURRENT halt (newest job halted+payload) STILL yields halt signals → Gate2 (no regression)', () => {
+    const jobs: DraftJobHaltShape[] = [
+      { state: 'halted', haltPayloadJson: { reasonCode: 'dx_not_found' } }, // newest IS the halt
+    ];
+    const s = deriveLatestHaltSignals(jobs);
+    expect(s.hasHaltPayload).toBe(true);
+    expect(s.hasHaltedJob).toBe(true);
+
+    const p = resolveCaseTopPanels(inputs({
+      status: 'needs_rn_decision', role: 'ops_staff', operatorState: 'paused',
+      hasHaltPayload: s.hasHaltPayload, hasHaltedJob: s.hasHaltedJob,
+    }));
+    expect(p.isGate2Halt).toBe(true);
+    expect(p.canSeeOpsHeldPanel).toBe(false);
+  });
+
+  it('empty / undefined history → no halt signals (no crash)', () => {
+    expect(deriveLatestHaltSignals([])).toEqual({ hasHaltPayload: false, hasHaltedJob: false });
+    expect(deriveLatestHaltSignals(undefined)).toEqual({ hasHaltPayload: false, hasHaltedJob: false });
   });
 });

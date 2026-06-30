@@ -26,6 +26,10 @@ export interface CaseTopPanelInputs {
   readonly hasCompletedDraft: boolean;
   // a job with state 'halted' exists (drives the Gate-2 halt panel's job prop upstream)
   readonly hasHaltedJob: boolean;
+  // a persisted Gate-2 halt payload (DraftJob.haltPayloadJson) exists on ANY draft job. Together with
+  // hasHaltedJob this is the positive signal of a REAL dx/event verification halt — distinguishing it
+  // from a user-cancelled / watcher-reconciled draft that lands at needs_rn_decision with no halt data.
+  readonly hasHaltPayload: boolean;
   // there is a viewable letter job (terminal/keyed) — gates the RN editor-entry card
   readonly hasViewableLetterJob: boolean;
   // held-state signals (OpsHeldPanel)
@@ -59,6 +63,31 @@ export interface CaseTopPanels {
   readonly canSeeExtractionCoverage: boolean;
 }
 
+// The minimal shape of a DraftJob row the halt-signal derivation reads. The case API returns
+// draftJobs ordered enqueuedAt DESC (backend cases.ts), so index 0 is ALWAYS the newest job.
+export interface DraftJobHaltShape {
+  readonly state?: string | null;
+  readonly haltPayloadJson?: unknown;
+}
+
+// Derive the Gate-2 halt signals (hasHaltPayload / hasHaltedJob) from the NEWEST draft job ONLY.
+//
+// WHY newest-only (Fix, 2026-06-30): a draft halt that is later RESUMED (a new queued/drafting job)
+// or CANCELLED (job→failed, case→needs_rn_decision+paused) leaves the OLD halted job AND its
+// haltPayloadJson in the row history. The prior derivation read them with .some()/.find() over ALL
+// jobs, so a stale prior halt out-voted the current state and a cancelled case wrongly rendered the
+// Gate-2 dx card. Any job NEWER than a halt necessarily moved the case off that halt, so a genuine
+// CURRENT halt is ALWAYS the latest job. `jobs` is newest-first (enqueuedAt DESC, per cases.ts).
+export function deriveLatestHaltSignals(
+  jobs: readonly DraftJobHaltShape[] | undefined,
+): { hasHaltPayload: boolean; hasHaltedJob: boolean } {
+  const latest = jobs?.[0];
+  return {
+    hasHaltPayload: !!latest?.haltPayloadJson,
+    hasHaltedJob: latest?.state === 'halted',
+  };
+}
+
 // The staff working window where the chart matters + the extraction-coverage score is relevant. NOT
 // physician_review / delivered / paid / rejected (the chart's read job is done by then).
 export const CHART_WORKING_STATUSES: readonly CaseStatus[] = [
@@ -81,16 +110,33 @@ export function resolveCaseTopPanels(input: CaseTopPanelInputs): CaseTopPanels {
   //       a bare "Send to Drafter" (looked like a fresh start, no "it was interrupted" explanation) and
   //       silently sat at 'drafting'. THIS is the orphaned-status bug. latestDraftState==='failed' with
   //       no completed draft, in 'drafting' status, IS an interrupted draft.
+  // CANCELLED / WATCHER-RECONCILED draft (Ryan 2026-06-29). When a user cancels a draft, or the
+  // stuck-job watcher reaps/reconciles a dead run, the case lands at status='needs_rn_decision' +
+  // operatorState='paused' with NO persisted halt payload and NO job in 'halted' state. This is NOT a
+  // Gate-2 dx/event verification halt — it is an interrupted draft. The two gates below BOTH key on
+  // this single predicate so they can never disagree about which case it is: it routes to the calm
+  // OpsHeld "this draft did not finish — start a new draft" panel, and is EXCLUDED from isGate2Halt so
+  // it never renders the dx-verification card (whose "override / records are in / change the dx"
+  // buttons are nonsensical for a cancelled case). A REAL dx-halt always carries hasHaltPayload and/or
+  // hasHaltedJob, so those two guards keep genuine halts on the Gate-2 panel even when operatorState
+  // happens to read 'paused'.
+  const isParkedWithoutHalt =
+    status === 'needs_rn_decision' &&
+    input.operatorState === 'paused' &&
+    !input.hasHaltPayload &&
+    !input.hasHaltedJob;
+
   const canSeeOpsHeldPanel =
     isStaff &&
-    status === 'drafting' &&
-    (input.runComplete === false ||
-      input.shipRecommendation === 'revise' ||
-      (latestDraftState === 'failed' && !input.hasCompletedDraft) ||
-      (input.operatorState !== undefined &&
-        input.operatorState !== null &&
-        input.operatorState !== 'ready' &&
-        input.operatorState !== 'ready_with_notes'));
+    ((status === 'drafting' &&
+      (input.runComplete === false ||
+        input.shipRecommendation === 'revise' ||
+        (latestDraftState === 'failed' && !input.hasCompletedDraft) ||
+        (input.operatorState !== undefined &&
+          input.operatorState !== null &&
+          input.operatorState !== 'ready' &&
+          input.operatorState !== 'ready_with_notes'))) ||
+      isParkedWithoutHalt);
 
   // Hide "Send to Drafter" while parked at a Gate-2 halt — the halt panel owns the decision there.
   // ALSO hide it when the interrupted panel is showing (Ryan 2026-06-18): an interrupted draft must offer
@@ -105,7 +151,10 @@ export function resolveCaseTopPanels(input: CaseTopPanelInputs): CaseTopPanels {
 
   const canSeeRnReviewPanel = status === 'rn_review' && isStaff;
 
-  const isGate2Halt = status === 'needs_rn_decision' || status === 'needs_records';
+  // EXCLUDE the cancelled/interrupted case (isParkedWithoutHalt) so it stops routing to Gate2HaltPanel.
+  // needs_records is unaffected (a records hold never carries operatorState='paused' as its signal).
+  const isGate2Halt =
+    (status === 'needs_rn_decision' || status === 'needs_records') && !isParkedWithoutHalt;
 
   const isRnLockBanner = role === 'ops_staff' && status === 'physician_review';
 

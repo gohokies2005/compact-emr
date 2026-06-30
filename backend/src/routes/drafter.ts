@@ -726,6 +726,23 @@ export function createDrafterClientRouter(db: AppDb): Router {
           where: { id: jobId },
           data: { state: 'failed', failureClass: 'system', completedAt: new Date(), errorMessage: 'Cancelled by RN' },
         });
+        // FIX (Bug 1, 2026-06-29): a cancel left Case.status at 'drafting' forever, so the Cases list
+        // kept reading "Drafting" with no in-flight job. Take the case OFF 'drafting' here. Target
+        // 'needs_rn_decision' (the decision-made park) — NOT 'rn_review', which would imply a completed
+        // letter exists. Mirror the stuck-job-watcher's terminal-case write (operatorState 'paused' +
+        // friendly operatorMessage + runComplete false + version bump so the 8s-poll UI refetches). The
+        // newest DraftJob is now terminal ('failed'), so the in-flight gate clears and redraft (POST
+        // /draft) stays available.
+        await tx.case.update({
+          where: { id: job.caseId },
+          data: {
+            status: 'needs_rn_decision',
+            operatorState: 'paused',
+            operatorMessage: 'This draft was cancelled. Click Send to Drafter to start a new draft when ready.',
+            runComplete: false,
+            version: { increment: 1 },
+          },
+        });
         await tx.activityLog.create({ data: { actorUserId: actor.sub, caseId: job.caseId, action: 'draft_job_cancelled', detailsJson: { jobId, cancelledBy: actor.sub } } });
         return j;
       });

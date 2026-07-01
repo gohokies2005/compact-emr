@@ -121,11 +121,13 @@ describe('GuidedRevisionPanel', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument(); // not the red rejection block
   });
 
-  it('shows a too-long / try-a-sentence message on proposal_unavailable / passage_too_complex', async () => {
+  it('shows a too-long / try-a-smaller-selection message on proposal_unavailable / passage_too_complex', async () => {
     proposeMock.mockRejectedValue(new SurgicalEditUnappliableError({ reason: 'proposal_unavailable', detail: 'passage_too_complex', passageTooLong: true }));
     renderPanel();
     await fillAndPropose();
-    expect(await screen.findByText(/it may be too long.*single sentence|single sentence.*hand-edit/i, undefined, FIND)).toBeInTheDocument();
+    // wording updated by #165 (full-section revision hardened to ~1-2 pages): "smaller selection … hand-edit",
+    // not the older "single sentence". Match the CURRENT component copy (GuidedRevisionPanel.tsx proposalUnavailableMessage).
+    expect(await screen.findByText(/it may be too long.*smaller selection|smaller selection.*hand-edit/i, undefined, FIND)).toBeInTheDocument();
     expect(screen.queryByText(/could not be generated/i)).not.toBeInTheDocument();
   });
 

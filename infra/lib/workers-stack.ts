@@ -490,9 +490,9 @@ export class WorkersStack extends Stack {
     textractCompletionTopic.addSubscription(new subs.LambdaSubscription(ocrCompletion, {
       deadLetterQueue: ocrCompletionDlq,
     }));
-    new cloudwatch.Alarm(this, 'OcrCompletionDlqDepthAlarm', {
+    const ocrCompletionDlqDepthAlarm = new cloudwatch.Alarm(this, 'OcrCompletionDlqDepthAlarm', {
       alarmName: `compact-emr-${config.envName}-ocr-completion-dlq-depth`,
-      alarmDescription: 'An ocr-completion SNS delivery exhausted retries and landed in the DLQ — a Textract completion (page text or the read-attempt-failed flag) was NOT recorded, so a doc may be stranded non-terminal. The stuck-doc watcher auto-recovers this; inspect compact-emr-' + config.envName + '-ocr-completion-dlq for the raw message.',
+      alarmDescription: 'ACTION NEEDED — A scanned document could not have its read results saved after several automatic retries and is now waiting in the holding queue compact-emr-' + config.envName + '-ocr-completion-dlq, so that document text may be missing and the case can stall. The stuck-document helper usually fixes this on its own within a few minutes — confirm the case moved forward; if it did not, re-run the read (OCR) on that document.',
       metric: ocrCompletionDlq.metricApproximateNumberOfMessagesVisible({
         statistic: 'Maximum',
         period: Duration.minutes(5),
@@ -507,18 +507,18 @@ export class WorkersStack extends Stack {
     // ocr-start RAISES intentionally on the recordDocument orphan race (self-heals on retry), so require a
     // SUSTAINED error (3 periods) before breaching — a single transient raise must not page. ocr-completion
     // has no such intended-raise, so a tighter 2-period alarm is correct there.
-    new cloudwatch.Alarm(this, 'OcrStartErrorsAlarm', {
+    const ocrStartErrorsAlarm = new cloudwatch.Alarm(this, 'OcrStartErrorsAlarm', {
       alarmName: `compact-emr-${config.envName}-ocr-start-errors`,
-      alarmDescription: 'ocr-start is erroring on a SUSTAINED basis (beyond the benign recordDocument-race retry) — record uploads may not be starting OCR.',
+      alarmDescription: 'ACTION NEEDED — Uploaded records keep failing to begin the read (OCR) step, beyond the harmless first-try timing retry, so the records may never be read and the letter cannot be drafted. Open the function logs at /aws/lambda/compact-emr-' + config.envName + '-ocr-start to see the error; if it is a real failure, the upload path or the reading service is broken and needs a fix.',
       metric: ocrStart.metricErrors({ statistic: 'Sum', period: Duration.minutes(5) }),
       threshold: 1,
       evaluationPeriods: 3,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    new cloudwatch.Alarm(this, 'OcrCompletionErrorsAlarm', {
+    const ocrCompletionErrorsAlarm = new cloudwatch.Alarm(this, 'OcrCompletionErrorsAlarm', {
       alarmName: `compact-emr-${config.envName}-ocr-completion-errors`,
-      alarmDescription: 'ocr-completion is erroring — Textract completions may not be recording page text or the read-attempt-failed flag (the SNS DLQ above captures the dropped messages).',
+      alarmDescription: 'ACTION NEEDED — The step that saves read (OCR) results keeps failing, so scanned page text may not be getting stored, which can leave a document with no readable text and stall the case. The backup queue and the stuck-document helper usually recover it, but open the function logs at /aws/lambda/compact-emr-' + config.envName + '-ocr-completion, then confirm the affected case has its page text; if not, re-run the read on that document.',
       metric: ocrCompletion.metricErrors({ statistic: 'Sum', period: Duration.minutes(5) }),
       threshold: 1,
       evaluationPeriods: 2,
@@ -545,6 +545,10 @@ export class WorkersStack extends Stack {
     // constructor; opsTopic exists now, so attach the action here. (Closes the "no SNS action wired yet" TODO.)
     ocrVisionSpendAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
     ocrStartDlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+    // Group A OCR alarms defined earlier in the constructor (before opsTopic existed) — attach here.
+    ocrCompletionDlqDepthAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+    ocrStartErrorsAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+    ocrCompletionErrorsAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
     const dlqDepthAlarm = (id: string, alarmName: string, queue: sqs.IQueue, what: string): void => {
       const a = new cloudwatch.Alarm(this, id, {
         alarmName,
@@ -789,15 +793,16 @@ export class WorkersStack extends Stack {
       metricName: 'StuckDocSweptToManual',
       metricValue: '1',
     });
-    new cloudwatch.Alarm(this, 'StuckDocSweptToManualAlarm', {
+    const stuckDocSweptToManualAlarm = new cloudwatch.Alarm(this, 'StuckDocSweptToManualAlarm', {
       alarmName: `compact-emr-${config.envName}-stuck-doc-swept-to-manual`,
-      alarmDescription: 'The stuck-doc watcher gave up on one+ files (auto-OCR + a re-fire both failed) and flagged them for manual summary — investigate the file type / OCR path if this is sustained.',
+      alarmDescription: 'FYI, already handled — A file could not be read automatically (the first read and one retry both failed) and was handed to a nurse for a manual summary, so the case is not blocked and nothing is lost. Nothing to do right now — but if this keeps happening, a certain kind of file is defeating the reader; review the file types in the stuck-document helper logs and decide whether the reading step needs work.',
       metric: sweptToManualMetric.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+    stuckDocSweptToManualAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
 
     // ===== Stuck-CHART-EXTRACTION-RUN watcher Lambda (audit 2026-06-13: never stuck, never silent) =====
     // Every 5 min: find a ChartExtractionRun still status IN ('queued','running') with createdAt > 45 min
@@ -968,9 +973,9 @@ export class WorkersStack extends Stack {
       defaultValue: 0,
     });
 
-    new cloudwatch.Alarm(this, 'StuckJobsSweptAlarm', {
+    const stuckJobsSweptAlarm = new cloudwatch.Alarm(this, 'StuckJobsSweptAlarm', {
       alarmName: `compact-emr-${config.envName}-stuck-jobs-swept-high`,
-      alarmDescription: 'Drafter Fargate tasks are repeatedly crashing - watcher swept >3 stuck jobs in 1 hour. Investigate Fargate task logs.',
+      alarmDescription: 'FYI, already handled — The letter-drafting engine crashed more than three times in the last hour. Each interrupted draft was automatically marked failed and is visible to the nurse, so no veteran is silently stuck. Nothing to do right now — but repeated crashes mean the drafting engine is unhealthy; review the drafting task logs, and if this keeps firing the letter pipeline is degraded and needs a person to look.',
       metric: sweptMetricFilter.metric({
         statistic: 'Sum',
         period: Duration.hours(1),
@@ -980,6 +985,7 @@ export class WorkersStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+    stuckJobsSweptAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
 
     // ===== G1 + G6: Stuck-DoctorPack watcher Lambda =====
     // Sweeps DoctorPack rows in two stuck states the existing pipeline doesn't recover from:
@@ -1063,9 +1069,9 @@ export class WorkersStack extends Stack {
       defaultValue: 0,
     });
 
-    new cloudwatch.Alarm(this, 'DoctorPacksSweptAlarm', {
+    const doctorPacksSweptAlarm = new cloudwatch.Alarm(this, 'DoctorPacksSweptAlarm', {
       alarmName: `compact-emr-${config.envName}-doctor-packs-swept-high`,
-      alarmDescription: 'Doctor Pack assembler is repeatedly crashing - watcher swept >2 stuck generating rows in 1 hour. Investigate assembler Lambda logs.',
+      alarmDescription: 'FYI, already handled — The doctor-packet builder crashed more than twice in the last hour. Each stuck packet was automatically marked failed so the nurse can retry it, and nothing is lost. Nothing to do right now — but if it keeps happening the packet builder has a real bug; review the doctor-packet builder logs when convenient.',
       metric: dpSweptMetricFilter.metric({
         statistic: 'Sum',
         period: Duration.hours(1),
@@ -1075,6 +1081,7 @@ export class WorkersStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+    doctorPacksSweptAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
 
     // ===== Jotform intake safety-net sweep (hourly) =====
     // Webhook deliveries can be silently missed (Jotform outage / our 5xx in a deploy window /
@@ -1133,19 +1140,18 @@ export class WorkersStack extends Stack {
 
     // A safety net that can die silently is not a safety net — this alarm is what was MISSING when
     // the sweep AccessDenied'd on every run for days with nobody paged. Any sweep invocation error
-    // (IAM, Jotform unreachable, code throw) breaches within the hour. No SNS action wired here yet
-    // (matches StuckJobsSweptAlarm/DoctorPacksSweptAlarm above — console/dashboard-visible); wire an
-    // ops topic subscription when one exists. NOT-breaching on missing data so a paused schedule
-    // doesn't false-alarm.
-    new cloudwatch.Alarm(this, 'JotformSweepErrorsAlarm', {
+    // (IAM, Jotform unreachable, code throw) breaches within the hour. NOT-breaching on missing data
+    // so a paused schedule doesn't false-alarm.
+    const jotformSweepErrorsAlarm = new cloudwatch.Alarm(this, 'JotformSweepErrorsAlarm', {
       alarmName: `compact-emr-${config.envName}-jotform-sweep-errors`,
-      alarmDescription: 'The hourly Jotform intake safety-net sweep is erroring (IAM / Jotform / code). Intake submissions on unregistered forms may be silently dropped. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-sweep.',
+      alarmDescription: 'ACTION NEEDED — The hourly safety-net that recovers missed intake submissions is itself failing, so the backup is down and any intake the form service drops from here on could be lost for good. This is usually a credentials or permissions problem, or the form service being unreachable. Open the function logs at /aws/lambda/compact-emr-' + config.envName + '-jotform-sweep and get the safety-net working again before the next missed submission.',
       metric: jotformSweep.metricErrors({ statistic: 'Sum', period: Duration.hours(1) }),
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+    jotformSweepErrorsAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
 
     // ===== Real-time webhook DROP detector (2026-06-23 incident, Herman Charles / CKD) =====
     // The SweepErrorsAlarm above only fires if the sweep itself throws. It is BLIND to the failure
@@ -1172,15 +1178,16 @@ export class WorkersStack extends Stack {
       metricValue: '1',
       defaultValue: 0,
     });
-    new cloudwatch.Alarm(this, 'JotformWebhookMissedAlarm', {
+    const jotformWebhookMissedAlarm = new cloudwatch.Alarm(this, 'JotformWebhookMissedAlarm', {
       alarmName: `compact-emr-${config.envName}-jotform-webhook-missed`,
-      alarmDescription: 'The hourly sweep had to RECOVER one+ Jotform submissions whose real-time webhook delivery was silently dropped (Jotform-side miss / our 5xx in a deploy window / a disabled webhook). The intake was saved by the sweep but the real-time path is failing — verify webhook registration on the affected form(s). This is the exact failure that lost Herman Charles (CKD) on 2026-06-23. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-sweep for the recovered-missed-webhook lines.',
+      alarmDescription: 'FYI, already handled — A veteran intake did not arrive instantly and the hourly safety-net picked it up within the hour, so no intake was lost. Nothing to do unless this keeps firing; if it does, instant delivery from the intake form is unreliable and we are leaning on the backup, so re-check and re-save the intake form notification (webhook) settings. (This is the failure that lost Herman Charles on 2026-06-23.)',
       metric: webhookMissedMetric.metric({ statistic: 'Sum', period: Duration.hours(1) }),
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+    jotformWebhookMissedAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
 
     // ===== jotform-ingest fail-loud alarms (2026-06-22, Travis Spring intake-loss class) =====
     // The SECOND systemic silent intake-loss leak: the jotform-ingest worker would fail the WHOLE
@@ -1191,17 +1198,17 @@ export class WorkersStack extends Stack {
 
     // (a) Lambda Errors > 0. Mirrors JotformSweepErrorsAlarm. A throw out of the handler (the worker
     // exhausting retries into the DLQ, an unhandled bug, the API callback failing) breaches within the
-    // hour. NOT-breaching on missing data so idle hours don't false-alarm. No SNS yet (console-visible,
-    // matches the other intake alarms) — wire an ops topic when one exists.
-    new cloudwatch.Alarm(this, 'JotformIngestErrorsAlarm', {
+    // hour. NOT-breaching on missing data so idle hours don't false-alarm.
+    const jotformIngestErrorsAlarm = new cloudwatch.Alarm(this, 'JotformIngestErrorsAlarm', {
       alarmName: `compact-emr-${config.envName}-jotform-ingest-errors`,
-      alarmDescription: 'The jotform-ingest worker is erroring (handler throw / failing API callback / DLQ-bound retries). A veteran intake may be stuck or lost. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-ingest.',
+      alarmDescription: 'ACTION NEEDED — The step that turns a submitted intake form into a case keeps failing, so a veteran intake may be stuck or lost (real revenue and a waiting veteran). Open the function logs at /aws/lambda/compact-emr-' + config.envName + '-jotform-ingest, find the submission id in the error, and re-run it from the nurse intake pool or add it back by hand.',
       metric: jotformIngest.metricErrors({ statistic: 'Sum', period: Duration.hours(1) }),
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+    jotformIngestErrorsAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
 
     // (b) Swallowed-failure detector: any intake the worker PATCHes to status=failed. This is the
     // EXACT class that hid Travis Spring — a per-submission failure that returns SUCCESS to SQS, so
@@ -1221,14 +1228,15 @@ export class WorkersStack extends Stack {
       metricValue: '1',
       defaultValue: 0,
     });
-    new cloudwatch.Alarm(this, 'JotformIngestFailedAlarm', {
+    const jotformIngestFailedAlarm = new cloudwatch.Alarm(this, 'JotformIngestFailedAlarm', {
       alarmName: `compact-emr-${config.envName}-jotform-ingest-failed`,
-      alarmDescription: 'One+ Jotform intakes were PATCHed to status=failed by the ingest worker in the last hour — a SWALLOWED failure (returns SUCCESS to SQS, never hits the DLQ). This is the silent-loss class that hid Travis Spring for ~2 days. The intake is sitting in the pool as failed, not ready. Check /aws/lambda/compact-emr-' + config.envName + '-jotform-ingest for the FAILED lines (submissionId + error included) and use the RN Retry button or backfill.',
+      alarmDescription: 'ACTION NEEDED — One or more veteran intakes were marked failed instead of ready in the last hour. This is a quiet failure that never reaches the error queue — it is exactly what hid Travis Spring stage-2 intake for two days. The intake is sitting in the pool as failed, not ready. Open the function logs at /aws/lambda/compact-emr-' + config.envName + '-jotform-ingest, find the failed line (it includes the submission id and the reason), then use the nurse Retry button or add it back by hand.',
       metric: ingestFailedMetric.metric({ statistic: 'Sum', period: Duration.hours(1) }),
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+    jotformIngestFailedAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
   }
 }

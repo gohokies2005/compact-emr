@@ -89,7 +89,7 @@ export async function assembleSoapContextForCase(
   caseId: string,
   routePickerFraming: RoutePickerFramingInput | null,
 ): Promise<SoapContext> {
-  let row: CaseRowForSoap | null = null;
+  let row: CaseRowForSoap | null;
   try {
     row = (await db.case.findFirst({
       where: { id: caseId },

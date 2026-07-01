@@ -839,7 +839,7 @@ export async function loadExtractionCoverageForCase(db: AppDb, caseId: string): 
   // keyDoc classification is ADVISORY (drives the relevance read only). Fail-open: a missing
   // keyDoc delegate (e.g. older callers / test harnesses) or a query error must NEVER 500 the
   // chart-readiness route — fall back to no relevance summary (the honest % still renders).
-  let keyDocRows: readonly KeyDocClassInput[] = [];
+  let keyDocRows: readonly KeyDocClassInput[];
   try {
     keyDocRows = (await db.keyDoc?.findMany?.({
       where: { caseId },

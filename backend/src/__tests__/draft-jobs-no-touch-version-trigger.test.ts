@@ -26,7 +26,7 @@ function migrationSqlInOrder(): Array<{ name: string; sql: string }> {
     .sort() // Prisma applies migrations in lexical (timestamp-prefixed) order
     .map((name) => {
       const p = join(MIGRATIONS_DIR, name, 'migration.sql');
-      let sql = '';
+      let sql: string;
       try { sql = readFileSync(p, 'utf8'); } catch { sql = ''; }
       return { name, sql };
     });

@@ -3,6 +3,7 @@ import { requireRole } from '../auth/roles.js';
 import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb, CaseStatus, Role } from '../services/db-types.js';
+import { SCREENING_SUMMARY_KEY_MARKER } from '../services/chart-build-state.js';
 import {
   parseAssignPhysician,
   parseAssignRn,
@@ -473,6 +474,9 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
           where: {
             caseId: id,
             NOT: [
+              // exclude the auto-generated screening-summary OUTPUT (not a veteran-uploaded record) —
+              // same exclusion every other per-case doc-set consumer uses (SCREENING_SUMMARY_KEY_MARKER)
+              { s3Key: { endsWith: SCREENING_SUMMARY_KEY_MARKER } },
               { s3Key: { endsWith: 'Intake_Summary.pdf' } },
               { s3Key: { contains: 'Doctor_Pack' } },
               { s3Key: { contains: 'DoctorPack' } },

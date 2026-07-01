@@ -50,12 +50,12 @@ describe('reconcileScConditions — collapse same-condition rows to authoritativ
 
   it('preserves all non-status fields on the surviving row', () => {
     const out = reconcileScConditions([
-      { condition: 'PTSD', status: 'pending', ratingPct: null, dcCode: '9411', id: 'a' } as any,
-      { condition: 'post-traumatic stress disorder', status: 'service_connected', ratingPct: 70, dcCode: '9411', id: 'b' } as any,
+      { condition: 'PTSD', status: 'pending', ratingPct: null, dcCode: '9411', id: 'a' },
+      { condition: 'post-traumatic stress disorder', status: 'service_connected', ratingPct: 70, dcCode: '9411', id: 'b' },
     ]);
     expect(out).toHaveLength(1);
-    expect((out[0] as any).id).toBe('b');
-    expect((out[0] as any).dcCode).toBe('9411');
+    expect(out[0]!.id).toBe('b');
+    expect(out[0]!.dcCode).toBe('9411');
   });
 
   it('empty / single-row inputs pass through unchanged', () => {
@@ -77,7 +77,7 @@ describe('reconcileScConditions — collapse same-condition rows to authoritativ
   });
 
   it('rows with no condition string pass through (never dropped)', () => {
-    const out = reconcileScConditions([{ condition: '', status: 'pending' } as any]);
+    const out = reconcileScConditions([{ condition: '', status: 'pending' }]);
     expect(out).toHaveLength(1);
   });
 
@@ -110,7 +110,7 @@ describe('reconcileScConditions — collapse same-condition rows to authoritativ
     ]);
     expect(out).toHaveLength(1);
     expect(out[0]!.status).toBe('service_connected');
-    expect((out[0] as any).statusConflict).toBe(true);
+    expect(out[0]!.statusConflict).toBe(true);
   });
 
   // SC + pending (the common Ryan case) must NOT be flagged as a conflict.
@@ -119,7 +119,7 @@ describe('reconcileScConditions — collapse same-condition rows to authoritativ
       { condition: 'PTSD', status: 'service_connected', ratingPct: 70 },
       { condition: 'post-traumatic stress disorder', status: 'pending' },
     ]);
-    expect((out[0] as any).statusConflict).toBeUndefined();
+    expect(out[0]!.statusConflict).toBeUndefined();
   });
 
   // never silently drop a needs-review flag when the reviewed row loses.
@@ -129,16 +129,16 @@ describe('reconcileScConditions — collapse same-condition rows to authoritativ
       { condition: 'Gastroesophageal reflux disease', status: 'pending', needsReview: true },
     ]);
     expect(out).toHaveLength(1);
-    expect((out[0] as any).needsReview).toBe(true);
+    expect(out[0]!.needsReview).toBe(true);
   });
 
   // winner inherits a dcCode it lacked from a same-condition group member.
   it('inherits dcCode onto the winner when it lacked one', () => {
     const out = reconcileScConditions([
-      { condition: 'Tinnitus', status: 'service_connected', ratingPct: 10, dcCode: null } as any,
-      { condition: 'Tinnitus', status: 'pending', dcCode: '6260' } as any,
+      { condition: 'Tinnitus', status: 'service_connected', ratingPct: 10, dcCode: null },
+      { condition: 'Tinnitus', status: 'pending', dcCode: '6260' },
     ]);
     expect(out).toHaveLength(1);
-    expect((out[0] as any).dcCode).toBe('6260');
+    expect(out[0]!.dcCode).toBe('6260');
   });
 });

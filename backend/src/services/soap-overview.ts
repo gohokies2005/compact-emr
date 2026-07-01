@@ -1002,7 +1002,7 @@ export async function getOrBuildSoapNote(
   const generate = opts?.generate ?? ((c: SoapContext) => buildSoapNote(c, { timeoutMs: opts?.timeoutMs }));
   const fingerprint = soapNoteFingerprint(ctx);
 
-  let stored: { inputHash: string; schemaVersion: number; resultJson: unknown } | null = null;
+  let stored: { inputHash: string; schemaVersion: number; resultJson: unknown } | null;
   try { stored = await db.soapOverview.findUnique({ where: { caseId } }); }
   catch { stored = null; /* fail-open: a cache-read error must never block the card */ }
 

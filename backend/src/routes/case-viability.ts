@@ -121,7 +121,7 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       try {
         ctx = await assembleSoapContextForCase(db, caseId, routePickerFraming);
       } catch {
-        let chartDigest: string | null = null;
+        let chartDigest: string | null;
         try { chartDigest = await buildDigestForCase(db, caseId); } catch { chartDigest = null; }
         ctx = { claimedCondition, routePickerFraming, chartDigest };
       }
@@ -259,12 +259,12 @@ export function createCaseViabilityRouter(db: AppDb): Router {
       const aiState = await getAiViabilityState(db, caseId, { compute: false });
       const aiViability = aiState.status === 'ready' ? aiState.card : null;
       if (aiState.status === 'none' && aiRoutePickerEnabled() && !draftingNow) {
-        void fireRecomputeViability(caseId); // fire-and-forget; never blocks/​fails the GET
+        void fireRecomputeViability(caseId); // fire-and-forget; never blocks/fails the GET
       }
       // Chart-read state for the SOAP traffic light (I2 fix): the calm light goes green only when the
       // chart is actually fully read — an unread/partial chart pulls it to amber. Fail-open: unknown → null
       // (the SOAP treats unknown conservatively). Cheap (no LLM).
-      let chartFullyRead: boolean | null = null;
+      let chartFullyRead: boolean | null;
       try {
         const r = await loadReconciledChartReadiness(db, caseId);
         chartFullyRead = r ? (r.ready === true && (r.blockingFiles?.length ?? 0) === 0) : null;

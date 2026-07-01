@@ -7,7 +7,6 @@ vi.mock('../services/chart-extract-trigger.js', () => ({
 }));
 
 import { handler } from '../lambdas/stuck-chart-extract-run-watcher.js';
-import { computeTriggerHash } from '../services/chart-build-state.js';
 import type { PrismaClient } from '@prisma/client';
 
 // The extraction analogue of stuck-job/stuck-doc: a ChartExtractionRun is created 'queued' and only

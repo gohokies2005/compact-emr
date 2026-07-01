@@ -48,7 +48,7 @@ function cleanName(raw: string): string | null {
   // Drop a leading article and any leading "the/a" boilerplate.
   s = s.replace(/^(?:the|a|an|your)\s+/i, '').trim();
   // Strip trailing connective fragments the non-greedy span may include.
-  s = s.replace(/[\s,;:.\-]+$/g, '').trim();
+  s = s.replace(/[\s,;:.-]+$/g, '').trim();
   if (!s || s.length < 3 || s.length > 70) return null;
   if (NOISE_RE.test(s)) return null;                 // captured social/URL noise → not a condition
   if (!/[a-z]/i.test(s)) return null;                // must contain letters

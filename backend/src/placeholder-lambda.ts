@@ -36,6 +36,5 @@ export const handler = async (event: unknown, context: unknown): Promise<unknown
     }
     return { ok: true };
   }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (expressHandler as (e: unknown, c: unknown) => unknown)(event, context);
 };

@@ -216,13 +216,15 @@ describe('SoapOverviewCard — honest plan-state surface (Zimmelman)', () => {
   });
 });
 
-// ── AUTO-REFRESH the SOAP poll in the INCOMPLETE-EXTRACTION provisional state (Marcus Bennett 2026-06-29) ──
-// The note shown is a REAL (fallback:false) note written while the chart was still being analyzed; its prose
-// hedges "…not fully extracted in the available pages". The OLD poll gated only on note.fallback, so this state
-// never polled → the note persisted until a HARD REFRESH re-read the note the completed extraction produced.
-// The poll must now fire while the chart is in flight and swap the final note in once it lands, then disable.
+// ── CHART-ANALYSIS-IN-PROGRESS GATE (redesign, Dr. Kasky 2026-06-30) ──────────────────────────────────────
+// SUPERSEDES the Marcus Bennett "show the provisional note + auto-refresh-swap" behavior. The owner's directive:
+// "No color until it's drafted and complete. DON'T EVEN SHOW the tentative stuff — just say 'still analyzing'."
+// While the chart is genuinely still being analyzed, the card must render ONE neutral placeholder — no colored
+// chip, no SOAP body, no provisional prose — and only render the final read once analysis is COMPLETE (the flip
+// at its source: the tentative read that flipped amber→green / appeared to lose data / disagreed with the plan
+// is never surfaced). The background poll/precompute still runs; it just isn't shown until complete.
 // (Own describe so its getSoapNote mockImplementation can't leak into the honest-surface tests above.)
-describe('SoapOverviewCard — auto-refresh poll covers the incomplete-extraction provisional (Marcus Bennett)', () => {
+describe('SoapOverviewCard — chart-analysis-in-progress gate (redesign, Dr. Kasky 2026-06-30)', () => {
   const soapMock = vi.mocked(getSoapNote);
   const FINAL_NOTE = { subjective: 'S2', objective: 'O2', assessment: 'AHI 28 — the diagnosis is fully documented', plan: 'Draft the nexus letter', confidence: 'high', action: 'draft', fallback: false };
   const PROVISIONAL_NOTE = { subjective: 'S', objective: 'O', assessment: 'the content of those opinions is not fully extracted in the available pages', plan: 'P', confidence: 'low', action: 'get_records', fallback: false };
@@ -238,7 +240,7 @@ describe('SoapOverviewCard — auto-refresh poll covers the incomplete-extractio
     soapMock.mockReset();
   });
 
-  it('chart in_progress + a real (fallback:false) note → FIRES pollOnly (today it does NOT) and swaps the final note in', async () => {
+  it('chart in_progress → shows the neutral "still analyzing" placeholder and NEVER the tentative read (no provisional prose, no colored chip)', async () => {
     coverageMock.mockResolvedValue({
       data: {
         totalPages: 80, extractedPages: 40, coveragePct: 50, gaps: [], status: 'in_progress',
@@ -247,17 +249,23 @@ describe('SoapOverviewCard — auto-refresh poll covers the incomplete-extractio
         chartAnalysis: { state: 'in_progress', label: 'Analyzing…', reason: null, likelyCauseFile: null, findings: null, minorGap: false },
       },
     } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
+    // Even if the backend would serve a real (fallback:false) provisional note built mid-analysis, the card must
+    // NOT surface it — the placeholder wins until the chart is complete.
     soapMock.mockImplementation(async (_id: string, _ctx: unknown, opts?: { forceRegenerate?: boolean; pollOnly?: boolean }) =>
       (opts?.pollOnly === true
         ? { data: FINAL_NOTE, generating: false, grounded: true }
         : { data: PROVISIONAL_NOTE, grounded: true }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
     renderCard();
-    await waitFor(() => expect(screen.getByText(/not fully extracted in the available pages/i)).toBeInTheDocument());
-    await waitFor(() => expect(soapMock).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ pollOnly: true })));
-    await waitFor(() => expect(screen.getByText(/the diagnosis is fully documented/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Still analyzing the chart/i)).toBeInTheDocument());
+    expect(screen.getByText(/keeps running in the background/i)).toBeInTheDocument();
+    // The tentative provisional read is NEVER shown while analyzing (bug 2 — "data lost" flip).
+    expect(screen.queryByText(/not fully extracted in the available pages/i)).not.toBeInTheDocument();
+    // NO colored go/no-go chip while analyzing (bugs 1 + 3 — amber→green flip / chip-vs-plan disagreement).
+    expect(screen.queryByText(/Ready to draft/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Records needed/i)).not.toBeInTheDocument();
   });
 
-  it('chart complete + a real non-fallback note → does NOT poll (no needless pollOnly churn)', async () => {
+  it('chart complete + a real non-fallback note → shows the final note (no placeholder) and does NOT poll (no needless pollOnly churn)', async () => {
     coverageMock.mockResolvedValue({
       data: {
         totalPages: 40, extractedPages: 40, coveragePct: 100, gaps: [], status: 'complete',
@@ -269,6 +277,43 @@ describe('SoapOverviewCard — auto-refresh poll covers the incomplete-extractio
     soapMock.mockImplementation(async () => ({ data: FINAL_NOTE, grounded: true }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
     renderCard();
     await waitFor(() => expect(screen.getByText(/the diagnosis is fully documented/i)).toBeInTheDocument());
+    // Final read is shown ONCE the chart is complete — the placeholder is gone and the colored chip appears.
+    expect(screen.queryByText(/Still analyzing the chart/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Ready to draft/i)).toBeInTheDocument(); // green chip, projected from the persisted note action
     expect(soapMock).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ pollOnly: true }));
+  });
+
+  // EDGE CASES — the gate must fire ONLY for genuine in_progress, never strand a manual/failed case on "analyzing".
+  it('not_analyzed (manual / no-extraction case, totalFiles 0) → shows the FINAL read immediately, never the placeholder', async () => {
+    strategyMock.mockResolvedValue(STOP_STRATEGY); // deterministic "Not supportable as filed"
+    soapMock.mockImplementation(async () => ({ data: null, grounded: false }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    coverageMock.mockResolvedValue({
+      data: {
+        totalPages: 0, extractedPages: 0, coveragePct: 100, gaps: [], status: 'complete',
+        unknownPageFiles: 0, totalFiles: 0, pageBreakdown: null,
+        pagesRead: { pct: 100, readUnits: 0, totalUnits: 0, approximate: false, label: '0 files' },
+        chartAnalysis: { state: 'not_analyzed', label: 'Not analyzed yet', reason: null, likelyCauseFile: null, findings: null, minorGap: false },
+      },
+    } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
+    renderCard();
+    await waitFor(() => expect(screen.getAllByText(/Not supportable as filed/i).length).toBeGreaterThan(0));
+    expect(screen.queryByText(/Still analyzing the chart/i)).not.toBeInTheDocument();
+  });
+
+  it('failed → shows the honest failed banner (re-run), never the "still analyzing" placeholder', async () => {
+    strategyMock.mockResolvedValue(STOP_STRATEGY);
+    soapMock.mockImplementation(async () => ({ data: null, grounded: false }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    coverageMock.mockResolvedValue({
+      data: {
+        totalPages: 100, extractedPages: 100, coveragePct: 100, gaps: [], status: 'failed',
+        unknownPageFiles: 0, totalFiles: 2, pageBreakdown: null,
+        pagesRead: { pct: 100, readUnits: 100, totalUnits: 100, approximate: false, label: '100% (100 of 100)' },
+        chartAnalysis: { state: 'failed', label: '✗ Chart analysis failed — re-run extraction', reason: 'The chart analysis errored out, so no structured chart was built.', likelyCauseFile: 'VA Blue Button Records.pdf', findings: null, minorGap: false },
+      },
+    } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/Chart analysis incomplete/i)).toBeInTheDocument());
+    expect(screen.queryByText(/Still analyzing the chart/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/re-run/i).length).toBeGreaterThan(0);
   });
 });

@@ -55,6 +55,16 @@ describe('CaseReadinessVerdictCard', () => {
     expect(sanityMock).not.toHaveBeenCalled();
   });
 
+  it('chart analysis in_progress → shows the neutral "still analyzing" placeholder, no colored verdict pill (redesign, Dr. Kasky 2026-06-30)', async () => {
+    primeStrong(); // strong strategy/viability that would otherwise render a green "Ready to draft" pill
+    coverageMock.mockResolvedValue({ data: { totalPages: 80, extractedPages: 40, coveragePct: 50, gaps: [], status: 'in_progress', unknownPageFiles: 0, totalFiles: 2, pageBreakdown: null, chartAnalysis: { state: 'in_progress', label: 'Analyzing…', reason: null, likelyCauseFile: null, findings: null, minorGap: false } } as any });
+    render(<CaseReadinessVerdictCard caseId="c3" claimedCondition="OSA" hasUnreadPages={false} />, { wrapper });
+    expect(await screen.findByText(/Still analyzing the chart/i)).toBeInTheDocument();
+    // the colored go/no-go verdict must NOT render while the chart is still analyzing
+    expect(screen.queryByText('Ready to draft')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Send to the drafter/i)).not.toBeInTheDocument();
+  });
+
   it('surfaces an over-call disagreement when the anchor is unreviewed (escalate→physician)', async () => {
     primeStrong();
     viabilityMock.mockResolvedValue({ data: { version: 1, claimed_canonical: 'MS', viability: 'strong', best_anchor: { upstream_canonical: 'PTSD', upstream_verbatim: 'PTSD', M_static: 4, M_eff: 4, E: null, tier: 'blessed', basis: '3.310b', is_granted_sc: true, mechanism_class: null, requires: null, physician_reviewed: false }, alternatives: [], why: '', missing_fact: null, presumptive_redirect: null, graveyard_redirect: null, excluded_traps: [], confidence: 'high', mode: 'chart_refined', table_version: null, table_content_hash: null, recommended_action: { action: 'escalate', route: 'physician', band: 'strong', reason: 'Mechanism not yet physician-reviewed.' } } as any });

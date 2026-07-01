@@ -299,6 +299,43 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
     );
   }
 
+  // ── CHART-ANALYSIS-IN-PROGRESS GATE (Dr. Kasky 2026-06-30, redesign — NOT another patch) ──────────────
+  // "No color until it's drafted and complete. DON'T EVEN SHOW the tentative stuff — just say 'still
+  // analyzing, this may take a few minutes. It runs in the background if you click away.'" While the chart is
+  // GENUINELY still being analyzed we render ONE neutral placeholder: no colored chip, no SOAP body, no
+  // verdict, no "Provisional —" heading, no banner. The tentative read is NEVER surfaced — it was the source
+  // of all three live bugs: the chip/heading flipped amber→green as the provisional read settled into the
+  // final (bug 1); the Objective appeared to "lose data" (Foster: rich sleep data → BMI) when the completed
+  // read replaced the provisional one (bug 2); and the chip read green "Ready to draft" over a plan that
+  // hedged "Do not draft yet" because chip and plan were computed from different, mid-analysis inputs
+  // (Walthour, bug 3). Suppressing the read until the chart is COMPLETE removes the flip at its source: the
+  // final SOAP + verdict + color are computed ONCE on the completed chart (chip and plan both project the SAME
+  // persisted note — soapChipFromNote(note) vs note.plan) and then STICK.
+  //
+  // Fires ONLY for genuine in-progress (pages still reading / analysis running) — `chartAnalysisInFlight` is
+  // in_progress-exclusive by construction (extraction-coverage.ts). It deliberately does NOT fire for:
+  //   • not_analyzed  — a manual / no-extraction case (cov.totalFiles === 0, veteran's prior record): no
+  //                     extraction ever runs, so we show the FINAL read immediately, never a stuck "analyzing".
+  //   • complete      — the read is final; show it.
+  //   • failed        — its own honest failed banner + analysis_failed verdict render below.
+  //   • incomplete    — its own honest provisional banner renders below (terminal, won't self-heal by waiting).
+  // The coverage poll (coverageQ, 5s while in-flight) flips this off on its own when the analysis lands — no
+  // manual refresh. The server-side precompute (precomputeSoapNoteForCase, fired off the request path via
+  // fireRecomputeViability → InvocationType:'Event') keeps running regardless of whether the RN stays on the
+  // page, so "it keeps running if you leave" is literally true.
+  if (chartAnalysisInFlight) {
+    return (
+      <div className="mb-4 rounded-lg border border-l-4 border-slate-200 border-l-slate-300 bg-[#FBF8F1] px-5 py-4">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Case overview</span>
+        <p className="mt-2 flex items-center gap-2 text-[15px] font-medium text-slate-700">
+          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-transparent" aria-hidden />
+          Still analyzing the chart — this can take a few minutes.
+        </p>
+        <p className="mt-1 text-[13px] text-slate-500">It keeps running in the background if you leave this page; check back shortly.</p>
+      </div>
+    );
+  }
+
   // ── HONEST plan-state surface (Ryan 2026-06-21, Zimmelman) ───────────────────────────────────────────
   // When the route-picker plan is the intended brain (aiViabilityState present + not 'off') but it is NOT
   // ready, NEVER render the resting "Not supportable as filed" deterministic verdict — that misleads ("if it

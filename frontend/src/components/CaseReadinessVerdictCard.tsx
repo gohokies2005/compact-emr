@@ -54,6 +54,29 @@ export function CaseReadinessVerdictCard({ caseId, claimedCondition, hasUnreadPa
   // PRE-DRAFT sanity-impression RETIRED (Ryan #68/#72, 2026-06-25): the divergent second LLM brain is gone.
   // The verdict defers to the route-picker plan; sanity is null below (inert add-caution-only overlay).
 
+  // ── CHART-ANALYSIS-IN-PROGRESS GATE (Dr. Kasky 2026-06-30, redesign) ──────────────────────────────────
+  // While the chart is genuinely still being analyzed, show ONE neutral placeholder — NO colored verdict pill,
+  // no next-action, no disagreements. The verdict is built on the STRUCTURED chart Stage-2 produces; rendering
+  // a colored go/no-go on a mid-analysis chart is exactly what let this card read green "Ready to draft" while
+  // the SOAP plan hedged "Do not draft yet" (Walthour). Gated on the SAME coverage SSOT (shared react-query key
+  // with the SOAP card, so both flip together — one brain). Fires ONLY for genuine in_progress: not_analyzed
+  // (manual/no-extraction), complete, failed, and incomplete all fall through to computeReadinessVerdict's own
+  // honest states below (which handle failed/incomplete via the chart-analysis safety overlay), so a manual case
+  // is never stuck on "analyzing".
+  const cov = coverageQ.data?.data ?? null;
+  const chartAnalyzing = cov?.chartAnalysis?.state === 'in_progress' || cov?.status === 'in_progress';
+  if (chartAnalyzing) {
+    return (
+      <SectionCard title="Case readiness">
+        <p className="flex items-center gap-2 text-sm font-medium text-slate-700">
+          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-transparent" aria-hidden />
+          Still analyzing the chart — this can take a few minutes.
+        </p>
+        <p className="mt-0.5 text-sm text-slate-500">It keeps running in the background if you leave this page; check back shortly.</p>
+      </SectionCard>
+    );
+  }
+
   // CHART-ANALYSIS SAFETY (Ryan 2026-06-23): feed Stage-2 analysis state into the verdict; fail SAFE while the
   // coverage query is loading/errored (state unknown → never a confident verdict). A resolved-but-null coverage
   // is NOT unknown (keeps the prior behavior).

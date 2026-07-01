@@ -179,6 +179,13 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
     return <SectionCard title="Chart extraction"><p className="text-sm text-slate-500">Extraction coverage is unavailable right now.</p></SectionCard>;
   }
 
+  // MANUAL-ENTRY case (Ryan 2026-06-30): a New-Claim case added by hand for an existing veteran has ZERO
+  // uploaded chart-input files (its records are pulled from the veteran's prior case automatically). The signal
+  // is the FILE count, not the page count — a case can have files whose pages aren't counted yet (totalFiles > 0,
+  // totalPages 0) and MUST NOT read as manual. totalFiles = the chart-input document rows (backend inputs.length).
+  // When 0, the "N of M pages / Not analyzed yet" stage lines read as broken ("0 of 0 = 100%") — replace them with
+  // one neutral plain-English line and a neutral (never amber) chip. A case WITH files renders exactly as before.
+  const isManualEntry = cov.totalFiles === 0;
   // Per-page vision breakdown (null for non-vision charts → behaves exactly as before).
   const pb = cov.pageBreakdown;
   const reviewPages = pb?.reviewPages ?? [];
@@ -210,7 +217,9 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
   const unreadable = pb?.unreadable ?? 0;
   const handwritingUncertain = pb?.handwritingUncertain ?? 0;
   // Chart-analysis trouble takes precedence in the chip (it's the load-bearing stage the verdict is built on).
-  const chip: { label: string; complete: boolean } = isComplete
+  const chip: { label: string; complete: boolean } = isManualEntry
+    ? { label: 'Manual entry', complete: false } // neutral; no files to analyze, never a problem to flag
+    : isComplete
     ? { label: 'Complete', complete: true }
     : analysisNotAnalyzed
       ? { label: 'Not analyzed yet', complete: false } // neutral; styled separately below (not amber-alarming)
@@ -239,7 +248,7 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
     <SectionCard
       title="Chart extraction"
       status={
-        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${chip.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : analysisNotAnalyzed ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
+        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${chip.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : (analysisNotAnalyzed || isManualEntry) ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
           {chip.label}
         </span>
       }
@@ -258,18 +267,27 @@ export function ExtractionCoveragePanel({ caseId }: ExtractionCoveragePanelProps
               hides a failed analysis. Stage 1 = Pages read (OCR). Stage 2 = Chart analysis (the structured
               chart the SOAP/verdict is built on). When the relevance read leads above, these become the
               SECONDARY transparency detail (the raw % is still shown, just no longer the headline). */}
-          <dl className="space-y-1.5">
-            <div className="flex flex-wrap items-baseline gap-x-2">
-              <dt className="text-[13px] font-semibold text-slate-800">Pages read</dt>
-              <dd className="text-[13px] text-slate-700">{pagesRead.label}</dd>
-              <span className="text-xs text-slate-400">(documents scanned to text)</span>
-            </div>
-            <div className="flex flex-wrap items-baseline gap-x-2">
-              <dt className="text-[13px] font-semibold text-slate-800">Chart analysis</dt>
-              <dd className={`text-[13px] ${analysisComplete ? 'text-emerald-700' : analysisNotAnalyzed ? 'text-slate-500' : 'text-amber-700'}`}>{chartAnalysis.label}</dd>
-              <span className="text-xs text-slate-400">(builds the chart the assessment uses)</span>
-            </div>
-          </dl>
+          {/* MANUAL-ENTRY case (Ryan 2026-06-30): zero uploaded chart-input files. The "0 of 0 = 100% / Not analyzed
+              yet" stage lines read as broken here — replace them with one neutral plain-English line. A case WITH
+              files (totalFiles ≥ 1) renders the two stage lines below exactly as before. */}
+          {isManualEntry ? (
+            <p className="text-[13px] text-slate-700">
+              Manual entry — records from the last case are pulled in automatically. Upload additional records as needed.
+            </p>
+          ) : (
+            <dl className="space-y-1.5">
+              <div className="flex flex-wrap items-baseline gap-x-2">
+                <dt className="text-[13px] font-semibold text-slate-800">Pages read</dt>
+                <dd className="text-[13px] text-slate-700">{pagesRead.label}</dd>
+                <span className="text-xs text-slate-400">(documents scanned to text)</span>
+              </div>
+              <div className="flex flex-wrap items-baseline gap-x-2">
+                <dt className="text-[13px] font-semibold text-slate-800">Chart analysis</dt>
+                <dd className={`text-[13px] ${analysisComplete ? 'text-emerald-700' : analysisNotAnalyzed ? 'text-slate-500' : 'text-amber-700'}`}>{chartAnalysis.label}</dd>
+                <span className="text-xs text-slate-400">(builds the chart the assessment uses)</span>
+              </div>
+            </dl>
+          )}
           {/* Plain reason + likely-cause file when the analysis stage is not clean. */}
           {!analysisComplete && chartAnalysis.reason ? (
             <p className="mt-1.5 text-[13px] text-amber-800">

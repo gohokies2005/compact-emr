@@ -267,6 +267,74 @@ describe('ExtractionCoveragePanel', () => {
     expect(screen.queryByText(/We read the documents relevant to this claim/)).not.toBeInTheDocument();
   });
 
+  // ===== MANUAL-ENTRY case: zero uploaded chart-input files (Ryan 2026-06-30) =====
+  // A New-Claim case added by hand for an existing veteran has NO uploaded documents (records come from the
+  // prior case automatically). "0 of 0 = 100% / Not analyzed yet" reads as broken — replace with one neutral line.
+
+  it('manual entry (totalFiles 0) → single neutral line, NO stage lines, neutral "Manual entry" chip (never amber)', async () => {
+    coverageMock.mockResolvedValue({
+      data: cov({
+        totalFiles: 0,
+        totalPages: 0,
+        extractedPages: 0,
+        coveragePct: 100, // backend: no chart inputs → vacuously 100%
+        status: 'complete',
+        chartAnalysis: { state: 'not_analyzed', label: 'Not analyzed yet', reason: null, likelyCauseFile: null, findings: null, minorGap: false },
+      }),
+    });
+    renderPanel();
+    // The single plain-English manual-entry line.
+    expect(await screen.findByText(/Manual entry — records from the last case are pulled in automatically\. Upload additional records as needed\./)).toBeInTheDocument();
+    // The confusing stage lines are GONE (no "Pages read", no "0 of 0", no "Not analyzed yet" body line).
+    expect(screen.queryByText('Pages read')).not.toBeInTheDocument();
+    expect(screen.queryByText('Chart analysis')).not.toBeInTheDocument();
+    expect(screen.queryByText(/0 of 0/)).not.toBeInTheDocument();
+    // Chip is the neutral "Manual entry" — never amber, never "Not analyzed yet".
+    const chip = screen.getByText('Manual entry');
+    expect(chip).toBeInTheDocument();
+    expect(chip.className).toMatch(/text-slate-500/);
+    expect(chip.className).not.toMatch(/amber/);
+    expect(screen.queryByText('Not analyzed yet')).not.toBeInTheDocument();
+  });
+
+  it('has files but pages not yet counted (totalFiles ≥ 1, totalPages 0) → NORMAL stage lines, NOT the manual message', async () => {
+    // The signal is the FILE count, not the page count. A real-file case whose pages aren't tallied yet must
+    // render the normal two-stage path — it must NEVER be mistaken for a manual entry.
+    coverageMock.mockResolvedValue({
+      data: cov({
+        totalFiles: 2,
+        totalPages: 0,
+        extractedPages: 0,
+        coveragePct: 0,
+        status: 'in_progress' as ExtractionCoverage['status'],
+        chartAnalysis: { state: 'in_progress', label: 'Analyzing the chart…', reason: null, likelyCauseFile: null, findings: null, minorGap: false },
+      }),
+    });
+    renderPanel();
+    // in_progress renders nothing (the panel returns null while extraction is still running), so assert the
+    // manual line never appears for a case that HAS files — verified against a settled state below too.
+    await waitFor(() => expect(coverageMock).toHaveBeenCalled());
+    expect(screen.queryByText(/Manual entry — records from the last case/)).not.toBeInTheDocument();
+  });
+
+  it('settled case WITH files but 0 pages counted → normal stage lines render, manual message absent', async () => {
+    coverageMock.mockResolvedValue({
+      data: cov({
+        totalFiles: 2,
+        totalPages: 0,
+        extractedPages: 0,
+        coveragePct: 100,
+        status: 'complete',
+        chartAnalysis: { state: 'not_analyzed', label: 'Not analyzed yet', reason: null, likelyCauseFile: null, findings: null, minorGap: false },
+      }),
+    });
+    renderPanel();
+    // Normal two-stage path — the manual line must be absent because totalFiles ≥ 1.
+    expect(await screen.findByText('Pages read')).toBeInTheDocument();
+    expect(screen.getByText('Chart analysis')).toBeInTheDocument();
+    expect(screen.queryByText(/Manual entry — records from the last case/)).not.toBeInTheDocument();
+  });
+
   it('no relevance data (null) → fail-open: no relevance read, the honest stage lines carry the report', async () => {
     coverageMock.mockResolvedValue({
       data: cov({

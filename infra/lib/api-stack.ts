@@ -133,6 +133,21 @@ export class ApiStack extends Stack {
       'arn:aws:secretsmanager:us-east-1:676591241787:secret:frn/ncbi-api-key-c8E88t',
     );
 
+    // Google Ads offline-conversion upload (routes/intakes.ts paid-intake assign →
+    // services/google-ads-conversions.ts getCreds() → readSecretByName(GOOGLE_ADS_SECRET_NAME) at
+    // RUNTIME). Unlike the NCBI key above (deploy-time {{resolve}}), this is a genuine runtime
+    // GetSecretValue call, so the grantRead below is LOAD-BEARING, not symmetry. Secret created
+    // out-of-band (NOT CDK-owned): friendly name 'frn/google-ads-credentials', full ARN ...-zLEsSM.
+    // Imported by COMPLETE ARN (fromSecretCompleteArn) — NOT fromSecretNameV2 (partial-ARN footgun,
+    // INCIDENTS 2026-06-05). Missing this grant silently zeroed ALL Google Ads conversion tracking:
+    // AccessDenied on GetSecretValue -> getCreds JSON.parse('') throws -> caught at intakes.ts -> no
+    // upload, no conversion, forever. Root-caused + fixed 2026-07-01.
+    const googleAdsSecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this,
+      'GoogleAdsSecret',
+      'arn:aws:secretsmanager:us-east-1:676591241787:secret:frn/google-ads-credentials-zLEsSM',
+    );
+
     const handler = new nodejs.NodejsFunction(this, 'PlaceholderApiLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: path.resolve(__dirname, '../../backend/src/placeholder-lambda.ts'),
@@ -386,6 +401,11 @@ export class ApiStack extends Stack {
     // runtime fetch; it writes secretsmanager:GetSecretValue on the exact ...-c8E88t ARN (complete-ARN
     // import → no partial-ARN footgun). Harmless if unused.
     ncbiApiKeySecret.grantRead(handler);
+    // Google Ads conversion upload: read the OAuth creds at RUNTIME (getCreds -> readSecretByName).
+    // Load-bearing (NOT symmetry): without it every paid-intake conversion upload fails at the secret
+    // read (AccessDenied). Complete-ARN import => GetSecretValue on the exact ...-zLEsSM ARN, no
+    // partial-ARN footgun. This one grant unblocks the whole offline-conversion pipeline.
+    googleAdsSecret.grantRead(handler);
     handler.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['ses:SendEmail', 'ses:SendRawEmail'],

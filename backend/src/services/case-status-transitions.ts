@@ -38,8 +38,8 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   // (2026-07-01): the physician declined + the RN hand-fixed the letter in the editor (edits, trivial
   // edits, or NONE — editing does not change status, letter.ts) and must be able to send it straight
   // back to the doctor's queue. Previously the ONLY exit was correction_review, which NO code path ever
-  // entered (dead state) — so the corrected letter was stranded with no forward door (CLM-5FB43F91DE,
-  // Bays). This direct edge is the forward door; it does NOT add a ->delivered edge, so /letter/approve
+  // entered (dead state) — so the corrected letter was stranded with no forward door (CLM-5FB43F91DE).
+  // This direct edge is the forward door; it does NOT add a ->delivered edge, so /letter/approve
   // + the fraud/signer/affirmativeness sign-off gates stay authoritative. Role = default (admin,
   // ops_staff) below — same as rn_review->physician_review. correction_review->physician_review stays
   // for back-compat. The forward re-pin (cases.ts) + assigned-physician guard cover this edge already.

@@ -122,7 +122,7 @@ describe('case status transitions', () => {
   // The physician declined + the RN hand-fixed the letter (edits, trivial edits, or NONE — editing does
   // not change status). The corrected letter must go straight back to the doctor. Previously the only
   // exit was correction_review, which NO code path ever entered (dead state), so the letter was stranded
-  // (CLM-5FB43F91DE, Bays). This direct edge is the forward door.
+  // (CLM-5FB43F91DE). This direct edge is the forward door.
   it('correction_requested -> physician_review exists and the RN (ops_staff) may send a corrected letter to the doctor', () => {
     expect(CASE_STATUS_TRANSITIONS.correction_requested).toContain('physician_review');
     expect(isValidCaseStatusTransition('correction_requested', 'physician_review')).toBe(true);

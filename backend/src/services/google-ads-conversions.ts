@@ -9,9 +9,15 @@
  * the Lambda context doesn't freeze with a dangling promise (fire-and-forget is unsafe on Lambda).
  * A 3-second abort guard prevents a hung Google endpoint from wedging the webhook past Stripe's
  * 30-second timeout.
+ *
+ * PRIVACY (2026-06-30): this uploads the gclid ONLY. We deliberately do NOT send the veteran's
+ * email (even hashed) to Google. A hashed email is a match identifier Google resolves back to the
+ * person, so it would tie a named individual to "completed a VA-disability nexus-letter intake" —
+ * a health-context identifier we will not hand to an ad platform (also barred by Google's own
+ * sensitive-data policy). The prior "enhanced conversions" email hedge was removed; Google was
+ * rejecting it anyway, so gclid-only is both the safe path and the working path.
  */
 
-import { createHash } from 'crypto';
 import { readSecretByName } from './mailer.js';
 import type { AppDb } from './db-types.js';
 
@@ -109,39 +115,7 @@ export async function extractGclidForCase(db: AppDb, caseId: string): Promise<st
   return null;
 }
 
-// ── email extraction (enhanced-conversions match hedge) ──────────────────────
-// Pull the customer's email from the SAME Intake rawAnswersJson (the `control_email` answer). Used as a
-// hashed identifier so attribution doesn't hinge solely on the gclid hop.
-export async function extractEmailForCase(db: AppDb, caseId: string): Promise<string | null> {
-  const intake = await (db as unknown as {
-    intake: {
-      findFirst: (q: {
-        where: Record<string, unknown>;
-        select: Record<string, boolean>;
-        orderBy: Record<string, string>;
-      }) => Promise<{ rawAnswersJson?: unknown } | null>;
-    }
-  }).intake.findFirst({
-    where: { assignedCaseId: caseId },
-    select: { rawAnswersJson: true },
-    orderBy: { createdAt: 'desc' },
-  });
-  if (!intake?.rawAnswersJson || typeof intake.rawAnswersJson !== 'object') return null;
-  for (const a of Object.values(intake.rawAnswersJson as Record<string, RawAnswer>)) {
-    const name = (a.name ?? '').toLowerCase();
-    if (name.includes('email') && typeof a.answer === 'string' && /\S+@\S+\.\S+/.test(a.answer.trim())) {
-      return a.answer.trim();
-    }
-  }
-  return null;
-}
-
-// Enhanced-conversions email normalization (Google standard): trim + lowercase, then SHA-256 hex.
-function hashedEmail(email: string): string {
-  return createHash('sha256').update(email.trim().toLowerCase()).digest('hex');
-}
-
-// ── Conversion upload ──────────────────────────────────────────────────────────
+// ── Conversion upload (gclid-only — see PRIVACY note in the file header) ──────────
 
 export async function uploadReviewConversion(
   db: AppDb,
@@ -155,17 +129,10 @@ export async function uploadReviewConversion(
     return;
   }
 
-  const email = await extractEmailForCase(db, caseId);
-  const emailHash = email ? hashedEmail(email) : null;
-
   const creds = await getCreds();
   const accessToken = await getAccessToken(creds);
 
-  // ENHANCED-CONVERSIONS HEDGE (2026-06-29): attach the hashed email as a userIdentifier so Google can
-  // still match the conversion if the gclid hop misses. FAIL-SAFE: the Data Manager UserIdentifier schema
-  // is newer (exact field/encoding to confirm against the live API) — if Google REJECTS the userData, we
-  // retry gclid-ONLY so this hedge can NEVER break the base attribution that just started working.
-  const baseEvent: Record<string, unknown> = {
+  const event: Record<string, unknown> = {
     adIdentifiers: { gclid },
     eventTimestamp: paymentAt.toISOString(),
     eventName: 'purchase',
@@ -174,31 +141,17 @@ export async function uploadReviewConversion(
     eventSource: 'WEB',
   };
 
-  function postEvent(withUserData: boolean): Promise<Response> {
-    const event = (withUserData && emailHash)
-      ? { ...baseEvent, userData: { userIdentifiers: [{ emailAddress: emailHash }] } }
-      : baseEvent;
-    return timedFetch(`${DATA_MANAGER_BASE}/v1/events:ingest`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        destinations: [{
-          operatingAccount: { accountId: AD_ACCOUNT_ID, accountType: 'GOOGLE_ADS' },
-          productDestinationId: CONVERSION_ACTION_ID,
-        }],
-        events: [event],
-      }),
-    });
-  }
-
-  let usedUserData = !!emailHash;
-  let r = await postEvent(usedUserData);
-  if (!r.ok && usedUserData) {
-    const errText = await r.text();
-    console.log(`[google-ads] caseId=${caseId} enhanced-conversions userData REJECTED (${r.status}: ${errText.slice(0, 160)}) — retrying gclid-only`);
-    usedUserData = false;
-    r = await postEvent(false);
-  }
+  const r = await timedFetch(`${DATA_MANAGER_BASE}/v1/events:ingest`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      destinations: [{
+        operatingAccount: { accountId: AD_ACCOUNT_ID, accountType: 'GOOGLE_ADS' },
+        productDestinationId: CONVERSION_ACTION_ID,
+      }],
+      events: [event],
+    }),
+  });
 
   const body = await r.json() as Record<string, unknown>;
 
@@ -211,10 +164,9 @@ export async function uploadReviewConversion(
   // silent-zero situation is visible in CloudWatch rather than appearing as success.
   const status = (body as { requestStatusPerDestination?: unknown }).requestStatusPerDestination;
   const requestId = (body as { requestId?: string }).requestId ?? '(no-id)';
-  const ec = usedUserData ? ' +ec(email)' : '';
   if (status) {
-    console.log(`[google-ads] caseId=${caseId} gclid=${gclid.slice(0, 12)}…${ec} requestId=${requestId} perDestStatus=${JSON.stringify(status).slice(0, 200)}`);
+    console.log(`[google-ads] caseId=${caseId} gclid=${gclid.slice(0, 12)}… requestId=${requestId} perDestStatus=${JSON.stringify(status).slice(0, 200)}`);
   } else {
-    console.log(`[google-ads] caseId=${caseId} gclid=${gclid.slice(0, 12)}…${ec} requestId=${requestId} accepted`);
+    console.log(`[google-ads] caseId=${caseId} gclid=${gclid.slice(0, 12)}… requestId=${requestId} accepted`);
   }
 }

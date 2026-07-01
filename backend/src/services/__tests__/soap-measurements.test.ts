@@ -8,7 +8,13 @@
 //   - a date/qualifier not in the context is nulled (date anti-fabrication, mirrors chart-extract);
 //   - NONE → graceful empty [] and the Objective prose is unchanged.
 import { describe, it, expect } from 'vitest';
-import { coerceMeasurements, withMeasurementsInObjective } from '../soap-overview.js';
+import {
+  coerceMeasurements,
+  withMeasurementsInObjective,
+  ensureSeverityMeasurements,
+  extractSeverityMeasurementsFromContext,
+  __renderContextForTest,
+} from '../soap-overview.js';
 
 // A realistic rendered-context excerpt (what renderContext would feed the model): a sleep-study + CPAP report.
 const CONTEXT = [
@@ -88,6 +94,60 @@ describe('coerceMeasurements — coerce + ground', () => {
       ctx,
     );
     expect(out).toHaveLength(1);
+  });
+
+  // ── PRIORITY ORDERING (#63, Dr. Kasky 2026-06-30) ──
+  // The OSA nightmare: the model surfaces sleep-ARCHITECTURE metrics (TST/efficiency/REM latency/N3) + BMI and
+  // omits or buries AHI — THE severity index. Fix: AHI leads, RDI second, above the architecture metrics, even
+  // when the model emits them in the wrong order, and even when they arrive late (must survive the cap).
+  it('reorders so AHI is FIRST and RDI SECOND above architecture metrics, regardless of emitted order', () => {
+    const ctx = [
+      'Polysomnogram 4/2024 (diagnostic): total sleep time 388 min, sleep efficiency 84%, REM latency 96 min,',
+      'N3 sleep 12%, BMI 34, RDI 33.1 events/hr, AHI 28.4 events/hr.',
+    ].join(' ');
+    const out = coerceMeasurements(
+      [
+        { label: 'Total sleep time', value: '388', unit: 'min', qualifier: 'diagnostic' },
+        { label: 'Sleep efficiency', value: '84', unit: '%', qualifier: 'diagnostic' },
+        { label: 'REM latency', value: '96', unit: 'min', qualifier: 'diagnostic' },
+        { label: 'N3 sleep', value: '12', unit: '%', qualifier: 'diagnostic' },
+        { label: 'BMI', value: '34', unit: 'kg/m2' },
+        { label: 'RDI', value: '33.1', unit: 'events/hr', qualifier: 'diagnostic' },
+        { label: 'AHI', value: '28.4', unit: 'events/hr', qualifier: 'diagnostic' }, // emitted LAST
+      ],
+      ctx,
+    );
+    const labels = out.map((m) => m.label);
+    expect(labels[0]).toBe('AHI');
+    expect(labels[1]).toBe('RDI');
+    // the architecture metrics all rank after AHI/RDI
+    expect(labels.indexOf('AHI')).toBeLessThan(labels.indexOf('Total sleep time'));
+    expect(labels.indexOf('RDI')).toBeLessThan(labels.indexOf('Sleep efficiency'));
+  });
+
+  it('AHI survives the cap even when the model emits it after 8 architecture rows (sort-before-cap)', () => {
+    const arch = Array.from({ length: 8 }, (_, i) => `arch metric M${i} value ${i} in the diagnostic study.`).join(' ');
+    const ctx = `${arch} Sleep study: AHI 28.4 events/hr.`;
+    const raw = [
+      ...Array.from({ length: 8 }, (_, i) => ({ label: `M${i}`, value: String(i) })),
+      { label: 'AHI', value: '28.4', unit: 'events/hr' }, // 9th, would be capped out without priority-before-cap
+    ];
+    const out = coerceMeasurements(raw, ctx);
+    expect(out.length).toBeLessThanOrEqual(8);
+    expect(out[0]!.label).toBe('AHI'); // priority pulls it to the front AND inside the cap
+  });
+
+  it('non-sleep measurements keep their emitted order (no regression for BP/A1c charts)', () => {
+    const ctx = 'Vitals: blood pressure 142/88 mmHg. Labs: HbA1c 7.1%, fasting glucose 138 mg/dL.';
+    const out = coerceMeasurements(
+      [
+        { label: 'Blood pressure', value: '142/88', unit: 'mmHg' },
+        { label: 'HbA1c', value: '7.1', unit: '%' },
+        { label: 'Fasting glucose', value: '138', unit: 'mg/dL' },
+      ],
+      ctx,
+    );
+    expect(out.map((m) => m.label)).toEqual(['Blood pressure', 'HbA1c', 'Fasting glucose']);
   });
 
   it('returns [] for a null / non-array tool input (graceful empty)', () => {
@@ -198,5 +258,113 @@ describe('withMeasurementsInObjective — threading into prose (plain-text consu
   it('is a no-op (prose unchanged) when there are no measurements', () => {
     const prose = 'OSA is confirmed on sleep study. All records were reviewed.';
     expect(withMeasurementsInObjective(prose, [])).toBe(prose);
+  });
+});
+
+// ── DETERMINISTIC SEVERITY BACKSTOP (Dr. Kasky, Robert Foster OSA collapse-to-BMI 2026-06-30) ──
+// The reliability failure: on a COMPLETE (large) chart the SOAP synthesizer emitted only {BMI} and DROPPED the
+// polysomnogram AHI/RDI the chart contained, so the Objective collapsed to "BMI 49.7" — thinner than the
+// provisional note. The priority sort only reorders what the model emitted; it cannot recover a dropped number.
+// ensureSeverityMeasurements is the guarantee: if AHI/RDI are present-and-label-grounded in the exact context
+// the model saw, they cannot be dropped — while a non-sleep chart (no "AHI …number") can never gain an invented
+// AHI (anti-fabrication by construction).
+const PSG_CTX = [
+  'Claimed condition: Obstructive sleep apnea',
+  'Extracted records (source material):',
+  '[Sleep p3] Polysomnogram 4/2024: AHI 28.4 events/hr (diagnostic); RDI 33.1 events/hr; lowest SpO2 81%.',
+  '[Clinic p1] BMI 49.7 kg/m2 (class III obesity).',
+].join('\n');
+
+describe('extractSeverityMeasurementsFromContext — deterministic, grounded, non-inventing', () => {
+  it('pulls AHI and RDI verbatim from a PSG context', () => {
+    const ms = extractSeverityMeasurementsFromContext(PSG_CTX);
+    expect(ms.map((m) => m.label).sort()).toEqual(['AHI', 'RDI']);
+    expect(ms.find((m) => m.label === 'AHI')!.value).toBe('28.4');
+    expect(ms.find((m) => m.label === 'RDI')!.value).toBe('33.1');
+  });
+
+  it('captures BOTH the diagnostic and the on-CPAP AHI as separate readings', () => {
+    const ctx = 'Polysomnogram: AHI 28.4 events/hr (diagnostic). On CPAP at 10 cm H2O, AHI 3.1 events/hr.';
+    const ahiVals = extractSeverityMeasurementsFromContext(ctx).filter((m) => m.label === 'AHI').map((m) => m.value);
+    expect(ahiVals.sort()).toEqual(['28.4', '3.1'].sort());
+  });
+
+  it('invents NOTHING when the chart mentions a sleep study but reports no AHI number', () => {
+    const ctx = '[Sleep p1] Sleep study ordered; polysomnogram pending. Patient reports loud snoring and witnessed apneas.';
+    expect(extractSeverityMeasurementsFromContext(ctx)).toEqual([]);
+  });
+
+  it('invents NOTHING on a non-sleep chart', () => {
+    expect(extractSeverityMeasurementsFromContext('Vitals: blood pressure 142/88 mmHg. HbA1c 7.1%.')).toEqual([]);
+  });
+});
+
+describe('ensureSeverityMeasurements — guarantee AHI/RDI cannot be dropped', () => {
+  it('RECOVERS the collapse-to-BMI: model emitted only BMI → AHI first, RDI second, BMI after', () => {
+    const modelOnlyBmi = coerceMeasurements([{ label: 'BMI', value: '49.7', unit: 'kg/m2' }], PSG_CTX);
+    expect(modelOnlyBmi.map((m) => m.label)).toEqual(['BMI']); // the exact failure the screenshot showed
+    const out = ensureSeverityMeasurements(modelOnlyBmi, PSG_CTX);
+    const labels = out.map((m) => m.label);
+    expect(labels[0]).toBe('AHI');
+    expect(labels[1]).toBe('RDI');
+    expect(labels).toContain('BMI');
+    expect(out.find((m) => m.label === 'AHI')!.value).toBe('28.4'); // grounded value, not invented
+  });
+
+  it('does NOT double an AHI the model already surfaced, but still backfills the missing RDI', () => {
+    const model = coerceMeasurements([{ label: 'AHI', value: '28.4', unit: 'events/hr', qualifier: 'diagnostic' }], PSG_CTX);
+    const out = ensureSeverityMeasurements(model, PSG_CTX);
+    expect(out.filter((m) => m.label === 'AHI')).toHaveLength(1); // no duplicate AHI
+    expect(out.some((m) => m.label === 'RDI')).toBe(true);        // RDI backfilled
+  });
+
+  it('non-sleep case is unchanged — no invented AHI (no regression for BP/A1c charts)', () => {
+    const ctx = 'Claimed condition: Hypertension\nVitals 5/2024: blood pressure 142/88 mmHg, heart rate 72.';
+    const model = coerceMeasurements([{ label: 'Blood pressure', value: '142/88', unit: 'mmHg' }], ctx);
+    const out = ensureSeverityMeasurements(model, ctx);
+    expect(out).toEqual(model);
+    expect(out.some((m) => /ahi|rdi/i.test(m.label))).toBe(false);
+  });
+
+  it('sleep-study-present-but-AHI-absent → does NOT invent AHI, keeps the model output', () => {
+    const ctx = [
+      'Claimed condition: Obstructive sleep apnea',
+      '[Sleep p1] Sleep study ordered; polysomnogram pending. Loud snoring and witnessed apneas reported.',
+      '[Clinic] BMI 41 kg/m2.',
+    ].join('\n');
+    const model = coerceMeasurements([{ label: 'BMI', value: '41', unit: 'kg/m2' }], ctx);
+    const out = ensureSeverityMeasurements(model, ctx);
+    expect(out.map((m) => m.label)).toEqual(['BMI']);
+    expect(out.some((m) => m.label === 'AHI')).toBe(false);
+  });
+});
+
+// ── DIGEST TRUNCATION FIX (root cause of the Foster collapse-to-BMI) ──
+// documentDigest emits VERBATIM high-signal page spans; on a large COMPLETE chart the polysomnogram span can sit
+// PAST the 12k CHART_DIGEST_CAP, so the OLD naive head-slice dropped the AHI line before the model ever saw it →
+// the model could only surface the early-appearing BMI. boundChartDigest floats the verbatim key study lines to
+// the front of the capped context so AHI/RDI survive the truncation.
+describe('renderContext digest bounding — PSG numbers survive the 12k cap', () => {
+  it('keeps AHI/RDI even when their line sits far past the cap in a large chart', () => {
+    const filler = Array.from({ length: 400 }, (_, i) =>
+      `[filler doc p${i}] routine progress note, vitals stable, no acute distress, continue current plan.`).join('\n');
+    const bigDigest = `${filler}\n[Sleep p3] Polysomnogram 4/2024: AHI 28.4 events/hr (diagnostic); RDI 33.1 events/hr; lowest SpO2 81%.`;
+    // Precondition: the digest exceeds the cap AND the AHI line is buried past it (the old head-slice would drop it).
+    expect(bigDigest.length).toBeGreaterThan(12_000);
+    expect(bigDigest.indexOf('AHI 28.4')).toBeGreaterThan(12_000);
+
+    const rendered = __renderContextForTest({ claimedCondition: 'Obstructive sleep apnea', chartDigest: bigDigest });
+    expect(rendered).toContain('AHI 28.4');
+    expect(rendered).toContain('RDI 33.1');
+    // And because the numbers are now IN the context, the backstop can ground+surface them.
+    const ms = extractSeverityMeasurementsFromContext(rendered);
+    expect(ms.map((m) => m.label).sort()).toEqual(['AHI', 'RDI']);
+  });
+
+  it('leaves a small digest untouched (no bounding when it fits)', () => {
+    const small = '[Sleep p1] Polysomnogram: AHI 12.3 events/hr.';
+    const rendered = __renderContextForTest({ claimedCondition: 'Obstructive sleep apnea', chartDigest: small });
+    expect(rendered).toContain(small);
+    expect(rendered).not.toContain('Key study measurements found in the records:');
   });
 });

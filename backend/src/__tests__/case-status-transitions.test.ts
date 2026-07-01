@@ -48,7 +48,10 @@ describe('case status transitions', () => {
       'rn_review',
       'rejected',
     ]);
-    expect(CASE_STATUS_TRANSITIONS.correction_requested).toEqual(['correction_review']);
+    // correction_requested -> physician_review is the RN "Send corrected letter to doctor" one-hop
+    // (2026-07-01): correction_review is a dead state nothing enters, so this direct edge is the
+    // corrected letter's forward door. No ->delivered edge is added (sign-off gate stays authoritative).
+    expect(CASE_STATUS_TRANSITIONS.correction_requested).toEqual(['correction_review', 'physician_review']);
     // correction_review -> physician_review = RN "Send corrected letter back to the doctor" for a
     // fresh sign-off (correction-round SSOT, audit 2026-06-13); -> delivered stays but is physician/
     // admin-only (the bare RN flip the audit closed).
@@ -113,6 +116,28 @@ describe('case status transitions', () => {
   it('correction_review -> physician_review exists and the RN (ops_staff) may send a corrected letter back to the doctor for a fresh sign-off', () => {
     expect(CASE_STATUS_TRANSITIONS.correction_review).toContain('physician_review');
     expect(canRolePerformCaseStatusTransition('ops_staff', 'correction_review', 'physician_review')).toBe(true);
+  });
+
+  // ── Correction-round forward door — the ONE-HOP send out of correction_requested (2026-07-01) ──
+  // The physician declined + the RN hand-fixed the letter (edits, trivial edits, or NONE — editing does
+  // not change status). The corrected letter must go straight back to the doctor. Previously the only
+  // exit was correction_review, which NO code path ever entered (dead state), so the letter was stranded
+  // (CLM-5FB43F91DE, Bays). This direct edge is the forward door.
+  it('correction_requested -> physician_review exists and the RN (ops_staff) may send a corrected letter to the doctor', () => {
+    expect(CASE_STATUS_TRANSITIONS.correction_requested).toContain('physician_review');
+    expect(isValidCaseStatusTransition('correction_requested', 'physician_review')).toBe(true);
+    expect(canRolePerformCaseStatusTransition('ops_staff', 'correction_requested', 'physician_review')).toBe(true);
+    expect(canRolePerformCaseStatusTransition('admin', 'correction_requested', 'physician_review')).toBe(true);
+  });
+
+  it('correction_requested -> delivered is STILL invalid — the forward door does NOT add a bare-flip to delivered (sign-off gate stays authoritative)', () => {
+    // The MAP is the gate on which edges EXIST (the /status route requires isValidCaseStatusTransition
+    // AND canRolePerform). correction_requested has no ->delivered edge, so the bare flip is impossible on
+    // the /status route for EVERY role — delivery goes through /letter/approve (re-render FINAL + the
+    // fraud/signer/affirmativeness sign-off gates). (canRolePerform alone returns true for admin because
+    // it never consults the map; the map is what closes this.)
+    expect(CASE_STATUS_TRANSITIONS.correction_requested).not.toContain('delivered');
+    expect(isValidCaseStatusTransition('correction_requested', 'delivered')).toBe(false);
   });
 
   it('allows admin on any transition', () => {

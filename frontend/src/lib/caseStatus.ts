@@ -9,7 +9,11 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   rn_review: ['physician_review', 'drafting', 'rejected'],
   // physician_review -> rn_review: drafter /complete legalization (admin-only as a human move).
   physician_review: ['correction_requested', 'delivered', 'rn_review', 'rejected'],
-  correction_requested: ['correction_review'],
+  // correction_requested -> physician_review: RN "Send corrected letter to doctor" one-hop (2026-07-01)
+  // — mirrors backend case-status-transitions.ts. correction_review is a dead state nothing enters, so
+  // this direct edge is the corrected letter's forward door. No ->delivered edge is added (sign-off gate
+  // stays authoritative).
+  correction_requested: ['correction_review', 'physician_review'],
   // correction_review -> physician_review: RN "Send corrected letter back to the doctor" for a fresh
   // sign-off (correction-round SSOT, audit 2026-06-13). correction_review -> delivered is physician/
   // admin-only below (closes the RN bare-flip that skipped /letter/approve + the sign-off byte gate).

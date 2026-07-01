@@ -34,7 +34,16 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   // lock by bouncing the case out of the doctor's queue. The doctor's reopen path stays
   // correction_requested (decline / "Send back to RN").
   physician_review: ['correction_requested', 'delivered', 'rn_review', 'rejected'],
-  correction_requested: ['correction_review'],
+  // correction_requested -> physician_review is the RN "Send corrected letter to doctor" one-hop
+  // (2026-07-01): the physician declined + the RN hand-fixed the letter in the editor (edits, trivial
+  // edits, or NONE — editing does not change status, letter.ts) and must be able to send it straight
+  // back to the doctor's queue. Previously the ONLY exit was correction_review, which NO code path ever
+  // entered (dead state) — so the corrected letter was stranded with no forward door (CLM-5FB43F91DE,
+  // Bays). This direct edge is the forward door; it does NOT add a ->delivered edge, so /letter/approve
+  // + the fraud/signer/affirmativeness sign-off gates stay authoritative. Role = default (admin,
+  // ops_staff) below — same as rn_review->physician_review. correction_review->physician_review stays
+  // for back-compat. The forward re-pin (cases.ts) + assigned-physician guard cover this edge already.
+  correction_requested: ['correction_review', 'physician_review'],
   // correction_review -> physician_review is the RN "Send corrected letter back to the doctor"
   // action (correction-round SSOT, audit 2026-06-13): after a doctor decline + RN fix the corrected
   // letter MUST return to the physician's queue for a fresh sign-off — there was previously no edge

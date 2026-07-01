@@ -256,15 +256,18 @@ export function CaseDetailPage() {
     onError: (e: unknown) => window.alert(`Could not cancel — ${describeApiError(e)}`),
   });
 
-  // Send to doctor for review: rn_review -> physician_review. Completed drafts no longer auto-route
+  // Send to doctor for review: <current status> -> physician_review. Completed drafts no longer auto-route
   // to the doctor — the RN reviews/edits, then explicitly sends. (Ryan 2026-06-04.) The send now
-  // always opens SendToDoctorModal for an optional handoff message (Ryan 2026-06-24).
+  // always opens SendToDoctorModal for an optional handoff message (Ryan 2026-06-24). `from` reads the
+  // LIVE status (2026-07-01) so this one mutation serves BOTH the rn_review send (identical to the old
+  // hardcoded 'rn_review') and the correction-round send (correction_requested/correction_review ->
+  // physician_review) — the corrected letter's forward door.
   const [sendToDoctorOpen, setSendToDoctorOpen] = useState(false);
   const sendToDoctor = useMutation({
     mutationFn: () => {
       const cur = caseQuery.data?.data;
       if (!cur) throw new Error('Case not loaded');
-      return transitionCaseStatus(caseId, { from: 'rn_review', to: 'physician_review', version: cur.version });
+      return transitionCaseStatus(caseId, { from: cur.status, to: 'physician_review', version: cur.version });
     },
     onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
     // Errors are surfaced by SendToDoctorModal (which awaits mutateAsync) — no window.alert here, or
@@ -818,7 +821,28 @@ export function CaseDetailPage() {
                       </p>
                       <div className="mt-4 flex flex-wrap gap-2">
                         {/* View letter lives in the page header — not duplicated here. */}
-                        <Button variant="primary" size="sm" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}>Open letter editor</Button>
+                        <Button variant="secondary" size="sm" onClick={() => navigate(`/cases/${encodeURIComponent(c.id)}/letter`)}>Open letter editor</Button>
+                        {/* Send corrected letter to doctor (2026-07-01): the correction-round forward door.
+                            Shown ONLY on the correction states (NOT 'drafting' — a pre-review edit must not
+                            be sendable). Independent of whether any edit was made — "no edits" and "trivial
+                            edits" both send (the transition requires no diff). Opens the same optional-message
+                            SendToDoctorModal already rendered above; the status-aware sendToDoctor mutation
+                            reads the live status as `from`. Disabled with an assign-physician hint when no
+                            physician is assigned (a truthful caution, not a hard block — a declined case
+                            always has one, so this won't actually fire). The doctor still reviews + signs off
+                            via /letter/approve before delivery. */}
+                        {c.status === 'correction_requested' || c.status === 'correction_review' ? (
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            loading={sendToDoctor.isPending}
+                            disabled={sendToDoctor.isPending || !c.assignedPhysician}
+                            title={c.assignedPhysician ? undefined : 'Assign a physician below before sending.'}
+                            onClick={() => setSendToDoctorOpen(true)}
+                          >
+                            Send corrected letter to doctor
+                          </Button>
+                        ) : null}
                       </div>
                     </div>
                   ) : null}

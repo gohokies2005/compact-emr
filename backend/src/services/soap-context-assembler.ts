@@ -122,7 +122,10 @@ export async function assembleSoapContextForCase(
   const keyFacts = row?.veteran?.weightLb != null ? [{ label: 'Weight', value: `${row.veteran.weightLb} lb` }] : [];
 
   const [chartDigest, coverageNote] = await Promise.all([
-    buildDigestForCase(db, caseId).catch(() => null),
+    // preserveSeverity: the SOAP note grounds its Objective on diagnostic severity numbers (AHI/RDI/…). The
+    // ONLY caller that opts in — the digest severity pre-pass guarantees those verbatim readings survive the
+    // cap even on a 1608-page bundle (Foster root-cause 2026-07-01). All other digest callers stay unchanged.
+    buildDigestForCase(db, caseId, { preserveSeverity: true }).catch(() => null),
     deriveCoverageNote(db, caseId),
   ]);
 

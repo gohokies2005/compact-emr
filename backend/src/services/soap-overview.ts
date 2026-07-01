@@ -21,6 +21,9 @@ import { resolveAnthropicApiKey } from './letter-surgical-propose.js';
 // import above is unresolvable in the FE test env). Re-exported here so every existing importer of
 // planViabilityToAction / SoapAction / RoutePickerViability from soap-overview.js is unchanged.
 import { planViabilityToAction, type SoapAction, type RoutePickerViability } from './soap-action-map.js';
+// SSOT for "this text carries a study severity index" — shared with documentDigest's severity pre-pass so the
+// harvest and the SOAP_OBJECTIVE_AHI_DROPPED canary below can never drift on what "severity" means.
+import { SEVERITY_LINE_RE } from '../advisory/documentDigest.js';
 export { planViabilityToAction };
 export type { SoapAction, RoutePickerViability };
 
@@ -54,7 +57,13 @@ const MODEL = process.env['SOAP_NOTE_MODEL'] || 'claude-sonnet-4-6';
 // EVERY pre-v29 cached note — including cases whose digest fit under the cap (unchanged fingerprint) but whose
 // stored measurements[] collapsed to BMI-only — recomputes with the backstop on next open. (Costs one regen per
 // case on next open; the async precompute absorbs the large charts.)
-export const SOAP_NOTE_SCHEMA_VERSION = 29;
+// v30 (2026-07-01, Foster OSA root-cause): the SOAP context assembler now builds its chart digest with the
+// documentDigest SEVERITY PRE-PASS on (preserveSeverity:true), so the verbatim AHI/RDI lines survive the
+// digest cap even on a 1608-page bundle — the fix moved UPSTREAM of ensureSeverityMeasurements/boundChartDigest
+// (which were starved by the same cap on Foster and never saw the reading). This changes the digest string on
+// any severity-bearing chart → renderContext → the fingerprint, so pre-v30 stored notes self-invalidate; the
+// bump also forces the BMI-only cached notes (whose digest fit under the cap but dropped the AHI) to recompute.
+export const SOAP_NOTE_SCHEMA_VERSION = 30;
 
 export type SoapConfidence = 'high' | 'moderate' | 'low';
 // SoapAction + RoutePickerViability are imported+re-exported from ./soap-action-map.js (top of file).
@@ -860,6 +869,21 @@ export async function buildSoapNote(ctx: SoapContext, opts?: { timeoutMs?: numbe
     // grounded in the exact context the model saw (never inventing one on a non-sleep chart) so the Objective
     // can no longer collapse to BMI-only. Priority sort keeps AHI first / RDI second inside the cap.
     const measurements = ensureSeverityMeasurements(coerceMeasurements(inp['measurements'], ctxText), ctxText);
+    // SOAP_OBJECTIVE_AHI_DROPPED canary (Foster root-cause, 2026-07-01). Even WITH the deterministic backstop,
+    // if the context carries a study severity index (AHI/apnea-hypopnea/RDI/…) but NEITHER the grounded
+    // measurements[] NOR the Objective prose surfaced ANY severity token, the reading was dropped upstream of
+    // this layer (e.g. it never reached the digest — the exact Foster collapse-to-BMI). Emit ONE greppable
+    // structured warn (CloudWatch metric-filter target); it NEVER blocks the note. SEVERITY_LINE_RE is the SSOT
+    // (imported from documentDigest) so this canary and the digest severity pre-pass agree on "severity".
+    try {
+      if (SEVERITY_LINE_RE.test(ctxText)) {
+        const measHasSeverity = measurements.some((m) => SEVERITY_LINE_RE.test(`${m.label} ${m.display}`));
+        const objHasSeverity = SEVERITY_LINE_RE.test(objective);
+        if (!measHasSeverity && !objHasSeverity) {
+          console.warn(JSON.stringify({ msg: 'SOAP_OBJECTIVE_AHI_DROPPED', claimedCondition: ctx.claimedCondition }));
+        }
+      }
+    } catch { /* observability only — a canary must never block the note */ }
     const base = { subjective, objective, assessment, plan };
     // One-brain at the action layer: when a route-picker plan is grounding the note, the Plan's action +
     // confidence are DERIVED DETERMINISTICALLY from the plan's viability band + confidence — NOT the model's

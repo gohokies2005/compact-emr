@@ -170,7 +170,15 @@ interface ChartSliceRaw {
 // EXPORTED (2026-06-21, same-brain SOAP): the SOAP Overview must read the SAME extracted-chart digest Ask
 // Aegis cites (Zimmelman: the SOAP was fed structured columns only and missed records Ask Aegis surfaced).
 // One builder, both consumers — never a second digest path that can drift.
-export async function buildDigestForCase(db: AppDb, caseId: string): Promise<string | null> {
+// `opts.preserveSeverity` (default OFF) opts INTO the documentDigest severity pre-pass — it guarantees the
+// verbatim diagnostic severity lines (AHI/RDI/…) survive the digest cap even on a huge bundle. Only the SOAP
+// context assembler passes it; the other three callers (Ask-Aegis, draft-readiness, case-viability) omit it →
+// unchanged byte-for-byte. (Foster root-cause 2026-07-01 — see documentDigest.ts SEVERITY_LINE_RE.)
+export async function buildDigestForCase(
+  db: AppDb,
+  caseId: string,
+  opts?: { preserveSeverity?: boolean },
+): Promise<string | null> {
   try {
     // #5 (Zimmelman, 2026-06-21): feed docs NEWEST-FIRST. buildDocumentDigest's per-doc FLOOR and tie-break
     // both prioritize the FRONT of this list, so newest-first guarantees the modern dx/decision survives the
@@ -196,7 +204,7 @@ export async function buildDigestForCase(db: AppDb, caseId: string): Promise<str
       arr.push(p);
       byDoc.set(p.documentId, arr);
     }
-    const { text } = buildDocumentDigest(docs, byDoc);
+    const { text } = buildDocumentDigest(docs, byDoc, { preserveSeverity: opts?.preserveSeverity === true });
     return text;
   } catch {
     return null;

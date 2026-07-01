@@ -220,13 +220,38 @@ export async function buildDrafterBundle(db: AppDb, caseId: string, opts: BuildD
   const buildStateDocs = (documents as ReadonlyArray<{ id: string; s3Key: string; caseId: string }>)
     .filter((d) => d.caseId === caseId)
     .map((d) => ({ id: d.id, s3Key: d.s3Key }));
-  const extractionState = deriveChartBuildState(
+  const rawExtractionState = deriveChartBuildState(
     buildStateDocs,
     thisCaseReadStatuses.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })),
     // deriveChartBuildState now takes the case's recent runs (sticky-completion fix, Ewell
     // CLM-A867B8C128, 2026-06-14); this caller queries a single latest run → wrap to preserve behavior.
     latestExtractionRun ? [latestExtractionRun] : [],
   ).state;
+  // Reconcile the veteran's SC rows to the authoritative status (service_connected > pending >
+  // denied) + fold synonyms — the drafter sees ONE clean anchor per condition (matches the UI). Lifted
+  // above the return so it also feeds the manual-case content signal below. (2026-06-20)
+  const reconciledScConditions = reconcileScConditions(
+    scConditions as ReadonlyArray<{ condition: string; status?: string | null; ratingPct?: number | null }>,
+  );
+  // ── MANUAL / EXISTING-VETERAN CASE, 0 UPLOADED FILES (Hackworth cervical, Ryan 2026-06-30) ──
+  // deriveChartBuildState keys on THIS case's uploaded-document COUNT, so a New-Claim case for an
+  // existing veteran that carries its records as on-file chart data (no file uploaded to this case)
+  // derives 'no_documents' — and the Fargate drafter refuses ("chart extraction is not ready (state:
+  // no_documents)") even though the SOAP note renders a full grounded chart. But this bundle is
+  // VETERAN-scoped for content: scConditions / activeProblems / activeMedications / chartNotes, plus
+  // every prior-case document + its OCR'd pages, are all present — the drafter CAN ground the letter.
+  // So broaden ONLY the 'no_documents' verdict: when there are 0 this-case input docs BUT real
+  // draftable chart content exists, the chart IS ready to draft. A genuinely empty case (0 docs AND 0
+  // content) stays 'no_documents' so the drafter never runs on nothing. Narrowly gated to
+  // 'no_documents' — extract_failed / extracting / ocr_in_progress are UNTOUCHED (a this-case file
+  // that failed/is-still-extracting must still block; the Bonnewitz failed-extract protection holds).
+  const hasDraftableChartContent =
+    reconciledScConditions.length > 0 ||
+    (activeProblems as readonly unknown[]).length > 0 ||
+    (activeMedications as readonly unknown[]).length > 0 ||
+    (chartNotes as readonly unknown[]).length > 0;
+  const extractionState: ChartBuildState =
+    rawExtractionState === 'no_documents' && hasDraftableChartContent ? 'chart_ready' : rawExtractionState;
   // Extraction gap counts (P2-3, 2026-06-14). Mirrors chart-readiness.ts:175-178 exactly: only a
   // `complete_with_gaps` run with a gaps block surfaces counts; everything else is null. The drafter
   // can then note a gapped chart in the letter provenance instead of silently drafting on a partial read.
@@ -258,12 +283,9 @@ export async function buildDrafterBundle(db: AppDb, caseId: string, opts: BuildD
       cdsRationale: process.env['CDS_ENABLED'] === 'on' ? c.cdsRationale : null,
     },
     veteran,
-    // Reconcile same-condition SC rows to the authoritative status (service_connected >
-    // pending > denied) + fold synonyms, so the drafter sees ONE clean anchor per condition
-    // and the granted-SC count isn't inflated by dupes. Matches the UI reconcile. (2026-06-20)
-    scConditions: reconcileScConditions(
-      scConditions as ReadonlyArray<{ condition: string; status?: string | null; ratingPct?: number | null }>,
-    ),
+    // Reconciled SC anchors (service_connected > pending > denied + synonym fold) — computed above so
+    // it also feeds the manual-case content signal. Matches the UI reconcile. (2026-06-20)
+    scConditions: reconciledScConditions,
     activeProblems,
     activeMedications,
     chartNotes,

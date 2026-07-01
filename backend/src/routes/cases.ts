@@ -20,6 +20,7 @@ import {
 import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor, type RequestActor } from '../services/request-actor.js';
 import { computeApproveBlockers, type ApproveBlocker, type ApproveBlockerDeps } from '../services/approve-blockers.js';
+import { resolveCurrentRefStrict, resolveViewableCurrentTxtKey, type CurrentRef } from '../services/letter-current.js';
 import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
 import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
 
@@ -748,10 +749,31 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         }
       }
 
+      // FORWARD RE-PIN — STRANDED-POINTER SELF-HEAL AT THE SOURCE (CLM-8EC828F1D7, Hildreth, 2026-07-01):
+      // when a halted render-parity draft was hand-edited + forwarded, Case.currentVersion can point at a
+      // dead version while a present letter is recoverable. The approve gate + blocker advisory resolve
+      // strictly by currentVersion, so without re-pinning the physician sees "No current letter to approve"
+      // over a present letter. On a forward → physician_review whose STRICT pointer does NOT resolve but a
+      // letter IS recoverable, materialize a LetterRevision for the recovered letter and re-pin
+      // Case.currentVersion to it — so every strict consumer converges. HeadObject probes run BEFORE the
+      // transaction (mirrors the delivery gate above); the DB writes stay inside it. Fail-open: recovery
+      // needs s3/bucket — with them unwired (local/test) resolveViewableCurrentTxtKey degrades to strict,
+      // so strandedRepin stays null and nothing changes.
+      let forwardRepin: CurrentRef | null = null;
+      if (parsed.to === 'physician_review' && isValidCaseStatusTransition(parsed.from, parsed.to)) {
+        const cForRepin = await db.case.findFirst({ where: { id }, select: { id: true, currentVersion: true } });
+        if (cForRepin !== null) {
+          const strict = await resolveCurrentRefStrict(db, id, cForRepin.currentVersion);
+          if (strict === null) {
+            forwardRepin = await resolveViewableCurrentTxtKey(db, deps.s3, deps.bucketName, id, cForRepin.currentVersion);
+          }
+        }
+      }
+
       const updated = await db.$transaction(async (tx) => {
         const existing = await tx.case.findFirst({
           where: { id },
-          select: { id: true, veteranId: true, status: true, version: true },
+          select: { id: true, veteranId: true, status: true, version: true, currentVersion: true },
         });
         if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
         if (existing.status !== parsed.from || existing.version !== parsed.version) {
@@ -772,9 +794,47 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
 
         const row = await tx.case.update({
           where: { id },
-          data: { status: parsed.to, version: { increment: 1 } },
+          data: {
+            status: parsed.to,
+            version: { increment: 1 },
+            // Re-pin onto the recovered letter so the strict approve gate + blocker resolve it.
+            ...(forwardRepin !== null ? { currentVersion: forwardRepin.version } : {}),
+          },
           select: CASE_LITE_SELECT,
         });
+
+        // Materialize a LetterRevision for the recovered letter (idempotent — the DESC-walk may land on a
+        // DraftJob row or an S3-only artifact that has no LetterRevision yet). editedBy = the forwarding
+        // human; source='drafter_run' (it IS a drafter-produced letter). Skipped when a revision already
+        // exists at that version (recovery landed on an existing LetterRevision).
+        if (forwardRepin !== null) {
+          const existingRev = await tx.letterRevision.findFirst({ where: { caseId: id, version: forwardRepin.version } });
+          if (existingRev === null) {
+            await tx.letterRevision.create({
+              data: {
+                caseId: id,
+                version: forwardRepin.version,
+                parentVersion: forwardRepin.version,
+                source: 'drafter_run',
+                artifactTxtS3Key: forwardRepin.txtKey,
+                artifactPdfS3Key: forwardRepin.pdfKey,
+                artifactDocxS3Key: forwardRepin.docxKey,
+                editedBy: user.sub,
+                editorRole: user.role,
+                sanityJson: null,
+              },
+            });
+          }
+          await tx.activityLog.create({
+            data: {
+              actorUserId: user.id,
+              action: 'letter_stranded_recovery',
+              caseId: id,
+              veteranId: existing.veteranId,
+              detailsJson: { strandedCurrentVersion: existing.currentVersion, recoveredVersion: forwardRepin.version, path: 'forward_to_physician' },
+            },
+          });
+        }
 
         await tx.activityLog.create({
           data: {

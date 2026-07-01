@@ -279,6 +279,38 @@ describe('PhysicianReviewPage', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  // CLM-8EC828F1D7 (Hildreth, 2026-07-01): a halted render-parity draft, hand-edited + forwarded, showed
+  // BOTH "Letter is ready · Grade A" AND a hard "No current letter to approve" blocker at the same time —
+  // because the card read the recovery-capable GET /letter while the blocker read the STRICT resolver. The
+  // backend fix reconciles them (the blocker now uses the same recovery resolver), so a present forwarded
+  // letter carries NO no_letter blocker. This pins the reconciled screen: the ready card + the honest
+  // Unverified caution render, and the contradictory "No current letter to approve" line is GONE.
+  it('reconciled halted-then-forwarded letter: ready card + Unverified caution, and NO "No current letter to approve" contradiction', async () => {
+    getCaseMock.mockResolvedValue({
+      // Hildreth: automated run did NOT complete (halted), grade A / 10, present letter, and — post-fix —
+      // approveBlockers carries no no_letter (the backend recovery resolver found the forwarded letter).
+      data: { ...readyCase, runComplete: false, grade: 'A', probativeScore: 10, approveBlockers: [] },
+    });
+    getLetterMock.mockResolvedValue({
+      data: {
+        source: 'drafter',
+        txt: 'I. Introduction\nHildreth OSA nexus letter, hand-edited after the render-parity halt.',
+        version: 54,
+        rendered: { pdfUrl: 'https://x/current.pdf', docxUrl: null },
+      },
+    } as unknown as Awaited<ReturnType<typeof getLetter>>);
+    renderReview();
+
+    // The two signals AGREE: the ready card shows AND there is no no_letter blocker.
+    expect(await screen.findByText('Letter is ready for your review')).toBeInTheDocument();
+    expect(screen.queryByText(/No current letter to approve/i)).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull(); // no hard blocker banner at all
+    // The honest soft caution is KEPT (only the hard blocker was wrong).
+    expect(screen.getByText(/Unverified/i)).toBeInTheDocument();
+    // The letter is signable — a present forwarded letter is never blocked (no-block-draft rule).
+    expect(screen.getByRole('button', { name: 'Approve and sign' })).toBeEnabled();
+  });
+
   // ── Imported-letter finalize (functional gap fix, 2026-06-14) ─────────────────────────────────
   // An external_import letter in physician_review NEVER sets runComplete/shipRecommendation, so the
   // normal "ready" gate dead-ended the physician on "Not ready for review". The page must instead

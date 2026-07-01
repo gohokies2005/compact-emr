@@ -51,6 +51,10 @@ interface DbOpts {
   readonly signer?: PhysicianRecord | null;
   readonly roster?: PhysicianRecord[];
   readonly chartReadinessOverride?: { id: string; chartReadinessOverrideReason: string | null } | null;
+  // STRANDED-RECOVERY (CLM-8EC828F1D7, 2026-07-01): draft-job rows the DESC-walk sees. When the strict
+  // pointer (findFirst) is null but a walk row carries a present TXT, the recovery resolver finds it → no
+  // no_letter. Rows carry a version OTHER than currentVersion (the stranded case).
+  readonly strandedJobs?: { version: number; artifactTxtS3Key: string; artifactPdfS3Key: string | null; artifactDocxS3Key: string | null }[];
 }
 
 function makeDb(opts: DbOpts = {}) {
@@ -68,8 +72,10 @@ function makeDb(opts: DbOpts = {}) {
         opts.documentRows ?? (opts.fileReadRows ?? []).map((r) => ({ s3Key: (r as { filePath: string }).filePath })),
       ),
     },
-    letterRevision: { findFirst: vi.fn(async () => revision) },
-    draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
+    // findMany added (CLM-8EC828F1D7): the no_letter check now uses the recovery-capable resolver, which
+    // DESC-walks both tables. Default [] → strict-only behavior (no recovery) for existing tests.
+    letterRevision: { findFirst: vi.fn(async () => revision), findMany: vi.fn(async () => []) },
+    draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => opts.strandedJobs ?? []) },
     // Chart-readiness override lookup (CLM-4DACAF4A80): the advisory mirror suppresses the
     // chart_not_ready banner when an override sign-off exists. Default: no override.
     signOff: { findFirst: vi.fn(async () => opts.chartReadinessOverride ?? null) },
@@ -149,6 +155,20 @@ describe('computeApproveBlockers (advisory pre-flight mirror of the approve gate
     expect(blockers.map((b) => b.code)).toEqual(['no_letter']);
   });
 
+  it('does NOT flag no_letter for a STRANDED-but-recoverable letter (CLM-8EC828F1D7, Hildreth)', async () => {
+    // The strict pointer (currentVersion) resolves NOTHING — a halted render-parity draft, hand-edited +
+    // forwarded, left Case.currentVersion pointing at a dead version. But a prior draft-job version carries
+    // a present TXT (the DESC-walk finds it; the s3Deps stub HeadObject-resolves every key). The advisory
+    // must mirror the review card (which serves it) + the approve route (which now recovers it): NO no_letter.
+    const { db } = makeDb({
+      revision: null,
+      strandedJobs: [{ version: 53, artifactTxtS3Key: 'drafter-artifacts/CASE-1/v53/v53.txt', artifactPdfS3Key: 'drafter-artifacts/CASE-1/v53/v53.pdf', artifactDocxS3Key: null }],
+    });
+    const blockers = await computeApproveBlockers(db, caseRow({ currentVersion: 99 }) as never, s3Deps(LETTER_NAMES_KASKY));
+    expect(blockers.map((b) => b.code)).not.toContain('no_letter');
+    expect(blockers).toEqual([]); // signer named, chart ready → fully clean
+  });
+
   it('flags no_assigned_physician and stops (every later check keys off the signer)', async () => {
     const { db, tx } = makeDb();
     const blockers = await computeApproveBlockers(db, caseRow({ assignedPhysicianId: null }) as never, s3Deps(LETTER_NAMES_KASKY));
@@ -169,12 +189,18 @@ describe('computeApproveBlockers (advisory pre-flight mirror of the approve gate
     expect(blockers[0]?.message).toContain('Ryan J. Kasky, DO is inactive');
   });
 
-  it('flags signer_credentials_incomplete and SKIPS the text checks (no creds to match against)', async () => {
+  it('flags signer_credentials_incomplete and SKIPS the text READ (no GetObject; the existence HeadObject may run)', async () => {
     const { db } = makeDb({ signer: physician({ credentialBlockJson: null }) });
     const deps = s3Deps(LETTER_NO_NAME);
     const blockers = await computeApproveBlockers(db, caseRow() as never, deps);
     expect(blockers.map((b) => b.code)).toEqual(['signer_credentials_incomplete']);
-    expect((deps.s3 as unknown as { send: unknown }).send).not.toHaveBeenCalled();
+    // The no_letter existence check now HeadObject-probes (recovery-capable resolver, CLM-8EC828F1D7),
+    // but the signer-name TEXT READ (a GetObject) must still be skipped when creds are incomplete.
+    const sendMock = deps.s3 as unknown as { send: ReturnType<typeof vi.fn> };
+    const getObjectCalls = sendMock.send.mock.calls.filter(
+      (c) => (c[0] as { constructor?: { name?: string } })?.constructor?.name === 'GetObjectCommand',
+    );
+    expect(getObjectCalls).toHaveLength(0);
   });
 
   it('flags signer_name_absent — the exact gate that burned the hour — with the gate\'s own message', async () => {

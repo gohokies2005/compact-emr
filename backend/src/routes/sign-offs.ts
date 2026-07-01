@@ -8,7 +8,7 @@ import { resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor } from '../services/request-actor.js';
 import { loadReconciledChartReadiness, buildChartNotReadyMessage, originalFileName } from '../services/chart-readiness.js';
 import { resolveOverrideReason } from '../services/chart-readiness-override.js';
-import { resolveCurrentTxtWithHash } from '../services/letter-current.js';
+import { resolveViewableCurrentTxtWithHash } from '../services/letter-current.js';
 import type { AppDb } from '../services/db-types.js';
 
 export interface SignOffsRouterDeps {
@@ -115,12 +115,16 @@ export function createSignOffsRouter(db: AppDb, deps: SignOffsRouterDeps = {}): 
       // current TXT and 409s if it changed after sign-off, so any later edit/approve blocks delivery
       // until the letter is re-signed. Best-effort: if S3 isn't configured (local dev) or no letter is
       // resolvable, store nulls — the delivery gate treats a null hash as "no byte check" (back-compat).
+      // RECOVERY-CAPABLE (CLM-8EC828F1D7 must-fix #2, 2026-07-01): bind to the SAME letter the physician
+      // was shown (resolveViewableCurrentTxtWithHash → strict/walk/S3-truth), NOT the strict pointer. On a
+      // stranded-shown letter (Hildreth) the strict resolver returned null → the sign-off null-bound and
+      // the delivery tamper tripwire was absent; binding to the recovered version + hash restores it.
       let signedVersion: number | null = null;
       let signedContentSha256: string | null = null;
       const bucketName = bucket();
       const s3Client = s3();
       if (s3Client !== undefined && bucketName !== undefined) {
-        const cur = await resolveCurrentTxtWithHash(db, s3Client, bucketName, caseId, c.currentVersion);
+        const cur = await resolveViewableCurrentTxtWithHash(db, s3Client, bucketName, caseId, c.currentVersion);
         if (cur !== null) {
           signedVersion = cur.version;
           signedContentSha256 = cur.sha256;

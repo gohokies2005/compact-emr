@@ -7,7 +7,7 @@ import {
   signerNameAppears,
   findForeignSignerNames,
 } from './credential-block.js';
-import { resolveCurrentTxtKey, readTxtFromS3 } from './letter-current.js';
+import { resolveViewableCurrentTxtKey, readTxtFromS3 } from './letter-current.js';
 import type { AppDb, CaseRecord } from './db-types.js';
 
 /**
@@ -19,7 +19,7 @@ import type { AppDb, CaseRecord } from './db-types.js';
  *
  * ADVISORY ONLY — the approve route's own gates remain the single authority (this mirror reuses
  * the exact same primitives: evaluateChartReadiness, parseCredentialBlock,
- * substituteSignerSentinels, signerNameAppears, findForeignSignerNames, resolveCurrentTxtKey —
+ * substituteSignerSentinels, signerNameAppears, findForeignSignerNames, resolveViewableCurrentTxtKey —
  * so the verdicts cannot drift in logic, only in coverage). Deliberately NOT mirrored here:
  *   - sign_off_required / sign_off_not_affirmative — the attestation is what the physician is
  *     about to do; flagging its absence pre-attest would always show a banner.
@@ -63,8 +63,15 @@ export async function computeApproveBlockers(
     });
   }
 
-  // A current letter must exist (mirrors the approve route's resolveCurrent 409 'no_letter').
-  const cur = await resolveCurrentTxtKey(db, caseId, c.currentVersion);
+  // A current letter must exist. RECONCILED 2026-07-01 (CLM-8EC828F1D7, Hildreth): use the SAME
+  // recovery-capable resolver the read path / review card uses (resolveViewableCurrentTxtKey), NOT the
+  // STRICT currentVersion-pinned resolveCurrentTxtKey. A stranded-but-recoverable letter (a halted
+  // render-parity draft, hand-edited then forwarded) is served by the review card yet the strict
+  // resolver returned null here → the contradictory "Letter ready · Grade A" card AND a hard
+  // "No current letter to approve" blocker on the same screen. The approve route now recovers the same
+  // letter (resolveCurrentForEdit), so this advisory must mirror it. FAIL-OPEN: with s3/bucket unwired
+  // (local/test) it degrades to the strict DB resolution — identical to the pre-change behavior.
+  const cur = await resolveViewableCurrentTxtKey(db, deps.s3, deps.bucketName, caseId, c.currentVersion);
   if (cur === null) {
     blockers.push({ code: 'no_letter', message: 'No current letter to approve.' });
   }

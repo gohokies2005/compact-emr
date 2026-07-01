@@ -564,6 +564,61 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
       expect(caseUpdates.some((u) => u.currentVersion === 41)).toBe(true);
     });
 
+    // CLM-8EC828F1D7 (Hildreth, 2026-07-01): the APPROVE route used the STRICT resolveCurrent → 409
+    // no_letter on a stranded pointer, so a halted render-parity draft that was hand-edited + forwarded
+    // (present, grade A, in the review card) could not be signed — the "No current letter to approve"
+    // blocker over a real letter. Approve now recovers via resolveCurrentForEdit and re-pins.
+    it('APPROVE on a stranded currentVersion=99 pointer RECOVERS (v53): builds v54 over v53, re-pins currentVersion=54 (not 409 no_letter)', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      // Full harness (chart-readiness + affirmative sign-off + physician wiring), then override the
+      // letter tables so the STRICT pointer at v99 resolves nothing but a present v53 letter is walkable.
+      // db.letterRevision === tx.letterRevision (same ref via the makeDb spread), so mutating tx re-wires both.
+      const { db, tx } = makeDb(baseCase({ currentVersion: 99 }));
+      const v53: LetterRevisionRecord = {
+        ...currentRevision(53), id: 'LR-53', parentVersion: 52, source: 'drafter_run',
+        artifactTxtS3Key: 'letter-revisions/CASE-1/v53/letter.txt',
+        artifactPdfS3Key: 'letter-revisions/CASE-1/v53/letter.pdf',
+        artifactDocxS3Key: 'letter-revisions/CASE-1/v53/letter.docx',
+      };
+      tx.letterRevision.findFirst = vi.fn(async (a: { where?: { version?: number } }) => (a?.where?.version === 53 ? v53 : null)) as never;
+      tx.letterRevision.findMany = vi.fn(async () => [v53]) as never; // DESC walk surfaces the recoverable v53
+      const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+      expect(res.status).toBe(200);
+      expect(res.body.data.status).toBe('delivered');
+      expect(res.body.data.version).toBe(54); // v53 (recovered) + 1, NOT c.currentVersion(99) + 1
+      const revCreate = (tx.letterRevision.create as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(revCreate.data.version).toBe(54);
+      expect(revCreate.data.parentVersion).toBe(53); // built over the recovered base
+      const caseUpdate = (tx.case.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(caseUpdate.data.currentVersion).toBe(54); // re-pinned off the stranded v99 pointer
+      expect(caseUpdate.data.status).toBe('delivered');
+    });
+
+    // CLM-8EC828F1D7 must-fix #1 (2026-07-01): the external-import 409 guard keyed on the PRE-recovery
+    // c.currentVersion → null on a stranded pointer → skipped. If recovery lands on an external_import
+    // letter, approve would re-render from its PLACEHOLDER txt and MANGLE the externally-signed PDF. The
+    // guard must re-check against the RECOVERED version.
+    it('APPROVE on a stranded pointer that RECOVERS an external_import letter → 409 use-finalize-as-is (NOT a re-render/mangle)', async () => {
+      mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+      const { db, tx } = makeDb(baseCase({ currentVersion: 99 }));
+      const v53import: LetterRevisionRecord = {
+        ...currentRevision(53), id: 'LR-53', parentVersion: 52, source: 'external_import',
+        artifactTxtS3Key: 'letter-revisions/CASE-1/v53/placeholder.txt', // an import has only a placeholder txt
+        artifactPdfS3Key: 'letter-revisions/CASE-1/v53/imported-signed.pdf',
+        artifactDocxS3Key: null,
+      };
+      // Strict v99 → null; the walk + resolveCurrentRevisionMeta both resolve the external_import v53.
+      tx.letterRevision.findFirst = vi.fn(async (a: { where?: { version?: number } }) => (a?.where?.version === 53 ? v53import : null)) as never;
+      tx.letterRevision.findMany = vi.fn(async () => [v53import]) as never;
+      const d = deps();
+      const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
+      expect(res.status).toBe(409);
+      expect(res.body.error.details.reason).toBe('imported_letter_use_finalize_as_is');
+      expect(res.body.error.details.version).toBe(53); // named the RECOVERED version, not the stranded pointer
+      // Proof it 409'd BEFORE any re-render (no mangle of the externally-signed PDF).
+      expect(d.renderLetter).not.toHaveBeenCalled();
+    });
+
     it('guided-revision PROPOSE on a stranded pointer recovers (no 409 no_letter; returns a preview)', async () => {
       process.env.GUIDED_REVISION_ENABLED = 'true';
       mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };

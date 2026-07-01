@@ -29,7 +29,7 @@ import { isValidCaseStatusTransition, canRolePerformCaseStatusTransition } from 
 import { resolveRateCents } from '../services/pay-earnings.js';
 import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../services/chart-readiness.js';
 import { findChartReadinessOverride, resolveOverrideReason } from '../services/chart-readiness-override.js';
-import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash, headObjectExists, resolveLatestS3DrafterArtifact } from '../services/letter-current.js';
+import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash, headObjectExists, resolveViewableCurrentTxtKey } from '../services/letter-current.js';
 import { detectLetterLeaks, blockingLeaks } from '../services/letter-leak-detector.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import {
@@ -252,63 +252,23 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
   // artifact does the caller get a clean 404. We HeadObject-verify the resolved version's TXT so a
   // dangling key (a non-null artifactTxtS3Key whose object was never written) can never be returned.
   async function resolveCurrentForRead(caseId: string, currentVersion: number): Promise<CurrentLetter | null> {
-    const strict = await resolveCurrent(caseId, currentVersion);
-    if (strict !== null && await headObjectExists(s3(), bucket() as string, strict.txtKey)) {
-      return strict;
-    }
-    // currentVersion is unresolvable or its TXT is missing — recover the latest version that truly
-    // has a letter. Re-read the winning row to carry its pdf/docx keys (the walk is txt-keyed).
-    const latest = await resolveLatestResolvableTxt(caseId, currentVersion);
-    // Nothing recoverable anywhere: return the STRICT row (if one exists). The normal read path then
-    // runs readTxtFromS3 on it and yields the precise "letter_artifact_missing — re-draft" 404 (more
-    // helpful than a generic no_letter). If strict is also null, the caller yields the generic 404.
-    if (latest === null) {
-      // S3-TRUTH FALLBACK: no DB row resolved to a present artifact. Discover the newest letter that
-      // actually EXISTS in S3 (a good drafter letter whose DB row lost/offset its key — Hackworth v73,
-      // where currentVersion points at the failed v97/v98 and no row carries a resolvable key).
-      const s3hit = await resolveLatestS3DrafterArtifact(s3(), bucket() as string, caseId);
-      if (s3hit !== null) {
-        console.warn(`[letter] s3-truth-recovery: case ${caseId} currentVersion=${currentVersion} had no DB-resolvable artifact; served S3 drafter-artifact v${s3hit.version}`);
-        return s3hit;
+    // Delegate to the SHARED recovery-capable resolver (letter-current.resolveViewableCurrentTxtKey) so
+    // the read path, the approve-blocker advisory, the approve route, and the forward re-pin all read ONE
+    // existence truth (CLM-8EC828F1D7, 2026-07-01). It resolves the strict pointer first (HeadObject-
+    // verified), then the newest prior present TXT across both tables, then the S3-truth fallback —
+    // behavior-identical to the prior inline logic for a normal (non-stranded) letter.
+    const hit = await resolveViewableCurrentTxtKey(db, s3(), bucket() as string, caseId, currentVersion);
+    if (hit !== null) {
+      // FAIL-LOUD parity with the prior inline recovery logging: only when we fell off the pointer.
+      if (hit.version !== currentVersion) {
+        console.warn(`[letter] stranded/s3-truth recovery: case ${caseId} currentVersion=${currentVersion} had no resolvable artifact at the pointer; served letter v${hit.version}`);
       }
-      return strict;
+      return { version: hit.version, txtKey: hit.txtKey, pdfKey: hit.pdfKey, docxKey: hit.docxKey };
     }
-    const rev = await db.letterRevision.findFirst({ where: { caseId, version: latest.version } });
-    if (rev !== null && rev.artifactTxtS3Key === latest.txtKey) {
-      return { version: rev.version, txtKey: rev.artifactTxtS3Key, pdfKey: rev.artifactPdfS3Key, docxKey: rev.artifactDocxS3Key };
-    }
-    const job = await db.draftJob.findFirst({ where: { caseId, version: latest.version } });
-    if (job !== null && job.artifactTxtS3Key === latest.txtKey) {
-      return { version: job.version, txtKey: latest.txtKey, pdfKey: job.artifactPdfS3Key, docxKey: job.artifactDocxS3Key };
-    }
-    // The winning row's txt key changed underfoot (extremely unlikely) — return txt-only; the GET
-    // path tolerates null pdf/docx (the editor opens the TXT; PDF/DOCX presign just go null).
-    return { version: latest.version, txtKey: latest.txtKey, pdfKey: null, docxKey: null };
-  }
-
-  // Walk DB versions DESC across BOTH tables and return the newest whose TXT object is present in S3.
-  // Inlined (not the shared lib resolveLatestResolvableLetter) so it reuses THIS router's db + s3()
-  // exactly as the strict resolver does, and stays test-injectable through the same deps.
-  async function resolveLatestResolvableTxt(caseId: string, _currentVersion: number): Promise<{ version: number; txtKey: string } | null> {
-    const candidates = new Map<number, string>();
-    const revs = await db.letterRevision.findMany({ where: { caseId }, orderBy: { version: 'desc' } });
-    for (const r of revs) {
-      if (typeof r.artifactTxtS3Key === 'string' && r.artifactTxtS3Key.length > 0 && !candidates.has(r.version)) {
-        candidates.set(r.version, r.artifactTxtS3Key);
-      }
-    }
-    const jobs = await db.draftJob.findMany({ where: { caseId }, orderBy: { version: 'desc' } });
-    for (const j of jobs) {
-      if (typeof j.artifactTxtS3Key === 'string' && j.artifactTxtS3Key.length > 0 && !candidates.has(j.version)) {
-        candidates.set(j.version, j.artifactTxtS3Key);
-      }
-    }
-    const versionsDesc = Array.from(candidates.keys()).sort((a, b) => b - a);
-    for (const version of versionsDesc) {
-      const txtKey = candidates.get(version) as string;
-      if (await headObjectExists(s3(), bucket() as string, txtKey)) return { version, txtKey };
-    }
-    return null;
+    // Nothing present anywhere: return the STRICT row (if one exists) so the normal read path runs
+    // readTxtFromS3 on it and yields the precise "letter_artifact_missing — re-draft" 404 (more helpful
+    // than a generic no_letter). If strict is also null, the caller yields the generic 404. Unchanged.
+    return resolveCurrent(caseId, currentVersion);
   }
 
   // MUTATING-PATH resolution with STRANDED-POINTER SELF-HEAL (Puller, CLM-CCFDA1BCC3, 2026-06-25).
@@ -889,8 +849,30 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
 
       const bucketName = bucket();
       if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
-      const cur = await resolveCurrent(caseId, c.currentVersion);
-      if (cur === null) throw new HttpError(409, 'conflict', 'No current letter to approve.', { reason: 'no_letter', caseId });
+      // STRANDED-POINTER SELF-HEAL AT APPROVE (CLM-8EC828F1D7, Hildreth, 2026-07-01): use the same
+      // recovery-capable resolver the editor/read path uses, NOT the strict resolveCurrent. A halted
+      // render-parity draft that was hand-edited + forwarded leaves Case.currentVersion pointing at a
+      // dead version, so the strict resolver 409'd 'no_letter' even though a present, forwarded letter
+      // exists (the review card served it) — a no-block-draft violation. resolveCurrentForEdit recovers
+      // the last good letter AND re-pins Case.currentVersion; `baseLetterVersion` is the REAL base we
+      // build the signed N+1 over (= currentVersion in the normal case; the recovered version when
+      // stranded). A genuinely no-letter case (nothing resolvable anywhere) still → 409 no_letter.
+      const editable = await resolveCurrentForEdit(caseId, c.currentVersion);
+      if (editable === null) throw new HttpError(409, 'conflict', 'No current letter to approve.', { reason: 'no_letter', caseId });
+      const cur = editable.letter;
+      const baseLetterVersion = cur.version;
+      // EXTERNAL-IMPORT GUARD ON THE RECOVERED VERSION (CLM-8EC828F1D7 must-fix #1, 2026-07-01): the
+      // import guard above (approveMeta) keyed on the PRE-recovery c.currentVersion → null on a stranded
+      // pointer → skipped. If recovery landed on an external_import letter, approve would re-render from
+      // its PLACEHOLDER txt and MANGLE the externally-signed PDF. Re-check the guard against the version we
+      // actually resolved. (No-op on the normal path: baseLetterVersion === c.currentVersion, and a re-run
+      // over the same non-import version stays null.)
+      if (baseLetterVersion !== c.currentVersion) {
+        const recoveredMeta = await resolveCurrentRevisionMeta(db, caseId, baseLetterVersion);
+        if (recoveredMeta !== null && recoveredMeta.source === 'external_import') {
+          throw new HttpError(409, 'conflict', 'This is an imported letter — approving would re-render and mangle the original PDF. Use "Finalize for delivery (as-is)" instead to deliver the imported PDF unchanged.', { reason: 'imported_letter_use_finalize_as_is', caseId, version: recoveredMeta.version });
+        }
+      }
       const text = await readTxtFromS3(bucketName, cur.txtKey, { caseId, version: cur.version });
 
       // LEAK CHECK = WARN ONLY at signature (Ryan 2026-06-20, HARD: "the block belongs at the DRAFT,
@@ -903,7 +885,9 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_approved_with_leak_warning', caseId, veteranId: c.veteranId, detailsJson: { caseId, leaks: residualLeaks.map((l) => l.code) } } });
       }
 
-      const newVersion = c.currentVersion + 1;
+      // Build the signed final over the RESOLVED base (recovered when stranded), not the stale/dead
+      // Case.currentVersion pointer — mirrors the PUT-save path (baseLetterVersion + 1).
+      const newVersion = baseLetterVersion + 1;
       const keys = {
         txtKey: buildLetterRevisionKey(caseId, newVersion, 'txt'),
         pdfKey: buildLetterRevisionKey(caseId, newVersion, 'pdf'),
@@ -978,7 +962,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           //    proven by the D2 gate above — never the clicker, who may be an admin). Reassignment
           //    after completion must never move past earnings.
           //  - payCents: rate-at-completion snapshot — future rate changes never rewrite history.
-          await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: c.currentVersion, source: 'approved_final', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: null, letterType: 'nexus_letter', signingPhysicianId: signer.id, payCents: resolveRateCents('nexus_letter') } });
+          await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: baseLetterVersion, source: 'approved_final', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: null, letterType: 'nexus_letter', signingPhysicianId: signer.id, payCents: resolveRateCents('nexus_letter') } });
           await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, status: 'delivered', version: { increment: 1 } } });
           await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_approved', caseId, veteranId: c.veteranId, detailsJson: { version: newVersion, finalArtifact: keys.pdfKey } } });
         });

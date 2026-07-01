@@ -1,7 +1,8 @@
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createSignOffsRouter } from '../routes/sign-offs.js';
+import { createHash } from 'node:crypto';
+import { createSignOffsRouter, type SignOffsRouterDeps } from '../routes/sign-offs.js';
 import { isHttpError, sendError } from '../http/errors.js';
 import type { AppDb, CaseRecord, PhysicianRecord, Role, SignOffRecord } from '../services/db-types.js';
 
@@ -124,6 +125,11 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physicianBySub?: R
     physician: { findUnique: physicianFindUnique, findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), create: vi.fn(), update: vi.fn() },
     activityLog: { create: activityLogCreate },
     signOff: { findUnique: vi.fn(async () => null), findFirst: signOffFindFirst, findMany: signOffFindMany, create: signOffCreate },
+    // Byte-binding resolver delegates (CLM-8EC828F1D7 must-fix #2): the sign-off now binds via the
+    // recovery-capable resolveViewableCurrentTxtWithHash (strict → DESC-walk → S3-truth). Defaults resolve
+    // NOTHING; a stranded-recovery test overrides draftJob.findMany + wires s3/bucket on appFor.
+    letterRevision: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
+    draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
     // Phase 5.2: OCR HARD-STOP gate. Tests run with no uploaded files (readiness vacuously ready).
     fileReadStatus: {
       findUnique: vi.fn(async () => null),
@@ -149,11 +155,11 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physicianBySub?: R
   return { db, signOffs, spies: { caseFindFirst, physicianFindUnique, activityLogCreate, signOffCreate, signOffFindMany, signOffFindFirst } };
 }
 
-function appFor(db: AppDb) {
+function appFor(db: AppDb, routerDeps: SignOffsRouterDeps = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => { if (mockUser) (req as express.Request & { user?: MockUser }).user = mockUser; next(); });
-  app.use('/api/v1', createSignOffsRouter(db));
+  app.use('/api/v1', createSignOffsRouter(db, routerDeps));
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     if (isHttpError(error)) {
       return sendError(res, error.status, error.code, error.message, error.details);
@@ -418,6 +424,34 @@ describe('sign-offs routes', () => {
     const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/sign-off').send({ answers: { records_reviewed: true } });
     expect(res.status).toBe(409);
     expect(spies.signOffCreate).not.toHaveBeenCalled();
+  });
+
+  // ── Byte-binding on a STRANDED-recovered letter (CLM-8EC828F1D7 must-fix #2, 2026-07-01) ──
+  // Hildreth: a halted render-parity draft, hand-edited + forwarded, leaves Case.currentVersion pointing
+  // at a dead version. The physician SEES the recovery-served letter (GET /letter), but the OLD sign-off
+  // bound via the STRICT resolver → null at the dead pointer → signedVersion/sha256 = null → the delivery
+  // "signed_bytes_changed" tamper tripwire was ABSENT (egress failed open). The sign-off now binds via the
+  // recovery resolver, so it records the recovered version + a real hash of the bytes the physician saw.
+  it('sign-off on a STRANDED-recovered letter records NON-null signedVersion + sha256 bound to the RECOVERED bytes', async () => {
+    mockUser = { sub: 'PHYS-SUB', roles: ['physician'] };
+    const RECOVERED_TXT = 'I. Introduction\nHildreth OSA nexus letter, hand-edited after the render-parity halt.';
+    const expectedSha = createHash('sha256').update(RECOVERED_TXT, 'utf-8').digest('hex');
+    const { db, spies } = makeDb(baseCase({ status: 'physician_review', currentVersion: 99, assignedPhysicianId: 'PHYS-001' }), {
+      physicianBySub: { 'PHYS-SUB': buildPhysician({ id: 'PHYS-001', cognitoSub: 'PHYS-SUB' }) },
+    });
+    // Strict pointer at v99 resolves nothing (findFirst → null default); the DESC-walk surfaces a present
+    // v53 drafter letter (only a DraftJob row). HeadObject resolves present; GetObject returns the txt.
+    (db.draftJob.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 'DJ-53', version: 53, artifactTxtS3Key: 'drafter-artifacts/CASE-1/v53/v53.txt', artifactPdfS3Key: 'drafter-artifacts/CASE-1/v53/v53.pdf', artifactDocxS3Key: null },
+    ]);
+    const s3 = { send: vi.fn(async () => ({ Body: { transformToString: async () => RECOVERED_TXT } })) } as unknown as SignOffsRouterDeps['s3'];
+    const res = await request(appFor(db, { s3, bucketName: 'phi-bucket' }))
+      .post('/api/v1/cases/CASE-1/sign-off').send({ answers: { records_reviewed: true } });
+
+    expect(res.status).toBe(201);
+    const created = spies.signOffCreate.mock.calls[0]?.[0]?.data;
+    expect(created.signedVersion).toBe(53); // the recovered version the physician actually saw, NOT null
+    expect(created.signedContentSha256).toBe(expectedSha); // bound to the recovered bytes, NOT null
   });
 
   it('(c) a non-signing role cannot override (ops_staff is 403 at the route gate)', async () => {

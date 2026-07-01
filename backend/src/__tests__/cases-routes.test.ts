@@ -3,6 +3,7 @@ import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCasesRouter } from '../routes/cases.js';
+import type { ApproveBlockerDeps } from '../services/approve-blockers.js';
 import { CASE_STATUSES } from '../services/case-status-transitions.js';
 import type { AppDb, CaseRecord, Role } from '../services/db-types.js';
 
@@ -76,6 +77,11 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
   const caseUpdate = vi.fn(async (args: { data: Record<string, unknown> }) => { current = { ...current, ...args.data, version: current.version + 1 } as CaseRecord; return current; });
   const caseDelete = vi.fn(async () => ({}));
   const draftJobFindMany = vi.fn(async () => [{ id: 'DJ-1', version: 1 }]);
+  // Letter-table delegates (CLM-8EC828F1D7, 2026-07-01): a forward → physician_review now probes for a
+  // stranded pointer via resolveCurrentRefStrict/resolveViewableCurrentTxtKey. Defaults resolve NOTHING
+  // (strict null, empty walk) so a normal forward re-pins nothing; a stranded-recovery test overrides these.
+  const letterRevisionCreate = vi.fn(async (a: { data: Record<string, unknown> }) => ({ id: 'LR-NEW', ...a.data }));
+  const draftJobFindFirst = vi.fn(async () => null);
   const correctionFindMany = vi.fn(async () => [{ id: 'CORR-1' }]);
   const veteranFindUnique = vi.fn(async () => ({ id: 'VET-1' }));
   const physicianFindUnique = vi.fn(async (args: { where: { cognitoSub?: string; id?: string } }) => {
@@ -97,7 +103,8 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
   const tx = {
     case: { findMany: caseFindMany, findFirst: caseFindFirst, findUnique: caseFindFirst, count: caseCount, create: caseCreate, update: caseUpdate, delete: caseDelete },
     veteran: { findUnique: veteranFindUnique },
-    draftJob: { findMany: draftJobFindMany },
+    draftJob: { findMany: draftJobFindMany, findFirst: draftJobFindFirst },
+    letterRevision: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), create: letterRevisionCreate },
     correction: { findMany: correctionFindMany },
     activityLog: { create: activityLogCreate },
     caseMessage: { create: caseMessageCreate },
@@ -107,15 +114,15 @@ function makeDb(initialCase: CaseRecord = baseCase(), opts: { physiciansByCognit
   };
   const db = { ...tx, $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)) } as unknown as AppDb;
 
-  return { db, tx, spies: { activityLogCreate, caseMessageCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, caseDelete, draftJobFindMany, physicianFindUnique, chartNoteFindMany } };
+  return { db, tx, spies: { activityLogCreate, caseMessageCreate, caseFindFirst, caseFindMany, caseCount, caseCreate, caseUpdate, caseDelete, draftJobFindMany, draftJobFindFirst, letterRevisionCreate, physicianFindUnique, chartNoteFindMany } };
 }
 
-function appFor(db: AppDb) {
+function appFor(db: AppDb, routerDeps: ApproveBlockerDeps = {}) {
   const app = express();
   app.use(express.json());
   // Stand in for authenticateJwt: populate req.user from the current mock user (or leave it unset for 401 paths).
   app.use((req, _res, next) => { if (mockUser) (req as express.Request & { user?: MockUser }).user = mockUser; next(); });
-  app.use('/api/v1', createCasesRouter(db));
+  app.use('/api/v1', createCasesRouter(db, routerDeps));
   return app;
 }
 
@@ -575,6 +582,45 @@ describe('cases routes', () => {
 
       expect(res.status).toBe(409);
       expect(doctorPackGenMock).not.toHaveBeenCalled();
+    });
+
+    // CLM-8EC828F1D7 (Hildreth, 2026-07-01): FORWARD RE-PIN AT THE SOURCE. A halted render-parity draft
+    // left Case.currentVersion pointing at a dead version while a present letter (v53) is recoverable.
+    // Forwarding to physician_review must re-pin currentVersion onto the recovered letter + materialize a
+    // LetterRevision, so the STRICT approve gate + blocker advisory resolve it (no "No current letter to
+    // approve" over a present letter). Requires s3/bucket wired (recovery HeadObject-probes).
+    it('forwarding a STRANDED held letter (currentVersion=99) to physician_review re-pins currentVersion=53 + materializes a LetterRevision', async () => {
+      const { db, tx, spies } = makeDb(baseCase({ status: 'needs_rn_decision', version: 9, currentVersion: 99, assignedPhysicianId: 'PHYS-001' }));
+      // Strict pointer at v99 resolves nothing; the DESC-walk surfaces a present v53 drafter letter (no
+      // LetterRevision yet — it lives only as a DraftJob row / S3 artifact). HeadObject resolves (present).
+      const v53job = { id: 'DJ-53', version: 53, artifactTxtS3Key: 'drafter-artifacts/CASE-1/v53/v53.txt', artifactPdfS3Key: 'drafter-artifacts/CASE-1/v53/v53.pdf', artifactDocxS3Key: null };
+      tx.draftJob.findMany = vi.fn(async () => [v53job]) as never;
+      const s3 = { send: vi.fn(async () => ({})) } as unknown as ApproveBlockerDeps['s3']; // HeadObject → present
+      const res = await request(appFor(db, { s3, bucketName: 'phi-bucket' }))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'needs_rn_decision', to: 'physician_review', version: 9 });
+
+      expect(res.status).toBe(200);
+      // Re-pin: the case update carries the recovered currentVersion alongside the status flip.
+      expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'physician_review', currentVersion: 53 }) }));
+      // A LetterRevision was materialized at the recovered version so the strict approve gate resolves it.
+      expect(spies.letterRevisionCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ version: 53, artifactTxtS3Key: 'drafter-artifacts/CASE-1/v53/v53.txt' }) }));
+    });
+
+    it('a NORMAL (non-stranded) forward to physician_review does NOT re-pin or materialize a revision (byte-identical to before)', async () => {
+      // currentVersion=5 resolves strictly (a LetterRevision exists at v5) → forwardRepin stays null.
+      const { db, tx, spies } = makeDb(baseCase({ status: 'needs_rn_decision', version: 9, currentVersion: 5, assignedPhysicianId: 'PHYS-001' }));
+      tx.letterRevision.findFirst = vi.fn(async () => ({ version: 5, artifactTxtS3Key: 'letter-revisions/CASE-1/v5/letter.txt', artifactPdfS3Key: 'p', artifactDocxS3Key: 'd' })) as never;
+      const s3 = { send: vi.fn(async () => ({})) } as unknown as ApproveBlockerDeps['s3'];
+      const res = await request(appFor(db, { s3, bucketName: 'phi-bucket' }))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'needs_rn_decision', to: 'physician_review', version: 9 });
+
+      expect(res.status).toBe(200);
+      expect(spies.letterRevisionCreate).not.toHaveBeenCalled();
+      // The case update flips status but carries NO currentVersion re-pin.
+      const call = spies.caseUpdate.mock.calls.find((c) => (c[0] as { data?: { status?: string } })?.data?.status === 'physician_review');
+      expect((call?.[0] as { data?: Record<string, unknown> })?.data).not.toHaveProperty('currentVersion');
     });
   });
 

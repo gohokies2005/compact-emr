@@ -14,6 +14,7 @@ import { fillIntakeDerived, deriveIntakeFields } from '../services/intake-derive
 import { renderIntakeSummaryPdf } from '../services/intake-summary-pdf.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
 import { uploadReviewConversion } from '../services/google-ads-conversions.js';
+import { uploadReviewConversionMeta } from '../services/meta-conversions.js';
 
 const PREVIEW_TTL_SECONDS = 300;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -425,10 +426,19 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
       //     the assign. The function no-ops+logs when there's no gclid (organic intake) and aborts each
       //     fetch at 3s internally, so it cannot wedge the request.
       if ((intake as { jotformFormId?: string }).jotformFormId === PAID_INTAKE_FORM_ID) {
+        const paidAt = new Date();
         try {
-          await uploadReviewConversion(db, caseId, new Date());
+          await uploadReviewConversion(db, caseId, paidAt);
         } catch (err) {
           console.warn(`[google-ads] lead conversion upload failed caseId=${caseId}:`, err instanceof Error ? err.message : String(err));
+        }
+        // Meta CAPI runs INDEPENDENTLY of Google (separate try/catch): a Facebook click carries an
+        // fbclid (Google carries a gclid); most intakes have neither and both no-op cleanly. Same
+        // fail-safe contract — a Meta outage/slow/4xx can never throw into or block the assign.
+        try {
+          await uploadReviewConversionMeta(db, caseId, paidAt);
+        } catch (err) {
+          console.warn(`[meta-capi] lead conversion upload failed caseId=${caseId}:`, err instanceof Error ? err.message : String(err));
         }
       }
     }

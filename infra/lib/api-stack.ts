@@ -148,6 +148,19 @@ export class ApiStack extends Stack {
       'arn:aws:secretsmanager:us-east-1:676591241787:secret:frn/google-ads-credentials-zLEsSM',
     );
 
+    // Meta (Facebook) CAPI offline-conversion upload (routes/intakes.ts paid-intake assign →
+    // services/meta-conversions.ts getCreds() → readSecretByName(META_CAPI_SECRET_NAME) at RUNTIME).
+    // Runtime GetSecretValue call → the grantRead below is LOAD-BEARING. Secret created out-of-band
+    // (NOT CDK-owned): friendly name 'frn/meta-capi-credentials', full ARN ...-TLAetA, value =
+    // { pixel_id, access_token }. Imported by COMPLETE ARN (fromSecretCompleteArn) — not
+    // fromSecretNameV2 (partial-ARN footgun, INCIDENTS 2026-06-05). Sibling of the Google Ads secret;
+    // same offline-conversion pattern for the Meta side. Added 2026-07-01.
+    const metaCapiSecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this,
+      'MetaCapiSecret',
+      'arn:aws:secretsmanager:us-east-1:676591241787:secret:frn/meta-capi-credentials-TLAetA',
+    );
+
     const handler = new nodejs.NodejsFunction(this, 'PlaceholderApiLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: path.resolve(__dirname, '../../backend/src/placeholder-lambda.ts'),
@@ -305,6 +318,7 @@ export class ApiStack extends Stack {
         EMAIL_TRANSPORT: (this.node.tryGetContext('email_transport') as string | undefined) ?? 'gmail',
         GMAIL_OAUTH_SECRET_NAME: `compact-emr-${props.config.envName}/gmail-oauth`,
         GOOGLE_ADS_SECRET_NAME: 'frn/google-ads-credentials', // developer_token, client_id, client_secret, refresh_token
+        META_CAPI_SECRET_NAME: 'frn/meta-capi-credentials', // { pixel_id, access_token } — Meta CAPI offline Purchase upload
         DELIVERY_PORTAL_BASE_URL: `https://${props.config.domainName}`,      // /d/<token> lives on the SPA
         DELIVERY_ADMIN_BCC: 'admin@flatratenexus.com',
         // SES-SANDBOX forwarding mode (Ryan 2026-06-10): all veteran emails delivered to this inbox
@@ -406,6 +420,10 @@ export class ApiStack extends Stack {
     // read (AccessDenied). Complete-ARN import => GetSecretValue on the exact ...-zLEsSM ARN, no
     // partial-ARN footgun. This one grant unblocks the whole offline-conversion pipeline.
     googleAdsSecret.grantRead(handler);
+    // Meta CAPI conversion upload: read the pixel_id + access_token at RUNTIME. Load-bearing (same as
+    // the Google grant above) — without it every Facebook-sourced conversion upload fails at the secret
+    // read. Complete-ARN import => GetSecretValue on the exact ...-TLAetA ARN, no partial-ARN footgun.
+    metaCapiSecret.grantRead(handler);
     handler.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['ses:SendEmail', 'ses:SendRawEmail'],

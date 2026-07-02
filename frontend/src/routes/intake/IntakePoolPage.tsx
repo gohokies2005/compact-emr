@@ -24,9 +24,9 @@ const ALLOWED_CT = new Set(['application/pdf', 'image/jpeg', 'image/png', 'appli
 // Canonical case-enum values (must match backend ClaimType / case-validation CLAIM_TYPES). The old
 // list used 'appeal', which the case layer rejects ('appeal_bva') — that mismatch failed Wayne
 // Mosely's assign 3× (2026-06-05). Friendly labels so the RN doesn't see raw enum slugs.
-const CLAIM_TYPES = [['initial', 'Initial'], ['supplemental', 'Supplemental'], ['hlr', 'Higher-level review'], ['appeal_bva', 'Board appeal']] as const;
+const CLAIM_TYPES = [['initial', 'Initial'], ['supplemental', 'Supplemental'], ['hlr', 'Higher-level review'], ['appeal_bva', 'Appeal']] as const;
 // Worker/Jotform legacy claim-type values → canonical enum (mirrors backend normalizeClaimType so a
-// pre-filled 'appeal' selects 'Board appeal' instead of silently falling back to Initial).
+// pre-filled 'appeal' selects the 'Appeal' option (value appeal_bva) instead of silently falling back to Initial).
 const CLAIM_TYPE_ALIAS: Readonly<Record<string, string>> = { appeal: 'appeal_bva', board_appeal: 'appeal_bva', bva: 'appeal_bva', nod: 'appeal_bva', hlr_request: 'hlr', higher_level_review: 'hlr' };
 const normalizeClaimType = (s: string | null): string => { const t = (s ?? '').trim().toLowerCase(); return CLAIM_TYPE_ALIAS[t] ?? (s ?? ''); };
 

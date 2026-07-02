@@ -24,7 +24,7 @@ const CLAIM_TYPES: readonly { readonly value: FormValues['claimType']; readonly 
   { value: 'initial', label: 'Initial' },
   { value: 'supplemental', label: 'Supplemental' },
   { value: 'hlr', label: 'Higher-level review' },
-  { value: 'appeal_bva', label: 'Board appeal' },
+  { value: 'appeal_bva', label: 'Appeal' },
 ];
 
 const FRAMING_CHOICES: readonly { readonly value: string; readonly label: string }[] = [

@@ -25,7 +25,7 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 // KEPT for the Type COLUMN + CSV export — only the claim-type FILTER was removed (P3.2).
-const CLAIM_TYPE_LABELS: Record<ClaimType, string> = { initial: 'Initial', supplemental: 'Supplemental', hlr: 'Higher-level review', appeal_bva: 'Board appeal' };
+const CLAIM_TYPE_LABELS: Record<ClaimType, string> = { initial: 'Initial', supplemental: 'Supplemental', hlr: 'Higher-level review', appeal_bva: 'Appeal' };
 const STATUS_OPTIONS = Object.entries(CASE_STATUS_LABELS) as [CaseStatus, string][];
 const PAGE_SIZES = [25, 50, 100];
 

@@ -312,9 +312,24 @@ export function slugifyTitle(title: string, maxLen = 60): string {
   const clipped = s.slice(0, maxLen).replace(/-+$/g, '');
   return clipped.length > 0 ? clipped : 'document';
 }
-/** `<LastName>_<slug(title)>.<ext>` (ext preserved from the original filename, else `pdf`). */
-export function deriveFilenameFromTitle(lastName: string | null | undefined, title: string, originalFilename?: string | null): string {
-  return `${cleanLastName(lastName)}_${slugifyTitle(title)}.${extOf(originalFilename)}`;
+/** Concise slug SOURCE for the filename: prefer the short `docType` over the rich `title` (the title
+ *  keeps the full per-condition detail for DISPLAY; the filename stays clean, e.g. `Margo_VA-Rating-
+ *  Decision.pdf`). Also strips a leading veteran-name echo ("Margo, William …") so the `<LastName>_`
+ *  prefix isn't doubled. Falls back to the title when docType is empty. (Ryan 2026-07-01.) */
+function filenameSlugSource(title: string, docType?: string | null, lastName?: string | null): string {
+  const dt = (docType ?? '').trim();
+  let src = dt.length > 0 ? dt : title;
+  const last = (lastName ?? '').normalize('NFKD').replace(/[^a-zA-Z0-9]+/g, '').toLowerCase();
+  if (last.length > 1) {
+    const re = new RegExp('^\\s*' + last.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b[\\s,]*', 'i');
+    src = src.replace(re, '');
+  }
+  return src.trim().length > 0 ? src : (dt.length > 0 ? dt : title);
+}
+/** `<LastName>_<slug(docType||title)>.<ext>` (ext preserved from the original filename, else `pdf`).
+ *  Slugs the concise docType so the download name stays short; the rich title is display-only. */
+export function deriveFilenameFromTitle(lastName: string | null | undefined, title: string, originalFilename?: string | null, docType?: string | null): string {
+  return `${cleanLastName(lastName)}_${slugifyTitle(filenameSlugSource(title, docType, lastName), 48)}.${extOf(originalFilename)}`;
 }
 /** Insert `_2`, `_3`, … before the extension until the name doesn't collide with `existing`. */
 export function withCollisionSuffix(filename: string, existing: ReadonlySet<string>): string {
@@ -406,7 +421,7 @@ export async function generateAndPersistDocumentTitle(
   }
 
   const lastName = doc.case?.veteran?.lastName ?? null;
-  const desired = deriveFilenameFromTitle(lastName, finalResult.title, doc.filename);
+  const desired = deriveFilenameFromTitle(lastName, finalResult.title, doc.filename, finalResult.doc_type);
   const siblings = await docDelegate.findMany({ where: { caseId: doc.caseId, id: { not: documentId } }, select: { id: true, filename: true } });
   const existing = new Set(siblings.map((s) => s.filename));
   const newFilename = desired === doc.filename ? doc.filename : withCollisionSuffix(desired, existing);

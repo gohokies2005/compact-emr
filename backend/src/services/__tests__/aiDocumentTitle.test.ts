@@ -134,6 +134,19 @@ describe('deriveFilenameFromTitle', () => {
     expect(deriveFilenameFromTitle(null, 'Intake summary')).toBe('Veteran_intake-summary.pdf');
     expect(deriveFilenameFromTitle("O'Brien", 'Intake summary')).toBe('OBrien_intake-summary.pdf');
   });
+  it('slugs the concise docType, NOT the rich multi-condition title, when docType is given', () => {
+    // The rich title stays for DISPLAY; the filename stays short (Ryan 2026-07-01).
+    const richTitle = 'VA Rating Decision — Lumbosacral 10%, Plantar Fasciitis 10%, Migraine 0%, MDD 50%, OSA 50%, nerve paralysis denied';
+    expect(deriveFilenameFromTitle('Margo', richTitle, 'Margo_Migraine_Misc_4.pdf', 'VA Rating Decision')).toBe('Margo_va-rating-decision.pdf');
+  });
+  it('falls back to the title slug when docType is empty/absent', () => {
+    expect(deriveFilenameFromTitle('Frank', 'Sleep study', 'x.pdf', '')).toBe('Frank_sleep-study.pdf');
+    expect(deriveFilenameFromTitle('Frank', 'Sleep study', 'x.pdf')).toBe('Frank_sleep-study.pdf');
+  });
+  it('strips a leading veteran-name echo so the LastName_ prefix is not doubled', () => {
+    // Model sometimes embeds the name; the LastName_ prefix already identifies the vet.
+    expect(deriveFilenameFromTitle('Margo', 'x', 'x.pdf', 'Margo — Nexus Letter')).toBe('Margo_nexus-letter.pdf');
+  });
 });
 
 describe('withCollisionSuffix', () => {

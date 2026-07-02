@@ -4,6 +4,8 @@ import { prisma } from './db/client.js';
 import { deriveAiViability } from './services/ai-viability.js';
 import { precomputeSoapNoteForCase } from './services/soap-context-assembler.js';
 import { isRecomputeViabilityEvent } from './services/recompute-viability-trigger.js';
+import { isTitleDocumentEvent } from './services/document-title-trigger.js';
+import { generateAndPersistDocumentTitle } from './services/aiDocumentTitle.js';
 import type { AppDb } from './services/db-types.js';
 
 const expressHandler = serverless(createApp());
@@ -33,6 +35,20 @@ export const handler = async (event: unknown, context: unknown): Promise<unknown
       console.warn(JSON.stringify({ msg: 'ai-viability recompute done', caseId: event.caseId, computed: plan !== null, soapPrecomputed: noteOk, planMs, ms: Date.now() - t0 }));
     } catch (e) {
       console.warn(JSON.stringify({ msg: 'ai-viability recompute failed open', caseId: event.caseId, error: e instanceof Error ? e.message : String(e) }));
+    }
+    return { ok: true };
+  }
+  // OFF-REQUEST async self-invoke for AI document titling (InvocationType:'Event', see
+  // document-title-trigger.ts). Runs the ~2s Haiku titling call here instead of on the intake request.
+  // Fail-open + idempotent (the orchestrator skips already-titled docs); AI_DOC_TITLE_ENABLED=off is a
+  // second guard (the trigger already short-circuits when off).
+  if (isTitleDocumentEvent(event)) {
+    if (process.env.AI_DOC_TITLE_ENABLED === 'off') return { ok: true, skipped: 'flag_off' };
+    try {
+      const r = await generateAndPersistDocumentTitle(prisma as unknown as AppDb, event.documentId);
+      console.warn(JSON.stringify({ msg: 'ai-document-title done', documentId: event.documentId, updated: r.updated, skipped: r.skipped ?? null }));
+    } catch (e) {
+      console.warn(JSON.stringify({ msg: 'ai-document-title failed open', documentId: event.documentId, error: e instanceof Error ? e.message : String(e) }));
     }
     return { ok: true };
   }

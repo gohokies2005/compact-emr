@@ -81,11 +81,12 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
         uploadedBy: true,
         updatedAt: true,
         version: true,
-        // Content-based NAMING (Ryan 2026-06-18: "it should NOT be hard to see a file named 'VA OSA
-        // denial'"). The deterministic classifier reads a doc's leading pages — every VA signature it
-        // keys on appears early (a decision letter opens "We made a decision on your VA benefits"; a
-        // Blue Button stamps "My HealtheVet" on every page footer), so the first 12 pages are plenty
-        // and a 1,100-page dump is NOT fully loaded. $0, no LLM. Title computed per-read (no migration).
+        // Content-based NAMING. PRIMARY source is the PERSISTED AI title (Haiku 4.5, written at
+        // OCR-completion → Document.autoTitle/docType). The deterministic classifier (documentClassifier.ts)
+        // is the FALLBACK when autoTitle is null (legacy row / titling not yet run / titling failed). The
+        // leading pages are still fetched for the dedupe badge and the classifier fallback.
+        autoTitle: true,
+        docType: true,
         pages: { orderBy: { pageNumber: 'asc' }, take: 12, select: { text: true } },
       },
     });
@@ -93,10 +94,16 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
     // computeDuplicateOf keys on exact byte size + a sha256 of the leading text (the first 12 pages already
     // fetched above) — the RN sees a "Duplicate" badge on a re-uploaded file. See documentDedupe.ts.
     const enriched = documents.map((doc) => {
-      const { pages, ...rest } = doc;
+      const { pages, autoTitle: storedTitle, docType: storedType, ...rest } = doc;
       const text = (pages ?? []).map((p) => p.text).join('\n');
-      const c = classifyDocument({ filename: doc.filename, text });
-      return { rest, sizeBytes: doc.sizeBytes.toString(), title: c.title, docType: c.docType, id: doc.id, leadingText: text, sizeBytesPositive: doc.sizeBytes > 0n, uploadedAt: doc.uploadedAt };
+      let title = typeof storedTitle === 'string' && storedTitle.trim().length > 0 ? storedTitle : null;
+      let docType: string | null = typeof storedType === 'string' && storedType.trim().length > 0 ? storedType : null;
+      if (title === null || docType === null) {
+        const c = classifyDocument({ filename: doc.filename, text });
+        if (title === null) title = c.title;
+        if (docType === null) docType = c.docType;
+      }
+      return { rest, sizeBytes: doc.sizeBytes.toString(), title, docType, id: doc.id, leadingText: text, sizeBytesPositive: doc.sizeBytes > 0n, uploadedAt: doc.uploadedAt };
     });
     const duplicateOf = computeDuplicateOf(enriched.map((d) => ({ id: d.id, sizeBytesStr: d.sizeBytes, sizeBytesPositive: d.sizeBytesPositive, leadingText: d.leadingText, uploadedAt: d.uploadedAt })));
     res.json({
@@ -125,16 +132,23 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps = {}) {
       select: {
         id: true, caseId: true, filename: true, sizeBytes: true, contentType: true, docTag: true,
         pageCount: true, s3Key: true, uploadedAt: true, uploadedBy: true, updatedAt: true, version: true,
+        autoTitle: true, docType: true, // persisted AI title (fallback: classifyDocument) — see the veteran-wide route.
         pages: { orderBy: { pageNumber: 'asc' }, take: 12, select: { text: true } },
       },
     })).filter((doc) => !isScreeningSummaryKey(doc.s3Key)); // hide the synthetic extraction OUTPUT — a physician
     // reviewing the case's RECORDS shouldn't see the AI's internal screening-summary .txt (also satisfies the
     // doc-set-exclusion closure guard: this is a per-case document-set query, so it must reference the exclusion).
     const enriched = documents.map((doc) => {
-      const { pages, ...rest } = doc;
+      const { pages, autoTitle: storedTitle, docType: storedType, ...rest } = doc;
       const text = (pages ?? []).map((p) => p.text).join('\n');
-      const cls = classifyDocument({ filename: doc.filename, text });
-      return { rest, sizeBytes: doc.sizeBytes.toString(), title: cls.title, docType: cls.docType, id: doc.id, leadingText: text, sizeBytesPositive: doc.sizeBytes > 0n, uploadedAt: doc.uploadedAt };
+      let title = typeof storedTitle === 'string' && storedTitle.trim().length > 0 ? storedTitle : null;
+      let docType: string | null = typeof storedType === 'string' && storedType.trim().length > 0 ? storedType : null;
+      if (title === null || docType === null) {
+        const cls = classifyDocument({ filename: doc.filename, text });
+        if (title === null) title = cls.title;
+        if (docType === null) docType = cls.docType;
+      }
+      return { rest, sizeBytes: doc.sizeBytes.toString(), title, docType, id: doc.id, leadingText: text, sizeBytesPositive: doc.sizeBytes > 0n, uploadedAt: doc.uploadedAt };
     });
     const duplicateOf = computeDuplicateOf(enriched.map((d) => ({ id: d.id, sizeBytesStr: d.sizeBytes, sizeBytesPositive: d.sizeBytesPositive, leadingText: d.leadingText, uploadedAt: d.uploadedAt })));
     res.json({ data: enriched.map((d) => ({ ...d.rest, sizeBytes: d.sizeBytes, autoTitle: d.title, docType: d.docType, duplicateOfId: duplicateOf.get(d.id) ?? null })) });

@@ -1,5 +1,6 @@
 import { classifyReadAttempt, nonWhitespaceCharCount } from './chart-readiness.js';
 import { maybeEnqueueChartExtract } from './chart-extract-trigger.js';
+import { fireDocumentTitle } from './document-title-trigger.js';
 import { SERVICE_ACTORS } from './service-actors.js';
 import type { AppDb } from './db-types.js';
 
@@ -222,6 +223,18 @@ export async function writeDocumentPages(
     } catch (err) {
       console.error(JSON.stringify({ msg: 'chart_extract_enqueue_failed', documentId, caseId: result.caseId, error: err instanceof Error ? err.message : String(err) }));
     }
+  }
+
+  // AI document titling — DISPATCHED OFF-REQUEST via async Lambda self-invoke (InvocationType:'Event',
+  // see document-title-trigger.ts), mirroring the SOAP/viability recompute. The ~2s Haiku call must NOT
+  // run inline: writeDocumentPages is called in a synchronous per-doc FOR-LOOP inside ONE intake-assign
+  // API request (routes/intakes.ts), so N inline Haiku calls would risk the 29s API-Gateway cap. This
+  // dispatch is a fast async 202 and fail-open (fireDocumentTitle never throws); the fresh invocation
+  // runs generateAndPersistDocumentTitle on its own 120s budget. Idempotent (skips already-titled docs)
+  // + killable via AI_DOC_TITLE_ENABLED=off (the trigger short-circuits when off). Only after pages
+  // committed, so the async worker re-reads this doc's text.
+  if (result.caseId !== null) {
+    await fireDocumentTitle(documentId);
   }
 
   return result;

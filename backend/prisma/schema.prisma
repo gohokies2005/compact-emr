@@ -693,6 +693,13 @@ model Document {
   contentType String   @map("content_type")
   docTag      String?  @map("doc_tag")
   pageCount   Int?     @map("page_count")
+  // AI document titling (Haiku 4.5, 2026-08). Persisted so the documents list serves a stored title
+  // instead of re-running the regex classifier on every read. All nullable → legacy rows / titling
+  // failures fall back to documentClassifier.ts. autoTitle = the human display title; docType = the
+  // model's free-form type string; titleModel = which model produced it (audit).
+  autoTitle   String?  @map("auto_title")
+  docType     String?  @map("doc_type")
+  titleModel  String?  @map("title_model")
   s3Key       String   @unique @map("s3_key")
   uploadedAt  DateTime @default(now()) @map("uploaded_at") @db.Timestamptz(6)
   uploadedBy  String   @map("uploaded_by")

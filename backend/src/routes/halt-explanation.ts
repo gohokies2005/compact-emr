@@ -50,7 +50,11 @@ interface HaltJobRow {
 function isCasePaused(c: HaltCaseRow, job: HaltJobRow | null): boolean {
   if (PAUSED_CASE_STATUSES.has(c.status)) return true;
   if (c.operatorState === 'paused') return true;
-  if (job !== null && job.state === 'halted') return true;
+  // A halted OR failed latest job is a "draft did not finish" state that renders the OpsHeldPanel with a
+  // real reason to explain (a framing/plan/phase failure reaped to 'failed' carries no haltPayload but its
+  // reason lives in Case.operatorMessage). Broadened 2026-07-02 (was 'halted'-only) so the OpsHeldPanel
+  // surface — the one a framing-contradiction case (CLM-BE673DFF78) renders on — gets a plain-language explanation.
+  if (job !== null && (job.state === 'halted' || job.state === 'failed')) return true;
   return false;
 }
 

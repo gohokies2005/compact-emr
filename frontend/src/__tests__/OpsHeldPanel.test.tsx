@@ -24,11 +24,17 @@ vi.mock('../api/letter', async () => {
   return { ...actual, getLetter: vi.fn() };
 });
 
+// Mock the halt-explanation hook so we can drive the plain-language explainer directly (default: null =
+// fail-open, so the panel shows the raw operator message exactly as before).
+vi.mock('../hooks/useHaltExplanation', () => ({ useHaltExplanation: vi.fn(() => ({ explanation: null, isLoading: false })) }));
+
 import { getLetter } from '../api/letter';
+import { useHaltExplanation } from '../hooks/useHaltExplanation';
 
 const postDraftMock = vi.mocked(postDraft);
 const transitionCaseStatusMock = vi.mocked(transitionCaseStatus);
 const getLetterMock = vi.mocked(getLetter);
+const useHaltExplanationMock = vi.mocked(useHaltExplanation);
 
 const heldCase: CaseDetail = {
   id: 'CASE-2',
@@ -95,10 +101,21 @@ function renderPanel(isAdmin = false) {
 }
 
 describe('OpsHeldPanel', () => {
-  it('does NOT mount the plain-language halt explainer (that surface is Gate2HaltPanel-only — QA 2026-07-02 #4)', () => {
+  it('MOUNTS the plain-language halt explainer — this panel IS a real paused surface (2026-07-02 fix: a drafting case whose run failed carries operatorState=paused, e.g. CLM-BE673DFF78)', () => {
+    useHaltExplanationMock.mockReturnValue({
+      explanation: { summary: 'This is really a secondary claim, not a direct one.', what_to_do: 'Set the framing to Secondary and re-run.', confidence: 'high' },
+      isLoading: false,
+    });
     renderPanel();
-    expect(screen.queryByText(/Why this paused \(plain language\)/i)).toBeNull();
-    // The raw operator message still renders as before.
+    expect(screen.getByText(/Why this paused/i)).toBeTruthy();
+    expect(screen.getByText(/This is really a secondary claim/i)).toBeTruthy();
+    expect(screen.getByText(/Set the framing to Secondary/i)).toBeTruthy();
+  });
+
+  it('falls back to the raw operator message when the explainer is unavailable (fail-open)', () => {
+    useHaltExplanationMock.mockReturnValue({ explanation: null, isLoading: false });
+    renderPanel();
+    expect(screen.queryByText(/Why this paused/i)).toBeNull();
     expect(screen.getByText(/Grade was below ship threshold\.|drafter completed with concerns|temporary AI service error|closer look/i)).toBeTruthy();
   });
 

@@ -55,6 +55,17 @@ describe('CitationEnricherPanel', () => {
     await waitFor(() => expect(onApplied).toHaveBeenCalled());
   });
 
+  it('DIRECT-PMID: "Fetch by PMID" proposes { pmid } and previews the resolved candidate', async () => {
+    render(<CitationEnricherPanel caseId="CASE-1" passage={null} onApplied={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/PubMed ID/i), { target: { value: '31393195' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Fetch by PMID' }));
+
+    expect(await screen.findByText('OSA and PTSD: a cohort study', undefined, { timeout: 5000 })).toBeInTheDocument();
+    // digits-only extraction; no claim/condition keys are sent on the by-PMID path.
+    expect(proposeMock).toHaveBeenCalledWith('CASE-1', { pmid: '31393195' });
+  });
+
   it('surfaces a "could not be re-verified" message when apply 422s (citation_unverified)', async () => {
     // The real typed error the api client throws on a 422 — the panel branches on instanceof.
     const { SurgicalEditUnappliableError } = await import('../api/client');

@@ -35,7 +35,7 @@ import { createLetterRouter } from './routes/letter.js';
 import { createDeliveryRouter } from './routes/delivery.js';
 import { makeRenderInvoker } from './services/letter-render-invoke.js';
 import { makeSurgicalProposerFromEnv } from './services/letter-surgical-propose.js';
-import { retrieveGroundedAnchors, verifyPmidById, makeTermsExtractorFromEnv } from './services/citation-enricher.js';
+import { retrieveGroundedAnchors, verifyPmidById, resolveCitationByPmid, makeTermsExtractorFromEnv } from './services/citation-enricher.js';
 import { createPhysiciansRouter } from './routes/physicians.js';
 import { createCaseMessagesRouter } from './routes/case-messages.js';
 import { createStaffMessagesRouter } from './routes/staff-messages.js';
@@ -206,6 +206,8 @@ export function createApp(options: CreateAppOptions = {}) {
     // whole feature when enrichRetrieve is absent (it never is here) — so the feature is on by default.
     enrichRetrieve: retrieveGroundedAnchors,
     enrichVerify: verifyPmidById,
+    // DIRECT-PMID: resolve+verify a physician-typed PubMed ID into a preview candidate (2026-07-02).
+    enrichResolvePmid: resolveCitationByPmid,
     ...(surgicalAiAvailable ? { extractTerms: makeTermsExtractorFromEnv() } : {}),
     s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
     bucketName: process.env.PHI_BUCKET_NAME,

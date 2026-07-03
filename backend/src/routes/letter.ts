@@ -20,6 +20,7 @@ import {
   insertVerifiedCitations,
   type EnrichCandidate,
   type ExtractedTerms,
+  type PmidResolveResult,
   type RetrieveResult,
   type VerifyResult,
   type VerifiedCitationForInsert,
@@ -186,6 +187,9 @@ function proposalUnavailableMessage(pu: ProposerUnavailableShape): string {
 //   - extractTerms:   optional claim-sentence → search-terms mapping (strict-schema Haiku, no cite field).
 export type EnrichRetriever = (condition: string, mechanismHints?: string[]) => Promise<RetrieveResult>;
 export type EnrichVerifier = (pmid: string, condition?: string) => Promise<VerifyResult>;
+//   - enrichResolvePmid: DIRECT-PMID PROPOSE — resolve+verify ONE physician-typed PubMed ID against
+//     NCBI (no on-topic gate; the physician chose it) into a preview candidate. (2026-07-02.)
+export type EnrichPmidResolver = (pmid: string) => Promise<PmidResolveResult>;
 export type TermsExtractor = (claim: string) => Promise<ExtractedTerms>;
 
 export interface LetterRouterDeps {
@@ -193,6 +197,7 @@ export interface LetterRouterDeps {
   proposeSurgicalEdit?: SurgicalProposer;
   enrichRetrieve?: EnrichRetriever;
   enrichVerify?: EnrichVerifier;
+  enrichResolvePmid?: EnrichPmidResolver;
   extractTerms?: TermsExtractor;
   s3?: S3Client;
   bucketName?: string;
@@ -1191,12 +1196,64 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       const user = currentActor(req);
       const caseId = String(req.params.id);
       assertPhysicianOnly(user.role, caseId);
-      const body = (req.body ?? {}) as { claim?: unknown; condition?: unknown; mechanismHints?: unknown };
+      const body = (req.body ?? {}) as { claim?: unknown; condition?: unknown; mechanismHints?: unknown; pmid?: unknown };
 
       const c = await db.case.findFirst({ where: { id: caseId } });
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
       await enforcePhysicianAssignment(caseId, user.role, user.sub, c.assignedPhysicianId);
       if (!EDITABLE_STATUSES.has(c.status)) throw new HttpError(409, 'conflict', `Letter is not editable in status '${c.status}'.`, { reason: 'not_editable', caseId, status: c.status });
+
+      // ── DIRECT-PMID branch (2026-07-02): the physician typed an EXACT PubMed ID, not a claim/condition
+      // to search. We resolve+verify that one paper against NCBI and store it as the (single) ready
+      // candidate, then the SAME poll + apply + sanctioned-guard path handles preview → add. The by-PMID
+      // job stores condition:'' — a NON-nullish sentinel so the apply-time `job.condition ?? claimedCondition`
+      // resolves to '' and verifyPmidById SKIPS the on-topic gate (the physician's explicit PMID is the
+      // relevance authority; anti-fabrication — real + non-retracted + grounded — still holds at apply). ──
+      const pmidRaw = typeof body.pmid === 'string' ? body.pmid.trim() : '';
+      if (pmidRaw !== '') {
+        const directPmid = pmidRaw.replace(/\D/g, '').replace(/^0+/, '');
+        if (directPmid === '') throw new HttpError(400, 'bad_request', 'Enter a numeric PubMed ID (digits only).', { reason: 'invalid_pmid', caseId });
+        if (deps.enrichResolvePmid === undefined) throw new HttpError(503, 'internal_error', 'Citation enrichment is not configured in this environment.', { reason: 'enricher_not_configured', caseId });
+
+        const job = await db.citationEnrichJob.create({
+          data: { caseId, status: 'pending', claim: null, condition: '', mechanismHints: [], requestedBy: user.sub },
+        });
+        await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_citation_enrich_proposed', caseId, veteranId: c.veteranId, detailsJson: { jobId: job.id, byPmid: directPmid } } });
+        res.status(202).json({ data: { jobId: job.id, status: 'pending' } });
+
+        // ── Async resolve (best-effort; failure flips the job to 'error', never throws to the client). ──
+        void (async () => {
+          try {
+            const resolved = await (deps.enrichResolvePmid as EnrichPmidResolver)(directPmid);
+            if (resolved.status === 'ok') {
+              await db.citationEnrichJob.update({
+                where: { id: job.id },
+                data: { status: 'ready', condition: '', candidatesJson: [resolved.candidate], errorMessage: null },
+              });
+            } else {
+              const message =
+                resolved.status === 'pmid_not_found'
+                  ? `PubMed has no record for PMID ${directPmid}. Check the ID and try again — nothing was changed.`
+                  : resolved.status === 'retracted'
+                    ? `PMID ${directPmid} is a RETRACTED publication and cannot be added.`
+                    : resolved.status === 'invalid_pmid'
+                      ? 'That is not a valid PubMed ID. Enter the numeric PMID.'
+                      : `PMID ${directPmid} could not be verified against PubMed right now (no readable abstract to ground it, or PubMed was unreachable). It was not added.`;
+              await db.citationEnrichJob.update({
+                where: { id: job.id },
+                data: { status: 'error', candidatesJson: [], errorMessage: message },
+              });
+            }
+          } catch (e: unknown) {
+            await db.citationEnrichJob.update({
+              where: { id: job.id },
+              data: { status: 'error', errorMessage: e instanceof Error ? e.message.slice(0, 500) : 'resolution failed' },
+            }).catch(() => { /* swallow — the poll will surface a stuck 'pending' row */ });
+          }
+        })();
+        return;
+      }
+
       if (deps.enrichRetrieve === undefined) throw new HttpError(503, 'internal_error', 'Citation enrichment is not configured in this environment.', { reason: 'enricher_not_configured', caseId });
 
       const claim = typeof body.claim === 'string' && body.claim.trim() !== '' ? body.claim.trim() : null;
@@ -1319,6 +1376,10 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         : [];
       if (jobId === '') throw new HttpError(400, 'bad_request', 'jobId is required.', { caseId });
       if (selectedPmids.length === 0) throw new HttpError(400, 'bad_request', 'Select at least one citation to add.', { reason: 'no_selection', caseId });
+      // Cap the apply set: each PMID is 2 serially-throttled NCBI round-trips on the shared egress IP,
+      // so an oversized list would tie up the request and risk a 429 that degrades the drafter's whole
+      // citation-fallback path. The UI only ever selects a few previewed candidates.
+      if (selectedPmids.length > 12) throw new HttpError(400, 'bad_request', `Too many citations selected (${selectedPmids.length}). Add at most 12 at a time.`, { reason: 'too_many_pmids', caseId });
       if (deps.enrichVerify === undefined) throw new HttpError(503, 'internal_error', 'Citation enrichment is not configured in this environment.', { reason: 'enricher_not_configured', caseId });
 
       const c = await db.case.findFirst({ where: { id: caseId } });
@@ -1365,7 +1426,10 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // server-re-verified PMIDs; ANY other added citation/stat is rejected. By construction the
       // deterministic insertion adds exactly the sanctioned PMIDs, so this proves that invariant
       // and fails closed if anything else slipped in (defense in depth on the string assembly).
-      const sanctionedDiff = diffCitationsSanctioned(oldText, newText, insertedPmids);
+      // Pass the verified citation strings so a legitimate %/ratio in a real paper's TITLE (part of an
+      // NCBI-verified inserted reference line) is not false-flagged as an invented statistic. Only tokens
+      // that literally appear in these verified strings are exempted; a stat anywhere else still rejects.
+      const sanctionedDiff = diffCitationsSanctioned(oldText, newText, insertedPmids, verifiedCitations.map((v) => v.full_citation ?? ''));
       if (sanctionedDiff.added.length > 0) {
         throw new HttpError(422, 'conflict', `Citation apply rejected: the insertion would introduce ${sanctionedDiff.added.length} citation/statistic that is not in the server-verified set (${sanctionedDiff.added.map(describeToken).join(', ')}). Nothing was changed.`, { reason: 'citation_invented', caseId, added: sanctionedDiff.added });
       }

@@ -215,10 +215,13 @@ export interface EnrichApplyResult {
   readonly warnings: readonly LetterWarning[];
 }
 
-/** PROPOSE: kick off a grounded retrieval. Returns 202 { jobId } — then poll. */
+/** PROPOSE: kick off a grounded retrieval. Returns 202 { jobId } — then poll. Pass EITHER a
+ *  claim/condition to SEARCH PubMed, OR a `pmid` to resolve+verify one exact paper (DIRECT-PMID,
+ *  2026-07-02). The by-PMID path skips the claimed-condition on-topic gate (the physician chose it);
+ *  anti-fabrication (real + non-retracted + grounded, re-verified at apply) is unchanged. */
 export function proposeCitationEnrich(
   caseId: string,
-  input: { claim?: string; condition?: string; mechanismHints?: string[] },
+  input: { claim?: string; condition?: string; mechanismHints?: string[]; pmid?: string },
 ): Promise<{ data: EnrichProposeResult }> {
   return apiPost<{ data: EnrichProposeResult }, typeof input>(caseLetterPath(caseId, '/citations/enrich'), input);
 }

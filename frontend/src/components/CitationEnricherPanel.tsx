@@ -36,6 +36,7 @@ export function CitationEnricherPanel({ caseId, passage, claimedCondition, onApp
   const [claim, setClaim] = useState('');
   const [condition, setCondition] = useState('');
   const [hints, setHints] = useState('');
+  const [pmid, setPmid] = useState(''); // DIRECT-PMID: paste an exact PubMed ID (2026-07-02)
   const [status, setStatus] = useState<'idle' | 'searching' | 'ready' | 'error'>('idle');
   const [candidates, setCandidates] = useState<readonly EnrichCandidate[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -70,17 +71,14 @@ export function CitationEnricherPanel({ caseId, passage, claimedCondition, onApp
     setError(null);
   }
 
-  async function onFind() {
-    if (claim.trim().length === 0 && condition.trim().length === 0) return;
+  // Shared PROPOSE → POLL driver for BOTH the claim/condition search and the DIRECT-PMID resolve.
+  // The response shape is identical (202 { jobId } → poll for ready candidates), so the two entry
+  // points differ only in the propose input they pass.
+  async function runProposeAndPoll(input: { claim?: string; condition?: string; mechanismHints?: string[]; pmid?: string }) {
     reset();
     setStatus('searching');
-    const mechanismHints = hints.split(',').map((h) => h.trim()).filter((h) => h.length > 0);
     try {
-      const proposed = await proposeCitationEnrich(caseId, {
-        ...(claim.trim().length > 0 ? { claim: claim.trim() } : {}),
-        ...(condition.trim().length > 0 ? { condition: condition.trim() } : {}),
-        ...(mechanismHints.length > 0 ? { mechanismHints } : {}),
-      });
+      const proposed = await proposeCitationEnrich(caseId, input);
       const jobId = proposed.data.jobId;
       jobIdRef.current = jobId;
       const startedAt = Date.now();
@@ -116,6 +114,25 @@ export function CitationEnricherPanel({ caseId, passage, claimedCondition, onApp
     }
   }
 
+  async function onFind() {
+    if (claim.trim().length === 0 && condition.trim().length === 0) return;
+    const mechanismHints = hints.split(',').map((h) => h.trim()).filter((h) => h.length > 0);
+    await runProposeAndPoll({
+      ...(claim.trim().length > 0 ? { claim: claim.trim() } : {}),
+      ...(condition.trim().length > 0 ? { condition: condition.trim() } : {}),
+      ...(mechanismHints.length > 0 ? { mechanismHints } : {}),
+    });
+  }
+
+  // DIRECT-PMID (2026-07-02): resolve+verify one exact PubMed ID. The backend fetches it from NCBI
+  // and returns it as the single ready candidate; the physician then Adds it exactly like a searched
+  // candidate. Nothing is trusted client-side — apply re-verifies the PMID against NCBI.
+  async function onFindByPmid() {
+    const digits = pmid.replace(/\D/g, '');
+    if (digits.length === 0) { setError('Enter a numeric PubMed ID (digits only).'); setStatus('error'); return; }
+    await runProposeAndPoll({ pmid: digits });
+  }
+
   function toggle(pmid: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -137,6 +154,7 @@ export function CitationEnricherPanel({ caseId, passage, claimedCondition, onApp
       setClaim('');
       setCondition('');
       setHints('');
+      setPmid('');
       onApplied();
     } catch (err: unknown) {
       if (err instanceof SurgicalEditUnappliableError) {
@@ -206,6 +224,37 @@ export function CitationEnricherPanel({ caseId, passage, claimedCondition, onApp
       >
         Find citations
       </Button>
+
+      {/* DIRECT-PMID (2026-07-02): paste an exact PubMed ID to pull one specific paper in as a verified
+          citation. The system fetches + verifies it from NCBI (never trusts the typed metadata); once
+          added you can weave it into the reasoning with Guided Revision. */}
+      <div className="mt-4 border-t border-dashed border-slate-200 pt-3">
+        <label className="block">
+          <span className="text-sm font-medium text-slate-800">Or add a specific paper by PubMed ID (PMID)</span>
+          <div className="mt-2 flex gap-2">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={pmid}
+              onChange={(e) => setPmid(e.target.value)}
+              maxLength={20}
+              className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+              placeholder="Example: 31393195"
+              aria-label="PubMed ID (PMID)"
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              loading={status === 'searching'}
+              disabled={status === 'searching' || pmid.replace(/\D/g, '').length === 0}
+              onClick={() => void onFindByPmid()}
+            >
+              Fetch by PMID
+            </Button>
+          </div>
+        </label>
+        <p className="mt-1 text-xs text-slate-500">The paper is verified against PubMed (real, non-retracted). It won’t be added if PubMed has no matching record.</p>
+      </div>
 
       {status === 'searching' ? (
         <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">

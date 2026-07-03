@@ -128,6 +128,12 @@ function deps(over: Partial<LetterRouterDeps> = {}): LetterRouterDeps {
         : { verified: false, pmid, title: '', journal: '', year: '', killer_finding: '', reason: 'no_summary' }
     )),
     extractTerms: vi.fn(async () => ({ condition: 'obstructive sleep apnea', mechanismHints: [] })),
+    // DIRECT-PMID resolver (2026-07-02): a known PMID resolves to a candidate; anything else → not found.
+    enrichResolvePmid: vi.fn(async (pmid: string) => (
+      pmid === '22222222'
+        ? { status: 'ok' as const, candidate: { pmid: '22222222', title: 'OSA and PTSD', journal: 'J Sleep', year: '2020', killer_finding: 'OSA prevalence was elevated.', pubmedUrl: 'https://pubmed.ncbi.nlm.nih.gov/22222222/', slot: 'A2' as const } }
+        : { status: 'pmid_not_found' as const, pmid }
+    )),
     ...over,
   };
 }
@@ -229,6 +235,61 @@ describe('Citation Enricher routes (Feature B)', () => {
     const { db } = makeDb();
     const res = await request(appFor(db, deps({ enrichRetrieve: undefined }))).post('/api/v1/cases/CASE-1/letter/citations/enrich').send({ condition: 'osa' });
     expect(res.status).toBe(503);
+  });
+
+  // ── DIRECT-PMID (2026-07-02): physician types an exact PubMed ID ──
+  it('PROPOSE by PMID returns 202 + the POLL reads the resolved candidate', async () => {
+    const { db } = makeDb();
+    const d = deps();
+    const app = appFor(db, d);
+    const propose = await request(app).post('/api/v1/cases/CASE-1/letter/citations/enrich').send({ pmid: '22222222' });
+    expect(propose.status).toBe(202);
+    expect(propose.body.data.jobId).toBe('JOB-1');
+    expect(d.enrichResolvePmid).toHaveBeenCalledWith('22222222');
+    await settle();
+    const poll = await request(app).get('/api/v1/cases/CASE-1/letter/citations/enrich/JOB-1');
+    expect(poll.status).toBe(200);
+    expect(poll.body.data.status).toBe('ready');
+    expect(poll.body.data.candidates[0].pmid).toBe('22222222');
+    expect(poll.body.data.candidates[0].pubmedUrl).toContain('22222222');
+  });
+
+  it('PROPOSE by a non-existent PMID → the POLL surfaces a clear "no record" error (nothing added)', async () => {
+    const { db } = makeDb();
+    const app = appFor(db, deps());
+    const propose = await request(app).post('/api/v1/cases/CASE-1/letter/citations/enrich').send({ pmid: '99999999' });
+    expect(propose.status).toBe(202);
+    await settle();
+    const poll = await request(app).get('/api/v1/cases/CASE-1/letter/citations/enrich/JOB-1');
+    expect(poll.body.data.status).toBe('error');
+    expect(poll.body.data.error).toMatch(/no record for PMID/i);
+  });
+
+  it('PROPOSE by a non-numeric PMID → 400 invalid_pmid', async () => {
+    const { db } = makeDb();
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/citations/enrich').send({ pmid: 'abc' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.reason).toBe('invalid_pmid');
+  });
+
+  it('PROPOSE by PMID → 503 when the by-PMID resolver is not wired', async () => {
+    const { db } = makeDb();
+    const res = await request(appFor(db, deps({ enrichResolvePmid: undefined }))).post('/api/v1/cases/CASE-1/letter/citations/enrich').send({ pmid: '22222222' });
+    expect(res.status).toBe(503);
+  });
+
+  it('APPLY of a by-PMID job re-verifies with the "" condition sentinel (on-topic SKIPPED) + inserts', async () => {
+    // A by-PMID job carries condition:'' → apply resolves condition to '' → verifyPmidById skips the
+    // claimed-condition on-topic gate (the physician chose the exact paper). It STILL re-verifies the
+    // PMID is real + non-retracted + grounded, and the sanctioned guard still proves the delta.
+    const { db, tx } = makeDb({ job: { condition: '', claim: null } });
+    const d = deps();
+    const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/citations/apply')
+      .send({ jobId: 'JOB-1', selectedPmids: ['22222222'] });
+    expect(res.status).toBe(200);
+    expect(res.body.data.insertedPmids).toEqual(['22222222']);
+    expect(d.enrichVerify).toHaveBeenCalledWith('22222222', '');
+    expect(tx.letterRevision.create).toHaveBeenCalled();
   });
 });
 

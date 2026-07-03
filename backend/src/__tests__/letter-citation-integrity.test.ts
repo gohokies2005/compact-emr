@@ -127,6 +127,24 @@ describe('letter-citation-integrity — diffCitationsSanctioned (Feature B keyst
     expect(diff.added.map((t) => t.key)).toContain('ay:jones:2021');
   });
 
+  // sanctionedTexts exemption (by-PMID apply, 2026-07-02): a real paper's TITLE can carry a %/ratio.
+  it('ALLOWS a %/ratio that appears in a SANCTIONED verified-citation string (real paper title), not fabrication', () => {
+    const before = 'VIII. References\n1. Old A. Prior. J. 2019. PMID: 11111111.';
+    // The inserted reference line is the verbatim NCBI full_citation whose TITLE contains "30%".
+    const insertedCitation = '2. Smith B, Lee C. A 30% reduction in adjacent-segment disease after fusion. Spine J. 2021;21(4):64-72. PMID: 22222222.';
+    const after = `${before}\n${insertedCitation}`;
+    const diff = diffCitationsSanctioned(before, after, ['22222222'], [insertedCitation]);
+    expect(diff.added).toHaveLength(0); // the "30%" is part of a verified citation string → exempt
+  });
+
+  it('STILL REJECTS a stat that is NOT in any sanctioned-citation string, even when sanctionedTexts is provided', () => {
+    const before = 'References. See PMID: 11111111.';
+    const after = 'The body now claims a fabricated 42% rate. See PMID: 22222222.';
+    // A verified citation string is provided, but "42%" does not appear in it → still fabrication.
+    const diff = diffCitationsSanctioned(before, after, ['22222222'], ['2. Smith B. Some title with no stat. J. 2021. PMID: 22222222.']);
+    expect(diff.added.map((t) => t.key)).toContain('pct:42');
+  });
+
   it('an EMPTY sanctioned set behaves exactly like diffCitations (no net-new allowed)', () => {
     const before = 'The mechanism is established.';
     const after = 'The mechanism is established (PMID: 33333333).';

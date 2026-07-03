@@ -212,6 +212,70 @@ export function anchorsToCandidates(anchors: readonly GroundedAnchor[]): EnrichC
   }));
 }
 
+// ── DIRECT-PMID resolver (Feature B complement, 2026-07-02) ────────────────────────────────────
+// The physician types an EXACT PubMed ID (not a claim/condition to search). We fetch + VERIFY that
+// one paper against NCBI and return it in the SAME EnrichCandidate shape the claim-search path uses,
+// so the preview + apply UI + sanctioned-PMID plumbing are reused verbatim.
+//
+// KEYSTONE (anti-fabrication, medico-legal): the citation is added ONLY if NCBI returns it for that
+// exact PMID — every metadata field comes FROM verifyPmidById's esummary/efetch, NEVER from the raw
+// input. verifyPmidById already holds the invariants (real PMID + non-retracted + grounded verbatim
+// killer stat). We call it WITHOUT a condition, so the claimed-condition ON-TOPIC gate is SKIPPED:
+// the physician's explicit PMID choice is the relevance authority (a foundational/mechanism paper
+// need not name the condition), and the frontend citationMayBeOffTopic advisory + the physician's
+// judgment cover relevance. Anti-fabrication is never relaxed — only the relevance heuristic is.
+// This mirrors the apply-time re-verify discipline (same verifyPmidById), so a PMID that resolves
+// here also passes at apply (the by-PMID job stores condition:'' so apply skips on-topic too).
+
+/** The verifier seam (verifyPmidById in prod; a stub in tests). Injected so the resolver is testable
+ *  without the vendored NCBI module / any network. */
+export type PmidVerifier = (pmid: string, condition?: string) => Promise<VerifyResult>;
+
+/** Outcome of a by-PMID resolve. `ok` carries a preview candidate (same shape as a claim-search
+ *  candidate); every other status is a clear, non-fabricating failure the route turns into a message. */
+export type PmidResolveResult =
+  | { status: 'ok'; candidate: EnrichCandidate }
+  | { status: 'invalid_pmid' | 'pmid_not_found' | 'retracted' | 'not_grounded'; pmid: string; reason?: string };
+
+/**
+ * Build a by-PMID resolver over an injected verifier. Normalizes the PMID to bare digits, verifies it
+ * against NCBI (no condition → no on-topic gate), and maps a verified result to an EnrichCandidate.
+ * Never throws (verifyPmidById never throws). A non-existent/unreadable/retracted PMID yields a clear
+ * status — NEVER a fabricated citation.
+ */
+export function makeResolveCitationByPmid(verify: PmidVerifier): (pmid: string) => Promise<PmidResolveResult> {
+  return async (pmid: string): Promise<PmidResolveResult> => {
+    const clean = String(pmid ?? '').replace(/\D/g, '').replace(/^0+/, '');
+    if (clean.length === 0) return { status: 'invalid_pmid', pmid: '' };
+    // NO condition argument → verifyPmidById does NOT run the on-topic gate (physician's explicit choice).
+    const v = await verify(clean);
+    if (!v.verified) {
+      const reason = v.reason ?? 'unverified';
+      // Map the vendored reject reason to a caller-facing status. no_summary/invalid_pmid == NCBI has
+      // no such record; retracted == reject; anything else (no_abstract / no_grounded_stat / efetch or
+      // network error) == real record but not groundable/reachable right now.
+      const status: Exclude<PmidResolveResult['status'], undefined> =
+        reason === 'retracted' ? 'retracted'
+          : (reason === 'no_summary' || reason === 'invalid_pmid') ? 'pmid_not_found'
+            : 'not_grounded';
+      return { status, pmid: clean, reason };
+    }
+    const candidate: EnrichCandidate = {
+      pmid: v.pmid,
+      title: v.title,
+      journal: v.journal,
+      year: v.year,
+      killer_finding: v.killer_finding,
+      pubmedUrl: pubmedUrl(v.pmid),
+      slot: 'A2', // not a slot-search result; a neutral placeholder (the shape requires a slot).
+    };
+    return { status: 'ok', candidate };
+  };
+}
+
+/** Production by-PMID resolver — verifies against NCBI via the vendored citationFallback module. */
+export const resolveCitationByPmid = makeResolveCitationByPmid(verifyPmidById);
+
 // ── DETERMINISTIC insertion (no LLM weave) ─────────────────────────────────────────────────────
 // Build the §VIII reference line for a verified citation in the house numbered format
 // (`<N>. Author. Title. Journal. Year;...` is the canonical FRN entry, but the grounded module

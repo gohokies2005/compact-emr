@@ -49,7 +49,7 @@ export interface CitationDiff {
 // ── Extraction patterns ──────────────────────────────────────────────────────
 // PMID: "PMID: 12345678" or "PMID 12345678". PubMed IDs are 1-8 digits historically, but we accept
 // up to 9 to be safe against future growth. Case-insensitive on the label.
-const PMID_RE = /\bPMID\s*:?\s*(\d{1,9})\b/gi;
+const PMID_RE = /\bPMID\s*:?\s*(\d{1,12})\b/gi;
 
 // Author-year: "Smith 2019", "Dell'Isola 2021", "El-Serag 2014", "Smith and Jones 2018",
 // "Smith et al. 2020", "Smith et al 2020". The surname token allows internal apostrophes/hyphens
@@ -188,6 +188,7 @@ export function diffCitationsSanctioned(
   before: string,
   after: string,
   sanctionedPmids: Iterable<string>,
+  sanctionedTexts?: Iterable<string>,
 ): CitationDiff {
   // Normalize the sanctioned PMIDs to the SAME bare-digit identity the PMID token key uses, so a
   // reformatted/zero-padded id can neither sneak past membership nor be falsely rejected.
@@ -197,15 +198,33 @@ export function diffCitationsSanctioned(
     if (digits.length > 0) sanctioned.add(`pmid:${digits}`);
   }
 
+  // SANCTIONED-TEXT exemption (by-PMID/enricher apply, 2026-07-02): the apply path inserts VERBATIM
+  // NCBI-verified citation strings (`full_citation`), and a real paper's TITLE can legitimately carry
+  // a "%" or a labeled ratio (e.g. "…a 30% reduction…"). Such a token is NOT a fabricated statistic —
+  // it is part of a server-verified citation we deterministically inserted. Exempt any net-new token
+  // whose key appears in one of these sanctioned citation strings. This ONLY relaxes tokens that
+  // literally occur in verified citation text; a stat introduced anywhere else (reworded prose) is
+  // still caught. Safe because the enricher apply path only APPENDS reference lines (no prose reword),
+  // so there is no body-fabrication vector for a matching value to hide behind. Empty/undefined =
+  // exactly the prior behavior.
+  const sanctionedTextTokens = new Set<string>();
+  if (sanctionedTexts !== undefined) {
+    for (const t of sanctionedTexts) {
+      for (const key of extractCitationTokenMap(String(t ?? '')).keys()) sanctionedTextTokens.add(key);
+    }
+  }
+
   const b = extractCitationTokenMap(before);
   const a = extractCitationTokenMap(after);
   const added: CitationToken[] = [];
   const removed: CitationToken[] = [];
   for (const [key, tok] of a) {
     if (b.has(key)) continue;
-    // A net-new token. Allow it ONLY if it is a PMID in the server-re-verified sanctioned set.
-    // Any other net-new token (unsanctioned PMID, author-year, or statistic) is fabrication → reject.
+    // A net-new token. Allow it ONLY if it is a PMID in the server-re-verified sanctioned set, OR the
+    // token appears verbatim in a server-verified inserted citation string (a %/ratio in a real title).
+    // Any other net-new token (unsanctioned PMID, author-year, or a stat in reworded prose) is rejected.
     if (tok.kind === 'pmid' && sanctioned.has(key)) continue;
+    if (sanctionedTextTokens.has(key)) continue;
     added.push(tok);
   }
   for (const [key, tok] of b) if (!a.has(key)) removed.push(tok);

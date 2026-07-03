@@ -21,6 +21,7 @@ import { createSignOffsRouter } from './routes/sign-offs.js';
 import { createClarificationsRouter } from './routes/clarifications.js';
 import { createViabilityRouter } from './routes/viability.js';
 import { createChartReadinessRouter } from './routes/chart-readiness.js';
+import { createHaltExplanationRouter } from './routes/halt-explanation.js';
 import { createDoctorPackRouter } from './routes/doctor-pack.js';
 import { createReportsRouter } from './routes/reports.js';
 import { createDashboardRouter } from './routes/dashboard.js';
@@ -174,6 +175,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createClarificationsRouter(db));
   app.use('/api/v1', authenticateJwt(), createViabilityRouter(db));
   app.use('/api/v1', authenticateJwt(), createChartReadinessRouter(db));
+  app.use('/api/v1', authenticateJwt(), createHaltExplanationRouter(db));
   // Jotform intake pool (triage). Signed previews need S3; assign endpoint ships in a later batch.
   app.use('/api/v1', authenticateJwt(), createIntakesRouter(db, { s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) as unknown as { send: (cmd: unknown) => Promise<unknown> }, bucketName: process.env.PHI_BUCKET_NAME }));
   app.use('/api/v1', authenticateJwt(), createDoctorPackRouter(db));

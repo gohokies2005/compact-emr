@@ -6,6 +6,7 @@ import { postDraft, type RnDecisionInput } from '../api/drafter';
 import { patchCase, transitionCaseStatus, type CaseDetail } from '../api/cases';
 import { ConflictError, describeApiError } from '../api/client';
 import { isBodyQualityHalt, type DraftJob, type Gate2HaltPayload } from '../types/prisma';
+import { HaltPlainLanguage } from './HaltPlainLanguage';
 
 /**
  * Gate-2 halt screen — shown when the pre-draft dx/event verification PARKED the case
@@ -117,7 +118,10 @@ function BodyQualityHoldCard({ c, payload, job, onChanged, onOpenEditor }: { rea
           {canOpenEditor ? 'Quality check — review before this goes to the doctor' : 'Quality hold — letter held for re-draft'}
         </h2>
       </div>
-      <p className="mt-2 text-sm text-amber-900">{message}</p>
+      <HaltPlainLanguage
+        caseId={c.id}
+        technicalDetail={<p className="mt-2 text-sm text-amber-900">{message}</p>}
+      />
       {canOpenEditor ? (
         <p className="mt-1 text-sm text-amber-900">The draft is ready to open — you can fix the flagged section by hand in the editor, or re-draft it.</p>
       ) : null}
@@ -281,7 +285,12 @@ export function Gate2HaltPanel({ c, job, onChanged, onOpenEditor }: { readonly c
         <svg className="h-5 w-5 flex-none text-amber-600" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.515 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>
         <h2 className="text-base font-semibold text-amber-900">Drafting paused — your decision needed</h2>
       </div>
-      <p className="mt-2 text-sm text-amber-900">{message}</p>
+      {/* Plain-language "why this paused" (Dr. Kasky 2026-07-02) above; the raw plain-English reason is passed
+          through as the collapsible technical fallback so nothing is lost when the explainer is unavailable. */}
+      <HaltPlainLanguage
+        caseId={c.id}
+        technicalDetail={<p className="mt-2 text-sm text-amber-900">{message}</p>}
+      />
       {/* #218a no_dx: the drafter could resolve no diagnosis at all — surface its plain-English note (if
           any) as extra context. The actionable behavior is unchanged from today (override / re-run / pause). */}
       {dxRes?.mode === 'no_dx' && dxRes.note.trim().length > 0 ? (

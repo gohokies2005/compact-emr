@@ -95,6 +95,13 @@ function renderPanel(isAdmin = false) {
 }
 
 describe('OpsHeldPanel', () => {
+  it('does NOT mount the plain-language halt explainer (that surface is Gate2HaltPanel-only — QA 2026-07-02 #4)', () => {
+    renderPanel();
+    expect(screen.queryByText(/Why this paused \(plain language\)/i)).toBeNull();
+    // The raw operator message still renders as before.
+    expect(screen.getByText(/Grade was below ship threshold\.|drafter completed with concerns|temporary AI service error|closer look/i)).toBeTruthy();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     postDraftMock.mockResolvedValue({ data: { job: {}, publish: {} } });

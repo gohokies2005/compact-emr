@@ -140,6 +140,9 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
               ? 'The run stopped before completing, but it produced a letter you can open and finish in the editor — usually faster and cheaper than a full re-run. Re-run only if a fresh draft is genuinely needed.'
               : 'The run stopped and did not produce a letter. Re-run it to draft to completion. The reason is below.'}
           </p>
+          {/* The plain-language halt explainer is wired to Gate2HaltPanel ONLY (framing/plan/dx halts). This
+              panel's states (drafting / revise / failed) do NOT trip the backend's isCasePaused, so mounting it
+              here would only flash "Explaining…" then a wasted {available:false} round-trip (QA 2026-07-02 #4). */}
           <p className="mt-2 text-sm text-steel">
             {humanizedOpMsg.text}
             {/* The raw offset/snippet stays available as a secondary tooltip line — lead with the

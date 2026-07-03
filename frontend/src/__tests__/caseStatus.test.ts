@@ -62,6 +62,20 @@ describe('caseStatus maps', () => {
     });
   });
 
+  // Backend-parity guard for the RN "Revise & resend" reopen edges (2026-07-03). Mirrors
+  // backend/src/services/case-status-transitions.ts; a drop here means the frontend map drifted.
+  describe('revise-and-resend reopen edges (mirror backend)', () => {
+    it('delivered reopens to correction_requested', () => {
+      expect(CASE_STATUS_TRANSITIONS.delivered).toEqual(['paid', 'physician_review', 'correction_requested']);
+    });
+    it('paid carries the physician recall + the RN revise edges', () => {
+      expect(CASE_STATUS_TRANSITIONS.paid).toEqual(['physician_review', 'correction_requested']);
+    });
+    it('correction_requested forwards to physician_review (send corrected letter to doctor)', () => {
+      expect(CASE_STATUS_TRANSITIONS.correction_requested).toContain('physician_review');
+    });
+  });
+
   // === FIXED lifecycle grouping for the Cases page (Dr. Kasky 2026-06-24) ===
   describe('lifecycleBucket', () => {
     it('exposes the six buckets in the LOCKED top->bottom order', () => {

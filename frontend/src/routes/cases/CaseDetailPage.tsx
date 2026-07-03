@@ -18,6 +18,7 @@ import { ChartRecoveryBanner } from '../../components/ChartRecoveryBanner';
 import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReadyPanel';
 import { SendToDoctorModal } from '../../components/SendToDoctorModal';
 import { ReturnToPhysicianModal } from '../../components/ReturnToPhysicianModal';
+import { ReviseLetterModal } from '../../components/ReviseLetterModal';
 import { DeliveryPanel } from '../../components/DeliveryPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
@@ -67,6 +68,7 @@ import { documentDisplayName } from '../../lib/docName';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
 import {
   archiveCase, deleteCase, getCase, listDraftJobs, patchCase, restoreCase, returnCaseToPhysician, transitionCaseStatus,
+  reviseLetter, publishCorrection,
   type CaseDetail, type PatchCaseInput, type TransitionInput,
 } from '../../api/cases';
 import type { CaseStatus, Role } from '../../types/prisma';
@@ -294,6 +296,44 @@ export function CaseDetailPage() {
     },
   });
 
+  // "Revise letter" (Ryan 2026-07-03): reopen a delivered/paid letter into the RN-editable correction state
+  // for a surgical edit (mandatory note). Unlike return-to-physician (which lands in physician_review where
+  // the RN is locked out), this lands in correction_requested so the RN can edit + then send to the doctor.
+  const [reviseLetterOpen, setReviseLetterOpen] = useState(false);
+  const reviseLetterMut = useMutation({
+    mutationFn: (message: string) => {
+      const cur = caseQuery.data?.data;
+      if (!cur) throw new Error('Case not loaded');
+      return reviseLetter(caseId, { version: cur.version, message });
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        refetch(),
+        qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }),
+        qc.invalidateQueries({ queryKey: ['case-messages', caseId] }),
+      ]);
+    },
+  });
+
+  // "Publish corrected letter" (Ryan 2026-07-03): after a correction is re-signed, re-issue the customer's
+  // secure download link to the corrected version (expires the stale one, emails a fresh link). No re-charge.
+  // Idempotent-safe: if the customer already has the current version the backend returns 'already_current'.
+  const publishCorrectionMut = useMutation({
+    mutationFn: () => publishCorrection(caseId),
+    onSuccess: async (res) => {
+      await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'delivery'] })]);
+      const s = res.data.status;
+      if (s === 'already_current') {
+        window.alert('The customer already has the current version of this letter — nothing to publish.');
+      } else if (s === 'reissued_email_pending') {
+        window.alert('The corrected letter was published (a new secure download link was created), but the notification email did not send. It can be re-sent.');
+      } else {
+        window.alert('Corrected letter published — the customer has been emailed a new secure download link to the updated letter, and the old link no longer works.');
+      }
+    },
+    onError: (e: unknown) => window.alert(`Could not publish the corrected letter — ${describeApiError(e)}.`),
+  });
+
   // Import final letter (2026-06-14): drop an already-finished letter PDF (rig-origin draft or
   // externally-signed) onto the case so it lands in the RN review queue and flows RN -> physician
   // -> delivery. No re-render — exact PDF bytes preserved. The hidden file input is triggered by
@@ -504,6 +544,24 @@ export function CaseDetailPage() {
                 || (c.status === 'paid' && (role === 'admin' || role === 'physician'))) ? (
                 <Button variant="secondary" size="sm" onClick={() => setReturnToPhysicianOpen(true)}>Return to physician</Button>
               ) : null}
+              {/* Revise letter (Ryan 2026-07-03): reopen a delivered/paid letter for a SURGICAL edit instead
+                  of a redraft — it lands in the RN-editable correction state (mandatory note, no re-charge,
+                  physician re-signs). RN-ONLY: only ops_staff gets the follow-through editor+send-to-doctor
+                  card (canShowRnEditorEntry), so offering this to admin/physician would strand them in a
+                  correction state they can't drive. Admin/physician use "Return to physician" instead
+                  (physician_review, which they CAN edit directly). */}
+              {((c.status === 'delivered' || c.status === 'paid') && role === 'ops_staff') ? (
+                <Button variant="secondary" size="sm" onClick={() => setReviseLetterOpen(true)}>Revise letter</Button>
+              ) : null}
+              {/* Publish corrected letter (Ryan 2026-07-03): re-issue the customer's secure download to the
+                  corrected, re-signed version. Shown once a letter has been PAID-delivered (a token was minted);
+                  idempotent-safe (no-op if the customer already has the current version). */}
+              {((c.status === 'delivered' || c.status === 'paid') && (role === 'admin' || role === 'ops_staff')
+                && (c.payments ?? []).some((p) => (p.kind === 'letter_500' || p.kind === 'letter_350') && p.status === 'paid')) ? (
+                <Button variant="secondary" size="sm" loading={publishCorrectionMut.isPending} disabled={publishCorrectionMut.isPending}
+                  onClick={() => { if (window.confirm('Publish the corrected letter to the customer? This re-issues their secure download link to the current signed version, disables the old link, and emails them. No re-charge.')) publishCorrectionMut.mutate(); }}
+                >Publish corrected letter</Button>
+              ) : null}
               {canRedraft ? <Button variant="secondary" size="sm" loading={redraft.isPending} disabled={redraft.isPending} onClick={() => setRedraftGate1Open(true)}>Redraft</Button> : null}
               {canImportLetter ? (
                 <>
@@ -548,6 +606,16 @@ export function CaseDetailPage() {
       isPaid={c.status === 'paid'}
       isInvoiced={(c.payments ?? []).some((p) => p.kind === 'letter_500' && p.status === 'invoiced')}
       onSubmit={async (message) => { await returnToPhysician.mutateAsync(message); }}
+    />
+
+    {/* Revise-letter modal (Ryan 2026-07-03): reopen a delivered/paid letter for a surgical edit with a
+        mandatory note. The dedicated route moves it to the RN-editable correction state (no re-draft). */}
+    <ReviseLetterModal
+      open={reviseLetterOpen}
+      onClose={() => setReviseLetterOpen(false)}
+      isPaid={c.status === 'paid'}
+      isInvoiced={(c.payments ?? []).some((p) => p.kind === 'letter_500' && p.status === 'invoiced')}
+      onSubmit={async (message) => { await reviseLetterMut.mutateAsync(message); }}
     />
 
     {/* Refund signal moved INTO the chart (UI sweep P2c, Ryan item 13): Refunds left the staff nav,

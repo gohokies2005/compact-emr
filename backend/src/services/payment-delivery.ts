@@ -26,7 +26,7 @@ function paymentKindForAmount(cents: number): 'letter_500' | 'letter_350' | 'rev
   return null;
 }
 
-async function resolveSignedPdf(db: AppDb, caseId: string, currentVersion: number): Promise<{ version: number; pdfS3Key: string } | null> {
+export async function resolveSignedPdf(db: AppDb, caseId: string, currentVersion: number): Promise<{ version: number; pdfS3Key: string } | null> {
   // PREFER the case's CURRENT letter (Case.currentVersion → LetterRevision) — the artifact the
   // physician actually approved/signed. The draftJob fallback alone shipped an OLDER render for any
   // case whose letter advanced via editor saves/approve after drafting (the Seam-B remediated cases
@@ -198,6 +198,162 @@ export async function processStripePayment(
   return { status: 'delivered', emailId };
 }
 
+// ───────────────────────────────────────────────────────────────────────────────────────────────────
+// RN "Publish corrected letter" re-issue (Ryan 2026-07-03). When an already-DELIVERED-and-PAID letter is
+// surgically corrected (a detail added) and re-signed, the customer's existing download link is FROZEN on
+// the OLD version — a DeliveryToken's pdfS3Key/letterVersion are captured once at Stripe-payment time and
+// nothing re-points them. This mints a FRESH identity-mode token bound to the CORRECTED version's signed
+// PDF, EXPIRES all prior tokens (so the stale version can no longer be pulled), and emails the veteran a new
+// portal link. NO new charge (a minor correction to a paid letter is not a new $500; a new THEORY still is).
+//
+// SAFETY: reuses the SAME sign/byte egress gate the money path uses (assertDeliveryEligible) — a corrected
+// letter that is not signed + byte-consistent on its current version is REFUSED (physician must re-sign
+// first). It also requires a PRIOR token to exist (proof the letter was already delivered to a paying
+// customer), so this can never be used to deliver a letter that was never paid for (that stays the Stripe
+// path). s3 + bucketName are REQUIRED here (we do NOT fail the byte check open on a re-publish).
+export interface ReissueResult {
+  readonly status:
+    | 'reissued'
+    | 'reissued_email_pending'
+    | 'already_current'
+    | 'no_case'
+    | 'no_prior_delivery'
+    | 'ineligible'
+    | 'no_pdf';
+  readonly emailId?: string;
+  readonly reason?: string;
+  readonly version?: number;
+}
+
+export async function reissueCorrectedDelivery(
+  db: AppDb,
+  input: { caseId: string; actorUserId: string },
+  cfg: { portalBaseUrl: string; adminBcc?: string; s3: S3Client; bucketName: string },
+): Promise<ReissueResult> {
+  const { caseId, actorUserId } = input;
+  const c = (await db.case.findFirst({
+    where: { id: caseId },
+    select: { id: true, veteranId: true, currentVersion: true, status: true },
+  })) as { id: string; veteranId: string; currentVersion: number; status: string } | null;
+  if (c === null) return { status: 'no_case' };
+
+  // A prior DeliveryToken = the customer was already delivered a link (tokens mint only at payment). No
+  // prior token → this letter was never paid-delivered; use the normal invoice→pay flow, not a re-issue.
+  // Fetch the LATEST token (createdAt desc) — it holds the version the customer can currently access.
+  const latestToken = (await db.deliveryToken.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' } })) as
+    | { token: string; letterVersion: number; expiresAt: Date; createdAt: Date }
+    | null;
+  if (latestToken === null) {
+    return { status: 'no_prior_delivery', reason: 'no delivery token exists for this case — use the normal delivery flow' };
+  }
+
+  // Same sign/byte contract as the money egress: the CURRENT version must carry an affirmative sign-off
+  // bound to its current bytes. A correction that was not re-signed is REFUSED here (never fail-open).
+  const eligibility = await assertDeliveryEligible(db, caseId, c.currentVersion, { s3: cfg.s3, bucketName: cfg.bucketName });
+  if (!eligibility.eligible) {
+    return { status: 'ineligible', reason: eligibility.reason };
+  }
+  // FAIL-CLOSED on a legacy sign-off with no bound content hash (byteCheckSkipped). The money path must
+  // honor legacy already-paid cases and fails OPEN there, but a CORRECTION is by definition freshly
+  // re-signed — so a corrected letter with no modern byte-binding means it was NOT re-signed; refuse it.
+  if (eligibility.details?.byteCheckSkipped === true) {
+    return { status: 'ineligible', reason: 'signoff_not_byte_bound' };
+  }
+
+  const pdf = await resolveSignedPdf(db, caseId, c.currentVersion);
+  if (pdf === null) return { status: 'no_pdf' };
+
+  const vet = (await db.veteran.findUnique({ where: { id: c.veteranId } })) as { email?: string; firstName?: string; phone?: string | null } | null;
+
+  // Send the corrected-letter portal email for a given token. Returns the SES messageId (or undefined when
+  // the veteran has no email on file). Throws on an SES failure so the caller can breadcrumb + return pending.
+  const sendCorrectedEmail = async (tok: string): Promise<string | undefined> => {
+    if (vet?.email === undefined || vet.email.length === 0) return undefined;
+    const link = `${cfg.portalBaseUrl.replace(/\/$/, '')}/d/${tok}`;
+    const text = buildCorrectedDeliveryEmailText({ firstName: vet.firstName, link, expiresDays: TOKEN_TTL_DAYS });
+    const r = await sendEmail({ to: vet.email, subject: 'Your updated nexus letter is ready', textBody: text, ...(cfg.adminBcc ? { bcc: cfg.adminBcc } : {}) });
+    return r.messageId;
+  };
+
+  // SAME-VERSION handling (idempotent + self-healing). If the latest token already serves the CURRENT
+  // version, there is no NEW correction to publish — UNLESS that token's delivery email never actually went
+  // out (an SES failure on a prior publish). A CONFIRMED delivery is a success breadcrumb (the original
+  // payment_delivered, or a prior delivery_correction_published) stamped at/after the token was created.
+  //   - delivered → true no-op (handles an unchanged letter whose link is active OR expired; NO false
+  //     "we updated your letter" email — reviewer finding #3).
+  //   - not delivered → the token was minted but its email failed; RE-SEND for the SAME token, no new mint,
+  //     no re-expire (self-heals the stranded-customer case — reviewer finding #5).
+  if (latestToken.letterVersion === pdf.version) {
+    const deliveredLog = await db.activityLog.findFirst({
+      where: { caseId, action: { in: ['payment_delivered', 'delivery_correction_published'] }, ts: { gte: latestToken.createdAt } },
+    });
+    if (deliveredLog !== null) {
+      return { status: 'already_current', version: pdf.version };
+    }
+    try {
+      const emailId = await sendCorrectedEmail(latestToken.token);
+      await db.activityLog.create({ data: { actorUserId, action: 'delivery_correction_published', caseId, veteranId: c.veteranId, detailsJson: { version: pdf.version, emailedTo: vet?.email ?? null, resend: true } } });
+      return { status: 'reissued', version: pdf.version, ...(emailId !== undefined ? { emailId } : {}) };
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      await db.activityLog.create({ data: { actorUserId, action: 'delivery_correction_email_failed', caseId, veteranId: c.veteranId, detailsJson: { token: latestToken.token, emailTo: vet?.email ?? null, error: errMsg } } }).catch(() => undefined);
+      return { status: 'reissued_email_pending', reason: `corrected link retry failed: ${errMsg}`, version: pdf.version };
+    }
+  }
+
+  // NEW corrected version → mint a fresh token, expire the stale ones, restore paid, then email.
+  const token = generateToken();
+  const expiresAt = new Date(Date.now() + TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+  // Was this letter already PAID? (a token exists, so it was — but confirm the ledger to decide whether to
+  // restore the 'paid' terminal, since the correction round left the case at 'delivered' post-approve.)
+  const paidRow = await db.payment.findFirst({ where: { caseId, kind: { in: ['letter_500', 'letter_350'] }, status: 'paid' } });
+  const now = new Date();
+
+  await db.$transaction(async (tx) => {
+    // EXPIRE every still-active token so the veteran can no longer pull the STALE (pre-correction) PDF.
+    await tx.deliveryToken.updateMany({ where: { caseId, expiresAt: { gt: now } }, data: { expiresAt: now } });
+    // Mint the corrected identity-mode token (DOB + phone last-4 unlock; nothing secret in transit).
+    await tx.deliveryToken.create({ data: { caseId, token, passwordHash: null, letterVersion: pdf.version, pdfS3Key: pdf.pdfS3Key, expiresAt } });
+    // Restore the billed-terminal 'paid' status (the correction round left the case at 'delivered' after
+    // /letter/approve). Billing is untouched — no new charge, no refund; this is only the status label.
+    if (paidRow !== null && c.status !== 'paid') {
+      await tx.case.update({ where: { id: caseId }, data: { status: 'paid' } });
+    }
+    await tx.activityLog.create({ data: { actorUserId, action: 'delivery_correction_reissued', caseId, veteranId: c.veteranId, detailsJson: { version: pdf.version, expiredPriorTokens: true, recharged: false } } });
+  });
+
+  // POST-COMMIT email (an SES failure must not roll back the token — it persists and re-sends via the
+  // self-healing same-version path above on the next publish click).
+  try {
+    const emailId = await sendCorrectedEmail(token);
+    await db.activityLog.create({ data: { actorUserId, action: 'delivery_correction_published', caseId, veteranId: c.veteranId, detailsJson: { version: pdf.version, emailedTo: vet?.email ?? null } } });
+    return { status: 'reissued', version: pdf.version, ...(emailId !== undefined ? { emailId } : {}) };
+  } catch (e) {
+    const errMsg = e instanceof Error ? e.message : String(e);
+    await db.activityLog.create({ data: { actorUserId, action: 'delivery_correction_email_failed', caseId, veteranId: c.veteranId, detailsJson: { token, emailTo: vet?.email ?? null, error: errMsg } } }).catch(() => undefined);
+    return { status: 'reissued_email_pending', reason: `corrected token issued; delivery email failed: ${errMsg}`, version: pdf.version };
+  }
+}
+
+// The corrected-letter portal email. Same identity-unlock link-only shape as the first delivery email, with
+// copy that signals this is an UPDATED letter replacing the prior one (so the veteran uses the new link).
+export function buildCorrectedDeliveryEmailText(input: { firstName?: string; link: string; expiresDays: number }): string {
+  const hi = input.firstName ? `Hi ${input.firstName},` : 'Hello,';
+  return [
+    hi, '',
+    'Your nexus letter has been updated with the additional details, and the revised version is ready. It',
+    'replaces the earlier one. For your security it is available through a private, verified link rather than',
+    'as an email attachment.', '',
+    `Link: ${input.link}`, '',
+    'When you open the link, you will be asked to confirm your date of birth and the last 4 digits of your',
+    'phone number. That is all you need — there is no password to keep track of.', '',
+    `Please use THIS link for the current version; any earlier download link no longer works. This link is`,
+    `valid for ${input.expiresDays} days.`, '',
+    'Thank you,', 'Flat Rate Nexus', 'flatratenexus.com', '',
+    'All correspondence should be directed to info@flatratenexus.com.',
+  ].join('\n');
+}
+
 // Link-ONLY delivery email (HIPAA audit APP-1 fix): no password, no secret of any kind in transit.
 // The portal verifies the veteran with their date of birth + the last 4 digits of their phone —
 // things they already know — so a compromised or mis-forwarded mailbox gets a link it cannot open.
@@ -215,7 +371,9 @@ export function buildDeliveryEmailText(input: { firstName?: string; link: string
     'All correspondence should be directed to info@flatratenexus.com.', '',
     // Passive review touch — AFTER payment + delivery, never on the invoice (Ryan 2026-06-11:
     // the invoice has one job; the review ask rides the moment the value lands).
-    'P.S. If our work helped you, a quick Google review helps other veterans find us:',
-    'https://g.page/r/CaYDGwvikxZEEAE/review',
+    'P.S. If our work helped you, a quick review helps other veterans find us:',
+    'Google: https://g.page/r/CaYDGwvikxZEEAE/review',
+    'Trustpilot: https://www.trustpilot.com/review/flatratenexus.com',
+    'And if you\'re ever in r/Veterans or r/VeteransBenefits and see someone asking where to get a nexus letter — a word from you carries more weight than any ad we could run.',
   ].join('\n');
 }

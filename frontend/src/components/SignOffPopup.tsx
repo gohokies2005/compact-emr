@@ -4,6 +4,7 @@ import { Button } from './ui/Button';
 import { signOffCase, type ChartReadinessBlockingFile, type SignOffAnswers, type SignOffQuestionKey } from '../api/cases';
 import { ConflictError } from '../api/client';
 import { documentFileName } from '../lib/documentFileName';
+import { WhatChangedPanel } from './WhatChangedPanel';
 
 // Plain-English rendering of the machine-read failure reason a blocking file carries (lastAttempt.note,
 // e.g. "too-few-words (22 < 20)" / "empty (0 words)" / "garbled ..."). Falls back to a calm default so
@@ -174,6 +175,10 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff, onSubmitAnswe
         </div>
 
         <div className="mt-4 space-y-3">
+          {/* "What changed since you last signed" (Ryan 2026-07-03): when re-signing an RN-corrected letter,
+              the physician sees the highlighted diff vs the last-signed version. Renders nothing on a first
+              signature or when nothing changed. */}
+          <WhatChangedPanel caseId={caseId} open={open} />
           {SIGN_OFF_QUESTIONS.map((q) => {
             const selected = answers[q.key];
             return (

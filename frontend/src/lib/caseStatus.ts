@@ -19,8 +19,11 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   // admin-only below (closes the RN bare-flip that skipped /letter/approve + the sign-off byte gate).
   correction_review: ['physician_review', 'delivered', 'rejected'],
   // delivered -> physician_review: G4 stale-signature return (admin-only as a human move).
-  delivered: ['paid', 'physician_review'],
-  paid: [],
+  // delivered/paid -> correction_requested: RN "Revise & resend" reopen (2026-07-03, dedicated route).
+  delivered: ['paid', 'physician_review', 'correction_requested'],
+  // paid -> physician_review: return-to-physician recall (2026-06-28). paid -> correction_requested: RN
+  // "Revise & resend" reopen of a billed letter (2026-07-03). Both via dedicated guarded routes.
+  paid: ['physician_review', 'correction_requested'],
   rejected: [],
   needs_rn_decision: ['drafting', 'records', 'rejected'],
   needs_records: ['drafting', 'records', 'rejected'],

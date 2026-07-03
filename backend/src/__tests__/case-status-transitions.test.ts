@@ -12,7 +12,8 @@ describe('case status transitions', () => {
     expect(CASE_STATUS_TRANSITIONS.rejected).toEqual([]);
     // paid is no longer a dead-end (2026-06-28): the physician/owner can RECALL a billed/closed letter to
     // correct it (return-to-physician door). The move does NOT auto-reverse billing.
-    expect(CASE_STATUS_TRANSITIONS.paid).toEqual(['physician_review']);
+    // paid -> correction_requested added 2026-07-03 (RN "Revise & resend" reopen of a billed letter).
+    expect(CASE_STATUS_TRANSITIONS.paid).toEqual(['physician_review', 'correction_requested']);
   });
 
   // ── Return-to-physician recall edge (2026-06-28) ──────────────────────────
@@ -59,7 +60,8 @@ describe('case status transitions', () => {
     // delivered -> physician_review is the G4 stale-signature return (ratified sign/edit
     // lifecycle, Ryan 2026-06-12): an edit over the signed version sends the case back to the
     // doctor's queue for re-signature instead of sitting delivered with changed bytes.
-    expect(CASE_STATUS_TRANSITIONS.delivered).toEqual(['paid', 'physician_review']);
+    // delivered -> correction_requested added 2026-07-03 (RN "Revise & resend" reopen; dedicated door).
+    expect(CASE_STATUS_TRANSITIONS.delivered).toEqual(['paid', 'physician_review', 'correction_requested']);
   });
 
   it('rejects ops_staff attempting physician_review to delivered', () => {
@@ -73,6 +75,17 @@ describe('case status transitions', () => {
     // legalized drafter-completion transition stays admin-only for humans too.
     expect(canRolePerformCaseStatusTransition('physician', 'physician_review', 'rn_review')).toBe(false);
     expect(canRolePerformCaseStatusTransition('admin', 'physician_review', 'rn_review')).toBe(true);
+  });
+
+  it('the RN "Revise & resend" reopen (delivered/paid -> correction_requested) is admin-only as a BARE /status flip', () => {
+    // ops_staff + physician must go through the dedicated /revise-letter door (mandatory note + audit); the
+    // generic /status bare flip is admin-only so an RN can never silently reopen a delivered/billed case.
+    expect(canRolePerformCaseStatusTransition('ops_staff', 'delivered', 'correction_requested')).toBe(false);
+    expect(canRolePerformCaseStatusTransition('physician', 'delivered', 'correction_requested')).toBe(false);
+    expect(canRolePerformCaseStatusTransition('admin', 'delivered', 'correction_requested')).toBe(true);
+    expect(canRolePerformCaseStatusTransition('ops_staff', 'paid', 'correction_requested')).toBe(false);
+    expect(canRolePerformCaseStatusTransition('physician', 'paid', 'correction_requested')).toBe(false);
+    expect(canRolePerformCaseStatusTransition('admin', 'paid', 'correction_requested')).toBe(true);
   });
 
   it('ops_staff can NOT manually pull a delivered (signed) case back to physician_review — the G4 return is system/admin-only', () => {

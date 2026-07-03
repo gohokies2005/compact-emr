@@ -23,6 +23,7 @@ import {
 } from '../services/delivery-config.js';
 import { resolveCurrentRevisionMeta } from '../services/letter-current.js';
 import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
+import { reissueCorrectedDelivery } from '../services/payment-delivery.js';
 import { sendEmail } from '../services/mailer.js';
 import * as quoClient from '../services/quoClient.js';
 import { renderMemoPdf } from '../services/memo-render.js';
@@ -691,6 +692,45 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
       }));
       const url = await getSignedUrl(client, new GetObjectCommand({ Bucket: bucketName, Key: memoKey }), { expiresIn: MEMO_PRESIGN_TTL_SECONDS });
       res.json({ data: { url } });
+    }),
+  );
+
+  // ── RN "Publish corrected letter" (Ryan 2026-07-03) ─────────────────────────────────────────────────
+  // Re-issue the customer's secure download to the CORRECTED, re-signed version. The customer's existing
+  // link is frozen on the old version (a DeliveryToken snapshots pdfS3Key at payment time and nothing
+  // re-points it), so after an RN revise + physician re-sign this mints a FRESH token bound to the corrected
+  // PDF, expires the stale one, and emails the veteran a new portal link. NO re-charge. Gated to the same
+  // sign/byte egress contract as the money path (inside reissueCorrectedDelivery → assertDeliveryEligible),
+  // and requires a prior delivery token (already paid-delivered) so it can never deliver an unpaid letter.
+  router.post(
+    '/cases/:id/delivery/publish-correction',
+    requireRole(['admin', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const user = currentActor(req);
+      const bucketName = bucket();
+      if (bucketName === undefined) throw new HttpError(503, 'internal_error', 'PHI_BUCKET_NAME not configured', { caseId });
+
+      const result = await reissueCorrectedDelivery(db, { caseId, actorUserId: user.id }, {
+        portalBaseUrl: process.env.DELIVERY_PORTAL_BASE_URL ?? 'https://emr.flatratenexus.com',
+        ...(process.env.DELIVERY_ADMIN_BCC ? { adminBcc: process.env.DELIVERY_ADMIN_BCC } : {}),
+        s3: s3(),
+        bucketName,
+      });
+
+      if (result.status === 'no_case') throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      if (result.status === 'no_prior_delivery') {
+        throw new HttpError(409, 'conflict', 'This letter has not been delivered to the customer yet — use the normal delivery flow to send it.', { caseId });
+      }
+      if (result.status === 'ineligible') {
+        throw new HttpError(409, 'signed_bytes_changed', 'The corrected letter must be re-signed by the physician before it can be re-published to the customer.', { caseId, reason: result.reason });
+      }
+      if (result.status === 'no_pdf') {
+        throw new HttpError(409, 'conflict', 'No signed PDF was found for the corrected version.', { caseId });
+      }
+      // reissued | reissued_email_pending → 200 with the result (the email-pending case still succeeded at
+      // minting the corrected token; the operator sees the pending-email breadcrumb).
+      res.json({ data: result });
     }),
   );
 

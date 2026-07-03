@@ -1039,6 +1039,89 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
     }),
   );
 
+  // ── RN "Revise & resend" (Ryan 2026-07-03) ────────────────────────────────────────────────────────
+  // A delivered/paid letter needs a couple details added (e.g. reference a buddy statement) — a SURGICAL
+  // edit, NOT a full redraft (the money-waster). This dedicated door reopens a delivered OR paid letter
+  // straight into 'correction_requested', the RN-EDITABLE state — unlike /return-to-physician, which lands
+  // in physician_review where the RN is locked out and the physician would have to decline first. The RN
+  // then edits the letter (surgical-ai / PUT, non-§VII) and sends it back to the doctor
+  // (correction_requested→physician_review) for a fresh sign-off + approve.
+  //
+  // ROLE POLICY (Ryan 2026-07-03, Gibbs paid-case): ops_staff MAY reopen BOTH delivered AND paid here — a
+  // deliberate loosening of the "RN can't reopen a billed case" guard, made SAFE by being transparent, not
+  // silent: a MANDATORY note + activity-log audit trail (wasPaid/wasInvoiced), NO billing change / NO
+  // un-charge, and the physician still re-signs + re-approves before anything re-delivers. The signed letter
+  // stays the CURRENT version until the RN actually edits it (no re-draft, no byte change on reopen).
+  router.post(
+    '/cases/:id/revise-letter',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentUser(req);
+      const id = String(req.params.id);
+      const { version, message } = parseReturnToPhysician(req.body);
+
+      const updated = await db.$transaction(async (tx) => {
+        const existing = await tx.case.findFirst({
+          where: { id },
+          select: {
+            id: true,
+            veteranId: true,
+            status: true,
+            version: true,
+            assignedPhysicianId: true,
+            _count: { select: { payments: { where: { kind: 'letter_500', status: 'invoiced' } } } },
+          },
+        });
+        if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+        if (!RETURNABLE_TO_PHYSICIAN.has(existing.status)) {
+          throw new HttpError(409, 'conflict', 'Only a finalized (Ready for delivery) or paid letter can be reopened for revision.', {
+            caseId: id,
+            currentStatus: existing.status,
+          });
+        }
+        if (existing.version !== version) {
+          throw new HttpError(409, 'conflict', 'Case status or version is stale', {
+            caseId: id,
+            currentStatus: existing.status,
+            currentVersion: existing.version,
+            receivedVersion: version,
+          });
+        }
+        if (existing.assignedPhysicianId === null) {
+          throw new HttpError(409, 'conflict', 'No physician is assigned to this case to send the revised letter back to.', { caseId: id });
+        }
+
+        const row = await tx.case.update({
+          where: { id },
+          data: { status: 'correction_requested', version: { increment: 1 } },
+          select: CASE_LITE_SELECT,
+        });
+
+        // Mandatory revision note → recorded on the case so reopening a delivered/paid (possibly billed)
+        // letter is never silent; the physician also sees it when the corrected letter returns for sign-off.
+        await tx.caseMessage.create({
+          data: { caseId: id, senderSub: user.sub, senderRole: user.role, body: message },
+        });
+
+        const wasPaid = existing.status === 'paid';
+        const wasInvoiced = (((existing as { _count?: { payments?: number } })._count?.payments) ?? 0) > 0;
+        await tx.activityLog.create({
+          data: {
+            actorUserId: user.id,
+            action: 'case_opened_for_revision',
+            caseId: id,
+            veteranId: existing.veteranId,
+            detailsJson: { caseId: id, from: existing.status, to: 'correction_requested', wasPaid, wasInvoiced },
+          },
+        });
+
+        return row;
+      });
+
+      res.json({ data: withRecordsSignal(updated as unknown as Record<string, unknown>) });
+    }),
+  );
+
   router.get(
     '/cases/:id/draft-jobs',
     requireStaffOrAssignedPhysician(db, ['admin', 'ops_staff']),

@@ -32,6 +32,7 @@ import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../serv
 import { findChartReadinessOverride, resolveOverrideReason } from '../services/chart-readiness-override.js';
 import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash, headObjectExists, resolveViewableCurrentTxtKey } from '../services/letter-current.js';
 import { detectLetterLeaks, blockingLeaks } from '../services/letter-leak-detector.js';
+import { resolveChangesSinceSigned } from '../services/letter-change-diff.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import {
   parseCredentialBlock,
@@ -353,6 +354,31 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
   async function readTxtFromS3(bucketName: string, key: string, ctx?: LetterTxtContext): Promise<string> {
     return readLetterTxtFromS3(s3(), bucketName, key, ctx);
   }
+
+  // ── GET — "what changed since the physician last signed" diff (Ryan 2026-07-03) ─────────────
+  // Deterministic sentence-level diff between the last-signed version and the current version, so the
+  // physician re-signing an RN-corrected letter can GLANCE at the change instead of re-reading. It is an
+  // AID, never a gate (the delivery byte-hash gate is the real re-sign enforcement), so it FAILS OPEN:
+  // no bucket, no prior signature, or any read error → { available: false } and the UI omits the panel.
+  router.get(
+    '/cases/:id/letter/changes-since-signed',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentActor(req);
+      const caseId = String(req.params.id);
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      await enforcePhysicianAssignment(caseId, user.role, user.sub, c.assignedPhysicianId);
+
+      const bucketName = bucket();
+      if (bucketName === undefined) {
+        res.json({ data: { available: false, reason: 'not_configured' } });
+        return;
+      }
+      const changes = await resolveChangesSinceSigned(db, s3(), bucketName, caseId, c.currentVersion);
+      res.json({ data: changes });
+    }),
+  );
 
   // ── GET — load the current letter for the editor ──────────────────────────
   router.get(

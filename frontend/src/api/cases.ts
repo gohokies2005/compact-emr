@@ -188,6 +188,45 @@ export async function returnCaseToPhysician(id: string, input: ReturnToPhysician
   return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/return-to-physician`, input);
 }
 
+// "Revise letter" (Ryan 2026-07-03): RN reopens a DELIVERED or PAID letter for a surgical edit — moves it
+// to correction_requested (the RN-editable state) with a MANDATORY note. NOT a redraft; the signed letter
+// stays current until the RN edits it. Dedicated route (no billing change; physician still re-signs).
+export interface ReviseLetterInput { readonly version: number; readonly message: string }
+export async function reviseLetter(id: string, input: ReviseLetterInput): Promise<{ data: CaseLite }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/revise-letter`, input);
+}
+
+// "Publish corrected letter" (Ryan 2026-07-03): after a correction is re-signed, re-issue the customer's
+// secure download link to the corrected version (expires the stale link, emails a fresh one). No re-charge.
+export interface PublishCorrectionResult {
+  readonly status: 'reissued' | 'reissued_email_pending' | 'already_current' | string;
+  readonly version?: number;
+  readonly emailId?: string;
+  readonly reason?: string;
+}
+export async function publishCorrection(id: string): Promise<{ data: PublishCorrectionResult }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/delivery/publish-correction`, {});
+}
+
+// "What changed since the physician last signed" (Ryan 2026-07-03): deterministic sentence-level diff
+// between the last-signed version and the current version, so the physician re-signing an RN correction can
+// glance instead of re-reading. Fail-open: { available:false } means no panel is shown.
+export interface LetterDiffSegment { readonly kind: 'unchanged' | 'added' | 'removed'; readonly text: string }
+export interface LetterChangesSinceSigned {
+  readonly available: boolean;
+  readonly changed?: boolean;
+  readonly signedVersion?: number;
+  readonly currentVersion?: number;
+  readonly signedAt?: string;
+  readonly addedCount?: number;
+  readonly removedCount?: number;
+  readonly segments?: readonly LetterDiffSegment[];
+  readonly reason?: string;
+}
+export async function getLetterChangesSinceSigned(id: string): Promise<{ data: LetterChangesSinceSigned }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(id)}/letter/changes-since-signed`);
+}
+
 export interface AssignPhysicianInput { readonly physicianId: string; readonly version: number }
 export interface AssignRnInput { readonly rnUserId: string; readonly version: number }
 

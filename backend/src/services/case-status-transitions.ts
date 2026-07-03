@@ -57,14 +57,21 @@ export const CASE_STATUS_TRANSITIONS: Record<CaseStatus, readonly CaseStatus[]> 
   // the case returns to the doctor's queue for re-signature instead of sitting 'delivered' with
   // changed bytes until the delivery-time signed_bytes_changed 409. Performed by the letter
   // routes in-transaction; role-gated admin-only below as a manual move.
-  delivered: ['paid', 'physician_review'],
+  // delivered -> correction_requested is the RN "Revise & resend" reopen (2026-07-03): a delivered letter
+  // that needs a couple details added drops straight into the RN-EDITABLE correction state. Performed by the
+  // dedicated guarded /cases/:id/revise-letter route (mandatory note + audit); as a bare /status move it is
+  // admin-only below (RN/physician go through the dedicated door).
+  delivered: ['paid', 'physician_review', 'correction_requested'],
   // paid -> physician_review is the RETURN-TO-PHYSICIAN recall (2026-06-28, Ryan): the physician/owner
   // can pull a finalized, BILLED (paid/closed) letter back into the doctor's review queue to correct it.
   // 'paid' is therefore no longer a dead-end terminal. Performed by the dedicated guarded
   // /cases/:id/return-to-physician route (which does its own role gating + mandatory message); as a bare
   // move on the generic /status route it is admin-only below. Billing is NOT auto-reversed by the move —
   // returning a paid letter does not refund/un-charge; the signed letter stays current until re-signed.
-  paid: ['physician_review'],
+  // paid -> correction_requested is the RN "Revise & resend" reopen of a BILLED letter (2026-07-03) — same
+  // dedicated /revise-letter door (mandatory note + audit, no un-charge, physician re-signs). Bare /status
+  // move is admin-only below.
+  paid: ['physician_review', 'correction_requested'],
   rejected: [],
   // Gate-2 parked states: the RN resumes (drafting via the rnDecision draft) or rejects. needs_records
   // can also drop back to records to gather more, then re-run.
@@ -113,6 +120,10 @@ export function requiredRolesForCaseStatusTransition(from: CaseStatus, to: CaseS
   // check there); as a HUMAN move it is admin-only so ops_staff can never manually pull a
   // delivered (signed/approved) case back into a mutable status.
   if (from === 'delivered' && to === 'physician_review') return ['admin'];
+  // RN "Revise & resend" reopen (2026-07-03): delivered/paid -> correction_requested as a BARE /status flip
+  // is admin-only. ops_staff + physician reach it through the dedicated /cases/:id/revise-letter route
+  // (mandatory note + audit trail), so an RN can never silently reopen a delivered/billed case by hand.
+  if ((from === 'delivered' || from === 'paid') && to === 'correction_requested') return ['admin'];
   // Drafter-completion legalization (see map comment) — live performer is the drafter service
   // principal via the internal /complete route (which bypasses role checks); admin-only as a
   // human move so the RN cannot self-unlock the G1 redraft lock (physician reopen = decline).

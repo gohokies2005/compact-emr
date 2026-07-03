@@ -146,6 +146,7 @@ export interface AppUserRoleDelegate {
 
 export interface ActivityLogDelegate {
   create(args: { data: ActivityCreateInput }): Promise<unknown>;
+  findFirst(args: unknown): Promise<{ id: string } | null>;
 }
 
 export interface CaseMessageRecord {

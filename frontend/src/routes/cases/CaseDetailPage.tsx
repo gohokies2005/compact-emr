@@ -19,6 +19,7 @@ import { PhysicianLetterReadyPanel } from '../../components/PhysicianLetterReady
 import { SendToDoctorModal } from '../../components/SendToDoctorModal';
 import { ReturnToPhysicianModal } from '../../components/ReturnToPhysicianModal';
 import { ReviseLetterModal } from '../../components/ReviseLetterModal';
+import { ReviewChangesPopup } from '../../components/ReviewChangesPopup';
 import { DeliveryPanel } from '../../components/DeliveryPanel';
 import { OpsHeldPanel } from '../../components/OpsHeldPanel';
 import { Gate2HaltPanel } from '../../components/Gate2HaltPanel';
@@ -966,6 +967,11 @@ export function CaseDetailPage() {
 
     {pendingTo ? <TransitionModal caseId={caseId} from={c.status} to={pendingTo} version={c.version} onClose={() => setPendingTo(null)} onDone={async () => { setPendingTo(null); await refetch(); }} /> : null}
     <SignOffPopup caseId={caseId} open={signOffOpen} onClose={() => setSignOffOpen(false)} onSignedOff={refetch} />
+
+    {/* "Came back for a revision" pop-up (Ryan 2026-07-03) — auto-shows for the PHYSICIAN/admin when a case
+        an RN corrected has unsigned changes, so the reason + the diff are front-and-center on open. Gated to
+        physician/admin: the RN who made the edit doesn't need it. Self-gates on there being real changes. */}
+    {(role === 'physician' || role === 'admin') ? <ReviewChangesPopup caseId={caseId} /> : null}
     {redraftGate1Open ? (
       <Gate1ChecklistModal
         caseId={caseId}

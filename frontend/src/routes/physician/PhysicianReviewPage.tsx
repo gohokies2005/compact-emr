@@ -16,6 +16,7 @@ import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 import { PhysicianHandoffNotes } from '../../components/PhysicianHandoffNotes';
+import { ReviewChangesPopup } from '../../components/ReviewChangesPopup';
 import { PhysicianDocumentsList } from '../../components/PhysicianDocumentsList';
 import { getCase, type SignOffAnswers } from '../../api/cases';
 import { formatNameLastFirst, formatDateOnly } from '../../lib/format';
@@ -303,6 +304,10 @@ export function PhysicianReviewPage() {
           />
         )}
         <LetterPdfModal caseId={showLetterPdf ? c.id : null} onClose={() => setShowLetterPdf(false)} />
+        {/* Auto-pops the moment the physician opens a case an RN sent back with a correction — shows the
+            reason + the what-changed diff up front (Ryan 2026-07-03). Self-gates: only when there are
+            unsigned changes vs the last-signed version, so it never fires on a first-time review. */}
+        <ReviewChangesPopup caseId={caseId} />
       </div>
     </AppShell>
   );

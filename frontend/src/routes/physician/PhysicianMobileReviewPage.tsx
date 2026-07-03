@@ -5,6 +5,7 @@ import { AppShell } from '../../layout/AppShell';
 import { Spinner } from '../../components/ui/Spinner';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { SignOffPopup } from '../../components/SignOffPopup';
+import { ReviewChangesPopup } from '../../components/ReviewChangesPopup';
 import { SendBackToRnModal } from '../../components/SendBackToRnModal';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
@@ -322,6 +323,8 @@ export function PhysicianMobileReviewPage() {
         onDone={onChanged}
       />
       <LetterPdfModal caseId={showLetterPdf ? c.id : null} onClose={() => setShowLetterPdf(false)} />
+      {/* Auto-pops when the physician opens an RN-corrected case with unsigned changes (Ryan 2026-07-03). */}
+      <ReviewChangesPopup caseId={caseId} />
     </AppShell>
   );
 }

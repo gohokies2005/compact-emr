@@ -267,7 +267,9 @@ function bodyForPathway(input: BuildCoverMemoInput): string[] {
       return [
         `The attached Independent Medical Opinion is submitted for ${v}'s appeal regarding ${cond}. The opinion is offered under the probative-value standards described in Nieves-Rodriguez v. Peake, 22 Vet. App. 295 (2008): factual accuracy, full articulation, and sound reasoning.`,
         '',
-        'I respectfully request that the Board review the attached opinion as evidence on the merits of the medical analysis it contains.',
+        // Restored 2026-07-02 (Ryan): the memo must ask the Board to consider the opinion as new and
+        // significant evidence that was not of record at the time of the original submission.
+        'I respectfully request that the Board consider the attached opinion as new and significant evidence that was not of record at the time of the original submission, and review it on the merits of the medical analysis it contains.',
         '',
         ...closingParagraphs(true),
       ];

@@ -24,6 +24,7 @@ import {
 import { resolveCurrentRevisionMeta } from '../services/letter-current.js';
 import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
 import { sendEmail } from '../services/mailer.js';
+import * as quoClient from '../services/quoClient.js';
 import { renderMemoPdf } from '../services/memo-render.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -496,6 +497,32 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
             emailSentAt = sentAt;
             messageId = r.messageId;
             redirectedFrom = r.redirectedFrom;
+
+            // ── ADDITIVE Tier-1 Quo SMS (2026-07-02) ─────────────────────────────────────────────
+            // The invoice email + letter_500 Payment are ALREADY committed above. This block texts the
+            // veteran "your letter is ready" as a STRICTLY ADDITIVE side effect. It is fully isolated:
+            // quoClient.sendSms never throws (returns {sent:false,reason}), and the whole block is wrapped
+            // in its own try/catch that SWALLOWS everything — a Quo failure, a null phone, or an
+            // activity-log failure CANNOT change the HTTP response, the Email row, the Payment record, or
+            // the delivery status. Fires only on a real transmit (this success branch), so a double-click
+            // that hits the "already sent, no resend" short-circuit never re-texts; an explicit resend
+            // does re-text (the veteran lost the email). AWAITed so the fire-and-forget request completes
+            // inside the Lambda invocation rather than being torn down after the response is sent.
+            try {
+              const veteranPhone = (veteran as { phone?: string | null } | null)?.phone ?? null;
+              if (veteranPhone !== null && veteranPhone.trim() !== '') {
+                const smsResult = await quoClient.sendSms(veteranPhone, quoClient.letterReadyText());
+                await db.activityLog.create({
+                  data: {
+                    actorUserId: user.sub,
+                    action: 'sms_sent',
+                    caseId,
+                    veteranId: c.veteranId,
+                    detailsJson: { sent: smsResult.sent, ...(smsResult.reason !== undefined ? { reason: smsResult.reason } : {}) },
+                  },
+                });
+              }
+            } catch { /* SMS is best-effort + strictly additive — never affects email/payment/delivery */ }
           } else {
             // mailer's loud no-op (SES_FROM_ADDRESS unset). The config gate keys on the same
             // precondition, so this branch means the env changed between gate-read and send.

@@ -23,6 +23,7 @@ import { computeApproveBlockers, type ApproveBlocker, type ApproveBlockerDeps } 
 import { resolveCurrentRefStrict, resolveViewableCurrentTxtKey, type CurrentRef } from '../services/letter-current.js';
 import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
 import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
+import * as quoClient from '../services/quoClient.js';
 
 const CASE_LITE_SELECT = {
   id: true,
@@ -558,6 +559,39 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
 
         return row;
       });
+
+      // ── ADDITIVE Quo contact sync (2026-07-02) ───────────────────────────────────────────────────
+      // Best-effort: create a Quo contact keyed by the case id so a later inbound call/text from the
+      // veteran is identifiable to the RNs. The case is ALREADY committed above; this block is fully
+      // isolated and SWALLOWS everything — a Quo failure, a missing veteran, or an activity-log failure
+      // MUST NOT block case creation or change the 201 response. No customFields (the Quo workspace
+      // custom fields aren't defined yet; passing them 400s). createContact itself never throws.
+      try {
+        const vet = await db.veteran.findUnique({
+          where: { id: veteranId },
+          select: { firstName: true, lastName: true, phone: true, email: true },
+        });
+        if (vet !== null) {
+          const contact = await quoClient.createContact({
+            firstName: vet.firstName,
+            lastName: vet.lastName,
+            phone: vet.phone,
+            email: vet.email,
+            externalId: created.id,
+          });
+          try {
+            await db.activityLog.create({
+              data: {
+                actorUserId: user.id,
+                action: 'quo_contact_synced',
+                caseId: created.id,
+                veteranId,
+                detailsJson: { ok: contact.ok, ...(contact.reason !== undefined ? { reason: contact.reason } : {}) },
+              },
+            });
+          } catch { /* audit is best-effort */ }
+        }
+      } catch { /* Quo contact sync is best-effort — never blocks case creation */ }
 
       res.status(201).json({ data: withRecordsSignal(created as unknown as Record<string, unknown>) });
     }),

@@ -108,6 +108,15 @@ export class ApiStack extends Stack {
       secretName: `compact-emr-${props.config.envName}/stripe-webhook-secret`,
     });
 
+    // Quo (formerly OpenPhone) SMS transport API key — operator-populated AFTER deploy (same lifecycle
+    // as the Stripe/Gmail secrets: CDK creates the secret with a random placeholder and NEVER owns the
+    // value, so it survives redeploys). Read at RUNTIME by FRIENDLY NAME (quoClient.readSecretByName via
+    // QUO_API_KEY_SECRET_NAME) — never a partial ARN (the AccessDenied footgun). Tier-1 additive SMS
+    // (letter-ready text + case-create contact sync) fails soft to {sent:false,no_api_key} until populated.
+    const quoApiKeySecret = new secretsmanager.Secret(this, 'QuoApiKeySecret', {
+      secretName: `compact-emr-${props.config.envName}/quo-api-key`,
+    });
+
     // Gmail OAuth grant for the outbound-email transport (EMAIL_TRANSPORT=gmail — SES production
     // access denied 2026-06-11, case 178094063100860; Gmail is BAA-covered under Google Workspace).
     // Operator-populated AFTER deploy (same lifecycle as the Anthropic/Stripe secrets — CDK never
@@ -310,6 +319,9 @@ export class ApiStack extends Stack {
         API_ANTHROPIC_KEY_SECRET_ARN: apiAnthropicSecret.secretArn,
         // Stripe payment → password-portal PDF delivery (Ryan 2026-06-06).
         STRIPE_WEBHOOK_SECRET_NAME: `compact-emr-${props.config.envName}/stripe-webhook-secret`,
+        // Quo SMS: secret read at runtime by friendly name; QUO_FROM is the public 757 number (not a secret).
+        QUO_API_KEY_SECRET_NAME: `compact-emr-${props.config.envName}/quo-api-key`,
+        QUO_FROM: '+17575401077',
         STRIPE_LINK_500: 'https://buy.stripe.com/3cI9ALcMG5LH05Y3Xm0Ba03', // public payment link (not a secret)
         STRIPE_LINK_350: 'https://buy.stripe.com/aFa5kvaEygql5qi9hG0Ba01', // $350 letter fee payment link (not a secret)
         SES_FROM_ADDRESS: 'info@flatratenexus.com',                          // From address (verified SES identity AND the Gmail OAuth user)
@@ -409,6 +421,9 @@ export class ApiStack extends Stack {
     // Gmail transport: read the OAuth grant at runtime (friendly name; CDK-created so the full ARN
     // grant resolves — not the fromSecretNameV2 partial-ARN footgun).
     gmailOauthSecret.grantRead(handler);
+    // Quo SMS transport: read the API key at runtime (CDK-created secret object → full-ARN grant, never
+    // the fromSecretNameV2 partial-ARN footgun).
+    quoApiKeySecret.grantRead(handler);
     // NCBI key: the env var above is resolved by CloudFormation at deploy time (a {{resolve}} dynamic
     // reference, NOT a runtime GetSecretValue), so the Lambda role does NOT strictly need GetSecretValue
     // to READ it. This grant is kept for IAM symmetry + forward-compat if the enricher ever switches to a

@@ -4,6 +4,7 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDeliveryRouter } from '../routes/delivery.js';
 import { sendEmail } from '../services/mailer.js';
+import * as quoClient from '../services/quoClient.js';
 import { isHttpError, sendError } from '../http/errors.js';
 import type { AppDb, Role, EmailRecord, PaymentRecord } from '../services/db-types.js';
 
@@ -26,6 +27,19 @@ vi.mock('../auth/roles', () => ({
 // Each test programs the stub (resolve sent / resolve redirected / reject) per its scenario.
 vi.mock('../services/mailer', () => ({ sendEmail: vi.fn() }));
 const sendEmailMock = vi.mocked(sendEmail);
+
+// Tier-1 additive Quo SMS (2026-07-02): the /send hook texts the veteran on a real transmit. Mock the
+// transport so no https/Secrets Manager call is made. sendSms defaults to a resolved {sent:true}; a
+// test can reprogram it (reject / {sent:false}) to prove the hook is strictly additive (non-blocking).
+vi.mock('../services/quoClient', () => ({
+  sendSms: vi.fn(async () => ({ sent: true, id: 'quo-msg-1' })),
+  createContact: vi.fn(async () => ({ ok: true, id: 'quo-contact-1' })),
+  letterReadyText: () => 'Flat Rate Nexus: your nexus letter is complete and ready.',
+  needInfoText: () => 'need info',
+  toE164: (p: string) => p,
+  deleteContact: vi.fn(),
+}));
+const sendSmsMock = vi.mocked(quoClient.sendSms);
 
 // E4 (memo-verify presign fix): the memo.pdf route renders → PUTs to S3 → returns a PRESIGNED GET
 // URL (mirroring the letter-verify path) instead of streaming bytes through the Lambda (API Gateway
@@ -69,6 +83,9 @@ interface MakeDbOpts {
   claimType?: string;
   previouslyDenied?: boolean;
   veteranEmail?: string;
+  // Tier-1 SMS hook: the veteran phone the /send hook texts. Default null → hook skips (preserves
+  // every pre-SMS test's behavior unchanged); the SMS tests set an explicit number.
+  veteranPhone?: string | null;
   // Byte-binding gate (#9 Fix 3 → #17 SSOT): sign-off rows the gate reads (latest by signedAt first).
   // answersJson defaults to an AFFIRMATIVE attestation so the gate reaches the byte step (the SSOT
   // checks exists → affirmative → bytes); a test can pass a non-affirmative answersJson to exercise
@@ -175,7 +192,7 @@ function makeDb(opts: MakeDbOpts = {}) {
 
   const db = {
     case: { findFirst: vi.fn(async () => (opts.caseExists === false ? null : caseRow)) },
-    veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Jane', lastName: 'Doe', email: opts.veteranEmail ?? 'jane@example.com' })) },
+    veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Jane', lastName: 'Doe', email: opts.veteranEmail ?? 'jane@example.com', phone: opts.veteranPhone ?? null })) },
     letterRevision: { findFirst: vi.fn(async () => ({ id: 'REV-1', version: 1, source: opts.revisionSource ?? 'drafter', artifactTxtS3Key: 'letter-revisions/CASE-1/v1/letter.txt', artifactPdfS3Key: 'letter-revisions/CASE-1/v1/letter.pdf' })) },
     draftJob: { findFirst: vi.fn(async () => null) },
     physician: { findFirst: vi.fn(async () => physicianRow) },
@@ -241,6 +258,8 @@ describe('POST /cases/:id/delivery/send — real SES send (E3) + idempotency', (
     mockUser = { sub: 'admin-sub', roles: ['admin'] };
     sendEmailMock.mockReset();
     sendEmailMock.mockResolvedValue({ sent: true, messageId: 'ses-msg-1' });
+    sendSmsMock.mockReset();
+    sendSmsMock.mockResolvedValue({ sent: true, id: 'quo-msg-1' });
   });
   afterEach(() => { delete process.env.SES_FROM_ADDRESS; });
 
@@ -591,6 +610,90 @@ describe('POST /cases/:id/delivery/send — real SES send (E3) + idempotency', (
     expect(res.body.data.excerpt.block).toBeNull();
     // The composed email body degrades to the generic "in your full letter" line, not a garbled excerpt.
     expect(res.body.data.email.body).toContain('contained in your full letter');
+  });
+});
+
+// ── Tier-1 additive Quo SMS hook on POST /send (2026-07-02) ──────────────────────────────────────
+// The whole point: the SMS is STRICTLY ADDITIVE. It fires only on a real transmit, and NOTHING it does
+// (null phone, transport failure, activity-log failure) can change the HTTP response, the Email row, the
+// Payment record, or the delivery status. These tests prove that invariant.
+describe('POST /cases/:id/delivery/send — Tier-1 Quo SMS (strictly additive)', () => {
+  beforeEach(() => {
+    mockUser = { sub: 'admin-sub', roles: ['admin'] };
+    sendEmailMock.mockReset();
+    sendEmailMock.mockResolvedValue({ sent: true, messageId: 'ses-msg-1' });
+    sendSmsMock.mockReset();
+    sendSmsMock.mockResolvedValue({ sent: true, id: 'quo-msg-1' });
+  });
+
+  it('fires the SMS on a successful send when a phone is present, and logs sms_sent', async () => {
+    const { db } = makeDb({ veteranPhone: '7035551234' });
+    const activityLog = (db as unknown as { activityLog: { create: ReturnType<typeof vi.fn> } }).activityLog;
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.emailSent).toBe(true);
+    expect(sendSmsMock).toHaveBeenCalledTimes(1);
+    expect(sendSmsMock.mock.calls[0][0]).toBe('7035551234');
+    // An sms_sent activity entry was written with the transport outcome.
+    const smsLog = activityLog.create.mock.calls.map((c) => c[0] as { data?: { action?: string; detailsJson?: unknown } }).find((a) => a.data?.action === 'sms_sent');
+    expect(smsLog).toBeDefined();
+    expect(smsLog?.data?.detailsJson).toMatchObject({ sent: true });
+  });
+
+  it('null phone → sendSms NOT called, email still sent (200)', async () => {
+    const { db } = makeDb({ veteranPhone: null });
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.emailSent).toBe(true);
+    expect(sendSmsMock).not.toHaveBeenCalled();
+  });
+
+  it('NON-BLOCKING: sendSms rejecting does NOT affect the response, Email, or Payment', async () => {
+    const { db, emails, payments } = makeDb({ veteranPhone: '7035551234' });
+    sendSmsMock.mockRejectedValue(new Error('quo transport exploded'));
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.emailSent).toBe(true);
+    expect(res.body.data.emailStatus).toBe('sent');
+    // Email + Payment committed exactly as they would be with no SMS at all.
+    expect(emails).toHaveLength(1);
+    expect(emails[0].status).toBe('sent');
+    expect(payments).toHaveLength(1);
+  });
+
+  it('NON-BLOCKING: sendSms returning {sent:false} is logged but does not fail the send', async () => {
+    const { db } = makeDb({ veteranPhone: '7035551234' });
+    sendSmsMock.mockResolvedValue({ sent: false, reason: 'http_400' });
+    const activityLog = (db as unknown as { activityLog: { create: ReturnType<typeof vi.fn> } }).activityLog;
+    const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.data.emailSent).toBe(true);
+    const smsLog = activityLog.create.mock.calls.map((c) => c[0] as { data?: { action?: string; detailsJson?: unknown } }).find((a) => a.data?.action === 'sms_sent');
+    expect(smsLog?.data?.detailsJson).toMatchObject({ sent: false, reason: 'http_400' });
+  });
+
+  it('does NOT re-text on an already-sent double-click (no resend requested)', async () => {
+    const { db } = makeDb({ veteranPhone: '7035551234' });
+    const app = appFor(db);
+    await request(app).post('/api/v1/cases/CASE-1/delivery/send').send({}); // first send texts
+    expect(sendSmsMock).toHaveBeenCalledTimes(1);
+    sendSmsMock.mockClear();
+    const res = await request(app).post('/api/v1/cases/CASE-1/delivery/send').send({}); // already-sent short-circuit
+    expect(res.status).toBe(200);
+    expect(sendSmsMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT text when the email send itself fails (SMS is gated on a real transmit)', async () => {
+    const { db, emails } = makeDb({ veteranPhone: '7035551234' });
+    sendEmailMock.mockRejectedValue(new Error('SES down'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const res = await request(appFor(db)).post('/api/v1/cases/CASE-1/delivery/send').send({});
+      expect(res.status).toBe(200);
+      expect(res.body.data.emailSent).toBe(false);
+      expect(emails[0].status).toBe('queued');
+      expect(sendSmsMock).not.toHaveBeenCalled();
+    } finally { warnSpy.mockRestore(); }
   });
 });
 

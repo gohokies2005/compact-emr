@@ -33,8 +33,10 @@ const CLAIMED = 'Obstructive sleep apnea';
 // The inputHash the service derives for the mocked case (claimed + sc=['Allergic rhinitis'], everything else
 // empty). Replicated with the EXACT serialization in buildPlanInputs so planting a status against THIS hash
 // means "about the current inputs" — the round-trip proof that the read short-circuit matches the write.
+// docHints:[] — the mock db has no `document` delegate, so buildPlanInputs' fail-open yields an empty
+// hint list (Ryan 2026-07-04 records-provenance change folded docHints into the inputHash).
 const INPUT_HASH = createHash('sha256')
-  .update(JSON.stringify({ claimed: CLAIMED, sc: ['Allergic rhinitis'], problems: [], events: [], guidance: null, vs: null }))
+  .update(JSON.stringify({ claimed: CLAIMED, sc: ['Allergic rhinitis'], problems: [], events: [], guidance: null, vs: null, docHints: [] }))
   .digest('hex');
 
 function readyPlan() {

@@ -1,10 +1,18 @@
-// Cross-module ONE-BRAIN agreement (Ryan 2026-06-22, Zimmelman FIX B). The Overview chip and the SOAP note
-// derive from the SAME route-picker band but in TWO different enums:
-//   • the chip:  frontend/src/lib/caseReadinessVerdict.ts  routePickerBandToVerdict(band) → ReadinessVerdict
-//   • the note:  backend/src/services/soap-action-map.ts   planViabilityToAction(band)    → SoapAction
-// If these ever disagree on the go/no-go for a band, the chip ("Ready to draft") could contradict the note's
-// Plan ("route to a physician") — the exact bug this fix kills. This test imports BOTH REAL functions and
-// asserts they agree, band-for-band, on the single bit that matters: may drafting proceed?
+// Cross-module BAND→verdict/action agreement (Ryan 2026-06-22, Zimmelman FIX B; reframed 2026-07-04).
+//
+// HONEST AGREEMENT, NOT A FORCED MIRROR (Ryan 2026-07-04): the RUNTIME forced override — where the persisted
+// SOAP `note.action` was set to `planViabilityToAction(band)` regardless of the model — has been RETIRED in
+// soap-overview.ts. The SOAP model now owns its own reasoned go/no-go (deferring to the band as a strong
+// input), so the live chip reflects the model's honest action, not a mechanical projection of the band.
+//
+// This test STILL guards the two BAND→ mapping FUNCTIONS, which remain live on the paths where the band IS
+// authoritative because no model ran:
+//   • the body headline: frontend/src/lib/caseReadinessVerdict.ts  routePickerBandToVerdict(band)
+//   • the deterministic FALLBACK note (buildExplanatoryNote, model failed): backend soap-action-map.ts
+//     planViabilityToAction(band)
+// If those two maps ever disagreed on go/no-go for a band, a fallback note's Plan could contradict the
+// headline chip. This test imports BOTH REAL functions and asserts they agree, band-for-band, on the single
+// bit that matters: may drafting proceed?
 //
 // planViabilityToAction is imported from soap-action-map.ts, an SDK-FREE module extracted from
 // soap-overview.ts precisely so this frontend test can import the REAL function without pulling the

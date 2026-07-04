@@ -114,7 +114,7 @@ describe('FIX C — coverage parity: a fully-read chart → "All records were re
     ];
     const db = buildDb({ caseRow: CASE_ROW, docs, frs, latestRun: { status: 'complete', resultJson: { gaps: { uncoveredPages: 0, truncatedWindows: 0 } } } });
     const ctx = await assembleSoapContextForCase(db, CASE_ID, null);
-    expect(ctx.coverageNote).toBe('All records were reviewed.');
+    expect(ctx.coverageNote).toBe('All uploaded pages were read.');
   });
 
   it('REGRESSION GUARD: the same fully-read chart does NOT report "0% of pages read"', async () => {
@@ -123,7 +123,7 @@ describe('FIX C — coverage parity: a fully-read chart → "All records were re
     const db = buildDb({ caseRow: CASE_ROW, docs, frs, latestRun: { status: 'complete', resultJson: {} } });
     const ctx = await assembleSoapContextForCase(db, CASE_ID, null);
     expect(ctx.coverageNote).not.toMatch(/0% of pages read/);
-    expect(ctx.coverageNote).toBe('All records were reviewed.');
+    expect(ctx.coverageNote).toBe('All uploaded pages were read.');
   });
 
   it('no chart inputs at all → coverageNote is null (nothing to report)', async () => {

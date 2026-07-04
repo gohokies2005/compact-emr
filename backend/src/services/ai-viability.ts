@@ -117,9 +117,10 @@ export type AiViabilityState =
 // GET re-fires a SECOND Sonnet compute, double-billing the slow cases the dedup guard is meant to protect.
 const COMPUTING_STALE_MS = 135_000;
 
-function buildUserPrompt(claimed: string, sc: string[], problems: string[], events: string[], statement: string | null, guidance: string | null): string {
+export function buildUserPrompt(claimed: string, sc: string[], problems: string[], events: string[], statement: string | null, guidance: string | null, docHints: string[]): string {
   const scLines = sc.length ? sc.map((s) => `- ${s}`).join('\n') : '- (none parsed)';
   const cand = sc.length ? sc.map((s) => `- ${s}`).join('\n') : '- (none)';
+  const docLines = docHints.length ? docHints.map((h) => `- ${h}`).join('\n') : '- (none uploaded beyond the intake form)';
   // DIRECT-ROUTE EVIDENCE (Ryan 2026-06-22, Zimmelman): the structured inServiceEvent column is often
   // empty even when the veteran's own statement documents an in-service onset/diagnosis (Zimmelman: 1984
   // STR esophagitis/GERD). The veteran statement is competent lay evidence under 38 USC 1154(b) and MUST
@@ -128,24 +129,32 @@ function buildUserPrompt(claimed: string, sc: string[], problems: string[], even
   // anchor (or, before, declared "no anchor → not supportable"). We surface BOTH: the statement stays in
   // veteran_proposed_theory (its goal/narrative role) AND, when it plausibly references service, it is also
   // listed as a lay in-service event the picker weighs for a direct route.
+  // 1154(b) laundering fix (Ryan 2026-07-04): only a GENUINE service token surfaces the statement as a
+  // candidate in-service event — a bare civilian year (e.g. a 2022 civilian surgery) is NOT service evidence,
+  // so the `\b(19|20)\d{2}\b` alternative was removed. Even on a real match it is labeled SELF-REPORTED /
+  // UNCORROBORATED, not a flat "competent evidence" assertion.
   const allEvents = [...events];
-  if (statement && statement.trim().length >= 12 && /\b(in[- ]?service|active duty|while serving|during service|enlist|deploy|STR|service treatment|in the (navy|army|air force|marines|service)|\b(19|20)\d{2}\b)\b/i.test(statement)) {
-    allEvents.push(`Veteran statement references in-service onset/treatment (competent lay evidence under 38 USC 1154(b)): ${statement.trim().slice(0, 600)}`);
+  if (statement && statement.trim().length >= 12 && /\b(in[- ]?service|active duty|while serving|during service|enlist|deploy|STR|service treatment|in the (navy|army|air force|marines|service))\b/i.test(statement)) {
+    allEvents.push(`Veteran self-reported in-service onset/treatment (UNCORROBORATED lay statement under 38 USC 1154(b) — verify against a service/medical record): ${statement.trim().slice(0, 600)}`);
   }
   return `<case>
-<claimed_condition>${claimed || '(unknown)'}</claimed_condition>
+<claimed_condition source="veteran self-reported claim">${claimed || '(unknown)'}</claimed_condition>
 
 <granted_sc_conditions>
 ${scLines}
 </granted_sc_conditions>
+
+<uploaded_documents note="titles are HINTS ONLY; a single PDF may bundle several record types — do not treat a title as proof. The intake form and lay statements are NOT medical records.">
+${docLines}
+</uploaded_documents>
 
 <in_service_events>
 ${allEvents.length ? allEvents.map((e) => `- ${e}`).join('\n') : '- (none documented)'}
 </in_service_events>
 
 <chart_facts>
-Confirmed diagnoses: ${[claimed].filter(Boolean).join('; ') || '(none)'}
-Problem list: ${problems.slice(0, 60).join('; ') || '(none)'}
+Problems noted in the chart: ${problems.slice(0, 60).join('; ') || '(none)'}
+DIAGNOSIS PROVENANCE: the claimed condition "${claimed || '(unknown)'}" is the veteran's SELF-REPORTED claim. It counts as a CONFIRMED diagnosis ONLY if an uploaded MEDICAL RECORD (not the intake form and not a lay statement) documents it. If no medical record is present among the uploaded documents above, the diagnosis is NOT yet documented — do not treat the claim itself as confirmation.
 </chart_facts>
 
 <candidate_anchors>
@@ -162,7 +171,9 @@ ${statement || '(none provided)'}
 </veteran_proposed_theory>
 </case>
 
-Produce the argument plan by calling emit_argument_plan. Pick the single best GRANT-defensible theory under the framing-priority doctrine; honor the team steer when defensible; abstain honestly if no theory reaches >=50%.`;
+Produce the argument plan by calling emit_argument_plan. Pick the single best GRANT-defensible theory under the framing-priority doctrine; honor the team steer when defensible; abstain honestly if no theory reaches >=50%.
+
+RECORDS SELF-CHECK (Ryan 2026-07-04): a nexus opinion requires a provider-documented CURRENT DIAGNOSIS in a medical record — the intake form and lay statements are NOT medical records and do not document a diagnosis. If the ONLY source for the claimed condition is the intake form / a lay statement (no corroborating medical record among the uploaded documents), you MUST set viability to needs_physician_review and name "awaiting corroborating medical records (current diagnosis)" in missing_facts — do NOT select a supportable theory off an uncorroborated self-reported claim.`;
 }
 
 // The shape we read off the case row for both the read and the compute path.
@@ -186,6 +197,9 @@ interface PlanInputs {
   readonly problems: string[];
   readonly events: string[];
   readonly guidance: string | null;
+  // Uploaded-document titles as HINTS for the records-present / provenance judgment (Ryan 2026-07-04).
+  // The titler's docType/autoTitle is a FREE-FORM label, so it is a HINT only — never a deterministic gate.
+  readonly docHints: string[];
 }
 
 /** Build the deterministic route-picker inputs + the inputHash for a case. The hash MUST be computed
@@ -217,8 +231,23 @@ async function buildPlanInputs(db: AppDb, caseId: string, c: CaseRow): Promise<P
   if (c.upstreamScCondition) guidanceBits.push(`suggested upstream anchor: ${c.upstreamScCondition}`);
   const guidance = guidanceBits.join('; ') || null;
 
-  const inputHash = createHash('sha256').update(JSON.stringify({ claimed: c.claimedCondition, sc, problems, events, guidance, vs: c.veteranStatement })).digest('hex');
-  return { inputHash, sc, problems, events, guidance };
+  // Uploaded-document inventory as HINTS (Ryan 2026-07-04): the model uses these to judge whether a real
+  // MEDICAL RECORD (vs only the intake form / a lay statement) documents the claimed diagnosis. Free-form
+  // titler labels → hint only. Sorted for a stable hash. Fail-open to []. Folded into inputHash so a case
+  // that was intake-only and later gets a real record RE-PLANS (records-present flips → verdict can change).
+  let docHints: string[] = [];
+  try {
+    const docs = (await db.document.findMany({
+      where: { caseId },
+      select: { docType: true, autoTitle: true, docTag: true },
+    })) as unknown as Array<{ docType: string | null; autoTitle: string | null; docTag: string | null }>;
+    // Exclude the extraction OUTPUT file — a screening-summary is our own artifact, not a veteran-uploaded
+    // record, so it must not count as an uploaded document hint (screening-summary wedge guard).
+    docHints = [...new Set(docs.filter((d) => d.docTag !== 'screening_summary').map((d) => (d.autoTitle ?? d.docType ?? '').trim()).filter(Boolean))].sort();
+  } catch { docHints = []; }
+
+  const inputHash = createHash('sha256').update(JSON.stringify({ claimed: c.claimedCondition, sc, problems, events, guidance, vs: c.veteranStatement, docHints })).digest('hex');
+  return { inputHash, sc, problems, events, guidance, docHints };
 }
 
 const PLAN_ROW_SELECT = { claimedCondition: true, veteranStatement: true, inServiceEvent: true, framingChoice: true, upstreamScCondition: true, aiViabilityPlanHash: true, aiViabilityPlanJson: true, aiViabilityPlanStatus: true, aiViabilityPlanError: true, aiViabilityPlanComputedAt: true } as never;
@@ -333,7 +362,7 @@ export async function getAiViabilityState(
         system: pp.SYSTEM,
         tools: [pp.TOOL],
         tool_choice: { type: 'tool', name: pp.TOOL.name },
-        messages: [{ role: 'user', content: buildUserPrompt(c.claimedCondition, inputs.sc, inputs.problems, inputs.events, c.veteranStatement, inputs.guidance) }],
+        messages: [{ role: 'user', content: buildUserPrompt(c.claimedCondition, inputs.sc, inputs.problems, inputs.events, c.veteranStatement, inputs.guidance, inputs.docHints) }],
       });
     } catch (e) {
       // The LLM call FAILED (timeout / overload / network) — the dominant Zimmelman failure on a large chart.

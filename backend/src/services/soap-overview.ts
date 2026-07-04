@@ -484,6 +484,18 @@ export interface SoapContext {
    * stored note INVALIDATES when the chart's extracted text changes (fix #2B). Capped to bound tokens.
    */
   readonly chartDigest?: string | null;
+  /** Claim-type context (Ryan 2026-07-04) — drives the records-ledger pertinent-negatives (an appeal expects a
+   *  prior denial letter) + the scope read. Assembled server-side; folded into the fingerprint via renderContext. */
+  readonly claimType?: string | null;
+  readonly previouslyDenied?: boolean | null;
+  readonly priorDenialReason?: string | null;
+  /** Uploaded-document inventory — the AI titler's labels are HINTS ONLY (docType is a free-form string, not an
+   *  enum; a single PDF may bundle several record types). The model confirms which record TYPES are actually
+   *  present from the digest CONTENT, not the titles alone. Drives the records-reviewed ledger. */
+  readonly uploadedDocs?: ReadonlyArray<{ readonly title: string | null; readonly docType: string | null }>;
+  /** Deterministic HINT: the claimed condition already appears on the granted-SC list → nothing to connect
+   *  (already-SC / usually a rating-increase, out of scope). The model confirms against the SC list it is given. */
+  readonly alreadyServiceConnected?: boolean;
   /** The deterministic engine read (band + confidence + next action) — a HINT the model explains, not gospel. */
   readonly engineVerdict?: string | null;
   readonly engineNextAction?: string | null;
@@ -622,7 +634,7 @@ const SOAP_TOOL: Anthropic.Tool = {
     required: ['subjective', 'objective', 'assessment', 'plan', 'confidence', 'action'],
     properties: {
       subjective: { type: 'string', description: 'PERTINENT patient-reported information only, in flowing prose (2-4 sentences). What the veteran reports about onset, symptoms, in-service experience, and their own theory — distilled and readable, NOT a verbatim copy of their statement. No headers, no lists.' },
-      objective: { type: 'string', description: 'A short, readable overview of the PERTINENT objective findings: the confirmed diagnosis, the relevant service-connected conditions (only those that matter to this claim — NOT every rated condition), and any key diagnostics provided (e.g. AHI, imaging excerpts, sleep study, labs). End with the records-capture status (e.g. "All records were reviewed."). 2-4 sentences of prose, no lists. Do NOT also restate the hard numbers from the `measurements` field as prose — those are surfaced separately; the prose is the narrative around them.' },
+      objective: { type: 'string', description: 'A readable overview of the PERTINENT objective findings PLUS a doctor-style RECORDS-REVIEWED ledger. (1) Findings: the current diagnosis ONLY if a medical record documents it (NEVER present a self-reported claim / the intake form as a "documented" or "confirmed" diagnosis), the relevant service-connected conditions (only those that matter to this claim), and any key diagnostics provided (AHI, imaging, sleep study, labs). (2) RECORDS-REVIEWED ledger, written like a physician naming the file: affirmatively name the record TYPES actually present — DD-214/separation, service treatment & personnel records (STRs), Blue Button report, VA rating decision/code sheet, VA denial or prior decision letter, private medical records (op reports/imaging/notes), C&P/DBQ, prior nexus/IMO, and veteran/lay statements (the intake form ALWAYS counts as a veteran statement) — but name a type ONLY if its content is actually present. The uploaded-document titles are HINTS ONLY: a single PDF may bundle several record types and a title is not proof — confirm each type from the extracted content, not the title. (3) Then the pertinent NEGATIVES for expected-but-missing records, e.g. "This appears to be an appeal but no prior VA denial letter was provided", "No DD-214 was uploaded", "No Blue Button report was provided"; distinguish "not uploaded" from "uploaded but not yet readable". Prose, no lists. Do NOT restate the hard numbers from `measurements` as prose.' },
       measurements: {
         type: 'array',
         description: 'The OBJECTIVE HARD-DATA MEASUREMENTS pertinent to THIS claimed condition, pulled VERBATIM from the chart facts / extracted records you were given. CONDITION-AWARE — surface the few numbers a physician needs for the claimed condition. FOR SLEEP APNEA the AHI (apnea-hypopnea index) is the single most important number: whenever the chart reports it, include AHI FIRST (capture the diagnostic AND any on-CPAP value as separate rows), then RDI (respiratory disturbance index) SECOND, then the oxygen desaturation nadir and CPAP nightly usage hours + adherence %. Do NOT surface sleep-architecture metrics (total sleep time, sleep efficiency, REM latency, N1/N2/N3 percentages, arousal index) IN PLACE OF AHI/RDI — those are secondary and belong AFTER the severity numbers, only if room remains. When a sleep study / polysomnogram is present in the records, you MUST include the AHI: NEVER return a measurements array that reports only BMI and/or sleep-architecture numbers while omitting the AHI the chart reports. Other conditions: hypertension → blood-pressure readings; diabetes → HbA1c, fasting glucose; hearing loss → audiometric thresholds (dB) / speech discrimination %; mental health → PHQ-9 / PCL-5 / GAD-7 scores; plus BMI, FEV1, eGFR, ejection fraction when relevant. GROUND STRICTLY: only include a measurement whose numeric VALUE appears verbatim in the facts/records provided — NEVER invent, estimate, average, or compute a value (do not derive BMI from height+weight). Omit the whole array (or return []) when no objective measurement for this condition is present in the chart. At most ~6 — the most pertinent, severity numbers first.',
@@ -640,9 +652,9 @@ const SOAP_TOOL: Anthropic.Tool = {
         },
       },
       assessment: { type: 'string', description: 'Tie it together as a clinician + VA-claims expert would: the medical mechanism linking the claim to the service-connected condition(s), how it fits VA theory and language (secondary causation/aggravation under 38 CFR 3.310, direct under 3.303, etc., as applicable), the strongest counterpoint, and an honest overall read of how strong what we have is. 3-5 sentences of smooth prose. No internal jargon (no M-tiers, no BVA percentages, no "pair-atlas").' },
-      plan: { type: 'string', description: 'The concrete next step in plain language, written as an RN WORK ORDER (the RN + the engine make the go/no-go and prep the letter; a physician only REVIEWS and SIGNS): draft now; get ONE specific record (say whether it BLOCKS the build or runs in parallel); ask the veteran ONE targeted question (with the legal reason); confirm the records are already in the chart (most "missing" facts are just un-parsed); or decline with a specific reason. An Ask-Aegis check is an OPTIONAL consideration the RN may use for a second read on the mechanism — offer it as "Ask-Aegis can help if useful", never as a required step the RN must do. Never write "route to a physician to decide" or "ask the doctor what he thinks" — that is not the next step. One or two sentences, and WHY.' },
+      plan: { type: 'string', description: 'The concrete next step in plain language, written as an RN WORK ORDER — but DO NOT force a "draft now" recommendation; choose honestly. TIERS: (a) ESSENTIALS MISSING → the FIRST LINE must be a capitalized "NEED THESE RECORDS: <specific list>" and the action is get_records — do NOT draft yet. Essentials = a provider-documented current DIAGNOSIS; for an APPEAL/supplemental, the prior VA DENIAL letter we are asked to rebut; for a SECONDARY, the primary condition\'s VA RATING decision. (b) ESSENTIALS PRESENT but an IDEAL record missing (sleep study for OSA severity, buddy statement, imaging) → drafting is reasonable; name the ideal record to request in parallel — not a show-stopper. (c) READY → draft now. (d) DECLINE (action reject) when it does not make sense OR is OUT OF SCOPE. An Ask-Aegis check is an OPTIONAL second read ("Ask-Aegis can help if useful"), never required. Never write "route to a physician to decide". One or two sentences (plus the NEED THESE RECORDS line when applicable), and WHY.' },
       confidence: { type: 'string', enum: ['high', 'moderate', 'low'], description: 'Overall confidence in what we have to support this claim as filed.' },
-      action: { type: 'string', enum: ['draft', 'get_records', 'clarify', 'physician_review', 'reject'], description: 'The single recommended next action, matching the plan. NOTE: "physician_review" means the case needs a closer RN/Ask-Aegis review before drafting — the RN owns that step; it does NOT mean handing the go/no-go decision to a physician.' },
+      action: { type: 'string', enum: ['draft', 'get_records', 'clarify', 'physician_review', 'reject'], description: 'The single recommended next action, matching the plan and matching the go/no-go DIRECTION of the DECIDED FRAMING band when one is given (defer to it; vary only on framing nuance). draft = ready. get_records = an ESSENTIAL record is missing (the "NEED THESE RECORDS" case) — this is the amber hold, NOT a decline. clarify = one targeted question to the veteran. reject = a firm no: it does not make sense, OR it is out of scope (we do NEXUS letters only — no TDIU, no rating-increase letters), OR the claimed condition is ALREADY service-connected (nothing to connect). physician_review = a closer RN/Ask-Aegis review is needed before drafting (the RN owns that step — it does NOT hand the go/no-go to a physician).' },
     },
   },
 };
@@ -671,7 +683,11 @@ const SYSTEM =
   'Do NOT substitute a different theory, anchor, or CFR basis than the one supplied. When no DECIDED FRAMING ' +
   'block is present, determine the most defensible VA theory yourself from the facts.\n' +
   'GROUND STRICTLY in the facts provided — including the "Extracted records" source material when present, ' +
-  'which is the digest of the veteran\'s actual uploaded documents (the same records the case team reads). ' +
+  'which is the digest of WHATEVER the veteran uploaded: it MAY be only an intake form or a lay statement, NOT ' +
+  'medical records. NEVER present a self-reported claim (the claimed condition, the intake narrative, or a lay ' +
+  'statement) as a "documented" or "confirmed" diagnosis, and never say a finding is "documented by [a specific ' +
+  'record]" (e.g. "documented by the March 2022 surgical record") unless a real medical record containing that ' +
+  'content is actually present in the uploads. ' +
   'Draw pertinent objective findings (diagnoses, diagnostics, dates, in-service events) from it; never invent ' +
   'an AHI, an imaging finding, a date, or a diagnosis that is not given. If a useful objective datum (like an ' +
   'AHI) was not provided, simply do not mention it. ' +
@@ -686,6 +702,37 @@ const SYSTEM =
   'the facts/records — never estimate, ' +
   'average, or compute one. Return an empty array when none is present. Do NOT also restate those numbers as ' +
   'prose inside Objective — they are surfaced from `measurements`. ' +
+  'RECORDS-REVIEWED LEDGER (Objective): write a doctor-style ledger of the file — affirmatively NAME the record ' +
+  'types actually present (DD-214, service treatment/personnel records, Blue Button, VA rating decision, VA ' +
+  'denial/decision letter, private medical records, C&P/DBQ, prior nexus, veteran/lay statements — the intake ' +
+  'form ALWAYS counts as a veteran statement), naming a type ONLY when its content is actually present (the ' +
+  'uploaded-document titles are HINTS, not proof — a single PDF may bundle several types; confirm each from the ' +
+  'extracted content). Then give the pertinent NEGATIVES for expected-but-missing records (an APPEAL expects a ' +
+  'prior VA denial letter; a SECONDARY expects the primary\'s VA rating; every case expects a documented ' +
+  'diagnosis + a DD-214 + a statement), e.g. "appears to be an appeal but no prior VA denial letter was ' +
+  'provided", "no DD-214 was uploaded"; distinguish "not uploaded" from "uploaded but not yet readable".\n' +
+  'GO/NO-GO — DO NOT force "draft now"; appreciate the records we have and tier honestly. A veteran CLAIM / the ' +
+  'intake form is NOT a diagnosis. Set `action` to MATCH the go/no-go DIRECTION of the DECIDED FRAMING band when ' +
+  'one is given (defer to the band; vary only on framing nuance) — EXCEPT the three HONEST ABSTENTIONS below, which ' +
+  'OVERRIDE a green band. The DECIDED FRAMING band is only a >=50% grant-defensibility judgment; it does NOT verify ' +
+  'that a documented diagnosis exists, nor does it check scope. So even if the band reads supportable: (i) NO ' +
+  'provider-documented current diagnosis in a medical record → action=get_records; (ii) claimed condition ALREADY ' +
+  'service-connected → action=reject; (iii) OUT OF SCOPE (TDIU / rating-increase) → action=reject. These three take ' +
+  'precedence over matching the band. Tiers: ' +
+  '(1) an ESSENTIAL record is missing — a provider-documented current DIAGNOSIS, or (for an appeal/supplemental) ' +
+  'the prior VA DENIAL letter we are asked to rebut, or (for a secondary) the primary condition\'s VA RATING ' +
+  'decision → open the Plan with a capitalized "NEED THESE RECORDS: <specific list>" and set action=get_records ' +
+  '(do NOT draft yet; this is an amber hold, NOT a decline). (2) essentials present but an IDEAL record missing ' +
+  '(sleep study for OSA severity, buddy statement, imaging) → drafting is reasonable; name the ideal record to ' +
+  'request in parallel — not a show-stopper. (3) ready → draft. (4) DECLINE (action=reject) when it does not ' +
+  'make sense or is OUT OF SCOPE.\n' +
+  'SCOPE: we write NEXUS (service-connection) letters ONLY. We do NOT take TDIU/unemployability. We do NOT write ' +
+  'rating-increase letters — a supporting memo for an already-awarded LOW rating is a case-by-case decision with ' +
+  'the physician ONLY, never an automated path. A TDIU or rating-increase request → action=reject, say so plainly.\n' +
+  'ALREADY-SERVICE-CONNECTED PRE-FLIGHT: if the claimed condition is ALREADY on the granted service-connected ' +
+  'list (check the SC list / the PRE-FLIGHT note in the context), there is nothing to connect — a nexus letter ' +
+  'does not apply (usually a rating-increase request). Set action=reject and state that the condition is already ' +
+  'service-connected, so the case is not sent to the drafter for a wasted run.\n' +
   'No internal jargon (no M-tiers, no BVA/win-rate percentages, no "pair-atlas"), no markdown, no headers ' +
   'inside a section. Write it with write_soap_note.';
 
@@ -754,7 +801,20 @@ function renderContext(ctx: SoapContext): string {
   if (ctx.activeProblems?.length) L.push(`Active problems: ${ctx.activeProblems.join('; ')}`);
   if (ctx.keyFacts?.length) L.push(`Key facts:\n- ${ctx.keyFacts.map((f) => `${f.label}: ${f.value}`).join('\n- ')}`);
   if (ctx.medications?.length) L.push(`Medications: ${ctx.medications.map((m) => `${m.drugName}${m.indication ? ` (${m.indication})` : ''}`).join('; ')}`);
-  if (ctx.coverageNote) L.push(`Records capture: ${ctx.coverageNote}`);
+  if (ctx.coverageNote) L.push(`Records capture (pages read, NOT records sufficiency): ${ctx.coverageNote}`);
+  // Claim posture — drives the records-ledger pertinent negatives (an appeal expects a prior VA denial letter).
+  if (ctx.claimType) L.push(`Claim type: ${ctx.claimType}${ctx.previouslyDenied ? ' (marked previously denied by the VA)' : ''}`);
+  if (ctx.priorDenialReason) L.push(`Prior VA denial reason on file: ${ctx.priorDenialReason}`);
+  // Uploaded-document inventory — TITLES ARE HINTS ONLY (a single PDF may bundle several record types; confirm
+  // the real record types from the extracted content below). The intake form + lay statements are NOT medical records.
+  if (ctx.uploadedDocs?.length) {
+    L.push(`Uploaded documents (${ctx.uploadedDocs.length}) — titler HINTS only, confirm the actual record types from the extracted content:\n${ctx.uploadedDocs.map((d) => `- ${d.title ?? d.docType ?? '(untitled)'}${d.docType && d.title ? ` [type hint: ${d.docType}]` : ''}`).join('\n')}`);
+  } else {
+    L.push('Uploaded documents: none beyond the intake form (no medical records uploaded yet).');
+  }
+  if (ctx.alreadyServiceConnected) {
+    L.push(`PRE-FLIGHT — ALREADY SERVICE-CONNECTED: the claimed condition "${ctx.claimedCondition}" appears to ALREADY be on the granted service-connected list above. Verify against that list; if it is already service-connected there is nothing to connect — a nexus letter does not apply (this is usually a rating-increase request, which is out of scope).`);
+  }
   if (ctx.chartDigest && ctx.chartDigest.trim().length > 0) {
     // The extracted-document digest (same source Ask Aegis cites). Capped so a very large chart cannot blow
     // the prompt budget; the digest is already high-signal (built by documentDigest), so the head holds the
@@ -885,17 +945,20 @@ export async function buildSoapNote(ctx: SoapContext, opts?: { timeoutMs?: numbe
       }
     } catch { /* observability only — a canary must never block the note */ }
     const base = { subjective, objective, assessment, plan };
-    // One-brain at the action layer: when a route-picker plan is grounding the note, the Plan's action +
-    // confidence are DERIVED DETERMINISTICALLY from the plan's viability band + confidence — NOT the model's
-    // free choice — so the SOAP Plan cannot disagree with the drafter's brain (e.g. plan=not_supportable but
-    // model emits "draft"). Without a plan, trust the model's own enums (today's behavior).
-    const rp = ctx.routePickerFraming;
+    // HONEST AGREEMENT, NOT A FORCED MIRROR (Ryan 2026-07-04). The SOAP model owns its OWN reasoned go/no-go
+    // (action + confidence). The route-picker band is a STRONG INPUT it defers to (rendered as the DECIDED
+    // FRAMING block); because BOTH brains now read the SAME honest, provenance-labeled context, the SOAP reaches
+    // the SAME go/no-go direction as the band NATURALLY — without the old deterministic override that forced the
+    // chip to mirror a (possibly wrong) band. The SYSTEM instructs the model to match the band's go/no-go
+    // direction and vary only on framing nuance. (This retires the forced one-brain action override. The
+    // deterministic fallback in buildExplanatoryNote still derives the action from the band — correct, because
+    // no model ran there, so there is no model action to defer to.)
     const modelConfidence: SoapConfidence = (conf === 'high' || conf === 'moderate' || conf === 'low') ? conf : 'moderate';
     const modelAction: SoapAction = (action === 'draft' || action === 'get_records' || action === 'clarify' || action === 'physician_review' || action === 'reject') ? action : 'physician_review';
     const note: SoapNote = {
       ...base,
-      confidence: rp ? planConfidenceToSoap(rp.confidence) : modelConfidence,
-      action: rp ? planViabilityToAction(rp.viability) : modelAction,
+      confidence: modelConfidence,
+      action: modelAction,
       caveat: checkGrounding(base, ctxText),
       measurements,
       fallback: false,
@@ -945,8 +1008,9 @@ export function soapNoteFingerprint(ctx: SoapContext): string {
  * Returns the freshly-generated note with its `action` either kept (a real decision change) or REVERTED to the
  * prior persisted action (no real change), per this rule:
  *   • No stored note yet, or the fresh note is a TRANSIENT fallback (not persisted anyway) → take fresh as-is.
- *   • GROUNDED (a route-picker plan drove this note): the action is `planViabilityToAction(band)` — an
- *     AUTHORITATIVE, deterministic decision. A genuine band change MUST propagate, so never override.
+ *   • GROUNDED (a route-picker plan drove this note): the action is the SOAP model's OWN reasoned decision,
+ *     made while deferring to the band (the DECIDED FRAMING input). A genuine band/context change makes the
+ *     model re-decide, and that real change MUST propagate — so never override on a grounded run.
  *   • UNGROUNDED (no plan this run — e.g. the route-picker inputHash drifted while status='drafting'): the
  *     fresh action came from the model's OWN (non-authoritative) choice with no new clinical band. The decision
  *     did NOT genuinely change, so KEEP the prior persisted action — the prose still refreshes, but the chip

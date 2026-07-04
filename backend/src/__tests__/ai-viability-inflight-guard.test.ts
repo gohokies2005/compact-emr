@@ -38,7 +38,8 @@ function expectedInputHash(row: { veteranStatement: string | null; inServiceEven
   if (row.framingChoice) guidanceBits.push(`framing preference: ${row.framingChoice}`);
   if (row.upstreamScCondition) guidanceBits.push(`suggested upstream anchor: ${row.upstreamScCondition}`);
   const guidance = guidanceBits.join('; ') || null;
-  return createHash('sha256').update(JSON.stringify({ claimed: CLAIMED, sc, problems, events, guidance, vs: row.veteranStatement })).digest('hex');
+  // docHints:[] — mock db has no `document` delegate → buildPlanInputs fail-opens to [] (Ryan 2026-07-04).
+  return createHash('sha256').update(JSON.stringify({ claimed: CLAIMED, sc, problems, events, guidance, vs: row.veteranStatement, docHints: [] })).digest('hex');
 }
 
 /** Build a mock AppDb whose case row carries the given plan-status fields. The two findFirst shapes the code

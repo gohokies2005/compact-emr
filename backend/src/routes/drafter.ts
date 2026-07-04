@@ -632,6 +632,19 @@ export function createDrafterClientRouter(db: AppDb): Router {
                 rnUser: rd.rnUser ?? actor.sub,
               },
             });
+            // WRITE-THROUGH (Ryan 2026-07-04): a Gate-2 "switch to condition" is the RN ACCEPTING a specific
+            // dx — persist it to the Case so the NEXT redraft reads the switched condition instead of
+            // re-refusing the original generic label (the latent revert bug: previously the switch was
+            // per-job scratch only). Stamp source='manual' (RN-accepted → immutable to AI-narrow), set BOTH
+            // claimedCondition and claimedConditions[] (they desync otherwise — CDS/drafter read the array
+            // when non-empty), and invalidate the stale route-picker plan so it recomputes on the new claim.
+            if (typeof rd.switchToCondition === 'string' && rd.switchToCondition.trim().length > 0) {
+              const switched = rd.switchToCondition.trim();
+              await tx.case.update({
+                where: { id: caseId },
+                data: { claimedCondition: switched, claimedConditions: [switched], claimedConditionSource: 'manual', aiViabilityPlanJson: null, aiViabilityPlanHash: null } as never,
+              });
+            }
           }
           return job;
         });

@@ -251,6 +251,9 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
           // defaulted to "direct" when they said "secondary to X". The assign-drawer values still win.
           ...(derived.upstreamCondition ? { upstreamScCondition: derived.upstreamCondition, framingChoice: derived.framing } : {}),
           ...parsed, veteranId: vId,
+          // claimedCondition provenance (2026-07-04): intake-assigned claim is 'intake'-tier — the AI-narrow
+          // step MAY refine a generic "Other …" label; an RN PATCH later bumps it to 'manual' (immutable).
+          claimedConditionSource: 'intake',
           // Provenance (keystone pkg 5): drawer-typed framing wins and is staff-set → 'manual';
           // otherwise an intake-derived pair is machine-written → 'derived' (refreshable later).
           ...(parsed.framingChoice !== undefined || parsed.upstreamScCondition !== undefined

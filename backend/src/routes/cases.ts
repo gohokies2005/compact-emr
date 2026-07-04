@@ -541,6 +541,10 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
             ...(parsed.framingChoice !== undefined || parsed.upstreamScCondition !== undefined
               ? { framingStampSource: 'manual' }
               : {}),
+            // claimedCondition provenance (2026-07-04): a staff-typed create value is 'intake'-tier — the
+            // AI-narrow step MAY still refine a generic "Other …" label from here (source != 'manual'). An
+            // RN who edits it later via PATCH bumps it to 'manual' (immutable).
+            claimedConditionSource: 'intake',
             veteranId,
             status: 'intake',
           },
@@ -632,6 +636,9 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         // stamp 'manual' so the post-merge restamp hook never auto-overwrites it. (Clearing the
         // fields to null is ALSO a deliberate staff action — still 'manual'.)
         const touchesFraming = parsed.changedFields.includes('framingChoice') || parsed.changedFields.includes('upstreamScCondition');
+        // claimedCondition provenance (2026-07-04): a PATCH that edits the claim is an RN/physician action →
+        // stamp 'manual' so the AI-narrow step (and any automated writer) can NEVER overwrite it afterwards.
+        const touchesClaim = parsed.changedFields.includes('claimedCondition');
 
         // Invalidate the persisted AI route-picker plan when an input-affecting field is edited, so Ask
         // Aegis never narrates a stale plan as the "anticipated drafter framing" (QA 2026-06-19 blocker).
@@ -645,6 +652,7 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
           data: {
             ...parsed.fields,
             ...(touchesFraming ? { framingStampSource: 'manual' } : {}),
+            ...(touchesClaim ? { claimedConditionSource: 'manual' } : {}),
             ...(invalidatesPlan ? ({ aiViabilityPlanJson: null, aiViabilityPlanHash: null } as object) : {}),
             ...syncConditions,
             version: { increment: 1 },

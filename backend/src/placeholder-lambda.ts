@@ -6,6 +6,8 @@ import { precomputeSoapNoteForCase } from './services/soap-context-assembler.js'
 import { isRecomputeViabilityEvent } from './services/recompute-viability-trigger.js';
 import { isTitleDocumentEvent } from './services/document-title-trigger.js';
 import { generateAndPersistDocumentTitle } from './services/aiDocumentTitle.js';
+import { isNarrowClaimEvent } from './services/claim-narrow-trigger.js';
+import { narrowAndPersistClaim } from './services/aiClaimNarrow.js';
 import type { AppDb } from './services/db-types.js';
 
 const expressHandler = serverless(createApp());
@@ -22,6 +24,12 @@ export const handler = async (event: unknown, context: unknown): Promise<unknown
   if (isRecomputeViabilityEvent(event)) {
     const t0 = Date.now();
     try {
+      // CLAIM-NARROW FIRST (Ryan 2026-07-04): if the claim is a generic "Other …" dropdown label, narrow it to
+      // the specific documented dx BEFORE the picker runs, so viability + SOAP compute on the real diagnosis
+      // (not the catch-all the drafter would refuse). No-ops fast (a cheap findFirst + regex) for the ~99% of
+      // cases whose claim is already specific or is 'manual'. Fail-open; never blocks the recompute.
+      const narrowed = await narrowAndPersistClaim(prisma as unknown as AppDb, event.caseId);
+      if (narrowed.updated) console.warn(JSON.stringify({ msg: 'ai-claim-narrow updated', caseId: event.caseId, diagnosis: narrowed.diagnosis }));
       // ONE async job, BOTH artifacts (Ryan 2026-06-22, Zimmelman): first the picker plan (the verdict the
       // card + drafter use), then — grounded on that SAME plan — the SOAP note, persisted under its
       // server-derived fingerprint so the next sync open serves it for $0. The picker budget is bounded
@@ -35,6 +43,18 @@ export const handler = async (event: unknown, context: unknown): Promise<unknown
       console.warn(JSON.stringify({ msg: 'ai-viability recompute done', caseId: event.caseId, computed: plan !== null, soapPrecomputed: noteOk, planMs, ms: Date.now() - t0 }));
     } catch (e) {
       console.warn(JSON.stringify({ msg: 'ai-viability recompute failed open', caseId: event.caseId, error: e instanceof Error ? e.message : String(e) }));
+    }
+    return { ok: true };
+  }
+  // OFF-REQUEST async self-invoke to AI-narrow a generic "Other …" claim label (claim-narrow-trigger.ts).
+  // Standalone path (the primary path runs inside the recompute job above); fail-open + guarded (no-op unless
+  // the claim is generic AND source != 'manual' AND records are present).
+  if (isNarrowClaimEvent(event)) {
+    try {
+      const r = await narrowAndPersistClaim(prisma as unknown as AppDb, event.caseId);
+      console.warn(JSON.stringify({ msg: 'ai-claim-narrow done', caseId: event.caseId, updated: r.updated, diagnosis: r.diagnosis ?? null, skipped: r.skipped ?? null }));
+    } catch (e) {
+      console.warn(JSON.stringify({ msg: 'ai-claim-narrow failed open', caseId: event.caseId, error: e instanceof Error ? e.message : String(e) }));
     }
     return { ok: true };
   }

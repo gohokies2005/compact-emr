@@ -432,6 +432,11 @@ model Case {
   framingStampSource   String?   @map("framing_stamp_source") @db.VarChar(16)
   viabilityStampSource String?   @map("viability_stamp_source") @db.VarChar(16)
   cdsStampSource       String?   @map("cds_stamp_source") @db.VarChar(16)
+  // Provenance for claimedCondition (2026-07-04): 'intake' (Jotform/create), 'ai' (AI-narrowed the generic
+  // "Other …" dropdown label to a specific documented dx), 'manual' (an RN/physician set it — IMMUTABLE: the
+  // AI-narrow writer + any automated path must never overwrite a 'manual' value). Nullable → legacy rows
+  // (null) are treated as overwritable (source unknown = intake-equivalent).
+  claimedConditionSource String? @map("claimed_condition_source") @db.VarChar(16)
   veteranStatement    String?    @map("veteran_statement")
   inServiceEvent      String?    @map("in_service_event")
   status              CaseStatus @default(intake)

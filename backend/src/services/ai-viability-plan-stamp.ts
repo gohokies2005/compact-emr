@@ -73,10 +73,16 @@ export async function stampAiViabilityPlan(
     if (row === null) return bundle;
 
     const plan = row.aiViabilityPlanJson;
-    // Only stamp a READY plan. A 'computing' / 'error' status means the persisted JSON (if any) does not
-    // reflect a settled decision for the current inputs — fall through to fresh-derive rather than feed a
-    // half-baked or failed plan as authoritative.
-    if (row.aiViabilityPlanStatus !== 'ready') return bundle;
+    // Stamp a settled plan. 'ready' is the steady state; 'computing' is honored TOO, because a TRANSIENT
+    // recompute (the recompute-on-open churn, or a one-time re-hash after a deploy) must NOT starve the drafter
+    // of the authoritative plan and force a fresh mis-derive. CLM-BE673DFF78 (Drummond): a 'computing' window at
+    // draft-enqueue dropped the good dual-prong secondary plan → the drafter fresh-derived a self-contradictory
+    // "direct 3.303 naming the SC right shoulder as cause" framing → the Stage-0.5a plan-validity PARK
+    // hard-failed the run with NO letter. markPlanStatus NEVER nulls aiViabilityPlanJson, so a 'computing' row
+    // still carries the last-good plan; the coherence guards below (on-condition, has-lead, source, schema)
+    // fully gate it, and a claim-CHANGE nulls the JSON → the `!plan` guard below correctly skips → fresh-derive
+    // on the new claim. 'error' still defers (a failed compute's JSON is not trustworthy).
+    if (row.aiViabilityPlanStatus !== 'ready' && row.aiViabilityPlanStatus !== 'computing') return bundle;
     if (!plan || typeof plan !== 'object' || !('viability' in plan)) return bundle;
     if (plan.schemaVersion !== AI_VIABILITY_PLAN_SCHEMA_VERSION) return bundle;
     if (plan.source !== 'ai_route_picker') return bundle;

@@ -1,9 +1,9 @@
 {
   "_meta": {
     "purpose": "Canonical facts for the RN advisory AI tool. The SINGLE SOURCE OF TRUTH that resolves the known doc conflicts (stale $350 pricing, first-person voice, anonymity/no-photo, Internal-Medicine). Every advisory answer defers to this over any other doc.",
-    "source_of_record": "docs/training/source/FRN_RN_Email_Response_Playbook.md Attachment L",
-    "sync_rule": "When pricing/scope/voice/policy changes, update Attachment L + CLAUDE.md + RN FAQ + THIS file in the same change so they never drift.",
-    "last_synced": "2026-06-11"
+    "source_of_record": "docs/training/source/FRN_RN_Email_Response_Playbook.md Attachment L + docs/training/source/FRN_RN_Ops_Manual.md (RN desk-operations policy) + docs/training/source/FRN_RN_REQUIRED_VA_RECORDS_MANDATE.md (records format rule)",
+    "sync_rule": "When pricing/scope/voice/operations policy changes, update THIS file + the matching RN training source doc (docs/training/source/*.md) in the SAME change, then rebuild the training kit (node app/scripts/_build_rn_training_kit.js) and re-vendor + redeploy the Ask Aegis prompt (EMR window). This file is the machine SSOT the advisory system prompt defers to; the training kit is the human copy — they must stay identical.",
+    "last_synced": "2026-07-05"
   },
   "pricing": {
     "record_review_fee_usd": 50,
@@ -25,9 +25,11 @@
     "physician_patient_relationship": false,
     "one_condition_per_letter": true,
     "shared_mechanism_exception": "Rare; doctor's call only.",
-    "we_do_not": ["file claims", "advise filing/appeal strategy", "complete VA forms", "talk to the VA", "predict ratings"],
+    "we_do_not": ["file claims", "advise filing/appeal strategy", "complete VA forms", "talk to the VA", "predict ratings", "take TDIU (individual-unemployability) claims", "take rating-increase claims for new customers"],
     "that_is_whose_job": "VSO",
-    "excluded_states": ["Oregon", "Utah"]
+    "excluded_states": ["Oregon", "Utah"],
+    "tdiu": "STOPPED (2026-07-02) — we do NOT take TDIU (total disability based on individual unemployability) cases. Do not offer or accept one; unemployability is the VSO's lane.",
+    "rating_increase": "We do NOT take rating-increase claims for NEW customers. A nexus letter connects a NOT-yet-service-connected condition to service (or to a service-connected condition); it does not argue an already-granted condition is more severe. A NEW customer whose claimed condition is ALREADY on their granted service-connected list is a rating-increase request → out of scope: do not draft, re-route them (rating/unemployability filing is the VSO's lane). EXCEPTION — existing customers: for a customer we already helped service-connect, we MAY provide a supporting memo when their granted condition was awarded at a LOW rating (e.g., 0%). That is the physician's call — escalate to Dr. Ryan with the rating decision; the RN does not promise it."
   },
   "post_denial_supplemental": {
     "rule": "A returning client who ACTUALLY SUBMITTED our letter and then received a VA denial may receive ONE standalone supplemental opinion (a 'memo') the physician signs, rebutting the stated denial rationale — only when the denial is medically rebuttable. It is a fresh one-page STANDALONE memo, never an addendum bolted onto the original letter.",
@@ -46,9 +48,11 @@
     "intake_link": "flatratenexus.com/intake",
     "upload_link": "flatratenexus.com/intake",
     "link_rule": "ALWAYS route veterans to the WEBSITE at flatratenexus.com/intake to start a case or send records. NEVER paste a raw jotform.com / hipaa.jotform.com URL or any Jotform form-ID number into a veteran-facing email. Jotform IDs change, and pointing a veteran at the wrong form means we cannot tell how their case came in. The website always routes them to the correct current form.",
-    "we_need": ["current diagnosis", "in-service event/exposure"],
+    "we_need": ["current diagnosis", "in-service event/exposure as the record documents it"],
     "we_supply": "the medical literature (occasionally one specific number)",
-    "do_not_re_ask": "Anything the VA already conceded (current dx already conceded, TERA/noise exposure already conceded)."
+    "do_not_re_ask": "Anything the VA already conceded (current dx already conceded, TERA/noise exposure already conceded).",
+    "right_records_rule": "Collect what the OPINION needs, not what the CLAIM needs. Two prohibitions: (1) never re-ask for anything the VA already conceded; (2) never collect claim-proof exhibits — photos next to the burn pit, deployment memorabilia, 'prove you were there'. We BELIEVE the veteran. Proving the in-service event is the CLAIM's burden and goes to the VA via the veteran + their VSO; our letter argues the medicine and never says 'I saw photos, so it's true.' Test for any request: if the opinion won't rest on it, don't ask for it. (A lay/buddy statement documenting onset or continuity CAN pass that test — the opinion cites it; an oil-fire photo never does.) This REPLACES the older phrase 'records-minimalism'.",
+    "format_rule": "STRONGLY prefer VA-downloaded searchable PDFs (faster, more accurate review from the original source; photo piles are easy to miss things in and not searchable). If a veteran sends photos/screenshots, ask ONCE for the PDF with the why + the VA.gov download steps; then ACCEPT their honest best if they try and can't (older/not computer-comfortable, VA.gov lockout, no computer, or persistent excuses). Never let format become the reason a winnable case stalls. NEVER acceptable: re-typed summaries or Word-doc paste-ups — those aren't records at all."
   },
   "voice_identity": {
     "voice": "team 'we' / 'our team' (NOT first-person 'I')",
@@ -61,14 +65,40 @@
     "no_midlevels": "We do not use, and do not intend to hire, nurse practitioners (NPs) or physician assistants (PAs). State this affirmatively (board-certified physicians, with DPT assistance on MSK letters always co-signed by an MD/DO). Never disparage other services for using mid-levels.",
     "never_say": ["Dr. Ryan personally reviews", "Dr. Ryan personally", "Dr. Ryan reviews the full records himself", "Dr. Ryan does everything", "one-man show", "Dr. Ryan writes every letter"],
     "photos_ok": true,
-    "never_publish_in_vet_facing_comms": ["NPI", "physician last name (Kasky)", "medical license number", "physical address"],
-    "nexus_letter_credential_exception": "SCOPE: the items above are kept OUT of emails, the cover memo, and other veteran-facing communications. They are NOT a defect when they appear in the nexus letter itself, where they belong. The nexus letter is a formal, credentialed medical-legal opinion submitted to the VA: the physician's full legal name, credentials, signature, and NPI ARE required and EXPECTED in the letter, and that credentialed identity is what gives the opinion its probative weight. So when reviewing or critiquing a NEXUS LETTER, treat the physician's name and NPI as correct and expected, and NEVER flag them as something to strip. (Medical license number and physical address still do not go on the letter either, because letter credentials are NPI-only, but the NPI and the physician name absolutely belong there.) Only flag the NPI or the physician's last name as a problem when they appear in an EMAIL, the cover memo, or other veteran-facing text, never when they appear in the letter."
+    "never_publish": ["NPI", "medical license number", "physical address"]
   },
   "positioning": {
     "async_online": "A feature, not a flaw. Never disparage our own model.",
     "competitor_pricing_usd": "1500-5000+",
     "our_position": "the affordable, physician-reviewed option",
     "red_flags_in_other_services": ["template letters", "no record review", "guaranteed approvals", "no physician credentials", "prices over $1,000"]
+  },
+  "rn_operations": {
+    "_note": "Internal RN desk-operations policy — how the RN runs the case, not veteran-facing truth. Source: docs/training/source/FRN_RN_Ops_Manual.md + FRN_RN_EMR_Process_Field_Guide.md, identical to what the RN training kit teaches. Set 2026-07-03/05.",
+    "morning_sweep": "Each shift, in order: (1) check email — the info@ delegated view + own mailbox; reply to routine within 4 business hours during YOUR shift; (2) check new Jotform intakes that arrived overnight — claim yours + send owed intro emails; (3) review case statuses in Aegis — what the physician signed, drafts completed, actions needed; work oldest-first; (4) triage anything unusual.",
+    "escalation_to_physician": "Escalate by EMAIL to ryan@flatratenexus.com. ONE email with full context beats multiple back-and-forths (time zones). GATHER FIRST — never send a bare 'is this viable?'; confirm all docs are collected, look the pathway up in the reference + Ask Aegis, form your own read, THEN email if still unsure. Include the case ID, the claim, what's in the record, your read, and the specific question. Questions are always welcome — the only ask is gather-first.",
+    "urgency_ladder": {
+      "business_stopping_outage": "Website/EMR down for everyone, intakes failing → TEXT Dr. Ryan at 571-330-6331 (he sees texts faster than email). RARE — reserve for genuinely business-stopping problems; if it needs a long explanation, text 'urgent — details by email' and send the email.",
+      "irate_customer": "Stay calm and professional in the reply — acknowledge, say we're actively working on it, never argue. Then email Dr. Ryan flagged URGENT with the thread context.",
+      "veteran_crisis": "Self-harm / hopelessness signal → STOP normal processing, give the Veterans Crisis Line (988 press 1, or text 838255), encourage them to use it, and alert Dr. Ryan immediately (text too if it reads acute). Overrides every other rule.",
+      "standard": "Gather → attempt with your tools → escalate by email if still stuck.",
+      "administrative": "Schedule, pay, equipment, chat access → your Connext lead (currently Frankie Berrame) first / CC them, per Connext policy — not Dr. Ryan."
+    },
+    "intake_pipeline": "Stage 1 (intake + $50) → notification email in info@ → Stage 2 (records upload) often minutes-to-days later. Submissions flow into Aegis automatically, but allow UP TO 1 HOUR to populate as a case — do not panic-escalate before then. Reconciliation is a core RN duty: every info@ intake email must eventually match a case in Aegis; if a submission is visible in info@ but has NOT appeared in Aegis after at least 1 hour → email Dr. Ryan (same rule for Stage 1 and Stage 2). Reliability is ~99%; the known failure mode is very large uploaded files hanging the ingest. Read-only Jotform access is the backup window to view a raw submission when something looks incomplete in the EMR.",
+    "claiming_cases": "Two RNs, one intake pool, target ~50/50 (skew is fine). Claim at receipt: forward the Stage-1 notification email to your own @flatratenexus.com account (the claim flag + your tracker), assign yourself as the RN in Aegis, note it in quick notes. Once you've made initial contact with a veteran you KEEP the case — never switch liaisons mid-case. Unsure whether your partner already contacted someone? Check the case Email tab (every @domain email is tracked there) plus the staff-note history.",
+    "intro_email": "Every new Stage-1 intake gets a personalized RN introduction within 24 hours — but wait ~3 hours first (Stage 2 often follows right behind, and one combined email beats two). If Stage 2 is already in: introduce yourself + confirm records received + review is beginning. If no Stage 2 yet: introduce yourself + gently remind them the records upload is the next step before review can begin. If both arrived overnight: one combined email in the morning sweep. Never promise outcomes, quote odds, or discuss refunds.",
+    "followup_cadence": "Stage-2 stragglers AND unpaid invoices both follow the 3 / 7 / 14-day cadence. At 30 days with no Stage 2 → stop and flag the case to Dr. Ryan (he handles closure and any refund decision — not the RN).",
+    "refund_after_stage1_only": "If a veteran requests a refund after submitting ONLY Stage 1, reply exactly: 'That will be submitted for review, and we will get back to you within 5 business days.' Then flag it to Dr. Ryan. Nothing more.",
+    "payments": "The Aegis Paid/unpaid pill is the everyday source of truth. Open Stripe (read-only) only to VERIFY a claim ('I paid' but Aegis shows unpaid → search the payment) or triage a discrepancy (suspected double charge). ALL Stripe ACTIONS (refund, adjustment) are Dr. Ryan only — the RN verifies the facts and forwards him the details. No regular Stripe audits (Dr. Ryan runs those).",
+    "draft_cost_rule": "Each AI draft run costs real money. Draft → if it fails or comes out wrong, fix the variable you believe caused it → redraft ONCE → if still wrong, STOP and escalate to Dr. Ryan. Exception: if the remaining problem is OBVIOUS (you can point at exactly what to change), one more attempt is OK. NEVER re-roll the same error hoping for different output.",
+    "beta_emr": "Aegis is a custom EMR still in beta; it has kinks. If it blocks something the process says you should be able to do, it's probably the tool — park the case (note it in quick notes), keep working the next case, and report the bug to Dr. Ryan with the case ID + what you clicked + expected-vs-actual + a screenshot. You are never blamed for a tool defect."
+  },
+  "decline_policy": {
+    "_note": "Source: FRN_Weekly_Decline_Report.md + FRN_RN_Condition_Playbook.md + FRN_RN_60_Second_Triage_Card.md.",
+    "bright_line_auto_decline_codes": ["statutory_bar — tobacco-CAUSED theory (§1103, post-1998) OR primary substance abuse as the claim (§105(a), 3.301(c)); a secondary chain via SC PTSD is NOT this", "no_diagnosis — none present AND none obtainable by a records request", "out_of_scope — OR/UT residence, wrong veteran/condition (includes TDIU, rating-increase for new customers, DBQ)", "medical_impossibility — categorically impossible etiology only (tinnitus-as-organic-cause, paranormal)"],
+    "everything_else_escalates": "Presumptive, already-service-connected, secondary-without-primary-in-records, 'not plausible', ANY MST, and hearing loss under 38 CFR 3.385 are NOT auto-declines — they ESCALATE or ROUTE. Each is a frequent false-decline.",
+    "who_sends": "The RN may DRAFT a bright-line decline but NEVER sends it. Nothing veteran-facing fires on the RN's click — Dr. Ryan releases declines (a weekly pass, or sooner). No refund language appears in any decline; the $50 is non-refundable and any refund is the physician's private call.",
+    "new_rn_ramp": "In the first weeks, escalate EVERY would-be decline until Dr. Ryan clears you."
   },
   "crisis_line": "988 then press 1, or text 838255"
 }

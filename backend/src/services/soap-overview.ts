@@ -722,7 +722,16 @@ const SYSTEM =
   '(1) an ESSENTIAL record is missing — a provider-documented current DIAGNOSIS, or (for an appeal/supplemental) ' +
   'the prior VA DENIAL letter we are asked to rebut, or (for a secondary) the primary condition\'s VA RATING ' +
   'decision → open the Plan with a capitalized "NEED THESE RECORDS: <specific list>" and set action=get_records ' +
-  '(do NOT draft yet; this is an amber hold, NOT a decline). (2) essentials present but an IDEAL record missing ' +
+  '(do NOT draft yet; this is an amber hold, NOT a decline). ' +
+  'HARD EXCLUSION (Ryan 2026-07-05) — the essentials are EXACTLY those three; NOTHING else is an essential. NEVER ' +
+  'require a C&P/DBQ examination report, the C&P examiner\'s underlying opinion, or a DBQ as a needed record: the ' +
+  'VA DENIAL/RATING DECISION letter IS the record of the denial and its rationale and is SUFFICIENT to rebut. ' +
+  'C&P exams and DBQs are records the veteran almost never has (FOIA can take months) — they are HARD-EXCLUDED ' +
+  'from "NEED THESE RECORDS" and from action=get_records; mention them at MOST as an optional Tier-2 ' +
+  '"would-strengthen" item, never a blocker. If the VA denial/rating decision IS present but the examiner\'s ' +
+  'opinion language appears cut off / not fully readable in the extract, that is NOT a blocker and NOT a ' +
+  'get_records reason — the physician distinguishes the denial using the reasons stated in the denial letter; do ' +
+  'NOT ask the veteran for the C&P/DBQ or the full examiner opinion. (2) essentials present but an IDEAL record missing ' +
   '(sleep study for OSA severity, buddy statement, imaging) → drafting is reasonable; name the ideal record to ' +
   'request in parallel — not a show-stopper. (3) ready → draft. (4) DECLINE (action=reject) when it does not ' +
   'make sense or is OUT OF SCOPE.\n' +

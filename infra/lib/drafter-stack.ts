@@ -257,6 +257,14 @@ export class DrafterStack extends Stack {
         // SC-grounded alternatives to the RN/physician (pre-draft, so no existing draft is blocked).
         // Revert: set to 'off' (or remove this line) + redeploy the drafter while the SQS queue is idle.
         PLAN_VALIDITY_PARK: 'on',
+        // DRAFTER_TRANSIENT_RESILIENCE (Ryan 2026-07-05): #3/#4 hardening — a TRANSIENT LLM hiccup
+        // (overload/timeout) or a DIRECT/zero-granted-SC claim (Scott/Drummond class) must NEVER fatal-with-
+        // no-letter. ON: (#3) the framing self-heal degrades to a conservative DIRECT 3.303 holding when zero
+        // granted SC exists (physician_review_anchor + a visible review banner); (#4) run-letter-pipeline
+        // retries transient failures then degrades (step-0 → draft-on-facts; framing → the #3 self-heal;
+        // initial draft → retry-only-then-fail-to-RN, never a fabricated body). OFF/unset is BYTE-IDENTICAL
+        // to before (c0 grade A-, real_panel, flag OFF). Instant revert = set 'off' + redeploy (idle queue).
+        DRAFTER_TRANSIENT_RESILIENCE: 'on',
       },
       secrets: {
         // The wrapper reads these from env at startup; AWS injects the actual secret values

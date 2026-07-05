@@ -127,20 +127,21 @@ describe('stuck-job-watcher reconcile pass (Bug 1 — stranded drafting cases)',
   // The reconcile findMany now selects the newest draft job (state + completedAt/updatedAt) so the
   // handler can apply the 15-min staleness floor. `terminalMinutesAgo` controls how long the newest
   // job has been terminal — the floor leaves anything fresher than 15 min for the next sweep.
-  type StrandedRow = { id: string; version: number; terminalMinutesAgo?: number };
-  function strandedToRows(stranded: StrandedRow[]): Array<{ id: string; version: number; draftJobs: Array<{ state: string; completedAt: Date; updatedAt: Date }> }> {
+  type StrandedRow = { id: string; version: number; terminalMinutesAgo?: number; veteranId?: string };
+  function strandedToRows(stranded: StrandedRow[]): Array<{ id: string; veteranId: string; version: number; draftJobs: Array<{ state: string; completedAt: Date; updatedAt: Date }> }> {
     return stranded.map((s) => {
       const terminalAt = new Date(Date.now() - (s.terminalMinutesAgo ?? 60) * 60 * 1000);
-      return { id: s.id, version: s.version, draftJobs: [{ state: 'failed', completedAt: terminalAt, updatedAt: terminalAt }] };
+      return { id: s.id, veteranId: s.veteranId ?? `vet-${s.id}`, version: s.version, draftJobs: [{ state: 'failed', completedAt: terminalAt, updatedAt: terminalAt }] };
     });
   }
   function makeReconcilePrisma(stranded: StrandedRow[]): {
-    prisma: PrismaClient; caseFindWhere: { value: unknown }; caseUpdate: ReturnType<typeof vi.fn>; logCreate: ReturnType<typeof vi.fn>;
+    prisma: PrismaClient; caseFindWhere: { value: unknown }; caseUpdate: ReturnType<typeof vi.fn>; logCreate: ReturnType<typeof vi.fn>; noteCreate: ReturnType<typeof vi.fn>;
   } {
     const rows = strandedToRows(stranded);
     const caseFindWhere: { value: unknown } = { value: undefined };
     const caseUpdate = vi.fn(() => ({}));
     const logCreate = vi.fn(() => ({}));
+    const noteCreate = vi.fn(() => ({}));
     const prisma = {
       // No STALE in-flight jobs — the reconcile pass must still run off Case.status (Dick has a TERMINAL
       // job, so the stale-job findMany never returns it).
@@ -150,25 +151,28 @@ describe('stuck-job-watcher reconcile pass (Bug 1 — stranded drafting cases)',
         findMany: vi.fn(async (args: { where: unknown }) => { caseFindWhere.value = args.where; return rows; }),
       },
       activityLog: { create: logCreate, count: vi.fn(async () => 0) },
-      // Array form: prisma.case.update(...) / activityLog.create(...) are EVALUATED to build the array,
-      // so their args are observable even though $transaction itself is stubbed.
+      // In-chart quick note posted on reconcile (Ryan 2026-07-05) so the RN is notified in the chart.
+      chartNote: { create: noteCreate },
+      // Array form: prisma.case.update(...) / activityLog.create(...) / chartNote.create(...) are EVALUATED
+      // to build the array, so their args are observable even though $transaction itself is stubbed.
       $transaction: vi.fn(async () => {}),
     } as unknown as PrismaClient;
-    return { prisma, caseFindWhere, caseUpdate, logCreate };
+    return { prisma, caseFindWhere, caseUpdate, logCreate, noteCreate };
   }
 
   it('reconciles a case stranded at drafting with a terminal newest job → needs_rn_decision/paused', async () => {
-    const { prisma, caseFindWhere, caseUpdate, logCreate } = makeReconcilePrisma([{ id: 'DICK', version: 26 }]);
+    const { prisma, caseFindWhere, caseUpdate, logCreate, noteCreate } = makeReconcilePrisma([{ id: 'DICK', version: 26 }]);
     const r = await handler(prisma);
 
     expect(r.reconciled).toBe(1);
     expect(r.swept).toBe(0);
 
-    // Predicate: drafting + NOT paused (don't clobber the sweep's own OpsHeldPanel handling) + has a job
-    // but none queued/running.
+    // Predicate (Ryan 2026-07-05): drafting + has a job but none queued/running. NO operatorState filter —
+    // a PAUSED strand (a failed /complete leaving status='drafting' + operatorState='paused') must ALSO be
+    // caught; the 30-min staleness floor keeps that safe from a still-settling callback / just-reaped case.
     const where = caseFindWhere.value as Record<string, unknown>;
     expect(where['status']).toBe('drafting');
-    expect(where['operatorState']).toEqual({ not: 'paused' });
+    expect(where['operatorState']).toBeUndefined();
     expect(where['draftJobs']).toEqual({ some: {}, none: { state: { in: ['queued', 'running'] } } });
 
     // Transition mirrors the cancel route exactly.
@@ -184,6 +188,14 @@ describe('stuck-job-watcher reconcile pass (Bug 1 — stranded drafting cases)',
     expect(logCreate).toHaveBeenCalledTimes(1);
     const log = logCreate.mock.calls[0]![0] as { data: { action: string } };
     expect(log.data.action).toBe('case_drafting_reconciled');
+
+    // An in-chart quick note is posted so the RN is notified IN the chart (top-of-chart + cases list),
+    // keyed by veteranId, not only via the list status flip.
+    expect(noteCreate).toHaveBeenCalledTimes(1);
+    const note = noteCreate.mock.calls[0]![0] as { data: { isQuickNote: boolean; veteranId: string; body: string } };
+    expect(note.data.isQuickNote).toBe(true);
+    expect(note.data.veteranId).toBe('vet-DICK');
+    expect(note.data.body).toMatch(/attention/i);
   });
 
   it('no stranded cases → reconciled 0, nothing mutated', async () => {
@@ -193,19 +205,19 @@ describe('stuck-job-watcher reconcile pass (Bug 1 — stranded drafting cases)',
     expect(caseUpdate).not.toHaveBeenCalled();
   });
 
-  // STALENESS FLOOR (Fix, 2026-06-30). The reconcile pass must NOT fire the instant a job goes terminal —
-  // it could race a /complete callback that is still settling. Only reconcile when the newest job has been
-  // terminal for > 15 min (comfortably past the 10-min STALE_THRESHOLD_MS). This guards against a future
-  // edit silently dropping the floor (the recurring recompute-liveness class).
-  it('does NOT reconcile a case whose newest job just went terminal (< 15-min floor)', async () => {
-    const { prisma, caseUpdate } = makeReconcilePrisma([{ id: 'FRESH', version: 2, terminalMinutesAgo: 5 }]);
+  // STALENESS FLOOR (Fix 2026-06-30; raised 15→30 min 2026-07-05 when paused strands were included). The
+  // reconcile pass must NOT fire the instant a job goes terminal — it could race a /complete callback that
+  // is still settling, or clobber a just-reaped "interrupted" case. Only reconcile when the newest job has
+  // been terminal for > 30 min. Guards against a future edit silently dropping the floor.
+  it('does NOT reconcile a case whose newest job went terminal within the 30-min floor', async () => {
+    const { prisma, caseUpdate } = makeReconcilePrisma([{ id: 'FRESH', version: 2, terminalMinutesAgo: 20 }]);
     const r = await handler(prisma);
-    expect(r.reconciled).toBe(0);            // too fresh — left for the next sweep
+    expect(r.reconciled).toBe(0);            // 20 min < 30-min floor — left for the next sweep
     expect(caseUpdate).not.toHaveBeenCalled();
   });
 
-  it('DOES reconcile a case whose newest job has been terminal past the 15-min floor', async () => {
-    const { prisma, caseUpdate } = makeReconcilePrisma([{ id: 'STALE', version: 9, terminalMinutesAgo: 20 }]);
+  it('DOES reconcile a case whose newest job has been terminal past the 30-min floor', async () => {
+    const { prisma, caseUpdate } = makeReconcilePrisma([{ id: 'STALE', version: 9, terminalMinutesAgo: 35 }]);
     const r = await handler(prisma);
     expect(r.reconciled).toBe(1);            // past the floor — reconciled
     expect(caseUpdate).toHaveBeenCalledTimes(1);

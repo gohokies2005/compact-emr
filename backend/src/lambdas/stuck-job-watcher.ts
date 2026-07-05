@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import {
   DRAFT_JOB_WATCHER_SWEPT_MESSAGE,
@@ -64,7 +64,12 @@ const BATCH_LIMIT = 100; // per invocation; lifecycle: 100 * (60/5) = 1200/hr ma
 // LONGER than this — comfortably past STALE_THRESHOLD_MS (10min). Dick-class strands are long-stuck, so
 // the delay costs nothing. (This is the recurring hash-drift / recompute-liveness class — never let a
 // recompute race a still-settling producer.)
-const RECONCILE_TERMINAL_FLOOR_MS = 15 * 60 * 1000;
+// 30 min (Ryan 2026-07-05): flip a stranded 'drafting' case (newest job terminal, no letter) to
+// "needs RN attention" after this delay + post an in-chart note. Raised 15→30 so it comfortably clears any
+// still-settling /complete callback AND lets us safely INCLUDE operatorState='paused' strands (below) — a
+// genuinely-paused case still 'drafting' after 30 min is the failed-/complete strand (Scott/migraine), which
+// needs the RN, while a just-reaped "interrupted" case is <30 min old and is left for the resume affordance.
+const RECONCILE_TERMINAL_FLOOR_MS = 30 * 60 * 1000;
 
 let cachedPrisma: PrismaClient | null = null;
 
@@ -237,26 +242,31 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
   // job is already terminal, not stale), so we reconcile them here directly off Case.status.
   //
   // Predicate: status='drafting' AND it HAS a draft job AND none of them is queued|running (newest job
-  // terminal). EXCLUDE operatorState='paused' — that is exactly the state the stale-job sweep above sets
-  // when it intentionally LEAVES a case at 'drafting' for the OpsHeldPanel "interrupted" affordance; we
-  // must not clobber that deliberate handling. Pre-fix cancels + Dick are NOT paused, so they qualify.
-  // (Prisma `{ not: 'paused' }` also returns NULL operatorState rows.)
+  // terminal). This now INCLUDES operatorState='paused' strands (Ryan 2026-07-05): a failed /complete
+  // (drafter.ts:1516) leaves a dead case at status='drafting' + operatorState='paused', which the old
+  // `{ not: 'paused' }` exclusion skipped forever → the RN saw a phantom "Drafting" spinner they couldn't
+  // act on (Scott CLM-5D723B7926 19h, migraine CLM-759FB593C7 3.5 days). Safe to include because the 30-min
+  // staleness floor below leaves a JUST-reaped "interrupted" case (<30 min) untouched for its resume
+  // affordance; only a genuinely-stranded case (terminal >30 min) is healed. status='drafting' already
+  // scopes us to strands — a properly-parked case is needs_rn_decision and never matches.
   //
-  // Transition mirrors the cancel route (drafter.ts) so a stranded case and a fresh cancel land in the
-  // SAME state. Idempotent: once moved to needs_rn_decision the row no longer matches status='drafting',
-  // so a re-run never re-touches it (no loop).
+  // Transition → needs_rn_decision/paused (mirrors the cancel + halt routes) + a chart-visible quick note so
+  // the RN is notified in the chart, not just the list. Idempotent: once moved off 'drafting' the row no
+  // longer matches, so a re-run never re-touches it (no loop, no duplicate note).
   const reconcileMessage =
-    'This draft didn’t finish. Click Send to Drafter to start a new draft when ready.';
+    'This draft didn’t finish and needs your attention. Click Send to Drafter to start a new draft when ready.';
+  const stuckChartNoteBody =
+    '⚠️ Needs RN attention: a drafting run for this case stopped without producing a letter. Open the case to review the hold reason, then click Send to Drafter to start a fresh draft when ready.';
   let reconciled = 0;
   try {
     const strandedDrafting = await prisma.case.findMany({
       where: {
         status: 'drafting',
-        operatorState: { not: 'paused' },
         draftJobs: { some: {}, none: { state: { in: ['queued', 'running'] } } },
       },
       select: {
         id: true,
+        veteranId: true,
         version: true,
         // The NEWEST job (enqueuedAt DESC, take:1). `none queued/running` above guarantees every job is
         // terminal, so this is the most-recent terminal job; its completedAt (fallback updatedAt) is when
@@ -281,7 +291,7 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
     });
     for (const c of reconcileTargets) {
       try {
-        await prisma.$transaction([
+        const ops: Prisma.PrismaPromise<unknown>[] = [
           prisma.case.update({
             where: { id: c.id },
             data: {
@@ -300,7 +310,21 @@ export async function handler(injectedPrisma?: PrismaClient): Promise<StuckJobWa
               detailsJson: { reason: 'no_in_flight_job', priorStatus: 'drafting' },
             },
           }),
-        ]);
+        ];
+        // In-chart notification (Ryan 2026-07-05): a quick note so the RN is told IN THE CHART (top-of-chart
+        // + cases-list at-a-glance), not only via the list status. Atomic with the flip; keyed by veteranId.
+        // Idempotent by construction — the case leaves 'drafting' in the same txn, so it never re-fires.
+        if (c.veteranId) {
+          ops.push(prisma.chartNote.create({
+            data: {
+              veteranId: c.veteranId,
+              body: stuckChartNoteBody,
+              createdBy: SERVICE_ACTORS.STUCK_JOB_WATCHER,
+              isQuickNote: true,
+            },
+          }));
+        }
+        await prisma.$transaction(ops);
         reconciled += 1;
         console.log(JSON.stringify({ msg: 'stuck-job-watcher: reconciled stranded drafting case', caseId: c.id }));
       } catch (err) {

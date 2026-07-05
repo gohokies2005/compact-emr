@@ -199,7 +199,7 @@ export async function deleteContact(id: string): Promise<{ ok: boolean; code?: n
 
 // ── FRN message templates (transactional, with STOP) ──
 export function letterReadyText(): string {
-  return 'Flat Rate Nexus: your nexus letter is complete and ready. Please check your email (and your spam folder) for the payment link to receive your signed letter. Reply STOP to opt out.';
+  return 'Flat Rate Nexus: your nexus letter is complete and ready. Please check your email (and your spam folder) for the payment link to receive your signed letter. This text line isn’t monitored — for any questions or issues, just email info@flatratenexus.com and we’ll be happy to help. Reply STOP to opt out.';
 }
 
 export function needInfoText(): string {

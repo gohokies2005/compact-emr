@@ -202,6 +202,27 @@ interface PlanInputs {
   readonly docHints: string[];
 }
 
+/** Order-invariant sha256 of the plan inputs — the cache + persist key. The array fields are sorted on
+ *  COPIES so the key is stable regardless of Postgres row order (the compute-Lambda write and the GET-Lambda
+ *  read run in different invocations, and unordered `findMany`/relation reads can return rows in a different
+ *  order → a permanent hash mismatch → the perpetual-recompute wedge, CLM-BE673DFF78). Sorting copies here
+ *  fixes the key WITHOUT reordering the arrays the caller hands to buildUserPrompt (the prompt stays
+ *  byte-identical). Key ORDER of the serialized object is unchanged from the original inline hash. */
+export function planInputHash(parts: {
+  claimed: string; sc: string[]; problems: string[]; events: string[];
+  guidance: string | null; vs: string | null; docHints: string[];
+}): string {
+  return createHash('sha256').update(JSON.stringify({
+    claimed: parts.claimed,
+    sc: [...parts.sc].sort(),
+    problems: [...parts.problems].sort(),
+    events: [...parts.events].sort(),
+    guidance: parts.guidance,
+    vs: parts.vs,
+    docHints: [...parts.docHints].sort(),
+  })).digest('hex');
+}
+
 /** Build the deterministic route-picker inputs + the inputHash for a case. The hash MUST be computed
  *  identically on the read short-circuit and the persist (else a fresh plan is never found again — the
  *  permanent-mismatch failure mode). Sharing this one builder between read + write is the guarantee. */
@@ -246,7 +267,7 @@ async function buildPlanInputs(db: AppDb, caseId: string, c: CaseRow): Promise<P
     docHints = [...new Set(docs.filter((d) => d.docTag !== 'screening_summary').map((d) => (d.autoTitle ?? d.docType ?? '').trim()).filter(Boolean))].sort();
   } catch { docHints = []; }
 
-  const inputHash = createHash('sha256').update(JSON.stringify({ claimed: c.claimedCondition, sc, problems, events, guidance, vs: c.veteranStatement, docHints })).digest('hex');
+  const inputHash = planInputHash({ claimed: c.claimedCondition, sc, problems, events, guidance, vs: c.veteranStatement, docHints });
   return { inputHash, sc, problems, events, guidance, docHints };
 }
 

@@ -98,9 +98,9 @@ function CasesPanel({ rows }: { readonly rows: readonly Case[] }) {
 
 // Editable veteran demographics grid (Ryan 2026-06-06: "click on it and change it" — a typo in DOB,
 // email, height, etc. shouldn't force a whole new chart). Each field PATCHes ONE column with the row
-// version (optimistic concurrency); the parent refetch bumps v.version for the next edit. Name + DOB
-// are ADMIN-ONLY — the backend enforces it (veteran-validation ADMIN_ONLY_FIELDS); the UI mirrors that
-// so a non-admin sees them read-only instead of hitting a 403.
+// version (optimistic concurrency); the parent refetch bumps v.version for the next edit. Name + DOB are
+// now OPS-editable too (Ryan 2026-07-06: RNs fix intake typos like a doubled first name / a wrong DOB) —
+// gated on canEdit like the rest; the backend ADMIN_ONLY_FIELDS set was emptied to match.
 function VeteranDemographics({ v, role, onSaved }: { readonly v: VeteranDetail; readonly role: Role; readonly onSaved: () => Promise<void> }) {
   const isAdmin = role === 'admin';
   // The backend PATCH /veterans/:id is gated to OPS_ROLES — a physician can VIEW the chart but cannot
@@ -127,9 +127,9 @@ function VeteranDemographics({ v, role, onSaved }: { readonly v: VeteranDetail; 
   const ht = v.heightIn != null ? `${Math.floor(v.heightIn / 12)}'${v.heightIn % 12}"` : '';
   return (
     <div className="mt-4 grid grid-cols-1 gap-x-10 gap-y-0.5 border-t border-slate-100 pt-4 sm:grid-cols-2">
-      <InlineField label="First name" value={v.firstName} editable={isAdmin} saving={save.isPending} onSave={reqStr('firstName', 'First name')} />
-      <InlineField label="Last name" value={v.lastName} editable={isAdmin} saving={save.isPending} onSave={reqStr('lastName', 'Last name')} />
-      <InlineField label="DOB" type="date" value={formatDateOnly(v.dob)} display={v.dob ? formatDateOnly(v.dob) : ''} editable={isAdmin} saving={save.isPending} onSave={onDob} />
+      <InlineField label="First name" value={v.firstName} editable={canEdit} saving={save.isPending} onSave={reqStr('firstName', 'First name')} />
+      <InlineField label="Last name" value={v.lastName} editable={canEdit} saving={save.isPending} onSave={reqStr('lastName', 'Last name')} />
+      <InlineField label="DOB" type="date" value={formatDateOnly(v.dob)} display={v.dob ? formatDateOnly(v.dob) : ''} editable={canEdit} saving={save.isPending} onSave={onDob} />
       <InlineField label="Email" value={v.email ?? ''} editable={canEdit} saving={save.isPending} onSave={reqStr('email', 'Email')} />
       <InlineField label="Phone" value={v.phone ?? ''} display={v.phone ? formatPhone(v.phone) : ''} editable={canEdit} saving={save.isPending} onSave={optStr('phone')} />
       <InlineField label="Address" value={v.address ?? ''} editable={canEdit} saving={save.isPending} onSave={optStr('address')} />

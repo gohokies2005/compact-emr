@@ -2,7 +2,11 @@ import { HttpError } from '../http/errors.js';
 import type { YesNoUnknown, VeteranCreateInput, VeteranUpdateInput } from './db-types.js';
 
 const YES_NO_UNKNOWN = new Set(['yes', 'no', 'unknown']);
-const ADMIN_ONLY_FIELDS = new Set(['firstName', 'lastName', 'dob']);
+// Ryan 2026-07-06: OPS staff (RNs) may now fix a veteran's name/DOB. Intake typos — a doubled first name,
+// a wrong DOB — are exactly what RNs catch and must correct without waiting on an admin. The gate mechanism
+// is kept (empty set) so a field can be re-locked later without re-adding the logic. The PATCH route is
+// OPS_ROLES-gated, so this only opens name/DOB to ops_staff + admin — a physician still cannot PATCH at all.
+const ADMIN_ONLY_FIELDS = new Set<string>([]);
 const ALLOWED_UPDATE_FIELDS = new Set([
   'firstName',
   'lastName',

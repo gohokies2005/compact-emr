@@ -427,7 +427,7 @@ describe('Phase 3A-1 veteran routes', () => {
     expect(res.body.error.details).toMatchObject({ id: 'TEST-001', version: 3 });
   });
 
-  it('PATCH /api/v1/veterans/:id blocks ops staff from changing name or DOB', async () => {
+  it('PATCH /api/v1/veterans/:id lets OPS STAFF fix name/DOB (Ryan 2026-07-06: RNs correct intake typos)', async () => {
     const db = new MockDb();
     db.veterans.set('TEST-001', sampleVeteran());
     const token = await makeJwt(['ops_staff']);
@@ -436,8 +436,8 @@ describe('Phase 3A-1 veteran routes', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ version: 1, lastName: 'Jones' });
 
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe('forbidden');
+    expect(res.status).toBe(200);
+    expect(res.body.data?.lastName ?? db.veterans.get('TEST-001')?.lastName).toBe('Jones');
   });
 
   it('DELETE /api/v1/veterans/:id is admin-only and soft deletes', async () => {

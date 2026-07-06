@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { classifyViewableDoc } from '../components/PdfViewerModal';
 
-const d = (filename: string, contentType?: string) => ({ id: 'x', filename, contentType });
+// Omit contentType when not given (exactOptionalPropertyTypes: the property must be ABSENT, not undefined).
+const d = (filename: string, contentType?: string): { id: string; filename: string; contentType?: string } =>
+  ({ id: 'x', filename, ...(contentType !== undefined ? { contentType } : {}) });
 
 describe('classifyViewableDoc — picks the in-page renderer per file type', () => {
   it('classifies .docx by extension and MIME', () => {

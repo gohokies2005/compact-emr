@@ -265,7 +265,7 @@ async function buildPlanInputs(db: AppDb, caseId: string, c: CaseRow): Promise<P
     // Exclude the extraction OUTPUT file — a screening-summary is our own artifact, not a veteran-uploaded
     // record, so it must not count as an uploaded document hint (screening-summary wedge guard).
     docHints = [...new Set(docs.filter((d) => d.docTag !== 'screening_summary').map((d) => (d.autoTitle ?? d.docType ?? '').trim()).filter(Boolean))].sort();
-  } catch { docHints = []; }
+  } catch { /* fail-open: keep the [] initializer */ }
 
   const inputHash = planInputHash({ claimed: c.claimedCondition, sc, problems, events, guidance, vs: c.veteranStatement, docHints });
   return { inputHash, sc, problems, events, guidance, docHints };

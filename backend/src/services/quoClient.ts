@@ -41,7 +41,7 @@ async function resolveApiKey(): Promise<string> {
   try {
     k = (await readSecretByName(process.env.QUO_API_KEY_SECRET_NAME)) || '';
   } catch {
-    k = '';
+    /* fail-open: keep the '' initializer */
   }
   if (!k) k = process.env.QUO_API_KEY ?? '';
   return k;

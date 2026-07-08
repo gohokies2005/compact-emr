@@ -45,6 +45,9 @@ export interface LetterSaveResult {
   // PUT returns render-success flags (not URLs); refetch GET for fresh presigned URLs.
   readonly rendered?: { readonly pdf: boolean; readonly docx: boolean };
   readonly warnings: readonly LetterWarning[];
+  // Per-version probative grade auto-computed on this save (Ryan 2026-07-08); null when the grade
+  // failed-open (LLM error/timeout) — the save still succeeds regardless. See LetterRegradeResult.
+  readonly grade?: LetterRegradeResult | null;
 }
 
 /** Opaque structured edit from the proposer — echo back to apply verbatim. */
@@ -240,20 +243,15 @@ export function applyCitationEnrich(
   return apiPost<{ data: EnrichApplyResult }, typeof input>(caseLetterPath(caseId, '/citations/apply'), input);
 }
 
-// ── Regrade-on-dirty (2026-07-08) ──────────────────────────────────────────────────────────────
-// FAST approximate probative RE-GRADE of the CURRENT (possibly edited/unsaved) letter text. Powers
-// the "Regrade letter" button shown in the editor ONLY when the draft is dirty. READ-ONLY: no save,
-// no new version. Sonnet, fail-open — a 503 means "couldn't grade, try again". Distinct from the
-// drafter's Opus full-pipeline grade: it judges the TEXT's internal probative quality (no record
-// cross-check), so it is labelled an approximate re-grade in the UI.
+// ── Per-version probative grade (Ryan 2026-07-08) ────────────────────────────────────────────────
+// A fast Sonnet re-grade is auto-computed SYNCHRONOUSLY on every SAVED edit (backend routes/letter.ts,
+// both the hand-edit PUT and the surgical-AI apply) and earmarked to that version: persisted on
+// LetterRevision.gradeJson AND mirrored to the displayed Case.grade. This is the shape the save
+// response's `grade` carries and the sidecar stores. Fail-open — a null grade never blocks a save.
 export interface LetterRegradeResult {
   readonly grade: string;
   readonly probative_score: number;
   readonly ship_recommendation: 'ship_ready' | 'normal_review' | 'examine_closely';
   readonly rationale: string;
   readonly weak_spots: readonly string[];
-}
-
-export function regradeLetter(caseId: string, txt: string): Promise<{ data: LetterRegradeResult }> {
-  return apiPost<{ data: LetterRegradeResult }, { txt: string }>(caseLetterPath(caseId, '/regrade'), { txt });
 }

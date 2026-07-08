@@ -577,6 +577,13 @@ model LetterRevision {
   editedBy          String               @map("edited_by")   // cognito sub of the editor
   editorRole        String               @map("editor_role") // cognito group: physician|ops_staff|admin
   sanityJson        Json?                @map("sanity_json")  // warn-only sanity findings snapshot
+  // Fast per-version probative grade (Ryan 2026-07-08): auto-computed by a synchronous Sonnet re-grade
+  // on EVERY saved edit and earmarked to this version. Null on pre-feature rows AND when the grade
+  // failed-open (a grade error NEVER blocks the save). Written best-effort OUTSIDE the save txn (see
+  // routes/letter.ts persistLetterGrade). Currently a per-version AUDIT blob: the DISPLAYED grade reads
+  // the Case.grade mirror (kept in sync alongside this write), not this column — a future UI can read
+  // gradeJson to show the rationale/weak_spots behind a post-edit grade. Shape mirrors LetterRegrade.
+  gradeJson         Json?                @map("grade_json")
   createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
   // ── Doctor-pay columns (docs/DOCTOR_PAY_BUILD_PLAN_2026-06-11.md) — meaningful on
   // source='approved_final' rows (the canonical completion event); default/null elsewhere. ──

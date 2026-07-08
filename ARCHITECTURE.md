@@ -131,7 +131,13 @@ on a request path that runs past 29s **kills the function before its own catch/f
 failure (the SOAP "thinks for minutes then nothing" + the original double-call timeout). Rules:
 - Never make TWO sequential LLM calls on one request (the SOAP card was fixed by sharing one query).
 - Bound any single on-request Anthropic client to **timeout ≤ ~22s, maxRetries 0** so it fails-open LOUDLY
-  inside the window (`deriveAiViability`).
+  inside the window (`deriveAiViability`). **The ~22s figure assumes the LLM call is the whole request cost —
+  it is NOT a blanket ceiling.** When another slow hop runs in series ahead of the LLM, subtract it: the
+  **letter-save auto-regrade** (Ryan 2026-07-08, `services/letter-grade.ts` → `routes/letter.ts` PUT save +
+  surgical-AI apply) runs the render Lambda (~3-8s) BEFORE a synchronous Sonnet grade, so the grade is bound
+  to **12s** (render 8 + grade 12 + save txn 2 + overhead 1 ≈ 23s, real margin under 29). If render blew the
+  wall while the grade still had 20s of budget, the Lambda would be killed mid-grade-await, before the
+  grade's own fail-open catch — losing the save. Size on-request LLM timeouts against the whole serial chain.
 - Prefer **compute-once-persist-then-read**: `deriveAiViability` short-circuits to the persisted plan when
   inputs are unchanged (no LLM on a cold Lambda); Ask-Aegis reads the persisted plan rather than recompute.
 - **Async self-invoke pattern (the viability picker, 2026-06-19):** a compute that needs >~20s can't run on
@@ -153,6 +159,13 @@ failure (the SOAP "thinks for minutes then nothing" + the original double-call t
 - **Ordering note:** migrate CodeBuild currently runs *after* `cdk deploy` → a brief window of
   code-without-columns. Benign today only because every new-column read/write is fail-open. Reordering
   migrate-before-deploy for additive migrations is an open improvement.
+  - **Pattern for a new-column write on a hot request path** (learned on the letter-save regrade,
+    `20260805000000_letter_revision_grade_json`): a Prisma write of a not-yet-migrated column throws P2022
+    and, if it sits inside the request's `$transaction`, rolls the whole action back → a hard 500 during the
+    deploy window (the txn catch only special-cases P2002). Keep such a write OUT of the critical txn and do
+    it best-effort in its own try/catch that swallows the missing-column error (see
+    `routes/letter.ts persistLetterGrade`), so the core action commits and only the additive field lags a
+    few minutes until migrate runs.
 - Drafter image: built from a CLEAN worktree, pushed to ECR, tag pinned in `infra/cdk.json`
   (`drafter_image_tag`); flip a drafter env flag via task-def re-register (runtime, no rebuild) — but a
   later `cdk deploy` converges it back unless baked into `drafter-stack.ts`.

@@ -32,7 +32,7 @@ import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../serv
 import { findChartReadinessOverride, resolveOverrideReason } from '../services/chart-readiness-override.js';
 import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash, headObjectExists, resolveViewableCurrentTxtKey } from '../services/letter-current.js';
 import { detectLetterLeaks, blockingLeaks } from '../services/letter-leak-detector.js';
-import { gradeLetterText } from '../services/letter-grade.js';
+import { gradeLetterText, type LetterRegrade } from '../services/letter-grade.js';
 import { resolveChangesSinceSigned } from '../services/letter-change-diff.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import {
@@ -223,6 +223,29 @@ function assertTripleArtifacts(keys: { txtKey?: string | null; pdfKey?: string |
   const missing = (['txtKey', 'pdfKey', 'docxKey'] as const).filter((k) => typeof keys[k] !== 'string' || (keys[k] as string).trim() === '');
   if (missing.length > 0) {
     throw new HttpError(502, 'internal_error', 'Refusing to persist a letter revision with a missing artifact key.', { reason: 'partial_artifacts', caseId: ctx.caseId, version: ctx.version, missing });
+  }
+}
+
+/**
+ * Best-effort persistence of the fast probative grade, DECOUPLED from the letter-save transaction
+ * (AWS QA 2026-07-08). It must never (a) roll back an already-rendered+saved revision, nor (b) 500
+ * the save during the deploy window where the new grade_json column has not been migrated yet — the
+ * migrate CodeBuild runs AFTER cdk deploy (ARCHITECTURE §6), so a fresh Lambda can briefly run against
+ * a table without the column. Both grade fields move together: LetterRevision.gradeJson (the per-version
+ * audit blob) and the display-only Case.grade mirror. ANY failure (P2022 missing column in the window,
+ * P2025 row race, transient DB blip) is swallowed with a warning — a missed grade is safe-direction: the
+ * displayed grade simply stays at the prior version's, and no gate reads either field (routing = the
+ * untouched shipRecommendation). No-op when the grade failed open (regrade === null).
+ */
+async function persistLetterGrade(db: AppDb, caseId: string, version: number, regrade: LetterRegrade | null): Promise<void> {
+  if (regrade === null) return;
+  try {
+    await db.$transaction(async (tx) => {
+      await tx.letterRevision.updateMany({ where: { caseId, version }, data: { gradeJson: JSON.parse(JSON.stringify(regrade)) as object } });
+      await tx.case.update({ where: { id: caseId }, data: { grade: regrade.grade } });
+    });
+  } catch (e: unknown) {
+    console.warn(JSON.stringify({ msg: 'letter-grade: best-effort persist failed (save already committed)', caseId, version, error: e instanceof Error ? e.message : String(e) }));
   }
 }
 
@@ -549,6 +572,12 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // Atomic triple-artifact invariant (#9 Fix 4): never persist a revision missing an artifact key.
       assertTripleArtifacts(keys, { caseId, version: newVersion });
 
+      // Auto-grade the saved edit (Ryan 2026-07-08): a fast Sonnet probative re-grade earmarked to THIS
+      // version so the listed grade reflects the edits. SYNCHRONOUS but FAIL-OPEN — a null grade (LLM
+      // error/timeout/too-short) NEVER blocks the save. Runs on the CLEANED text that is actually stored.
+      // Persistence is DECOUPLED from the save txn below (see the best-effort block after it).
+      const regrade = await gradeLetterText({ letterText: cleaned, claimedCondition: c.claimedCondition });
+
       try {
         await db.$transaction(async (tx) => {
           await tx.letterRevision.create({
@@ -567,6 +596,8 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           });
           // G4: a stale-signature edit on a delivered case returns it to the doctor's queue in
           // the SAME transaction (delivered → physician_review is legal in CASE_STATUS_TRANSITIONS).
+          // NOTE: the probative grade (Case.grade + LetterRevision.gradeJson) is written OUTSIDE this
+          // transaction, best-effort — see below. It must never be able to roll back a saved revision.
           await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, version: { increment: 1 }, ...(stale?.returnToPhysicianReview ? { status: 'physician_review' } : {}) } });
           await tx.activityLog.create({
             data: {
@@ -597,47 +628,20 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         throw e;
       }
 
+      // Persist the probative grade OUTSIDE the save transaction, best-effort (AWS QA 2026-07-08).
+      // TWO reasons it must not sit inside the txn above: (1) a grade write must NEVER be able to roll
+      // back an already-rendered+saved revision; (2) gradeJson is a NEW column and the migrate CodeBuild
+      // runs AFTER cdk deploy (ARCHITECTURE §6) — during that brief window a P2022 "column does not exist"
+      // must be swallowed here, not 500 the save. gradeJson has no hard reader and Case.grade is
+      // display-only (routing gate = shipRecommendation, untouched), so a missed grade is safe-direction
+      // (the displayed grade simply stays at the prior version's). Both grade fields move together.
+      await persistLetterGrade(db, caseId, newVersion, regrade);
+
       // Return the canonical saved text — cleanProseForSave may have altered it (em dashes →
       // commas, smart quotes, etc.), so the editor must re-sync to what was actually stored.
       // notice (G4): non-null when this save went over a signed version — the UI surfaces it so
       // the editor learns at save time (not delivery time) that the doctor must re-sign.
-      res.json({ data: { version: newVersion, txt: cleaned, rendered: { pdf: rendered.ok, docx: rendered.ok }, warnings, notice: stale?.notice ?? null } });
-    }),
-  );
-
-  // ── POST regrade — fast approximate probative RE-GRADE of the current (possibly edited/unsaved)
-  // letter text. Powers the "Regrade letter" button that appears in the editor only when the draft is
-  // dirty. READ-ONLY: no save, no new version, no render, NO DB mutation (only a best-effort activity
-  // log). RN (ops_staff) + physician parity, same door roles as surgical-AI. Sonnet, fail-open — a null
-  // grade returns a friendly 503 the UI shows as "couldn't grade, try again". Purely additive. ──
-  router.post(
-    '/cases/:id/letter/regrade',
-    requireRole(['admin', 'physician', 'ops_staff']),
-    asyncHandler(async (req: Request, res: Response) => {
-      const caseId = String(req.params.id);
-      const body = (req.body ?? {}) as { txt?: unknown };
-      const txt = typeof body.txt === 'string' ? body.txt : '';
-      if (txt.trim().length < 200) {
-        throw new HttpError(400, 'bad_request', 'txt (the letter text to grade) is required.', { reason: 'txt_required', caseId });
-      }
-
-      const c = await db.case.findFirst({ where: { id: caseId } });
-      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
-
-      const result = await gradeLetterText({ letterText: txt, claimedCondition: c.claimedCondition });
-      if (result === null) {
-        throw new HttpError(503, 'internal_error', "Couldn't grade the letter right now. Try again in a moment.", { reason: 'regrade_unavailable', caseId });
-      }
-
-      // Best-effort audit; never fail the grade on a log error.
-      try {
-        const user = currentActor(req);
-        await db.activityLog.create({
-          data: { actorUserId: user.sub, action: 'letter_regraded', caseId, veteranId: c.veteranId, detailsJson: { grade: result.grade, probative_score: result.probative_score } },
-        });
-      } catch { /* ignore */ }
-
-      res.json({ data: result });
+      res.json({ data: { version: newVersion, txt: cleaned, rendered: { pdf: rendered.ok, docx: rendered.ok }, warnings, notice: stale?.notice ?? null, grade: regrade ?? null } });
     }),
   );
 
@@ -716,11 +720,16 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         if (!rendered.ok) throw new HttpError(502, 'internal_error', 'Render failed; nothing saved.', { reason: 'render_failed', caseId });
         // Atomic triple-artifact invariant (#9 Fix 4).
         assertTripleArtifacts(keys, { caseId, version: newVersion });
+        // Auto-grade the surgical edit (Ryan 2026-07-08): fast Sonnet re-grade earmarked to this version.
+        // SYNCHRONOUS + FAIL-OPEN — a null grade never blocks the apply. Persistence is DECOUPLED from the
+        // save txn below (best-effort block after it), same as the PUT-save path.
+        const regrade = await gradeLetterText({ letterText: applied.newText, claimedCondition: c.claimedCondition });
         try {
           await db.$transaction(async (tx) => {
             await tx.letterRevision.create({ data: { caseId, version: newVersion, parentVersion: baseLetterVersion, source: 'surgical_ai', artifactTxtS3Key: keys.txtKey, artifactPdfS3Key: keys.pdfKey, artifactDocxS3Key: keys.docxKey, editedBy: user.sub, editorRole: user.role, sanityJson: warnings } });
             // G4: stale-signature edit on a delivered case returns it to physician_review in-transaction.
             // currentVersion: newVersion re-pins the pointer (heals a stranded pointer when we recovered).
+            // NOTE: the probative grade (Case.grade + gradeJson) is written OUTSIDE this txn, best-effort — see below.
             await tx.case.update({ where: { id: caseId }, data: { currentVersion: newVersion, version: { increment: 1 }, ...(stale?.returnToPhysicianReview ? { status: 'physician_review' } : {}) } });
             await tx.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_surgical_ai_applied', caseId, veteranId: c.veteranId, detailsJson: { version: newVersion, anchor_fallback: applied.anchor_fallback, warnings: warnings.map((w) => w.rule) } } });
             if (stale !== null) {
@@ -731,7 +740,9 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
           if ((e as { code?: string }).code === 'P2002') throw new HttpError(409, 'conflict', 'Another save advanced the version; reload and re-propose.', { reason: 'concurrent_save', caseId });
           throw e;
         }
-        res.json({ data: { version: newVersion, txt: applied.newText, warnings, notice: stale?.notice ?? null } });
+        // Best-effort grade persistence, decoupled from the save txn (see the PUT-save path for the full why).
+        await persistLetterGrade(db, caseId, newVersion, regrade);
+        res.json({ data: { version: newVersion, txt: applied.newText, warnings, notice: stale?.notice ?? null, grade: regrade ?? null } });
         return;
       }
 

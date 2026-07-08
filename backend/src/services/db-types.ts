@@ -527,6 +527,8 @@ export interface LetterRevisionDelegate {
   create(args: unknown): Promise<LetterRevisionRecord>;
   // Doctor-pay: admin-only memo-tag PATCH (routes/pay.ts) re-types an approved_final row.
   update(args: unknown): Promise<LetterRevisionRecord>;
+  // Best-effort grade earmark by (caseId, version) — decoupled from the save txn (routes/letter.ts).
+  updateMany(args: unknown): Promise<{ count: number }>;
 }
 
 export interface CorrectionDelegate {

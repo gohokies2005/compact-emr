@@ -14,10 +14,19 @@
  *   labels it as an approximate re-grade of the edited text.
  *
  * MODELED EXACTLY on halt-explainer.ts: Anthropic-direct via resolveAnthropicApiKey, forced-tool JSON,
- * Sonnet, timeout 20s (≤ the ARCHITECTURE §5 22s sync-LLM cap; a ~700-token grade runs in ~3-8s, well inside
- * the API-Gateway 29s ceiling — no async self-invoke), maxRetries 0, FAIL-OPEN (returns null on missing key /
- * API error / timeout / truncation / malformed result), NEVER throws. The route surfaces a friendly
- * "couldn't grade, try again" on null. It is purely ADDITIVE and read-only (no save, no version, no DB write).
+ * Sonnet, maxRetries 0, FAIL-OPEN (returns null on missing key / API error / timeout / truncation /
+ * malformed result), NEVER throws. The route surfaces a friendly "couldn't grade, try again" on null.
+ *
+ * TIMEOUT = 12s (AWS QA 2026-07-08, tightened from 20s): on the letter-save path the render Lambda runs
+ * IN SERIES *ahead* of this grade (render ~3-8s → grade → save txn ~2s → overhead ~1s), all under the
+ * API-Gateway 29s hard cap. A 20s grade ceiling stacked behind an ~8s render could blow the 29s wall and
+ * kill the Lambda MID-AWAIT — before this function's own fail-open catch runs — silently losing the save.
+ * The grade only needs ~3-8s in practice, so 12s costs nothing on the happy path and keeps real margin.
+ *
+ * No `temperature` param (AI QA 2026-07-08): forced tool_choice on a grade is already near-deterministic,
+ * and `temperature` is a REJECTED (400) parameter on newer models — so if LETTER_REGRADE_MODEL is ever
+ * bumped to Sonnet 5 / Opus / Fable, a hardcoded temperature would fail-open EVERY save into "couldn't
+ * grade" silently. Omitting it keeps the grader model-swap-safe.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -25,7 +34,7 @@ import { resolveAnthropicApiKey } from './letter-surgical-propose.js';
 
 const MODEL = process.env['LETTER_REGRADE_MODEL'] || 'claude-sonnet-4-6';
 const MAX_TOKENS = 900;
-const TIMEOUT_MS = 20_000;
+const TIMEOUT_MS = 12_000; // see header: render runs in series ahead of the grade under the 29s API-GW cap
 
 // The grade bands from the drafter's probative rubric (overall_score_to_grade). Kept in sync with
 // backend/src/routes/drafter.ts GRADES so the response renders in the existing <GradeChip/>.
@@ -122,7 +131,8 @@ export async function gradeLetterText(input: LetterRegradeInput): Promise<Letter
       resp = await anthropic.messages.create({
         model: MODEL,
         max_tokens: MAX_TOKENS,
-        temperature: 0, // a grade is a judgment, not prose — keep it stable
+        // No temperature: forced tool_choice already makes a grade near-deterministic, and temperature is
+        // a 400-rejected param on newer models — hardcoding it would silently kill grading on a model bump.
         system: SYSTEM,
         tools: [TOOL],
         tool_choice: { type: 'tool', name: TOOL.name },

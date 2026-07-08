@@ -22,10 +22,13 @@ import {
   finalizeImportLetter,
   getLetter,
   previewSurgicalAi,
+  regradeLetter,
   saveLetter,
+  type LetterRegradeResult,
   type LetterWarning,
   type SurgicalProposal,
 } from '../../api/letter';
+import { GradeChip } from '../../components/ui/GradeChip';
 import type { SignOffAnswers } from '../../api/cases';
 
 // Turns an approve failure into an actionable physician-facing message. The render Lambda being
@@ -95,6 +98,11 @@ export function LetterEditorPage() {
   const [declineReason, setDeclineReason] = useState('');
   const [signOffOpen, setSignOffOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // Regrade-on-dirty (2026-07-08): the button appears ONLY when the current draft has unsaved edits.
+  // `isDirty` is derived from the editor's onChange (editedTextRef vs the loaded/saved `txt`); the
+  // regrade result is ephemeral (inline only, never persisted) and cleared on load/save.
+  const [isDirty, setIsDirty] = useState(false);
+  const [regradeResult, setRegradeResult] = useState<LetterRegradeResult | null>(null);
   // Guided Revision UI (2026-06-13): the verbatim passage the physician highlighted in the letter,
   // and a session-sticky flag set once the backend 503s GUIDED_REVISION_ENABLED=off (so we stop
   // offering a dead feature). The apply path REUSES the surgical applyMutation below.
@@ -137,7 +145,19 @@ export function LetterEditorPage() {
     setTxt(letter.txt);
     editedTextRef.current = letter.txt;
     setBaseVersion(letter.version);
+    setIsDirty(false);
+    setRegradeResult(null);
   }, [letter]);
+
+  // Fast approximate re-grade of the CURRENT edited (unsaved) text. Read-only; result is ephemeral.
+  const regradeMutation = useMutation({
+    mutationFn: () => regradeLetter(caseId, editedTextRef.current),
+    onSuccess: (res) => { setRegradeResult(res.data); },
+    onError: (error: unknown) => {
+      if (error instanceof ServiceUnavailableError) { setMessage("Couldn't grade the letter right now. Try again in a moment."); return; }
+      setMessage('Regrade failed. Please retry.');
+    },
+  });
 
   const saveMutation = useMutation({
     mutationFn: () => {
@@ -150,6 +170,9 @@ export function LetterEditorPage() {
       editedTextRef.current = res.data.txt;
       setWarnings(res.data.warnings ?? []);
       setMessage(`Saved version ${res.data.version}.`);
+      // Saved text is the new baseline → no longer dirty; the pre-save regrade no longer applies.
+      setIsDirty(false);
+      setRegradeResult(null);
       void qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] });
     },
     onError: async (error: unknown) => {
@@ -312,7 +335,7 @@ export function LetterEditorPage() {
         <WarningList warnings={warnings} />
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <LetterEditor key={baseVersion ?? letter.version} txt={txt} lockedRanges={letter.locked_ranges} mode={canOpsEdit || canPhysicianAct ? 'editable' : 'readonly'} zoom={zoom} onChange={(t) => { editedTextRef.current = t; }} onSelectPassage={setSelectedPassage} />
+          <LetterEditor key={baseVersion ?? letter.version} txt={txt} lockedRanges={letter.locked_ranges} mode={canOpsEdit || canPhysicianAct ? 'editable' : 'readonly'} zoom={zoom} onChange={(t) => { editedTextRef.current = t; setIsDirty(t !== txt); }} onSelectPassage={setSelectedPassage} />
 
           <aside className="space-y-4">
             {canOpsEdit || canPhysicianAct ? (
@@ -324,6 +347,31 @@ export function LetterEditorPage() {
                     runs after first paint). Without this a click in that window throws "Letter
                     version is missing" and silently no-ops the save. (architect de-flake 2026-06-08.) */}
                 <Button type="button" variant="primary" className="mt-4 w-full" loading={saveMutation.isPending} disabled={saveMutation.isPending || baseVersion === null} onClick={() => saveMutation.mutate()}>Save new version</Button>
+
+                {/* Regrade-on-dirty (2026-07-08): appears ONLY when there are unsaved edits. A fast,
+                    approximate probative re-grade of the edited text — read-only, never saved. */}
+                {isDirty ? (
+                  <div className="mt-3">
+                    <Button type="button" variant="secondary" className="w-full" loading={regradeMutation.isPending} disabled={regradeMutation.isPending} onClick={() => regradeMutation.mutate()}>
+                      {regradeResult ? 'Regrade edited letter' : 'Regrade letter'}
+                    </Button>
+                    <p className="mt-1 text-xs text-slate-500">Grades your unsaved edits. Approximate &mdash; a quick check, not the full drafter grade.</p>
+                    {regradeResult ? (
+                      <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <div className="flex items-center gap-2">
+                          <GradeChip grade={regradeResult.grade} />
+                          <span className="text-xs text-slate-500">score {regradeResult.probative_score}/10</span>
+                        </div>
+                        <p className="mt-2 text-sm text-slate-700">{regradeResult.rationale}</p>
+                        {regradeResult.weak_spots.length > 0 ? (
+                          <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-slate-600">
+                            {regradeResult.weak_spots.map((w) => <li key={w}>{w}</li>)}
+                          </ul>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </Card>
             ) : null}
 

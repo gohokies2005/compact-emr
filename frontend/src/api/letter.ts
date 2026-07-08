@@ -239,3 +239,21 @@ export function applyCitationEnrich(
 ): Promise<{ data: EnrichApplyResult }> {
   return apiPost<{ data: EnrichApplyResult }, typeof input>(caseLetterPath(caseId, '/citations/apply'), input);
 }
+
+// ── Regrade-on-dirty (2026-07-08) ──────────────────────────────────────────────────────────────
+// FAST approximate probative RE-GRADE of the CURRENT (possibly edited/unsaved) letter text. Powers
+// the "Regrade letter" button shown in the editor ONLY when the draft is dirty. READ-ONLY: no save,
+// no new version. Sonnet, fail-open — a 503 means "couldn't grade, try again". Distinct from the
+// drafter's Opus full-pipeline grade: it judges the TEXT's internal probative quality (no record
+// cross-check), so it is labelled an approximate re-grade in the UI.
+export interface LetterRegradeResult {
+  readonly grade: string;
+  readonly probative_score: number;
+  readonly ship_recommendation: 'ship_ready' | 'normal_review' | 'examine_closely';
+  readonly rationale: string;
+  readonly weak_spots: readonly string[];
+}
+
+export function regradeLetter(caseId: string, txt: string): Promise<{ data: LetterRegradeResult }> {
+  return apiPost<{ data: LetterRegradeResult }, { txt: string }>(caseLetterPath(caseId, '/regrade'), { txt });
+}

@@ -32,6 +32,7 @@ import { loadReconciledChartReadiness, buildChartNotReadyMessage } from '../serv
 import { findChartReadinessOverride, resolveOverrideReason } from '../services/chart-readiness-override.js';
 import { readTxtFromS3 as readLetterTxtFromS3, type LetterTxtContext, resolveCurrentRevisionMeta, readPdfBytesWithHash, headObjectExists, resolveViewableCurrentTxtKey } from '../services/letter-current.js';
 import { detectLetterLeaks, blockingLeaks } from '../services/letter-leak-detector.js';
+import { gradeLetterText } from '../services/letter-grade.js';
 import { resolveChangesSinceSigned } from '../services/letter-change-diff.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import {
@@ -601,6 +602,42 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // notice (G4): non-null when this save went over a signed version — the UI surfaces it so
       // the editor learns at save time (not delivery time) that the doctor must re-sign.
       res.json({ data: { version: newVersion, txt: cleaned, rendered: { pdf: rendered.ok, docx: rendered.ok }, warnings, notice: stale?.notice ?? null } });
+    }),
+  );
+
+  // ── POST regrade — fast approximate probative RE-GRADE of the current (possibly edited/unsaved)
+  // letter text. Powers the "Regrade letter" button that appears in the editor only when the draft is
+  // dirty. READ-ONLY: no save, no new version, no render, NO DB mutation (only a best-effort activity
+  // log). RN (ops_staff) + physician parity, same door roles as surgical-AI. Sonnet, fail-open — a null
+  // grade returns a friendly 503 the UI shows as "couldn't grade, try again". Purely additive. ──
+  router.post(
+    '/cases/:id/letter/regrade',
+    requireRole(['admin', 'physician', 'ops_staff']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+      const body = (req.body ?? {}) as { txt?: unknown };
+      const txt = typeof body.txt === 'string' ? body.txt : '';
+      if (txt.trim().length < 200) {
+        throw new HttpError(400, 'bad_request', 'txt (the letter text to grade) is required.', { reason: 'txt_required', caseId });
+      }
+
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+
+      const result = await gradeLetterText({ letterText: txt, claimedCondition: c.claimedCondition });
+      if (result === null) {
+        throw new HttpError(503, 'internal_error', "Couldn't grade the letter right now. Try again in a moment.", { reason: 'regrade_unavailable', caseId });
+      }
+
+      // Best-effort audit; never fail the grade on a log error.
+      try {
+        const user = currentActor(req);
+        await db.activityLog.create({
+          data: { actorUserId: user.sub, action: 'letter_regraded', caseId, veteranId: c.veteranId, detailsJson: { grade: result.grade, probative_score: result.probative_score } },
+        });
+      } catch { /* ignore */ }
+
+      res.json({ data: result });
     }),
   );
 

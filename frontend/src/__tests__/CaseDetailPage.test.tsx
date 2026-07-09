@@ -53,6 +53,15 @@ vi.mock('../api/chart-notes', () => ({
   getLatestQuickNote: getLatestQuickNoteMock,
   createChartNote: createChartNoteMock, deleteChartNote: vi.fn(), patchChartNote: patchChartNoteMock,
 }));
+// RN↔physician handoff notes (flat case_messages) now render on the case page (Action + Messages
+// tabs, 2026-07-09). Default to EMPTY so unrelated tests keep the panel hidden (it self-hides when
+// there are no notes); the dedicated placement test overrides per case.
+const { listCaseMessagesMock } = vi.hoisted(() => ({ listCaseMessagesMock: vi.fn() }));
+vi.mock('../api/case-messages', () => ({
+  listCaseMessages: listCaseMessagesMock,
+  createCaseMessage: vi.fn(async () => ({ data: {} })),
+  markCaseMessagesRead: vi.fn(async () => ({ data: { markedCount: 0 } })),
+}));
 // The letter-open path (View letter -> GET /cases/:id/letter) — mocked so the dead-end-fix tests
 // can drive a structured 404 through describeApiError without a network.
 vi.mock('../api/letter', () => ({ getLetter: vi.fn() }));
@@ -82,6 +91,23 @@ describe('CaseDetailPage', () => {
     getLatestQuickNoteMock.mockReset().mockResolvedValue({ data: null });
     createChartNoteMock.mockReset().mockResolvedValue({ data: {} });
     patchChartNoteMock.mockReset().mockResolvedValue({ data: {} });
+    // Default: no handoff notes → PhysicianHandoffNotes self-hides (no clutter, no change to other tests).
+    listCaseMessagesMock.mockReset().mockResolvedValue({ data: [], unreadCount: 0 });
+  });
+
+  it('renders RN↔physician handoff notes on the Action tab when a note exists (Spring-bug re-orphan lock)', async () => {
+    // The handoff note lives in the flat case_messages table; before 2026-07-09 it rendered ONLY on the
+    // physician-review page, so it was invisible on the main case page where the RN/admin invoices (Ryan
+    // reported it lost on ready-to-invoice cases). It must show on the Action tab (the default working
+    // surface). Self-hides when empty, so this asserts the with-a-note path.
+    listCaseMessagesMock.mockResolvedValue({
+      data: [{ id: 'M1', caseId: 'CASE-1', senderSub: 'rn-1', senderRole: 'ops_staff', senderName: 'Riley RN',
+        body: 'Reviewed and tightened §VII — flagging the 1996 weight note.', createdAt: '2026-07-09T12:00:00Z', readAt: null, readBySub: null }],
+      unreadCount: 1,
+    });
+    renderPage();
+    expect(await screen.findByText('Notes from the care team')).toBeInTheDocument();
+    expect(screen.getByText(/tightened §VII/)).toBeInTheDocument();
   });
 
   it('renders the case header and admin transition controls', async () => {

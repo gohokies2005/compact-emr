@@ -29,6 +29,7 @@ import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { DocumentUploadPanel } from '../../components/DocumentUploadPanel';
 import { CaseAssignmentPanel } from '../../components/CaseAssignmentPanel';
 import { CaseMessagesPanel } from '../../components/CaseMessagesPanel';
+import { PhysicianHandoffNotes } from '../../components/PhysicianHandoffNotes';
 import { joinCaseLabel } from '../../components/messaging/caseLabel';
 import { EmailLogPanel } from '../../components/EmailLogPanel';
 import { ChartNotesPanel } from '../veterans/ChartNotesPanel';
@@ -646,6 +647,13 @@ export function CaseDetailPage() {
       <div className="p-4">
         {tab === 'action' ? (
           <div className="space-y-6">
+            {/* RN↔physician HANDOFF NOTES at the top of the working surface — the RN/admin invoices and
+                works the case HERE (Action tab / DeliveryPanel), so a note sent WITH the case must be
+                seen without hunting for the Messages tab (architect QA 2026-07-09; the Messages-tab
+                render alone still missed the invoicing surface, the exact failure Ryan reported on
+                ready-to-invoice cases). Reads the flat case_messages table; SELF-HIDES when there are
+                no handoff notes → zero clutter on the ~99% of cases without one. */}
+            <PhysicianHandoffNotes caseId={caseId} />
             {/* (Latest quick note now lives in the persistent patient header above the tab bar — Ryan
                 "top of chart" 2026-06-21 — so it shows on every tab and isn't duplicated here.) */}
             {/* Abridged notes and records — the curated chart abridgement (Ryan 2026-06-12, renamed
@@ -947,12 +955,21 @@ export function CaseDetailPage() {
         {tab === 'documents' ? <DocumentsTab veteranId={c.veteranId} caseId={c.id} role={role} /> : null}
         {tab === 'emails' ? <EmailLogPanel queryKey={['case', caseId, 'emails']} fetcher={() => listCaseEmails(caseId)} scope="claim" caseId={caseId} /> : null}
         {tab === 'messages' ? (
-          <CaseMessagesPanel
-            caseId={caseId}
-            caseLabel={joinCaseLabel(formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, ''), formatConditionLabel(c.claimedCondition), caseId)}
-            assignedRn={c.assignedRn ?? null}
-            assignedPhysician={c.assignedPhysician ?? null}
-          />
+          <div className="space-y-6">
+            {/* RN↔physician HANDOFF NOTES (flat case_messages table) — SendToDoctorModal /
+                ReturnToPhysicianModal write here, but the threads panel below reads a SEPARATE system,
+                so without this the handoff note was invisible on every RN/admin surface once a case
+                left physician_review (Ryan 2026-07-09 — lost on ready-to-invoice cases; the "Spring bug"
+                that PhysicianHandoffNotes only half-fixed on the physician review page). Read-only until
+                the two messaging systems are unified; renders NOTHING when there are no handoff notes. */}
+            <PhysicianHandoffNotes caseId={caseId} />
+            <CaseMessagesPanel
+              caseId={caseId}
+              caseLabel={joinCaseLabel(formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, ''), formatConditionLabel(c.claimedCondition), caseId)}
+              assignedRn={c.assignedRn ?? null}
+              assignedPhysician={c.assignedPhysician ?? null}
+            />
+          </div>
         ) : null}
         {/* Clinical chart tabs — same veteran data + same panels as the veteran chart page. The case
             carries the veteran id (c.veteranId); the clinical sections fetch the veteran detail and

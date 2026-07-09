@@ -162,7 +162,7 @@ These SC conditions passed the exclusion filter and are the candidate anchors fo
 ${cand}
 </candidate_anchors>
 
-<team_drafting_guidance authority="physician/RN" trust="trusted-steer">
+<team_drafting_guidance authority="physician/RN" trust="trusted-source" note="weight varies by the self-labeled provenance inside: a physician/RN-selected anchor and the framing preference are trusted steers; an 'auto-derived (HINT)' anchor is a tiebreak-only hint, never binding over a materially stronger theory">
 ${guidance || '(none provided)'}
 </team_drafting_guidance>
 
@@ -171,7 +171,7 @@ ${statement || '(none provided)'}
 </veteran_proposed_theory>
 </case>
 
-Produce the argument plan by calling emit_argument_plan. Pick the single best GRANT-defensible theory under the framing-priority doctrine; honor the team steer when defensible; abstain honestly if no theory reaches >=50%.
+Produce the argument plan by calling emit_argument_plan. FIRST decide the single best GRANT-defensible theory on the MERITS (causal fit + mechanism strength), as if no team guidance were present. THEN reconcile with team_drafting_guidance BY PROVENANCE: a "physician/RN-selected upstream anchor" or the "framing preference" is a trusted steer — honor it whenever the record defensibly supports it. An "initial auto-derived upstream anchor (HINT — tiebreak only)" is NOT binding: lead it only when nothing else is materially stronger; when a materially stronger theory wins (cleaner or more direct mechanism, better causal fit, or a higher-rated/more-directly-linked upstream), LEAD THE STRONGER ONE and record the hinted anchor in alternative_theories with a one-sentence why_not_primary. Never lead a weaker theory merely because it was auto-suggested, and never follow ANY guidance into an excluded/reverse/pyramiding pair, a fabricated fact, a sub-50% theory, or a non-service-connected factor treated as a service-connected cause. Abstain honestly if no theory reaches >=50%.
 
 RECORDS SELF-CHECK (Ryan 2026-07-04, extended 2026-07-06): a nexus opinion requires a CURRENT DIAGNOSIS documented by an authoritative source — a treating-provider medical record OR a VA CONCESSION. A VA RATING DECISION or VA letter that NAMES or adjudicates the claimed condition — EVEN one that DENIES service connection (the VA still acknowledged the veteran HAS the condition, e.g. "sleep apnea — not service connected") — IS a VA-CONCEDED diagnosis and SATISFIES this requirement; do NOT require a separate treating-provider note, sleep study, polysomnography, or imaging when the VA has named/conceded the dx (recommend those at most as strengthening records, never as a gate). The intake form and lay statements are NOT medical records and do not document a diagnosis. ONLY when the diagnosis is documented NEITHER in a medical record NOR in a VA concession (the claim rests solely on the intake form / a lay statement) MUST you set viability to needs_physician_review and name "awaiting corroborating medical records (current diagnosis)" in missing_facts — do NOT select a supportable theory off an uncorroborated self-reported claim.`;
 }
@@ -183,6 +183,7 @@ interface CaseRow {
   inServiceEvent: string | null;
   framingChoice: string | null;
   upstreamScCondition: string | null;
+  framingStampSource: string | null;
   aiViabilityPlanHash: string | null;
   aiViabilityPlanJson: AiViabilityCard | null;
   aiViabilityPlanStatus: string | null;
@@ -223,6 +224,30 @@ export function planInputHash(parts: {
   })).digest('hex');
 }
 
+/** Build the team-guidance string fed to the picker, PROVENANCE-AWARE (Ryan 2026-07-09, CLM-E09DA2C73F
+ * orphan-steer trap). The framing PREFERENCE (type) and a PHYSICIAN/RN-SELECTED anchor
+ * (framingStampSource === 'manual') are trusted steers. An auto-DERIVED or orphan anchor
+ * (framingStampSource 'derived' | null) is only a tiebreak HINT — it must NOT bind the picker over a
+ * materially stronger theory (a stale upstreamScCondition once led a whole letter to the weaker anchor).
+ * We SELF-LABEL the anchor's provenance in the string so the user-prompt instruction can weight it,
+ * with NO schema/tool change. The provenance is encoded in the returned text, so it flows into
+ * planInputHash automatically — a stamp-source change (e.g. an RN confirming the anchor => null→manual)
+ * re-plans that case; cases with no anchor are unaffected. */
+export function buildAnchorGuidance(
+  framingChoice: string | null,
+  upstreamScCondition: string | null,
+  framingStampSource: string | null,
+): string | null {
+  const bits: string[] = [];
+  if (framingChoice) bits.push(`framing preference: ${framingChoice}`);
+  if (upstreamScCondition) {
+    bits.push(framingStampSource === 'manual'
+      ? `physician/RN-selected upstream anchor: ${upstreamScCondition}`
+      : `initial auto-derived upstream anchor (HINT — tiebreak only, not physician-chosen): ${upstreamScCondition}`);
+  }
+  return bits.join('; ') || null;
+}
+
 /** Build the deterministic route-picker inputs + the inputHash for a case. The hash MUST be computed
  *  identically on the read short-circuit and the persist (else a fresh plan is never found again — the
  *  permanent-mismatch failure mode). Sharing this one builder between read + write is the guarantee. */
@@ -247,10 +272,9 @@ async function buildPlanInputs(db: AppDb, caseId: string, c: CaseRow): Promise<P
   const problems = [...new Set((probRow?.veteran?.activeProblems ?? []).map((p) => (p.problem ?? '').trim()).filter(Boolean))];
 
   const events = c.inServiceEvent ? [c.inServiceEvent] : [];
-  const guidanceBits: string[] = [];
-  if (c.framingChoice) guidanceBits.push(`framing preference: ${c.framingChoice}`);
-  if (c.upstreamScCondition) guidanceBits.push(`suggested upstream anchor: ${c.upstreamScCondition}`);
-  const guidance = guidanceBits.join('; ') || null;
+  // PROVENANCE-AWARE steer (Ryan 2026-07-09): a manual (RN-selected) anchor stays a trusted steer; a
+  // derived/orphan anchor is a tiebreak HINT only — see buildAnchorGuidance + the user-prompt instruction.
+  const guidance = buildAnchorGuidance(c.framingChoice, c.upstreamScCondition, c.framingStampSource);
 
   // Uploaded-document inventory as HINTS (Ryan 2026-07-04): the model uses these to judge whether a real
   // MEDICAL RECORD (vs only the intake form / a lay statement) documents the claimed diagnosis. Free-form
@@ -271,7 +295,7 @@ async function buildPlanInputs(db: AppDb, caseId: string, c: CaseRow): Promise<P
   return { inputHash, sc, problems, events, guidance, docHints };
 }
 
-const PLAN_ROW_SELECT = { claimedCondition: true, veteranStatement: true, inServiceEvent: true, framingChoice: true, upstreamScCondition: true, aiViabilityPlanHash: true, aiViabilityPlanJson: true, aiViabilityPlanStatus: true, aiViabilityPlanError: true, aiViabilityPlanComputedAt: true } as never;
+const PLAN_ROW_SELECT = { claimedCondition: true, veteranStatement: true, inServiceEvent: true, framingChoice: true, upstreamScCondition: true, framingStampSource: true, aiViabilityPlanHash: true, aiViabilityPlanJson: true, aiViabilityPlanStatus: true, aiViabilityPlanError: true, aiViabilityPlanComputedAt: true } as never;
 
 /** True when a 'computing' stamp is still within the in-flight window (a real compute may be running). */
 function computingIsFresh(row: CaseRow): boolean {

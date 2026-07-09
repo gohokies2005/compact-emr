@@ -65,8 +65,11 @@ function makeDb(opts?: {
     { match: (w) => w.status === 'rn_review', value: 5 },
     // tile 6: physician_review (single)
     { match: (w) => w.status === 'physician_review', value: 6 },
-    // tile 8: delinquent payments (delivered + payments.none paid)
-    { match: (w) => w.status === 'delivered' && 'payments' in w, value: 8 },
+    // tile 8: delinquent payments (delivered + payments.none paid + NOT archived).
+    // archivedAt:null is required — an archived (given-up) case must NOT count toward
+    // delinquent payments even though it's still unpaid (Ryan 2026-07-09: archive = set aside,
+    // still payable if the customer returns; it just shouldn't nag on the dashboard).
+    { match: (w) => w.status === 'delivered' && 'payments' in w && w.archivedAt === null, value: 8 },
   ]);
   const draftJobCount = countByWhere([
     { match: (w) => w.state === 'running', value: 9 }, // tile 9

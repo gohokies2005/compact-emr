@@ -113,6 +113,9 @@ export function createDashboardRouter(db: AppDb): Router {
       // case is when it landed delivered). Approximation noted in the D1 report.
       const delinquentPaymentsWhere = {
         status: 'delivered',
+        archivedAt: null, // exclude archived (given-up) cases — still payable if the customer
+        // returns (unarchiving re-counts them), but they should not nag on the dashboard. Matches
+        // the archivedAt:null filter every other case tile uses. (Ryan 2026-07-09.)
         updatedAt: { lt: threeDaysAgo },
         payments: { none: { kind: 'letter_500', status: 'paid' } },
       };

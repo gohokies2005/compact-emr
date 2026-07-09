@@ -16,7 +16,10 @@ const navItems: readonly { label: string; href: string; roles: readonly Role[] }
   { label: 'Intake', href: '/intake', roles: ['admin', 'ops_staff'] },
   { label: 'Cases', href: '/cases', roles: ['admin', 'ops_staff'] },
   { label: 'Veterans', href: '/veterans', roles: ['admin', 'ops_staff'] },
-  { label: 'RN Queue', href: '/rn', roles: ['admin', 'ops_staff'] },
+  // 'RN Queue' (/rn) dropped from the nav 2026-07-09 (Ryan): the standard flow is chart → RN review
+  // → send to drafter (worked from Cases/Veterans), so the standalone RN-queue tab was clutter. The
+  // page (manual-summary "type it" + invoice/release side-queues) stays reachable by URL via the
+  // App.tsx route; remove the route+page too if those workstreams are confirmed dead.
   { label: 'Templates', href: '/templates', roles: ['admin'] },
   { label: 'Physicians', href: '/physicians', roles: ['admin'] },
   { label: 'Staff', href: '/staff', roles: ['admin'] },

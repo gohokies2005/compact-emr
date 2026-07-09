@@ -34,16 +34,16 @@ const TILES: DashboardResponse = {
   generatedAt: '2026-06-13T12:00:00.000Z',
   timezone: 'America/Los_Angeles',
   pacificMidnightUtc: '2026-06-13T07:00:00.000Z',
+  // 3×3 order (Ryan 2026-07-09): standalone 'rn_review' tile removed (redundant subset of rn_queue).
   tiles: [
     { key: 'new_intakes_today', label: 'New intakes today', count: 4, clickable: true, filter: { kind: 'intakes', createdSince: '2026-06-13T07:00:00.000Z' } },
     { key: 'stage1_turnaround_7d', label: 'Avg intake-to-pickup (7d)', value: 18.4, unit: 'hours', clickable: false },
-    { key: 'rn_queue', label: 'RN queue', count: 7, clickable: true, filter: { kind: 'cases', statuses: ['rn_review', 'needs_rn_decision', 'correction_requested', 'correction_review'] } },
     { key: 'pre_draft', label: 'Pre-draft', count: 3, clickable: true, filter: { kind: 'cases', statuses: ['intake', 'viability'] } },
-    { key: 'rn_review', label: 'RN review', count: 2, clickable: true, filter: { kind: 'cases', status: 'rn_review' } },
+    { key: 'rn_queue', label: 'RN queue', count: 7, clickable: true, filter: { kind: 'cases', statuses: ['rn_review', 'needs_rn_decision', 'correction_requested', 'correction_review'] } },
     { key: 'physician_review', label: 'Physician review', count: 1, clickable: true, filter: { kind: 'cases', status: 'physician_review' } },
+    { key: 'stuck_drafts', label: 'Stuck drafts', count: 0, clickable: true, filter: { kind: 'draft-jobs', stuck: true, startedBeforeMinutes: 45, staleHeartbeat: true } },
     { key: 'delinquent_intakes', label: 'Delinquent intakes', count: 5, clickable: true, filter: { kind: 'intakes', status: 'pending', olderThanDays: 7 } },
     { key: 'delinquent_payments', label: 'Delinquent payments', count: 2, clickable: true, filter: { kind: 'cases', status: 'delivered', unpaidLetter500OlderThanDays: 3 } },
-    { key: 'stuck_drafts', label: 'Stuck drafts', count: 0, clickable: true, filter: { kind: 'draft-jobs', stuck: true, startedBeforeMinutes: 45, staleHeartbeat: true } },
     { key: 'total_veterans', label: 'Total veterans', count: 120, clickable: true, filter: { kind: 'veterans' } },
   ],
 };
@@ -66,7 +66,7 @@ beforeEach(() => {
 });
 
 describe('HomePage', () => {
-  it('renders all 10 dashboard tiles from getDashboard', async () => {
+  it('renders all 9 dashboard tiles from getDashboard', async () => {
     renderHome();
 
     expect(await screen.findByText('New intakes today')).toBeInTheDocument();

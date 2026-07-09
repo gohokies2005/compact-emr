@@ -137,7 +137,6 @@ export function createDashboardRouter(db: AppDb): Router {
         newIntakesToday,
         rnReviewGroup,
         preDraft,
-        rnReview,
         physicianReview,
         delinquentIntakes,
         delinquentPayments,
@@ -153,9 +152,8 @@ export function createDashboardRouter(db: AppDb): Router {
         db.case.count({ where: { status: { in: RN_REVIEW_GROUP_STATUSES }, archivedAt: null } }),
         // 4. pre-draft group
         db.case.count({ where: { status: { in: PRE_DRAFT_STATUSES }, archivedAt: null } }),
-        // 5. rn_review (single status)
-        db.case.count({ where: { status: 'rn_review', archivedAt: null } }),
-        // 6. physician_review (single status)
+        // 6. physician_review (single status) — the standalone 'RN review' tile (formerly #5, a strict
+        // SUBSET of the RN-queue group tile) was removed 2026-07-09 (Ryan): redundant with RN queue.
         db.case.count({ where: { status: 'physician_review', archivedAt: null } }),
         // 7. delinquent intakes (see computeStage1TurnaroundOrNull comment for the Stage-1/2 caveat)
         db.intake.count({ where: { status: 'pending', createdAt: { lt: sevenDaysAgo } } }),
@@ -188,13 +186,10 @@ export function createDashboardRouter(db: AppDb): Router {
           ...(stage1Turnaround.reason !== undefined ? { reason: stage1Turnaround.reason } : {}),
           clickable: false, // the only non-clickable tile — a duration, not a list
         },
-        {
-          key: 'rn_queue',
-          label: 'RN queue',
-          count: rnReviewGroup,
-          clickable: true,
-          filter: { kind: 'cases', statuses: RN_REVIEW_GROUP_STATUSES },
-        },
+        // Tile ORDER is a clean 3×3 (Ryan 2026-07-09). Row 1: new intakes · intake-to-pickup ·
+        // pre-draft. Row 2: RN queue (the joint "RN action after pre-draft" list — the redundant
+        // standalone 'RN review' subset tile was removed) · physician review · stuck drafts.
+        // Row 3: delinquent intakes · delinquent payments · total veterans.
         {
           key: 'pre_draft',
           label: 'Pre-draft',
@@ -203,11 +198,11 @@ export function createDashboardRouter(db: AppDb): Router {
           filter: { kind: 'cases', statuses: PRE_DRAFT_STATUSES },
         },
         {
-          key: 'rn_review',
-          label: 'RN review',
-          count: rnReview,
+          key: 'rn_queue',
+          label: 'RN queue',
+          count: rnReviewGroup,
           clickable: true,
-          filter: { kind: 'cases', status: 'rn_review' },
+          filter: { kind: 'cases', statuses: RN_REVIEW_GROUP_STATUSES },
         },
         {
           key: 'physician_review',
@@ -215,6 +210,13 @@ export function createDashboardRouter(db: AppDb): Router {
           count: physicianReview,
           clickable: true,
           filter: { kind: 'cases', status: 'physician_review' },
+        },
+        {
+          key: 'stuck_drafts',
+          label: 'Stuck drafts',
+          count: stuckDrafts,
+          clickable: true,
+          filter: { kind: 'draft-jobs', stuck: true, startedBeforeMinutes: 45, staleHeartbeat: true },
         },
         {
           key: 'delinquent_intakes',
@@ -229,13 +231,6 @@ export function createDashboardRouter(db: AppDb): Router {
           count: delinquentPayments,
           clickable: true,
           filter: { kind: 'cases', status: 'delivered', unpaidLetter500OlderThanDays: 3 },
-        },
-        {
-          key: 'stuck_drafts',
-          label: 'Stuck drafts',
-          count: stuckDrafts,
-          clickable: true,
-          filter: { kind: 'draft-jobs', stuck: true, startedBeforeMinutes: 45, staleHeartbeat: true },
         },
         {
           key: 'total_veterans',

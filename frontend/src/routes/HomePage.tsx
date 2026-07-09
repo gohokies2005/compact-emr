@@ -150,30 +150,6 @@ export function HomePage() {
           {tiles.map((tile) => <TileCard key={tile.key} tile={tile} />)}
         </div>
       )}
-
-      <div className="mt-8">
-        <Card>
-          <h2 className="text-base font-semibold text-slate-900">RN workflow</h2>
-          <p className="mt-1 text-sm text-slate-500">The standard path for each new claim.</p>
-          <ol className="mt-4 space-y-2 text-sm">
-            <li>
-              <Link className="text-indigo-600 hover:underline" to="/veterans">
-                1. Open or create the veteran chart
-              </Link>
-            </li>
-            <li>
-              <Link className="text-indigo-600 hover:underline" to="/rn">
-                2. Complete RN file review
-              </Link>
-            </li>
-            <li>
-              <Link className="text-indigo-600 hover:underline" to="/cases">
-                3. Send the case to the drafter
-              </Link>
-            </li>
-          </ol>
-        </Card>
-      </div>
     </AppShell>
   );
 }

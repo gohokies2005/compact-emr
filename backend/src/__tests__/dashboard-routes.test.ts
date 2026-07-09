@@ -61,9 +61,8 @@ function makeDb(opts?: {
     { match: (w) => isStatusIn(w, ['rn_review', 'needs_rn_decision', 'correction_requested', 'correction_review']), value: 33 },
     // tile 4: pre-draft group (status.in [intake, viability])
     { match: (w) => isStatusIn(w, ['intake', 'viability']), value: 44 },
-    // tile 5: rn_review (single)
-    { match: (w) => w.status === 'rn_review', value: 5 },
-    // tile 6: physician_review (single)
+    // tile 6: physician_review (single) — standalone 'rn_review' tile removed 2026-07-09 (redundant)
+
     { match: (w) => w.status === 'physician_review', value: 6 },
     // tile 8: delinquent payments (delivered + payments.none paid + NOT archived).
     // archivedAt:null is required — an archived (given-up) case must NOT count toward
@@ -136,7 +135,13 @@ describe('GET /api/v1/reports/dashboard', () => {
     const body = res.body as { tiles: Array<{ key: string }>; timezone: string; pacificMidnightUtc: string };
 
     expect(body.timezone).toBe('America/Los_Angeles');
-    expect(body.tiles).toHaveLength(10);
+    expect(body.tiles).toHaveLength(9);
+    // 3×3 order lock (Ryan 2026-07-09): row1 intake funnel · row2 RN→physician→stuck · row3 SLA + total.
+    expect(body.tiles.map((t) => t.key)).toEqual([
+      'new_intakes_today', 'stage1_turnaround_7d', 'pre_draft',
+      'rn_queue', 'physician_review', 'stuck_drafts',
+      'delinquent_intakes', 'delinquent_payments', 'total_veterans',
+    ]);
 
     expect(tileByKey(body, 'new_intakes_today')).toMatchObject({
       count: 2, // 4 intakes today, but only the 2 stage-1 forms count (stage-2 + additional-docs excluded)
@@ -153,7 +158,6 @@ describe('GET /api/v1/reports/dashboard', () => {
       clickable: true,
       filter: { kind: 'cases', statuses: ['intake', 'viability'] },
     });
-    expect(tileByKey(body, 'rn_review')).toMatchObject({ count: 5, clickable: true, filter: { kind: 'cases', status: 'rn_review' } });
     expect(tileByKey(body, 'physician_review')).toMatchObject({ count: 6, clickable: true, filter: { kind: 'cases', status: 'physician_review' } });
     expect(tileByKey(body, 'delinquent_intakes')).toMatchObject({ count: 7, clickable: true, filter: { kind: 'intakes', status: 'pending', olderThanDays: 7 } });
     expect(tileByKey(body, 'delinquent_payments')).toMatchObject({ count: 8, clickable: true, filter: { kind: 'cases', status: 'delivered', unpaidLetter500OlderThanDays: 3 } });

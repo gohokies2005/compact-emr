@@ -21,6 +21,16 @@ vi.mock('../services/doctor-pack-queue.js', () => ({
   publishDoctorPackQueued: vi.fn(async () => ({})),
 }));
 
+// Mock the Bedrock caller behind the page-picker (doctor-pack-page-llm.ts) so the classification
+// test is deterministic in every environment. Without this, the test made a LIVE Opus call: it
+// passed only where AWS credentials exist and failed in CI ("Region is missing" → fail-open →
+// the regex fallback selects a WIDER range than the value-page assertion expects). The real
+// selectPagesLlm parse/range logic still runs — only the network call is mocked.
+const invokeAdvisory = vi.fn();
+vi.mock('../advisory/bedrockClient.js', () => ({
+  invokeAdvisory: (...args: unknown[]) => invokeAdvisory(...args),
+}));
+
 const READY_PACK = {
   id: 'pack-1',
   caseId: 'CASE-1',
@@ -163,6 +173,14 @@ describe('POST /cases/:id/doctor-pack/generate — content-aware classification 
   }
 
   it('classifies Misc_1.pdf as rating_decision from PAGE TEXT and page-selects (no whole-doc fallback)', async () => {
+    // The selection Opus makes on this fixture: keep ONLY the substantive decision page (2), drop
+    // the VA cover (1) and appeal boilerplate (3). Pinned so the assertion is env-independent.
+    invokeAdvisory.mockResolvedValue({
+      text: '{"keep":[2],"note":"decision reasons page"}',
+      usage: { input_tokens: 100, output_tokens: 20 },
+      stopReason: 'end_turn',
+      costUsd: 0.01,
+    });
     const { prisma, tx, created } = generatePrisma();
     await request(appFor(prisma)).post('/api/v1/cases/CASE-1/doctor-pack/generate').send({}).expect(201);
 

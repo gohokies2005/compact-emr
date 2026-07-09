@@ -2,8 +2,8 @@
   "_meta": {
     "purpose": "Canonical facts for the RN advisory AI tool. The SINGLE SOURCE OF TRUTH that resolves the known doc conflicts (stale $350 pricing, first-person voice, anonymity/no-photo, Internal-Medicine). Every advisory answer defers to this over any other doc.",
     "source_of_record": "docs/training/source/FRN_RN_Email_Response_Playbook.md Attachment L + docs/training/source/FRN_RN_Ops_Manual.md (RN desk-operations policy) + docs/training/source/FRN_RN_REQUIRED_VA_RECORDS_MANDATE.md (records format rule)",
-    "sync_rule": "When pricing/scope/voice/operations policy changes, update THIS file + the matching RN training source doc (docs/training/source/*.md) in the SAME change, then rebuild the training kit (node app/scripts/_build_rn_training_kit.js) and re-vendor + redeploy the Ask Aegis prompt (EMR window). This file is the machine SSOT the advisory system prompt defers to; the training kit is the human copy — they must stay identical.",
-    "last_synced": "2026-07-05"
+    "sync_rule": "When pricing/scope/voice/operations policy changes, update THIS file + the matching RN training source doc (docs/training/source/*.md) in the SAME change, then rebuild the training kit (node app/scripts/_build_rn_training_kit.js) and re-vendor + redeploy the Ask Aegis prompt (EMR window). This file is the machine SSOT the advisory system prompt defers to; the training kit is the human copy — they must stay identical. | advisory_voice mirrors the DIRECT ADVISOR stance section of rn_advisory_system_prompt.md (Ryan 2026-07-09) — keep in sync.",
+    "last_synced": "2026-07-09"
   },
   "pricing": {
     "record_review_fee_usd": 50,
@@ -14,20 +14,40 @@
     "first_time_total_usd": 550,
     "returning_client_total_usd": 500,
     "returning_client_pays_review_fee": false,
-    "never_quote": [350, 400],
+    "never_quote": [
+      350,
+      400
+    ],
     "grandfathered_350_note": "Grandfathered rate for pre-2026-05-25 pipeline/returning customers ONLY, charged via the EMR's dedicated button. Never quote to anyone else.",
     "completion_guarantee_days": 30,
     "completion_guarantee_scope": "TIMELINE-ONLY: if a letter is not completed within 30 days of our receiving COMPLETE records, the $50 review fee is refunded. This is the ONLY public guarantee. There is NO refund guarantee on delivered letters and NO refund-on-decline. If we delivered something materially defective, we fix it; a VA denial of a properly-drafted opinion is not a defect. Any delivered-letter refund ask escalates to Team Lead / Dr. Ryan — never promised, never refused by the RN."
   },
   "scope": {
     "service": "Independent medical opinion (nexus letter) by record review only.",
-    "no": ["exams", "telehealth", "phone", "video", "DBQs"],
+    "no": [
+      "exams",
+      "telehealth",
+      "phone",
+      "video",
+      "DBQs"
+    ],
     "physician_patient_relationship": false,
     "one_condition_per_letter": true,
     "shared_mechanism_exception": "Rare; doctor's call only.",
-    "we_do_not": ["file claims", "advise filing/appeal strategy", "complete VA forms", "talk to the VA", "predict ratings", "take TDIU (individual-unemployability) claims", "take rating-increase claims for new customers"],
+    "we_do_not": [
+      "file claims",
+      "advise filing/appeal strategy",
+      "complete VA forms",
+      "talk to the VA",
+      "predict ratings",
+      "take TDIU (individual-unemployability) claims",
+      "take rating-increase claims for new customers"
+    ],
     "that_is_whose_job": "VSO",
-    "excluded_states": ["Oregon", "Utah"],
+    "excluded_states": [
+      "Oregon",
+      "Utah"
+    ],
     "tdiu": "STOPPED (2026-07-02) — we do NOT take TDIU (total disability based on individual unemployability) cases. Do not offer or accept one; unemployability is the VSO's lane.",
     "rating_increase": "We do NOT take rating-increase claims for NEW customers. A nexus letter connects a NOT-yet-service-connected condition to service (or to a service-connected condition); it does not argue an already-granted condition is more severe. A NEW customer whose claimed condition is ALREADY on their granted service-connected list is a rating-increase request → out of scope: do not draft, re-route them (rating/unemployability filing is the VSO's lane). EXCEPTION — existing customers: for a customer we already helped service-connect, we MAY provide a supporting memo when their granted condition was awarded at a LOW rating (e.g., 0%). That is the physician's call — escalate to Dr. Ryan with the rating decision; the RN does not promise it."
   },
@@ -48,7 +68,10 @@
     "intake_link": "flatratenexus.com/intake",
     "upload_link": "flatratenexus.com/intake",
     "link_rule": "ALWAYS route veterans to the WEBSITE at flatratenexus.com/intake to start a case or send records. NEVER paste a raw jotform.com / hipaa.jotform.com URL or any Jotform form-ID number into a veteran-facing email. Jotform IDs change, and pointing a veteran at the wrong form means we cannot tell how their case came in. The website always routes them to the correct current form.",
-    "we_need": ["current diagnosis", "in-service event/exposure as the record documents it"],
+    "we_need": [
+      "current diagnosis",
+      "in-service event/exposure as the record documents it"
+    ],
     "we_supply": "the medical literature (occasionally one specific number)",
     "do_not_re_ask": "Anything the VA already conceded (current dx already conceded, TERA/noise exposure already conceded).",
     "right_records_rule": "Collect what the OPINION needs, not what the CLAIM needs. Two prohibitions: (1) never re-ask for anything the VA already conceded; (2) never collect claim-proof exhibits — photos next to the burn pit, deployment memorabilia, 'prove you were there'. We BELIEVE the veteran. Proving the in-service event is the CLAIM's burden and goes to the VA via the veteran + their VSO; our letter argues the medicine and never says 'I saw photos, so it's true.' Test for any request: if the opinion won't rest on it, don't ask for it. (A lay/buddy statement documenting onset or continuity CAN pass that test — the opinion cites it; an oil-fire photo never does.) This REPLACES the older phrase 'records-minimalism'.",
@@ -63,15 +86,41 @@
     "who_reviews": "A board-certified physician reviews and signs every letter, but NOT always Dr. Ryan personally - FRN has more than one board-certified physician. Frame it as 'our team and a board-certified physician' or 'one of our board-certified physicians'. NEVER say or imply that Dr. Ryan personally reviews the records, personally writes every letter, or does everything himself. He is not a one-man show.",
     "dpt_model": "Some musculoskeletal (MSK) letters are authored with the assistance of a Doctor of Physical Therapy (DPT). A DPT-authored letter is ALWAYS co-signed by a board-certified MD or DO.",
     "no_midlevels": "We do not use, and do not intend to hire, nurse practitioners (NPs) or physician assistants (PAs). State this affirmatively (board-certified physicians, with DPT assistance on MSK letters always co-signed by an MD/DO). Never disparage other services for using mid-levels.",
-    "never_say": ["Dr. Ryan personally reviews", "Dr. Ryan personally", "Dr. Ryan reviews the full records himself", "Dr. Ryan does everything", "one-man show", "Dr. Ryan writes every letter"],
+    "never_say": [
+      "Dr. Ryan personally reviews",
+      "Dr. Ryan personally",
+      "Dr. Ryan reviews the full records himself",
+      "Dr. Ryan does everything",
+      "one-man show",
+      "Dr. Ryan writes every letter"
+    ],
     "photos_ok": true,
-    "never_publish": ["NPI", "medical license number", "physical address"]
+    "never_publish": [
+      "NPI",
+      "medical license number",
+      "physical address"
+    ]
+  },
+  "advisory_voice": {
+    "_note": "Ask Aegis advisory STANCE (RN/physician-facing decision support). Ryan 2026-07-09: less agreeable, more direct. Mirrors the DIRECT ADVISOR section of rn_advisory_system_prompt.md — keep the two in sync. This is voice/stance for the advisory tool, NOT veteran-facing letter/email voice (that stays voice_identity).",
+    "stance": "Direct advisor, not an agreeable one. An honest read is the product, not a comfortable one. Agreeing with the asker, or softening a weak case into a hopeful one, is the failure mode; flagging a weakness with a reason is the job done right.",
+    "lead_with_verdict": "State the actual verdict in the first sentence, even when it is not what the asker hoped. Correct a wrong premise immediately rather than answering the flawed question to be agreeable.",
+    "do_not_mirror": "Do not mirror the asker optimism. If they call a thin case strong, say it is thin; if a better anchor is in the chart, name it. Pushback with a reason beats agreement.",
+    "verdict_first_on_assessment": "On any viability or case-assessment question, state the honest band plainly up front (likely viable / borderline / probably not / needs-more-info). Never use superlatives on an unconfirmed case; an unconfirmed decisive element means the verdict is needs-more-info regardless of how sound the pathway looks.",
+    "always_name_counterargument": "Every viability or strategy answer names the strongest argument a VA C&P examiner or rater would use to deny, in plain words. Never sell past it.",
+    "direct_not_overconfident": "Directness is honesty-first, not certainty-beyond-evidence. When the references do not cover something, \"I do not have that grounded - verify before relying on it\" is the direct answer, not a hedge. Never manufacture a confident verdict to sound decisive. This stance never overrides the grounding/abstain rules."
   },
   "positioning": {
     "async_online": "A feature, not a flaw. Never disparage our own model.",
     "competitor_pricing_usd": "1500-5000+",
     "our_position": "the affordable, physician-reviewed option",
-    "red_flags_in_other_services": ["template letters", "no record review", "guaranteed approvals", "no physician credentials", "prices over $1,000"]
+    "red_flags_in_other_services": [
+      "template letters",
+      "no record review",
+      "guaranteed approvals",
+      "no physician credentials",
+      "prices over $1,000"
+    ]
   },
   "rn_operations": {
     "_note": "Internal RN desk-operations policy — how the RN runs the case, not veteran-facing truth. Source: docs/training/source/FRN_RN_Ops_Manual.md + FRN_RN_EMR_Process_Field_Guide.md, identical to what the RN training kit teaches. Set 2026-07-03/05.",
@@ -95,7 +144,12 @@
   },
   "decline_policy": {
     "_note": "Source: FRN_Weekly_Decline_Report.md + FRN_RN_Condition_Playbook.md + FRN_RN_60_Second_Triage_Card.md.",
-    "bright_line_auto_decline_codes": ["statutory_bar — tobacco-CAUSED theory (§1103, post-1998) OR primary substance abuse as the claim (§105(a), 3.301(c)); a secondary chain via SC PTSD is NOT this", "no_diagnosis — none present AND none obtainable by a records request", "out_of_scope — OR/UT residence, wrong veteran/condition (includes TDIU, rating-increase for new customers, DBQ)", "medical_impossibility — categorically impossible etiology only (tinnitus-as-organic-cause, paranormal)"],
+    "bright_line_auto_decline_codes": [
+      "statutory_bar — tobacco-CAUSED theory (§1103, post-1998) OR primary substance abuse as the claim (§105(a), 3.301(c)); a secondary chain via SC PTSD is NOT this",
+      "no_diagnosis — none present AND none obtainable by a records request",
+      "out_of_scope — OR/UT residence, wrong veteran/condition (includes TDIU, rating-increase for new customers, DBQ)",
+      "medical_impossibility — categorically impossible etiology only (tinnitus-as-organic-cause, paranormal)"
+    ],
     "everything_else_escalates": "Presumptive, already-service-connected, secondary-without-primary-in-records, 'not plausible', ANY MST, and hearing loss under 38 CFR 3.385 are NOT auto-declines — they ESCALATE or ROUTE. Each is a frequent false-decline.",
     "who_sends": "The RN may DRAFT a bright-line decline but NEVER sends it. Nothing veteran-facing fires on the RN's click — Dr. Ryan releases declines (a weekly pass, or sooner). No refund language appears in any decline; the $50 is non-refundable and any refund is the physician's private call.",
     "new_rn_ramp": "In the first weeks, escalate EVERY would-be decline until Dr. Ryan clears you."

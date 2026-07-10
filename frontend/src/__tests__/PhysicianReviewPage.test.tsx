@@ -329,6 +329,44 @@ describe('PhysicianReviewPage', () => {
     expect(screen.getByRole('button', { name: 'Finalize for delivery (as-is, no re-render)' })).toBeInTheDocument();
   });
 
+  // Probative grade persistence in the header (Ryan 2026-07-10): the grade lived only inside the
+  // physician_review-gated letter panel, so it vanished the moment the doctor sent the letter back to the
+  // RN. It must persist in the header for history/tracking when the doctor reopens a post-review case.
+  it('probative grade PERSISTS in the header after the letter is sent back to the RN (history/tracking)', async () => {
+    // correction_requested = the RN-editable state a send-back lands in — not physician_review, so the
+    // ready panel (which carried the grade) is gone, but the grade must remain visible.
+    getCaseMock.mockResolvedValue({
+      data: { ...readyCase, status: 'correction_requested', runComplete: true },
+    });
+    renderReview();
+
+    // The full review panel is gone (not physician_review) …
+    expect(await screen.findByText('This case is not ready for physician review.')).toBeInTheDocument();
+    // … but the grade + probative score persist in the header.
+    expect(screen.getByText(/Grade: A-/)).toBeInTheDocument();
+    expect(screen.getByText(/Probative score: 8\/10/)).toBeInTheDocument();
+  });
+
+  it('does NOT double-show the grade — during physician_review the grade is in the panel only, not also the header', async () => {
+    getCaseMock.mockResolvedValue({ data: readyCase });
+    renderReview();
+
+    expect(await screen.findByText('Letter is ready for your review')).toBeInTheDocument();
+    // Exactly one grade chip on the page (the panel's) — the header does not add a second while reviewing.
+    expect(screen.getAllByText(/Grade: A-/).length).toBe(1);
+  });
+
+  it('a genuinely pre-draft case (never graded → grade & score null) shows NO header grade', async () => {
+    getCaseMock.mockResolvedValue({
+      data: { ...readyCase, status: 'records', runComplete: false, grade: null, probativeScore: null },
+    } as unknown as { data: CaseDetail });
+    renderReview();
+
+    expect(await screen.findByText('This case is not ready for physician review.')).toBeInTheDocument();
+    expect(screen.queryByText(/Grade:/)).toBeNull();
+    expect(screen.queryByText(/Probative score:/)).toBeNull();
+  });
+
   it('submitting the imported-letter sign-off routes to finalizeImportLetter (not approveLetter)', async () => {
     getCaseMock.mockResolvedValue({
       data: { ...readyCase, runComplete: false, shipRecommendation: undefined, draftJobs: [] },

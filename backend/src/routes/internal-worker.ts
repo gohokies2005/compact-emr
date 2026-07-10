@@ -1225,7 +1225,9 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       assignedRnId: r.assignedRnId, assignedPhysicianId: r.assignedPhysicianId,
     };
   };
-  const caseDelegate = () => (db as unknown as {
+  // Distinct name from the block-scoped `caseDelegate` inside sc-provenance-dryrun (different shape) — a
+  // maintainer shouldn't see two helpers named the same (architect QA nit, 2026-07-10).
+  const caseIndexDelegate = () => (db as unknown as {
     case: { findMany: (a: Record<string, unknown>) => Promise<CaseIndexRow[]> };
   }).case;
 
@@ -1233,7 +1235,7 @@ export function createInternalWorkerRouter(db: AppDb): Router {
   // Resolve a veteran name → matching cases. Every whitespace token must match firstName OR lastName
   // (so "Trent Conyers" and "Conyers" both work). Active-only by default.
   router.get('/internal/admin/case-search', asyncHandler(async (req: Request, res: Response) => {
-    const q = String(req.query.q ?? '').trim();
+    const q = String(req.query.q ?? '').trim().slice(0, 100); // cap length (defense-in-depth, architect QA)
     if (q.length < 2) throw new HttpError(400, 'bad_request', 'q must be at least 2 characters', { q });
     const includeArchived = String(req.query.includeArchived ?? '') === 'true';
     const tokens = q.split(/\s+/).filter(Boolean).slice(0, 5);
@@ -1244,13 +1246,16 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       ] },
     }));
     const where: Record<string, unknown> = { AND, ...(includeArchived ? {} : { archivedAt: null }) };
-    const rows = await caseDelegate().findMany({ where, orderBy: { updatedAt: 'desc' }, take: 25, select: CASE_INDEX_SELECT });
+    const rows = await caseIndexDelegate().findMany({ where, orderBy: { updatedAt: 'desc' }, take: 25, select: CASE_INDEX_SELECT });
     res.json({ data: { query: q, count: rows.length, cases: rows.map(formatIndexRow) } });
   }));
 
   // GET /internal/admin/cases?status=<status|ready_to_invoice>[&limit=N][&includeArchived=true]
   // List a status queue. `ready_to_invoice` aliases to `delivered` (the RN "signed off — ready to invoice"
-  // queue). Omit status for the most-recently-updated cases across all statuses. Active-only by default.
+  // queue). NOTE: returns ALL delivered/awaiting-payment cases; it does NOT exclude ones whose invoice
+  // email already went out — that "invoiced" sub-state lives in the Payment table, not Case.status, so it
+  // can't be filtered at the case-column level (architect QA, 2026-07-10). Omit status for the
+  // most-recently-updated cases across all statuses. Active-only by default.
   router.get('/internal/admin/cases', asyncHandler(async (req: Request, res: Response) => {
     const raw = String(req.query.status ?? '').trim();
     const aliased = raw === 'ready_to_invoice' || raw === 'ready-to-invoice' ? 'delivered' : raw;
@@ -1260,7 +1265,7 @@ export function createInternalWorkerRouter(db: AppDb): Router {
     const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '50'), 10) || 50, 1), 200);
     const includeArchived = String(req.query.includeArchived ?? '') === 'true';
     const where: Record<string, unknown> = { ...(aliased ? { status: aliased } : {}), ...(includeArchived ? {} : { archivedAt: null }) };
-    const rows = await caseDelegate().findMany({ where, orderBy: { updatedAt: 'desc' }, take: limit, select: CASE_INDEX_SELECT });
+    const rows = await caseIndexDelegate().findMany({ where, orderBy: { updatedAt: 'desc' }, take: limit, select: CASE_INDEX_SELECT });
     res.json({ data: { status: aliased || 'all', count: rows.length, cases: rows.map(formatIndexRow) } });
   }));
 

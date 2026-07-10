@@ -1132,10 +1132,14 @@ export function createInternalWorkerRouter(db: AppDb): Router {
           inServiceEvent: true, status: true, veteranId: true,
           // Framing provenance + assignment (msg-gate + DM2 orphan-steer diagnosis, 2026-07-09).
           framingStampSource: true, assignedRnId: true, assignedPhysicianId: true,
+          // Letter-version pointer — which revision the "current" (ready-to-invoice) letter resolves to
+          // (Conyers CLM-44742B4040 edit-reversion forensics, 2026-07-10).
+          currentVersion: true,
           // AI viability plan snapshot — the actual route-picker output (not exposed elsewhere).
           aiViabilityPlanJson: true, aiViabilityPlanHash: true, aiViabilityPlanStatus: true,
           aiViabilityPlanError: true, aiViabilityPlanComputedAt: true,
           veteran: { select: {
+            firstName: true, lastName: true,
             scConditions: { select: { condition: true, status: true, ratingPct: true, dcCode: true } },
             activeProblems: { select: { problem: true, icd10: true, notes: true } },
             activeMedications: { select: { drugName: true, indication: true, medStatus: true } },
@@ -1177,7 +1181,21 @@ export function createInternalWorkerRouter(db: AppDb): Router {
         readAt: m['readAt'], createdAt: m['createdAt'],
       }));
 
-      res.json({ data: { case: c, documents: docSummary, fileReadStatus, recentExtractRuns, caseMessages: caseMessageSummary, caseMessageCount: caseMessages.length } });
+      // Letter-version LINEAGE — every LetterRevision (who edited, when, from what parent). Paired with
+      // case.currentVersion + the sign-off's signedVersion, this reveals an edit that saved a new revision
+      // but left currentVersion pointing at an older one (the "my edit reverted" class). NO letter bytes
+      // here — just the metadata graph (Conyers CLM-44742B4040, 2026-07-10).
+      const letterRevisions = await safe((db as unknown as {
+        letterRevision: { findMany: (a: { where: { caseId: string }; select: Record<string, true>; orderBy: Record<string, 'asc'>; take: number }) => Promise<Array<Record<string, unknown>>> };
+      }).letterRevision.findMany({ where: { caseId }, select: { version: true, parentVersion: true, source: true, editedBy: true, editorRole: true, artifactTxtS3Key: true, createdAt: true }, orderBy: { version: 'asc' }, take: 100 }), [] as Array<Record<string, unknown>>);
+
+      // Sign-offs — the version each attestation BOUND (signedVersion) + its byte-hash. If a signed version
+      // differs from currentVersion, that's the delivery-gate boundary (a post-sign edit).
+      const signOffs = await safe((db as unknown as {
+        signOff: { findMany: (a: { where: { caseId: string }; select: Record<string, true>; orderBy: Record<string, 'asc'>; take: number }) => Promise<Array<Record<string, unknown>>> };
+      }).signOff.findMany({ where: { caseId }, select: { version: true, signedVersion: true, signedContentSha256: true, signedAt: true, physicianId: true }, orderBy: { signedAt: 'asc' }, take: 20 }), [] as Array<Record<string, unknown>>);
+
+      res.json({ data: { case: c, documents: docSummary, fileReadStatus, recentExtractRuns, caseMessages: caseMessageSummary, caseMessageCount: caseMessages.length, letterRevisions, signOffs } });
     }),
   );
 

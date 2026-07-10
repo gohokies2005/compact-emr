@@ -1130,6 +1130,11 @@ export function createInternalWorkerRouter(db: AppDb): Router {
           id: true, claimedCondition: true, claimedConditions: true, claimType: true,
           framingChoice: true, upstreamScCondition: true, veteranStatement: true,
           inServiceEvent: true, status: true, veteranId: true,
+          // Framing provenance + assignment (msg-gate + DM2 orphan-steer diagnosis, 2026-07-09).
+          framingStampSource: true, assignedRnId: true, assignedPhysicianId: true,
+          // AI viability plan snapshot — the actual route-picker output (not exposed elsewhere).
+          aiViabilityPlanJson: true, aiViabilityPlanHash: true, aiViabilityPlanStatus: true,
+          aiViabilityPlanError: true, aiViabilityPlanComputedAt: true,
           veteran: { select: {
             scConditions: { select: { condition: true, status: true, ratingPct: true, dcCode: true } },
             activeProblems: { select: { problem: true, icd10: true, notes: true } },
@@ -1160,7 +1165,19 @@ export function createInternalWorkerRouter(db: AppDb): Router {
         chartExtractionRun: { findMany: (a: { where: { caseId: string }; select: Record<string, true>; orderBy: Record<string, 'desc'>; take: number }) => Promise<Array<Record<string, unknown>>> };
       }).chartExtractionRun.findMany({ where: { caseId }, select: { id: true, status: true, errorMessage: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: 3 }), [] as Array<Record<string, unknown>>);
 
-      res.json({ data: { case: c, documents: docSummary, fileReadStatus, recentExtractRuns } });
+      // Flat 2-party handoff notes (case_messages) — the "send a note with the file" writes here.
+      // Diagnoses whether a note persisted at all vs. was dropped by the sender-participant gate.
+      const caseMessages = await safe((db as unknown as {
+        caseMessage: { findMany: (a: { where: { caseId: string }; select: Record<string, true>; orderBy: Record<string, 'asc'>; take: number }) => Promise<Array<Record<string, unknown>>> };
+      }).caseMessage.findMany({ where: { caseId }, select: { id: true, senderRole: true, senderSub: true, body: true, readAt: true, createdAt: true }, orderBy: { createdAt: 'asc' }, take: 50 }), [] as Array<Record<string, unknown>>);
+      const caseMessageSummary = caseMessages.map((m) => ({
+        id: m['id'], senderRole: m['senderRole'], senderSub: m['senderSub'],
+        bodyChars: typeof m['body'] === 'string' ? (m['body'] as string).length : 0,
+        bodyPreview: typeof m['body'] === 'string' ? (m['body'] as string).slice(0, 120) : null,
+        readAt: m['readAt'], createdAt: m['createdAt'],
+      }));
+
+      res.json({ data: { case: c, documents: docSummary, fileReadStatus, recentExtractRuns, caseMessages: caseMessageSummary, caseMessageCount: caseMessages.length } });
     }),
   );
 

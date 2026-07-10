@@ -49,6 +49,19 @@ beforeEach(() => {
 });
 
 describe('SignOffPopup', () => {
+  // Ryan 2026-07-10: a tall "what changed" diff pushed the vertically-centered modal past both screen
+  // edges, making the Approve/sign buttons unreachable. The modal must be viewport-capped with a
+  // scrollable body + a pinned footer so the submit button is always present + reachable.
+  it('is viewport-capped with a scrollable body so the sign buttons stay reachable when content is tall', () => {
+    const { container } = renderPopup();
+    // The modal box is height-capped to the viewport ...
+    expect(container.querySelector('[class*="max-h-"]')).not.toBeNull();
+    // ... has a scroll region for the body ...
+    expect(container.querySelector('[class*="overflow-y-auto"]')).not.toBeNull();
+    // ... and the submit button is always rendered (in the pinned footer, not scrolled away).
+    expect(screen.getByRole('button', { name: /submit sign-off/i })).toBeInTheDocument();
+  });
+
   it('renders all five sign-off questions', () => {
     renderPopup();
     expect(screen.getByText('I reviewed all uploaded records and the chart.')).toBeInTheDocument();

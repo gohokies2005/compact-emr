@@ -165,8 +165,11 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff, onSubmitAnswe
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="sign-off-title">
       <div className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm" />
-      <div ref={dialogRef} className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-lg bg-white p-6 shadow-2xl">
-        <div className="flex items-start justify-between gap-4">
+      {/* Capped to the viewport (max-h-[90vh]) as a flex column: header + footer stay put, the BODY
+          scrolls. Without this, a tall "what changed" diff pushed the whole vertically-centered modal past
+          both screen edges so the Approve/sign buttons at the bottom were unreachable (Ryan 2026-07-10). */}
+      <div ref={dialogRef} className="fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-full max-w-lg -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg bg-white shadow-2xl">
+        <div className="flex shrink-0 items-start justify-between gap-4 px-6 pt-6 pb-2">
           <div>
             <h2 id="sign-off-title" className="text-lg font-semibold text-slate-900">{title ?? 'Physician sign-off'}</h2>
             <p className="mt-1 text-sm text-slate-500">Confirm each item before the letter is finalized.</p>
@@ -174,7 +177,7 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff, onSubmitAnswe
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>Close</Button>
         </div>
 
-        <div className="mt-4 space-y-3">
+        <div className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
           {/* "What changed since you last signed" (Ryan 2026-07-03): when re-signing an RN-corrected letter,
               the physician sees the highlighted diff vs the last-signed version. Renders nothing on a first
               signature or when nothing changed. */}
@@ -236,7 +239,7 @@ export function SignOffPopup({ caseId, open, onClose, onSignedOff, onSubmitAnswe
           ) : null}
         </div>
 
-        <div className="mt-6 flex justify-end gap-2">
+        <div className="flex shrink-0 justify-end gap-2 border-t border-slate-200 px-6 py-4">
           <Button type="button" variant="secondary" onClick={onClose} disabled={signOffMutation.isPending}>Cancel</Button>
           {blockingFiles !== null ? (
             <Button type="button" variant="primary" loading={signOffMutation.isPending} disabled={!allAffirmative || !overrideReady || signOffMutation.isPending} onClick={() => signOffMutation.mutate({ reason: overrideReason.trim() })}>Sign off anyway</Button>

@@ -1,56 +1,43 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { Button } from './ui/Button';
-import { createCaseMessage } from '../api/case-messages';
 import { describeApiError } from '../api/client';
 
 interface SendToDoctorModalProps {
   readonly caseId: string;
   readonly open: boolean;
   readonly onClose: () => void;
-  // Performs the actual transition into physician_review (rn_review -> physician_review, or the
-  // halted-letter forward). The modal handles the OPTIONAL handoff message first, then calls this.
-  readonly onConfirm: () => Promise<void>;
+  // Performs the transition into physician_review (rn_review -> physician_review, or the halted-letter
+  // forward) AND persists the optional handoff note atomically with it. The note text is passed through
+  // so the parent's /status call carries `handoffMessage` — written server-side under the transition's
+  // own auth, so it can never be silently dropped (was: a separate gated POST that 403'd off-assignment).
+  readonly onConfirm: (handoffMessage: string) => Promise<void>;
 }
 
 // "Send to doctor for review" prompt (Ryan 2026-06-24 + the 2026-06-21 handoff-message spec): a
-// message box ALWAYS comes up on send, but it is OPTIONAL — type a note and it posts to the case's
-// RN↔physician thread (so the doctor sees it), or send with the box empty and it behaves exactly as
-// the old bare confirm did. The transition (move to the doctor) runs FIRST and is the load-bearing
-// action; the note is strictly best-effort, so a note problem can NEVER block the send (no-block rule).
-export function SendToDoctorModal({ caseId, open, onClose, onConfirm }: SendToDoctorModalProps) {
+// message box ALWAYS comes up on send, but it is OPTIONAL — type a note and it rides WITH the transition
+// onto the case's RN↔physician thread (so the doctor sees it), or send with the box empty and it behaves
+// exactly as the old bare confirm did. The note is written server-side in the SAME transaction as the
+// move under the SAME auth (Ryan 2026-07-09 fix): if the send succeeds, the note is saved — no separate
+// droppable POST. The server truncates an over-long note rather than rejecting, so it can never block the
+// send (no-block rule). If the transition fails, nothing moved and nothing was saved — the RN retries.
+export function SendToDoctorModal({ open, onClose, onConfirm }: SendToDoctorModalProps) {
   const [message, setMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const mutation = useMutation({
-    mutationFn: async (): Promise<{ noteError: string | null }> => {
-      // Move the case FIRST, then attach the optional note best-effort. If the note POST fails — the
-      // sender isn't this case's assigned RN (the message thread is gated to the assigned RN), the
-      // body exceeds the 4000-char server cap, or a transient error — the case is already with the
-      // doctor; we surface a notice to add it on the Messages tab. A note failure must not strand the
-      // send. (QA HIGH #1 + HIGH #2, 2026-06-24.)
-      await onConfirm();
-      const body = message.trim();
-      if (!body) return { noteError: null };
-      try {
-        await createCaseMessage(caseId, { body });
-        return { noteError: null };
-      } catch (e: unknown) {
-        return { noteError: describeApiError(e) };
-      }
+    mutationFn: async (): Promise<void> => {
+      // ONE load-bearing call: the transition carries the note. Atomic — either both land or the send
+      // fails cleanly (nothing partial). No best-effort second write that could silently lose the note.
+      await onConfirm(message.trim());
     },
-    onSuccess: (res) => {
+    onSuccess: () => {
       setMessage('');
       setErrorMessage(null);
       onClose();
-      if (res.noteError) {
-        // The case already moved — the precise technical reason (often a 403 "not the assigned RN")
-        // adds anxiety, not action, so keep it plain (codebase's no-code-speak-to-RNs principle; QA UX #1).
-        window.alert("The case was sent to the doctor. Your note wasn't attached automatically — you can post it on the case's Messages tab.");
-      }
     },
     onError: (e: unknown) => {
-      // Only the transition itself failing reaches here (the note is caught above) — the case did NOT move.
+      // The transition failed — the case did NOT move and the note was NOT saved. Surface + let them retry.
       setErrorMessage(`Could not send to the doctor — ${describeApiError(e)}. The case was not moved; please retry.`);
     },
   });

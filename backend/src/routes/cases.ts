@@ -845,6 +845,19 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
           select: CASE_LITE_SELECT,
         });
 
+        // HANDOFF NOTE rides WITH the send-to-doctor transition (Ryan 2026-07-09). Previously the note
+        // was a SEPARATE best-effort POST /cases/:id/messages hitting the strict participant gate (admin
+        // OR the case's assigned physician/RN) — so a note sent from any other account 403'd and was
+        // silently DROPPED while the case still moved. Writing it HERE, inside the same transaction, means
+        // it is persisted under the SAME auth that just authorized the move (roleGuardForStatusTransition):
+        // if you can send the case, your note goes with it. Only on a forward INTO physician_review; the
+        // parser truncates (never rejects) so it can never BLOCK the send (no-block rule).
+        if (parsed.to === 'physician_review' && parsed.handoffMessage) {
+          await tx.caseMessage.create({
+            data: { caseId: id, senderSub: user.sub, senderRole: user.role, body: parsed.handoffMessage },
+          });
+        }
+
         // Materialize a LetterRevision for the recovered letter (idempotent — the DESC-walk may land on a
         // DraftJob row or an S3-only artifact that has no LetterRevision yet). editedBy = the forwarding
         // human; source='drafter_run' (it IS a drafter-produced letter). Skipped when a revision already

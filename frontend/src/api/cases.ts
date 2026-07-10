@@ -165,6 +165,9 @@ export interface TransitionInput {
   readonly to: CaseStatus;
   readonly version: number;
   readonly transitionReason?: string;
+  // OPTIONAL handoff note that rides WITH a forward into physician_review (the "send to doctor" note box).
+  // Written server-side inside the transition txn under the same auth — never a separate droppable POST.
+  readonly handoffMessage?: string;
 }
 
 export async function getCase(id: string): Promise<{ data: CaseDetail }> {

@@ -480,6 +480,53 @@ describe('cases routes', () => {
       });
     });
 
+    // Handoff note rides WITH the send-to-doctor transition (Ryan 2026-07-09 lost-notes fix): written
+    // server-side in the transition txn under the transition's auth, NOT a separate droppable POST.
+    it('rn_review -> physician_review WITH handoffMessage writes the note to case_messages (trimmed)', async () => {
+      const { db, spies } = makeDb(baseCase({ status: 'rn_review', version: 7, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'rn_review', to: 'physician_review', version: 7, handoffMessage: '  please double-check §VII  ' });
+
+      expect(res.status).toBe(200);
+      expect(spies.caseMessageCreate).toHaveBeenCalledTimes(1);
+      expect(spies.caseMessageCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ caseId: 'CASE-1', body: 'please double-check §VII', senderSub: 'USER-1' }) }),
+      );
+    });
+
+    it('an over-long handoffMessage is TRUNCATED to 4000 chars (not rejected) so it can never block the send', async () => {
+      const { db, spies } = makeDb(baseCase({ status: 'rn_review', version: 7, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'rn_review', to: 'physician_review', version: 7, handoffMessage: 'x'.repeat(5000) });
+
+      expect(res.status).toBe(200);
+      expect(spies.caseMessageCreate).toHaveBeenCalledTimes(1);
+      const body = (spies.caseMessageCreate.mock.calls[0] as unknown as Array<{ data: { body: string } }>)[0].data.body;
+      expect(body.length).toBe(4000);
+    });
+
+    it('rn_review -> physician_review with NO handoffMessage writes NO case_message (bare send unchanged)', async () => {
+      const { db, spies } = makeDb(baseCase({ status: 'rn_review', version: 7, assignedPhysicianId: 'PHYS-001' }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'rn_review', to: 'physician_review', version: 7 });
+
+      expect(res.status).toBe(200);
+      expect(spies.caseMessageCreate).not.toHaveBeenCalled();
+    });
+
+    it('a handoffMessage on a transition that is NOT into physician_review is ignored (scoped write)', async () => {
+      const { db, spies } = makeDb(baseCase({ status: 'intake', version: 1 }));
+      const res = await request(appFor(db))
+        .post('/api/v1/cases/CASE-1/status')
+        .send({ from: 'intake', to: 'records', version: 1, handoffMessage: 'not a handoff — ignored' });
+
+      expect(res.status).toBe(200);
+      expect(spies.caseMessageCreate).not.toHaveBeenCalled();
+    });
+
     it('drafting -> physician_review (the legacy/manual landing edge) ALSO fires the auto-gen', async () => {
       // assignedPhysicianId required: the no-unassigned-doctor guard now covers EVERY edge into
       // physician_review (2026-06-23), drafting included — a "send to doctor" with no doctor 409s.

@@ -62,6 +62,10 @@ export interface ParsedStatusTransition {
   to: CaseStatus;
   version: number;
   transitionReason?: string;
+  // OPTIONAL handoff note that rides WITH a forward into physician_review (the "send to doctor" note box).
+  // Distinct from transitionReason (operational audit metadata, PHI-forbidden): this is a clinical RN↔MD
+  // note persisted to case_messages, so PHI IS allowed and it is NOT run through PHI_PATTERN_REJECTIONS.
+  handoffMessage?: string;
 }
 
 export interface ParsedAssignPhysician {
@@ -258,11 +262,21 @@ export function parseStatusTransition(body: unknown): ParsedStatusTransition {
     }
   }
 
+  // Handoff note: TRUNCATE (never reject) so an over-long note can NEVER block the send (no-block rule,
+  // Ryan 2026-06-22). The transition is the load-bearing action; the note rides along atomically.
+  let handoffMessage: string | undefined;
+  if (body.handoffMessage !== undefined && body.handoffMessage !== null) {
+    if (typeof body.handoffMessage !== 'string') badRequest('handoffMessage must be a string', { field: 'handoffMessage' });
+    const trimmed = body.handoffMessage.trim().slice(0, 4000);
+    if (trimmed.length > 0) handoffMessage = trimmed;
+  }
+
   return {
     from: body.from,
     to: body.to,
     version,
     ...(transitionReason !== undefined && { transitionReason }),
+    ...(handoffMessage !== undefined && { handoffMessage }),
   };
 }
 

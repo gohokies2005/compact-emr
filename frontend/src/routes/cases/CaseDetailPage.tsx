@@ -268,12 +268,20 @@ export function CaseDetailPage() {
   // physician_review) — the corrected letter's forward door.
   const [sendToDoctorOpen, setSendToDoctorOpen] = useState(false);
   const sendToDoctor = useMutation({
-    mutationFn: () => {
+    mutationFn: (handoffMessage: string) => {
       const cur = caseQuery.data?.data;
       if (!cur) throw new Error('Case not loaded');
-      return transitionCaseStatus(caseId, { from: cur.status, to: 'physician_review', version: cur.version });
+      // The optional handoff note rides WITH the transition (server writes it atomically under the
+      // transition's own auth) — never a separate droppable POST (Ryan 2026-07-09 lost-notes fix).
+      return transitionCaseStatus(caseId, {
+        from: cur.status,
+        to: 'physician_review',
+        version: cur.version,
+        ...(handoffMessage ? { handoffMessage } : {}),
+      });
     },
-    onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] })]); },
+    // Invalidate case-messages too so a just-attached handoff note appears immediately on the Messages/Action tabs.
+    onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['case', caseId, 'draft-jobs'] }), qc.invalidateQueries({ queryKey: ['case-messages', caseId] })]); },
     // Errors are surfaced by SendToDoctorModal (which awaits mutateAsync) — no window.alert here, or
     // the user would get a double error (modal banner + alert).
   });
@@ -817,10 +825,9 @@ export function CaseDetailPage() {
                   {/* Send-to-doctor handoff: ALWAYS offers an optional message to the reviewing
                       physician (Ryan 2026-06-24). Empty message = behaves like the old bare confirm. */}
                   <SendToDoctorModal
-                    caseId={caseId}
                     open={sendToDoctorOpen}
                     onClose={() => setSendToDoctorOpen(false)}
-                    onConfirm={async () => { await sendToDoctor.mutateAsync(); }}
+                    onConfirm={async (handoffMessage) => { await sendToDoctor.mutateAsync(handoffMessage); }}
                   />
 
                   {/* Post-draft sanity impression — the auto-fired Opus gut-check on the FINISHED letter,

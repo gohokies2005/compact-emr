@@ -339,3 +339,46 @@ describe('OpsHeldPanel — Fix 5 (substantive hints → physician considerations
     expect(screen.getByRole('button', { name: /send to doctor for review/i })).toBeEnabled();
   });
 });
+
+// REGRESSION GUARD (Ryan 2026-07-09 lost-notes fix + architect QA CRITICAL): this park-forward call site
+// is the SECOND SendToDoctorModal render (the first is CaseDetailPage). It is the path MOST likely to
+// carry a load-bearing RN→MD note ("I hand-fixed §VII…"). The note must ride WITH the transition — a
+// zero-arg onConfirm here silently drops it, and TS's fewer-param rule won't flag it. These tests assert
+// the arg is threaded, so a future re-break is caught.
+describe('OpsHeldPanel — send-to-doctor handoff note rides WITH the transition', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    postDraftMock.mockResolvedValue({ data: { job: {}, publish: {} } });
+    getLetterMock.mockResolvedValue({ data: { txt: LETTER_TXT } } as never);
+    transitionCaseStatusMock.mockResolvedValue({
+      data: {
+        id: 'CASE-7', veteranId: 'VET-2', claimedCondition: 'Back condition', claimType: 'supplemental',
+        status: 'physician_review', version: 4, currentVersion: 1, assignedPhysicianId: null, assignedRnId: null,
+        refundEligible: false, createdAt: heldCase.createdAt, updatedAt: heldCase.updatedAt,
+      },
+    });
+  });
+
+  it('threads the typed handoffMessage INTO the /status payload (the note is NOT a separate droppable POST)', async () => {
+    renderFix(fixCase(), hintsJob());
+    fireEvent.click(screen.getByRole('button', { name: /send to doctor for review/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Example:/), { target: { value: '  I hand-fixed §VII — flag the 1996 weight note  ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send with message' }));
+
+    await waitFor(() => expect(transitionCaseStatusMock).toHaveBeenCalledWith('CASE-7', expect.objectContaining({
+      from: 'needs_rn_decision',
+      to: 'physician_review',
+      handoffMessage: 'I hand-fixed §VII — flag the 1996 weight note',
+    })));
+  });
+
+  it('empty note: the transition fires WITHOUT a handoffMessage key (bare forward unchanged)', async () => {
+    renderFix(fixCase(), hintsJob());
+    fireEvent.click(screen.getByRole('button', { name: /send to doctor for review/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send to doctor' }));
+
+    await waitFor(() => expect(transitionCaseStatusMock).toHaveBeenCalledTimes(1));
+    const payload = transitionCaseStatusMock.mock.calls[0]?.[1];
+    expect(payload).not.toHaveProperty('handoffMessage');
+  });
+});

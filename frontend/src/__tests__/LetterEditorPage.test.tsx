@@ -114,12 +114,26 @@ describe('LetterEditorPage', () => {
     expect(screen.queryByText(/new em dashes/)).not.toBeInTheDocument();
   });
 
-  it('reloads on a stale save (ConflictError)', async () => {
+  // Ryan 2026-07-10 (Conyers CLM-44742B4040 — a physician edit was silently lost): a stale-version 409
+  // must NOT silently reload + clobber the typed text. It must PRESERVE the edit and surface a blocking
+  // conflict choice (save-my-changes-onto-latest / discard). The old "Reloaded the latest version" clobber
+  // is gone.
+  it('preserves the edit + surfaces a save-conflict (no silent reload/clobber) on a stale save', async () => {
     saveLetterMock.mockRejectedValueOnce(new ConflictError());
     renderPage();
     await clickSave();
-    expect(await screen.findByText('This letter was changed elsewhere. Reloaded the latest version.', undefined, FIND)).toBeInTheDocument();
-    expect(getLetterMock).toHaveBeenCalledTimes(2);
+
+    // Blocking conflict modal appears; the physician's text was NOT reloaded over.
+    expect(await screen.findByText('This letter changed while you were editing', undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByText(/Your changes are still in the editor/)).toBeInTheDocument();
+    // The old silent-clobber message is gone.
+    expect(screen.queryByText('This letter was changed elsewhere. Reloaded the latest version.')).toBeNull();
+
+    // "Save my changes" re-saves the preserved text onto the LATEST base_version (4 here → creates v5).
+    fireEvent.click(screen.getByRole('button', { name: /Save my changes as version 5/ }));
+    await waitFor(() => expect(saveLetterMock).toHaveBeenLastCalledWith('CASE-1', expect.objectContaining({ base_version: 4 })));
+    // On success the conflict clears.
+    await waitFor(() => expect(screen.queryByText('This letter changed while you were editing')).toBeNull());
   });
 
   it('shows "not available" on a 503 save', async () => {

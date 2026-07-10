@@ -49,7 +49,6 @@ import { allowedNextStatusesForRole, CASE_STATUS_LABELS } from '../../lib/caseSt
 import { NOTES_TAB, SHARED_TABS, type SharedTabId } from '../../lib/caseTabs';
 import { resolveCaseTopPanels, CHART_WORKING_STATUSES, deriveLatestHaltSignals, type DraftJobHaltShape } from '../../lib/caseTopPanels';
 import { resolveViewableLetterJob } from '../../lib/viewableLetter';
-import { StrategyPreviewCard } from '../../components/StrategyPreviewCard';
 // CaseViabilityCard mount REMOVED from this page (Ryan 2026-06-20, item #64): the static M/E
 // (mechanism/evidence) "Anchor viability" ratings card is erased from the case UI entirely.
 // RecommendedPlanCard mount REMOVED from this page (Ryan 2026-06-29): its deterministic verdict chip
@@ -760,19 +759,13 @@ export function CaseDetailPage() {
                       (Ryan 2026-06-20, item #64). The deterministic RecommendedPlanCard verdict chip was
                       REMOVED here too (Ryan 2026-06-29) — it was a second pre-draft verdict that could
                       contradict the SOAP card; the SOAP/viability card is the single pre-draft signal.
-                      StrategyPreviewCard remains as a QUIET argument/theory summary (no ✓/⚠ verdict). */}
-                  {p.canSendFirstDraft ? (
-                    <details key="full-analysis" className="mb-4 rounded-lg border border-slate-200 bg-white">
-                      <summary className="cursor-pointer select-none px-4 py-2.5 text-sm font-medium text-slate-600 hover:text-slate-800">
-                        View full analysis
-                      </summary>
-                      <div className="space-y-4 px-2 pb-3">
-                        <StrategyPreviewCard key="strategy" caseId={caseId} chartReady={chartReadiness.ready} completeness={chartReadiness.completeness} />
-                        {/* RecommendedPlanCard (deterministic verdict chip) retired from this page 2026-06-29 — redundant/contradictory second verdict; SOAP card owns the pre-draft go/no-go. */}
-                        {/* PreDraftSanityImpression (the "AI Sanity Check" card) retired 2026-06-25 (Ryan #68) — redundant with the SOAP overview's holistic read; removed to stop the misleading note + the per-mount Opus call. */}
-                      </div>
-                    </details>
-                  ) : null}
+                      the pre-draft "default pick" display (StrategyPreviewCard's "Anticipated: secondary to
+                      X") was REMOVED 2026-07-10 (Ryan): it surfaced a stale/orphan derived anchor (e.g. Jay
+                      Legallee "OSA secondary to ankle") that misrepresented the picker — which actually leads
+                      the correct theory. This is DISPLAY-ONLY: the route-picker plan still computes + feeds
+                      the drafter untouched (the drafter reads it server-side, not this card). The SOAP note
+                      remains the pre-draft clinical read. RecommendedPlanCard (2026-06-29) + PreDraftSanity
+                      (2026-06-25) were already retired, so the whole "View full analysis" block is gone. */}
 
                   {/* 5. Assignments — moved INTO the story (was below the region). Staff only; floats in
                       review/halt states too (a physician must be assigned before send-to-doctor). */}

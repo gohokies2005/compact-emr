@@ -81,30 +81,30 @@ function renderPage() {
 }
 
 describe('CaseDetailPage — pre-draft Action-tab story order (locked)', () => {
-  it('renders the Action-tab order (2026-06-29): Chart extraction → [collapsed: Background] → Assignments → Send to Drafter', async () => {
+  it('renders the Action-tab order (2026-07-10): Chart extraction → Assignments → Send to Drafter', async () => {
     renderPage();
-    // RESTRUCTURE (2026-06-20): the clinical SOAP note moved to the new Summary tab; the static M/E
-    // "Anchor viability" card (CaseViabilityCard) was ERASED from the page (item #64). The Action tab is
-    // the operational story: Chart extraction stays visible; the dense analysis panel (Background &
-    // argument) is nested in a collapsed "View full analysis" <details> — it still MOUNTS (so it's in the
-    // DOM), just below extraction.
-    // DE-NOISE (2026-06-29): the deterministic "Recommended plan" verdict card (RecommendedPlanCard) was
-    // REMOVED from the page — it was a second pre-draft verdict that could contradict the SOAP card. The
-    // SOAP/viability card is now the single pre-draft signal; Background & argument is a quiet summary.
+    // RESTRUCTURE (2026-06-20): the clinical SOAP note moved to the Summary tab; the static M/E "Anchor
+    // viability" card (CaseViabilityCard) was ERASED (item #64). DE-NOISE (2026-06-29): the deterministic
+    // "Recommended plan" verdict card was removed. REMOVED (2026-07-10, Ryan): the pre-draft "Background &
+    // argument" / "default pick" card (StrategyPreviewCard, incl. the whole "View full analysis" details)
+    // — it surfaced a stale/orphan derived anchor that misrepresented the picker (Jay Legallee "secondary
+    // to ankle"). DISPLAY-ONLY: the route-picker plan still feeds the drafter server-side. The SOAP note is
+    // now the sole pre-draft signal.
     const extraction = await screen.findByRole('heading', { name: 'Chart extraction' });
-    const background = screen.getByRole('heading', { name: 'Background & argument' });
     const assignments = screen.getByRole('heading', { name: 'Assignments' });
     const send = screen.getByRole('heading', { name: 'Send to Drafter' });
     // The erased M/E card must NOT render anywhere on the page.
     expect(screen.queryByRole('heading', { name: 'Anchor viability' })).not.toBeInTheDocument();
     // The retired deterministic "Recommended plan" verdict card must NOT render (2026-06-29).
     expect(screen.queryByRole('heading', { name: 'Recommended plan' })).not.toBeInTheDocument();
-    // The retired pre-draft "AI Sanity Check" card must NOT render (Ryan #68, 2026-06-25) even though the
-    // sanity-impression API is mocked to return a non-null impression — the card was unmounted.
+    // The retired pre-draft "AI Sanity Check" card must NOT render (Ryan #68, 2026-06-25).
     expect(screen.queryByRole('heading', { name: 'AI Sanity Check' })).not.toBeInTheDocument();
+    // The removed pre-draft "default pick" card must NOT render (Ryan 2026-07-10).
+    expect(screen.queryByRole('heading', { name: 'Background & argument' })).not.toBeInTheDocument();
+    expect(screen.queryByText('View full analysis')).not.toBeInTheDocument();
     expect(screen.queryByText('should not render')).not.toBeInTheDocument();
 
-    const ordered = [extraction, background, assignments, send];
+    const ordered = [extraction, assignments, send];
     // each heading must precede the next in document order
     ordered.reduce((prev, cur) => {
       expect(prev.compareDocumentPosition(cur) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

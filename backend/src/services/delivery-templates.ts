@@ -23,12 +23,12 @@ import { formatConditionLabel } from './condition-label.js';
 export const FRN_FOOTER = [
   '',
   'Thanks,',
-  'Dr. Ryan K.',
+  'The Flat Rate Nexus Team',
   '',
   'Flat Rate Nexus',
   'flatratenexus.com',
   '',
-  'All correspondence should be directed to info@flatratenexus.com.',
+  'New inquiries and follow-up emails may be sent to info@flatratenexus.com, or to your assigned nurse liaison if one has been designated for your case.',
   '',
   'This communication is for general educational purposes and is not legal advice or VA claims representation. No physician-patient relationship is established. For specific claims-strategy or filing questions, a VA-accredited VSO or attorney can advise at no cost.',
 ].join('\n');

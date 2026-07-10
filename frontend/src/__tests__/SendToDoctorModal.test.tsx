@@ -16,14 +16,14 @@ function wrap(node: ReactNode) {
 
 describe('SendToDoctorModal', () => {
   it('does not render when closed', () => {
-    wrap(<SendToDoctorModal caseId="C1" open={false} onClose={() => {}} onConfirm={vi.fn()} />);
+    wrap(<SendToDoctorModal open={false} onClose={() => {}} onConfirm={vi.fn()} />);
     expect(screen.queryByText('Send to doctor for review')).toBeNull();
   });
 
   it('empty message: transitions with an EMPTY handoff note (behaves like the old bare confirm)', async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
-    wrap(<SendToDoctorModal caseId="C1" open onClose={onClose} onConfirm={onConfirm} />);
+    wrap(<SendToDoctorModal open onClose={onClose} onConfirm={onConfirm} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Send to doctor' }));
 
@@ -35,7 +35,7 @@ describe('SendToDoctorModal', () => {
 
   it('with a message: the trimmed note rides WITH the transition (one atomic call, no separate POST)', async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
-    wrap(<SendToDoctorModal caseId="C1" open onClose={vi.fn()} onConfirm={onConfirm} />);
+    wrap(<SendToDoctorModal open onClose={vi.fn()} onConfirm={onConfirm} />);
 
     fireEvent.change(screen.getByPlaceholderText(/Example:/), { target: { value: '  please double-check §VII  ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send with message' }));
@@ -52,7 +52,7 @@ describe('SendToDoctorModal', () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
-    wrap(<SendToDoctorModal caseId="C1" open onClose={onClose} onConfirm={onConfirm} />);
+    wrap(<SendToDoctorModal open onClose={onClose} onConfirm={onConfirm} />);
 
     fireEvent.change(screen.getByPlaceholderText(/Example:/), { target: { value: 'a note' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send with message' }));
@@ -68,7 +68,7 @@ describe('SendToDoctorModal', () => {
   it('transition failure: surfaces an error and does NOT close (case not moved, note not saved)', async () => {
     const onConfirm = vi.fn().mockRejectedValue(new Error('boom'));
     const onClose = vi.fn();
-    wrap(<SendToDoctorModal caseId="C1" open onClose={onClose} onConfirm={onConfirm} />);
+    wrap(<SendToDoctorModal open onClose={onClose} onConfirm={onConfirm} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Send to doctor' }));
 

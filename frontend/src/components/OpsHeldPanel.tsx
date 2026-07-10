@@ -297,12 +297,20 @@ export function OpsHeldPanel({ c, job, isAdmin, hasLetter, onViewLetter, onOpenE
           mutation's onError and paint a second error banner behind the modal (QA MED #3). The admin
           "Open as-is" path below keeps openAsIsMutation (and its panel-level error). */}
       <SendToDoctorModal
-        caseId={c.id}
         open={sendToDoctorOpen}
         onClose={() => setSendToDoctorOpen(false)}
-        onConfirm={async () => {
-          await transitionCaseStatus(c.id, { from: c.status, to: 'physician_review', version: c.version, transitionReason: 'send to doctor for review' });
-          await qc.invalidateQueries({ queryKey: ['case', c.id] });
+        onConfirm={async (handoffMessage) => {
+          // Thread the optional handoff note THROUGH the transition (Ryan 2026-07-09) — this park-forward
+          // path is the one most likely to carry a load-bearing RN→MD note ("I hand-fixed §VII…"), so it
+          // must persist the note server-side atomically, not drop it. Invalidate case-messages too.
+          await transitionCaseStatus(c.id, {
+            from: c.status, to: 'physician_review', version: c.version, transitionReason: 'send to doctor for review',
+            ...(handoffMessage ? { handoffMessage } : {}),
+          });
+          await Promise.all([
+            qc.invalidateQueries({ queryKey: ['case', c.id] }),
+            qc.invalidateQueries({ queryKey: ['case-messages', c.id] }),
+          ]);
         }}
       />
 

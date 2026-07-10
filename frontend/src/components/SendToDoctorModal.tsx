@@ -4,7 +4,6 @@ import { Button } from './ui/Button';
 import { describeApiError } from '../api/client';
 
 interface SendToDoctorModalProps {
-  readonly caseId: string;
   readonly open: boolean;
   readonly onClose: () => void;
   // Performs the transition into physician_review (rn_review -> physician_review, or the halted-letter

@@ -825,7 +825,6 @@ export function CaseDetailPage() {
                   {/* Send-to-doctor handoff: ALWAYS offers an optional message to the reviewing
                       physician (Ryan 2026-06-24). Empty message = behaves like the old bare confirm. */}
                   <SendToDoctorModal
-                    caseId={caseId}
                     open={sendToDoctorOpen}
                     onClose={() => setSendToDoctorOpen(false)}
                     onConfirm={async (handoffMessage) => { await sendToDoctor.mutateAsync(handoffMessage); }}

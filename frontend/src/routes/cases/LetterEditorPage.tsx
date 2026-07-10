@@ -95,6 +95,13 @@ export function LetterEditorPage() {
   const [declineReason, setDeclineReason] = useState('');
   const [signOffOpen, setSignOffOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // Save-conflict guard (Ryan 2026-07-10, Conyers CLM-44742B4040 — a physician edit was silently lost).
+  // When a save 409s (a concurrent edit advanced the version) OR a background refetch changes `letter`
+  // under a DIRTY buffer, we must NEVER clobber the typed text. Hold the conflict + the latest version so
+  // the physician can save their preserved text ONTO the latest, compare, or (only on consent) discard.
+  const [conflict, setConflict] = useState<{ latestVersion: number; latestTxt: string } | null>(null);
+  // The text we last LOADED into the buffer — lets the load-effect tell a clean reload from a dirty one.
+  const loadedTxtRef = useRef('');
   // Guided Revision UI (2026-06-13): the verbatim passage the physician highlighted in the letter,
   // and a session-sticky flag set once the backend 503s GUIDED_REVISION_ENABLED=off (so we stop
   // offering a dead feature). The apply path REUSES the surgical applyMutation below.
@@ -106,6 +113,9 @@ export function LetterEditorPage() {
     queryKey: ['case', caseId, 'letter'],
     queryFn: () => getLetter(caseId),
     enabled: caseId.length > 0,
+    // A letter being typed in must NEVER auto-refetch under the physician's fingers — a focus-refetch
+    // would fire the load-effect and wipe unsaved text (Ryan 2026-07-10, second clobber vector).
+    refetchOnWindowFocus: false,
   });
 
   const letter = letterQuery.data?.data;
@@ -134,10 +144,30 @@ export function LetterEditorPage() {
 
   useEffect(() => {
     if (!letter) return;
+    // Never clobber UNSAVED edits when `letter` changes under a dirty buffer (a background refetch/
+    // invalidate). Surface a conflict instead of destroying the physician's text (Ryan 2026-07-10). A
+    // normal save/apply sets editedTextRef to the new server text first, so editedTextRef === letter.txt
+    // there → clean load, no false conflict.
+    const dirty = editedTextRef.current !== loadedTxtRef.current;
+    if (dirty && editedTextRef.current !== letter.txt) {
+      setConflict((prev) => prev ?? { latestVersion: letter.version, latestTxt: letter.txt });
+      return;
+    }
     setTxt(letter.txt);
     editedTextRef.current = letter.txt;
+    loadedTxtRef.current = letter.txt;
     setBaseVersion(letter.version);
   }, [letter]);
+
+  // Belt for the "refreshed the page" half of the incident (Ryan 2026-07-10): warn before a hard
+  // refresh/close drops unsaved editor text.
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (editedTextRef.current !== loadedTxtRef.current) { e.preventDefault(); e.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, []);
 
   const saveMutation = useMutation({
     mutationFn: () => {
@@ -148,6 +178,7 @@ export function LetterEditorPage() {
       setBaseVersion(res.data.version);
       setTxt(res.data.txt);
       editedTextRef.current = res.data.txt;
+      loadedTxtRef.current = res.data.txt;
       setWarnings(res.data.warnings ?? []);
       // The save auto-regrades the new version (Ryan 2026-07-08); surface it in the confirmation.
       // Label it as an APPROXIMATE, text-only re-grade (AI QA 2026-07-08): it's a fast Sonnet pass on the
@@ -165,8 +196,16 @@ export function LetterEditorPage() {
           setMessage('This letter is locked while the doctor has the case — your changes were NOT saved. Copy your text if you need it; editing reopens when the case leaves physician review.');
           return;
         }
-        setMessage('This letter was changed elsewhere. Reloaded the latest version.');
-        await letterQuery.refetch();
+        // Concurrency conflict (stale_version / concurrent_save). DO NOT refetch into letterQuery — that
+        // fires the load-effect which resets the buffer and DESTROYS the typed edit (Ryan 2026-07-10,
+        // Conyers CLM-44742B4040). Keep the physician's text in place; fetch the latest via a RAW getLetter
+        // (does NOT touch the query cache/effect) and surface a BLOCKING choice.
+        try {
+          const latest = await getLetter(caseId);
+          setConflict({ latestVersion: latest.data.version, latestTxt: latest.data.txt });
+        } catch {
+          setMessage('This letter changed elsewhere and your save was rejected. Your text is still in the editor — copy it before reloading.');
+        }
         return;
       }
       if (error instanceof ServiceUnavailableError) { setMessage('Letter service is not available in this environment.'); return; }
@@ -209,12 +248,44 @@ export function LetterEditorPage() {
       setSelectedPassage(null);
       setTxt(res.data.txt);
       editedTextRef.current = res.data.txt;
+      loadedTxtRef.current = res.data.txt;
       setBaseVersion(res.data.version);
       setWarnings(res.data.warnings ?? []);
       setMessage(`Applied edit. Current version ${res.data.version}.`);
       void qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] });
     },
     onError: (error: unknown) => setMessage(error instanceof ServiceUnavailableError ? 'Surgical AI is not available in this environment.' : 'Edit could not be applied.'),
+  });
+
+  // Merge-forward: re-save the physician's PRESERVED text using the LATEST version as base, so their edit
+  // becomes the next version on top of whatever concurrently landed — never silently discarded (Ryan
+  // 2026-07-10). The backend accepts base_version === currentVersion (letter.ts stale-version check).
+  const resaveOntoLatestMutation = useMutation({
+    mutationFn: () => {
+      if (conflict === null) throw new Error('No conflict to resolve.');
+      return saveLetter(caseId, { base_version: conflict.latestVersion, txt: editedTextRef.current });
+    },
+    onSuccess: (res) => {
+      setConflict(null);
+      setBaseVersion(res.data.version);
+      setTxt(res.data.txt);
+      editedTextRef.current = res.data.txt;
+      loadedTxtRef.current = res.data.txt;
+      setWarnings(res.data.warnings ?? []);
+      setMessage(`Saved your changes as version ${res.data.version}.`);
+      void qc.invalidateQueries({ queryKey: ['case', caseId, 'letter'] });
+    },
+    onError: async (error: unknown) => {
+      // Advanced AGAIN between fetch and re-save → re-open the conflict with the newest. Text preserved.
+      if (error instanceof ConflictError) {
+        try {
+          const l = await getLetter(caseId);
+          setConflict({ latestVersion: l.data.version, latestTxt: l.data.txt });
+        } catch { /* keep the modal open on the prior latest */ }
+        return;
+      }
+      setMessage('Could not save onto the latest version. Your text is still in the editor — copy it if needed.');
+    },
   });
 
   const approveMutation = useMutation({
@@ -480,6 +551,57 @@ export function LetterEditorPage() {
               <div className="mt-6 flex justify-end gap-2">
                 <Button type="button" variant="secondary" onClick={() => setDeclineOpen(false)}>Cancel</Button>
                 <Button type="button" variant="primary" loading={declineMutation.isPending} disabled={declineReason.trim().length === 0 || declineMutation.isPending} onClick={() => declineMutation.mutate()}>Send back</Button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Save-conflict modal (Ryan 2026-07-10): the letter advanced under the physician's edit. Their text
+            is STILL in the editor behind this modal (baseVersion untouched → LetterEditor not remounted).
+            Height-capped + scrollable so the actions are always reachable (the sign-off scroll-bug lesson). */}
+        {conflict !== null ? (
+          <div role="dialog" aria-modal="true" aria-labelledby="save-conflict-title">
+            <div className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm" />
+            <div className="fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg bg-white shadow-2xl">
+              <div className="shrink-0 px-6 pt-6 pb-2">
+                <h2 id="save-conflict-title" className="text-lg font-semibold text-slate-900">This letter changed while you were editing</h2>
+                <p className="mt-2 text-sm text-slate-600">
+                  Another edit advanced this letter to <span className="font-medium">version {conflict.latestVersion}</span> while you were working.{' '}
+                  <span className="font-medium text-emerald-800">Your changes are still in the editor and have not been lost.</span> Choose how to proceed:
+                </p>
+              </div>
+              <div className="flex-1 overflow-y-auto px-6 py-2">
+                <details className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <summary className="cursor-pointer text-sm font-medium text-slate-700">View the latest version (read-only) to compare</summary>
+                  <pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap rounded border border-slate-200 bg-white p-3 text-xs text-slate-700">{conflict.latestTxt}</pre>
+                </details>
+              </div>
+              <div className="flex shrink-0 flex-col gap-2 border-t border-slate-200 px-6 py-4 sm:flex-row sm:justify-end">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={resaveOntoLatestMutation.isPending}
+                  onClick={() => {
+                    // Explicit consent to drop the physician's edits: adopt the latest as the buffer, remount.
+                    setTxt(conflict.latestTxt);
+                    editedTextRef.current = conflict.latestTxt;
+                    loadedTxtRef.current = conflict.latestTxt;
+                    setBaseVersion(conflict.latestVersion);
+                    setConflict(null);
+                    setMessage(`Loaded the latest version (v${conflict.latestVersion}). Your earlier changes were discarded.`);
+                  }}
+                >
+                  Discard my changes, load the latest
+                </Button>
+                <Button
+                  type="button"
+                  variant="primary"
+                  loading={resaveOntoLatestMutation.isPending}
+                  disabled={resaveOntoLatestMutation.isPending}
+                  onClick={() => resaveOntoLatestMutation.mutate()}
+                >
+                  Save my changes as version {conflict.latestVersion + 1}
+                </Button>
               </div>
             </div>
           </div>

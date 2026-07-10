@@ -68,6 +68,9 @@ function makeDb(initialDoctorPack: DoctorPackRecord | null = null, initialDocume
       }),
     },
     activityLog: { create: vi.fn(async () => ({})) },
+    // Case index delegate for the admin case-search + status-queue endpoints (Ryan 2026-07-10).
+    // Per-test controllable; captures the `where`/`take` so we can assert alias + validation routing.
+    case: { findMany: vi.fn(async () => [] as unknown[]) },
     // Mock the document delegate so the new tx.document.update path (architect QA finding #1)
     // doesn't crash on the page-count write. Also support findUnique for the closeout #3
     // read-attempt-failed route.
@@ -574,5 +577,51 @@ describe('POST /internal/documents/:id/read-attempt-failed', () => {
       .set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN)
       .send({ textractStatus: 'FAILED', jobId: 'tex-job-123' });
     expect(res.status).toBe(404);
+  });
+});
+
+// Admin case-lookup index endpoints (Ryan 2026-07-10): name → case + status queue. Read-only, token-gated.
+describe('internal-worker: admin case index', () => {
+  const rows = [
+    { id: 'CLM-1', claimedCondition: 'GERD', status: 'delivered', currentVersion: 3, updatedAt: new Date(0),
+      assignedRnId: 'RN-1', assignedPhysicianId: 'PHY-1', veteran: { firstName: 'Trent', lastName: 'Conyers' } },
+  ];
+
+  it('case-search formats "Last, First" + returns caseId/status, and passes each name token as an AND filter', async () => {
+    const { db, tx } = makeDb();
+    (tx.case.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(rows);
+    const res = await request(appFor(db)).get('/api/v1/internal/admin/case-search?q=Trent%20Conyers').set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN);
+    expect(res.status).toBe(200);
+    expect(res.body.data.cases[0]).toMatchObject({ caseId: 'CLM-1', veteranName: 'Conyers, Trent', status: 'delivered', currentVersion: 3 });
+    const where = (tx.case.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0].where;
+    expect(where.AND).toHaveLength(2); // one AND clause per name token
+    expect(where.archivedAt).toBeNull(); // active-only by default
+  });
+
+  it('case-search rejects a <2-char query (400)', async () => {
+    const { db } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/internal/admin/case-search?q=a').set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN);
+    expect(res.status).toBe(400);
+  });
+
+  it('cases?status=ready_to_invoice ALIASES to status=delivered in the query', async () => {
+    const { db, tx } = makeDb();
+    (tx.case.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(rows);
+    const res = await request(appFor(db)).get('/api/v1/internal/admin/cases?status=ready_to_invoice').set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN);
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('delivered');
+    expect((tx.case.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0].where.status).toBe('delivered');
+  });
+
+  it('cases?status=<bogus> rejects with 400 (unknown status)', async () => {
+    const { db } = makeDb();
+    const res = await request(appFor(db)).get('/api/v1/internal/admin/cases?status=not_a_status').set(INTERNAL_WORKER_TOKEN_HEADER, TEST_TOKEN);
+    expect(res.status).toBe(400);
+  });
+
+  it('both endpoints are token-gated (401 without the worker token)', async () => {
+    const { db } = makeDb();
+    expect((await request(appFor(db)).get('/api/v1/internal/admin/case-search?q=Conyers')).status).toBe(401);
+    expect((await request(appFor(db)).get('/api/v1/internal/admin/cases?status=delivered')).status).toBe(401);
   });
 });

@@ -17,6 +17,7 @@ import { refreshDerivedStamps } from '../services/case-stamp-refresh.js';
 import { deriveIntakeFields } from '../services/intake-derive.js';
 import { deriveFramingFromEvidence } from '../services/case-framing.js';
 import { buildScProvenanceDryrun, mutationForRow, type ScDryrunRowInput, type ScDryrunDoc } from '../services/sc-provenance-dryrun.js';
+import { CASE_STATUSES, isCaseStatus } from '../services/case-status-transitions.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
 import { candidateAddresses, decideVeteranMatch, deriveEmailId, makeSnippet, normalizeEmailAddress } from '../services/email-matching.js';
 import type { AppDb, DoctorPackState } from '../services/db-types.js';
@@ -1198,6 +1199,70 @@ export function createInternalWorkerRouter(db: AppDb): Router {
       res.json({ data: { case: c, documents: docSummary, fileReadStatus, recentExtractRuns, caseMessages: caseMessageSummary, caseMessageCount: caseMessages.length, letterRevisions, signOffs } });
     }),
   );
+
+  // ── Agent/ops case-lookup (Ryan 2026-07-10, "say a name → see the whole chart; say ready-to-invoice →
+  //    see my queue"). Two READ-ONLY, token-gated (whole router) index endpoints so an agent can resolve a
+  //    veteran name to a CLM id and list a status queue WITHOUT staff-Cognito or direct RDS access — the
+  //    same data the EMR screen shows, read through the same API. NO writes, NO letter bytes/PHI-body. ──
+
+  type CaseIndexRow = {
+    id: string; claimedCondition: string | null; status: string | null; currentVersion: number | null;
+    updatedAt: Date | null; assignedRnId: string | null; assignedPhysicianId: string | null;
+    veteran: { firstName: string | null; lastName: string | null } | null;
+  };
+  const CASE_INDEX_SELECT = {
+    id: true, claimedCondition: true, status: true, currentVersion: true, updatedAt: true,
+    assignedRnId: true, assignedPhysicianId: true,
+    veteran: { select: { firstName: true, lastName: true } },
+  } as const;
+  const formatIndexRow = (r: CaseIndexRow) => {
+    const first = r.veteran?.firstName ?? '';
+    const last = r.veteran?.lastName ?? '';
+    const name = last || first ? `${last}${last && first ? ', ' : ''}${first}`.trim() : null;
+    return {
+      caseId: r.id, veteranName: name, claimedCondition: r.claimedCondition, status: r.status,
+      currentVersion: r.currentVersion, updatedAt: r.updatedAt,
+      assignedRnId: r.assignedRnId, assignedPhysicianId: r.assignedPhysicianId,
+    };
+  };
+  const caseDelegate = () => (db as unknown as {
+    case: { findMany: (a: Record<string, unknown>) => Promise<CaseIndexRow[]> };
+  }).case;
+
+  // GET /internal/admin/case-search?q=<name>[&includeArchived=true]
+  // Resolve a veteran name → matching cases. Every whitespace token must match firstName OR lastName
+  // (so "Trent Conyers" and "Conyers" both work). Active-only by default.
+  router.get('/internal/admin/case-search', asyncHandler(async (req: Request, res: Response) => {
+    const q = String(req.query.q ?? '').trim();
+    if (q.length < 2) throw new HttpError(400, 'bad_request', 'q must be at least 2 characters', { q });
+    const includeArchived = String(req.query.includeArchived ?? '') === 'true';
+    const tokens = q.split(/\s+/).filter(Boolean).slice(0, 5);
+    const AND = tokens.map((tok) => ({
+      veteran: { OR: [
+        { firstName: { contains: tok, mode: 'insensitive' } },
+        { lastName: { contains: tok, mode: 'insensitive' } },
+      ] },
+    }));
+    const where: Record<string, unknown> = { AND, ...(includeArchived ? {} : { archivedAt: null }) };
+    const rows = await caseDelegate().findMany({ where, orderBy: { updatedAt: 'desc' }, take: 25, select: CASE_INDEX_SELECT });
+    res.json({ data: { query: q, count: rows.length, cases: rows.map(formatIndexRow) } });
+  }));
+
+  // GET /internal/admin/cases?status=<status|ready_to_invoice>[&limit=N][&includeArchived=true]
+  // List a status queue. `ready_to_invoice` aliases to `delivered` (the RN "signed off — ready to invoice"
+  // queue). Omit status for the most-recently-updated cases across all statuses. Active-only by default.
+  router.get('/internal/admin/cases', asyncHandler(async (req: Request, res: Response) => {
+    const raw = String(req.query.status ?? '').trim();
+    const aliased = raw === 'ready_to_invoice' || raw === 'ready-to-invoice' ? 'delivered' : raw;
+    if (aliased && !isCaseStatus(aliased)) {
+      throw new HttpError(400, 'bad_request', 'unknown status', { status: raw, validStatuses: CASE_STATUSES });
+    }
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '50'), 10) || 50, 1), 200);
+    const includeArchived = String(req.query.includeArchived ?? '') === 'true';
+    const where: Record<string, unknown> = { ...(aliased ? { status: aliased } : {}), ...(includeArchived ? {} : { archivedAt: null }) };
+    const rows = await caseDelegate().findMany({ where, orderBy: { updatedAt: 'desc' }, take: limit, select: CASE_INDEX_SELECT });
+    res.json({ data: { status: aliased || 'all', count: rows.length, cases: rows.map(formatIndexRow) } });
+  }));
 
   return router;
 }

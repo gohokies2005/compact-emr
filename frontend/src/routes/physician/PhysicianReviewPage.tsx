@@ -15,6 +15,7 @@ import { LetterPdfModal } from '../../components/LetterPdfModal';
 import { AdvisoryPanel } from '../../components/AdvisoryPanel';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
+import { GradeChip } from '../../components/ui/GradeChip';
 import { PhysicianHandoffNotes } from '../../components/PhysicianHandoffNotes';
 import { ReviewChangesPopup } from '../../components/ReviewChangesPopup';
 import { PhysicianDocumentsList } from '../../components/PhysicianDocumentsList';
@@ -165,6 +166,18 @@ export function PhysicianReviewPage() {
               first real record lands. */}
           {c.recordsReceivedAt ? (
             <p className="mt-1 text-sm text-slate-500">Date submitted: {formatDateOnly(c.recordsReceivedAt)}</p>
+          ) : null}
+          {/* Probative grade PERSISTS in the header for history/tracking (Ryan 2026-07-10): the grade + score
+              live on the case row, but the desktop page only showed them INSIDE the physician_review-gated
+              letter panel — so once the doctor sent the letter back to the RN (status leaves physician_review),
+              the grade vanished when they reopened the case. Surface it here whenever a grade exists AND the
+              full ready panel (which shows its own grade) is NOT rendered, so a reopened post-review case
+              still shows what the letter graded. (The mobile review page already persisted this in its header.) */}
+          {!readyForPhysician && (c.grade != null || c.probativeScore != null) ? (
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-600">
+              <GradeChip grade={c.grade ?? null} synthesizedFloor={latestDraftJob?.gradeSidecarJson?.synthesized_floor} reason={latestDraftJob?.gradeSidecarJson?.synthesized_floor_reason} />
+              <span>Probative score: {typeof c.probativeScore === 'number' ? `${c.probativeScore}/10` : 'Not scored'}</span>
+            </div>
           ) : null}
           <p className="mt-2 text-sm">
             <Link className="text-indigo-600 hover:underline" to="/p/queue">

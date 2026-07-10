@@ -41,7 +41,7 @@ describe('buildDeliveryEmail (E2 body order)', () => {
       'A quick note on the wording:',
       'The final opinion and sources from your full letter, excerpted below:',
       'If you have any questions before then, reply to this email.',
-      'All correspondence should be directed to info@flatratenexus.com.',
+      'New inquiries and follow-up emails may be sent to info@flatratenexus.com, or to your assigned nurse liaison if one has been designated for your case.',
     ];
     let last = -1;
     for (const marker of order) {

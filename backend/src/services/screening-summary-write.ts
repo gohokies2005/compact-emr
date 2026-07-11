@@ -33,6 +33,8 @@ export interface ScreeningSummaryWriteResult {
   s3Key?: string;
   count?: number;
   reason?: string;
+  /** True when the summary text was persisted as a DocumentPage (so the digest/drafter can read it). */
+  pageWritten?: boolean;
 }
 
 /**
@@ -71,16 +73,41 @@ export async function writeScreeningSummary(
   }));
 
   // Upsert by the unique s3Key: a re-extraction refreshes the file's Document row (no duplicate).
-  await (db as unknown as {
-    document: { upsert: (a: { where: { s3Key: string }; create: Record<string, unknown>; update: Record<string, unknown> }) => Promise<unknown> };
+  const doc = await (db as unknown as {
+    document: { upsert: (a: { where: { s3Key: string }; create: Record<string, unknown>; update: Record<string, unknown> }) => Promise<{ id: string }> };
   }).document.upsert({
     where: { s3Key },
     create: {
       caseId, filename: 'Screening Summary.txt', sizeBytes: BigInt(body.length),
       contentType: 'text/plain', docTag: 'screening_summary', s3Key, uploadedBy: SERVICE_ACTORS.WORKER,
+      pageCount: 1,
     },
-    update: { sizeBytes: BigInt(body.length), version: { increment: 1 } },
+    update: { sizeBytes: BigInt(body.length), version: { increment: 1 }, pageCount: 1 },
   });
 
-  return { written: true, s3Key, count: screenings.length };
+  // Persist the summary TEXT as a DocumentPage (Ryan 2026-07-10: "you make a screening doc … but NEVER
+  // parse it"). buildDigestForCase (→ every gate + the SOAP note) and the Fargate drafter both read
+  // Document.pages[].text; before this the screening-summary Document had ZERO pages, so its content
+  // reached NOTHING downstream. It stays OUT of the extraction INPUT / coverage / build-state / OCR
+  // watchers / doctor-pack (all keyed on the s3Key marker + docTag) — only the two page-reading
+  // CONSUMERS pick it up, which is exactly the point. Idempotent: clear stale page(s) then rewrite (the
+  // Document is stable by s3Key, so a re-extraction refreshes rather than duplicates).
+  let pageWritten = false;
+  try {
+    const pageDb = db as unknown as {
+      documentPage: {
+        deleteMany: (a: { where: { documentId: string } }) => Promise<unknown>;
+        create: (a: { data: Record<string, unknown> }) => Promise<unknown>;
+      };
+    };
+    await pageDb.documentPage.deleteMany({ where: { documentId: doc.id } });
+    await pageDb.documentPage.create({ data: { documentId: doc.id, pageNumber: 1, text } });
+    pageWritten = true;
+  } catch {
+    // Best-effort: a page-write hiccup must not lose the S3 file + Document row already committed above.
+    // pageWritten stays false (its initial value); the next re-extraction re-attempts (the Document is
+    // stable), and the digest degrades to the manifest header — never a hard failure of this write.
+  }
+
+  return { written: true, s3Key, count: screenings.length, pageWritten };
 }

@@ -12,6 +12,7 @@ import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { PhysicianDocumentsList } from '../../components/PhysicianDocumentsList';
 import { PreSignTheoryBlocks } from '../../components/PreSignTheoryBlocks';
 import { buildPreSignTheory } from '../../components/preSignTheory';
+import { useVeteranTheory } from '../../hooks/useVeteranTheory';
 import { PhysicianHandoffNotes } from '../../components/PhysicianHandoffNotes';
 import { LetterPdfModal } from '../../components/LetterPdfModal';
 import { GradeChip } from '../../components/ui/GradeChip';
@@ -63,6 +64,9 @@ export function PhysicianMobileReviewPage() {
     enabled: caseId.length > 0,
   });
   const isImportedLetter = letterQuery.data?.data.source === 'external_import';
+  // Part B veteran-theory overlay (shared hook) — called UNCONDITIONALLY here, above the loading/not-found
+  // early returns, so hook order is stable (Rules of Hooks). enabled:caseId.length>0 gates the actual fetch.
+  const veteranTheoryAi = useVeteranTheory(caseId);
 
   if (caseQuery.isLoading || letterQuery.isLoading) {
     return (
@@ -145,8 +149,10 @@ export function PhysicianMobileReviewPage() {
   const considerations = (latestDraftJob?.gradeSidecarJson?.targeted_revision_hints ?? [])
     .filter((h) => typeof h.issue === 'string' && h.issue.trim().length > 0)
     .slice(0, 3);
-  // Pre-sign theory reconciliation (Ryan 2026-07-11) — mirrors the desktop panel. Deterministic, fail-open.
-  const theory = buildPreSignTheory(c);
+  // Pre-sign theory reconciliation (Ryan 2026-07-11) — mirrors the desktop panel. Deterministic, plus the
+  // Part B LLM restatement overlay via the SAME shared hook (so desktop/mobile can't drift; the hook is
+  // called above, before the early returns). Fail-open.
+  const theory = buildPreSignTheory({ ...c, veteranTheoryAi: veteranTheoryAi.data });
 
   return (
     <AppShell>

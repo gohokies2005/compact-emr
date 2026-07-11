@@ -6,6 +6,11 @@ import { PhysicianLetterReadyPanel } from '../components/PhysicianLetterReadyPan
 import type { CaseDetail } from '../api/cases';
 import type { DraftJob } from '../types/prisma';
 
+// The panel's Part B useVeteranTheory hook lazy-fetches GET /cases/:id/veteran-theory — stub it to the
+// fail-open shape so the test makes no real network call (an unstubbed call leaks async ENOTFOUND rejections
+// into the parallel suite and flakes unrelated tests).
+vi.mock('../api/veteran-theory', () => ({ getVeteranTheory: vi.fn().mockResolvedValue({ data: null }) }));
+
 // PhysicianLetterReadyPanel renders SendBackToRnModal which uses useMutation, so each
 // render needs a QueryClientProvider in the tree.
 function withQueryClient(children: ReactNode) {

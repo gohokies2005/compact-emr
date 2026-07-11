@@ -22,14 +22,31 @@ export interface PreSignTheoryInput {
   readonly upstreamScCondition?: string;
   readonly veteranStatement?: string;
   readonly aiViabilityPlanJson?: AiViabilityCard | null;
+  /**
+   * Part B (Ryan 2026-07-11): the LLM restatement of the veteran's OWN theory, in concise clinical terms.
+   * When present it SUPERSEDES the deterministic template — its `theory` prose is shown, and its
+   * statement-grounded `upstream`/`framing` drive the reconciliation (full scope, Ryan's choice). null (flag
+   * off / ungrounded / failure) → the deterministic path below is used unchanged (no regression). The
+   * backend has already gated `upstream` on the veteran's statement, so it is trusted here (the Ankle guard
+   * lives server-side in veteran-theory-ai.ts).
+   */
+  readonly veteranTheoryAi?: {
+    readonly theory: string;
+    readonly framing: 'secondary' | 'direct' | 'aggravation' | 'unclear';
+    readonly upstream: string | null;
+  } | null;
 }
 
 export interface PreSignTheory {
   readonly veteranStatement: string | null;
   readonly veteranClaim: string | null;
-  /** The veteran's stated causation theory, e.g. "Secondary to service-connected PTSD" — ONLY when the
-   *  upstream is corroborated by their statement (else null; the literal statement stands alone). */
+  /** The veteran's stated causation theory as a SHORT template, e.g. "Secondary to service-connected PTSD"
+   *  — ONLY when the upstream is corroborated by their statement (else null; the literal statement stands
+   *  alone). null in the LLM path (superseded by `veteranTheoryProse`). */
   readonly veteranTheory: string | null;
+  /** Part B: the LLM's concise clinical restatement of the veteran's OWN theory (a full sentence). Present
+   *  only when the veteran-theory model produced a grounded result; else null (the template/quote stands). */
+  readonly veteranTheoryProse: string | null;
   readonly letterDx: string | null;
   readonly letterTheory: string | null;
   /** Present ONLY when the veteran's (corroborated) theory and the letter's theory clearly differ. */
@@ -129,6 +146,36 @@ function letterTheoryLine(lead: AiViabilityCard['lead']): string | null {
   }
 }
 
+// Part B reconciliation (full scope, Ryan 2026-07-11): compare the veteran's LLM theory against the plan's
+// 3-anchor set — lead ∪ convergent ∪ alternatives (the `excluded` set does not exist on AiViabilityCard).
+// The LLM `upstream` is already statement-grounded server-side, so it is trusted here.
+//   - veteran's anchor == the letter's lead OR a convergent anchor → the letter argues it → silent (no ✓).
+//   - == an alternative the plan considered but didn't lead → surface why_not + suggest a surgical edit.
+//   - nowhere in the plan → informational "differs" (no edit suggestion, no reason to quote).
+//   - 'unclear' framing → assert nothing (can't honestly compare).
+function reconcileLlmWithPlan(
+  llmFraming: 'secondary' | 'direct' | 'aggravation' | 'unclear',
+  llmUpstream: string | null,
+  plan: AiViabilityCard,
+): PreSignTheory['mismatch'] {
+  const vBucket = framingBucket(llmFraming);
+  if (vBucket === 'other') return null; // 'unclear' — nothing to honestly compare
+  const lead = plan.lead;
+  const leadBucket = framingBucket(lead.framing);
+  const secondaryish = vBucket === 'secondary' || vBucket === 'aggravation';
+  if (secondaryish && (llmUpstream ?? '').trim()) {
+    const inLead = looseMatch(llmUpstream, lead.upstream);
+    const inConvergent = (plan.convergent ?? []).some((cv) => looseMatch(llmUpstream, cv.upstream));
+    if (inLead || inConvergent) return null; // the letter argues / converges on the veteran's anchor
+    const alt = (plan.alternatives ?? []).find((a) => looseMatch(llmUpstream, a.upstream));
+    if (alt) return { reason: nonEmpty(alt.why_not), suggestEdit: true };
+    return { reason: null, suggestEdit: false }; // veteran's anchor not among the plan's considered anchors
+  }
+  // A direct veteran theory (or secondary without a usable upstream): compare framing buckets only.
+  const framingDiffers = leadBucket !== 'other' && vBucket !== leadBucket;
+  return framingDiffers ? { reason: null, suggestEdit: false } : null;
+}
+
 export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
   const veteranStatement = nonEmpty(c.veteranStatement);
   const claimList = (c.claimedConditions && c.claimedConditions.length > 0 ? c.claimedConditions : c.claimedCondition ? [c.claimedCondition] : [])
@@ -150,9 +197,29 @@ export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
   // no upstream; secondary/aggravation need a trusted one.
   const veteranTheory = isSecondaryish && !upstreamTrusted ? null : veteranTheoryLine(vBucket, c.framingChoice, c.upstreamScCondition);
 
-  const lead = c.aiViabilityPlanJson?.lead ?? null;
+  const plan = c.aiViabilityPlanJson ?? null;
+  const lead = plan?.lead ?? null;
   const letterDx = nonEmpty(lead?.claimed);
   const letterTheory = lead ? letterTheoryLine(lead) : null;
+
+  // Part B (Ryan 2026-07-11): when the veteran-theory model produced a grounded restatement, it SUPERSEDES
+  // the deterministic template — show its prose and reconcile using its statement-grounded upstream/framing
+  // (full scope). Absent (flag off / ungrounded / failure) → fall through to the deterministic path below,
+  // which is unchanged (no regression). The stale-upstream guard for THIS path lives server-side.
+  const llmTheory = nonEmpty(c.veteranTheoryAi?.theory);
+  if (c.veteranTheoryAi && llmTheory) {
+    const llmMismatch = plan && lead ? reconcileLlmWithPlan(c.veteranTheoryAi.framing, c.veteranTheoryAi.upstream ?? null, plan) : null;
+    return {
+      veteranStatement,
+      veteranClaim,
+      veteranTheory: null, // superseded by the prose restatement
+      veteranTheoryProse: llmTheory,
+      letterDx,
+      letterTheory,
+      mismatch: llmMismatch,
+      hasContent: !!(veteranStatement || llmTheory || veteranClaim || letterTheory),
+    };
+  }
 
   let mismatch: PreSignTheory['mismatch'] = null;
   // Compare ONLY when the veteran expressed a theory we can trust — a known framing, and for a
@@ -173,5 +240,5 @@ export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
   }
 
   const hasContent = !!(veteranStatement || veteranTheory || veteranClaim || letterTheory);
-  return { veteranStatement, veteranClaim, veteranTheory, letterDx, letterTheory, mismatch, hasContent };
+  return { veteranStatement, veteranClaim, veteranTheory, veteranTheoryProse: null, letterDx, letterTheory, mismatch, hasContent };
 }

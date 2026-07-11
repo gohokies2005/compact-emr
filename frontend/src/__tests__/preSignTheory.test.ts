@@ -156,3 +156,95 @@ describe('buildPreSignTheory', () => {
     expect(buildPreSignTheory({}).hasContent).toBe(false);
   });
 });
+
+describe('buildPreSignTheory — Part B LLM overlay (full-scope reconciliation)', () => {
+  const planPTSD = plan({ claimed: 'OSA', framing: 'secondary', upstream: 'PTSD' });
+
+  it('LLM prose SUPERSEDES the deterministic template (prose shown, template null); PTSD==lead → no mismatch', () => {
+    const t = buildPreSignTheory({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'PTSD',
+      veteranStatement: 'my PTSD gave me sleep apnea',
+      aiViabilityPlanJson: planPTSD,
+      veteranTheoryAi: { theory: 'Veteran attributes his obstructive sleep apnea to service-connected PTSD.', framing: 'secondary', upstream: 'PTSD' },
+    });
+    expect(t.veteranTheoryProse).toContain('obstructive sleep apnea');
+    expect(t.veteranTheory).toBeNull();
+    expect(t.mismatch).toBeNull();
+  });
+
+  it('LLM upstream matches a CONVERGENT anchor → no mismatch (3-set includes convergent)', () => {
+    const p: AiViabilityCard = { ...plan({ framing: 'secondary', upstream: 'Depression' }), convergent: [{ upstream: 'PTSD', note: 'also supports the claim' }] };
+    const t = buildPreSignTheory({
+      veteranStatement: 'my ptsd caused it',
+      aiViabilityPlanJson: p,
+      veteranTheoryAi: { theory: 'Veteran attributes the claim to service-connected PTSD.', framing: 'secondary', upstream: 'PTSD' },
+    });
+    expect(t.mismatch).toBeNull();
+  });
+
+  it('LLM upstream matches an ALTERNATIVE → mismatch with why_not + suggestEdit', () => {
+    const p = plan({ framing: 'secondary', upstream: 'Depression' }, [{ upstream: 'PTSD', framing: 'secondary', why_not: 'depression is the stronger anchor' }]);
+    const t = buildPreSignTheory({
+      veteranStatement: 'my ptsd caused it',
+      aiViabilityPlanJson: p,
+      veteranTheoryAi: { theory: 'Veteran attributes the claim to service-connected PTSD.', framing: 'secondary', upstream: 'PTSD' },
+    });
+    expect(t.mismatch).not.toBeNull();
+    expect(t.mismatch!.reason).toContain('stronger anchor');
+    expect(t.mismatch!.suggestEdit).toBe(true);
+  });
+
+  it('LLM upstream NOWHERE in the plan → informational mismatch (no reason, no suggestEdit)', () => {
+    const t = buildPreSignTheory({
+      veteranStatement: 'my tinnitus caused it',
+      aiViabilityPlanJson: plan({ framing: 'secondary', upstream: 'Depression' }),
+      veteranTheoryAi: { theory: 'Veteran attributes the claim to service-connected tinnitus.', framing: 'secondary', upstream: 'tinnitus' },
+    });
+    expect(t.mismatch).not.toBeNull();
+    expect(t.mismatch!.reason).toBeNull();
+    expect(t.mismatch!.suggestEdit).toBe(false);
+  });
+
+  it('LLM framing "unclear" → prose shows but asserts NO mismatch', () => {
+    const t = buildPreSignTheory({
+      veteranStatement: 'a lot has happened to me',
+      aiViabilityPlanJson: planPTSD,
+      veteranTheoryAi: { theory: 'Veteran describes symptoms without stating a clear causal theory.', framing: 'unclear', upstream: null },
+    });
+    expect(t.veteranTheoryProse).toContain('symptoms');
+    expect(t.mismatch).toBeNull();
+  });
+
+  it('LLM direct vs letter secondary → framing mismatch (informational)', () => {
+    const t = buildPreSignTheory({
+      veteranStatement: 'i was hurt in an explosion',
+      aiViabilityPlanJson: planPTSD,
+      veteranTheoryAi: { theory: 'Veteran attributes the claim directly to an in-service blast injury.', framing: 'direct', upstream: null },
+    });
+    expect(t.mismatch).not.toBeNull();
+    expect(t.mismatch!.suggestEdit).toBe(false);
+  });
+
+  it('LLM present but EMPTY theory → falls through to the deterministic path (no prose)', () => {
+    const t = buildPreSignTheory({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'PTSD',
+      veteranStatement: 'my ptsd caused it',
+      aiViabilityPlanJson: planPTSD,
+      veteranTheoryAi: { theory: '   ', framing: 'secondary', upstream: 'PTSD' },
+    });
+    expect(t.veteranTheoryProse).toBeNull();
+    expect(t.veteranTheory).toBe('Secondary to service-connected PTSD');
+  });
+
+  it('LLM present + NO plan → prose shows, no mismatch (fail-open)', () => {
+    const t = buildPreSignTheory({
+      veteranStatement: 'my ptsd caused it',
+      aiViabilityPlanJson: null,
+      veteranTheoryAi: { theory: 'Veteran attributes the claim to service-connected PTSD.', framing: 'secondary', upstream: 'PTSD' },
+    });
+    expect(t.veteranTheoryProse).toContain('PTSD');
+    expect(t.mismatch).toBeNull();
+  });
+});

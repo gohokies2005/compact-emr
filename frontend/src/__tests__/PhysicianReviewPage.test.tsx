@@ -23,6 +23,10 @@ vi.mock('../api/letter', () => ({
   finalizeImportLetter: vi.fn(),
   getLetter: vi.fn(),
 }));
+// PhysicianLetterReadyPanel's Part B useVeteranTheory hook lazy-fetches GET /cases/:id/veteran-theory —
+// stub it to the fail-open shape so no real network call fires (unstubbed calls leak async ENOTFOUND
+// rejections into the parallel suite and flake unrelated tests).
+vi.mock('../api/veteran-theory', () => ({ getVeteranTheory: vi.fn().mockResolvedValue({ data: null }) }));
 
 vi.mock('../layout/AppShell', () => ({
   AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div>,

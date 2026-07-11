@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { HttpError } from '../http/errors.js';
+import { resolveGroundedFraming } from './grounded-framing.js';
 import { evaluateChartReadiness, isEffectivelyRead } from './chart-readiness.js';
 import { renderRecordTextPdf, previewRecordTextLayout, previewRecordTextLineRects } from './record-text-render.js';
 import {
@@ -824,6 +825,7 @@ export async function generateDoctorPackForCase(
       claimType: true,
       framingChoice: true,
       upstreamScCondition: true,
+      framingStampSource: true,
       documents: {
         // H1 (audit 2026-05-27): `id` MUST be selected. classifiedFiles maps
         // documentId: d.id, and the page-selector queries document_pages by that id.
@@ -837,8 +839,12 @@ export async function generateDoctorPackForCase(
         orderBy: { uploadedAt: 'asc' },
       },
     },
-  })) as unknown as { id: string; veteranId: string; version: number; claimedCondition: string | null; veteranStatement?: string | null; createdAt?: Date | string | null; claimType?: string | null; framingChoice?: string | null; upstreamScCondition?: string | null; documents: readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null; filename?: string | null; contentType?: string | null; uploadedAt?: Date | string | null }[] } | null;
+  })) as unknown as { id: string; veteranId: string; version: number; claimedCondition: string | null; veteranStatement?: string | null; createdAt?: Date | string | null; claimType?: string | null; framingChoice?: string | null; upstreamScCondition?: string | null; framingStampSource?: string | null; documents: readonly { id: string; s3Key: string; pageCount: number | null; docTag: string | null; filename?: string | null; contentType?: string | null; uploadedAt?: Date | string | null }[] } | null;
   if (caseWithDocs === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+  // "ANKLE nowhere" (Ryan 2026-07-11): resolve the anchor SAFE to display on the cover — the route-picker
+  // grounded anchor, or suppressed — so a stale mechanism-blind upstreamScCondition never prints on the
+  // physician-facing cover. Display-only: this writes no column; the drafter reads the raw case fields.
+  const coverFraming = await resolveGroundedFraming(db, caseId, caseWithDocs);
   const c = { id: caseWithDocs.id, veteranId: caseWithDocs.veteranId, version: caseWithDocs.version };
   const claimedCondition = caseWithDocs.claimedCondition ?? undefined;
 
@@ -1593,8 +1599,8 @@ export async function generateDoctorPackForCase(
           caseId,
           ...(claimedCondition !== undefined ? { claimedCondition } : {}),
           claimType: caseWithDocs.claimType ?? null,
-          framingChoice: caseWithDocs.framingChoice ?? null,
-          upstreamScCondition: caseWithDocs.upstreamScCondition ?? null,
+          framingChoice: coverFraming.framing,
+          upstreamScCondition: coverFraming.upstream,
           linkedCover: true,
           // DOCTOR_PACK_LLM_BULK: opt the cover into real per-doc descriptors + a claim-filtered/deduped
           // problem snapshot. OFF ⇒ absent ⇒ the linked cover renders exactly as before.
@@ -1674,8 +1680,8 @@ export async function generateDoctorPackForCase(
           caseId,
           ...(claimedCondition !== undefined ? { claimedCondition } : {}),
           claimType: caseWithDocs.claimType ?? null,
-          framingChoice: caseWithDocs.framingChoice ?? null,
-          upstreamScCondition: caseWithDocs.upstreamScCondition ?? null,
+          framingChoice: coverFraming.framing,
+          upstreamScCondition: coverFraming.upstream,
           ...(categoryAssertions.length > 0 ? { categoryAssertions } : {}),
           entries: budgetedMetas.map((m) => {
             const pinnedWhyLines = pinnedWhyLinesFor(m);

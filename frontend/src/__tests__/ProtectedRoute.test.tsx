@@ -18,7 +18,9 @@ const baseAuth: AuthContextValue = {
   confirmMfaCode: vi.fn(),
   confirmTotpSetup: vi.fn(),
   signOut: vi.fn(),
-  refreshUser: vi.fn()
+  refreshUser: vi.fn(),
+  idleWarningSecondsLeft: null,
+  stayActive: vi.fn()
 };
 
 function renderWithAuth(value: AuthContextValue) {

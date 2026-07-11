@@ -49,6 +49,14 @@ export class AuthStack extends Stack {
       userPoolClientName: `compact-emr-${props.config.envName}-web`,
       authFlows: { userPassword: true, userSrp: true },
       preventUserExistenceErrors: true,
+      // HIPAA session caps (Ryan 2026-07-10). Access/ID tokens live 1h (the frontend silently refreshes),
+      // but the REFRESH token is capped at 12h (was the 30-day Cognito default) — so even a session left
+      // ACTIVE forces a fresh login + MFA at least daily. The 30-min idle auto-logout (frontend) handles
+      // walked-away sessions. Changing these updates the existing client in place (no client-id change,
+      // no forced logout of live sessions — the new validity applies to newly issued tokens).
+      accessTokenValidity: Duration.hours(1),
+      idTokenValidity: Duration.hours(1),
+      refreshTokenValidity: Duration.hours(12),
     });
 
     for (const groupName of ['physician', 'ops_staff', 'admin']) {

@@ -61,6 +61,18 @@ describe('veteran-theory-ai drafter/gate/SOAP-isolation tripwire', () => {
     ).toEqual([]);
   });
 
+  it('POSITIVE INVARIANT: veteran-theory-ai is imported by EXACTLY ONE non-test file (the lazy route)', () => {
+    // Strictly stronger than the denylist above (architect work-QA): the denylist is the 10 SINKS, so a new
+    // importer — or a file that transitively feeds the drafter but isn't listed, or a rename of a sink that
+    // makes its FORBIDDEN regex stop matching — would slip through. This asserts the single-importer fact
+    // directly: the ONLY non-test file that imports veteran-theory-ai is its own route. Any new importer
+    // (transitive or not) fails the build, which is the real guarantee behind "display-only, AT ALL".
+    const importers = walk(SRC)
+      .filter((f) => IMPORT_RE.test(readFileSync(f, 'utf8')))
+      .map((f) => path.relative(SRC, f).split(path.sep).join('/'));
+    expect(importers).toEqual(['routes/veteran-theory.ts']);
+  });
+
   it('DETECTOR PROOF: the tripwire regexes actually match every forbidden path + allow the route', () => {
     const forbiddenPaths = [
       'services/drafter-bundle.ts',

@@ -32,16 +32,19 @@ export function createVeteranTheoryRouter(db: AppDb): Router {
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
       // runVeteranTheoryAi never throws (it fails open to null internally); the extra guard here means a
       // display value can NEVER 500 the physician panel. null -> deterministic fallback client-side.
-      let data: Awaited<ReturnType<typeof runVeteranTheoryAi>>;
+      let result: Awaited<ReturnType<typeof runVeteranTheoryAi>>;
       try {
-        data = await runVeteranTheoryAi({
+        result = await runVeteranTheoryAi({
           caseId,
           claimedCondition: c.claimedCondition ?? '',
           veteranStatement: c.veteranStatement ?? '',
         });
       } catch {
-        data = null;
+        result = null;
       }
+      // costUsd is server-side telemetry (logged) — do NOT ship it to the browser; the UI needs only the
+      // display fields. null passes through unchanged (→ deterministic fallback client-side).
+      const data = result === null ? null : { theory: result.theory, framing: result.framing, upstream: result.upstream };
       res.json({ data });
     }),
   );

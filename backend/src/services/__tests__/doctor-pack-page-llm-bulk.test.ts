@@ -112,3 +112,32 @@ describe('selectPagesLlm — label + Haiku model (DOCTOR_PACK_LLM_BULK)', () => 
     expect((mockInvoke.mock.calls[0]![2] as { modelId?: string }).modelId).toBeUndefined();
   });
 });
+
+describe('relevance verdict — v3 "keep 30, drop irrelevant"', () => {
+  it('selectPagesLlm surfaces relevant:false when the model says the doc is unrelated (haiku)', async () => {
+    mockInvoke.mockResolvedValue({ text: JSON.stringify({ keep: [1], note: 'other conditions only', relevant: false }), usage: {}, stopReason: 'end_turn', costUsd: 0.01 });
+    const out = await selectPagesLlm({ docType: 'progress_notes', claimedCondition: 'osa', pages: pages(5), haiku: true });
+    expect(out!.relevant).toBe(false);
+  });
+
+  it('selectPagesLlm relevant is null on the Opus path (haiku off) — the standard path never drops', async () => {
+    mockInvoke.mockResolvedValue({ text: JSON.stringify({ keep: [1], relevant: false }), usage: {}, stopReason: 'end_turn', costUsd: 0.05 });
+    const out = await selectPagesLlm({ docType: 'progress_notes', pages: pages(5) });
+    expect(out!.relevant).toBeNull();
+  });
+
+  it('selectPagesLlmBulk aggregates relevant=true if ANY batch found supporting content', async () => {
+    mockInvoke.mockImplementation(async (_s: string, uc: string) => {
+      const first = firstPageOf(uc);
+      return { text: JSON.stringify({ keep: [first], relevant: first === 41 }), usage: {}, stopReason: 'end_turn', costUsd: 0.001 };
+    });
+    const out = await selectPagesLlmBulk({ docType: 'blue_button', claimedCondition: 'osa', pages: pages(50) });
+    expect(out.relevant).toBe(true);
+  });
+
+  it('selectPagesLlmBulk relevant=false only when a batch says false AND none says true', async () => {
+    mockInvoke.mockImplementation(async (_s: string, uc: string) => { const first = firstPageOf(uc); return { text: JSON.stringify({ keep: [first], relevant: false }), usage: {}, stopReason: 'end_turn', costUsd: 0.001 }; });
+    const out = await selectPagesLlmBulk({ docType: 'blue_button', claimedCondition: 'osa', pages: pages(50) });
+    expect(out.relevant).toBe(false);
+  });
+});

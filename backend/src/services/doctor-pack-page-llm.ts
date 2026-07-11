@@ -87,6 +87,11 @@ export interface PageLlmResult {
   // descriptor so EVERY LLM-picked doc (not just bulk dumps) gets a real cover label instead of the
   // generic per-category why. Page refs are never taken from here (code-generated from pageRanges).
   readonly label?: string | null;
+  // DOCTOR_PACK_LLM_BULK v3 (Ryan "keep 30, just drop irrelevant"): the model's verdict on whether this
+  // document contains ANY content supporting the claimed condition. false ⇒ the dispatch may DROP an
+  // 'other'-category doc from the pack (must-have categories are never dropped). null/absent ⇒ keep
+  // (default-safe — a missing/failed verdict never drops a doc).
+  readonly relevant?: boolean | null;
 }
 
 /** True when the LLM picker should run for this doc. Skips tiny docs (nothing to pick), and
@@ -138,6 +143,9 @@ export async function selectPagesLlm(input: {
     input.claimedCondition && input.claimedCondition.trim().length > 0
       ? `Claimed condition for this case: ${input.claimedCondition.trim()}`
       : null,
+    // Flag-on only: ask for the claim-relevance verdict (drives the "drop irrelevant 'other' doc"
+    // logic). Kept out of the shared SYSTEM_PROMPT so the Opus/flag-off path is byte-identical.
+    ...(input.haiku ? ['', relevanceInstruction(input.claimedCondition)] : []),
     '',
     'Pages (text truncated to the top of each page):',
   ].filter((l) => l !== null);
@@ -167,6 +175,7 @@ export async function selectPagesLlm(input: {
       costUsd: res.costUsd,
       rationale: `page_llm kept ${keep.length}/${usable.length} pages ($${res.costUsd.toFixed(4)})`,
       label: extractLabelFromResponse(res.text),
+      relevant: input.haiku ? extractRelevantFromResponse(res.text) : null,
     };
   } catch (e) {
     console.warn(
@@ -208,6 +217,9 @@ export interface BulkPickResult {
   // the model gave none. Page refs are NEVER taken from the model — they come from the deterministic
   // pageRanges. So the label only ever echoes text the model read; the number is code-generated.
   readonly label: string | null;
+  // v3: false ⇒ the model judged the WHOLE doc unrelated to the claim (droppable if 'other' category).
+  // null ⇒ no verdict (default-safe keep). true ⇒ some batch found supporting content.
+  readonly relevant: boolean | null;
 }
 
 function chunkPages(pages: readonly PageLlmInputPage[], size: number): PageLlmInputPage[][] {
@@ -296,23 +308,45 @@ export function extractLabelFromResponse(text: string): string | null {
   }
 }
 
-/** Parse ONE batch's response: the kept page numbers (validated against this batch) + an optional
- * grounded label. Tolerant of stray prose / fences, like parseKeep. */
-function parseBulkBatch(text: string, validPageNumbers: readonly number[]): { keep: number[]; label: string | null } {
+/** Pull the boolean "relevant" verdict out of a picker response. null when absent/unparseable (so a
+ * missing verdict is default-safe = keep the doc). Only an explicit `false` is a drop signal. */
+export function extractRelevantFromResponse(text: string): boolean | null {
   const match = text.match(/\{[\s\S]*\}/);
-  if (!match) return { keep: [], label: null };
+  if (!match) return null;
+  try {
+    const obj = JSON.parse(match[0]) as { relevant?: unknown };
+    return typeof obj.relevant === 'boolean' ? obj.relevant : null;
+  } catch {
+    return null;
+  }
+}
+
+// The claim-relevance instruction appended (flag-on only) to a picker's user content so the model also
+// judges whether the WHOLE document supports the claimed condition. Kept out of the shared cached
+// SYSTEM_PROMPT so the Opus/flag-off path stays byte-identical.
+function relevanceInstruction(claimedCondition: string | undefined): string {
+  const cc = (claimedCondition ?? '').trim();
+  const subject = cc.length > 0 ? `the claimed condition (${cc})` : 'the claimed condition';
+  return `Also return "relevant": true if this document contains ANY evidence that supports ${subject} — a diagnosis of it, an objective study of it, or a finding linking it to service or to the claimed secondary cause. Return "relevant": false if the document is unrelated to ${subject} (e.g. it is about other conditions only). Judge the DOCUMENT, not a single page.`;
+}
+
+/** Parse ONE batch's response: the kept page numbers (validated against this batch) + an optional
+ * grounded label + the claim-relevance verdict. Tolerant of stray prose / fences, like parseKeep. */
+function parseBulkBatch(text: string, validPageNumbers: readonly number[]): { keep: number[]; label: string | null; relevant: boolean | null } {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return { keep: [], label: null, relevant: null };
   let obj: unknown;
   try {
     obj = JSON.parse(match[0]);
   } catch {
-    return { keep: [], label: null };
+    return { keep: [], label: null, relevant: null };
   }
   const valid = new Set(validPageNumbers);
   const keepRaw = (obj as { keep?: unknown }).keep;
   const keep = Array.isArray(keepRaw)
     ? [...new Set(keepRaw.map((v) => Number(v)).filter((n) => Number.isInteger(n) && valid.has(n)))].sort((a, b) => a - b)
     : [];
-  return { keep, label: extractLabelFromResponse(text) };
+  return { keep, label: extractLabelFromResponse(text), relevant: extractRelevantFromResponse(text) };
 }
 
 /** The per-batch user content. Reuses the shared (unchanged) SYSTEM_PROMPT and adds a bulk-mode block:
@@ -330,6 +364,7 @@ function buildBulkUserContent(
     'These pages are ONE SLICE of a larger records export, not a whole document. Keep only pages that individually carry decisive substance. If NO page in this slice qualifies, return {"keep":[]} — that is a correct answer, not an error. Keep at most 3 pages from this slice.',
     'The single highest-priority page is the objective-test VALUE page for the claimed condition — e.g. a SLEEP STUDY page showing the apnea-hypopnea index (AHI) or respiratory disturbance index (RDI), an AUDIOGRAM threshold/speech-discrimination table, a PULMONARY FUNCTION TEST FEV1/FVC page. These decisive-value pages are easily buried in a bulk export; if you see one, KEEP it.',
     'Also add "label": a <=6 word description of the MOST decisive page you kept (e.g. "Sleep study, AHI 42", "OSA diagnosis note", "VA denial, OSA 2019"). Describe ONLY what you actually read; never state a value/date you did not see; NEVER put a page number in the label; leave it "" if unsure.',
+    relevanceInstruction(input.claimedCondition),
     '',
     'Pages (text truncated to the top of each page):',
   ].filter((l): l is string => l !== null);
@@ -347,7 +382,7 @@ export async function selectPagesLlmBulk(input: {
   readonly pages: readonly PageLlmInputPage[];
 }): Promise<BulkPickResult> {
   const usable = input.pages.filter((p) => (p.text ?? '').trim().length > 0);
-  if (usable.length < 3) return { result: null, costUsd: 0, label: null };
+  if (usable.length < 3) return { result: null, costUsd: 0, label: null, relevant: null };
   // Bound total pages at the LLM (30s API-GW window). Grounded-page union still pins money pages beyond.
   const capped = usable.slice(0, MAX_BULK_LLM_PAGES);
   const batches = chunkPages(capped, BULK_BATCH_PAGES);
@@ -366,15 +401,22 @@ export async function selectPagesLlmBulk(input: {
       },
       BULK_RETRIES,
     );
-    if (res === null) return { keep: [] as number[], label: null as string | null, costUsd: 0, errored: true };
+    if (res === null) return { keep: [] as number[], label: null as string | null, relevant: null as boolean | null, costUsd: 0, errored: true };
     const parsed = parseBulkBatch(res.text, batch.map((p) => p.pageNumber));
-    return { keep: parsed.keep, label: parsed.label, costUsd: res.costUsd, errored: false };
+    return { keep: parsed.keep, label: parsed.label, relevant: parsed.relevant, costUsd: res.costUsd, errored: false };
   });
 
   const costUsd = perBatch.reduce((s, b) => s + b.costUsd, 0);
+  // Doc-level relevance: relevant if ANY batch found supporting content; false only if a batch said
+  // false and none said true; null if no batch gave a verdict (default-safe = keep the doc).
+  const relevant: boolean | null = perBatch.some((b) => b.relevant === true)
+    ? true
+    : perBatch.some((b) => b.relevant === false)
+      ? false
+      : null;
   if (perBatch.every((b) => b.errored)) {
     // Total failure (every batch threw/throttled out) → regex fallback, but report the billed cost.
-    return { result: null, costUsd, label: null };
+    return { result: null, costUsd, label: null, relevant: null };
   }
 
   const keptSet = new Set<number>();
@@ -382,7 +424,8 @@ export async function selectPagesLlmBulk(input: {
   const kept = [...keptSet].sort((a, b) => a - b).slice(0, BULK_DOC_MAX_KEEP);
   if (kept.length === 0) {
     // Model judged the whole (sent) dump boilerplate → let regex have it (never fewer pages than today).
-    return { result: null, costUsd, label: null };
+    // relevant still flows so an irrelevant 'other' doc can be dropped by the caller.
+    return { result: null, costUsd, label: null, relevant };
   }
 
   // Label = the first non-empty batch label (its "most decisive page" descriptor).
@@ -397,5 +440,6 @@ export async function selectPagesLlmBulk(input: {
     },
     costUsd,
     label,
+    relevant,
   };
 }

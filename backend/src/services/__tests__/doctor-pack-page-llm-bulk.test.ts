@@ -8,7 +8,7 @@ vi.mock('../../advisory/bedrockClient.js', async (orig) => {
   return { ...actual, invokeAdvisory: vi.fn() };
 });
 import { invokeAdvisory } from '../../advisory/bedrockClient.js';
-import { selectPagesLlmBulk } from '../doctor-pack-page-llm.js';
+import { selectPagesLlmBulk, selectPagesLlm } from '../doctor-pack-page-llm.js';
 
 const mockInvoke = vi.mocked(invokeAdvisory);
 
@@ -93,5 +93,22 @@ describe('selectPagesLlmBulk — batching, union, fail-safe', () => {
     expect(out.result).not.toBeNull();
     expect(out.result!.keptPageNumbers).toEqual([1]);
     expect(out.label).toBe('OSA note');
+  });
+});
+
+describe('selectPagesLlm — label + Haiku model (DOCTOR_PACK_LLM_BULK)', () => {
+  it('surfaces the model note as a cover label AND runs on Haiku when haiku:true', async () => {
+    mockInvoke.mockResolvedValue({ text: JSON.stringify({ keep: [1, 2], note: 'OSA diagnosis and plan' }), usage: {}, stopReason: 'end_turn', costUsd: 0.01 });
+    const out = await selectPagesLlm({ docType: 'progress_notes', claimedCondition: 'osa', pages: pages(5), haiku: true });
+    expect(out).not.toBeNull();
+    expect(out!.label).toBe('OSA diagnosis and plan');
+    expect(String((mockInvoke.mock.calls[0]![2] as { modelId?: string }).modelId)).toContain('haiku');
+  });
+
+  it('defaults to Opus (no modelId override) when haiku is absent — byte-identical to prior callers', async () => {
+    mockInvoke.mockResolvedValue({ text: JSON.stringify({ keep: [1] }), usage: {}, stopReason: 'end_turn', costUsd: 0.05 });
+    const out = await selectPagesLlm({ docType: 'progress_notes', pages: pages(5) });
+    expect(out).not.toBeNull();
+    expect((mockInvoke.mock.calls[0]![2] as { modelId?: string }).modelId).toBeUndefined();
   });
 });

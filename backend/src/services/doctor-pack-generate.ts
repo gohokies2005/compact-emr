@@ -20,7 +20,7 @@ import {
 } from './doctor-pack.js';
 import { classifyDocument, CLASSIFIER_VERSION_NUM } from './key-docs-classifier.js';
 import { selectPages, unionGroundedPagesIntoResult, type PageSelectorInputPage, type PageSelectorResult } from './page-selector.js';
-import { selectPagesLlm, selectPagesLlmBulk, shouldUseLlmPicker, PAGE_LLM_VERSION } from './doctor-pack-page-llm.js';
+import { selectPagesLlm, selectPagesLlmBulk, shouldUseLlmPicker, MAX_PAGES_FOR_LLM, PAGE_LLM_VERSION } from './doctor-pack-page-llm.js';
 // doctor-pack grounded pages, 2026-06-13 (PR-2): facts→pages back-map.
 import {
   chartFactCategoryByDocument,
@@ -1034,13 +1034,17 @@ export async function generateDoctorPackForCase(
     // drops: a bulk doc that previously paid for an LLM ranking pass now pays $0. Flag OFF ⇒ this
     // predicate is false ⇒ the picker dispatch is byte-identical to PR-2/PR-3.
     const isBulkDump = cls.classification === 'bulk' || cls.docType === 'blue_button';
-    // DOCTOR_PACK_LLM_BULK: when ON, the bulk/blue_button dumps that today short-circuit to regex are
-    // routed through the chunked Haiku picker instead — so the narrow-out only fires when the bulk flag
-    // is OFF (flag-OFF ⇒ predicate identical to before ⇒ byte-identical dispatch).
-    const narrowOutOfLlmScope =
-      groundedPagesEnabled && isBulkDump && !bulkLlmOn;
+    const tooBigForStdPicker = textPageCount > MAX_PAGES_FOR_LLM;
+    // DOCTOR_PACK_LLM_BULK: route to the chunked bulk picker any doc that TODAY falls through to regex —
+    // a bulk/blue_button dump OR simply a doc too big for the single-call picker (>60pp), REGARDLESS of
+    // the blue_button/my-healthevet content marker. (Walthour: a large 'unspecified' VA export with no
+    // "my healthevet" marker classified 'unspecified' and >60pp → bypassed both pickers → identical
+    // regex output. Size is the real trigger, not the label.)
+    const routeToBulk = bulkLlmOn && !physicianOverride && textPageCount >= 3 && (isBulkDump || tooBigForStdPicker);
+    // The narrow-out only gates the STANDARD picker branch; flag-OFF ⇒ predicate identical to before.
+    const narrowOutOfLlmScope = groundedPagesEnabled && isBulkDump && !bulkLlmOn;
     let bulkLabel: string | null = null;
-    if (bulkLlmOn && isBulkDump && !physicianOverride && textPageCount >= 3) {
+    if (routeToBulk) {
       // Chunked Haiku pass over the whole dump; fail-safe returns result:null (never fewer pages than
       // regex). Cost is added REGARDLESS of result (fixes the billed-but-unparsed cost-visibility leak).
       const bulk = await selectPagesLlmBulk({
@@ -1057,13 +1061,18 @@ export async function generateDoctorPackForCase(
         selection = runRegex();
       }
     } else if (!physicianOverride && !narrowOutOfLlmScope && LLM_PICKER_DOCTYPES.has(cls.docType) && shouldUseLlmPicker(textPageCount)) {
+      // Standard single-call picker. When the bulk flag is on, run it on Haiku (cheap+fast; the Opus
+      // path was ~5-6c/call and often unparsed → this is also why a regen was costing ~27c) and surface
+      // its label as the cover descriptor so EVERY LLM-picked doc gets a real label, not just bulk dumps.
       const llm = await selectPagesLlm({
         docType: cls.docType,
         pages: pagesInput,
         ...(claimedCondition !== undefined ? { claimedCondition } : {}),
+        ...(bulkLlmOn ? { haiku: true } : {}),
       });
       if (llm !== null) {
         packPickerCostUsd += llm.costUsd;
+        if (bulkLlmOn) bulkLabel = llm.label ?? null;
         const llmResult: PageSelectorResult = { pageRanges: llm.pageRanges, selectorRationale: llm.rationale, needsRnReview: false, selectorVersion: PAGE_LLM_VERSION };
         // PR-2: union grounded pages into the LLM picker's output too (it never saw them). When the
         // flag is off groundedPages is empty ⇒ this is the unchanged llmResult.

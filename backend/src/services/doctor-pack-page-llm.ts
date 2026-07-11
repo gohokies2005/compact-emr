@@ -34,10 +34,10 @@ export const PAGE_LLM_VERSION = 'page-llm-1.1.0';
 // the value on the page the model is judging while staying well under full-page token cost.
 // Exported for the page-llm test (regression guard on the bump).
 export const PAGE_TEXT_CHARS = 1200;
-// Safety cap: docs bigger than this skip the LLM and fall back to regex (keeps cost bounded and
-// avoids dumping a 500-page blue-button export at the model). The real VA decision letter is well
-// under this; its decision pages are early.
-const MAX_PAGES_FOR_LLM = 60;
+// Safety cap for the SINGLE-CALL picker: docs bigger than this skip selectPagesLlm and are handled by
+// the chunked bulk picker (DOCTOR_PACK_LLM_BULK) instead — a doc over this size is exactly what the
+// bulk router now catches (>60pp → chunked Haiku), so it is no longer a silent regex fallback.
+export const MAX_PAGES_FOR_LLM = 60;
 // Output cap — we only need a short JSON keep-list, never prose.
 const MAX_OUTPUT_TOKENS = 700;
 
@@ -83,6 +83,10 @@ export interface PageLlmResult {
   readonly keptPageNumbers: readonly number[];
   readonly costUsd: number;
   readonly rationale: string;
+  // DOCTOR_PACK_LLM_BULK: the model's short reason/label for the kept pages, surfaced as the cover
+  // descriptor so EVERY LLM-picked doc (not just bulk dumps) gets a real cover label instead of the
+  // generic per-category why. Page refs are never taken from here (code-generated from pageRanges).
+  readonly label?: string | null;
 }
 
 /** True when the LLM picker should run for this doc. Skips tiny docs (nothing to pick), and
@@ -121,6 +125,10 @@ export async function selectPagesLlm(input: {
   readonly docType: string;
   readonly claimedCondition?: string;
   readonly pages: readonly PageLlmInputPage[];
+  // DOCTOR_PACK_LLM_BULK: when true, run this single-doc picker on Haiku 4.5 (cheaper + faster than the
+  // Opus advisory default, which was costing ~5-6c/call and often unparsed) instead of Opus. Absent ⇒
+  // Opus (byte-identical to every prior caller).
+  readonly haiku?: boolean;
 }): Promise<PageLlmResult | null> {
   const usable = input.pages.filter((p) => (p.text ?? '').trim().length > 0);
   if (!shouldUseLlmPicker(usable.length)) return null;
@@ -142,6 +150,9 @@ export async function selectPagesLlm(input: {
     const res = await invokeAdvisory(SYSTEM_PROMPT, userContent, {
       maxTokens: MAX_OUTPUT_TOKENS,
       temperature: 0,
+      ...(input.haiku
+        ? { modelId: HAIKU_MODEL_ID, pricePerMInput: HAIKU_PRICE_PER_M_INPUT_USD, pricePerMOutput: HAIKU_PRICE_PER_M_OUTPUT_USD }
+        : {}),
     });
     const keep = parseKeep(res.text, usable.map((p) => p.pageNumber));
     if (keep === null) {
@@ -155,6 +166,7 @@ export async function selectPagesLlm(input: {
       keptPageNumbers: keep,
       costUsd: res.costUsd,
       rationale: `page_llm kept ${keep.length}/${usable.length} pages ($${res.costUsd.toFixed(4)})`,
+      label: extractLabelFromResponse(res.text),
     };
   } catch (e) {
     console.warn(
@@ -269,6 +281,21 @@ function sanitizeLabel(raw: string): string | null {
   return out;
 }
 
+/** Pull a sanitized label/note out of a picker response (tolerant of prose/fences). Shared by the
+ * single-doc picker (selectPagesLlm) and the bulk batches so EVERY LLM-picked doc can surface a real
+ * cover descriptor. Prefers "label", falls back to the "note" the SYSTEM_PROMPT already asks for. */
+export function extractLabelFromResponse(text: string): string | null {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const obj = JSON.parse(match[0]) as { label?: unknown; note?: unknown };
+    const raw = typeof obj.label === 'string' ? obj.label : typeof obj.note === 'string' ? obj.note : null;
+    return typeof raw === 'string' ? sanitizeLabel(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Parse ONE batch's response: the kept page numbers (validated against this batch) + an optional
  * grounded label. Tolerant of stray prose / fences, like parseKeep. */
 function parseBulkBatch(text: string, validPageNumbers: readonly number[]): { keep: number[]; label: string | null } {
@@ -285,9 +312,7 @@ function parseBulkBatch(text: string, validPageNumbers: readonly number[]): { ke
   const keep = Array.isArray(keepRaw)
     ? [...new Set(keepRaw.map((v) => Number(v)).filter((n) => Number.isInteger(n) && valid.has(n)))].sort((a, b) => a - b)
     : [];
-  const rawLabel = (obj as { label?: unknown }).label ?? (obj as { note?: unknown }).note;
-  const label = typeof rawLabel === 'string' ? sanitizeLabel(rawLabel) : null;
-  return { keep, label };
+  return { keep, label: extractLabelFromResponse(text) };
 }
 
 /** The per-batch user content. Reuses the shared (unchanged) SYSTEM_PROMPT and adds a bulk-mode block:

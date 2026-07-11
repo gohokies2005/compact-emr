@@ -280,6 +280,14 @@ export class ApiStack extends Stack {
         // off link-map PRESENCE (flag-agnostic). Read at request time in doctor-pack-generate (no image
         // rebuild); dark-deploy then validate on a real pack before flipping.
         DOCTOR_PACK_LINKED_COVER: (this.node.tryGetContext('doctor_pack_linked_cover') as string | undefined) ?? 'off',
+        // DOCTOR_PACK_LLM_BULK (2026-07-11): route large bulk/blue_button dumps THROUGH the page-picker
+        // (chunked Haiku 4.5) instead of the regex short-circuit — so a sleep study buried in a
+        // Blue-Button export is actually surfaced — AND render real per-doc cover descriptors + a
+        // claim-filtered/deduped problem snapshot. Runs INLINE on the 30s API path; bounded (page cap +
+        // bounded concurrency + throttle backoff) and FAIL-SAFE (never fewer pages than the regex
+        // selector). OFF = byte-identical to today (bulk → regex). Read at request time (no image
+        // rebuild); revert is one context flip. KILL SWITCH: cdk.json `doctor_pack_llm_bulk: "off"`.
+        DOCTOR_PACK_LLM_BULK: (this.node.tryGetContext('doctor_pack_llm_bulk') as string | undefined) ?? 'off',
         // Guided Revision (physician highlight-the-passage broader letter edit, Opus 4.8) — ON (Ryan
         // 2026-06-14: "guided revision looks good, but not available"). Context-overridable to disable.
         GUIDED_REVISION_ENABLED: (this.node.tryGetContext('guided_revision_enabled') as string | undefined) ?? 'true',

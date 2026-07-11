@@ -12,6 +12,12 @@ export const ADVISORY_MODEL_ID = 'us.anthropic.claude-opus-4-6-v1';
 // Lambda, which runs Sonnet 4.6 on Bedrock today). Cheaper + faster than Opus; adequate for a small
 // GROUNDED classification call (the strategy-preview dx-match / PACT check). NOT the advisory default.
 export const SONNET_MODEL_ID = 'us.anthropic.claude-sonnet-4-6';
+// Haiku 4.5 US inference profile — live-invokable on this account (probe-verified 2026-07-10: returns
+// "Pong!" on a bare InvokeModel, IAM is bedrock:InvokeModel on '*'). Fast + cheap; used by the Doctor
+// Pack BULK page-picker (DOCTOR_PACK_LLM_BULK) where the task is shallow keep/drop over hundreds of
+// noisy pages — Haiku's sweet spot, ~93% cheaper than Opus and materially faster (fewer 30s-window /
+// throttle problems on the synchronous API path). Not the advisory default.
+export const HAIKU_MODEL_ID = 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
 // Output cap = the cost ceiling on each answer. 1536 tokens (~1100 words) — raised +50% from 1024 on
 // 2026-06-25 (Dr. Kasky: answers were truncating, forcing repeated "ask me to continue" clicks). Cost
 // stays modest: output 1536 @ $75/M ≈ 11.5¢ + input (cached system prompt) ≈ 1-3¢. Answers should
@@ -26,6 +32,10 @@ export const PRICE_PER_M_OUTPUT_USD = 75;
 // Sonnet call doesn't get attributed at Opus rates in the cost log.
 export const SONNET_PRICE_PER_M_INPUT_USD = 3;
 export const SONNET_PRICE_PER_M_OUTPUT_USD = 15;
+// Haiku 4.5 list price, per 1M tokens (Bedrock). VERIFY against the AWS Bedrock pricing page before
+// trusting the cost log for billing — cost-attribution rates for the oversight dashboard only.
+export const HAIKU_PRICE_PER_M_INPUT_USD = 1;
+export const HAIKU_PRICE_PER_M_OUTPUT_USD = 5;
 
 export interface AdvisoryUsage {
   input_tokens?: number;

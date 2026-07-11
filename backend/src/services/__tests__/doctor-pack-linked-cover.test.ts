@@ -159,6 +159,68 @@ describe('linked cover — calm clickable TOC layout', () => {
   });
 });
 
+describe('linked cover — betterCover (DOCTOR_PACK_LLM_BULK): descriptors + claim-filtered snapshot', () => {
+  const otherEntry = (overrides: Partial<CoverIndexEntryInput> = {}): CoverIndexEntryInput => ({
+    displayLabel: 'Blue Button pages',
+    docType: 'unspecified',
+    category: 'other',
+    pageRanges: [{ from: 13, to: 13 }],
+    mentionsClaimedCondition: false,
+    assembledStartPage: 13,
+    ...overrides,
+  });
+
+  it('renders the grounded descriptor instead of "Supporting record — Supporting record"', () => {
+    const built = buildLinked({ betterCover: true, entries: [otherEntry({ descriptor: 'Sleep study, AHI 42' })], notIncluded: [] });
+    const body = built.lines.join('\n');
+    expect(body).toContain('Supporting record — Sleep study, AHI 42');
+    expect(body).not.toContain('Supporting record — Supporting record');
+  });
+
+  it('collapses a redundant (no-descriptor) "other" row to just the label — still ONE page ref', () => {
+    const built = buildLinked({ betterCover: true, entries: [otherEntry()], notIncluded: [] });
+    const body = built.lines.join('\n');
+    expect(body).not.toContain('Supporting record — Supporting record');
+    for (const row of built.contentRows ?? []) {
+      const line = built.lines[row.sourceLineIndex]!;
+      expect((line.match(/p\. \d+/g) ?? []).length).toBe(1);
+    }
+  });
+
+  it('flag-OFF (no betterCover) STILL renders the doubled generic row — legacy byte-identical', () => {
+    const built = buildLinked({ entries: [otherEntry()], notIncluded: [] });
+    expect(built.lines.join('\n')).toContain('Supporting record — Supporting record');
+  });
+
+  it('snapshot dedups + leads with claim-relevant problems, never empties, stays ONE line', () => {
+    const built = buildLinked({
+      betterCover: true,
+      claimedCondition: 'obstructive sleep apnea',
+      activeProblems: [
+        'ADHD', 'ADHD', 'Adjustment disorder with depressed mood',
+        'Obstructive sleep apnea', 'Hypertension',
+        'adjustment disorder with depressed mood', // case-insensitive dup
+      ],
+    });
+    const line = built.lines.find((l) => l.startsWith('Active problems:'))!;
+    expect(line).toContain('Obstructive sleep apnea');
+    // claim-relevant leads the irrelevant
+    expect(line.indexOf('Obstructive sleep apnea')).toBeLessThan(line.indexOf('ADHD'));
+    // ADHD + adjustment-disorder each appear ONCE (deduped)
+    expect((line.match(/ADHD/g) ?? []).length).toBe(1);
+    expect((line.match(/[Aa]djustment disorder/g) ?? []).length).toBe(1);
+    // exactly one snapshot line
+    expect(built.lines.filter((l) => l.startsWith('Active problems:')).length).toBe(1);
+  });
+
+  it('snapshot with NO claim-relevant problems still shows the list (never "none")', () => {
+    const built = buildLinked({ betterCover: true, claimedCondition: 'tinnitus', activeProblems: ['Hypertension', 'ADHD'] });
+    const line = built.lines.find((l) => l.startsWith('Active problems:'))!;
+    expect(line).toContain('Hypertension');
+    expect(line).not.toContain('none recorded');
+  });
+});
+
 describe('linked cover — link-map rects map each content row to a rendered rectangle', () => {
   it('every content row resolves to exactly one rendered line with a plausible rect', async () => {
     const built = buildLinked();

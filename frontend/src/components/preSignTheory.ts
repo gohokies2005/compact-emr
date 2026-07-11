@@ -1,20 +1,18 @@
 // Pre-sign theory reconciliation (Ryan 2026-07-11): above the "Considerations before signing" list the
-// physician should see (1) the veteran's OWN stated theory (their literal intake words + what they
-// claimed + what they said it's secondary to), (2) what the LETTER argues (the diagnosis + causation
-// theory the drafter's route-picker plan led with), and (3) ONLY when the two DON'T match, a plain
-// reason why + — when the veteran's anchor was itself a considered alternative — a nudge toward a brief
-// surgical edit (physician discretion).
+// physician sees (1) the veteran's OWN stated theory (their literal intake words + what they claimed +
+// what they said it's secondary to), (2) what the LETTER argues (the diagnosis + causation theory the
+// drafter's route-picker plan led with), and (3) ONLY when the two genuinely differ, a plain reason why.
 //
-// PURE + DETERMINISTIC: the RECONCILIATION is pure string ops over structured Case fields (no LLM, no
-// letter-text parse — nothing to hallucinate in the compare). Block 2's CONTENT is route-picker output
-// (an AI artifact) and reflects the PLAN the drafter followed; in rare cases the drafter can diverge
-// from the plan (a known limitation, honestly labeled).
+// PURE + DETERMINISTIC: pure string ops over structured Case fields (no LLM, no letter-text parse).
 //
-// SAFETY (3-agent QA 2026-07-11): NO positive "✓ matches" affirmation is ever emitted — a green
-// reassurance on a legal sign-off surface risks a FALSE positive, so we only WARN on a clear divergence.
-// When the framing on file was RN-adjusted (framingStampSource='manual') the derived theory is the RN's,
-// so it is labeled as such and the mismatch check is skipped (the literal veteranStatement is the
-// veteran's ground truth). Fail-open: a missing route-picker plan just hides blocks 2+3.
+// TRUST GUARD (Ryan 2026-07-11, CLM-47FAC163B8): `upstreamScCondition` is an AUTO-derived field and can
+// be STALE/WRONG (Jay's said "Ankle" while the veteran's own statement + the letter both said depression
+// → a bogus "Their theory: Ankle" + a phantom mismatch). So we only assert the derived "secondary to X"
+// theory (and only run the mismatch check) when X is CORROBORATED by the veteran's literal statement.
+// If the field contradicts / is absent from the statement, we show ONLY the veteran's literal words +
+// what the letter argues, and stay silent — the statement is the ground truth, never a stale column.
+// NO positive "✓ matches" affirmation is ever emitted (a green ✓ on a sign-off surface risks false
+// reassurance). Fail-open: a missing route-picker plan just hides blocks 2+3.
 import type { AiViabilityCard } from '../api/case-viability';
 
 export interface PreSignTheoryInput {
@@ -24,26 +22,18 @@ export interface PreSignTheoryInput {
   readonly upstreamScCondition?: string;
   readonly veteranStatement?: string;
   readonly aiViabilityPlanJson?: AiViabilityCard | null;
-  // 'manual' ⇒ the framing/upstream on the row was set/adjusted by the RN, NOT the veteran.
-  readonly framingStampSource?: string | null;
 }
 
 export interface PreSignTheory {
-  /** The veteran's literal intake paragraph (why they think they're service-connected), or null. */
   readonly veteranStatement: string | null;
-  /** The condition(s) the veteran claimed. */
   readonly veteranClaim: string | null;
-  /** The veteran's stated causation theory, e.g. "Secondary to service-connected ankle". */
+  /** The veteran's stated causation theory, e.g. "Secondary to service-connected PTSD" — ONLY when the
+   *  upstream is corroborated by their statement (else null; the literal statement stands alone). */
   readonly veteranTheory: string | null;
-  /** Label for the theory line: "Their theory" normally, "Framing on file (RN-adjusted)" when manual. */
-  readonly veteranTheoryLabel: string;
-  /** The diagnosis the letter argues (route-picker lead.claimed), or null when no plan. */
   readonly letterDx: string | null;
-  /** The causation theory the letter argues, e.g. "OSA secondary to PTSD" / "Direct — fall in service". */
   readonly letterTheory: string | null;
-  /** Present ONLY when the veteran's theory and the letter's theory clearly differ. */
+  /** Present ONLY when the veteran's (corroborated) theory and the letter's theory clearly differ. */
   readonly mismatch: { readonly reason: string | null; readonly suggestEdit: boolean } | null;
-  /** Whether there is anything to render at all. */
   readonly hasContent: boolean;
 }
 
@@ -65,8 +55,7 @@ function framingBucket(f: string | null | undefined): Framing {
 }
 
 // Laterality / severity / generic-medical tokens that must NOT count as a condition match — otherwise
-// "Right knee strain" vs "Right shoulder impingement" collide on "right" and a real upstream mismatch is
-// silently swallowed (or the wrong alternative's reason is shown). (3-agent QA 2026-07-11.)
+// "Right knee" vs "Right shoulder" collide on "right". (3-agent QA 2026-07-11.)
 const MATCH_STOPWORDS = new Set([
   'left', 'right', 'chronic', 'acute', 'bilateral', 'joint', 'pain', 'disorder', 'syndrome', 'disease',
   'condition', 'mild', 'moderate', 'severe', 'service', 'connected', 'status', 'post', 'spine', 'strain',
@@ -76,21 +65,19 @@ function significantTokens(n: string): string[] {
   return n.split(' ').filter((t) => t.length >= 4 && !MATCH_STOPWORDS.has(t));
 }
 
-// Acronym ↔ expansion equivalence so "PTSD" ~ "post traumatic stress disorder", "OSA" ~ "obstructive
-// sleep apnea", "GERD" ~ "gastroesophageal reflux disease" don't FALSE-differ (AI-SME QA 2026-07-11).
+// Acronym ↔ expansion equivalence ("PTSD" ~ "post traumatic stress disorder", "OSA" ~ "obstructive
+// sleep apnea") so they don't FALSE-differ (AI-SME QA 2026-07-11).
 function initialsOf(n: string): string {
   return n.split(' ').filter(Boolean).map((t) => t[0]).join('');
 }
 function acronymMatch(na: string, nb: string): boolean {
-  const isAcr = (s: string) => /^[a-z]{2,6}$/.test(s); // single short all-letters token (already normed)
+  const isAcr = (s: string) => /^[a-z]{2,6}$/.test(s);
   if (isAcr(na) && !na.includes(' ') && initialsOf(nb) === na) return true;
   if (isAcr(nb) && !nb.includes(' ') && initialsOf(na) === nb) return true;
   return false;
 }
 
-// Loose condition match so "Asthma" vs "Asthma, Bronchial" (or "ankle" vs "limited motion of ankle")
-// aren't flagged as a mismatch: equal, substring, acronym↔expansion, or a shared SIGNIFICANT token
-// (>=4 chars, not a laterality/generic stopword). The stopword filter keeps "Right knee" ≠ "Right shoulder".
+// Loose condition match: equal, substring, acronym↔expansion, or a shared SIGNIFICANT token.
 function looseMatch(a: string | null | undefined, b: string | null | undefined): boolean {
   const na = norm(a);
   const nb = norm(b);
@@ -99,6 +86,17 @@ function looseMatch(a: string | null | undefined, b: string | null | undefined):
   if (acronymMatch(na, nb)) return true;
   const ta = new Set(significantTokens(na));
   return significantTokens(nb).some((t) => ta.has(t));
+}
+
+// Is `needle` (a condition name) actually mentioned in `haystack` (the veteran's free-text statement)?
+// A significant token of the needle appearing in the statement (as a word or substring) corroborates it.
+function mentionedIn(needle: string | null | undefined, haystack: string | null | undefined): boolean {
+  const h = norm(haystack);
+  if (!h) return false;
+  const toks = significantTokens(norm(needle));
+  if (toks.length === 0) return false;
+  const words = new Set(h.split(' '));
+  return toks.some((t) => words.has(t) || h.includes(t));
 }
 
 function veteranTheoryLine(bucket: Framing, framingRaw: string | null | undefined, upstream: string | null | undefined): string | null {
@@ -138,38 +136,42 @@ export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
     .filter(Boolean);
   const veteranClaim = claimList.length > 0 ? claimList.join(', ') : null;
 
-  const framingIsRnAdjusted = (c.framingStampSource ?? '').toLowerCase() === 'manual';
   const hasUpstream = !!(c.upstreamScCondition ?? '').trim();
-  // "Auto" framing ('') + a named upstream ⇒ the veteran indicated a secondary theory even without
-  // picking the enum. Infer secondary so their theory shows AND a direct/secondary conflict can surface.
+  // TRUST GUARD: an upstream is trusted as the veteran's own theory only if their statement corroborates
+  // it — OR there is no statement to check against (then the field is all we have). A stale/contradicting
+  // field (Jay's "Ankle" vs a depression statement) is NOT trusted.
+  const upstreamTrusted = hasUpstream && (!veteranStatement || mentionedIn(c.upstreamScCondition, veteranStatement));
+
   const vBucketRaw = framingBucket(c.framingChoice);
-  const vBucket: Framing = vBucketRaw === 'other' && hasUpstream ? 'secondary' : vBucketRaw;
-  const veteranTheory = veteranTheoryLine(vBucket, c.framingChoice, c.upstreamScCondition);
-  const veteranTheoryLabel = framingIsRnAdjusted ? 'Framing on file (RN-adjusted)' : 'Their theory';
+  // "Auto" framing ('') + a TRUSTED upstream ⇒ infer secondary (the veteran indicated a secondary theory).
+  const vBucket: Framing = vBucketRaw === 'other' && upstreamTrusted ? 'secondary' : vBucketRaw;
+  const isSecondaryish = vBucket === 'secondary' || vBucket === 'aggravation';
+  // Show the derived theory line only when it doesn't rest on an untrusted upstream. Direct claims need
+  // no upstream; secondary/aggravation need a trusted one.
+  const veteranTheory = isSecondaryish && !upstreamTrusted ? null : veteranTheoryLine(vBucket, c.framingChoice, c.upstreamScCondition);
 
   const lead = c.aiViabilityPlanJson?.lead ?? null;
   const letterDx = nonEmpty(lead?.claimed);
   const letterTheory = lead ? letterTheoryLine(lead) : null;
 
   let mismatch: PreSignTheory['mismatch'] = null;
-  // Compare ONLY when the framing on file is the VETERAN's (not RN-adjusted) AND the veteran actually
-  // expressed a theory (vBucket known). Otherwise it isn't honestly "veteran vs letter" — Block 1's
-  // literal statement stays the physician's ground truth. NO positive affirmation is emitted either way.
-  if (lead && !framingIsRnAdjusted && vBucket !== 'other') {
+  // Compare ONLY when the veteran expressed a theory we can trust — a known framing, and for a
+  // secondary/aggravation theory a CORROBORATED upstream. Otherwise it isn't honestly "veteran vs letter"
+  // (Block 1's literal statement stays the physician's ground truth). No positive affirmation either way.
+  const canCompare = vBucket !== 'other' && (!isSecondaryish || upstreamTrusted);
+  if (lead && canCompare) {
     const lBucket = framingBucket(lead.framing);
     const framingDiffers = lBucket !== 'other' && vBucket !== lBucket;
-    const secondaryish = lBucket === 'secondary' || lBucket === 'aggravation';
+    const leadSecondaryish = lBucket === 'secondary' || lBucket === 'aggravation';
     const upstreamDiffers =
-      secondaryish && hasUpstream && !!(lead.upstream ?? '').trim() && !looseMatch(c.upstreamScCondition, lead.upstream);
+      leadSecondaryish && hasUpstream && !!(lead.upstream ?? '').trim() && !looseMatch(c.upstreamScCondition, lead.upstream);
     if (framingDiffers || upstreamDiffers) {
-      // Use ONLY the plan's explicit "why this alternative wasn't led" (alternatives[].why_not). Do NOT
-      // reuse counterargument/rationale — those are about the CHOSEN theory, not why the veteran's was
-      // set aside (counterargument would wrongly argue AGAINST the letter). (AI-SME QA.)
+      // Use ONLY the plan's explicit "why this alternative wasn't led" (alternatives[].why_not).
       const alt = (c.aiViabilityPlanJson?.alternatives ?? []).find((a) => looseMatch(a.upstream, c.upstreamScCondition));
       mismatch = { reason: nonEmpty(alt?.why_not), suggestEdit: !!alt };
     }
   }
 
   const hasContent = !!(veteranStatement || veteranTheory || veteranClaim || letterTheory);
-  return { veteranStatement, veteranClaim, veteranTheory, veteranTheoryLabel, letterDx, letterTheory, mismatch, hasContent };
+  return { veteranStatement, veteranClaim, veteranTheory, letterDx, letterTheory, mismatch, hasContent };
 }

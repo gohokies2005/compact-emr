@@ -20,7 +20,7 @@ export function PreSignTheoryBlocks({ theory }: { readonly theory: PreSignTheory
           {theory.veteranTheory ? (
             <>
               {' · '}
-              <span className="font-medium">{theory.veteranTheoryLabel}:</span> {theory.veteranTheory}
+              <span className="font-medium">Their theory:</span> {theory.veteranTheory}
             </>
           ) : null}
         </p>
@@ -43,19 +43,18 @@ export function PreSignTheoryBlocks({ theory }: { readonly theory: PreSignTheory
       ) : null}
 
       {/* Block 3 — reconciliation: shown ONLY when the two clearly differ (no positive "matches"
-          affirmation — a green ✓ on a sign-off surface risks false reassurance). When the veteran's
-          anchor was itself a considered alternative, nudge toward a brief surgical edit (discretion). */}
+          affirmation — a green ✓ on a sign-off surface risks false reassurance). Rendered as a plain
+          line in the SAME format as the blocks above (Ryan 2026-07-11: no highlighted box). */}
       {theory.mismatch ? (
-        <div className="rounded-md border border-amber-200 bg-amber-50 p-2.5">
-          <p className="text-sm text-amber-900">
-            <span className="font-semibold">The letter&rsquo;s theory differs from the veteran&rsquo;s.</span>
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Where they differ</p>
+          <p className="mt-1 text-sm text-slate-700">
+            The letter&rsquo;s theory differs from the veteran&rsquo;s.
             {theory.mismatch.reason ? <> {theory.mismatch.reason}</> : null}
+            {theory.mismatch.suggestEdit ? (
+              <> The veteran&rsquo;s anchor was considered as an alternative — if clinically appropriate, consider a brief surgical edit to address it (your discretion).</>
+            ) : null}
           </p>
-          {theory.mismatch.suggestEdit ? (
-            <p className="mt-1 text-xs text-amber-800">
-              The veteran&rsquo;s anchor was considered as an alternative — if clinically appropriate, consider a brief surgical edit to address it (your discretion).
-            </p>
-          ) : null}
         </div>
       ) : null}
     </div>

@@ -25,7 +25,6 @@ describe('buildPreSignTheory', () => {
       aiViabilityPlanJson: plan({ claimed: 'Obstructive Sleep Apnea', framing: 'secondary', upstream: 'PTSD' }),
     });
     expect(t.mismatch).toBeNull();
-    expect(t.veteranTheoryLabel).toBe('Their theory');
     expect(t.veteranTheory).toBe('Secondary to service-connected PTSD');
     expect(t.letterTheory).toBe('Obstructive Sleep Apnea secondary to PTSD');
   });
@@ -93,15 +92,32 @@ describe('buildPreSignTheory', () => {
     expect(t.hasContent).toBe(true);
   });
 
-  it('RN-ADJUSTED framing (framingStampSource="manual") → labeled + mismatch check skipped', () => {
+  it('TRUST GUARD (Jay CLM-47FAC163B8): stale upstream="Ankle" that contradicts the depression statement → NO theory, NO mismatch', () => {
+    const t = buildPreSignTheory({
+      claimedCondition: 'Obstructive Sleep Apnea (OSA)',
+      framingChoice: 'secondary',
+      upstreamScCondition: 'Ankle', // auto-derived + STALE
+      veteranStatement: 'I am service connected for depressive disorder with chronic sleep impairment and believe my sleep apnea was caused or aggravated by my service-connected mental health condition.',
+      aiViabilityPlanJson: plan(
+        { claimed: 'OSA', framing: 'secondary', upstream: 'depressive disorder with chronic sleep impairment' },
+        [{ upstream: 'LIMITED MOTION OF ANKLE', framing: 'secondary', why_not: 'ankle-to-OSA is indirect' }],
+      ),
+    });
+    expect(t.veteranTheory).toBeNull(); // "Ankle" is not in the veteran's words → not asserted as their theory
+    expect(t.mismatch).toBeNull(); // veteran said depression, letter argues depression → no real mismatch
+    expect(t.veteranStatement).toContain('depressive disorder');
+    expect(t.letterTheory).toBe('OSA secondary to depressive disorder with chronic sleep impairment');
+  });
+
+  it('TRUST GUARD: upstream CORROBORATED by the statement → theory shows + mismatch works', () => {
     const t = buildPreSignTheory({
       framingChoice: 'secondary',
       upstreamScCondition: 'PTSD',
-      framingStampSource: 'manual',
-      aiViabilityPlanJson: plan({ framing: 'secondary', upstream: 'Asthma' }), // would differ, but must NOT flag
+      veteranStatement: 'My PTSD from combat gave me sleep apnea.',
+      aiViabilityPlanJson: plan({ framing: 'secondary', upstream: 'Asthma' }, [{ upstream: 'PTSD', framing: 'secondary', why_not: 'asthma is a stronger anchor' }]),
     });
-    expect(t.veteranTheoryLabel).toBe('Framing on file (RN-adjusted)');
-    expect(t.mismatch).toBeNull();
+    expect(t.veteranTheory).toBe('Secondary to service-connected PTSD'); // corroborated by "my PTSD"
+    expect(t.mismatch).not.toBeNull(); // PTSD (veteran) vs Asthma (letter) → real, trusted mismatch
   });
 
   it('direct claim: letter shows the mechanism, aligned → no mismatch', () => {

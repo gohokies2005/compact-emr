@@ -1,5 +1,6 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from './client';
 import type { Case, CaseStatus, ClaimType, Correction, Document, DraftJob, Email, Payment } from '../types/prisma';
+import type { AiViabilityCard } from './case-viability';
 
 export interface CaseVeteranLite {
   readonly id: string; readonly firstName: string; readonly lastName: string; readonly email: string;
@@ -123,6 +124,14 @@ export interface ApproveBlocker { readonly code: string; readonly message: strin
 
 export interface CaseDetail extends Case {
   readonly approveBlockers?: readonly ApproveBlocker[];
+  // Already on the wire (GET /cases/:id spreads the whole Case row) but not on the base Case type.
+  // The full clustered claim set + the persisted route-picker plan the drafter FOLLOWED — used by the
+  // physician pre-sign "veteran theory vs letter theory" reconciliation (buildPreSignTheory).
+  readonly claimedConditions?: readonly string[];
+  readonly aiViabilityPlanJson?: AiViabilityCard | null;
+  // 'manual' ⇒ the framing/upstream was RN-adjusted (not the veteran's own) — the reconciliation labels
+  // the theory line accordingly and skips the veteran-vs-letter mismatch check.
+  readonly framingStampSource?: string | null;
   // Soft-delete timestamp (C6 lifecycle, 2026-06-13). Non-null = archived → the claim page shows
   // Reopen instead of Archive. GET /cases/:id returns the full Case row, so this is already present.
   readonly archivedAt?: string | null;

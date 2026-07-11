@@ -3,6 +3,8 @@ import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 import { GradeChip } from './ui/GradeChip';
 import { SendBackToRnModal } from './SendBackToRnModal';
+import { buildPreSignTheory } from './preSignTheory';
+import { PreSignTheoryBlocks } from './PreSignTheoryBlocks';
 import type { CaseDetail } from '../api/cases';
 import type { DraftJob, TargetedRevisionHint, DraftGradeSidecarJson } from '../types/prisma';
 
@@ -76,6 +78,9 @@ export function PhysicianLetterReadyPanel({
   const hints = normalizedHints(job);
   const reviewNotices = reviewUnavailableNotices(job);
   const pdfKey = job.artifactPdfS3Key ?? null;
+  // Pre-sign theory reconciliation (Ryan 2026-07-11): the veteran's own stated theory + what the letter
+  // argues + a plain reason if they differ. Pure/deterministic from Case fields — no fetch, fail-open.
+  const theory = buildPreSignTheory(c);
 
   return (
     <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">
@@ -153,20 +158,25 @@ export function PhysicianLetterReadyPanel({
           MEDICAL-judgment items for the physician — NOT RN mechanical fixes. They live here, in the
           physician review surface, framed OPTIONAL ("Not required — consider before you sign"). They never
           block forwarding or signing; the sign-off attestation is unchanged. Shown in full (Ryan 2026-06-04). */}
-      {hints.length > 0 ? (
+      {hints.length > 0 || theory.hasContent ? (
         <div className="mt-6 rounded-lg border border-slate-200 bg-slate-50 p-4">
           <h3 className="text-sm font-semibold text-navyDeep">Considerations before signing</h3>
           <p className="mt-0.5 text-xs text-steel">Not required — consider before you sign.</p>
-          <ul className="mt-3 space-y-2">
-            {hints.map((hint, index) => (
-              <li key={`${hint.section ?? 'section'}-${index}`} className="text-sm text-steel">
-                <span className="text-slate-400">{'• '}</span>
-                <span className="font-medium">Section {hint.section ?? 'review'} — </span>
-                {/* Shown in full — never truncated (Ryan 2026-06-04). */}
-                <span className="whitespace-pre-wrap">{hint.issue ?? ''}</span>
-              </li>
-            ))}
-          </ul>
+
+          <PreSignTheoryBlocks theory={theory} />
+
+          {hints.length > 0 ? (
+            <ul className="mt-3 space-y-2">
+              {hints.map((hint, index) => (
+                <li key={`${hint.section ?? 'section'}-${index}`} className="text-sm text-steel">
+                  <span className="text-slate-400">{'• '}</span>
+                  <span className="font-medium">Section {hint.section ?? 'review'} — </span>
+                  {/* Shown in full — never truncated (Ryan 2026-06-04). */}
+                  <span className="whitespace-pre-wrap">{hint.issue ?? ''}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
 

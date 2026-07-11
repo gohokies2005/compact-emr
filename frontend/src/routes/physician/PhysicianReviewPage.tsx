@@ -186,6 +186,12 @@ export function PhysicianReviewPage() {
           </p>
         </Card>
 
+        {/* RN→doctor handoff notes (Ryan 2026-06-24, Spring bug): the note the RN attached when sending
+            the case for review. MOVED to the top (Ryan 2026-07-11): below the header, ABOVE the "Letter
+            is ready" panel — the physician should read the care team's note before the letter action.
+            Self-fetching + hides when empty (mobile page already renders it first). */}
+        <PhysicianHandoffNotes caseId={c.id} />
+
         {isImportedLetter && c.status === 'physician_review' ? (
           // Imported letter ready to finalize (2026-06-14). Distinct from the drafter_run ready panel:
           // there is no grade/hints/draftJob — the imported PDF is the final artifact. Render READY and
@@ -269,11 +275,6 @@ export function PhysicianReviewPage() {
             message="This case is not ready for physician review."
           />
         )}
-
-        {/* RN→doctor handoff notes (Ryan 2026-06-24, Spring bug): the note the RN attached when sending the
-            case for review. It was written to case_messages but no screen rendered it; this surfaces it on the
-            physician's primary page, under the letter action and above the clinical SOAP. Hides when empty. */}
-        <PhysicianHandoffNotes caseId={c.id} />
 
         {/* Clinical SOAP-note Overview (Ryan 2026-06-24, item: grade + signature ABOVE the SOAP note in the
             doctor view). Moved BELOW the letter/grade/sign-off panel so the physician sees the letter grade and

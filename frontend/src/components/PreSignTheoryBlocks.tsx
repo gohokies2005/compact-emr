@@ -1,0 +1,63 @@
+import type { PreSignTheory } from './preSignTheory';
+
+// The pre-sign theory blocks shown ABOVE the grader considerations on BOTH the desktop
+// (PhysicianLetterReadyPanel) and mobile (PhysicianMobileReviewPage) physician review surfaces
+// (Ryan 2026-07-11). One shared component so the two can't drift. Everything is deterministic from
+// Case fields (buildPreSignTheory) — no letter-text parse, nothing to hallucinate; fail-open blocks
+// with no data simply don't render. Renders nothing when there is no content.
+export function PreSignTheoryBlocks({ theory }: { readonly theory: PreSignTheory }) {
+  if (!theory.hasContent) return null;
+  return (
+    <div className="mt-3 space-y-3 border-b border-slate-200 pb-3">
+      {/* Block 1 — the veteran's OWN words + what they claimed + what they said it's secondary to */}
+      <div>
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">What the veteran told us</p>
+        {theory.veteranStatement ? (
+          <p className="mt-1 whitespace-pre-wrap text-sm italic text-slate-700">&ldquo;{theory.veteranStatement}&rdquo;</p>
+        ) : null}
+        <p className="mt-1 text-sm text-slate-700">
+          <span className="font-medium">Claimed:</span> {theory.veteranClaim ?? '—'}
+          {theory.veteranTheory ? (
+            <>
+              {' · '}
+              <span className="font-medium">{theory.veteranTheoryLabel}:</span> {theory.veteranTheory}
+            </>
+          ) : null}
+        </p>
+      </div>
+
+      {/* Block 2 — what the drafter/letter actually argues (from the persisted route-picker plan) */}
+      {theory.letterTheory ? (
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">What the letter argues</p>
+          <p className="mt-1 text-sm text-slate-700">
+            {theory.letterDx ? (
+              <>
+                <span className="font-medium">Diagnosis:</span> {theory.letterDx}
+                {' · '}
+              </>
+            ) : null}
+            <span className="font-medium">Theory:</span> {theory.letterTheory}
+          </p>
+        </div>
+      ) : null}
+
+      {/* Block 3 — reconciliation: shown ONLY when the two clearly differ (no positive "matches"
+          affirmation — a green ✓ on a sign-off surface risks false reassurance). When the veteran's
+          anchor was itself a considered alternative, nudge toward a brief surgical edit (discretion). */}
+      {theory.mismatch ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-2.5">
+          <p className="text-sm text-amber-900">
+            <span className="font-semibold">The letter&rsquo;s theory differs from the veteran&rsquo;s.</span>
+            {theory.mismatch.reason ? <> {theory.mismatch.reason}</> : null}
+          </p>
+          {theory.mismatch.suggestEdit ? (
+            <p className="mt-1 text-xs text-amber-800">
+              The veteran&rsquo;s anchor was considered as an alternative — if clinically appropriate, consider a brief surgical edit to address it (your discretion).
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}

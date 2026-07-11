@@ -10,6 +10,8 @@ import { SendBackToRnModal } from '../../components/SendBackToRnModal';
 import { SoapOverviewCard } from '../../components/SoapOverviewCard';
 import { DoctorPackPanel } from '../../components/DoctorPackPanel';
 import { PhysicianDocumentsList } from '../../components/PhysicianDocumentsList';
+import { PreSignTheoryBlocks } from '../../components/PreSignTheoryBlocks';
+import { buildPreSignTheory } from '../../components/preSignTheory';
 import { PhysicianHandoffNotes } from '../../components/PhysicianHandoffNotes';
 import { LetterPdfModal } from '../../components/LetterPdfModal';
 import { GradeChip } from '../../components/ui/GradeChip';
@@ -143,6 +145,8 @@ export function PhysicianMobileReviewPage() {
   const considerations = (latestDraftJob?.gradeSidecarJson?.targeted_revision_hints ?? [])
     .filter((h) => typeof h.issue === 'string' && h.issue.trim().length > 0)
     .slice(0, 3);
+  // Pre-sign theory reconciliation (Ryan 2026-07-11) — mirrors the desktop panel. Deterministic, fail-open.
+  const theory = buildPreSignTheory(c);
 
   return (
     <AppShell>
@@ -247,19 +251,23 @@ export function PhysicianMobileReviewPage() {
               {/* Considerations before signing (Dr. Kasky 2026-06-25): optional, physician-judgment
                   argument hints. Never block approve/sign — informational only, mirroring the desktop
                   PhysicianLetterReadyPanel. Hidden when there are none. */}
-              {considerations.length > 0 ? (
+              {considerations.length > 0 || theory.hasContent ? (
                 <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
                   <h3 className="text-sm font-semibold text-slate-900">Considerations before signing</h3>
                   <p className="mt-0.5 text-xs text-slate-500">Not required — consider before you sign.</p>
-                  <ul className="mt-2 space-y-2">
-                    {considerations.map((hint, index) => (
-                      <li key={`${hint.section ?? 'section'}-${index}`} className="text-sm text-slate-600">
-                        <span className="text-slate-400">{'• '}</span>
-                        <span className="font-medium">Section {hint.section ?? 'review'} — </span>
-                        <span className="whitespace-pre-wrap">{hint.issue ?? ''}</span>
-                      </li>
-                    ))}
-                  </ul>
+                  {/* Veteran theory vs letter theory (Ryan 2026-07-11), above the grader hints. */}
+                  <PreSignTheoryBlocks theory={theory} />
+                  {considerations.length > 0 ? (
+                    <ul className="mt-2 space-y-2">
+                      {considerations.map((hint, index) => (
+                        <li key={`${hint.section ?? 'section'}-${index}`} className="text-sm text-slate-600">
+                          <span className="text-slate-400">{'• '}</span>
+                          <span className="font-medium">Section {hint.section ?? 'review'} — </span>
+                          <span className="whitespace-pre-wrap">{hint.issue ?? ''}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </div>
               ) : null}
             </section>

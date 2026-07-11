@@ -20,7 +20,7 @@ import {
 } from './doctor-pack.js';
 import { classifyDocument, CLASSIFIER_VERSION_NUM } from './key-docs-classifier.js';
 import { selectPages, unionGroundedPagesIntoResult, type PageSelectorInputPage, type PageSelectorResult } from './page-selector.js';
-import { selectPagesLlm, shouldUseLlmPicker, PAGE_LLM_VERSION } from './doctor-pack-page-llm.js';
+import { selectPagesLlm, selectPagesLlmBulk, shouldUseLlmPicker, PAGE_LLM_VERSION } from './doctor-pack-page-llm.js';
 // doctor-pack grounded pages, 2026-06-13 (PR-2): facts→pages back-map.
 import {
   chartFactCategoryByDocument,
@@ -458,10 +458,32 @@ function formatScSnapshot(list: readonly { condition: string; ratingPct: number 
   const extra = list.length - shown.length;
   return shown.join(' · ') + (extra > 0 ? ` +${extra} more` : '');
 }
-function formatProblemSnapshot(list: readonly string[]): string {
+function formatProblemSnapshot(list: readonly string[], claimedCondition?: string): string {
   if (list.length === 0) return 'none recorded';
-  const shown = list.slice(0, 6);
-  const extra = list.length - shown.length;
+  // Legacy (claimedCondition undefined ⇒ flag-off): raw first-6, byte-identical.
+  if (claimedCondition === undefined) {
+    const shown = list.slice(0, 6);
+    const extra = list.length - shown.length;
+    return shown.join(' · ') + (extra > 0 ? ` +${extra} more` : '');
+  }
+  // DOCTOR_PACK_LLM_BULK: (1) case-insensitive dedup (a messy chart repeats near-identical problem
+  // strings across notes), then (2) STABLE-sort claim-relevant problems first so the shown few are the
+  // ones that matter — WITHOUT dropping everything (a hard filter could empty the line). Then the same
+  // 6-cap + "+N more".
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const p of list) {
+    const key = p.trim().toLowerCase().replace(/\s+/g, ' ');
+    if (key.length === 0 || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(p.trim());
+  }
+  const relevant: string[] = [];
+  const rest: string[] = [];
+  for (const p of deduped) (textMentionsCondition(p, claimedCondition) ? relevant : rest).push(p);
+  const ordered = [...relevant, ...rest];
+  const shown = ordered.slice(0, 6);
+  const extra = ordered.length - shown.length;
   return shown.join(' · ') + (extra > 0 ? ` +${extra} more` : '');
 }
 // Shorten coverWhyLine to a calm fragment: first clause, no trailing period, capped length.
@@ -476,7 +498,10 @@ function shortCoverWhy(why: string): string {
 // and therefore the printed page numbers — is independent of label/why length): friendly label —
 // why, a calm dotted leader, then the single page ref.
 function composeCoverRow(friendly: string, why: string, pageRef: number | undefined): string {
-  const left = `  ${friendly} — ${why}`;
+  // An empty why (DOCTOR_PACK_LLM_BULK: a descriptor that would merely repeat the label) renders the
+  // label alone — never "Supporting record — Supporting record". Still exactly ONE line (the invariant
+  // the cover page-number math relies on).
+  const left = why.trim().length > 0 ? `  ${friendly} — ${why}` : `  ${friendly}`;
   const LEFT_CAP = 64;
   const leftTrunc = left.length > LEFT_CAP ? `${left.slice(0, LEFT_CAP - 1).trimEnd()}…` : left;
   const pr = pageRef !== undefined ? `p. ${pageRef}` : 'p. -';
@@ -540,6 +565,11 @@ export interface CoverIndexEntryInput {
   readonly docType?: DoctorPackManifestEntry['docType'];
   readonly friendlyLabel?: string;
   readonly assembledStartPage?: number;
+  // DOCTOR_PACK_LLM_BULK (2026-07-11): a short, grounded per-DOCUMENT descriptor from the bulk picker
+  // (e.g. "Sleep study, AHI 42") to render as the linked-cover row's why-text INSTEAD of the generic
+  // per-category line. Absent ⇒ the row falls back to coverWhyLine (byte-identical). Page refs on the
+  // cover are always code-generated (assembledStartPage), never taken from this string.
+  readonly descriptor?: string;
 }
 
 // DOCTOR_PACK_LINKED_COVER (2026-06-27): buildCoverIndexLines returns the cover's text lines AND
@@ -607,6 +637,9 @@ export function buildCoverIndexLines(input: {
   readonly veteranName?: string;
   readonly serviceConnected?: readonly { condition: string; ratingPct: number | null }[];
   readonly activeProblems?: readonly string[];
+  // DOCTOR_PACK_LLM_BULK: opt the linked cover into per-doc descriptors + a claim-filtered/deduped
+  // problem snapshot. Absent/false ⇒ byte-identical linked cover.
+  readonly betterCover?: boolean;
 }): CoverIndexBuild {
   if (input.linkedCover === true) return buildLinkedCoverLines(input);
   const lines: string[] = [];
@@ -660,7 +693,9 @@ function buildLinkedCoverLines(input: {
   readonly veteranName?: string;
   readonly serviceConnected?: readonly { condition: string; ratingPct: number | null }[];
   readonly activeProblems?: readonly string[];
+  readonly betterCover?: boolean;
 }): CoverIndexBuild {
+  const betterCover = input.betterCover === true;
   const lines: string[] = [];
   const contentRows: { entriesIndex: number; sourceLineIndex: number; category: PackCategory; label: string }[] = [];
 
@@ -675,7 +710,7 @@ function buildLinkedCoverLines(input: {
   lines.push('');
   lines.push('Case snapshot');
   lines.push(`Service-connected: ${formatScSnapshot(input.serviceConnected ?? [])}`);
-  lines.push(`Active problems: ${formatProblemSnapshot(input.activeProblems ?? [])}`);
+  lines.push(`Active problems: ${formatProblemSnapshot(input.activeProblems ?? [], betterCover ? input.claimedCondition : undefined)}`);
 
   // Contents, grouped by category.
   lines.push('');
@@ -698,7 +733,16 @@ function buildLinkedCoverLines(input: {
     }
     for (const { e, idx } of rows) {
       const friendly = e.friendlyLabel ?? coverFriendlyLabel(e.docType ?? 'unspecified', e.category);
-      const why = shortCoverWhy(coverWhyLine(e.category, e.mentionsClaimedCondition));
+      // DOCTOR_PACK_LLM_BULK: prefer the grounded per-doc descriptor (e.g. "Sleep study, AHI 42") over
+      // the generic per-category why-line. Absent/flag-off ⇒ the generic why (byte-identical).
+      const rawWhy =
+        betterCover && e.descriptor && e.descriptor.trim().length > 0
+          ? e.descriptor.trim()
+          : coverWhyLine(e.category, e.mentionsClaimedCondition);
+      let why = shortCoverWhy(rawWhy);
+      // Kill a why that merely repeats the label — "Supporting record — Supporting record" becomes just
+      // "Supporting record". Only in betterCover mode (flag-off keeps the generic doubled row).
+      if (betterCover && why.trim().toLowerCase() === friendly.trim().toLowerCase()) why = '';
       const pageRef = e.assembledStartPage ?? (e.pageRanges.length > 0 ? e.pageRanges[0]!.from : undefined);
       contentRows.push({ entriesIndex: idx, sourceLineIndex: lines.length, category: e.category, label: friendly });
       lines.push(composeCoverRow(friendly, why, pageRef));
@@ -926,6 +970,11 @@ export async function generateDoctorPackForCase(
     ? await groundedSourcePagesForCase(db as unknown as GroundedPagesDb, caseId)
     : new Map();
 
+  // DOCTOR_PACK_LLM_BULK (2026-07-11): route large bulk/blue_button dumps THROUGH the picker (chunked
+  // Haiku) instead of the regex short-circuit, AND surface real per-doc cover descriptors + a claim-
+  // filtered problem snapshot. Flag OFF ⇒ every branch below is inert ⇒ byte-identical to today.
+  const bulkLlmOn = process.env['DOCTOR_PACK_LLM_BULK'] === 'on';
+
   // ── DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26, dark): wider 30-page budget + per-category floors +
   // chart-fact category override + defining-study force-include + cover coverage checklist. Flag OFF
   // ⇒ every derived value below is empty/null and the effective budget is 15 ⇒ byte-identical to
@@ -984,9 +1033,30 @@ export async function generateDoctorPackForCase(
     // the deterministic regex selector (which still applies the grounded-page union). Per-call cost
     // drops: a bulk doc that previously paid for an LLM ranking pass now pays $0. Flag OFF ⇒ this
     // predicate is false ⇒ the picker dispatch is byte-identical to PR-2/PR-3.
+    const isBulkDump = cls.classification === 'bulk' || cls.docType === 'blue_button';
+    // DOCTOR_PACK_LLM_BULK: when ON, the bulk/blue_button dumps that today short-circuit to regex are
+    // routed through the chunked Haiku picker instead — so the narrow-out only fires when the bulk flag
+    // is OFF (flag-OFF ⇒ predicate identical to before ⇒ byte-identical dispatch).
     const narrowOutOfLlmScope =
-      groundedPagesEnabled && (cls.classification === 'bulk' || cls.docType === 'blue_button');
-    if (!physicianOverride && !narrowOutOfLlmScope && LLM_PICKER_DOCTYPES.has(cls.docType) && shouldUseLlmPicker(textPageCount)) {
+      groundedPagesEnabled && isBulkDump && !bulkLlmOn;
+    let bulkLabel: string | null = null;
+    if (bulkLlmOn && isBulkDump && !physicianOverride && textPageCount >= 3) {
+      // Chunked Haiku pass over the whole dump; fail-safe returns result:null (never fewer pages than
+      // regex). Cost is added REGARDLESS of result (fixes the billed-but-unparsed cost-visibility leak).
+      const bulk = await selectPagesLlmBulk({
+        docType: cls.docType,
+        pages: pagesInput,
+        ...(claimedCondition !== undefined ? { claimedCondition } : {}),
+      });
+      packPickerCostUsd += bulk.costUsd;
+      if (bulk.result !== null) {
+        bulkLabel = bulk.label;
+        const llmResult: PageSelectorResult = { pageRanges: bulk.result.pageRanges, selectorRationale: bulk.result.rationale, needsRnReview: false, selectorVersion: PAGE_LLM_VERSION };
+        selection = unionGroundedPagesIntoResult(llmResult, pickerPageCount, groundedPages);
+      } else {
+        selection = runRegex();
+      }
+    } else if (!physicianOverride && !narrowOutOfLlmScope && LLM_PICKER_DOCTYPES.has(cls.docType) && shouldUseLlmPicker(textPageCount)) {
       const llm = await selectPagesLlm({
         docType: cls.docType,
         pages: pagesInput,
@@ -1004,12 +1074,17 @@ export async function generateDoctorPackForCase(
     } else {
       selection = runRegex();
     }
-    return { file: f, classification: cls, selection };
+    return { file: f, classification: cls, selection, bulkLabel };
   }));
   if (packPickerCostUsd > 0) {
     console.log(JSON.stringify({ msg: 'doctor_pack_page_picker_cost', costUsd: Math.round(packPickerCostUsd * 10000) / 10000 }));
   }
   const clsByPath = new Map(perFileSelection.map((s) => [s.file.filePath, s.classification]));
+  // DOCTOR_PACK_LLM_BULK: grounded per-document cover descriptors from the bulk picker, keyed by
+  // filePath. Empty unless the flag is on AND a bulk doc produced a label ⇒ flag-off cover unchanged.
+  const bulkLabelByPath = new Map<string, string>(
+    perFileSelection.flatMap((s) => (s.bulkLabel ? [[s.file.filePath, s.bulkLabel] as const] : [])),
+  );
 
   // DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26): raise the progress_notes importance floor so a
   // content-classified clinical note clears the NORMAL_INCLUSION_THRESHOLD (50) and the budget's
@@ -1492,6 +1567,9 @@ export async function generateDoctorPackForCase(
           framingChoice: caseWithDocs.framingChoice ?? null,
           upstreamScCondition: caseWithDocs.upstreamScCondition ?? null,
           linkedCover: true,
+          // DOCTOR_PACK_LLM_BULK: opt the cover into real per-doc descriptors + a claim-filtered/deduped
+          // problem snapshot. OFF ⇒ absent ⇒ the linked cover renders exactly as before.
+          betterCover: bulkLlmOn,
           veteranName: coverPage?.veteran.fullName ?? '',
           serviceConnected: snapshotSc,
           activeProblems: coverPage?.activeProblems ?? [],
@@ -1502,6 +1580,9 @@ export async function generateDoctorPackForCase(
             pageRanges: m.entry.pageRanges,
             mentionsClaimedCondition: m.mentionsClaimedCondition,
             assembledStartPage: coverPageCount + cumPreceding[k]! + 1,
+            // Grounded descriptor from the bulk picker (e.g. "Sleep study, AHI 42"); absent ⇒ the row
+            // falls back to the generic category why-line.
+            ...(bulkLlmOn && bulkLabelByPath.has(m.entry.filePath) ? { descriptor: bulkLabelByPath.get(m.entry.filePath)! } : {}),
           })),
           notIncluded: coverNotIncluded,
         });

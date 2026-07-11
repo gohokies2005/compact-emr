@@ -15,7 +15,12 @@
 // FAIL-SAFE: any failure (Bedrock error, unparseable JSON, empty keep-list) returns null so the
 // caller falls back to the deterministic regex selector — the pack ALWAYS generates.
 
-import { invokeAdvisory } from '../advisory/bedrockClient.js';
+import {
+  invokeAdvisory,
+  HAIKU_MODEL_ID,
+  HAIKU_PRICE_PER_M_INPUT_USD,
+  HAIKU_PRICE_PER_M_OUTPUT_USD,
+} from '../advisory/bedrockClient.js';
 import { rangesFromIncluded } from './page-selector.js';
 import type { KeyDocPageRange } from './db-types.js';
 
@@ -157,4 +162,215 @@ export async function selectPagesLlm(input: {
     );
     return null;
   }
+}
+
+// ============================ DOCTOR_PACK_LLM_BULK (2026-07-11) ============================
+// The BULK page-picker. Today large "bulk"/blue_button dumps (hundreds of pages) BYPASS the picker
+// entirely (narrowOutOfLlmScope + the 60-page cap) and are page-selected by the brittle regex — so a
+// sleep study buried in a Blue-Button export is never surfaced (both live OSA packs showed
+// "DEFINING STUDY: Not found"). This routes the dump THROUGH the picker in bounded, PARALLEL Haiku
+// batches, unions the kept pages, and returns them for the existing budget/importance machinery.
+//
+// SAFETY (this runs INLINE on the API Lambda's 30s API-Gateway path — aws-cloud-sme 2026-07-10):
+//   - Haiku 4.5 (fast + a separate, higher Bedrock quota than the throttled Opus advisory path).
+//   - Total pages sent is CAPPED (MAX_BULK_LLM_PAGES) so a 900-page dump can't blow the 30s window;
+//     the $0 grounded-page union still pins high-yield pages from BEYOND the cap.
+//   - Batches run at BULK_CONCURRENCY, each throttle-retried with backoff (the picker already throttles
+//     Opus at 8-wide today; this bounds the Haiku fan-out).
+//   - FAIL-SAFE: a per-batch failure contributes nothing; if ALL batches fail or the union is empty,
+//     returns result:null so the caller falls back to runRegex() — NEVER fewer pages than today.
+const BULK_BATCH_PAGES = 40;         // pages per Haiku call (~12k input tok at 1200 chars/page)
+const MAX_BULK_LLM_PAGES = 200;      // hard cap on pages sent to the LLM (30s-window budget)
+const BULK_CONCURRENCY = 3;          // simultaneous Haiku calls per bulk doc (throttle guard)
+const BULK_DOC_MAX_KEEP = 12;        // cap on kept pages per bulk doc BEFORE the pack budget trims further
+const BULK_RETRIES = 2;              // throttle retries per batch (exponential backoff)
+const BULK_LABEL_MAX_CHARS = 40;
+
+export interface BulkPickResult {
+  // null ⇒ the caller must fall back to runRegex() (all batches failed, or the model kept nothing).
+  readonly result: PageLlmResult | null;
+  // Billed cost is returned REGARDLESS of result so the caller can always attribute spend (fixes the
+  // cost-visibility leak where a billed-but-unparsed call incremented nothing — aws-cloud-sme).
+  readonly costUsd: number;
+  // A short, grounded per-DOCUMENT descriptor for the cover TOC (e.g. "Sleep study, AHI 42"); null when
+  // the model gave none. Page refs are NEVER taken from the model — they come from the deterministic
+  // pageRanges. So the label only ever echoes text the model read; the number is code-generated.
+  readonly label: string | null;
+}
+
+function chunkPages(pages: readonly PageLlmInputPage[], size: number): PageLlmInputPage[][] {
+  const out: PageLlmInputPage[][] = [];
+  for (let i = 0; i < pages.length; i += size) out.push(pages.slice(i, i + size));
+  return out;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Run fn over items with a bounded number of simultaneous in-flight calls (throttle guard). */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next;
+      next += 1;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]!, i);
+    }
+  }
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+/** invokeAdvisory with throttle-aware retry+backoff. Returns null after the last retry (never throws)
+ * so a batch failure degrades to "contributes nothing" rather than killing the whole bulk pass. */
+async function invokeWithRetry(
+  systemPrompt: string,
+  userContent: string,
+  opts: Parameters<typeof invokeAdvisory>[2],
+  retries: number,
+): Promise<Awaited<ReturnType<typeof invokeAdvisory>> | null> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await invokeAdvisory(systemPrompt, userContent, opts);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const throttled = /throttl|too many requests|rate exceeded|429/i.test(msg);
+      if (attempt >= retries || !throttled) {
+        console.warn(JSON.stringify({ msg: 'page_llm_bulk_batch_failed', throttled, error: msg }));
+        return null;
+      }
+      await sleep(250 * 2 ** attempt); // 250ms, 500ms, …
+    }
+  }
+}
+
+/** Strip any page/number references + quotes from a model-provided label and bound its length. Page
+ * refs on the cover come from code (the pageRanges), never the model, so a label may only describe
+ * CONTENT the model read. */
+function sanitizeLabel(raw: string): string | null {
+  let out = raw
+    .replace(/\s+/g, ' ')
+    .replace(/\bp\.?\s?\d+\b/gi, '')
+    .replace(/\bpages?\s+\d+\b/gi, '')
+    .replace(/["'`]/g, '')
+    .trim()
+    .replace(/^[-–—:,\s]+|[-–—:,\s]+$/g, '')
+    .trim();
+  if (out.length === 0) return null;
+  if (out.length > BULK_LABEL_MAX_CHARS) out = `${out.slice(0, BULK_LABEL_MAX_CHARS - 1).trimEnd()}…`;
+  return out;
+}
+
+/** Parse ONE batch's response: the kept page numbers (validated against this batch) + an optional
+ * grounded label. Tolerant of stray prose / fences, like parseKeep. */
+function parseBulkBatch(text: string, validPageNumbers: readonly number[]): { keep: number[]; label: string | null } {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return { keep: [], label: null };
+  let obj: unknown;
+  try {
+    obj = JSON.parse(match[0]);
+  } catch {
+    return { keep: [], label: null };
+  }
+  const valid = new Set(validPageNumbers);
+  const keepRaw = (obj as { keep?: unknown }).keep;
+  const keep = Array.isArray(keepRaw)
+    ? [...new Set(keepRaw.map((v) => Number(v)).filter((n) => Number.isInteger(n) && valid.has(n)))].sort((a, b) => a - b)
+    : [];
+  const rawLabel = (obj as { label?: unknown }).label ?? (obj as { note?: unknown }).note;
+  const label = typeof rawLabel === 'string' ? sanitizeLabel(rawLabel) : null;
+  return { keep, label };
+}
+
+/** The per-batch user content. Reuses the shared (unchanged) SYSTEM_PROMPT and adds a bulk-mode block:
+ * (a) "this is one SLICE — empty keep is a valid answer", (b) hunt the buried objective-test value page,
+ * (c) emit a short grounded label. */
+function buildBulkUserContent(
+  input: { readonly docType: string; readonly claimedCondition?: string },
+  batch: readonly PageLlmInputPage[],
+): string {
+  const cc = input.claimedCondition?.trim();
+  const header = [
+    `Document type: ${input.docType}`,
+    cc && cc.length > 0 ? `Claimed condition for this case: ${cc}` : null,
+    '',
+    'These pages are ONE SLICE of a larger records export, not a whole document. Keep only pages that individually carry decisive substance. If NO page in this slice qualifies, return {"keep":[]} — that is a correct answer, not an error. Keep at most 3 pages from this slice.',
+    'The single highest-priority page is the objective-test VALUE page for the claimed condition — e.g. a SLEEP STUDY page showing the apnea-hypopnea index (AHI) or respiratory disturbance index (RDI), an AUDIOGRAM threshold/speech-discrimination table, a PULMONARY FUNCTION TEST FEV1/FVC page. These decisive-value pages are easily buried in a bulk export; if you see one, KEEP it.',
+    'Also add "label": a <=6 word description of the MOST decisive page you kept (e.g. "Sleep study, AHI 42", "OSA diagnosis note", "VA denial, OSA 2019"). Describe ONLY what you actually read; never state a value/date you did not see; NEVER put a page number in the label; leave it "" if unsure.',
+    '',
+    'Pages (text truncated to the top of each page):',
+  ].filter((l): l is string => l !== null);
+  const pageLines = batch.map(
+    (p) => `--- Page ${p.pageNumber} ---\n${p.text.slice(0, PAGE_TEXT_CHARS).replace(/\s+/g, ' ').trim()}`,
+  );
+  return [...header, ...pageLines].join('\n');
+}
+
+/** Route a bulk records dump through the picker in bounded parallel Haiku batches. Never throws;
+ * returns result:null (with any billed cost) when the caller must fall back to the regex selector. */
+export async function selectPagesLlmBulk(input: {
+  readonly docType: string;
+  readonly claimedCondition?: string;
+  readonly pages: readonly PageLlmInputPage[];
+}): Promise<BulkPickResult> {
+  const usable = input.pages.filter((p) => (p.text ?? '').trim().length > 0);
+  if (usable.length < 3) return { result: null, costUsd: 0, label: null };
+  // Bound total pages at the LLM (30s API-GW window). Grounded-page union still pins money pages beyond.
+  const capped = usable.slice(0, MAX_BULK_LLM_PAGES);
+  const batches = chunkPages(capped, BULK_BATCH_PAGES);
+
+  const perBatch = await mapWithConcurrency(batches, BULK_CONCURRENCY, async (batch) => {
+    const content = buildBulkUserContent(input, batch);
+    const res = await invokeWithRetry(
+      SYSTEM_PROMPT,
+      content,
+      {
+        modelId: HAIKU_MODEL_ID,
+        maxTokens: MAX_OUTPUT_TOKENS,
+        temperature: 0,
+        pricePerMInput: HAIKU_PRICE_PER_M_INPUT_USD,
+        pricePerMOutput: HAIKU_PRICE_PER_M_OUTPUT_USD,
+      },
+      BULK_RETRIES,
+    );
+    if (res === null) return { keep: [] as number[], label: null as string | null, costUsd: 0, errored: true };
+    const parsed = parseBulkBatch(res.text, batch.map((p) => p.pageNumber));
+    return { keep: parsed.keep, label: parsed.label, costUsd: res.costUsd, errored: false };
+  });
+
+  const costUsd = perBatch.reduce((s, b) => s + b.costUsd, 0);
+  if (perBatch.every((b) => b.errored)) {
+    // Total failure (every batch threw/throttled out) → regex fallback, but report the billed cost.
+    return { result: null, costUsd, label: null };
+  }
+
+  const keptSet = new Set<number>();
+  for (const b of perBatch) for (const n of b.keep) keptSet.add(n);
+  const kept = [...keptSet].sort((a, b) => a - b).slice(0, BULK_DOC_MAX_KEEP);
+  if (kept.length === 0) {
+    // Model judged the whole (sent) dump boilerplate → let regex have it (never fewer pages than today).
+    return { result: null, costUsd, label: null };
+  }
+
+  // Label = the first non-empty batch label (its "most decisive page" descriptor).
+  const label = perBatch.map((b) => b.label).find((l): l is string => l !== null && l.length > 0) ?? null;
+
+  return {
+    result: {
+      pageRanges: rangesFromIncluded(kept),
+      keptPageNumbers: kept,
+      costUsd,
+      rationale: `page_llm_bulk kept ${kept.length}/${capped.length} pages in ${batches.length} batch(es) on haiku ($${costUsd.toFixed(4)})`,
+    },
+    costUsd,
+    label,
+  };
 }

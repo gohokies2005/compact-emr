@@ -51,6 +51,20 @@ describe('AuthProvider idle auto-logout', () => {
     expect(amplifySignOut).toHaveBeenCalled();
   });
 
+  it('fail-CLOSED: logs out even if the Amplify revoke REJECTS, and does not spam signOut every second', async () => {
+    vi.mocked(amplifySignOut).mockRejectedValue(new Error('network blip during revoke'));
+    render(<AuthProvider idleTimeoutMs={3000} idleWarnMs={1000}><Probe /></AuthProvider>);
+    await flush();
+    expect(screen.getByTestId('signed').textContent).toBe('in');
+    // Go idle past the timeout + let several ticks fire while the revoke keeps rejecting.
+    await act(async () => { vi.advanceTimersByTime(3300); await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(4000); await Promise.resolve(); await Promise.resolve(); });
+    // Local state was cleared despite the reject (fail-closed) → user is signed out.
+    expect(screen.getByTestId('signed').textContent).toBe('out');
+    // And signOut was NOT called once per second (the non-overlap guard + fail-closed teardown).
+    expect(vi.mocked(amplifySignOut).mock.calls.length).toBeLessThanOrEqual(2);
+  });
+
   it('does NOT arm the idle timer before sign-in (no logout, no warning)', async () => {
     (await import('aws-amplify/auth')).getCurrentUser = vi.fn().mockRejectedValue(new Error('no user')) as never;
     render(<AuthProvider idleTimeoutMs={3000} idleWarnMs={1000}><Probe /></AuthProvider>);

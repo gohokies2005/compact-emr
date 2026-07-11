@@ -99,6 +99,7 @@ export function AuthProvider({
   const [totpSetupDetails, setTotpSetupDetails] = useState<TotpSetupDetails | null>(null);
   const [idleWarningSecondsLeft, setIdleWarningSecondsLeft] = useState<number | null>(null);
   const lastActivityRef = useRef(Date.now());
+  const signingOutRef = useRef(false); // non-overlap guard: don't stack idle-logout signOut() calls
 
   const refreshUser = useCallback(async () => {
     // DEV/DEMO ONLY: bypass Amplify and present a fixed signed-in physician.
@@ -120,10 +121,15 @@ export function AuthProvider({
   }, [refreshUser]);
 
   const signOut = useCallback(async () => {
-    await amplifySignOut();
-    setUser(null);
-    setChallengeStep('idle');
-    setTotpSetupDetails(null);
+    // Fail-CLOSED: clear local auth state even if Amplify's network token-revoke rejects (offline/5xx).
+    // Otherwise an idle-logout whose revoke blips would never null `user` → the idle interval would call
+    // signOut() every second forever (HIPAA fail-open + unhandled-rejection flood). (architect QA 2026-07-10)
+    try { await amplifySignOut(); }
+    finally {
+      setUser(null);
+      setChallengeStep('idle');
+      setTotpSetupDetails(null);
+    }
   }, []);
 
   const stayActive = useCallback(() => {
@@ -140,6 +146,15 @@ export function AuthProvider({
     if (env.demoMode || !user) { setIdleWarningSecondsLeft(null); return; }
     lastActivityRef.current = Date.now();
     setIdleWarningSecondsLeft(null);
+    signingOutRef.current = false;
+    // Single, non-overlapping logout (architect QA): the fail-closed signOut() nulls `user` which tears
+    // this effect down, but guard anyway so a slow (>1s) revoke can't stack in-flight calls.
+    const lockOut = () => {
+      setIdleWarningSecondsLeft(null);
+      if (signingOutRef.current) return;
+      signingOutRef.current = true;
+      void signOut().catch(() => { /* fail-closed already cleared local state */ }).finally(() => { signingOutRef.current = false; });
+    };
     let lastRecord = 0;
     const record = () => {
       const now = Date.now();
@@ -154,18 +169,25 @@ export function AuthProvider({
       const t = Number(e.newValue);
       if (Number.isFinite(t) && t > lastActivityRef.current) { lastActivityRef.current = t; setIdleWarningSecondsLeft(null); }
     };
+    // A hidden tab's setInterval is browser-throttled, so its idle countdown can run late. When a tab
+    // becomes visible, re-check idle against wall-clock BEFORE any activity handler resets it (architect QA).
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastActivityRef.current >= idleTimeoutMs) lockOut();
+    };
     const events = ['mousemove', 'mousedown', 'keydown', 'wheel', 'touchstart', 'scroll', 'click'] as const;
     events.forEach((ev) => window.addEventListener(ev, record, { passive: true }));
     window.addEventListener('storage', onStorage);
+    document.addEventListener('visibilitychange', onVisible);
     const tick = window.setInterval(() => {
       const idle = Date.now() - lastActivityRef.current;
-      if (idle >= idleTimeoutMs) { setIdleWarningSecondsLeft(null); void signOut(); return; }
+      if (idle >= idleTimeoutMs) { lockOut(); return; }
       if (idle >= idleTimeoutMs - idleWarnMs) setIdleWarningSecondsLeft(Math.max(1, Math.ceil((idleTimeoutMs - idle) / 1000)));
       else setIdleWarningSecondsLeft((prev) => (prev === null ? prev : null));
     }, 1000);
     return () => {
       events.forEach((ev) => window.removeEventListener(ev, record));
       window.removeEventListener('storage', onStorage);
+      document.removeEventListener('visibilitychange', onVisible);
       window.clearInterval(tick);
     };
   }, [user, signOut, idleTimeoutMs, idleWarnMs]);

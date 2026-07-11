@@ -1044,6 +1044,7 @@ export async function generateDoctorPackForCase(
     // The narrow-out only gates the STANDARD picker branch; flag-OFF ⇒ predicate identical to before.
     const narrowOutOfLlmScope = groundedPagesEnabled && isBulkDump && !bulkLlmOn;
     let bulkLabel: string | null = null;
+    let docRelevant: boolean | null = null;
     if (routeToBulk) {
       // Chunked Haiku pass over the whole dump; fail-safe returns result:null (never fewer pages than
       // regex). Cost is added REGARDLESS of result (fixes the billed-but-unparsed cost-visibility leak).
@@ -1053,6 +1054,7 @@ export async function generateDoctorPackForCase(
         ...(claimedCondition !== undefined ? { claimedCondition } : {}),
       });
       packPickerCostUsd += bulk.costUsd;
+      docRelevant = bulk.relevant; // captured even when result is null (an irrelevant doc that kept nothing)
       if (bulk.result !== null) {
         bulkLabel = bulk.label;
         const llmResult: PageSelectorResult = { pageRanges: bulk.result.pageRanges, selectorRationale: bulk.result.rationale, needsRnReview: false, selectorVersion: PAGE_LLM_VERSION };
@@ -1072,7 +1074,7 @@ export async function generateDoctorPackForCase(
       });
       if (llm !== null) {
         packPickerCostUsd += llm.costUsd;
-        if (bulkLlmOn) bulkLabel = llm.label ?? null;
+        if (bulkLlmOn) { bulkLabel = llm.label ?? null; docRelevant = llm.relevant ?? null; }
         const llmResult: PageSelectorResult = { pageRanges: llm.pageRanges, selectorRationale: llm.rationale, needsRnReview: false, selectorVersion: PAGE_LLM_VERSION };
         // PR-2: union grounded pages into the LLM picker's output too (it never saw them). When the
         // flag is off groundedPages is empty ⇒ this is the unchanged llmResult.
@@ -1083,7 +1085,14 @@ export async function generateDoctorPackForCase(
     } else {
       selection = runRegex();
     }
-    return { file: f, classification: cls, selection, bulkLabel };
+    // DOCTOR_PACK_LLM_BULK v3 ("keep 30, drop irrelevant"): drop an 'other'-category doc the picker
+    // judged unrelated to the claim (relevant===false) so the 30-page budget is a CEILING, not a
+    // fill-target. Guardrails: only the low-value catch-all ('other') is droppable — a doc with a
+    // chart-fact category override (granted-SC/denial/problem) or any must-have category is NEVER
+    // dropped; physician-override docs are never dropped; a null/absent verdict never drops.
+    const packCat = chartFactCategoryByDoc.has(f.documentId) ? null : packCategoryOf(cls.docType);
+    const dropFromPack = bulkLlmOn && !physicianOverride && docRelevant === false && packCat === 'other';
+    return { file: f, classification: cls, selection, bulkLabel, dropFromPack };
   }));
   if (packPickerCostUsd > 0) {
     console.log(JSON.stringify({ msg: 'doctor_pack_page_picker_cost', costUsd: Math.round(packPickerCostUsd * 10000) / 10000 }));
@@ -1094,6 +1103,17 @@ export async function generateDoctorPackForCase(
   const bulkLabelByPath = new Map<string, string>(
     perFileSelection.flatMap((s) => (s.bulkLabel ? [[s.file.filePath, s.bulkLabel] as const] : [])),
   );
+  // v3 "keep 30, drop irrelevant": docs the picker judged unrelated to the claim (an 'other'-category
+  // doc with relevant===false) are excluded from the pack — so the 30-page budget is a ceiling, not a
+  // fill-target. They still appear in the cover's "Not included" line (via dropNotes below). Empty
+  // unless the flag is on ⇒ flag-off pack is byte-identical.
+  const droppedPaths = new Set(perFileSelection.filter((s) => s.dropFromPack).map((s) => s.file.filePath));
+  const dropNotes = perFileSelection
+    .filter((s) => s.dropFromPack)
+    .map((s) => `${s.file.filePath}: not included — the page-picker judged this document unrelated to the claimed condition`);
+  if (droppedPaths.size > 0) {
+    console.log(JSON.stringify({ msg: 'doctor_pack_dropped_irrelevant', count: droppedPaths.size }));
+  }
 
   // DOCTOR_PACK_CATEGORY_FLOORS (2026-06-26): raise the progress_notes importance floor so a
   // content-classified clinical note clears the NORMAL_INCLUSION_THRESHOLD (50) and the budget's
@@ -1136,7 +1156,7 @@ export async function generateDoctorPackForCase(
   // the manifest's include/exclude tiers agree with the selector's docTypes.
   const manifest = assembleDoctorPackManifest({
     classifiedFiles: classifiedFiles
-      .filter((f) => !duplicatePaths.has(f.filePath))
+      .filter((f) => !duplicatePaths.has(f.filePath) && !droppedPaths.has(f.filePath))
       .map((f) => ({ ...f, cls: clsByPathAdjusted.get(f.filePath) })),
     readStatuses,
   });
@@ -1554,7 +1574,7 @@ export async function generateDoctorPackForCase(
   // a cover render failure drops only the cover (note in trimNotes), never the pack.
   // DOCTOR_PACK_CATEGORY_FLOORS: per-category DROPPED warnings join the Not-included notes (empty
   // when the flag is off ⇒ byte-identical).
-  const dedupAndBudgetNotes = [...dedup.notes, ...budget.trimNotes, ...droppedCategoryWarnings];
+  const dedupAndBudgetNotes = [...dedup.notes, ...budget.trimNotes, ...droppedCategoryWarnings, ...dropNotes];
   let coverEntry: LabeledEntry | null = null;
   let coverLinkMap: CoverLinkMapEntry[] | null = null;
   {

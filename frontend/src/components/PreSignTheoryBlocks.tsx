@@ -24,6 +24,14 @@ export function PreSignTheoryBlocks({ theory }: { readonly theory: PreSignTheory
             </>
           ) : null}
         </p>
+        {/* Part B (Ryan 2026-07-11): the LLM restatement of the veteran's OWN theory in concise clinical
+            terms — shown as its own line (it's a full sentence). Present only in the LLM path; falls back to
+            the template/quote above when absent. */}
+        {theory.veteranTheoryProse ? (
+          <p className="mt-1 text-sm text-slate-700">
+            <span className="font-medium">Their theory (in clinical terms):</span> {theory.veteranTheoryProse}
+          </p>
+        ) : null}
       </div>
 
       {/* Block 2 — what the drafter/letter actually argues (from the persisted route-picker plan) */}

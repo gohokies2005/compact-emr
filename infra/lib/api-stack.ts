@@ -301,6 +301,15 @@ export class ApiStack extends Stack {
         // --context ai_route_picker_enabled=off / set it in cdk.json) + deploy. The drafter carries the
         // same flag in drafter-stack.ts; flip both to fully disable the route-picker brain.
         AI_ROUTE_PICKER_ENABLED: (this.node.tryGetContext('ai_route_picker_enabled') as string | undefined) ?? 'true',
+        // VETERAN_THEORY_AI_ENABLED (Ryan 2026-07-11, Part B "Ankle nowhere"): the lazy physician
+        // GET /cases/:id/veteran-theory endpoint runs a Sonnet restatement of the veteran's OWN theory,
+        // grounded in their statement. Runs IN THE API LAMBDA, so the flag lives HERE (not the drafter task
+        // def). Default 'false' → ships DARK (no call, no spend). The flag MUST live in this CDK env map so
+        // enabling it survives a converge — a bare Lambda-console env edit would be silently reverted by the
+        // next `cdk deploy --all` (the out-of-band-resource footgun). Read at request time (no image rebuild).
+        // TURN ON: pass --context veteran_theory_ai_enabled=true (or set it in cdk.json) + deploy. Display-only;
+        // never influences the drafter (enforced by veteran-theory-drafter-isolation.test.ts).
+        VETERAN_THEORY_AI_ENABLED: (this.node.tryGetContext('veteran_theory_ai_enabled') as string | undefined) ?? 'false',
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue

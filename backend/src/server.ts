@@ -14,6 +14,7 @@ import { createChartNotesRouter } from './routes/chart-notes.js';
 import { createAdvisoryRouter } from './routes/advisory.js';
 import { createStrategyPreviewRouter } from './routes/strategy-preview.js';
 import { createCaseViabilityRouter } from './routes/case-viability.js';
+import { createVeteranTheoryRouter } from './routes/veteran-theory.js';
 import { createRecommendationEmailRouter } from './routes/recommendation-email.js';
 import { createCdsRouter } from './routes/cds.js';
 import { createLookupRouter } from './routes/lookup.js';
@@ -159,6 +160,9 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createStrategyPreviewRouter(db));
   // P4 anchor-viability card (caseViability v1) — DARK behind EMR_CASE_VIABILITY_ENABLED.
   app.use('/api/v1', authenticateJwt(), createCaseViabilityRouter(db));
+  // Veteran-theory restatement (Part B "Ankle nowhere") — lazy physician sub-resource, DARK behind
+  // VETERAN_THEORY_AI_ENABLED. Display-only; the SINGLE importer of veteran-theory-ai.ts.
+  app.use('/api/v1', authenticateJwt(), createVeteranTheoryRouter(db));
   // Recommended-plan outreach email (Sonnet 4.6 draft for the RN to copy; never auto-sent).
   app.use('/api/v1', authenticateJwt(), createRecommendationEmailRouter(db));
   app.use('/api/v1', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), createCaseMessagesRouter(db));

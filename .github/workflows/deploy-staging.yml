@@ -29,7 +29,11 @@ jobs:
       - run: npm ci
       - run: npm run db:generate -w backend
       - run: npm run cdk:synth:staging
-      - run: npm run cdk -w infra -- deploy --all --require-approval never --context env=staging
+      # veteran_theory_ai_enabled=true is STAGING-ONLY (Ryan 2026-07-11: "i need to test it") — Part B
+      # ships dark by default; this turns it ON for staging so it can be exercised on the physician page.
+      # Display-only + drafter-isolated, so this cannot affect a letter. Prod (deploy-prod.yml) does NOT
+      # pass it → prod stays dark until deliberately flipped. Drop this flag to turn staging back to dark.
+      - run: npm run cdk -w infra -- deploy --all --require-approval never --context env=staging --context veteran_theory_ai_enabled=true
 
       - name: Apply database migrations
         run: |

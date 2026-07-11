@@ -19,6 +19,9 @@ vi.mock('../api/letter', () => ({
   getLetter: vi.fn(),
 }));
 vi.mock('../api/drafter', () => ({ sendBackToRn: vi.fn() }));
+// Part B veteran-theory lazy fetch (useVeteranTheory) fires from the page — stub it to the fail-open shape
+// so these review/approve-flow tests don't make a real network call (mirrors the child-query stubs above).
+vi.mock('../api/veteran-theory', () => ({ getVeteranTheory: vi.fn().mockResolvedValue({ data: null }) }));
 vi.mock('../layout/AppShell', () => ({ AppShell: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 
 // Child panels fire their own data queries / need an AuthProvider — they each have their own suites,

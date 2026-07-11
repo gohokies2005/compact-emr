@@ -5,6 +5,7 @@ import { GradeChip } from './ui/GradeChip';
 import { SendBackToRnModal } from './SendBackToRnModal';
 import { buildPreSignTheory } from './preSignTheory';
 import { PreSignTheoryBlocks } from './PreSignTheoryBlocks';
+import { useVeteranTheory } from '../hooks/useVeteranTheory';
 import type { CaseDetail } from '../api/cases';
 import type { DraftJob, TargetedRevisionHint, DraftGradeSidecarJson } from '../types/prisma';
 
@@ -79,8 +80,10 @@ export function PhysicianLetterReadyPanel({
   const reviewNotices = reviewUnavailableNotices(job);
   const pdfKey = job.artifactPdfS3Key ?? null;
   // Pre-sign theory reconciliation (Ryan 2026-07-11): the veteran's own stated theory + what the letter
-  // argues + a plain reason if they differ. Pure/deterministic from Case fields — no fetch, fail-open.
-  const theory = buildPreSignTheory(c);
+  // argues + a plain reason if they differ. Deterministic from Case fields; Part B overlays the LLM
+  // restatement of the veteran's own theory (lazy fetch, shared hook, fail-open to the deterministic line).
+  const veteranTheoryAi = useVeteranTheory(c.id);
+  const theory = buildPreSignTheory({ ...c, veteranTheoryAi: veteranTheoryAi.data });
 
   return (
     <Card className="rounded-2xl border border-aegis bg-ivory shadow-aegis-card">

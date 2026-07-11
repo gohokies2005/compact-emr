@@ -122,17 +122,22 @@ const ALLOW_LIST: ReadonlyArray<{ readonly relPath: string; readonly fnHint: str
       'The GATE decision (chartReadiness.extractionState) is computed via deriveChartBuildState → ' +
       'computeTriggerHash, which EXCLUDES the summary by marker — so the wedge surface is already gated in ' +
       'the called helper. The raw documents[] payload deliberately carries ALL of the veteran\'s docs ' +
-      '(returning-customer reuse, Ryan 2026-06-04); the synthetic summary has 0 DocumentPage rows so it is ' +
-      'inert page-content to the drafter. Exclusion lives in the helper, not this function body.',
+      '(returning-customer reuse, Ryan 2026-06-04). The screening-summary now carries ONE synthetic ' +
+      'DocumentPage (Ryan 2026-07-10 "parse it") whose text INTENTIONALLY reaches the drafter as chart ' +
+      'content — that is the point of the page. It remains OUT of the extraction input / coverage / ' +
+      'build-state / OCR watchers / doctor-pack (all keyed on the marker), so it never wedges those. ' +
+      'The gate exclusion lives in the helper, not this function body.',
   },
   {
     relPath: 'advisory/chartSlice.ts',
     fnHint: 'buildDigestForCase',
     reason:
-      'Ask-Aegis live-pull digest. The screening-summary Document has ZERO DocumentPage rows (OCR is skipped ' +
-      'for it), so it contributes no page text to the digest — at most a header line naming the synthetic doc. ' +
-      'Low-risk (advisory, not a gate; never wedges). RECOMMENDED CHEAP FOLLOW-UP: add a docTag !== ' +
-      "'screening_summary' filter here too so the model never even sees the header. Out of scope for this sweep.",
+      'THE shared extracted-chart digest (Ask-Aegis + draft-readiness + case-viability + SOAP). The ' +
+      'screening-summary now carries ONE synthetic DocumentPage (Ryan 2026-07-10 "parse it") whose text ' +
+      'INTENTIONALLY flows into the digest so the gates + SOAP note can see the PHQ-9/GAD-7/PCL-5/AUDIT-C ' +
+      'results — that is the whole point of persisting the page. It stays OUT of the extraction input / ' +
+      'coverage / build-state / OCR watchers / doctor-pack (all keyed on the marker), so it can never ' +
+      'wedge those. Advisory content, never a gate; never wedges.',
   },
 ];
 

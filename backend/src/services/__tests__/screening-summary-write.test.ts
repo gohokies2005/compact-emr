@@ -16,11 +16,18 @@ function screen(instrument: string, score: string, date: string | null): Screeni
 
 function makeDb() {
   const upserts: { where: { s3Key: string }; create: Record<string, unknown>; update: Record<string, unknown> }[] = [];
+  const pageCreates: { data: Record<string, unknown> }[] = [];
+  const pageDeletes: { where: { documentId: string } }[] = [];
   const db = {
     case: { findFirst: vi.fn(async () => ({ veteranId: 'VET-1', veteran: { firstName: 'John', lastName: 'Doe' } })) },
-    document: { upsert: vi.fn(async (a: { where: { s3Key: string }; create: Record<string, unknown>; update: Record<string, unknown> }) => { upserts.push(a); return a.create; }) },
+    // Upsert returns the row (with its id) — the writer attaches the summary page to doc.id.
+    document: { upsert: vi.fn(async (a: { where: { s3Key: string }; create: Record<string, unknown>; update: Record<string, unknown> }) => { upserts.push(a); return { id: 'DOC-1', ...a.create }; }) },
+    documentPage: {
+      deleteMany: vi.fn(async (a: { where: { documentId: string } }) => { pageDeletes.push(a); return { count: 0 }; }),
+      create: vi.fn(async (a: { data: Record<string, unknown> }) => { pageCreates.push(a); return a.data; }),
+    },
   } as unknown as AppDb;
-  return { db, upserts };
+  return { db, upserts, pageCreates, pageDeletes };
 }
 
 beforeEach(() => { sendSpy.mockClear(); process.env.PHI_BUCKET_NAME = 'test-bucket'; });
@@ -47,6 +54,25 @@ describe('writeScreeningSummary', () => {
     expect(upserts).toHaveLength(1);
     expect(upserts[0]!.where.s3Key).toBe(r.s3Key);
     expect(upserts[0]!.create).toMatchObject({ caseId: 'CLM-1', docTag: 'screening_summary', contentType: 'text/plain' });
+  });
+
+  // Ryan 2026-07-10: the summary was generated but NEVER parsed — it had ZERO DocumentPage rows, so the
+  // chart digest + drafter (both read Document.pages[].text) saw nothing. The writer must persist the
+  // summary TEXT as a DocumentPage so the screenings actually reach the digest/gates + the drafter.
+  it('persists the summary text as a DocumentPage so the digest + drafter can read it (idempotent refresh)', async () => {
+    const { db, pageCreates, pageDeletes } = makeDb();
+    const r = await writeScreeningSummary(db, 'CLM-1', [screen('PHQ-9', '18', '2024-03-01'), screen('GAD-7', '12', '2024-03-01')], 'RUN-1');
+    expect(r.written).toBe(true);
+    // Stale pages cleared first (a re-extraction refreshes, never duplicates), then ONE page written.
+    expect(pageDeletes).toHaveLength(1);
+    expect(pageDeletes[0]!.where.documentId).toBe('DOC-1');
+    expect(pageCreates).toHaveLength(1);
+    expect(pageCreates[0]!.data).toMatchObject({ documentId: 'DOC-1', pageNumber: 1 });
+    // The page text carries the actual screening results (what the drafter/gates will now see).
+    const pageText = String(pageCreates[0]!.data['text'] ?? '');
+    expect(pageText).toContain('PHQ-9');
+    expect(pageText).toContain('GAD-7');
+    expect(pageText).toContain('SCREENING SUMMARY');
   });
 
   it('returns no_bucket when PHI_BUCKET_NAME is unset (never throws)', async () => {

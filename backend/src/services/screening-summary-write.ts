@@ -105,9 +105,8 @@ export async function writeScreeningSummary(
     pageWritten = true;
   } catch {
     // Best-effort: a page-write hiccup must not lose the S3 file + Document row already committed above.
-    // The next re-extraction re-attempts (the Document is stable), and the digest degrades to the
-    // manifest header — never a hard failure of the screening-summary write.
-    pageWritten = false;
+    // pageWritten stays false (its initial value); the next re-extraction re-attempts (the Document is
+    // stable), and the digest degrades to the manifest header — never a hard failure of this write.
   }
 
   return { written: true, s3Key, count: screenings.length, pageWritten };

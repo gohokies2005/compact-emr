@@ -414,11 +414,17 @@ export function createDrafterClientRouter(db: AppDb): Router {
       const readiness = await getDraftReadiness(db, caseId);
       if (readiness === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
       // "ANKLE nowhere" (Ryan 2026-07-11): the DecisionsOverridesPanel reads caseFraming.upstreamScCondition
-      // off this (retired-gate) route — ground its ANCHOR for display so a stale value never shows. This
-      // route gates nothing (the draft path never calls getDraftReadiness); display-only, no DB write.
+      // off this (retired-gate) route — ground its ANCHOR for display so a stale value never shows. Feed the
+      // resolver the DERIVED/SSOT caseFraming values (already drops unrecognized anchors) with only the RAW
+      // framingStampSource as provenance — mirroring halt-explanation — so grounding never DOWNGRADES a
+      // cleaned SSOT anchor back to the raw column (architect QA). This route gates nothing; display-only.
       if (readiness.caseFraming) {
-        const raw = (await db.case.findFirst({ where: { id: caseId }, select: { framingStampSource: true, framingChoice: true, upstreamScCondition: true } })) as { framingStampSource?: string | null; framingChoice?: string | null; upstreamScCondition?: string | null } | null;
-        const g = await resolveGroundedFraming(db, caseId, raw ?? {});
+        const raw = (await db.case.findFirst({ where: { id: caseId }, select: { framingStampSource: true } })) as { framingStampSource?: string | null } | null;
+        const g = await resolveGroundedFraming(db, caseId, {
+          framingStampSource: raw?.framingStampSource ?? null,
+          framingChoice: readiness.caseFraming.framingChoice ?? null,
+          upstreamScCondition: readiness.caseFraming.upstreamScCondition ?? null,
+        });
         readiness.caseFraming = { ...readiness.caseFraming, upstreamScCondition: g.upstream };
       }
       res.json({ data: readiness });

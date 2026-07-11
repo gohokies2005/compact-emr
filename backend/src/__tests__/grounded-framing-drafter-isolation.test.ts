@@ -7,10 +7,11 @@ import { fileURLToPath } from 'node:url';
 // `resolveGroundedFraming` (services/grounded-framing.ts) is a DISPLAY-ONLY resolver: it returns the
 // anchor SAFE TO SHOW so a stale mechanism-blind `upstreamScCondition` ("Ankle") never reaches a chart
 // surface. The owner's HARD constraint: NONE of it can influence the drafter or break a letter. That
-// holds ONLY because it is never wired into what the drafter reads. The single way it could become a
-// drafter/gate input is if it were imported into the DRAFTER BUNDLE or a FRAMING STAMP (the two paths
-// that feed the Fargate drafter). This meta-test FAILS the build if that ever happens — making the
-// display-only guarantee bypass-proof at the harness level, not just by convention (3-agent QA).
+// holds ONLY because it is never wired into what the drafter reads. The two realistic ways it could
+// become a drafter/gate input are being imported into the DRAFTER BUNDLE or a FRAMING STAMP (the paths
+// that feed the Fargate drafter). This meta-test FAILS the build if the resolver is imported into either
+// (static OR dynamic import) — guarding the two drafter-feed entry points at the harness level, not just
+// by convention (3-agent QA). It does not prove data-flow isolation in general, only these entry points.
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.resolve(here, '..'); // backend/src
 
@@ -19,7 +20,8 @@ const FORBIDDEN: readonly RegExp[] = [
   /(^|\/)drafter-bundle\.ts$/, // the bundle the Fargate drafter reads
   /-stamp\.ts$/, // case-framing-stamp.ts / ai-viability-plan-stamp.ts — what stamps the bundle
 ];
-const IMPORT_RE = /from\s+['"][^'"]*grounded-framing(?:\.js)?['"]/;
+// Matches both a static `from '...grounded-framing'` and a dynamic `import('...grounded-framing')`.
+const IMPORT_RE = /(?:from\s+|import\s*\(\s*)['"][^'"]*grounded-framing(?:\.js)?['"]/;
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -54,5 +56,7 @@ describe('grounded-framing drafter-isolation tripwire', () => {
     expect(FORBIDDEN.some((re) => re.test('services/ai-viability-plan-stamp.ts'))).toBe(true);
     expect(FORBIDDEN.some((re) => re.test('routes/drafter.ts'))).toBe(false); // a display route MAY use it
     expect(IMPORT_RE.test("import { resolveGroundedFraming } from './grounded-framing.js';")).toBe(true);
+    expect(IMPORT_RE.test("const m = await import('../services/grounded-framing.js');")).toBe(true); // dynamic
+    expect(IMPORT_RE.test("import { foo } from './other-framing.js';")).toBe(false); // no false-positive
   });
 });

@@ -62,13 +62,14 @@ export async function resolveGroundedFraming(db: AppDb, caseId: string, stored: 
       // leads have no secondary anchor and can carry sentinel keys — never display those).
       if (leadUpstream && (leadBucket === 'secondary' || leadBucket === 'aggravation')) {
         if (isDerived && storedUpstream.toLowerCase() !== leadUpstream.toLowerCase()) {
-          console.log(JSON.stringify({ msg: 'grounded_upstream_override', caseId, from: storedUpstream, to: leadUpstream, source: 'grounded' }));
+          // No condition NAMES in the log line (AWS-SME PHI note) — the source/msg convey the action.
+          console.log(JSON.stringify({ msg: 'grounded_upstream_override', caseId, source: 'grounded' }));
         }
         return { upstream: leadUpstream, framing: leadFraming, source: 'grounded' };
       }
       // ready but the lead is direct/empty → there is NO valid secondary anchor → suppress a derived guess.
       if (isDerived) {
-        console.log(JSON.stringify({ msg: 'grounded_upstream_override', caseId, from: storedUpstream, to: null, source: 'suppressed_direct_lead' }));
+        console.log(JSON.stringify({ msg: 'grounded_upstream_override', caseId, source: 'suppressed_direct_lead' }));
         return { upstream: null, framing: leadFraming ?? storedFraming, source: 'suppressed' };
       }
       return { upstream: storedUpstream, framing: storedFraming, source: 'stored' };
@@ -80,7 +81,7 @@ export async function resolveGroundedFraming(db: AppDb, caseId: string, stored: 
   // No ready plan to corroborate against → a DERIVED value is an unverifiable mechanism-blind guess →
   // suppress it (Ryan: "ankle nowhere"). A non-derived value is left as-is.
   if (isDerived) {
-    console.log(JSON.stringify({ msg: 'grounded_upstream_override', caseId, from: storedUpstream, to: null, source: 'suppressed_no_plan' }));
+    console.log(JSON.stringify({ msg: 'grounded_upstream_override', caseId, source: 'suppressed_no_plan' }));
     return { upstream: null, framing: storedFraming, source: 'suppressed' };
   }
   return { upstream: storedUpstream, framing: storedFraming, source: 'stored' };

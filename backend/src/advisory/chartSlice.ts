@@ -306,11 +306,13 @@ export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartS
 
   // "ANKLE nowhere" (Ryan 2026-07-11): a stale mechanism-blind upstreamScCondition must not appear in
   // the Ask-Aegis slice text NOR seed its RAG retrieval. Resolve the display-safe anchor (grounded or
-  // suppressed). Display/retrieval-only — never written back; the drafter reads the raw column elsewhere.
+  // suppressed). Feed the DERIVED/SSOT upstream (caseFraming — already drops unrecognized anchors) with
+  // the RAW framingStampSource as provenance, mirroring halt-explanation — so grounding never DOWNGRADES
+  // a cleaned SSOT anchor back to the raw column (architect QA). Display/retrieval-only, never written back.
   const groundedFraming = await resolveGroundedFraming(db, caseId, {
     framingStampSource: (c as { framingStampSource?: string | null }).framingStampSource ?? null,
-    framingChoice: (c as { framingChoice?: string | null }).framingChoice ?? null,
-    upstreamScCondition: c.upstreamScCondition ?? null,
+    framingChoice: caseFraming?.framingChoice ?? (c as { framingChoice?: string | null }).framingChoice ?? null,
+    upstreamScCondition: caseFraming?.upstreamScCondition ?? c.upstreamScCondition ?? null,
   });
 
   const data: ChartSliceData = {

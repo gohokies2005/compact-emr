@@ -4,6 +4,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import type { AppDb, CaseStatus, Role } from '../services/db-types.js';
 import { SCREENING_SUMMARY_KEY_MARKER } from '../services/chart-build-state.js';
+import { resolveGroundedFraming } from '../services/grounded-framing.js';
 import {
   parseAssignPhysician,
   parseAssignRn,
@@ -517,7 +518,20 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         }
       }
 
-      res.json({ data: { ...found, draftingCostUsd, recordsReceivedAt, ...(approveBlockers !== undefined ? { approveBlockers } : {}) } });
+      // Grounded framing for DISPLAY (Ryan 2026-07-11, CLM-47FAC163B8 "ANKLE nowhere"): a stale,
+      // mechanism-blind `upstreamScCondition` ("Ankle" while the plan/letter argue depression) must never
+      // reach any chart surface. `resolveGroundedFraming` returns the value SAFE to display (the
+      // route-picker's grounded anchor, or suppressed). ADDITIVE on the RESPONSE ONLY — NEVER a DB write,
+      // NEVER in CASE_LITE_SELECT or PATCH data, so the drafter (which reads the raw column via
+      // drafter-bundle) is untouched. FAIL-OPEN: any failure omits the field (surfaces fall back to raw).
+      let groundedFraming: Awaited<ReturnType<typeof resolveGroundedFraming>> | undefined;
+      try {
+        groundedFraming = await resolveGroundedFraming(db, id, found);
+      } catch (error: unknown) {
+        console.warn(JSON.stringify({ msg: 'grounded_framing_unavailable', caseId: id, error: error instanceof Error ? error.message : String(error) }));
+      }
+
+      res.json({ data: { ...found, draftingCostUsd, recordsReceivedAt, ...(approveBlockers !== undefined ? { approveBlockers } : {}), ...(groundedFraming !== undefined ? { groundedFraming } : {}) } });
     }),
   );
 

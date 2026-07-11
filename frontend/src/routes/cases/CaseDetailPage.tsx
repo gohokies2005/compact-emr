@@ -1069,8 +1069,12 @@ function CaseSummaryFields({ c, onSave, saving }: { readonly c: CaseDetail; read
   // and showed "—" (Ryan 2026-06-04). null === no recorded cost on any job → honest "—".
   const draftingCost = c.draftingCostUsd ?? null;
   return <div className="divide-y divide-aegis">
-    <InlineEditRow label="Framing" value={c.framingChoice ?? ''} saving={saving} onSave={(v) => onSave('framingChoice', v)} />
-    <InlineEditRow label="Upstream SC condition" value={c.upstreamScCondition ?? ''} saving={saving} onSave={(v) => onSave('upstreamScCondition', v)} />
+    {/* "ANKLE nowhere" (Ryan 2026-07-11): show the GROUNDED anchor (route-picker) — never a stale
+        mechanism-blind upstreamScCondition. When the resolver ran, use its value (null ⇒ blank when a
+        stale guess is suppressed); fall back to the raw field only if the resolver didn't run (fail-open).
+        Editing saves the shown value as an RN-chosen (manual) framing — a deliberate self-heal. */}
+    <InlineEditRow label="Framing" value={(c.groundedFraming ? (c.groundedFraming.framing ?? '') : (c.framingChoice ?? ''))} saving={saving} onSave={(v) => onSave('framingChoice', v)} />
+    <InlineEditRow label="Upstream SC condition" value={(c.groundedFraming ? (c.groundedFraming.upstream ?? '') : (c.upstreamScCondition ?? ''))} saving={saving} onSave={(v) => onSave('upstreamScCondition', v)} />
     <InlineEditRow label="Veteran statement" value={c.veteranStatement ?? ''} multiline saving={saving} onSave={(v) => onSave('veteranStatement', v)} />
     <InlineEditRow label="In-service event" value={c.inServiceEvent ?? ''} multiline saving={saving} onSave={(v) => onSave('inServiceEvent', v)} />
     <div className="py-3">

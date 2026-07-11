@@ -132,6 +132,10 @@ export interface CaseDetail extends Case {
   // 'manual' ⇒ the framing/upstream was RN-adjusted (not the veteran's own) — the reconciliation labels
   // the theory line accordingly and skips the veteran-vs-letter mismatch check.
   readonly framingStampSource?: string | null;
+  // Grounded framing SAFE to display (Ryan 2026-07-11 "ANKLE nowhere"): the backend resolves a stale
+  // mechanism-blind upstreamScCondition to the route-picker's grounded anchor (or suppresses it).
+  // Response-only (never persisted). Display surfaces prefer this over the raw upstreamScCondition.
+  readonly groundedFraming?: { readonly upstream: string | null; readonly framing: string | null; readonly source: 'manual' | 'grounded' | 'stored' | 'suppressed' } | null;
   // Soft-delete timestamp (C6 lifecycle, 2026-06-13). Non-null = archived → the claim page shows
   // Reopen instead of Archive. GET /cases/:id returns the full Case row, so this is already present.
   readonly archivedAt?: string | null;

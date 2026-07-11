@@ -24,6 +24,7 @@ import { asyncHandler } from '../http/async-handler.js';
 import { HttpError } from '../http/errors.js';
 import { requireRole } from '../auth/roles.js';
 import { deriveCaseFramingForCase } from '../services/case-framing-stamp.js';
+import { resolveGroundedFraming } from '../services/grounded-framing.js';
 import { explainHalt, type HaltExplanation } from '../services/halt-explainer.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -166,7 +167,7 @@ export function createHaltExplanationRouter(db: AppDb): Router {
 
       const c = (await db.case.findFirst({
         where: { id: caseId },
-        select: { id: true, veteranId: true, status: true, operatorState: true, operatorMessage: true, claimedCondition: true },
+        select: { id: true, veteranId: true, status: true, operatorState: true, operatorMessage: true, claimedCondition: true, framingChoice: true, upstreamScCondition: true, framingStampSource: true },
       })) as HaltCaseRow | null;
       if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
 
@@ -188,7 +189,15 @@ export function createHaltExplanationRouter(db: AppDb): Router {
       // Framing (theory + upstream) via the ONE shared derivation; null → undetermined framing (fail-open).
       const caseFraming = await deriveCaseFramingForCase(db, caseId).catch(() => null);
       const theory = caseFraming?.framing ?? 'undetermined';
-      const upstream = caseFraming?.upstreamScCondition ?? null;
+      // "ANKLE nowhere" (Ryan 2026-07-11): ground the DISPLAYED upstream (the SSOT caseFraming value fed
+      // to the explanation LLM) so a stale mechanism-blind anchor never reaches the RN's halt text. The
+      // provenance signal is the raw framingStampSource. Display-only; writes no column.
+      const grounded = await resolveGroundedFraming(db, caseId, {
+        framingStampSource: (c as { framingStampSource?: string | null }).framingStampSource ?? null,
+        framingChoice: caseFraming?.framingChoice ?? null,
+        upstreamScCondition: caseFraming?.upstreamScCondition ?? null,
+      });
+      const upstream = grounded.upstream;
       const grantedScConditions = (caseFraming?.grantedScAnchors ?? []).map((a) => ({ name: a.condition, ratingPct: a.ratingPct }));
       // Deterministic highest-stakes fact: is the claimed condition ALREADY on the granted SC list? (→ re-route,
       // not a nexus letter). Computed here, passed to the model as a stated fact, and part of the cache key.

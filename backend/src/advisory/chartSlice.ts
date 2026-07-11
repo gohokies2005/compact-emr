@@ -10,6 +10,7 @@ import type { AppDb } from '../services/db-types.js';
 import { redactPhi } from './phiRedactor.js';
 import { listVeteranCorrespondence } from '../services/gmail-readonly.js';
 import { deriveCaseFramingForCase } from '../services/case-framing-stamp.js';
+import { resolveGroundedFraming } from '../services/grounded-framing.js';
 import { reconcileScConditions } from '../services/sc-reconcile.js';
 import type { CaseFraming } from '../services/case-framing.js';
 import {
@@ -276,6 +277,8 @@ export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartS
       claimedCondition: true,
       claimedConditions: true,
       upstreamScCondition: true,
+      framingChoice: true,
+      framingStampSource: true,
       veteranId: true,
       veteranStatement: true,
       inServiceEvent: true,
@@ -301,11 +304,20 @@ export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartS
     buildStaffMessagesForCase(db, caseId),
   ]);
 
+  // "ANKLE nowhere" (Ryan 2026-07-11): a stale mechanism-blind upstreamScCondition must not appear in
+  // the Ask-Aegis slice text NOR seed its RAG retrieval. Resolve the display-safe anchor (grounded or
+  // suppressed). Display/retrieval-only — never written back; the drafter reads the raw column elsewhere.
+  const groundedFraming = await resolveGroundedFraming(db, caseId, {
+    framingStampSource: (c as { framingStampSource?: string | null }).framingStampSource ?? null,
+    framingChoice: (c as { framingChoice?: string | null }).framingChoice ?? null,
+    upstreamScCondition: c.upstreamScCondition ?? null,
+  });
+
   const data: ChartSliceData = {
     claimType: c.claimType,
     claimedCondition: c.claimedCondition,
     claimedConditions: c.claimedConditions ?? [],
-    upstreamScCondition: c.upstreamScCondition,
+    upstreamScCondition: groundedFraming.upstream,
     // Reconcile so Ask Aegis sees the SAME collapsed SC list the chart UI + drafter do —
     // otherwise the "PTSD shown SC and pending" contradiction just moves into the AI answer
     // (QA finding, 2026-06-20). Same read-time helper; statusConflict rides along when relevant.
@@ -314,7 +326,10 @@ export async function buildChartSlice(db: AppDb, caseId: string): Promise<ChartS
     activeMedications: c.veteran?.activeMedications ?? [],
     veteranStatement: c.veteranStatement,
     inServiceEvent: c.inServiceEvent,
-    caseFraming,
+    // Override the SSOT framing object's theory-anchor with the grounded value so the "upstream SC
+    // condition" line can't print a stale "Ankle" (the granted-SC-anchors list still shows ankle as a
+    // real granted condition — that's a fact, not the theory).
+    caseFraming: caseFraming ? { ...caseFraming, upstreamScCondition: groundedFraming.upstream } : null,
     documentDigest,
     emailThread,
     staffNotes,

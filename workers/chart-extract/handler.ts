@@ -19,6 +19,9 @@ import Anthropic from '@anthropic-ai/sdk';
 interface SqsRecord { body: string; attributes?: { ApproximateReceiveCount?: string } }
 interface SqsEvent { Records?: SqsRecord[] }
 interface ExtractMessage { runId: string; caseId: string; veteranId: string; triggerHash: string }
+// Minimal shape of the Lambda invocation Context — we need only the countdown to the hard kill. The
+// runtime always passes it as the 2nd handler arg; typed optional so unit tests can invoke handler(event).
+interface LambdaContext { getRemainingTimeInMillis(): number }
 
 const MAX_RECEIVE = Number(process.env.CHART_EXTRACT_MAX_RECEIVE ?? '3');
 
@@ -104,7 +107,7 @@ async function postFailed(caseId: string, runId: string, error: string): Promise
   }).catch(() => { /* best-effort: the stuck-run watcher is the backstop */ });
 }
 
-export async function handler(event: SqsEvent): Promise<void> {
+export async function handler(event: SqsEvent, context?: LambdaContext): Promise<void> {
   for (const rec of event.Records ?? []) {
     let msg: ExtractMessage;
     try { msg = JSON.parse(rec.body) as ExtractMessage; } catch { console.error('chart-extract: bad message body', rec.body); continue; }
@@ -120,7 +123,11 @@ export async function handler(event: SqsEvent): Promise<void> {
       }
       const key = await resolveAnthropicKey();
       const documents = await fetchDocuments(msg.caseId);
-      const result = await makeChartExtractor(key).extract(documents);
+      // Pass the Lambda's ABSOLUTE kill time so the extractor stops launching/splitting before the 900s
+      // wall and degrades to complete_with_gaps — the structural fix for the Reckart CLM-84B137F353 DLQ
+      // (a dense page's late re-read outrunning the wall). Absent context (unit tests) → self-budget only.
+      const deadlineMs = context ? Date.now() + context.getRemainingTimeInMillis() : undefined;
+      const result = await makeChartExtractor(key).extract(documents, { deadlineMs });
       await postMerge(msg.caseId, msg.runId, result.items, result.costUsd, { truncatedWindows: result.truncatedWindows ?? 0, uncoveredPages: result.uncoveredPages ?? 0, fullRead: result.fullRead ?? false });
       console.log(JSON.stringify({ msg: 'chart_extract_done', caseId: msg.caseId, runId: msg.runId, items: result.items.length, screenings: result.screenings?.length ?? 0, costUsd: result.costUsd, model: result.model, fullRead: result.fullRead, windowsProcessed: result.windowsProcessed, chunksProcessed: result.chunksProcessed, uncoveredPages: result.uncoveredPages, truncatedWindows: result.truncatedWindows }));
       // A truncated window means the extraction is INCOMPLETE for this chart — make it loud so it's

@@ -475,6 +475,46 @@ export function splitChunkText(text: string): [string, string] | null {
   return [text.slice(0, best).trimEnd(), text.slice(best)];
 }
 
+/** Overlap (chars) re-included from the tail of the first half into the head of the second half, snapped
+ *  to a line boundary, so an item straddling the split point is seen WHOLE by the second half. Dedup
+ *  (chartDedupKey) collapses the duplicate that the overlap introduces. Mirrors SPLIT_OVERLAP_CHARS. */
+const PAGE_SPLIT_OVERLAP_CHARS = 1_500;
+
+/** Split a SINGLE dense page's text at an internal newline near the midpoint, carrying the leading [p.N]
+ *  marker onto the second half so both halves keep page context. For the case splitChunkText can't handle
+ *  (one page whose EXTRACTION OUTPUT overflows the token ceiling because it lists many items — e.g. a
+ *  rating decision itemizing dozens of SC grants on one page). Splitting the input in half halves the
+ *  output too, so each half fits the base budget — replacing the slow 32k-token re-read that blew the
+ *  15-min Lambda wall and DLQ'd Reckart CLM-84B137F353 (2026-07-12). Line-boundary split with a tail
+ *  overlap (PAGE_SPLIT_OVERLAP_CHARS), so a multi-line item straddling the boundary is captured whole by
+ *  the second half and the duplicate collapses in dedup — no item is lost. Returns null for a single
+ *  over-long line (no usable internal newline) — the caller then accepts the base-budget partial + flags
+ *  it. Pure; exported for unit testing. */
+export function splitPageByChar(text: string): [string, string] | null {
+  const body = text.trim();
+  if (body.length < 2) return null;
+  const marker = body.match(/^\s*\[p\.\d+\]\s*/)?.[0] ?? '';
+  const mid = Math.floor(body.length / 2);
+  const before = body.lastIndexOf('\n', mid);
+  const after = body.indexOf('\n', mid);
+  let cut = -1;
+  if (before > marker.length && after !== -1 && after < body.length - 1) cut = mid - before <= after - mid ? before : after;
+  else if (before > marker.length) cut = before;
+  else if (after !== -1 && after < body.length - 1) cut = after;
+  if (cut <= marker.length || cut >= body.length - 1) return null; // no usable internal split point
+  const first = body.slice(0, cut).trimEnd();
+  // Second half starts an overlap window BEFORE the cut, snapped back to a line boundary, so a boundary-
+  // straddling multi-line item is present whole in the second half (dedup removes the overlap copy).
+  const overlapAnchor = Math.max(marker.length, cut - PAGE_SPLIT_OVERLAP_CHARS);
+  const overlapStart = Math.max(marker.length, body.lastIndexOf('\n', overlapAnchor) + 1);
+  const secondBody = body.slice(overlapStart).replace(/^\s+/, '');
+  if (!first || !secondBody.trim()) return null;
+  // Carry the page marker onto the second half if the overlap window dropped it, so grounding/page
+  // attribution holds (groundExtractedItem matches sourceQuote against the whole page.text regardless).
+  const second = marker && !secondBody.startsWith('[p.') ? `${marker}${secondBody}` : secondBody;
+  return [first, second];
+}
+
 /** Confidence gate thresholds (Ryan chose AUTO-FILL: write high-confidence; flag the middle band). */
 export const CONFIDENCE_AUTOFILL = 0.85;
 export const CONFIDENCE_FLOOR = 0.6;

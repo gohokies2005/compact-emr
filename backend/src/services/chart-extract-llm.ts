@@ -21,6 +21,7 @@ import {
   uncoveredPages,
   dedupeIdenticalDocuments,
   splitChunkText,
+  splitPageByChar,
   groundExtractedItem,
   normalizeForQuoteMatch,
   chartDedupKey,
@@ -50,12 +51,10 @@ const FULLREAD_MODEL = process.env.CHART_EXTRACT_FULLREAD_MODEL ?? MODEL;
 // Higher than the windowed 2000 — a combined-category chunk legitimately emits many items; a bigger
 // ceiling cuts how often we hit the split-retry. Truncation is still detected + split-retried.
 const CHUNK_MAX_TOKENS = 8192;
-// Escalated ceiling for an UNSPLITTABLE truncation: a single dense rating-decision page can itemize
-// dozens of SC grants and overflow 8192 output tokens, and splitChunkText can't split one page
-// without orphaning its [p.N] marker. Re-running that page at a high ceiling is the page-level
-// fallback that stops the rebuild from RELOCATING the buried-grant loss (architect BLOCKER). Sonnet
-// 4.x supports well above this; if a page somehow still overflows 32k items, we log loud + accept.
-const CHUNK_MAX_TOKENS_CEILING = 32_000;
+// NOTE (2026-07-12): an UNSPLITTABLE dense single page used to re-run at a 32k ceiling — a single
+// 5-9 min generation that blew the 15-min Lambda wall and DLQ'd Reckart CLM-84B137F353. That
+// escalation is RETIRED: a dense single page is now char-split into base-budget halves (splitPageByChar),
+// so no single call ever needs a higher ceiling. See the max_tokens branch in extractOneChunk.
 // Bounded concurrency. Raised 4→8 (Ryan 2026-06-13): Woodley (2,256pp → 60 chunks) took 14-17 min at
 // 4-wide, past the Lambda timeout. 8-wide ~halves wall-clock (~7-9 min) while staying within the
 // Anthropic direct-API rate ceiling for these short tool calls. Timeout bumped to 15 min in tandem.
@@ -77,6 +76,31 @@ function selfBudgetMs(): number {
 // Split-retry depth: a truncated chunk is halved and re-run; bounded so a pathological page can't
 // recurse forever (it falls through to "accept + log loud" at the floor).
 const MAX_SPLIT_DEPTH = 2;
+// LAMBDA-DEADLINE GUARD (Reckart CLM-84B137F353 root-cause hardening, 2026-07-12). The fixed self-budget
+// above assumes a FRESH 15-min Lambda; it resets its clock at extractFullRead start and can't see time
+// already consumed (cold start, doc fetch, a prior record in the batch). When the SQS handler passes the
+// runtime's ABSOLUTE deadline (Date.now()+getRemainingTimeInMillis()), these margins bound the run to the
+// REAL wall so it always degrades to complete_with_gaps / FLOOR (already-plumbed, RN-visible) instead of
+// being killed mid-run → DLQ. All three fire only when a deadline is supplied; without one the code path
+// is byte-for-byte the old behavior. Batch margin > recursion margin > 0 so we stop launching before we
+// stop recursing before a call could straddle the kill; batch margin also reserves the post-extraction
+// tail (grounding + merge POST + the DARK event-classifier's extra Sonnet call + screening-summary).
+const DEADLINE_BATCH_MARGIN_MS = 180_000;      // stop launching NEW batches with < 3 min of Lambda left
+const DEADLINE_RECURSION_MARGIN_MS = 120_000;  // stop SPLIT recursion (accept FLOOR) with < 2 min left
+const DEADLINE_CALL_MARGIN_MS = 30_000;        // cap a single SDK call to finish ≥ 30 s before the kill
+const PER_CALL_TIMEOUT_MS = 14 * 60 * 1000;    // the pre-existing per-request ceiling (upper bound)
+const MIN_CALL_TIMEOUT_MS = 240_000;           // never cap BELOW this — a normal base call must never be cut
+
+/** Per-call duration budget, used for BOTH the SDK `timeout` (per-attempt, time-to-headers) AND the
+ *  deadline AbortSignal (wall-clock, covers the stream body): the pre-existing 14-min ceiling, tightened
+ *  toward the remaining Lambda budget when a deadline is known — floored at MIN_CALL_TIMEOUT_MS so a
+ *  slow-but-legit call is never spuriously aborted. The batch/recursion gates handle the graceful stop
+ *  when NEW work would start near the deadline; this bounds a single in-flight call that stalls. */
+export function perCallTimeoutMs(deadlineMs: number | undefined): number {
+  if (deadlineMs === undefined) return PER_CALL_TIMEOUT_MS;
+  const remaining = deadlineMs - Date.now() - DEADLINE_CALL_MARGIN_MS;
+  return Math.min(PER_CALL_TIMEOUT_MS, Math.max(remaining, MIN_CALL_TIMEOUT_MS));
+}
 
 // icd10 / dcCode are short CODE columns (icd10 = Postgres VarChar(16); manual entry validates the
 // same way in chart-entry-validation.ts). A model-authored value that's over-length or not
@@ -715,7 +739,10 @@ export function groundAndDispose(
 }
 
 export interface ChartExtractor {
-  extract(documents: BundleDocument[]): Promise<ExtractionResult>;
+  // opts.deadlineMs = the Lambda runtime's ABSOLUTE kill time (Date.now()+getRemainingTimeInMillis()),
+  // passed by the SQS handler so extraction stops early + degrades to complete_with_gaps instead of being
+  // killed mid-run. Optional: omitted (tests, non-Lambda callers) → the fixed self-budget alone applies.
+  extract(documents: BundleDocument[], opts?: { deadlineMs?: number }): Promise<ExtractionResult>;
 }
 
 /** Per-LLM-call result, shared by both paths' accumulation. */
@@ -736,52 +763,92 @@ async function extractOneChunk(
   unit: { documentId: string; filename: string; text: string },
   model: string,
   depth: number,
-  maxTokens: number = CHUNK_MAX_TOKENS,
+  deadlineMs?: number,
 ): Promise<CallResult> {
-  // STREAMING (keystone fix 2026-06-23): a dense single page can escalate maxTokens to
-  // CHUNK_MAX_TOKENS_CEILING (32k). On the NON-streaming .create() path the SDK refuses the request
-  // BEFORE sending — "Streaming is required for operations that may take longer than 10 minutes" — so
-  // a legitimately-dense rating-decision page CRASHED the whole run (ChartExtractionRun → failed; the
-  // coverage card then lied "100% Complete" off a stale earlier run). messages.stream(...).finalMessage()
-  // removes that ceiling entirely; the SDK accumulates input_json_delta internally, so the returned
-  // Anthropic.Message has the SAME stop_reason / usage / tool_use.input shape — every line below is
-  // unchanged. Per-request timeout sized UNDER the 15-min Lambda kill (the self-budget stops launching
-  // new batches at 12.5 min; a single chunk should never need 14 min — if it does that's a chunking
-  // bug, not a timeout to widen). Transient 500/529/overloaded/429 are retried by the SDK (maxRetries
-  // on the client); 400s are NOT retried (fail fast — a bad schema must not burn the Lambda budget).
-  const resp = await anthropic.messages.stream({
-    model,
-    max_tokens: maxTokens,
-    system: combinedSystemPrompt(),
-    tools: [EXTRACT_TOOL_COMBINED],
-    tool_choice: { type: 'tool', name: 'record_chart_items' },
-    messages: [{ role: 'user', content: chunkUserPrompt(unit) }],
-  }, { timeout: 14 * 60 * 1000 }).finalMessage();
+  // STREAMING (keystone fix 2026-06-23): retained on the .stream(...).finalMessage() surface even now
+  // that every call runs at the base 8192 budget (no more 32k escalation) — the SDK accumulates
+  // input_json_delta internally and returns the SAME stop_reason / usage / tool_use.input shape, so the
+  // branch below is unchanged, and streaming keeps us clear of the SDK's "Streaming is required for
+  // operations that may take longer than 10 minutes" refusal on any slow-but-legit call.
+  //
+  // TWO independent timers, because the SDK's per-request `timeout` only bounds time-to-RESPONSE-HEADERS
+  // and is applied per-attempt (retried up to maxRetries×) — it does NOT bound the streaming BODY (SDK
+  // 0.100.1, verified: the sole timer is cleared the instant headers arrive). So a mid-stream STALL — the
+  // real Reckart failure — would block on `.finalMessage()` until the 900s Lambda kill. The wall-clock
+  // bound is therefore a deadline-derived AbortSignal (covers the body, NOT re-entered into the retry
+  // loop), added ONLY when a Lambda deadline is supplied. `timeout` stays for fast dead-on-connect
+  // detection + its retry. When the signal fires we degrade THIS chunk to a FLOOR (below) so the run posts
+  // complete_with_gaps — never a crash. Transient 500/529/429 still retry (SDK maxRetries); 400s fail fast.
+  const callSignal = deadlineMs !== undefined ? AbortSignal.timeout(perCallTimeoutMs(deadlineMs)) : undefined;
+  let resp: Anthropic.Message;
+  try {
+    resp = await anthropic.messages.stream({
+      model,
+      max_tokens: CHUNK_MAX_TOKENS,
+      system: combinedSystemPrompt(),
+      tools: [EXTRACT_TOOL_COMBINED],
+      tool_choice: { type: 'tool', name: 'record_chart_items' },
+      messages: [{ role: 'user', content: chunkUserPrompt(unit) }],
+    }, { timeout: perCallTimeoutMs(deadlineMs), signal: callSignal }).finalMessage();
+  } catch (err) {
+    // A DEADLINE abort (our wall-clock AbortSignal fired mid-stream) must NOT crash the run — degrade this
+    // chunk to a flagged FLOOR so extractFullRead still posts complete_with_gaps (RN-visible). ANY OTHER
+    // error (transient 5xx after retries, a 400, a connect-phase timeout) re-throws to preserve the
+    // existing retry / fail-loud semantics. callSignal.aborted is the reliable discriminator; the name
+    // check is a belt for however the SDK surfaces the abort.
+    const abortedByDeadline = callSignal?.aborted === true || (err instanceof Error && err.name === 'APIUserAbortError');
+    if (!abortedByDeadline) throw err;
+    console.warn(JSON.stringify({
+      event: 'chart_extract_chunk_truncated_FLOOR', document: unit.filename, depth,
+      reason: 'lambda_deadline_abort',
+      note: 'call aborted at the Lambda wall — chunk degraded to a flagged partial so the run posts complete_with_gaps',
+    }));
+    return { raw: [], screenings: [], costUsd: 0, truncated: 1 };
+  }
   const costUsd = resp.usage.input_tokens * INPUT_USD_PER_TOKEN + resp.usage.output_tokens * OUTPUT_USD_PER_TOKEN;
 
   if (resp.stop_reason === 'max_tokens') {
+    // DEADLINE GUARD: within DEADLINE_RECURSION_MARGIN_MS of the Lambda wall, do NOT start a fresh split
+    // re-read — each is a new multi-minute call that could straddle the kill. Accept the partial NOW so
+    // the run degrades to complete_with_gaps (RN-visible) instead of being killed mid-generation → DLQ.
+    const deadlineNear = deadlineMs !== undefined && Date.now() >= deadlineMs - DEADLINE_RECURSION_MARGIN_MS;
     // Multi-page chunk → split at a page boundary and recurse (each half re-reads at the base budget).
-    const halves = depth < MAX_SPLIT_DEPTH ? splitChunkText(unit.text) : null;
+    const halves = depth < MAX_SPLIT_DEPTH && !deadlineNear ? splitChunkText(unit.text) : null;
     if (halves) {
       // Split-retry IN ORDER (first half then second) so accumulated raw stays deterministic.
-      const a = await extractOneChunk(anthropic, { ...unit, text: halves[0] }, model, depth + 1);
-      const b = await extractOneChunk(anthropic, { ...unit, text: halves[1] }, model, depth + 1);
+      const a = await extractOneChunk(anthropic, { ...unit, text: halves[0] }, model, depth + 1, deadlineMs);
+      const b = await extractOneChunk(anthropic, { ...unit, text: halves[1] }, model, depth + 1, deadlineMs);
       return { raw: [...a.raw, ...b.raw], screenings: [...a.screenings, ...b.screenings], costUsd: costUsd + a.costUsd + b.costUsd, truncated: a.truncated + b.truncated };
     }
-    // Single dense page (unsplittable) → re-run the SAME page at the escalated ceiling before giving
-    // up. This is the page-level fallback for the buried-grant case (architect BLOCKER): a rating
-    // decision listing dozens of SC grants on one page must not lose any past the 8192 cutoff.
-    if (maxTokens < CHUNK_MAX_TOKENS_CEILING) {
-      console.warn(JSON.stringify({
-        event: 'chart_extract_chunk_truncated_escalating', document: unit.filename,
-        fromMaxTokens: maxTokens, toMaxTokens: CHUNK_MAX_TOKENS_CEILING,
-        note: 'single dense page hit the output ceiling — re-running at the high ceiling so no item is lost',
-      }));
-      return extractOneChunk(anthropic, unit, model, depth, CHUNK_MAX_TOKENS_CEILING);
+    // Single dense page (no page-marker boundary to split on) whose EXTRACTION OUTPUT overflowed the
+    // budget — the buried-grant case (a rating decision itemizing dozens of SC grants on one page must
+    // not lose any). The OLD path re-ran the whole page at the 32k ceiling: a single 5-9 min generation
+    // that fired late in the run and blew the 15-min Lambda wall, DLQ'ing the entire chart (Reckart
+    // CLM-84B137F353, 2026-07-12 — three 900 s timeouts → "Chart analysis failed", zero items). Instead,
+    // split the page's TEXT at an internal line boundary and re-read each half at the BASE budget: two
+    // FAST calls that can't blow the wall, and — because halving the input halves the output — each half
+    // fits, so no grant is lost. Bounded by MAX_SPLIT_DEPTH (2 → up to 4 pieces = 4×8192 output capacity,
+    // exceeding the old 32k ceiling). The deterministic grant parser (extractRatingDecisionGrants) is the
+    // independent no-loss guarantee for SC grants even if this or a deadline FLOOR drops one.
+    if (depth < MAX_SPLIT_DEPTH && !deadlineNear) {
+      const charHalves = splitPageByChar(unit.text);
+      if (charHalves) {
+        console.warn(JSON.stringify({ event: 'chart_extract_dense_page_char_split', document: unit.filename, depth }));
+        const a = await extractOneChunk(anthropic, { ...unit, text: charHalves[0] }, model, depth + 1, deadlineMs);
+        const b = await extractOneChunk(anthropic, { ...unit, text: charHalves[1] }, model, depth + 1, deadlineMs);
+        return { raw: [...a.raw, ...b.raw], screenings: [...a.screenings, ...b.screenings], costUsd: costUsd + a.costUsd + b.costUsd, truncated: a.truncated + b.truncated };
+      }
     }
+    // FLOOR: unsplittable (single over-long line / depth exhausted) OR stopped by the deadline guard.
+    // Accept the base-budget items and flag truncated. A loud PARTIAL (the coverage card shows the gap)
+    // beats a total run failure that renders "Chart analysis failed" with ZERO items. NEVER re-read at
+    // 32k here — that is the Lambda-timeout crash this fix removes.
     console.warn(JSON.stringify({
-      event: 'chart_extract_chunk_truncated_FLOOR', document: unit.filename, depth, maxTokens,
-      note: 'chunk hit max_tokens even at the ceiling and could not be split — items after the cutoff were lost (INVESTIGATE)',
+      event: 'chart_extract_chunk_truncated_FLOOR', document: unit.filename, depth, maxTokens: CHUNK_MAX_TOKENS,
+      reason: deadlineNear ? 'lambda_deadline_near' : 'unsplittable_dense_page',
+      note: deadlineNear
+        ? 'stopped splitting near the Lambda deadline — partial captured, run degrades to complete_with_gaps'
+        : 'dense page could not be split — items after the output cutoff were captured partial (INVESTIGATE)',
     }));
     const input = toolUseInput(resp);
     return {
@@ -841,8 +908,8 @@ export function makeChartExtractor(apiKey: string): ChartExtractor {
   }
 
   return {
-    async extract(documents: BundleDocument[]): Promise<ExtractionResult> {
-      return fullReadEnabled() ? extractFullRead(anthropic, documents, FULLREAD_MODEL) : extractWindowed(documents);
+    async extract(documents: BundleDocument[], opts?: { deadlineMs?: number }): Promise<ExtractionResult> {
+      return fullReadEnabled() ? extractFullRead(anthropic, documents, FULLREAD_MODEL, opts ?? {}) : extractWindowed(documents);
     },
   };
 }
@@ -857,7 +924,9 @@ export async function extractFullRead(
   anthropic: Anthropic,
   documents: BundleDocument[],
   model: string = FULLREAD_MODEL,
+  opts: { deadlineMs?: number } = {},
 ): Promise<ExtractionResult> {
+  const deadlineMs = opts.deadlineMs;
   // COST-SAFETY (Ryan 2026-06-17): drop byte-identical-content duplicate documents BEFORE chunking so
   // the same content is never sent to the model twice (Woodley Misc_2==Misc_3). Compute everything
   // downstream over the KEPT set so coverage + grounding match what was actually fed. Logged, never silent.
@@ -873,17 +942,22 @@ export async function extractFullRead(
   let chunksRun = 0;
   let budgetExceeded = false;
   for (let start = 0; start < chunks.length; start += CHUNK_CONCURRENCY) {
-    // Self-budget gate: stop launching NEW batches once the wall-clock budget is spent, so the merge
-    // callback posts before the Lambda's hard kill. The first batch (start===0) always runs — a
-    // single batch must be allowed even on a degraded/slow cold start. Chunks run sequentially and
-    // in-order, so chunks[chunksRun..] are exactly the un-run remainder (counted as uncovered below).
-    if (start > 0 && Date.now() - startedAt >= budgetMs) {
+    // Budget gate: stop launching NEW batches once EITHER wall-clock bound is hit, so the merge callback
+    // posts before the Lambda's hard kill. (1) the fixed self-budget (assumes a fresh 15-min Lambda), and
+    // (2) the REAL Lambda deadline when the handler supplies it — Date.now() ≥ deadline − batch margin —
+    // which correctly accounts for time already consumed (cold start, doc fetch, a prior record) that the
+    // self-budget's reset clock cannot see. The first batch (start===0) always runs — a single batch must
+    // be allowed even on a degraded/slow cold start. Chunks run in-order, so chunks[chunksRun..] are
+    // exactly the un-run remainder (counted as uncovered below → complete_with_gaps, never a crash).
+    const selfBudgetHit = Date.now() - startedAt >= budgetMs;
+    const deadlineHit = deadlineMs !== undefined && Date.now() >= deadlineMs - DEADLINE_BATCH_MARGIN_MS;
+    if (start > 0 && (selfBudgetHit || deadlineHit)) {
       budgetExceeded = true;
-      console.warn(JSON.stringify({ event: 'chart_extract_self_budget_exceeded', model, chunksRun, chunksTotal: chunks.length, elapsedMs: Date.now() - startedAt, budgetMs }));
+      console.warn(JSON.stringify({ event: 'chart_extract_self_budget_exceeded', reason: deadlineHit ? 'lambda_deadline' : 'self_budget', model, chunksRun, chunksTotal: chunks.length, elapsedMs: Date.now() - startedAt, budgetMs }));
       break;
     }
     const batch = chunks.slice(start, start + CHUNK_CONCURRENCY);
-    const settled = await Promise.all(batch.map((c) => extractOneChunk(anthropic, c, model, 0)));
+    const settled = await Promise.all(batch.map((c) => extractOneChunk(anthropic, c, model, 0, deadlineMs)));
     settled.forEach((r, k) => { results[start + k] = r; });
     chunksRun += batch.length;
   }

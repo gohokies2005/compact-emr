@@ -8,6 +8,7 @@ import {
   dedupeIdenticalDocuments,
   chunkDocuments,
   splitOversizedPage,
+  splitPageByChar,
   CHUNK_CHARS,
   type BundleDocument,
 } from '../chart-extractor.js';
@@ -244,6 +245,57 @@ describe('splitOversizedPage (oversized single page → char-offset slices)', ()
       expect(s.startsWith('[p.42]\n')).toBe(true);
       expect(s.length).toBeLessThanOrEqual(CHUNK_CHARS);
     }
+  });
+});
+
+// Reckart CLM-84B137F353 (2026-07-12): a page UNDER the input char budget (so splitOversizedPage never
+// touched it) whose EXTRACTION OUTPUT overflowed 8192 tokens (a dense rating page listing many SC grants)
+// forced extractOneChunk to re-read the WHOLE page at the 32k ceiling — a 5-9 min call that blew the
+// 15-min Lambda wall and DLQ'd the entire chart (zero items → "Chart analysis failed"). splitPageByChar
+// is the extract-time complement to splitOversizedPage: halve the input → halve the output → two FAST
+// base-budget re-reads that can't time out, losing no grant.
+describe('splitPageByChar (dense page whose OUTPUT overflows → two base-budget halves)', () => {
+  it('returns null for a single over-long line with no internal newline (caller degrades to FLOOR)', () => {
+    expect(splitPageByChar(`[p.5]\n${'GRANT '.repeat(5000)}`)).toBeNull(); // one huge line, unsplittable
+  });
+
+  it('returns null for trivially short text', () => {
+    expect(splitPageByChar('[p.1]\n')).toBeNull();
+    expect(splitPageByChar('')).toBeNull();
+  });
+
+  it('splits a dense multi-line page at a line boundary near the midpoint; both halves carry [p.N]', () => {
+    const rows = Array.from({ length: 40 }, (_, i) => `${i + 1}. Service connection for condition ${i + 1} is GRANTED, 30%.`);
+    const page = `[p.12]\n${rows.join('\n')}`;
+    const split = splitPageByChar(page);
+    expect(split).not.toBeNull();
+    const [a, b] = split!;
+    expect(a.startsWith('[p.12]')).toBe(true);
+    expect(b.startsWith('[p.12]')).toBe(true);
+    // No row is cut mid-line: every line in each half is a complete "…GRANTED, 30%." row.
+    for (const half of [a, b]) {
+      for (const line of half.split('\n').slice(1).filter((l) => l.trim())) {
+        expect(line.endsWith('GRANTED, 30%.')).toBe(true);
+      }
+    }
+  });
+
+  it('no grant is lost across the split: every row appears in at least one half (overlap-safe)', () => {
+    const rows = Array.from({ length: 40 }, (_, i) => `${i + 1}. Service connection for condition ${i + 1} is GRANTED, 30%.`);
+    const page = `[p.12]\n${rows.join('\n')}`;
+    const [a, b] = splitPageByChar(page)!;
+    const combined = `${a}\n${b}`;
+    for (const row of rows) expect(combined.includes(row)).toBe(true); // completeness: nothing dropped
+  });
+
+  it('overlap re-includes the boundary row in the second half so a straddling item is seen whole', () => {
+    const rows = Array.from({ length: 30 }, (_, i) => `Row ${i} ${'x'.repeat(80)}`);
+    const page = `[p.9]\n${rows.join('\n')}`;
+    const [a, b] = splitPageByChar(page)!;
+    // The overlap window means the last row of the first half also appears at the head of the second.
+    const firstHalfLines = a.split('\n').slice(1).filter((l) => l.trim());
+    const lastOfFirst = firstHalfLines[firstHalfLines.length - 1]!;
+    expect(b.includes(lastOfFirst)).toBe(true);
   });
 });
 

@@ -48,15 +48,24 @@ describe('buildPreSignTheory', () => {
     expect(t.mismatch!.suggestEdit).toBe(true);
   });
 
-  it('MISMATCH reason uses ONLY why_not — never counterargument/rationale', () => {
-    const t = buildPreSignTheory({
+  it('reason comes ONLY from why_not (never counterargument/rationale); a bare non-alternative anchor is silent', () => {
+    // Flat feet is not a plan alternative + same framing as the lead → nothing specific/grounded → SILENT.
+    const silent = buildPreSignTheory({
       framingChoice: 'secondary',
       upstreamScCondition: 'Flat feet',
       aiViabilityPlanJson: plan({ framing: 'secondary', upstream: 'PTSD', counterargument: 'PTSD is the strongest anchor.', rationale: 'strong PTSD nexus' }),
     });
-    expect(t.mismatch).not.toBeNull();
-    expect(t.mismatch!.suggestEdit).toBe(false); // flat feet not a listed alternative
-    expect(t.mismatch!.reason).toBeNull(); // no why_not → neutral, does NOT borrow counterargument
+    expect(silent.mismatch).toBeNull();
+    // When the veteran pushes a DEMOTED alternative, reason = its (tidied) why_not — NEVER the counterargument.
+    const flagged = buildPreSignTheory({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'Flat feet',
+      aiViabilityPlanJson: plan(
+        { framing: 'secondary', upstream: 'PTSD', counterargument: 'PTSD is the strongest anchor.', rationale: 'strong PTSD nexus' },
+        [{ upstream: 'Flat feet', framing: 'secondary_causation', why_not: 'pes planus is a weaker mechanism' }],
+      ),
+    });
+    expect(flagged.mismatch!.reason).toBe('Pes planus is a weaker mechanism.'); // tidied why_not, not counterargument
   });
 
   it('LOOSE match: "Asthma" vs "Asthma, Bronchial" → not flagged', () => {
@@ -69,9 +78,24 @@ describe('buildPreSignTheory', () => {
     expect(t.mismatch).toBeNull();
   });
 
-  it('LATERALITY different joints: "Left ankle" vs "Left wrist" → FLAGGED (must not match on "left")', () => {
-    const t = buildPreSignTheory({ framingChoice: 'secondary', upstreamScCondition: 'Left ankle', aiViabilityPlanJson: plan({ framing: 'secondary', upstream: 'Left wrist' }) });
-    expect(t.mismatch).not.toBeNull();
+  it('LATERALITY: a distinct-joint anchor does NOT wrongly align on "left" — a same-joint ALTERNATIVE is skipped, a different one surfaces', () => {
+    // lead = Left wrist; alternatives = Right wrist (same joint "wrist" → letter already argues it, 2 framings)
+    // + GERD (distinct, 2 framings). Only GERD should surface; the "wrist" alt must be recognized as the lead's.
+    const t = buildPreSignTheory({
+      veteranStatement: 'my left wrist problem caused it',
+      aiViabilityPlanJson: plan(
+        { framing: 'secondary', upstream: 'Left wrist' },
+        [
+          { upstream: 'Right wrist', framing: 'secondary_causation', why_not: 'a' },
+          { upstream: 'Right wrist', framing: 'aggravation', why_not: 'b' },
+          { upstream: 'gastroesophageal reflux disease (GERD)', framing: 'secondary_causation', why_not: 'c' },
+          { upstream: 'gastroesophageal reflux disease (GERD)', framing: 'aggravation', why_not: 'd' },
+        ],
+      ),
+      veteranTheoryAi: { theory: 'Veteran attributes it to the left wrist.', framing: 'secondary', upstream: 'Left wrist' },
+    });
+    expect(t.mismatch!.summary).toContain('GERD');
+    expect(t.mismatch!.summary).not.toContain('wrist'); // same-joint-as-lead alternative is not an "addition"
   });
 
   it('ACRONYM: "PTSD" vs "post-traumatic stress disorder" → NOT flagged', () => {
@@ -127,7 +151,7 @@ describe('buildPreSignTheory', () => {
       aiViabilityPlanJson: plan({ claimed: 'Lumbar strain', framing: 'direct', mechanism: 'fall during a training exercise' }),
     });
     expect(t.mismatch).toBeNull();
-    expect(t.letterTheory).toBe('Direct service connection — fall during a training exercise');
+    expect(t.letterTheory).toBe('Direct service connection (fall during a training exercise)');
   });
 
   it('aggravation framing line renders', () => {
@@ -211,7 +235,7 @@ describe('buildPreSignTheory — Part B LLM overlay (full-scope reconciliation)'
     const t = buildPreSignTheory({
       aiViabilityPlanJson: plan({ claimed: 'Obstructive Sleep Apnea (OSA)', framing: 'dual_prong', upstream: 'knee strain, limitation of flexion left' }),
     });
-    expect(t.letterTheory).toBe('Obstructive Sleep Apnea (OSA) secondary to — and aggravated by — service-connected knee strain, limitation of flexion left');
+    expect(t.letterTheory).toBe('Obstructive Sleep Apnea (OSA) secondary to (and aggravated by) service-connected knee strain, limitation of flexion left');
     expect(t.letterTheory).not.toMatch(/dual_prong/);
   });
 
@@ -268,6 +292,37 @@ describe('buildPreSignTheory — Part B LLM overlay (full-scope reconciliation)'
     expect(t.mismatch!.summary).toContain('fallback');
     expect(t.mismatch!.reason).toContain('stronger anchor');
     expect(t.mismatch!.suggestEdit).toBe(true);
+  });
+
+  it('ANKLE NOWHERE (Jay): a single-framing DEMOTED alternative must NEVER resurface as "the letter also weighs…"', () => {
+    const t = buildPreSignTheory({
+      veteranStatement: 'I am service connected for depressive disorder and believe my sleep apnea was caused by my mental health condition.',
+      aiViabilityPlanJson: plan(
+        { claimed: 'OSA', framing: 'secondary', upstream: 'depressive disorder with chronic sleep impairment' },
+        [{ upstream: 'LIMITED MOTION OF ANKLE', framing: 'secondary_causation', why_not: 'the ankle-to-OSA pathway is indirect; depression is materially stronger' }],
+      ),
+      veteranTheoryAi: { theory: 'Veteran attributes his OSA to service-connected depression.', framing: 'secondary', upstream: 'depressive disorder with chronic sleep impairment' },
+    });
+    expect(t.mismatch).toBeNull(); // ankle is a single-framing demotion → gated out → silent
+    expect(JSON.stringify(t)).not.toMatch(/ankle/i); // HARD: "ANKLE" must appear NOWHERE on the surface
+  });
+
+  it('shared-token: a veteran anchor matching BOTH the lead and a distinct alternative is ALIGNED, not a fallback (architect QA)', () => {
+    const t = buildPreSignTheory({
+      veteranStatement: 'my neck / cervical problem caused it',
+      aiViabilityPlanJson: plan(
+        { framing: 'secondary', upstream: 'cervical spine strain' },
+        [{ upstream: 'cervical radiculopathy', framing: 'secondary_causation', why_not: 'x' }],
+      ),
+      veteranTheoryAi: { theory: 'Veteran attributes it to the cervical spine.', framing: 'secondary', upstream: 'cervical strain' },
+    });
+    expect(t.mismatch).toBeNull(); // aligns with the lead; must NOT say "treats cervical radiculopathy as a fallback"
+  });
+
+  it('an UNKNOWN framing key is humanized (de-underscored), never rendered raw', () => {
+    const t = buildPreSignTheory({ aiViabilityPlanJson: plan({ claimed: 'OSA', framing: 'foo_bar', upstream: 'X' }) });
+    expect(t.letterTheory).toBe('OSA (X): foo bar');
+    expect(t.letterTheory).not.toMatch(/foo_bar/);
   });
 
   it('LLM framing "unclear" → prose shows but asserts NO mismatch', () => {

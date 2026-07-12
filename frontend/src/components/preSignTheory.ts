@@ -95,6 +95,14 @@ function joinWords(ws: readonly string[]): string {
   if (u.length === 2) return `${u[0]} and ${u[1]}`;
   return `${u.slice(0, -1).join(', ')}, and ${u[u.length - 1]}`;
 }
+// Tidy a plan free-text fragment (why_not) for physician display: capitalize + ensure a terminal period so
+// it reads as a clean sentence when appended after a summary (AI-SME work-QA: raw why_not is lower-cased).
+function tidySentence(s: string | null | undefined): string | null {
+  const t = (s ?? '').trim();
+  if (!t) return null;
+  const cap = t.charAt(0).toUpperCase() + t.slice(1);
+  return /[.!?]$/.test(cap) ? cap : `${cap}.`;
+}
 
 // Laterality / severity / generic-medical tokens that must NOT count as a condition match — otherwise
 // "Right knee" vs "Right shoulder" collide on "right". (3-agent QA 2026-07-11.)
@@ -162,7 +170,7 @@ function letterTheoryLine(lead: AiViabilityCard['lead']): string | null {
   const f = norm(lead.framing);
   // dual_prong = 3.310(a)+(b): BOTH causation AND aggravation of the SAME upstream (not two conditions).
   if (f.includes('dual')) {
-    return up ? `${claimed} secondary to — and aggravated by — service-connected ${up}` : 'Secondary service connection (causation and aggravation)';
+    return up ? `${claimed} secondary to (and aggravated by) service-connected ${up}` : 'Secondary service connection (causation and aggravation)';
   }
   if (f.includes('presumptive')) {
     return up ? `${claimed} on a presumptive basis (${up})` : `${claimed} on a presumptive basis`;
@@ -173,10 +181,10 @@ function letterTheoryLine(lead: AiViabilityCard['lead']): string | null {
     case 'aggravation':
       return up ? `Aggravation of service-connected ${up}` : 'Aggravation of a service-connected condition';
     case 'direct':
-      return mech ? `Direct service connection — ${mech}` : 'Direct service connection';
+      return mech ? `Direct service connection (${mech})` : 'Direct service connection';
     default:
       // Never leak a raw framing key — humanize it (e.g. an unknown "foo_bar" → "foo bar").
-      return nonEmpty(lead.framing) ? `${claimed}${up ? ` — ${up}` : ''} (${humanFramingWord(lead.framing)})` : null;
+      return nonEmpty(lead.framing) ? `${claimed}${up ? ` (${up})` : ''}: ${humanFramingWord(lead.framing)}` : null;
   }
 }
 
@@ -208,35 +216,47 @@ function reconcileLlmWithPlan(
   const lead = plan.lead;
   const vUp = (llmUpstream ?? '').trim() || null;
   const alternatives = plan.alternatives ?? [];
+  const convergent = plan.convergent ?? [];
+  // An anchor the letter ALREADY argues (leads with, or converges on via the same mechanism) is NOT a
+  // difference — even if it also appears in alternatives (architect work-QA). Guards branches (1) and (2)
+  // so a shared common token (e.g. "cervical") can't mislabel an ALIGNED anchor as a "fallback".
+  const onLeadOrConvergent = (name: string | null | undefined): boolean =>
+    looseMatch(lead.upstream, name) || convergent.some((cv) => looseMatch(cv.upstream, name));
 
-  // (1) Is the veteran pushing a specific anchor the letter considered but DEMOTED? (confident divergence)
-  const vetPushesDemoted = vUp ? alternatives.find((a) => looseMatch(a.upstream, vUp)) : undefined;
+  // (1) Is the veteran pushing a specific anchor the letter considered but DEMOTED (and does NOT already
+  //     argue)? (confident divergence)
+  const vetPushesDemoted = vUp && !onLeadOrConvergent(vUp) ? alternatives.find((a) => looseMatch(a.upstream, vUp)) : undefined;
   if (vetPushesDemoted) {
     return {
-      reason: nonEmpty(vetPushesDemoted.why_not),
+      reason: tidySentence(vetPushesDemoted.why_not),
       suggestEdit: true,
       summary: `The veteran points to ${vetPushesDemoted.upstream}; the letter leads with ${leadLabel(lead)} and treats ${vetPushesDemoted.upstream} as a fallback.`,
     };
   }
 
-  // (2) DIFFERENT-mechanism alternatives the letter weighs that the veteran NEVER raised (grounded against
-  //     the literal statement, and not the veteran's own anchor). Dedup by upstream, collect framings.
-  const groups = new Map<string, { upstream: string; framings: string[] }>();
+  // (2) Different-mechanism supplemental arguments the letter weighs that the veteran NEVER raised. Grounded
+  //     against the literal statement + not the veteran's own anchor + not something the letter already
+  //     argues. Dedup by upstream, collect the DISTINCT framings the route-picker gave it.
+  const groups = new Map<string, { upstream: string; framings: Set<string> }>();
   for (const a of alternatives) {
     const upA = (a.upstream ?? '').trim();
     if (!upA) continue;
+    if (onLeadOrConvergent(upA)) continue; // the letter already leads/converges on it → not an "addition"
     if (mentionedIn(upA, veteranStatement)) continue; // the veteran DID raise it → not a difference
     if (vUp && looseMatch(upA, vUp)) continue; // it's the veteran's own anchor
     const key = norm(upA);
-    const g = groups.get(key) ?? { upstream: upA, framings: [] };
-    if (a.framing) g.framings.push(humanFramingWord(a.framing));
+    const g = groups.get(key) ?? { upstream: upA, framings: new Set<string>() };
+    if (a.framing) g.framings.add(humanFramingWord(a.framing));
     groups.set(key, g);
   }
-  const additions = [...groups.values()];
+  // SURFACE ONLY DEVELOPED SUPPLEMENTALS — an alternative the route-picker articulated under 2+ DISTINCT
+  // framings (e.g. Cox's GERD as BOTH causation AND aggravation). A single-framing alternative is a quiet
+  // DEMOTION of a weaker anchor (e.g. Jay's demoted "LIMITED MOTION OF ANKLE") — surfacing it would
+  // RESURFACE the exact mechanism-blind anchor Part A removed. This gate is the "ANKLE nowhere" guarantee
+  // for this line: a demoted single-framing anchor can never render here. (Heuristic; when unsure, silent.)
+  const additions = [...groups.values()].filter((g) => g.framings.size >= 2);
   if (additions.length > 0) {
-    const phrase = additions
-      .map((g) => (g.framings.length ? `${g.upstream} as a ${joinWords(g.framings)} cause` : g.upstream))
-      .join('; ');
+    const phrase = additions.map((g) => `${g.upstream} as a ${joinWords([...g.framings])} cause`).join('; ');
     return { reason: null, suggestEdit: false, summary: `The letter also weighs ${phrase}, which the veteran didn't raise.` };
   }
 
@@ -302,23 +322,15 @@ export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
     };
   }
 
-  let mismatch: PreSignTheory['mismatch'] = null;
-  // Compare ONLY when the veteran expressed a theory we can trust — a known framing, and for a
-  // secondary/aggravation theory a CORROBORATED upstream. Otherwise it isn't honestly "veteran vs letter"
-  // (Block 1's literal statement stays the physician's ground truth). No positive affirmation either way.
-  const canCompare = vBucket !== 'other' && (!isSecondaryish || upstreamTrusted);
-  if (lead && canCompare) {
-    const lBucket = framingBucket(lead.framing);
-    const framingDiffers = lBucket !== 'other' && vBucket !== lBucket;
-    const leadSecondaryish = lBucket === 'secondary' || lBucket === 'aggravation';
-    const upstreamDiffers =
-      leadSecondaryish && hasUpstream && !!(lead.upstream ?? '').trim() && !looseMatch(c.upstreamScCondition, lead.upstream);
-    if (framingDiffers || upstreamDiffers) {
-      // Use ONLY the plan's explicit "why this alternative wasn't led" (alternatives[].why_not).
-      const alt = (c.aiViabilityPlanJson?.alternatives ?? []).find((a) => looseMatch(a.upstream, c.upstreamScCondition));
-      mismatch = { reason: nonEmpty(alt?.why_not), suggestEdit: !!alt };
-    }
-  }
+  // Reconcile the DERIVED theory (fallback when the LLM restatement is unavailable) through the SAME
+  // specific-or-silent logic as the LLM path, so the useless generic "they differ" never shows on either
+  // path (AI-SME work-QA I-1). Feed the TRUSTED upstream only — an untrusted/stale upstream (Jay's "Ankle")
+  // is dropped to null so it can never anchor a "veteran points to…" line. Map the derived bucket to the
+  // veteran-theory framing vocabulary ('other' → 'unclear').
+  const derivedFraming: 'secondary' | 'direct' | 'aggravation' | 'unclear' =
+    vBucket === 'secondary' ? 'secondary' : vBucket === 'aggravation' ? 'aggravation' : vBucket === 'direct' ? 'direct' : 'unclear';
+  const mismatch: PreSignTheory['mismatch'] =
+    plan && lead ? reconcileLlmWithPlan(derivedFraming, upstreamTrusted ? c.upstreamScCondition ?? null : null, plan, veteranStatement) : null;
 
   const hasContent = !!(veteranStatement || veteranTheory || veteranClaim || letterTheory);
   return { veteranStatement, veteranClaim, veteranTheory, veteranTheoryProse: null, letterDx, letterTheory, mismatch, hasContent };

@@ -957,7 +957,19 @@ export async function extractFullRead(
       break;
     }
     const batch = chunks.slice(start, start + CHUNK_CONCURRENCY);
-    const settled = await Promise.all(batch.map((c) => extractOneChunk(anthropic, c, model, 0, deadlineMs)));
+    // PER-CHUNK TIMING (Reckart CLM-84B137F353 diagnostic, 2026-07-12) — LOG-ONLY: the .then wrapper
+    // returns the SAME CallResult, so results/order/logic are byte-identical. Surfaces which chunk(s) are
+    // slow (a single slow chunk bottlenecks the whole Promise.all batch) so a 2× slowdown can be pinned to
+    // a chunk/doc rather than guessed at. Cheap to leave in (one line per chunk).
+    const batchStartedAt = Date.now();
+    const settled = await Promise.all(batch.map((c) => {
+      const t0 = Date.now();
+      return extractOneChunk(anthropic, c, model, 0, deadlineMs).then((r) => {
+        console.warn(JSON.stringify({ event: 'chart_extract_chunk_timing', chunkIndex: c.chunkIndex, pages: c.pageNumbers.length, chars: c.text.length, durationMs: Date.now() - t0, truncated: r.truncated, items: r.raw.length }));
+        return r;
+      });
+    }));
+    console.warn(JSON.stringify({ event: 'chart_extract_batch_timing', firstChunk: start, batchSize: batch.length, batchDurationMs: Date.now() - batchStartedAt, elapsedMs: Date.now() - startedAt }));
     settled.forEach((r, k) => { results[start + k] = r; });
     chunksRun += batch.length;
   }

@@ -155,4 +155,14 @@ describe('cleanEmailText — attribution strip must NOT cut a mid-word "on" (Mar
     expect(cleanEmailText('New reply.\nOn Jul 5, 2026 at 9:26 AM, Mark Lo <m@x.com> wrote: old', 'full')).toBe('New reply.');
     expect(cleanEmailText('Reply body.\nOn 7/5/2026, Mark wrote: quoted', 'full')).toBe('Reply body.');
   });
+
+  // ACCEPTED residuals (architect + AI-SME QA): a user's OWN sentence starting "On <Weekday/Month/digit>…"
+  // within 300 chars of a real "wrote:" still matches — identical to the old regex, strictly rarer than the
+  // mid-word bug, and it fails SAFE (leak/fallback, never a mid-word chop). Pinned so a future "tighten the
+  // regex" change can't silently alter this contract without a failing test.
+  it('ACCEPTED EDGE: a leading "On <date>…" whose match empties the head falls back to the FULL text (safe leak, never data-loss)', () => {
+    const s = 'On Monday I filed my claim. On Jul 5, 2026 at 9:26 AM, X <x@y.com> wrote: quoted history';
+    const out = cleanEmailText(s, 'preview');
+    expect(out).toContain('On Monday I filed my claim'); // never silently dropped — the veteran's content survives
+  });
 });

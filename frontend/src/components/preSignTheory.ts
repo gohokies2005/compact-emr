@@ -49,8 +49,10 @@ export interface PreSignTheory {
   readonly veteranTheoryProse: string | null;
   readonly letterDx: string | null;
   readonly letterTheory: string | null;
-  /** Present ONLY when the veteran's (corroborated) theory and the letter's theory clearly differ. */
-  readonly mismatch: { readonly reason: string | null; readonly suggestEdit: boolean } | null;
+  /** Present ONLY when there is a SPECIFIC, grounded difference to show (never a generic "they differ").
+   *  `summary` is the specific sentence (preferred by the UI); `reason` is the plan's why_not detail
+   *  (appended after the summary); `suggestEdit` adds the surgical-edit nudge. */
+  readonly mismatch: { readonly reason: string | null; readonly suggestEdit: boolean; readonly summary?: string } | null;
   readonly hasContent: boolean;
 }
 
@@ -69,6 +71,37 @@ function framingBucket(f: string | null | undefined): Framing {
   if (n.includes('aggrav')) return 'aggravation';
   if (n.includes('direct')) return 'direct';
   return 'other';
+}
+
+// Physician-facing words for a route-picker framing key (mirrors CaseViabilityCard FRAMING_LABEL). The
+// point is NEVER to render a raw enum key like "dual_prong" — it's code-speak to a physician (Ryan
+// 2026-07-11, Cox CLM-58482FEB66). Unknown keys degrade to a de-underscored phrase, never the raw token.
+const FRAMING_WORD: Record<string, string> = {
+  secondary_causation: 'secondary',
+  secondary: 'secondary',
+  aggravation: 'aggravating',
+  dual_prong: 'secondary and aggravating',
+  direct: 'direct',
+  presumptive: 'presumptive',
+};
+function humanFramingWord(f: string | null | undefined): string {
+  const n = norm(f).replace(/\s+/g, '_');
+  return FRAMING_WORD[n] ?? norm(f);
+}
+// Join framing words: ["secondary","aggravating"] → "secondary and aggravating"; 3+ → oxford list.
+function joinWords(ws: readonly string[]): string {
+  const u = [...new Set(ws.filter(Boolean))];
+  if (u.length <= 1) return u[0] ?? '';
+  if (u.length === 2) return `${u[0]} and ${u[1]}`;
+  return `${u.slice(0, -1).join(', ')}, and ${u[u.length - 1]}`;
+}
+// Tidy a plan free-text fragment (why_not) for physician display: capitalize + ensure a terminal period so
+// it reads as a clean sentence when appended after a summary (AI-SME work-QA: raw why_not is lower-cased).
+function tidySentence(s: string | null | undefined): string | null {
+  const t = (s ?? '').trim();
+  if (!t) return null;
+  const cap = t.charAt(0).toUpperCase() + t.slice(1);
+  return /[.!?]$/.test(cap) ? cap : `${cap}.`;
 }
 
 // Laterality / severity / generic-medical tokens that must NOT count as a condition match — otherwise
@@ -131,49 +164,117 @@ function veteranTheoryLine(bucket: Framing, framingRaw: string | null | undefine
 }
 
 function letterTheoryLine(lead: AiViabilityCard['lead']): string | null {
-  const claimed = (lead.claimed ?? '').trim();
+  const claimed = (lead.claimed ?? '').trim() || 'The claimed condition';
   const up = (lead.upstream ?? '').trim();
   const mech = (lead.mechanism ?? '').trim();
+  const f = norm(lead.framing);
+  // dual_prong = 3.310(a)+(b): BOTH causation AND aggravation of the SAME upstream (not two conditions).
+  if (f.includes('dual')) {
+    return up ? `${claimed} secondary to (and aggravated by) service-connected ${up}` : 'Secondary service connection (causation and aggravation)';
+  }
+  if (f.includes('presumptive')) {
+    return up ? `${claimed} on a presumptive basis (${up})` : `${claimed} on a presumptive basis`;
+  }
   switch (framingBucket(lead.framing)) {
     case 'secondary':
-      return up ? `${claimed || 'The claimed condition'} secondary to ${up}` : 'Secondary service connection';
+      return up ? `${claimed} secondary to ${up}` : 'Secondary service connection';
     case 'aggravation':
       return up ? `Aggravation of service-connected ${up}` : 'Aggravation of a service-connected condition';
     case 'direct':
-      return mech ? `Direct service connection — ${mech}` : 'Direct service connection';
+      return mech ? `Direct service connection (${mech})` : 'Direct service connection';
     default:
-      return nonEmpty(lead.framing);
+      // Never leak a raw framing key — humanize it (e.g. an unknown "foo_bar" → "foo bar").
+      return nonEmpty(lead.framing) ? `${claimed}${up ? ` (${up})` : ''}: ${humanFramingWord(lead.framing)}` : null;
   }
 }
 
-// Part B reconciliation (full scope, Ryan 2026-07-11): compare the veteran's LLM theory against the plan's
-// 3-anchor set — lead ∪ convergent ∪ alternatives (the `excluded` set does not exist on AiViabilityCard).
-// The LLM `upstream` is already statement-grounded server-side, so it is trusted here.
-//   - veteran's anchor == the letter's lead OR a convergent anchor → the letter argues it → silent (no ✓).
-//   - == an alternative the plan considered but didn't lead → surface why_not + suggest a surgical edit.
-//   - nowhere in the plan → informational "differs" (no edit suggestion, no reason to quote).
-//   - 'unclear' framing → assert nothing (can't honestly compare).
+function humanBucketWord(b: Framing): string {
+  return b === 'secondary' ? 'secondary' : b === 'aggravation' ? 'aggravation' : b === 'direct' ? 'direct service connection' : '';
+}
+function leadLabel(lead: AiViabilityCard['lead']): string {
+  const up = (lead.upstream ?? '').trim();
+  const fw = humanFramingWord(lead.framing);
+  return up ? `${up}${fw ? ` (${fw})` : ''}` : fw || 'its lead theory';
+}
+
+// Reconcile the veteran's theory against the letter's plan and produce a SPECIFIC, GROUNDED "where they
+// differ" line — or stay SILENT. NEVER the old useless generic "they differ" (Ryan 2026-07-11, Cox
+// CLM-58482FEB66: "'where they differ' is just 'they differ' — totally useless"). We only assert things we
+// can ground in the plan's structured fields, so we can't produce a FALSE differ from lexical mismatch
+// (e.g. the veteran's "limited mobility" vs the letter's "knee strain" — same theory, different words).
+//   1. Veteran is pushing an anchor the letter DEMOTED to an alternative → name it + the plan's own why_not.
+//   2. The letter also weighs DIFFERENT-mechanism alternatives the veteran never raised (checked against
+//      the literal statement) → "the letter also weighs GERD as a secondary and aggravating cause…".
+//   3. A clear framing conflict (veteran direct vs a secondary letter, etc.) → name it specifically.
+//   4. Otherwise → silent. (`convergent` = the SAME mechanism/theory, more anchors — never a "difference".)
 function reconcileLlmWithPlan(
   llmFraming: 'secondary' | 'direct' | 'aggravation' | 'unclear',
   llmUpstream: string | null,
   plan: AiViabilityCard,
+  veteranStatement: string | null,
 ): PreSignTheory['mismatch'] {
-  const vBucket = framingBucket(llmFraming);
-  if (vBucket === 'other') return null; // 'unclear' — nothing to honestly compare
   const lead = plan.lead;
-  const leadBucket = framingBucket(lead.framing);
-  const secondaryish = vBucket === 'secondary' || vBucket === 'aggravation';
-  if (secondaryish && (llmUpstream ?? '').trim()) {
-    const inLead = looseMatch(llmUpstream, lead.upstream);
-    const inConvergent = (plan.convergent ?? []).some((cv) => looseMatch(llmUpstream, cv.upstream));
-    if (inLead || inConvergent) return null; // the letter argues / converges on the veteran's anchor
-    const alt = (plan.alternatives ?? []).find((a) => looseMatch(llmUpstream, a.upstream));
-    if (alt) return { reason: nonEmpty(alt.why_not), suggestEdit: true };
-    return { reason: null, suggestEdit: false }; // veteran's anchor not among the plan's considered anchors
+  const vUp = (llmUpstream ?? '').trim() || null;
+  const alternatives = plan.alternatives ?? [];
+  const convergent = plan.convergent ?? [];
+  // An anchor the letter ALREADY argues (leads with, or converges on via the same mechanism) is NOT a
+  // difference — even if it also appears in alternatives (architect work-QA). Guards branches (1) and (2)
+  // so a shared common token (e.g. "cervical") can't mislabel an ALIGNED anchor as a "fallback".
+  const onLeadOrConvergent = (name: string | null | undefined): boolean =>
+    looseMatch(lead.upstream, name) || convergent.some((cv) => looseMatch(cv.upstream, name));
+
+  // (1) Is the veteran pushing a specific anchor the letter considered but DEMOTED (and does NOT already
+  //     argue)? (confident divergence)
+  const vetPushesDemoted = vUp && !onLeadOrConvergent(vUp) ? alternatives.find((a) => looseMatch(a.upstream, vUp)) : undefined;
+  if (vetPushesDemoted) {
+    return {
+      reason: tidySentence(vetPushesDemoted.why_not),
+      suggestEdit: true,
+      summary: `The veteran points to ${vetPushesDemoted.upstream}; the letter leads with ${leadLabel(lead)} and treats ${vetPushesDemoted.upstream} as a fallback.`,
+    };
   }
-  // A direct veteran theory (or secondary without a usable upstream): compare framing buckets only.
-  const framingDiffers = leadBucket !== 'other' && vBucket !== leadBucket;
-  return framingDiffers ? { reason: null, suggestEdit: false } : null;
+
+  // (2) Different-mechanism supplemental arguments the letter weighs that the veteran NEVER raised. Grounded
+  //     against the literal statement + not the veteran's own anchor + not something the letter already
+  //     argues. Dedup by upstream, collect the DISTINCT framings the route-picker gave it.
+  const groups = new Map<string, { upstream: string; framings: Set<string> }>();
+  for (const a of alternatives) {
+    const upA = (a.upstream ?? '').trim();
+    if (!upA) continue;
+    if (onLeadOrConvergent(upA)) continue; // the letter already leads/converges on it → not an "addition"
+    if (mentionedIn(upA, veteranStatement)) continue; // the veteran DID raise it → not a difference
+    if (vUp && looseMatch(upA, vUp)) continue; // it's the veteran's own anchor
+    const key = norm(upA);
+    const g = groups.get(key) ?? { upstream: upA, framings: new Set<string>() };
+    if (a.framing) g.framings.add(humanFramingWord(a.framing));
+    groups.set(key, g);
+  }
+  // SURFACE ONLY DEVELOPED SUPPLEMENTALS — an alternative the route-picker articulated under 2+ DISTINCT
+  // framings (e.g. Cox's GERD as BOTH causation AND aggravation). A single-framing alternative is a quiet
+  // DEMOTION of a weaker anchor (e.g. Jay's demoted "LIMITED MOTION OF ANKLE") — surfacing it would
+  // RESURFACE the exact mechanism-blind anchor Part A removed. This gate is the "ANKLE nowhere" guarantee
+  // for this line: a demoted single-framing anchor can never render here. (Heuristic; when unsure, silent.)
+  const additions = [...groups.values()].filter((g) => g.framings.size >= 2);
+  if (additions.length > 0) {
+    const phrase = additions.map((g) => `${g.upstream} as a ${joinWords([...g.framings])} cause`).join('; ');
+    return { reason: null, suggestEdit: false, summary: `The letter also weighs ${phrase}, which the veteran didn't raise.` };
+  }
+
+  // (3) A clear framing conflict — but NOT when a dual_prong lead already covers the veteran's prong.
+  const vBucket = framingBucket(llmFraming);
+  const leadBucket = framingBucket(lead.framing);
+  const leadIsDual = norm(lead.framing).includes('dual');
+  const framingConflicts =
+    vBucket !== 'other' &&
+    leadBucket !== 'other' &&
+    vBucket !== leadBucket &&
+    !(leadIsDual && (vBucket === 'secondary' || vBucket === 'aggravation'));
+  if (framingConflicts) {
+    return { reason: null, suggestEdit: false, summary: `The veteran frames it as ${humanBucketWord(vBucket)}; the letter argues ${humanFramingWord(lead.framing)}.` };
+  }
+
+  // (4) Nothing specific + grounded to say → stay silent (the veteran quote + letter line stand on their own).
+  return null;
 }
 
 export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
@@ -208,7 +309,7 @@ export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
   // which is unchanged (no regression). The stale-upstream guard for THIS path lives server-side.
   const llmTheory = nonEmpty(c.veteranTheoryAi?.theory);
   if (c.veteranTheoryAi && llmTheory) {
-    const llmMismatch = plan && lead ? reconcileLlmWithPlan(c.veteranTheoryAi.framing, c.veteranTheoryAi.upstream ?? null, plan) : null;
+    const llmMismatch = plan && lead ? reconcileLlmWithPlan(c.veteranTheoryAi.framing, c.veteranTheoryAi.upstream ?? null, plan, veteranStatement) : null;
     return {
       veteranStatement,
       veteranClaim,
@@ -221,23 +322,15 @@ export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
     };
   }
 
-  let mismatch: PreSignTheory['mismatch'] = null;
-  // Compare ONLY when the veteran expressed a theory we can trust — a known framing, and for a
-  // secondary/aggravation theory a CORROBORATED upstream. Otherwise it isn't honestly "veteran vs letter"
-  // (Block 1's literal statement stays the physician's ground truth). No positive affirmation either way.
-  const canCompare = vBucket !== 'other' && (!isSecondaryish || upstreamTrusted);
-  if (lead && canCompare) {
-    const lBucket = framingBucket(lead.framing);
-    const framingDiffers = lBucket !== 'other' && vBucket !== lBucket;
-    const leadSecondaryish = lBucket === 'secondary' || lBucket === 'aggravation';
-    const upstreamDiffers =
-      leadSecondaryish && hasUpstream && !!(lead.upstream ?? '').trim() && !looseMatch(c.upstreamScCondition, lead.upstream);
-    if (framingDiffers || upstreamDiffers) {
-      // Use ONLY the plan's explicit "why this alternative wasn't led" (alternatives[].why_not).
-      const alt = (c.aiViabilityPlanJson?.alternatives ?? []).find((a) => looseMatch(a.upstream, c.upstreamScCondition));
-      mismatch = { reason: nonEmpty(alt?.why_not), suggestEdit: !!alt };
-    }
-  }
+  // Reconcile the DERIVED theory (fallback when the LLM restatement is unavailable) through the SAME
+  // specific-or-silent logic as the LLM path, so the useless generic "they differ" never shows on either
+  // path (AI-SME work-QA I-1). Feed the TRUSTED upstream only — an untrusted/stale upstream (Jay's "Ankle")
+  // is dropped to null so it can never anchor a "veteran points to…" line. Map the derived bucket to the
+  // veteran-theory framing vocabulary ('other' → 'unclear').
+  const derivedFraming: 'secondary' | 'direct' | 'aggravation' | 'unclear' =
+    vBucket === 'secondary' ? 'secondary' : vBucket === 'aggravation' ? 'aggravation' : vBucket === 'direct' ? 'direct' : 'unclear';
+  const mismatch: PreSignTheory['mismatch'] =
+    plan && lead ? reconcileLlmWithPlan(derivedFraming, upstreamTrusted ? c.upstreamScCondition ?? null : null, plan, veteranStatement) : null;
 
   const hasContent = !!(veteranStatement || veteranTheory || veteranClaim || letterTheory);
   return { veteranStatement, veteranClaim, veteranTheory, veteranTheoryProse: null, letterDx, letterTheory, mismatch, hasContent };

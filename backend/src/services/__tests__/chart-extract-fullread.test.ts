@@ -367,3 +367,65 @@ describe('active_problem precision — active vs resolved / h/o / duplicate (Woo
     expect(result.items.filter((i) => i.category === 'active_problem')).toHaveLength(1); // dedup key collapses
   });
 });
+
+// ── rolling concurrency pool (barrier → pool, Reckart CLM-84B137F353, 2026-07-12) ──────────────────
+// The per-batch Promise.all barrier was replaced by a rolling pool that keeps up to CHUNK_CONCURRENCY
+// chunks in flight and launches the next the instant any settles. These prove it is OUTPUT-NEUTRAL:
+// (a) results are placed by chunk INDEX, not completion order; (b) concurrency never exceeds 8 and does
+// reach 8 (true parallelism, not an accidental barrier-of-1); (c) the budget gate still degrades to
+// complete_with_gaps with the correct uncoveredPages.
+describe('rolling concurrency pool (output-neutral vs the barrier)', () => {
+  // Each of N single-page docs → one chunk (chunkIndex = doc order). A marker in the page text lets the
+  // mock key its response + delay to the chunk, so completion order can be forced to differ from index.
+  function orderedDocs(n: number): BundleDocument[] {
+    return Array.from({ length: n }, (_, k) => ({
+      id: `ord-${k}`, filename: `f${k}.pdf`,
+      pages: [{ pageNumber: 30, text: `active condition COND_INDEX_${k} present on exam` }],
+    }));
+  }
+  function orderedResp(k: number) {
+    return {
+      usage: { input_tokens: 500, output_tokens: 200 },
+      stop_reason: 'end_turn',
+      content: [{ type: 'tool_use', input: { items: [
+        { category: 'active_problem', name: `Cond ${k}`, sourcePage: 30, sourceQuote: `active condition COND_INDEX_${k} present`, confidence: 0.95 },
+      ] } }],
+    };
+  }
+  const idxOf = (params: unknown) => Number(JSON.stringify(params).match(/COND_INDEX_(\d+)/)![1]);
+
+  it('(a) places results in CHUNK-INDEX order regardless of COMPLETION order', async () => {
+    const n = 6; // one full wave (≤ CHUNK_CONCURRENCY): all run concurrently, resolve in REVERSE
+    createMock.mockImplementation((params: unknown) => {
+      const k = idxOf(params);
+      return new Promise((res) => setTimeout(() => res(orderedResp(k)), (n - k) * 15)); // higher k first
+    });
+    const result = await makeChartExtractor('sk-test').extract(orderedDocs(n));
+    const names = result.items.filter((i) => i.category === 'active_problem').map((i) => i.name);
+    // Completion order was 5,4,3,2,1,0; index placement keeps items 0..5 in order. A completion-ordered
+    // pool would emit them reversed.
+    expect(names).toEqual(Array.from({ length: n }, (_, k) => `Cond ${k}`));
+  });
+
+  it('(b) never exceeds CHUNK_CONCURRENCY (8) in flight, and does reach it (true parallelism)', async () => {
+    let live = 0, peak = 0;
+    createMock.mockImplementation((params: unknown) => {
+      const k = idxOf(params);
+      live++; peak = Math.max(peak, live);
+      return new Promise((res) => setTimeout(() => { live--; res(orderedResp(k)); }, 15));
+    });
+    await makeChartExtractor('sk-test').extract(orderedDocs(20)); // 20 chunks > 8
+    expect(peak).toBe(8);                 // fills the pool — parallel, not a barrier-of-1
+    expect(peak).toBeLessThanOrEqual(8);  // and NEVER exceeds the cap
+  });
+
+  it('(c) budget gate degrades to complete_with_gaps with correct uncoveredPages', async () => {
+    process.env.CHART_EXTRACT_SELF_BUDGET_MS = '0'; // trip immediately after the first wave
+    createMock.mockImplementation((params: unknown) => Promise.resolve(orderedResp(idxOf(params))));
+    const result = await makeChartExtractor('sk-test').extract(orderedDocs(12)); // 12 chunks, 1 page each
+    expect(result.chunksProcessed).toBe(8);          // first wave launched (exemption), then gate stopped
+    expect(result.uncoveredPages).toBe(4);           // the 4 un-launched chunks' pages → complete_with_gaps
+    expect(result.items.filter((i) => i.category === 'active_problem')).toHaveLength(8); // partial fully captured
+    delete process.env.CHART_EXTRACT_SELF_BUDGET_MS;
+  });
+});

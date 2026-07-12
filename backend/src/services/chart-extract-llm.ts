@@ -941,38 +941,65 @@ export async function extractFullRead(
   const budgetMs = selfBudgetMs();
   let chunksRun = 0;
   let budgetExceeded = false;
-  for (let start = 0; start < chunks.length; start += CHUNK_CONCURRENCY) {
-    // Budget gate: stop launching NEW batches once EITHER wall-clock bound is hit, so the merge callback
-    // posts before the Lambda's hard kill. (1) the fixed self-budget (assumes a fresh 15-min Lambda), and
-    // (2) the REAL Lambda deadline when the handler supplies it — Date.now() ≥ deadline − batch margin —
-    // which correctly accounts for time already consumed (cold start, doc fetch, a prior record) that the
-    // self-budget's reset clock cannot see. The first batch (start===0) always runs — a single batch must
-    // be allowed even on a degraded/slow cold start. Chunks run in-order, so chunks[chunksRun..] are
-    // exactly the un-run remainder (counted as uncovered below → complete_with_gaps, never a crash).
+  // ROLLING CONCURRENCY POOL (Reckart CLM-84B137F353 head-of-line fix, 2026-07-12). REPLACES the
+  // per-batch `Promise.all` barrier. The barrier made every chunk in a batch wait for that batch's
+  // SLOWEST chunk before ANY chunk of the next batch could start: on a repetitive Blue Button chart a
+  // few chunks emit 75-107 items and take 200-300s while their 7 batch-mates finish in 1-27s and sit
+  // IDLE at the barrier (measured batch 1 = 213s, 7/8 done < 27s → ~185s wasted). Only 24/39 chunks ran
+  // before the 15-min wall → complete_with_gaps. The pool keeps up to CHUNK_CONCURRENCY chunks in flight
+  // and launches the NEXT chunk the instant ANY in-flight one settles — no head-of-line stall.
+  //
+  // OUTPUT-NEUTRAL vs the barrier — invariants that MUST NOT break:
+  //  1. DETERMINISM: each result is written to results[c.chunkIndex] (chunk-index order, NOT completion
+  //     order; chunkDocuments guarantees chunkIndex === array position). Downstream raw accumulation +
+  //     dedup-survivor tie-break (groundAndDispose keeps the FIRST on a completeness tie) stay identical.
+  //  2. CAP: never more than CHUNK_CONCURRENCY calls in flight (Anthropic rate + reserved concurrency=8).
+  //  3. GATE: stops LAUNCHING new chunks on the SAME two bounds (self-budget OR the Lambda deadline).
+  //     In-flight chunks are NOT cancelled — they settle in the drain — so chunksRun counts launched
+  //     ( == completed) and the un-launched suffix folds into unrunPages → complete_with_gaps, never a
+  //     mid-run kill. Chunks LAUNCH strictly in index order, so the launched set is always the prefix
+  //     chunks[0..chunksRun).
+  //  4. FIRST-WAVE EXEMPTION: the first CHUNK_CONCURRENCY launches bypass the gate — the exact translation
+  //     of the old `start > 0` that exempted the first BATCH — so a single degraded cold start still reads
+  //     ≥ one wave.
+  //  5. FAIL-LOUD: a genuine extractOneChunk rejection (transient 5xx after retries, a 400) is captured
+  //     and re-thrown after the drain, preserving the old "one bad chunk fails the run" semantics. (A
+  //     Lambda-deadline abort is NOT a rejection — extractOneChunk catches it and returns a FLOOR.)
+  const inFlight = new Set<Promise<void>>();
+  let firstError: unknown = null;
+  let nextIndex = 0;
+  while (nextIndex < chunks.length && firstError === null) {
     const selfBudgetHit = Date.now() - startedAt >= budgetMs;
     const deadlineHit = deadlineMs !== undefined && Date.now() >= deadlineMs - DEADLINE_BATCH_MARGIN_MS;
-    if (start > 0 && (selfBudgetHit || deadlineHit)) {
+    if (nextIndex >= CHUNK_CONCURRENCY && (selfBudgetHit || deadlineHit)) {
       budgetExceeded = true;
       console.warn(JSON.stringify({ event: 'chart_extract_self_budget_exceeded', reason: deadlineHit ? 'lambda_deadline' : 'self_budget', model, chunksRun, chunksTotal: chunks.length, elapsedMs: Date.now() - startedAt, budgetMs }));
       break;
     }
-    const batch = chunks.slice(start, start + CHUNK_CONCURRENCY);
-    // PER-CHUNK TIMING (Reckart CLM-84B137F353 diagnostic, 2026-07-12) — LOG-ONLY: the .then wrapper
-    // returns the SAME CallResult, so results/order/logic are byte-identical. Surfaces which chunk(s) are
-    // slow (a single slow chunk bottlenecks the whole Promise.all batch) so a 2× slowdown can be pinned to
-    // a chunk/doc rather than guessed at. Cheap to leave in (one line per chunk).
-    const batchStartedAt = Date.now();
-    const settled = await Promise.all(batch.map((c) => {
-      const t0 = Date.now();
-      return extractOneChunk(anthropic, c, model, 0, deadlineMs).then((r) => {
+    const c = chunks[nextIndex++]!;
+    chunksRun++;
+    // PER-CHUNK TIMING (Reckart diagnostic) — LOG-ONLY: the .then writes the SAME CallResult to
+    // results[c.chunkIndex]. .catch captures the FIRST genuine rejection so NO promise ever rejects
+    // unobserved (fail-loud is re-raised after the drain); .finally self-removes so the next chunk can run.
+    const t0 = Date.now();
+    const p: Promise<void> = extractOneChunk(anthropic, c, model, 0, deadlineMs)
+      .then((r) => {
         console.warn(JSON.stringify({ event: 'chart_extract_chunk_timing', chunkIndex: c.chunkIndex, pages: c.pageNumbers.length, chars: c.text.length, durationMs: Date.now() - t0, truncated: r.truncated, items: r.raw.length }));
-        return r;
-      });
-    }));
-    console.warn(JSON.stringify({ event: 'chart_extract_batch_timing', firstChunk: start, batchSize: batch.length, batchDurationMs: Date.now() - batchStartedAt, elapsedMs: Date.now() - startedAt }));
-    settled.forEach((r, k) => { results[start + k] = r; });
-    chunksRun += batch.length;
+        results[c.chunkIndex] = r;
+      })
+      .catch((err) => { if (firstError === null) firstError = err; })
+      .finally(() => { inFlight.delete(p); });
+    inFlight.add(p);
+    // Refill: when the pool is full, wait for the FIRST in-flight chunk to settle before launching the
+    // next (vs the barrier that waited for ALL 8). The settled promise already self-removed via .finally.
+    if (inFlight.size >= CHUNK_CONCURRENCY) await Promise.race(inFlight);
   }
+  // Drain every launched-but-unsettled chunk. Each extractOneChunk always settles (a CallResult, or a
+  // FLOOR on deadline-abort; a genuine error was captured above), so this never hangs. After the drain,
+  // results[0..chunksRun) are all populated and results[chunksRun..] stay undefined (the un-launched
+  // suffix → unrunPages below). A captured genuine error re-throws to preserve fail-loud.
+  await Promise.all(inFlight);
+  if (firstError !== null) throw firstError;
   // On a budget cutoff, results[chunksRun..] are undefined holes — only fold the chunks we actually
   // ran. The un-run chunks' pages join the structural gaps so the run records complete_with_gaps
   // (never a silent clean 'complete') and the RN sees exactly how much of the chart went unread.

@@ -16,7 +16,7 @@ const READ = [
   { filePath: 'cases/C-1/k2', terminalStatus: 'read' },
 ];
 
-function makeDb(opts: { docs?: typeof DOCS; readStatuses?: typeof READ; createThrowsP2002?: boolean; recentRun?: { createdAt: Date; status: string } | null } = {}) {
+function makeDb(opts: { docs?: typeof DOCS; readStatuses?: typeof READ; createThrowsP2002?: boolean; recentRun?: { createdAt: Date; status: string; triggerHash?: string } | null } = {}) {
   const creates: Record<string, unknown>[] = [];
   const db = {
     case: { findFirst: vi.fn(async () => ({ veteranId: 'VET-1' })) },
@@ -99,5 +99,42 @@ describe('maybeEnqueueChartExtract — force salt (keystone 4b)', () => {
     expect(out.enqueued).toBe(true); // not wedged at ocr_in_progress
     // the hash is over the REAL docs only (computeTriggerHash already filters the summary), salted
     expect(creates[0]?.['triggerHash']).toBe(`${computeTriggerHash(DOCS, READ)}:manual:req-2`);
+  });
+});
+
+// SCOPED RUNAWAY GUARD (Jericho CLM-E22AE69A8C, 2026-07-12): the guard must block only the SAME doc set
+// or a FORCED repeat within the window — a genuinely-GROWN doc set (a different hash) must re-extract, or
+// the first partial run is orphaned and the chart wedges (the staggered-upload wedge).
+describe('maybeEnqueueChartExtract — runaway guard scoped to same-hash/forced (staggered-upload wedge)', () => {
+  it('WEDGE FIX: a NON-forced enqueue whose doc set GREW (different hash) within the window ENQUEUES', async () => {
+    // recentRun = the partial first run over a subset; the incoming natural hash is over the FULL set now.
+    const { db, creates } = makeDb({ recentRun: { createdAt: new Date(Date.now() - 60 * 1000), status: 'queued', triggerHash: 'PARTIAL_SUBSET_HASH' } });
+    const out = await maybeEnqueueChartExtract(db, 'C-1'); // no forceSalt — the natural /pages re-trigger
+    expect(out.enqueued).toBe(true); // must NOT be rate-limited — the doc set genuinely grew
+    expect(creates[0]?.['triggerHash']).toBe(computeTriggerHash(DOCS, READ)); // the full-set run
+  });
+
+  it('SAME doc set (same hash) within the window is still rate-limited (no duplicate paid run)', async () => {
+    const { db, creates } = makeDb({ recentRun: { createdAt: new Date(Date.now() - 60 * 1000), status: 'queued', triggerHash: computeTriggerHash(DOCS, READ) } });
+    const out = await maybeEnqueueChartExtract(db, 'C-1'); // same doc set, natural re-trigger
+    expect(out).toEqual({ enqueued: false, reason: 'rate_limited_recent_run' });
+    expect(creates).toHaveLength(0);
+  });
+
+  it('a recent FAILED run never blocks, even same-hash (failure-recovery retries immediately)', async () => {
+    const { db } = makeDb({ recentRun: { createdAt: new Date(Date.now() - 30 * 1000), status: 'failed', triggerHash: computeTriggerHash(DOCS, READ) } });
+    const out = await maybeEnqueueChartExtract(db, 'C-1');
+    expect(out.enqueued).toBe(true);
+  });
+
+  // The CLM-CCFDA1BCC3 runaway guarantee (architect QA): a FORCED re-extract mints a fresh hash every
+  // call (bypassing the mutex), so it MUST stay rate-limited within the window even against a DIFFERENT
+  // recent-run hash. Locks the property so a future reorder of the `forceSalt || sameHash` OR can't
+  // silently reopen the $34/hr runaway with green tests.
+  it('RATE GUARD: a forced re-extract is blocked even when the recent run has a DIFFERENT hash', async () => {
+    const { db, creates } = makeDb({ recentRun: { createdAt: new Date(Date.now() - 60 * 1000), status: 'complete', triggerHash: 'A_DIFFERENT_HASH' } });
+    const out = await maybeEnqueueChartExtract(db, 'C-1', { forceSalt: 'manual:loop' });
+    expect(out).toEqual({ enqueued: false, reason: 'rate_limited_recent_run' });
+    expect(creates).toHaveLength(0);
   });
 });

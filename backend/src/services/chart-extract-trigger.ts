@@ -42,17 +42,11 @@ export async function maybeEnqueueChartExtract(db: AppDb, caseId: string, opts: 
   const c = (await db.case.findFirst({ where: { id: caseId } })) as { veteranId: string } | null;
   if (c === null) return { enqueued: false, reason: 'case_not_found' };
 
-  const recentRun = await (db as unknown as {
-    chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { createdAt: true; status: true } }) => Promise<{ createdAt: Date; status: string } | null> };
-  }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true, status: true } });
-  if (recentRun && recentRun.status !== 'failed') {
-    const ageMs = Date.now() - new Date(recentRun.createdAt).getTime();
-    if (ageMs >= 0 && ageMs < RATE_WINDOW_MS) {
-      console.warn(JSON.stringify({ event: 'chart_extract_rate_limited', caseId, lastRunAgeMs: ageMs, lastStatus: recentRun.status, windowMs: RATE_WINDOW_MS }));
-      return { enqueued: false, reason: 'rate_limited_recent_run' };
-    }
-  }
-
+  // Gather the doc set + OCR statuses and compute the incoming triggerHash FIRST, so the runaway guard
+  // below can be scoped to the SAME doc set (or a forced repeat) rather than blocking a genuinely-grown
+  // one — the staggered-upload WEDGE (Jericho CLM-E22AE69A8C, 2026-07-12): the first run fired over a
+  // PARTIAL doc set, then every "docs grew → re-extract the full set" enqueue was rate-refused, orphaning
+  // the partial run and wedging the chart at build-state=extracting until an expensive on-open self-heal.
   const allDocs = await (db as unknown as {
     document: { findMany: (args: { where: { caseId: string }; select: { id: true; s3Key: true } }) => Promise<{ id: string; s3Key: string }[]> };
   }).document.findMany({ where: { caseId }, select: { id: true, s3Key: true } });
@@ -70,6 +64,25 @@ export async function maybeEnqueueChartExtract(db: AppDb, caseId: string, opts: 
   if (!allTerminal) return { enqueued: false, reason: 'ocr_in_progress' };
 
   const triggerHash = computeTriggerHash(docs, readStatuses, opts.forceSalt);
+
+  // RUNAWAY GUARD (Ryan 2026-06-20 — CLM-CCFDA1BCC3 re-extracted every ~2 min, ~$34/hr), SCOPED
+  // (2026-07-12): refuse a re-enqueue within the window ONLY when it is the SAME doc set (same
+  // triggerHash — a genuine hammer, which the (caseId,triggerHash) mutex would also P2002-dedup) OR a
+  // FORCED re-extract (forceSalt mints a fresh hash every call, bypassing the mutex → the exact runaway
+  // this guard exists for). A NON-forced enqueue whose doc set GREW (a DIFFERENT hash) is a legitimate
+  // re-extract and MUST pass — blocking it is what orphaned the partial run and wedged the chart.
+  const recentRun = await (db as unknown as {
+    chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { createdAt: true; status: true; triggerHash: true } }) => Promise<{ createdAt: Date; status: string; triggerHash: string } | null> };
+  }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true, status: true, triggerHash: true } });
+  if (recentRun && recentRun.status !== 'failed') {
+    const ageMs = Date.now() - new Date(recentRun.createdAt).getTime();
+    const sameDocSetOrForced = opts.forceSalt !== undefined || recentRun.triggerHash === triggerHash;
+    if (ageMs >= 0 && ageMs < RATE_WINDOW_MS && sameDocSetOrForced) {
+      console.warn(JSON.stringify({ event: 'chart_extract_rate_limited', caseId, lastRunAgeMs: ageMs, lastStatus: recentRun.status, windowMs: RATE_WINDOW_MS, forced: opts.forceSalt !== undefined }));
+      return { enqueued: false, reason: 'rate_limited_recent_run' };
+    }
+  }
+
   const runId = randomUUID();
 
   // INSERT-AS-MUTEX on the unique (caseId, triggerHash). P2002 → another doc-completion already

@@ -325,6 +325,27 @@ describe('buildPreSignTheory — Part B LLM overlay (full-scope reconciliation)'
     expect(t.letterTheory).not.toMatch(/foo_bar/);
   });
 
+  it('DERIVED fallback path (no LLM theory) is ALSO specific-or-silent — surfaces a developed supplemental, never generic', () => {
+    // veteranTheoryAi ABSENT (flag off / Bedrock fail-open) → the deterministic path routes through the same
+    // reconciler, so the useless generic "they differ" is gone there too (AI-SME I-1); a 2-framing GERD surfaces.
+    const t = buildPreSignTheory({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'depressive disorder',
+      veteranStatement: 'my depression caused my apnea',
+      aiViabilityPlanJson: plan(
+        { framing: 'secondary', upstream: 'depressive disorder' },
+        [
+          { upstream: 'gastroesophageal reflux disease (GERD)', framing: 'secondary_causation', why_not: 'a' },
+          { upstream: 'gastroesophageal reflux disease (GERD)', framing: 'aggravation', why_not: 'b' },
+        ],
+      ),
+      // no veteranTheoryAi → deterministic path
+    });
+    expect(t.veteranTheoryProse).toBeNull();
+    expect(t.mismatch!.summary).toContain('GERD');
+    expect(t.mismatch!.summary).not.toMatch(/theory differs from the veteran/); // never the generic line
+  });
+
   it('LLM framing "unclear" → prose shows but asserts NO mismatch', () => {
     const t = buildPreSignTheory({
       veteranStatement: 'a lot has happened to me',

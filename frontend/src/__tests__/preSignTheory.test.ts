@@ -195,15 +195,79 @@ describe('buildPreSignTheory — Part B LLM overlay (full-scope reconciliation)'
     expect(t.mismatch!.suggestEdit).toBe(true);
   });
 
-  it('LLM upstream NOWHERE in the plan → informational mismatch (no reason, no suggestEdit)', () => {
+  it('veteran anchor nowhere in the plan + no grounded difference → SILENT (no useless generic "they differ")', () => {
+    // Ryan 2026-07-11 (Cox): a bare "they differ" is useless. Deterministic token-matching can't tell a real
+    // divergence (tinnitus vs depression) from same-theory-different-words (limited mobility vs knee strain),
+    // so we stay silent unless we can ground a SPECIFIC difference. The veteran quote + letter line stand alone.
     const t = buildPreSignTheory({
       veteranStatement: 'my tinnitus caused it',
       aiViabilityPlanJson: plan({ framing: 'secondary', upstream: 'Depression' }),
       veteranTheoryAi: { theory: 'Veteran attributes the claim to service-connected tinnitus.', framing: 'secondary', upstream: 'tinnitus' },
     });
+    expect(t.mismatch).toBeNull();
+  });
+
+  it('DUAL_PRONG letter framing renders in plain English, NEVER the raw key (Cox CLM-58482FEB66)', () => {
+    const t = buildPreSignTheory({
+      aiViabilityPlanJson: plan({ claimed: 'Obstructive Sleep Apnea (OSA)', framing: 'dual_prong', upstream: 'knee strain, limitation of flexion left' }),
+    });
+    expect(t.letterTheory).toBe('Obstructive Sleep Apnea (OSA) secondary to — and aggravated by — service-connected knee strain, limitation of flexion left');
+    expect(t.letterTheory).not.toMatch(/dual_prong/);
+  });
+
+  it('PRESUMPTIVE letter framing renders in plain English, not the raw key', () => {
+    const t = buildPreSignTheory({ aiViabilityPlanJson: plan({ claimed: 'Chronic sinusitis', framing: 'presumptive', upstream: 'burn pit exposure' }) });
+    expect(t.letterTheory).toBe('Chronic sinusitis on a presumptive basis (burn pit exposure)');
+    expect(t.letterTheory).not.toMatch(/presumptive"/);
+  });
+
+  it('DIFFERENCE names the letter\'s alternative anchors the veteran never raised, deduped across framings (Cox → GERD)', () => {
+    const t = buildPreSignTheory({
+      veteranStatement: 'Since having limited mobility because of other service connected disabilities I have gained weight, making my apnea even worse.',
+      aiViabilityPlanJson: plan(
+        { claimed: 'Obstructive Sleep Apnea (OSA)', framing: 'dual_prong', upstream: 'knee strain, limitation of flexion left' },
+        [
+          { upstream: 'gastroesophageal reflux disease (GERD)', framing: 'secondary_causation', why_not: 'contested bidirectional mechanism' },
+          { upstream: 'gastroesophageal reflux disease (GERD)', framing: 'aggravation', why_not: 'supplemental, not the lead' },
+        ],
+      ),
+      veteranTheoryAi: { theory: 'Veteran attributes worsening OSA to weight gain from limited mobility caused by service-connected disabilities.', framing: 'secondary', upstream: 'limited mobility' },
+    });
     expect(t.mismatch).not.toBeNull();
-    expect(t.mismatch!.reason).toBeNull();
+    expect(t.mismatch!.summary).toContain('GERD');
+    expect(t.mismatch!.summary).toContain('secondary and aggravating cause');
+    expect(t.mismatch!.summary).toMatch(/didn.t raise/);
     expect(t.mismatch!.suggestEdit).toBe(false);
+  });
+
+  it('DIFFERENCE does NOT surface an alternative the veteran DID mention in their statement (grounded skip)', () => {
+    const t = buildPreSignTheory({
+      // The veteran's MAIN anchor is depression (= the lead), but they also mention GERD reflux in passing.
+      veteranStatement: 'my depression caused my apnea, and my GERD reflux probably makes it worse too.',
+      aiViabilityPlanJson: plan(
+        { claimed: 'OSA', framing: 'secondary', upstream: 'depressive disorder' },
+        [{ upstream: 'gastroesophageal reflux disease (GERD)', framing: 'secondary_causation', why_not: 'x' }],
+      ),
+      veteranTheoryAi: { theory: 'Veteran attributes OSA to service-connected depression.', framing: 'secondary', upstream: 'depressive disorder' },
+    });
+    // GERD was mentioned by the veteran → not a "difference"; depression aligns with the lead → silent.
+    expect(t.mismatch).toBeNull();
+  });
+
+  it('vetPushesDemoted: veteran insists on an anchor the letter DEMOTED → specific summary + why_not + suggestEdit', () => {
+    const t = buildPreSignTheory({
+      veteranStatement: 'my ptsd caused my sleep apnea',
+      aiViabilityPlanJson: plan(
+        { claimed: 'OSA', framing: 'secondary', upstream: 'depressive disorder' },
+        [{ upstream: 'PTSD', framing: 'secondary_causation', why_not: 'depression is the materially stronger anchor' }],
+      ),
+      veteranTheoryAi: { theory: 'Veteran attributes OSA to service-connected PTSD.', framing: 'secondary', upstream: 'PTSD' },
+    });
+    expect(t.mismatch).not.toBeNull();
+    expect(t.mismatch!.summary).toContain('PTSD');
+    expect(t.mismatch!.summary).toContain('fallback');
+    expect(t.mismatch!.reason).toContain('stronger anchor');
+    expect(t.mismatch!.suggestEdit).toBe(true);
   });
 
   it('LLM framing "unclear" → prose shows but asserts NO mismatch', () => {

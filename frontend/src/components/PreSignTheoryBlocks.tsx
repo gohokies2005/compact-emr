@@ -57,10 +57,10 @@ export function PreSignTheoryBlocks({ theory }: { readonly theory: PreSignTheory
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Where they differ</p>
           <p className="mt-1 text-sm text-slate-700">
-            The letter&rsquo;s theory differs from the veteran&rsquo;s.
+            {theory.mismatch.summary ?? <>The letter&rsquo;s theory differs from the veteran&rsquo;s.</>}
             {theory.mismatch.reason ? <> {theory.mismatch.reason}</> : null}
             {theory.mismatch.suggestEdit ? (
-              <> The veteran&rsquo;s anchor was considered as an alternative — if clinically appropriate, consider a brief surgical edit to address it (your discretion).</>
+              <> If clinically appropriate, consider a brief surgical edit to address it (your discretion).</>
             ) : null}
           </p>
         </div>

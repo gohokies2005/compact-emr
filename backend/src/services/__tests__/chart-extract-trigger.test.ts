@@ -126,4 +126,15 @@ describe('maybeEnqueueChartExtract — runaway guard scoped to same-hash/forced 
     const out = await maybeEnqueueChartExtract(db, 'C-1');
     expect(out.enqueued).toBe(true);
   });
+
+  // The CLM-CCFDA1BCC3 runaway guarantee (architect QA): a FORCED re-extract mints a fresh hash every
+  // call (bypassing the mutex), so it MUST stay rate-limited within the window even against a DIFFERENT
+  // recent-run hash. Locks the property so a future reorder of the `forceSalt || sameHash` OR can't
+  // silently reopen the $34/hr runaway with green tests.
+  it('RATE GUARD: a forced re-extract is blocked even when the recent run has a DIFFERENT hash', async () => {
+    const { db, creates } = makeDb({ recentRun: { createdAt: new Date(Date.now() - 60 * 1000), status: 'complete', triggerHash: 'A_DIFFERENT_HASH' } });
+    const out = await maybeEnqueueChartExtract(db, 'C-1', { forceSalt: 'manual:loop' });
+    expect(out).toEqual({ enqueued: false, reason: 'rate_limited_recent_run' });
+    expect(creates).toHaveLength(0);
+  });
 });

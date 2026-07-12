@@ -31,7 +31,13 @@ function decodeEntities(s: string): string {
 // divider, a From:/Sent: header block, the first quoted ">" line, or a known mobile-client footer.
 // STRONG = unambiguous start of a QUOTED chain (the prior email) — always safe to cut here.
 const STRONG_QUOTE_MARKERS: readonly RegExp[] = [
-  /\r?\n?On\s[\s\S]{0,300}?\bwrote:/i,
+  // The Apple Mail / Gmail reply attribution: "On <Mon|Jul|Sun|…|digit> …, <name> wrote:". It MUST be
+  // anchored to a real attribution, NOT a bare "on" — the old /\r?\n?On\s…wrote:/i matched the "on" INSIDE
+  // words (menti-ON, reas-ON, conditi-ON) whenever a quoted "wrote:" followed within 300 chars, chopping
+  // every incoming reply at that letter ("I forgot to mention" → "I forgot to menti"). So: word boundary +
+  // capital "On" + a whitespace + a DATE token (capitalized weekday/month like Jul/Mon, OR a digit). This
+  // can only ever cut LESS than before (never a mid-word "on"), so it cannot re-truncate legitimate content.
+  /\bOn\s+(?:[A-Z][a-z]{2}|\d)[\s\S]{0,300}?\bwrote:/,
   /\r?\n-{2,}\s*Original Message\s*-{2,}/i,
   /\r?\nFrom:\s.*\r?\n(Sent|Date|To):\s/i,
 ];

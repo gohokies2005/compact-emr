@@ -120,3 +120,39 @@ describe('cleanEmailText — full mode keeps the complete new message (C4c, 2026
     expect(cleanEmailText(reply, 'full')).toBe('My new reply with real content.');
   });
 });
+
+// Regression (Ryan 2026-07-12, Mark Lo): incoming replies were truncated at the "on" INSIDE a word
+// (menti-ON, reas-ON) — the attribution regex /\r?\n?On\s…wrote:/i lacked a word boundary, so any reply
+// with a word ending in "on" before the quoted "…wrote:" got chopped there ("I forgot to mention" → "I
+// forgot to menti"). The fix anchors it to a real "On <date> … wrote:" (\b + capital On + a date token).
+describe('cleanEmailText — attribution strip must NOT cut a mid-word "on" (Mark Lo truncation)', () => {
+  const markSnippet =
+    'I forgot to mention I have been going to a chiropractor for a few years now. Would a letter from her be sufficient? Thank you, Mark On Jul 5, 2026, at 9:26 AM, Mark Lo <mjlo808@gmail.com> wrote:';
+
+  it('preview: keeps the full new content through "mention", cuts only at the real "On <date> … wrote:"', () => {
+    expect(cleanEmailText(markSnippet, 'preview')).toBe(
+      'I forgot to mention I have been going to a chiropractor for a few years now. Would a letter from her be sufficient? Thank you, Mark',
+    );
+    expect(cleanEmailText(markSnippet, 'preview')).not.toMatch(/wrote/);
+  });
+
+  it('full: the expanded body is not chopped at "menti" either', () => {
+    const body =
+      'I forgot to mention I have been going to a chiropractor.\nThank you,\nMark\n\nOn Jul 5, 2026, at 9:26 AM, Mark Lo <mjlo808@gmail.com> wrote:\n> old quoted';
+    const out = cleanEmailText(body, 'full');
+    expect(out).toContain('mention I have been going to a chiropractor');
+    expect(out).not.toMatch(/old quoted/);
+  });
+
+  it('words ending in "on" before a real attribution survive (reason/condition/information/person/question)', () => {
+    for (const w of ['reason', 'condition', 'information', 'person', 'question']) {
+      const s = `The ${w} matters here. On Mon, Jul 6, 2026 at 1:00 PM, X <x@y.com> wrote: prior stuff`;
+      expect(cleanEmailText(s, 'preview')).toBe(`The ${w} matters here.`);
+    }
+  });
+
+  it('still strips the genuine "On <date> … wrote:" attribution (no regression)', () => {
+    expect(cleanEmailText('New reply.\nOn Jul 5, 2026 at 9:26 AM, Mark Lo <m@x.com> wrote: old', 'full')).toBe('New reply.');
+    expect(cleanEmailText('Reply body.\nOn 7/5/2026, Mark wrote: quoted', 'full')).toBe('Reply body.');
+  });
+});

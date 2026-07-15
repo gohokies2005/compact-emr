@@ -13,6 +13,8 @@
  * Keep the two in sync when the heuristics change.
  */
 
+import { isInvalidClaimLabel } from './generic-claim-label.js';
+
 type RawAnswer = { type?: string; name?: string; text?: string; answer?: unknown; prettyFormat?: string };
 export type DerivedIntakeFields = {
   name?: string; email?: string; phone?: string; state?: string;
@@ -150,7 +152,9 @@ export function deriveIntakeFields(rawAnswers: unknown): DerivedIntakeFields {
     if (/denial|denied|va decided|prior decision/.test(label) && /yes|denied/.test(ansStr.toLowerCase())) priorDenial = true;
     if (out.name === undefined && /name/.test(label) && ansStr) out.name = ansStr;
     if (/\bstate\b/.test(label) && ansStr) out.state ??= toStateAbbr(ansStr) ?? ansStr.slice(0, 2).toUpperCase();
-    if (/condition/.test(label) && ansStr) out.condition ??= ansStr;
+    // JUNK GUARD (Greene `--EYES--`, 2026-07-14): a dropdown separator / punctuation-only answer must
+    // never become the drawer's condition prefill (it would flow verbatim into Case.claimedCondition).
+    if (/condition/.test(label) && ansStr && !isInvalidClaimLabel(ansStr)) out.condition ??= ansStr;
     // The "why do you think this is service-connected" narrative — the case in one sentence; surfaced
     // pre-draft so the RN/physician sees the veteran's own theory. A real narrative, not a yes/no.
     if (out.veteranTheory === undefined && /why|connect|believe|caused|relate|in[- ]service|theory|happened|explain|describe/.test(label) && ansStr.trim().length > 25) {

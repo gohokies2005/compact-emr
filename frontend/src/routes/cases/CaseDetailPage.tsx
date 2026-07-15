@@ -177,7 +177,9 @@ export function CaseDetailPage() {
 
   const patch = useMutation({
     mutationFn: (input: PatchCaseInput) => patchCase(caseId, input),
-    onSuccess: () => refetch(),
+    // Also invalidate the cases LIST (Ryan 2026-07-14): an edit that changes list-visible fields (claimed
+    // condition, framing, …) must propagate to the Cases page without a hard refresh, not just the detail view.
+    onSuccess: async () => { await Promise.all([refetch(), qc.invalidateQueries({ queryKey: ['cases'] })]); },
     onError: async (err) => { if (err instanceof ConflictError) { await refetch(); window.alert('This case was modified elsewhere. Reloaded the latest version — please retry your edit.'); } },
   });
 

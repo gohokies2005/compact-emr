@@ -1,7 +1,7 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { createJotformWebhookRouter } from '../routes/jotform-webhook.js';
+import { createJotformWebhookRouter, jotformWebhookBodyParsers } from '../routes/jotform-webhook.js';
 import { publishJotformIngest } from '../services/jotform-ingest-queue.js';
 
 // Mock the queue so we can observe whether the doorbell re-enqueues (the sweep-cost gate).
@@ -9,16 +9,39 @@ vi.mock('../services/jotform-ingest-queue.js', () => ({ publishJotformIngest: vi
 const enqueueMock = vi.mocked(publishJotformIngest);
 
 // NODE_ENV=test makes publishJotformIngest a no-op, so no SQS is touched.
+// Mounts the EXACT parser stack server.ts uses (jotformWebhookBodyParsers) — the 2026-07-15 outage
+// (multipart 400'd for 5+ weeks) survived because the old test built its own urlencoded-only stack.
 function appFor(intakeDelegate: unknown) {
   process.env.JOTFORM_WEBHOOK_SECRET = 'sek';
   const app = express();
-  app.use('/api/v1/jotform/webhook', express.urlencoded({ extended: true }), createJotformWebhookRouter({ intake: intakeDelegate } as never));
+  app.use('/api/v1/jotform/webhook', ...jotformWebhookBodyParsers(), createJotformWebhookRouter({ intake: intakeDelegate } as never));
   return app;
 }
 
 beforeEach(() => { process.env.JOTFORM_WEBHOOK_SECRET = 'sek'; enqueueMock.mockClear(); });
 
 describe('jotform webhook (doorbell)', () => {
+  // ⭐ THE 2026-07-15 OUTAGE LOCK: Jotform delivers multipart/form-data. The urlencoded-only mount
+  // 400'd every real-time delivery since ≥2026-06-06 (the sweep's urlencoded replays masked it).
+  // These two tests pin the multipart dialect end-to-end through the REAL parser stack.
+  it('MULTIPART (how Jotform actually posts): records the intake and 200s', async () => {
+    const create = vi.fn(async () => ({ id: 'mp-intake-1' }));
+    const res = await request(appFor({ create }))
+      .post('/api/v1/jotform/webhook/sek')
+      .field('formID', '261928293758069')
+      .field('submissionID', 'MP-SUB-1')
+      .expect(200);
+    expect(res.body).toMatchObject({ ok: true });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(enqueueMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('MULTIPART with a wrong secret still 404s (secret gate unaffected by parser)', async () => {
+    const create = vi.fn();
+    await request(appFor({ create })).post('/api/v1/jotform/webhook/WRONG').field('formID', '1').field('submissionID', '2').expect(404);
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('404s on a wrong secret and does not record anything', async () => {
     const create = vi.fn();
     await request(appFor({ create })).post('/api/v1/jotform/webhook/WRONG').type('form').send({ formID: '1', submissionID: '2' }).expect(404);

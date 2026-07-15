@@ -95,6 +95,16 @@ export interface SoapNote {
   readonly confidence: SoapConfidence;
   readonly action: SoapAction;
   /**
+   * CHIP DISAMBIGUATOR (Ryan 2026-07-14 status-color fix): the route-picker plan's viability band, stamped on
+   * the note when a plan GROUNDED it. Both 'marginal' and 'needs_physician_review' collapse to the SAME action
+   * ('physician_review'), but the chip must render them differently — needs_physician_review is GREEN
+   * ("Ready to draft — doctor confirms theory at signing") while marginal stays AMBER ("Draftable — thin case").
+   * Optional so every pre-existing stored note (band absent) reads gracefully — the chip treats a band-less
+   * 'physician_review' as the green family (same band family; the go/no-go SEMANTICS are unchanged either way).
+   * Display-only: nothing decision-bearing reads this field.
+   */
+  readonly viabilityBand?: RoutePickerViability;
+  /**
    * Condition-relevant OBJECTIVE MEASUREMENTS pulled from the chart for THIS claim (#63). Empty array = none
    * found in the chart (graceful — the Objective prose simply omits a measurements line). Grounded: every
    * surfaced value appears in the source context. The FE renders these as a labeled list under the Objective.
@@ -622,7 +632,16 @@ function buildExplanatoryNote(ctx: SoapContext, reason: 'truncated' | 'error' | 
   // empty_model) where prose SHOULD have been produced → fallback:true so it is NOT persisted and the next
   // open / the 110s async precompute retries. (Herman CLM-E9FEC31D99 fix, 2026-06-23.)
   const isStableVerdict = reason === 'not_supportable' || rp?.viability === 'not_supportable';
-  return { ...base, confidence, action, caveat: checkGrounding(base, renderContext(ctx)), fallback: !isStableVerdict };
+  return {
+    ...base,
+    confidence,
+    action,
+    // Chip disambiguator (2026-07-14): carry the grounding band so the chip can split marginal (amber) from
+    // needs_physician_review (green) — both map to the same 'physician_review' action. Absent when ungrounded.
+    ...(rp ? { viabilityBand: rp.viability } : {}),
+    caveat: checkGrounding(base, renderContext(ctx)),
+    fallback: !isStableVerdict,
+  };
 }
 
 const SOAP_TOOL: Anthropic.Tool = {
@@ -979,6 +998,10 @@ export async function buildSoapNote(ctx: SoapContext, opts?: { timeoutMs?: numbe
       ...base,
       confidence: modelConfidence,
       action: modelAction,
+      // Chip disambiguator (2026-07-14): stamp the grounding plan's viability band alongside the model's own
+      // action so the chip can split marginal (amber) from needs_physician_review (green). Absent when the
+      // note is ungrounded (no plan this run) — the chip then treats 'physician_review' as the green family.
+      ...(ctx.routePickerFraming ? { viabilityBand: ctx.routePickerFraming.viability } : {}),
       caveat: checkGrounding(base, ctxText),
       measurements,
       fallback: false,
@@ -1042,11 +1065,18 @@ export function soapNoteFingerprint(ctx: SoapContext): string {
 export function reconcileStickyAction(fresh: SoapNote, stored: SoapNote | null, grounded: boolean): SoapNote {
   if (stored === null || fresh.fallback === true || stored.fallback === true) return fresh;
   if (grounded) return fresh; // authoritative band decided this — a real change must propagate
-  if (stored.action === fresh.action) return fresh; // already agree → nothing to stick
+  // Chip-band stickiness (2026-07-14): an UNGROUNDED recompute carries no viabilityBand (no plan this run),
+  // but the chip disambiguates marginal (amber) vs needs_physician_review (green) off the persisted band. If
+  // the fresh note silently dropped the stored band, the chip would flip on a recompute that asserted no new
+  // verdict — so carry the stored band forward whenever the fresh note lacks one.
+  const carriedBand = fresh.viabilityBand ?? stored.viabilityBand;
+  if (stored.action === fresh.action) {
+    return carriedBand !== undefined && carriedBand !== fresh.viabilityBand ? { ...fresh, viabilityBand: carriedBand } : fresh;
+  }
   // Ungrounded recompute with no new band: revert the chip-bearing action to the prior decision. Confidence
   // is carried with it so the displayed confidence label tracks the (preserved) decision rather than the
   // model's fresh ungrounded guess. Prose (S/O/A/P) stays the freshly-generated text.
-  return { ...fresh, action: stored.action, confidence: stored.confidence };
+  return { ...fresh, action: stored.action, confidence: stored.confidence, ...(carriedBand !== undefined ? { viabilityBand: carriedBand } : {}) };
 }
 
 /** A minimal Prisma-delegate view of the soap_overviews cache table — cast at the call site (mirrors how

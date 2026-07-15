@@ -12,6 +12,7 @@ import { SoapOverviewCard } from '../components/SoapOverviewCard';
 import { getStrategyPreview } from '../api/strategy-preview';
 import { getCaseViability, computeCaseViability, getSoapNote } from '../api/case-viability';
 import { getExtractionCoverage } from '../api/extraction-coverage';
+import { SOAP_CHIP_TOOLTIP } from '../lib/soapChip';
 
 vi.mock('../api/strategy-preview', () => ({ getStrategyPreview: vi.fn() }));
 vi.mock('../api/extraction-coverage', () => ({ getExtractionCoverage: vi.fn() }));
@@ -315,5 +316,149 @@ describe('SoapOverviewCard — chart-analysis-in-progress gate (redesign, Dr. Ka
     await waitFor(() => expect(screen.getByText(/Chart analysis incomplete/i)).toBeInTheDocument());
     expect(screen.queryByText(/Still analyzing the chart/i)).not.toBeInTheDocument();
     expect(screen.getAllByText(/re-run/i).length).toBeGreaterThan(0);
+  });
+});
+
+// ── STATUS COLOR + CARD TINT (Ryan 2026-07-14 HARD ORDER: "make it GREEN"; amber ONLY for true caution) ──────
+// The whole-card tint is reserved for red (reject); green/amber/neutral keep a WHITE card with just the colored
+// dot + chip. A physician_review note renders the GREEN action-directive chip (the doctor confirms at signing —
+// not a caution); only a marginal-band note stays amber. The chip carries an advisory tooltip (never a blocker).
+describe('SoapOverviewCard — chip color directive + no whole-card tint (2026-07-14)', () => {
+  const soapMock = vi.mocked(getSoapNote);
+  const COMPLETE_COVERAGE = {
+    data: {
+      totalPages: 40, extractedPages: 40, coveragePct: 100, gaps: [], status: 'complete',
+      unknownPageFiles: 0, totalFiles: 2, pageBreakdown: null,
+      pagesRead: { pct: 100, readUnits: 40, totalUnits: 40, approximate: false, label: '100% (40 of 40)' },
+      chartAnalysis: { state: 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: 40, minorGap: false },
+    },
+  } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>;
+  const READY_STRATEGY = {
+    data: { tier: 'Plausible', primaryArgument: 'OSA secondary to rhinitis', proposedMechanism: null, recommendedPathway: null, inputSet: { scConditions: [], activeProblems: [], keyFacts: [], medications: [] } },
+  } as unknown as Awaited<ReturnType<typeof getStrategyPreview>>;
+  const noteOf = (action: string, viabilityBand?: string) => ({
+    subjective: 'S', objective: 'O', assessment: 'A body sentence', plan: 'P next step', confidence: 'moderate', action, fallback: false,
+    ...(viabilityBand !== undefined ? { viabilityBand } : {}),
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    strategyMock.mockResolvedValue(READY_STRATEGY);
+    viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'off' } });
+    computeMock.mockResolvedValue({ aiViabilityState: { status: 'off' } });
+    coverageMock.mockResolvedValue(COMPLETE_COVERAGE);
+    soapMock.mockReset();
+  });
+
+  it('physician_review note (needs_physician_review band) → GREEN action-directive chip "Ready to draft — doctor confirms theory at signing"', async () => {
+    soapMock.mockImplementation(async () => ({ data: noteOf('physician_review', 'needs_physician_review'), grounded: true, stale: false }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/Ready to draft — doctor confirms theory at signing/i)).toBeInTheDocument());
+    expect(screen.queryByText(/^Physician review$/)).not.toBeInTheDocument(); // the old amber label is gone
+  });
+
+  it('OLD stored note (physician_review, no band — pre-fix DB rows) → the same GREEN treatment (band family)', async () => {
+    soapMock.mockImplementation(async () => ({ data: noteOf('physician_review'), grounded: true, stale: false }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/Ready to draft — doctor confirms theory at signing/i)).toBeInTheDocument());
+  });
+
+  it("physician_review note with band MARGINAL → AMBER 'Draftable — thin case' directive", async () => {
+    soapMock.mockImplementation(async () => ({ data: noteOf('physician_review', 'marginal'), grounded: true, stale: false }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/Draftable — thin case, doctor's judgment call/i)).toBeInTheDocument());
+  });
+
+  it('green/amber states render a WHITE card (no whole-card tint) — the colored dot + chip carry the status', async () => {
+    soapMock.mockImplementation(async () => ({ data: noteOf('draft'), grounded: true, stale: false }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    const { container } = renderCard();
+    await waitFor(() => expect(screen.getByText(/^Ready to draft$/)).toBeInTheDocument());
+    const card = container.firstElementChild as HTMLElement;
+    expect(card.className).toContain('bg-white');
+    expect(card.className).not.toContain('bg-[#F1F5F2]'); // the old green wash
+    expect(card.className).not.toContain('border-l-[#5E8B7E]'); // the old green rule
+  });
+
+  it('reject (red) KEEPS the whole-card tint — a true stop still reads loud', async () => {
+    soapMock.mockImplementation(async () => ({ data: noteOf('reject'), grounded: true, stale: false }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    const { container } = renderCard();
+    await waitFor(() => expect(screen.getByText(/Not supportable/i)).toBeInTheDocument());
+    const card = container.firstElementChild as HTMLElement;
+    expect(card.className).toContain('bg-[#F6EDE9]');
+    expect(card.className).toContain('border-l-[#B0654F]');
+  });
+
+  it('the chip carries the advisory tooltip ("never blocks drafting")', async () => {
+    soapMock.mockImplementation(async () => ({ data: noteOf('draft'), grounded: true, stale: false }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/^Ready to draft$/)).toBeInTheDocument());
+    expect(screen.getByTitle(SOAP_CHIP_TOOLTIP)).toBeInTheDocument();
+  });
+});
+
+// ── STALE → SILENT AUTO-RELOAD (Ryan 2026-07-14, "edits must propagate with NO hard refresh") ────────────────
+// A served note with stale:true (the backend's honest fingerprint-drift report after an RN edit) must arm the $0
+// pollOnly auto-refresh and show a QUIET "Updating…" next to the chip — keeping the OLD chip color (stability
+// rule) — and the folded refreshed note must clear both, all without a hard refresh or a whole-card change.
+describe('SoapOverviewCard — stale arms the poll + quiet Updating indicator (2026-07-14)', () => {
+  const soapMock = vi.mocked(getSoapNote);
+  const COMPLETE_COVERAGE = {
+    data: {
+      totalPages: 40, extractedPages: 40, coveragePct: 100, gaps: [], status: 'complete',
+      unknownPageFiles: 0, totalFiles: 2, pageBreakdown: null,
+      pagesRead: { pct: 100, readUnits: 40, totalUnits: 40, approximate: false, label: '100% (40 of 40)' },
+      chartAnalysis: { state: 'complete', label: '✓ Complete', reason: null, likelyCauseFile: null, findings: 40, minorGap: false },
+    },
+  } as unknown as Awaited<ReturnType<typeof getExtractionCoverage>>;
+  const READY_STRATEGY = {
+    data: { tier: 'Plausible', primaryArgument: 'OSA secondary to rhinitis', proposedMechanism: null, recommendedPathway: null, inputSet: { scConditions: [], activeProblems: [], keyFacts: [], medications: [] } },
+  } as unknown as Awaited<ReturnType<typeof getStrategyPreview>>;
+  const OLD_NOTE = { subjective: 'S1', objective: 'O1', assessment: 'the OLD pre-edit assessment', plan: 'P1', confidence: 'moderate', action: 'get_records', fallback: false };
+  const FRESH_NOTE = { subjective: 'S2', objective: 'O2', assessment: 'the REFRESHED post-edit assessment', plan: 'P2', confidence: 'high', action: 'draft', fallback: false };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    strategyMock.mockResolvedValue(READY_STRATEGY);
+    viabilityMock.mockResolvedValue({ data: null, aiViabilityState: { status: 'off' } });
+    computeMock.mockResolvedValue({ aiViabilityState: { status: 'off' } });
+    coverageMock.mockResolvedValue(COMPLETE_COVERAGE);
+    soapMock.mockReset();
+  });
+
+  it('stale:true → quiet "Updating…" next to the chip, the pollOnly auto-refresh arms, and the OLD chip label stays (stability rule)', async () => {
+    soapMock.mockImplementation(async (_id: string, _ctx: unknown, opts?: { forceRegenerate?: boolean; pollOnly?: boolean }) =>
+      (opts?.pollOnly === true
+        ? { data: null, generating: true, cached: false } // refreshed note not landed yet — keep polling
+        : { data: OLD_NOTE, stale: true, cached: true, grounded: true }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/the OLD pre-edit assessment/i)).toBeInTheDocument());
+    // The quiet indicator renders next to the chip…
+    await waitFor(() => expect(screen.getByText(/Updating…/i)).toBeInTheDocument());
+    // …the poll armed (the $0 status check fired)…
+    await waitFor(() => expect(soapMock).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ pollOnly: true })));
+    // …and the chip keeps its OLD persisted verdict while updating (no wobble).
+    expect(screen.getByText(/Records needed/i)).toBeInTheDocument();
+  });
+
+  it('the folded refreshed note CLEARS the Updating indicator and swaps the body — no hard refresh', async () => {
+    soapMock.mockImplementation(async (_id: string, _ctx: unknown, opts?: { forceRegenerate?: boolean; pollOnly?: boolean }) =>
+      (opts?.pollOnly === true
+        ? { data: FRESH_NOTE, generating: false, stale: false, cached: true, grounded: true } // the recompute landed
+        : { data: OLD_NOTE, stale: true, cached: true, grounded: true }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    renderCard();
+    // The refreshed note folds in via the poll → body swaps to the post-edit assessment…
+    await waitFor(() => expect(screen.getByText(/the REFRESHED post-edit assessment/i)).toBeInTheDocument());
+    // …the provisional state is over: indicator gone, and the chip now projects the refreshed verdict.
+    await waitFor(() => expect(screen.queryByText(/Updating…/i)).not.toBeInTheDocument());
+    expect(screen.getByText(/^Ready to draft$/)).toBeInTheDocument();
+    expect(screen.queryByText(/the OLD pre-edit assessment/i)).not.toBeInTheDocument();
+  });
+
+  it('stale:false → no Updating indicator and the poll never fires (nothing owed)', async () => {
+    soapMock.mockImplementation(async () => ({ data: OLD_NOTE, stale: false, cached: true, grounded: true }) as unknown as Awaited<ReturnType<typeof getSoapNote>>);
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/the OLD pre-edit assessment/i)).toBeInTheDocument());
+    expect(screen.queryByText(/Updating…/i)).not.toBeInTheDocument();
+    expect(soapMock).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ pollOnly: true }));
   });
 });

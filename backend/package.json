@@ -31,6 +31,7 @@
     "@prisma/client": "latest",
     "express": "latest",
     "jose": "latest",
+    "multer": "^2.2.0",
     "pdf-lib": "^1.17.1",
     "pg": "^8.13.1",
     "serverless-http": "latest"
@@ -39,6 +40,7 @@
     "@eslint/js": "latest",
     "@types/aws-lambda": "latest",
     "@types/express": "latest",
+    "@types/multer": "^2.2.0",
     "@types/node": "latest",
     "@types/pg": "^8.11.10",
     "@types/supertest": "latest",

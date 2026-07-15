@@ -28,7 +28,7 @@ import { createReportsRouter } from './routes/reports.js';
 import { createDashboardRouter } from './routes/dashboard.js';
 import { createPayRouter } from './routes/pay.js';
 import { createInternalWorkerRouter } from './routes/internal-worker.js';
-import { createJotformWebhookRouter } from './routes/jotform-webhook.js';
+import { createJotformWebhookRouter, jotformWebhookBodyParsers } from './routes/jotform-webhook.js';
 import { createStripeWebhookRouter } from './routes/stripe-webhook.js';
 import { createDeliveryPortalRouter } from './routes/delivery-portal.js';
 import { createIntakesRouter } from './routes/intakes.js';
@@ -114,9 +114,15 @@ export function createApp(options: CreateAppOptions = {}) {
   }));
 
   // Public, secret-gated Jotform webhook (doorbell). Mounted BEFORE the authenticateJwt client
-  // routes (it has no Cognito) with its OWN urlencoded parser scoped to this subtree — Jotform
-  // POSTs urlencoded, and the payload can exceed the 1mb global json limit. See spec §2.
-  app.use('/api/v1/jotform/webhook', express.urlencoded({ extended: true, limit: '2mb' }), createJotformWebhookRouter(db));
+  // routes (it has no Cognito) with its OWN body parsers scoped to this subtree; payloads can exceed
+  // the 1mb global json limit. TWO parsers because there are two real dialects (2026-07-15 fix, see
+  // INCIDENTS.md): Jotform itself delivers multipart/form-data, which the original urlencoded-only
+  // mount 400'd on EVERY real-time delivery since at least 2026-06-06 (zero real-time ingests in the
+  // whole log history — the hourly sweep silently carried 100% of ingestion). The sweep's replays
+  // POST urlencoded, which is why they always worked and masked the outage. multer().none() parses
+  // fields-only multipart into req.body (Jotform sends no binary parts — uploads arrive as URL
+  // fields); a malformed multipart 400s here and the hourly sweep remains the backstop.
+  app.use('/api/v1/jotform/webhook', ...jotformWebhookBodyParsers(), createJotformWebhookRouter(db));
 
   // Public Stripe webhook (signature-gated, no Cognito). express.raw so the body is the EXACT bytes
   // Stripe signed — express.json would re-serialize them and break HMAC verification. (Mounted before

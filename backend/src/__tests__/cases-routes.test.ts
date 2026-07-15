@@ -32,6 +32,15 @@ vi.mock('../services/doctor-pack-generate.js', () => ({
 import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
 const doctorPackGenMock = vi.mocked(generateDoctorPackForCase);
 
+// Edit-propagation fix (Ryan 2026-07-14): a PATCH that invalidates the route-picker plan now fires the SAME
+// off-request recompute the Overview open path uses (fire-and-forget, log-only failure). Mocked so the tests
+// pin the ROUTE's dispatch decision without the AWS SDK.
+vi.mock('../services/recompute-viability-trigger.js', () => ({
+  fireRecomputeViability: vi.fn(async () => true),
+}));
+import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
+const recomputeMock = vi.mocked(fireRecomputeViability);
+
 function baseCase(overrides: Partial<CaseRecord> = {}): CaseRecord {
   return {
     id: 'CASE-1',
@@ -355,6 +364,51 @@ describe('cases routes', () => {
     expect(res.status).toBe(200);
     const data = (spies.caseUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
     expect(data).not.toHaveProperty('framingStampSource');
+  });
+
+  // ── PATCH → recompute dispatch (Ryan 2026-07-14, "edits must propagate with NO hard refresh"). The PATCH
+  // nulls the persisted plan on a PLAN_INPUT_FIELDS change but used to regenerate it only lazily on the next
+  // card open. It now fires the off-request recompute post-transaction — EXCEPT while status='drafting' (the
+  // recompute-storm freeze) and never on a PATCH that didn't touch a plan input.
+  describe('PATCH fires the plan recompute on plan-input edits (2026-07-14)', () => {
+    beforeEach(() => { recomputeMock.mockReset(); recomputeMock.mockResolvedValue(true); });
+
+    it.each([['claimedCondition', 'Left knee strain'], ['framingChoice', 'secondary'], ['veteranStatement', 'updated statement'], ['inServiceEvent', 'updated event']])(
+      'a %s edit (plan input) dispatches the recompute exactly once',
+      async (field, value) => {
+        const { db } = makeDb();
+        const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, [field]: value });
+        expect(res.status).toBe(200);
+        expect(recomputeMock).toHaveBeenCalledTimes(1);
+        expect(recomputeMock).toHaveBeenCalledWith('CASE-1');
+      },
+    );
+
+    it('a NON-plan-input PATCH (refundEligible) does NOT dispatch a recompute', async () => {
+      const { db } = makeDb();
+      const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, refundEligible: true });
+      expect(res.status).toBe(200);
+      expect(recomputeMock).not.toHaveBeenCalled();
+    });
+
+    it('a plan-input PATCH while status=drafting does NOT dispatch (recompute-storm freeze holds)', async () => {
+      const { db } = makeDb(baseCase({ status: 'drafting' }));
+      const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, veteranStatement: 'edited mid-draft' });
+      expect(res.status).toBe(200);
+      expect(recomputeMock).not.toHaveBeenCalled();
+    });
+
+    it('a dispatch failure NEVER breaks the PATCH (fire-and-forget, log-only)', async () => {
+      recomputeMock.mockRejectedValue(new Error('lambda invoke throttled'));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const { db, spies } = makeDb();
+      const res = await request(appFor(db)).patch('/api/v1/cases/CASE-1').send({ version: 1, claimedCondition: 'Tinnitus' });
+      expect(res.status).toBe(200); // the edit committed and responded normally
+      expect(spies.caseUpdate).toHaveBeenCalled();
+      // give the detached .catch a microtask to run before restoring
+      await new Promise((r) => setImmediate(r));
+      warnSpy.mockRestore();
+    });
   });
 
   it('rejects PATCH stale version with 409', async () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   extractFirstBalancedJson,
   parseDocTitleResponse,
@@ -8,8 +8,10 @@ import {
   mergeGrantedConditionBackstop,
   isRatingDecision,
   modelAcceptsPrefill,
+  generateAndPersistDocumentTitle,
   type DocTitleResult,
 } from '../aiDocumentTitle.js';
+import type { AppDb } from '../db-types.js';
 
 describe('extractFirstBalancedJson', () => {
   it('returns a clean object unchanged', () => {
@@ -203,6 +205,62 @@ describe('mergeGrantedConditionBackstop', () => {
     const withReordered: DocTitleResult = { ...decision, conditions: [{ name: 'Sleep Apnea, Obstructive', outcome: 'granted', percent: 50 }] };
     const r = mergeGrantedConditionBackstop(withReordered, ['Obstructive Sleep Apnea']);
     expect(r).toBe(withReordered); // unchanged reference — recognized as the same condition
+  });
+});
+
+// ── system-artifact guard (dup-mint incident 2026-07-14): the titler renaming the generated
+// Intake_Summary.pdf defeated the assign-time filename-equality idempotency guard → duplicate mints.
+// Our own generated artifacts (reserved s3Key shapes) must NEVER be retitled. ──
+describe('generateAndPersistDocumentTitle — system-artifact guard', () => {
+  function dbWithDoc(doc: Record<string, unknown> | null, update?: ReturnType<typeof vi.fn>) {
+    return {
+      document: {
+        findUnique: vi.fn(async () => doc),
+        findMany: vi.fn(async () => []),
+        update: update ?? vi.fn(async () => ({})),
+      },
+    } as unknown as AppDb;
+  }
+  const baseDoc = { id: 'doc-1', filename: 'Intake_Summary.pdf', autoTitle: null, caseId: 'CLM-1', case: null };
+
+  it('skips the generated Intake_Summary.pdf (reserved s3Key suffix) — never retitled, no model call', async () => {
+    const update = vi.fn(async () => ({}));
+    const db = dbWithDoc({ ...baseDoc, s3Key: 'cases/CLM-1/i1-Intake_Summary.pdf' }, update);
+    const r = await generateAndPersistDocumentTitle(db, 'doc-1');
+    expect(r).toEqual({ documentId: 'doc-1', updated: false, skipped: 'system_artifact' });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('skips a Doctor_Pack artifact by s3Key substring', async () => {
+    const db = dbWithDoc({ ...baseDoc, filename: 'pack.pdf', s3Key: 'cases/CLM-1/Doctor_Pack_v2.pdf' });
+    const r = await generateAndPersistDocumentTitle(db, 'doc-1');
+    expect(r.skipped).toBe('system_artifact');
+    expect(r.updated).toBe(false);
+  });
+
+  it('skips even under force (a system artifact is never retitleable)', async () => {
+    const db = dbWithDoc({ ...baseDoc, s3Key: 'cases/CLM-1/i1-Intake_Summary.pdf' });
+    const r = await generateAndPersistDocumentTitle(db, 'doc-1', { force: true });
+    expect(r.skipped).toBe('system_artifact');
+  });
+
+  it('does NOT over-match a normal document (falls through to the already_titled path)', async () => {
+    // A real uploaded record with a normal key + an existing title proceeds PAST the artifact guard
+    // and hits the already_titled skip — proving the guard only matches reserved key shapes.
+    const db = dbWithDoc({ ...baseDoc, filename: 'Lozano_sleep-study.pdf', s3Key: 'cases/CLM-1/3f2a9c1e-Lozano_records.pdf', autoTitle: 'Sleep study' });
+    const r = await generateAndPersistDocumentTitle(db, 'doc-1');
+    expect(r.skipped).toBe('already_titled');
+  });
+
+  it('a veteran-uploaded "<Last>_Intake_Summary.pdf" is NOT blocked (key ends "_Intake…", not the reserved "-Intake…")', async () => {
+    // The guard keys on the reserved '-Intake_Summary.pdf' s3Key suffix only the GENERATED summary
+    // carries. A real uploaded record named Lozano_Intake_Summary.pdf gets the key
+    // `<uuid>-Lozano_Intake_Summary.pdf` — its suffix is '_Intake_Summary.pdf' (underscore), so the
+    // guard does not match and the doc proceeds (here to already_titled). Mirrors chart-readiness's
+    // reserved-suffix distinction.
+    const db = dbWithDoc({ ...baseDoc, filename: 'Lozano_Intake_Summary.pdf', s3Key: 'cases/CLM-1/3f2a9c1e-Lozano_Intake_Summary.pdf', autoTitle: 'existing' });
+    const r = await generateAndPersistDocumentTitle(db, 'doc-1');
+    expect(r.skipped).toBe('already_titled');
   });
 });
 

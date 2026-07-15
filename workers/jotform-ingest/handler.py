@@ -206,6 +206,30 @@ def _normalize_claim_type(s: Any) -> str | None:
     return None
 
 
+# Dropdown SECTION HEADERS are selectable in Jotform and cannot be disabled there (Greene
+# CLM-1E3DF51DAA came in with claimedCondition '--EYES--'). A "condition" that is a separator row
+# (leading AND trailing dash runs) or carries no letters/digits at all is junk, not a condition.
+# PURELY deterministic — no AI, no fuzzy matching. Real conditions with INTERIOR dashes
+# ('L5-S1 radiculopathy', 'Post-traumatic stress disorder') don't start with a dash run, so they
+# never match.
+_SEPARATOR_CONDITION_RE = re.compile(r"^\s*-{2,}.*-{2,}\s*$", re.DOTALL)
+
+
+def _clean_condition(ans: Any) -> str | None:
+    """Return the condition string, or None when it's separator/junk (empty, punctuation-only, or a
+    '--SECTION--' dropdown header)."""
+    if not isinstance(ans, str):
+        return None
+    t = ans.strip()
+    if not t:
+        return None
+    if _SEPARATOR_CONDITION_RE.match(t):
+        return None
+    if not re.search(r"[A-Za-z0-9]", t):
+        return None
+    return ans
+
+
 def _parse_submission(content: dict[str, Any]) -> dict[str, Any]:
     """Heuristically pull the fields we surface in the pool + collect uploaded-file URLs. Defensive:
     forms vary across 59 templates, so match on Jotform field TYPE first, then on the field name."""
@@ -245,7 +269,9 @@ def _parse_submission(content: dict[str, Any]) -> dict[str, Any]:
         if "state" in (a_name + " " + text) and isinstance(ans, str) and len(ans) <= 20:
             parsed["state"] = parsed["state"] or ans
         if "condition" in (a_name + " " + text) and isinstance(ans, str):
-            parsed["condition"] = parsed["condition"] or ans
+            # _clean_condition: a selectable dropdown SECTION HEADER ('--EYES--') or punctuation-only
+            # answer must never become the claimed condition (Greene CLM-1E3DF51DAA).
+            parsed["condition"] = parsed["condition"] or _clean_condition(ans)
         if parsed["claim_type"] is None and "claim" in (a_name + " " + text) and "type" in (a_name + " " + text):
             parsed["claim_type"] = _normalize_claim_type(ans if isinstance(ans, str) else a.get("prettyFormat"))
         if parsed["email"] is None and isinstance(ans, str) and "@" in ans and "." in ans:

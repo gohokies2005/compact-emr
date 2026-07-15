@@ -1,8 +1,37 @@
-import { Router, type Request, type Response } from 'express';
+import express, { Router, type Request, type Response, type NextFunction, type RequestHandler } from 'express';
+import multer from 'multer';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { asyncHandler } from '../http/async-handler.js';
 import type { AppDb } from '../services/db-types.js';
 import { publishJotformIngest } from '../services/jotform-ingest-queue.js';
+
+/**
+ * The doorbell's body-parser stack — exported so server.ts and the route tests mount the IDENTICAL
+ * stack (the 2026-07-15 outage went undetected partly because tests built their own parser).
+ *
+ * TWO dialects are real (INCIDENTS.md 2026-07-15): Jotform itself delivers multipart/form-data,
+ * which the original urlencoded-only mount 400'd on EVERY real-time delivery since at least
+ * 2026-06-06 — zero real-time ingests in the whole log history; the hourly sweep (whose replays
+ * POST urlencoded, the one dialect that worked) silently carried 100% of ingestion and masked the
+ * outage. multer().none() parses fields-only multipart into req.body (Jotform sends no binary
+ * parts — uploads arrive as URL fields); a malformed multipart 400s and the sweep stays the backstop.
+ */
+export function jotformWebhookBodyParsers(): RequestHandler[] {
+  return [
+    express.urlencoded({ extended: true, limit: '2mb' }),
+    (req: Request, res: Response, next: NextFunction) => {
+      if (!req.is('multipart/form-data')) { next(); return; }
+      multer({ limits: { fields: 500, fieldSize: 2 * 1024 * 1024 } }).none()(req, res, (err: unknown) => {
+        if (err) {
+          console.error(JSON.stringify({ msg: 'jotform-webhook: multipart parse failed', error: err instanceof Error ? err.message : String(err) }));
+          res.status(400).json({ error: { code: 'bad_request', message: 'unparseable multipart body' } });
+          return;
+        }
+        next();
+      });
+    },
+  ];
+}
 
 // Constant-time secret compare. timingSafeEqual needs equal-length buffers, so compare SHA-256
 // digests (fixed 32 bytes) rather than raw strings — also avoids leaking the secret length.

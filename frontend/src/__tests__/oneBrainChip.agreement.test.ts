@@ -18,6 +18,10 @@
 // soap-overview.ts precisely so this frontend test can import the REAL function without pulling the
 // Anthropic SDK (which the frontend test env can't resolve). It is the SAME function soap-overview.ts
 // re-exports and uses to drive the SOAP Plan action.
+// STATUS-COLOR NOTE (Ryan 2026-07-14): the chip now renders a physician_review action GREEN ("Ready to
+// draft — doctor confirms theory at signing") unless the persisted note's band is 'marginal' (amber). That is
+// a LABEL/COLOR change in soapChip.ts only — the band→action and band→verdict DECISION maps below are
+// untouched, and this test continues to pin that they agree on the single go/no-go bit.
 import { describe, expect, it } from 'vitest';
 import { routePickerBandToVerdict, type ReadinessVerdict } from '../lib/caseReadinessVerdict';
 import { planViabilityToAction, type RoutePickerViability } from '../../../backend/src/services/soap-action-map';

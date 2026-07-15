@@ -92,9 +92,10 @@ function makeDb() {
 }
 
 /** A db whose soap_overviews delegate returns `row` from findUnique — for exercising the pollOnly / serve-
- *  stored-first branches (which read the persisted note). */
-function makeDbWithSoap(row: unknown) {
-  const caseFindFirst = vi.fn(async () => ({ id: 'CASE-1' }));
+ *  stored-first branches (which read the persisted note). `caseRow` overrides the case read (e.g. to set
+ *  status:'drafting' for the chip-freeze tests). */
+function makeDbWithSoap(row: unknown, caseRow: unknown = { id: 'CASE-1' }) {
+  const caseFindFirst = vi.fn(async () => caseRow);
   const soapFindUnique = vi.fn(async () => row);
   const db = { case: { findFirst: caseFindFirst }, soapOverview: { findUnique: soapFindUnique } } as unknown as AppDb;
   return { db, caseFindFirst, soapFindUnique };
@@ -250,6 +251,62 @@ describe('POST /cases/:id/soap-overview pollOnly — $0 status check, never bill
     expect(res.body.data).toBeNull();
     expect(getOrBuildSoapNote).not.toHaveBeenCalled(); // still $0
     expect(fireRecomputeViability).not.toHaveBeenCalled(); // pollOnly never re-fires (the normal open path does)
+  });
+});
+
+// ── SERVE-STORED stale flag (Ryan 2026-07-14, no-hard-refresh fix) ──────────────────────────────────────────
+// The serve-stored-first branch used to hardcode stale:false even when decideServeStored reported the stored
+// note's fingerprint had DRIFTED (decision.refresh) — so the FE's pollOnly auto-refresh never armed after an
+// RN edit and the refreshed note needed a hard refresh. It must now report the drift honestly (stale:true),
+// EXCEPT while status='drafting' (the drafter mutates the Case row constantly → artificial drift → reporting
+// stale would spin the poll for the whole draft; the chip-freeze rule).
+describe('POST /cases/:id/soap-overview serve-stored — honest stale flag (2026-07-14)', () => {
+  const storedNote = { subjective: 's', objective: 'o', assessment: 'a', plan: 'p', confidence: 'high', action: 'draft', fallback: false };
+  const storedRow = { inputHash: 'OLD-fp', schemaVersion: SOAP_NOTE_SCHEMA_VERSION, resultJson: storedNote };
+
+  beforeEach(() => {
+    mockUser = { sub: 'U1', roles: ['ops_staff'] };
+    getAiViabilityState.mockReset();
+    aiRoutePickerEnabled.mockReset(); aiRoutePickerEnabled.mockReturnValue(true);
+    fireRecomputeViability.mockReset(); fireRecomputeViability.mockResolvedValue(true);
+    getOrBuildSoapNote.mockClear();
+    caseViabilityEnabled.mockReset(); caseViabilityEnabled.mockReturnValue(true);
+    soapNoteFingerprint.mockReset(); soapNoteFingerprint.mockReturnValue('fp');
+    decideServeStored.mockReset(); decideServeStored.mockReturnValue(null);
+  });
+
+  it('DRIFTED stored note (refresh:true) → serves the note WITH stale:true so the card arms its auto-refresh poll', async () => {
+    stateReady(plan()); // grounded, non-drafting case
+    decideServeStored.mockReturnValue({ note: storedNote, refresh: true });
+    const { db } = makeDbWithSoap(storedRow);
+    const res = await POST(db, { claimedCondition: 'Obstructive sleep apnea' });
+    expect(res.status).toBe(200);
+    expect(res.body.stale).toBe(true); // the FE poll gate — this was the hardcoded-false bug
+    expect(res.body.data).toMatchObject({ assessment: 'a', plan: 'p' }); // the note is STILL served this open
+    expect(res.body.cached).toBe(true);
+    expect(fireRecomputeViability).toHaveBeenCalledOnce(); // the ONE background drift-refresh
+    expect(getOrBuildSoapNote).not.toHaveBeenCalled(); // still $0 — no sync generate
+  });
+
+  it('CURRENT stored note (refresh:false) → stale:false (nothing owed, poll stays disarmed)', async () => {
+    stateReady(plan());
+    decideServeStored.mockReturnValue({ note: storedNote, refresh: false });
+    const { db } = makeDbWithSoap({ ...storedRow, inputHash: 'fp' });
+    const res = await POST(db, { claimedCondition: 'Obstructive sleep apnea' });
+    expect(res.status).toBe(200);
+    expect(res.body.stale).toBe(false);
+    expect(fireRecomputeViability).not.toHaveBeenCalled();
+  });
+
+  it('DRAFTING FREEZE: a drifted note on a status=drafting case reports stale:false AND fires no recompute (never stale during drafting)', async () => {
+    stateReady(plan());
+    decideServeStored.mockReturnValue({ note: storedNote, refresh: true });
+    const { db } = makeDbWithSoap(storedRow, { id: 'CASE-1', status: 'drafting' });
+    const res = await POST(db, { claimedCondition: 'Obstructive sleep apnea' });
+    expect(res.status).toBe(200);
+    expect(res.body.stale).toBe(false); // drafter-mutated row drift is artificial — no poll spin-up
+    expect(res.body.data).toMatchObject({ assessment: 'a' });
+    expect(fireRecomputeViability).not.toHaveBeenCalled(); // the recompute-storm freeze holds
   });
 });
 

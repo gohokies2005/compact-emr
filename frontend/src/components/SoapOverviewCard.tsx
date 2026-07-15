@@ -5,7 +5,7 @@ import { getCaseViability, computeCaseViability, getSoapNote, type SoapContextIn
 import { getExtractionCoverage } from '../api/extraction-coverage';
 import { computeReadinessVerdict } from '../lib/caseReadinessVerdict';
 import { soapHeadline } from '../lib/soapHeadline';
-import { soapChipFromNote, type ChipColor } from '../lib/soapChip';
+import { soapChipFromNote, SOAP_CHIP_TOOLTIP, type ChipColor } from '../lib/soapChip';
 
 // AI-synthesized SOAP-note Overview (Ryan 2026-06-20). The calm lead on the case: a physician-voice
 // Subjective / Objective / Assessment / Plan note the MODEL writes from the assembled facts — smooth and
@@ -18,6 +18,9 @@ import { soapChipFromNote, type ChipColor } from '../lib/soapChip';
 
 // The chip/card accent palette, keyed by the SOAP-derived chip color (soapChip.ts). `neutral` is the
 // white/neutral default shown BEFORE a SOAP verdict is persisted (no flicker — see soapChipFromNote).
+// NOTE (Ryan 2026-07-14): the WHOLE-CARD tint/rule is applied ONLY for red (reject) — green/amber/info
+// states keep a white card with just the colored dot + chip (see the render below). `tint`/`rule` here
+// remain the full palette for the red case + the dot.
 const LIGHT: Record<ChipColor, { rule: string; dot: string; tint: string }> = {
   green: { rule: 'border-l-[#5E8B7E]', dot: 'bg-[#5E8B7E]', tint: 'bg-[#F1F5F2]' },
   amber: { rule: 'border-l-[#C19A5B]', dot: 'bg-[#C19A5B]', tint: 'bg-[#F7F2E8]' },
@@ -215,6 +218,18 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   // an open tab) and show the manual "check again" affordance. Reset per case (a fresh card re-arms).
   const [soapPollCount, setSoapPollCount] = useState(0);
   useEffect(() => { setSoapPollCount(0); }, [caseId]);
+  // RE-ARM ON STALE (Ryan 2026-07-14, "edits must propagate with NO hard refresh"). When the served note flips
+  // stale:true (an RN edit drifted the fingerprint; the backend fired the background recompute and now reports
+  // the drift honestly), a previously-capped poll must re-arm — otherwise a case whose earlier generation used
+  // up the cap would never fold the refreshed note in without a hard refresh. Rising-edge only (a ref guard),
+  // so a persistent stale flag doesn't reset the cap every render (the cap still bounds a wedged recompute).
+  const soapStaleNow = soapQ.data?.stale === true;
+  const soapWasStale = useRef(false);
+  useEffect(() => {
+    if (soapStaleNow && !soapWasStale.current) setSoapPollCount(0);
+    soapWasStale.current = soapStaleNow;
+  }, [soapStaleNow]);
+  useEffect(() => { soapWasStale.current = false; }, [caseId]);
   const soapPollCapped = soapPollCount >= SOAP_MAX_POLLS;
   const soapPollKey = ['case', caseId, 'soap-note', 'poll'] as const;
   const soapPollQ = useQuery({
@@ -392,6 +407,12 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   // the deterministic fallback line, and the chart-analysis provisional banner — but NOT the chip color.
   const chip = soapChipFromNote(note);
   const L = LIGHT[chip.color];
+  // WHOLE-CARD COLOR ONLY FOR A TRUE STOP (Ryan 2026-07-14): the full-card tint + colored left rule are
+  // reserved for red (reject) — a real "do not proceed" — and the blocker banners above keep their own loud
+  // treatment. Green/amber/neutral states render a WHITE card: the colored dot + chip carry the status, the
+  // card itself stays calm (amber-washing the whole card read as a warning on cases that are ready to draft).
+  const cardRule = chip.color === 'red' ? L.rule : 'border-l-slate-300';
+  const cardTint = chip.color === 'red' ? L.tint : 'bg-white';
   // The stored note's inputs changed since it was written (new info came in). We do NOT auto-spend — we
   // surface a subtle hint and let the RN click Regenerate. Suppressed while a regenerate is in flight.
   const isStale = soapQ.data?.stale === true && !regenerate.isPending;
@@ -427,7 +448,7 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
   const planUnavailable = !routePickerActive && soapResolved && soapQ.data?.grounded !== true;
 
   return (
-    <div className={`mb-4 rounded-lg border border-l-4 ${L.rule} border-slate-200 ${L.tint} px-5 py-4`}>
+    <div className={`mb-4 rounded-lg border border-l-4 ${cardRule} border-slate-200 ${cardTint} px-5 py-4`}>
       {/* PROMINENT chart-analysis-incomplete banner (Ryan 2026-06-23). When the chart that the verdict is
           built on was not fully analyzed, this sits ABOVE the verdict and the verdict reads as PROVISIONAL —
           never a confident conclusion built on an empty/partial chart. Plain language, names the likely-cause
@@ -450,11 +471,22 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Case overview</span>
         <span className="flex items-center gap-1.5 text-xs font-medium text-slate-700">
+          {/* QUIET "Updating…" while the note is provisional/stale (Ryan 2026-07-14, no-hard-refresh fix):
+              the poll is re-fetching the refreshed note in the background. The chip KEEPS its old color/label
+              while updating (chip-stability rule — the persisted verdict stands until the new note folds in). */}
+          {soapProvisional ? (
+            <span className="mr-1 inline-flex items-center gap-1 text-[11px] font-normal text-slate-400">
+              <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-slate-300 border-t-transparent" aria-hidden />
+              Updating…
+            </span>
+          ) : null}
           {/* Chip color + label are LOCKED to the persisted SOAP verdict (soapChipFromNote) so they cannot
               recompute/flicker across loads. The chart-analysis "provisional" caution stays loud in the banner
               + the headline below — it is a separate honesty layer, not a chip-color signal. */}
-          <span className={`inline-block h-2 w-2 rounded-full ${L.dot}`} />
-          {chip.label}
+          <span title={SOAP_CHIP_TOOLTIP} className="inline-flex items-center gap-1.5">
+            <span className={`inline-block h-2 w-2 rounded-full ${L.dot}`} />
+            {chip.label}
+          </span>
         </span>
       </div>
       <p className="mt-2 text-lg font-semibold leading-snug text-slate-900">
@@ -522,7 +554,10 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
             <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-900">Plan</div>
             <div className="mt-0.5 text-[15px] font-medium text-slate-800"><span className="text-[#B08D3C]">→ </span>{note.plan}</div>
           </div>
-          {isStale ? (
+          {/* The manual "regenerate" nag shows only once the AUTO-refresh gave up (poll capped) — while the
+              poll is live the quiet "Updating…" indicator next to the chip covers it (Ryan 2026-07-14:
+              auto-reload silently, no hard refresh, no click needed on the happy path). */}
+          {isStale && soapPollCapped ? (
             <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800">
               New information has come in since this summary was written. Click <span className="font-medium">Regenerate with new info</span> to refresh it.
             </div>

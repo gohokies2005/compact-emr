@@ -190,6 +190,8 @@ describe('POST /cases/:id/reprocess', () => {
         // The rate-limit/runaway guard in maybeEnqueueChartExtract (chart-extract-trigger.ts, 2026-06-20)
         // calls findFirst for a recent run; the real PrismaClient has it. null = no recent run → no-op.
         findFirst: vi.fn(async () => null),
+        // The hard per-case budget (2026-07-14, $146 incident) counts runs in the last hour; 0 = headroom.
+        count: vi.fn(async () => 0),
         create: vi.fn(async (args: { data: Record<string, unknown> }) => {
           if (over.runCreateThrowsP2002) { const err = new Error('unique'); (err as Error & { code?: string }).code = 'P2002'; throw err; }
           runCreates.push(args.data);

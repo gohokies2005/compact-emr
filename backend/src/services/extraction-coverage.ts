@@ -801,6 +801,52 @@ function toNonNegInt(v: unknown): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
+/** The lite run row the authoritative-run selection reads (status + result + the doc-set identity hash). */
+export interface ExtractionRunLite {
+  readonly status: string;
+  readonly resultJson: unknown;
+  readonly triggerHash: string | null;
+}
+
+/** The doc-set identity of a run: triggerHash's base segment. A FORCED reprocess run stores
+ *  `<sha256>:manual:<requestId>` (see schema.prisma ChartExtractionRun.triggerHash) — the base sha256 stays
+ *  prefix-recoverable, so two runs over the SAME doc set share a base even when one carries the manual suffix. */
+function runBaseHash(triggerHash: string | null): string {
+  return (triggerHash ?? '').split(':')[0] ?? '';
+}
+
+/**
+ * STALE-FAILURE GUARD (Kimbrough CLM-41E9900FB8, 2026-07-14). Pick the run whose status should drive the UI's
+ * chart-analysis state. PURE + unit-tested.
+ *
+ * THE BUG: the state keyed on the LATEST-CREATED run row. During the 7/14 duplicate flood, watcher-failed
+ * DUPLICATE rows were created AFTER the successful runs, so a complete chart showed "✗ analysis failed".
+ *
+ * THE RULE: a failed newest run drives the failed state ONLY when it represents work no completed run covered —
+ *   • newest run is not failed → newest run (unchanged behavior; running/queued/complete pass straight through);
+ *   • newest failed + NO completed run at all → newest (HONEST: the chart really has no successful analysis);
+ *   • newest failed + a completed run over the SAME doc set (same base triggerHash) → the completed run — the
+ *     failed row was a duplicate/watcher-kill of work that already succeeded;
+ *   • newest failed + the failed run's doc set is STRICTLY NEWER (base hash differs from the completed run's,
+ *     i.e. docs changed after the last success) → newest (HONEST: the current doc set's analysis really failed).
+ */
+export function selectAuthoritativeExtractionRun(
+  newest: ExtractionRunLite | null,
+  latestCompleted: ExtractionRunLite | null,
+): { status: string; resultJson: unknown } | null {
+  if (newest === null) return null;
+  if (newest.status !== 'failed') return { status: newest.status, resultJson: newest.resultJson };
+  if (latestCompleted === null || latestCompleted.status !== 'complete') {
+    return { status: newest.status, resultJson: newest.resultJson }; // no successful run to fall back on → honest failed
+  }
+  const failedBase = runBaseHash(newest.triggerHash);
+  const completedBase = runBaseHash(latestCompleted.triggerHash);
+  if (failedBase.length > 0 && failedBase === completedBase) {
+    return { status: latestCompleted.status, resultJson: latestCompleted.resultJson }; // duplicate failure of covered work
+  }
+  return { status: newest.status, resultJson: newest.resultJson }; // doc set moved on since the last success → honest failed
+}
+
 /**
  * SHARED coverage loader (Ryan 2026-06-22, Zimmelman FIX C — "0% of pages read" though extraction is 100%).
  *
@@ -826,9 +872,21 @@ export async function loadExtractionCoverageForCase(db: AppDb, caseId: string): 
     select: { id: true, s3Key: true, filename: true, contentType: true, pageCount: true },
   })) as readonly CoverageDocInput[];
   const rows = await db.fileReadStatus.findMany({ where: { caseId } });
-  const latestRun = await (db as unknown as {
-    chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { status: true; resultJson: true } }) => Promise<{ status: string; resultJson: unknown } | null> };
-  }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true } });
+  // AUTHORITATIVE RUN, not merely NEWEST-CREATED (Kimbrough CLM-41E9900FB8, 2026-07-14). The UI's chart-
+  // analysis state used to key on the latest-created run row alone; during the 7/14 duplicate flood,
+  // watcher-failed DUPLICATE rows were created AFTER the successful runs, so a fully-complete chart showed
+  // "analysis failed". When the newest run FAILED, we now also look up the most recent COMPLETED run and let
+  // selectAuthoritativeExtractionRun (pure, tested) decide: the completed run wins when it covered the SAME
+  // doc set (same base triggerHash — the failed row was a duplicate/watcher-kill of already-completed work);
+  // the failed run honestly wins when no completed run exists or the failed run's doc set is strictly newer.
+  const runDelegate = (db as unknown as {
+    chartExtractionRun: { findFirst: (a: { where: Record<string, unknown>; orderBy: { createdAt: 'desc' }; select: { status: true; resultJson: true; triggerHash: true } }) => Promise<{ status: string; resultJson: unknown; triggerHash: string | null } | null> };
+  }).chartExtractionRun;
+  const newestRun = await runDelegate.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true, triggerHash: true } });
+  const latestCompletedRun = newestRun?.status === 'failed'
+    ? await runDelegate.findFirst({ where: { caseId, status: 'complete' }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true, triggerHash: true } })
+    : null;
+  const latestRun = selectAuthoritativeExtractionRun(newestRun, latestCompletedRun);
   const pageRows = (await db.documentPage.findMany({
     where: { document: { caseId } },
     select: { documentId: true, pageNumber: true, extractionCoverage: true, handwritingPresent: true },

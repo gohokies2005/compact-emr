@@ -1178,20 +1178,20 @@ export class WorkersStack extends Stack {
       metricValue: '1',
       defaultValue: 0,
     });
-    new cloudwatch.Alarm(this, 'JotformWebhookMissedAlarm', {
+    const webhookMissedAlarm = new cloudwatch.Alarm(this, 'JotformWebhookMissedAlarm', {
       alarmName: `compact-emr-${config.envName}-jotform-webhook-missed`,
-      alarmDescription: 'FYI, already handled — A veteran intake did not arrive instantly and the hourly safety-net picked it up within the hour, so no intake was lost. Nothing to do unless this keeps firing; if it does, instant delivery from the intake form is unreliable and we are leaning on the backup, so re-check and re-save the intake form notification (webhook) settings. (This is the failure that lost Herman Charles on 2026-06-23.)',
+      alarmDescription: 'ACTION NEEDED — the hourly safety-net sweep recovered 3+ intakes in one hour that the real-time intake webhook never delivered. No intake was lost, but real-time delivery is broken again (root cause last time, fixed 2026-07-15: the endpoint could not parse Jotform\'s multipart posts — dead 5+ weeks, invisible because this alarm had no action wired). Verify the webhook endpoint accepts multipart (POST a test per INCIDENTS.md 2026-07-15) and check the Jotform form webhook settings. (The failure class that lost Herman Charles on 2026-06-23.)',
       metric: webhookMissedMetric.metric({ statistic: 'Sum', period: Duration.hours(1) }),
-      threshold: 1,
+      // Spike threshold, not ≥1 (Ryan 2026-06-30: per-intake firing = alarm fatigue). Pre-multipart-fix
+      // the sweep recovered EVERY intake (~1-2/hr baseline); post-fix the baseline is 0 and 3+/hr means
+      // the real-time path regressed. This is the "re-wire with a spike threshold once the real-time
+      // webhook is fixed" follow-through (fixed 2026-07-15, INCIDENTS.md).
+      threshold: 3,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    // NOT wired to ops-alerts (Ryan 2026-06-30): this fires on essentially EVERY intake — the real-time
-    // Jotform webhook misses and the hourly sweep recovers it each time — so an email per intake is pure
-    // noise (alarm fatigue). The alarm + its metric stay (dashboard-visible) to track the real-time-webhook
-    // miss RATE, but it must never page. If we later fix the real-time webhook, re-wire it with a spike
-    // threshold. (Was briefly wired 2026-06-30; Ryan asked to stop the per-intake emails.)
+    webhookMissedAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
 
     // ===== jotform-ingest fail-loud alarms (2026-06-22, Travis Spring intake-loss class) =====
     // The SECOND systemic silent intake-loss leak: the jotform-ingest worker would fail the WHOLE

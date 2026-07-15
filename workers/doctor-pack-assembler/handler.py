@@ -28,6 +28,7 @@ while. The pack is now ONE pdf-lib cover + the merged source pages.
 import io
 import json
 import os
+import traceback
 import urllib.request
 from typing import Any
 
@@ -119,14 +120,18 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
 
             outcome = assemble_pack(writer, entries, _fetch, cover_link_map)
             skipped_non_pdf = outcome["skipped_non_pdf"]
+            skipped_unreadable_pdf = outcome["skipped_unreadable_pdf"]
 
             if skipped_non_pdf:
                 print(f"assembled with {skipped_non_pdf} non-PDF manifest entr(ies) skipped")
+            if skipped_unreadable_pdf:
+                print(f"assembled with {skipped_unreadable_pdf} unreadable PDF entr(ies) skipped")
             if len(writer.pages) == 0:
                 # EVERY source was unreadable/non-PDF — an empty pack would be a silent lie.
                 raise RuntimeError(
-                    f"no PDF pages could be assembled ({skipped_non_pdf} non-PDF source(s) skipped); "
-                    "the case's key documents may all be text files"
+                    f"no PDF pages could be assembled ({skipped_non_pdf} non-PDF and "
+                    f"{skipped_unreadable_pdf} unreadable PDF source(s) skipped); "
+                    "the case's key documents may all be text files or unreadable"
                 )
 
             # Upload to the server-computed S3 key.
@@ -147,6 +152,10 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             results.append({"doctorPackId": doctor_pack_id, "state": "ready", "pages": len(writer.pages)})
         except Exception as exc:  # broad catch — every failure surfaces to the UI via state='failed'
             error_message = f"{type(exc).__name__}: {exc}"
+            # LOG the failure with its full traceback BEFORE the PATCH. The message lands in the DB
+            # row for the UI, but until 2026-07 it was never printed — an entire failure class
+            # (Kimbrough: encrypted-PDF DependencyError) was invisible in CloudWatch.
+            print(f"doctor-pack {doctor_pack_id} FAILED: {error_message}\n{traceback.format_exc()}")
             try:
                 _patch_doctor_pack(doctor_pack_id, {"state": "failed", "errorMessage": error_message[:2000]})
             except Exception:

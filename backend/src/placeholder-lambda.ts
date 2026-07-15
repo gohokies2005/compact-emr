@@ -1,7 +1,7 @@
 import serverless from 'serverless-http';
 import { createApp } from './server.js';
 import { prisma } from './db/client.js';
-import { deriveAiViability } from './services/ai-viability.js';
+import { getAiViabilityState } from './services/ai-viability.js';
 import { precomputeSoapNoteForCase } from './services/soap-context-assembler.js';
 import { isRecomputeViabilityEvent } from './services/recompute-viability-trigger.js';
 import { isTitleDocumentEvent } from './services/document-title-trigger.js';
@@ -34,13 +34,26 @@ export const handler = async (event: unknown, context: unknown): Promise<unknown
       // card + drafter use), then — grounded on that SAME plan — the SOAP note, persisted under its
       // server-derived fingerprint so the next sync open serves it for $0. The picker budget is bounded
       // smaller so the note has room within the 110s Lambda budget; the note gets the remaining time.
-      const plan = await deriveAiViability(prisma as unknown as AppDb, event.caseId, { compute: true, timeoutMs: 75_000 });
+      // The discriminated STATE (not the null-collapsing deriveAiViability) so this job can tell "another
+      // invocation is already mid-compute" ('computing', the in-flight guard short-circuit) apart from a
+      // genuine result — see the skip below.
+      const planState = await getAiViabilityState(prisma as unknown as AppDb, event.caseId, { compute: true, timeoutMs: 75_000 });
       const planMs = Date.now() - t0;
+      // DUPLICATE-WRITE GUARD (Ryan 2026-07-14, "2 ungrounded Sonnet writes per edit"). When the plan compute
+      // was SKIPPED because another invocation holds the in-flight guard (getAiViabilityState returned
+      // 'computing' without running the LLM), the plan this invocation would ground the SOAP on does not exist
+      // YET — running the SOAP precompute now would burn a Sonnet call on an UNGROUNDED context and the
+      // in-flight invocation will write the real grounded note itself moments later. Skip both artifacts and
+      // let the owner invocation finish the job.
+      if (planState.status === 'computing') {
+        console.warn(JSON.stringify({ msg: 'ai-viability recompute skipped — compute already in flight', caseId: event.caseId, planMs, ms: Date.now() - t0 }));
+        return { ok: true, skipped: 'in_flight' };
+      }
       // Generate the SOAP note with the REMAINING budget (Lambda timeout 120s, leave headroom). Fail-open:
       // a note failure never affects the plan that already persisted.
       const noteBudget = Math.max(15_000, 110_000 - planMs);
       const noteOk = await precomputeSoapNoteForCase(prisma as unknown as AppDb, event.caseId, noteBudget);
-      console.warn(JSON.stringify({ msg: 'ai-viability recompute done', caseId: event.caseId, computed: plan !== null, soapPrecomputed: noteOk, planMs, ms: Date.now() - t0 }));
+      console.warn(JSON.stringify({ msg: 'ai-viability recompute done', caseId: event.caseId, computed: planState.status === 'ready', soapPrecomputed: noteOk, planMs, ms: Date.now() - t0 }));
     } catch (e) {
       console.warn(JSON.stringify({ msg: 'ai-viability recompute failed open', caseId: event.caseId, error: e instanceof Error ? e.message : String(e) }));
     }

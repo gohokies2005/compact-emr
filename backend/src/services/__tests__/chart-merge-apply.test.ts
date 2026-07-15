@@ -1,10 +1,18 @@
 // Keystone pkg 6 — the autofill-ON guard test the plan names: with CHART_AUTOFILL='on' and the
 // normalizeName dedup guard, a re-extract of a case that already has "PTSD" inserts 0 new sc rows
 // (the variant explosion can no longer land once the flag is flipped).
-import { afterEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { applyExtractionMerge } from '../chart-merge-apply.js';
+import { fireRecomputeViability } from '../recompute-viability-trigger.js';
 import type { FinalExtractedItem } from '../chart-extract-llm.js';
 import type { AppDb } from '../db-types.js';
+
+// Mock the recompute dispatch (Tier-B records-landed trigger) so tests can assert fire-once + that a
+// dispatch failure never fails the merge — without touching the AWS SDK.
+vi.mock('../recompute-viability-trigger.js', () => ({
+  fireRecomputeViability: vi.fn(async () => true),
+}));
+const mockFireRecompute = vi.mocked(fireRecomputeViability);
 
 function item(name: string): FinalExtractedItem {
   return {
@@ -33,6 +41,7 @@ function makeDb(existingScRows: { condition: string; source: string }[]) {
 }
 
 afterEach(() => { delete process.env['CHART_AUTOFILL']; });
+beforeEach(() => { mockFireRecompute.mockClear(); mockFireRecompute.mockResolvedValue(true); });
 
 describe('applyExtractionMerge — autofill ON + dedup guard (keystone pkg 6)', () => {
   it('NAMED ACCEPTANCE: a re-extract against an existing "PTSD" row inserts ZERO new sc rows', async () => {
@@ -134,5 +143,33 @@ describe('applyExtractionMerge — medication temporality', () => {
     expect(result.written).toBe(1);       // historical 2015 still inserts (additive)
     expect(medCreates).toHaveLength(1);
     expect(medCreates[0]).toMatchObject({ medStatus: 'historical', lastSeenDate: '06/14/2015' });
+  });
+});
+
+// ── Tier-B records-landed trigger (2026-07-14): the merge commit dispatches the SAME off-request
+// recompute the viability-card open uses, exactly once, and a dispatch failure never fails the merge. ──
+describe('applyExtractionMerge — recompute dispatch on completion', () => {
+  it('fires fireRecomputeViability exactly ONCE with the caseId after the merge commits (shadow mode too)', async () => {
+    const { db } = makeDb([]);
+    await applyExtractionMerge(db, { caseId: 'C-1', veteranId: 'VET-1', runId: 'RUN-1', items: [item('PTSD')] });
+    expect(mockFireRecompute).toHaveBeenCalledTimes(1);
+    expect(mockFireRecompute).toHaveBeenCalledWith('C-1');
+  });
+
+  it('fires once with autofill ON as well', async () => {
+    process.env['CHART_AUTOFILL'] = 'on';
+    const { db } = makeDb([]);
+    await applyExtractionMerge(db, { caseId: 'C-2', veteranId: 'VET-1', runId: 'RUN-2', items: [item('PTSD')] });
+    expect(mockFireRecompute).toHaveBeenCalledTimes(1);
+    expect(mockFireRecompute).toHaveBeenCalledWith('C-2');
+  });
+
+  it('a dispatch REJECTION never fails the merge (log-only catch)', async () => {
+    mockFireRecompute.mockRejectedValueOnce(new Error('lambda invoke denied'));
+    const { db, runUpdates } = makeDb([]);
+    const result = await applyExtractionMerge(db, { caseId: 'C-3', veteranId: 'VET-1', runId: 'RUN-3', items: [item('PTSD')] });
+    expect(result.autofill).toBe(false); // merge result returned normally
+    expect(runUpdates).toHaveLength(1);  // the run status write committed before the dispatch
+    expect(mockFireRecompute).toHaveBeenCalledTimes(1);
   });
 });

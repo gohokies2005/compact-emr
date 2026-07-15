@@ -241,18 +241,24 @@ describe('intakes assign', () => {
       document: { create: docCreate, delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) },
     };
     const res = await request(assignApp(db, s3send)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
-    const calls = docCreate.mock.calls as unknown as Array<[{ data: { filename: string; contentType: string } }]>;
+    const calls = docCreate.mock.calls as unknown as Array<[{ data: { filename: string; contentType: string; s3Key: string } }]>;
     const summary = calls.find((c) => c[0].data.filename === 'Intake_Summary.pdf');
     expect(summary).toBeTruthy();
     expect(summary![0].data.contentType).toBe('application/pdf');
+    // Deterministic per-intake key with the load-bearing reserved suffix (2026-07-14 idempotency fix):
+    // cases/<caseId>/<intakeId>-Intake_Summary.pdf — cases.ts / chart-readiness.ts / key-docs-classifier.ts
+    // all anchor on the '-Intake_Summary.pdf' suffix.
+    expect(summary![0].data.s3Key).toBe('cases/CLM-1/i1-Intake_Summary.pdf');
     expect(res.body.data.attached.some((a: { name: string }) => a.name === 'Intake_Summary.pdf')).toBe(true);
     expect(s3send).toHaveBeenCalled(); // PutObject of the PDF bytes
   });
 
-  it('does NOT mint a second Intake_Summary.pdf when one already exists (hash-drift idempotency)', async () => {
+  it('does NOT mint a second Intake_Summary.pdf when one already exists (hash-drift idempotency, s3Key-suffix guard)', async () => {
     // Dick/Mittge stuck-gate, 2026-06-26: a duplicate Intake_Summary.pdf drifted the chart-build
     // trigger hash → readiness wedged on 'extracting'. The mint must be skipped when one exists.
+    // Since 2026-07-14 the guard matches the IMMUTABLE s3Key suffix, not filename equality.
     const docCreate = vi.fn(async () => ({ id: 'doc-s' }));
+    const docFindFirst = vi.fn(async () => ({ id: 'existing-summary' }));
     const s3send = vi.fn(async () => ({}));
     const intakeUpdate = vi.fn(async () => ({}));
     const db = {
@@ -264,14 +270,102 @@ describe('intakes assign', () => {
         update: intakeUpdate,
       },
       $transaction: txWithExisting(),
-      // An Intake_Summary.pdf ALREADY exists on this case → the mint must be skipped.
-      document: { create: docCreate, delete: vi.fn(), findFirst: vi.fn().mockResolvedValue({ id: 'existing-summary' }) },
+      // A generated summary ALREADY exists on this case → the mint must be skipped.
+      document: { create: docCreate, delete: vi.fn(), findFirst: docFindFirst },
     };
     const res = await request(assignApp(db, s3send)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    // The guard queries by caseId + the reserved immutable s3Key suffix (NOT filename equality).
+    expect(docFindFirst).toHaveBeenCalledWith({
+      where: { caseId: 'CLM-1', s3Key: { endsWith: '-Intake_Summary.pdf' } },
+      select: { id: true },
+    });
     const calls = docCreate.mock.calls as unknown as Array<[{ data: { filename: string } }]>;
     expect(calls.find((c) => c[0].data.filename === 'Intake_Summary.pdf')).toBeFalsy(); // NO second mint
     expect(res.body.data.attached.some((a: { name: string }) => a.name === 'Intake_Summary.pdf')).toBe(false);
     expect(res.body.data.assigned).toBe(true); // still assigns
+  });
+
+  it('does NOT re-mint when the AI titler RENAMED the existing summary (filename changed, s3Key intact)', async () => {
+    // The dup-mint incident (×2-4 on 7 cases incl. paid): aiDocumentTitle renamed the summary's
+    // filename, defeating the old filename==='Intake_Summary.pdf' guard. Emulate a DB whose only
+    // summary row has a titler-renamed filename but the immutable generated s3Key: the suffix guard
+    // must still find it. (A filename-equality query against this store returns null → would re-mint.)
+    const existingDocs = [{ id: 'doc-old', caseId: 'CLM-1', filename: 'Justice_intake-summary.pdf', s3Key: 'cases/CLM-1/i0-Intake_Summary.pdf' }];
+    const docFindFirst = vi.fn(async (args: { where: { caseId?: string; filename?: string; s3Key?: { endsWith?: string } } }) => {
+      const w = args?.where ?? {};
+      return existingDocs.find((d) =>
+        (w.caseId === undefined || d.caseId === w.caseId)
+        && (w.filename === undefined || d.filename === w.filename)
+        && (w.s3Key?.endsWith === undefined || d.s3Key.endsWith(w.s3Key.endsWith)),
+      ) ?? null;
+    });
+    const docCreate = vi.fn(async () => ({ id: 'doc-s' }));
+    const db = {
+      intake: {
+        findUnique: async () => ({
+          id: 'i1', status: 'ready', fileManifestJson: [], submittedName: 'Marcus Justice',
+          rawAnswersJson: { q1: { type: 'control_textbox', name: 's2_dob_s1', text: 'Date of Birth', answer: '08/13/1985' } },
+        }),
+        update: vi.fn(async () => ({})),
+      },
+      $transaction: txWithExisting(),
+      document: { create: docCreate, delete: vi.fn(), findFirst: docFindFirst },
+    };
+    const res = await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    const calls = docCreate.mock.calls as unknown as Array<[{ data: { filename: string } }]>;
+    expect(calls.find((c) => c[0].data.filename === 'Intake_Summary.pdf')).toBeFalsy(); // renamed summary still blocks the re-mint
+    expect(res.body.data.assigned).toBe(true);
+  });
+
+  it('refuses a JUNK claim label (--EYES-- separator) at case create — persists empty + logs the refusal', async () => {
+    // Greene incident: a Jotform dropdown separator row reached Case.claimedCondition verbatim. The
+    // Tier-A deterministic guard blanks it (required column → '') and drops junk from the array.
+    const caseCreate = vi.fn(async () => ({ id: 'CLM-0123456789' }));
+    const tx = async (fn: (t: unknown) => unknown) => fn({
+      veteran: { findUnique: async () => ({ id: 'VET-1' }), create: async () => ({ id: 'VET-NEW' }) },
+      case: { findFirst: async () => null, create: caseCreate },
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const db = {
+        intake: { findUnique: async () => readyIntake([]), update: vi.fn(async () => ({})) },
+        $transaction: tx,
+        document: { create: vi.fn(async () => ({ id: 'doc-x' })), delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) },
+      };
+      const res = await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({
+        veteranId: 'VET-1',
+        newCase: { id: 'CLM-0123456789', claimedCondition: '--EYES--', claimType: 'initial' },
+      }).expect(200);
+      expect(res.body.data.assigned).toBe(true); // the guard never blocks the assign itself
+      expect(caseCreate).toHaveBeenCalledTimes(1);
+      const data = (caseCreate.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0].data;
+      expect(data['claimedCondition']).toBe(''); // junk refused; required column persisted empty-safe
+      expect(data['claimedConditions']).toEqual([]); // junk dropped from the array too
+      expect(data['claimedConditionSource']).toBe('intake');
+      expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('claim_label_junk_refused'))).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a REAL claim label passes the junk guard untouched', async () => {
+    const caseCreate = vi.fn(async () => ({ id: 'CLM-0123456789' }));
+    const tx = async (fn: (t: unknown) => unknown) => fn({
+      veteran: { findUnique: async () => ({ id: 'VET-1' }), create: async () => ({ id: 'VET-NEW' }) },
+      case: { findFirst: async () => null, create: caseCreate },
+    });
+    const db = {
+      intake: { findUnique: async () => readyIntake([]), update: vi.fn(async () => ({})) },
+      $transaction: tx,
+      document: { create: vi.fn(async () => ({ id: 'doc-x' })), delete: vi.fn(), findFirst: vi.fn().mockResolvedValue(null) },
+    };
+    await request(assignApp(db, vi.fn(async () => ({})))).post('/api/v1/intakes/i1/assign').send({
+      veteranId: 'VET-1',
+      newCase: { id: 'CLM-0123456789', claimedCondition: 'Foot Dysfunction', claimType: 'initial' },
+    }).expect(200);
+    const data = (caseCreate.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0].data;
+    expect(data['claimedCondition']).toBe('Foot Dysfunction');
+    expect(data['claimedConditions']).toEqual(['Foot Dysfunction']);
   });
 
   it('409s when the intake is not ready', async () => {

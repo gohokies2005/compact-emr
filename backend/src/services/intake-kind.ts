@@ -16,6 +16,7 @@ export type IntakeKind = 'stage1' | 'additional_docs' | 'stage2';
 // title match below takes precedence; this map is the fallback when the title is blank/ambiguous.
 const KNOWN_FORMS: Record<string, IntakeKind> = {
   '261180463266153': 'stage1',        // First-time intake (LIVE)
+  '261928293758069': 'stage1',        // FB Fast-Track intake (LIVE) — title doesn't match the stage-1 regex, ID map is load-bearing
   '261495407772061': 'stage1',        // Returning-client no-fee intake (LIVE)
   '260898029223159': 'stage1',        // Old main Stage-1 intake (DISABLED, historical rows)
   '261178428720156': 'stage2',        // Stage-2 master (LIVE)

@@ -104,6 +104,8 @@ export type IntakeKind = 'stage1' | 'additional_docs' | 'stage2';
 // the condition forms to match-veteran + new claim.
 const KNOWN_FORMS: Record<string, IntakeKind> = {
   '260898029223159': 'stage1',        // Main Stage-1 intake (new veteran + initial claim)
+  '261180463266153': 'stage1',        // Paid first-time intake (LIVE)
+  '261928293758069': 'stage1',        // FB Fast-Track intake (LIVE) — title doesn't match the stage-1 regex, ID map is load-bearing
   '261495407772061': 'stage1',        // Returning-client intake (new veteran/claim in a fresh EMR)
   '260804641700146': 'additional_docs', // Additional Records upload (existing veteran + existing claim)
   '261483559233058': 'stage2',        // Stage-2 condition form (carries Stage-1 demographics)

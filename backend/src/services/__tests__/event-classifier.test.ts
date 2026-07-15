@@ -5,13 +5,17 @@
 // is parsed against a wrong enum. The forced-tool schema's event_canonical enum is asserted equal to
 // the vendored EVENT_ENUM so the schema can never diverge from the deterministic floor.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import type Anthropic from '@anthropic-ai/sdk';
 import {
   EXTRACT_TOOL_EVENTS,
   EVENT_CLASSIFIER_SYSTEM_PROMPT,
+  CLASSIFIER_MAX_INPUT_CHARS,
   eventEnum,
+  segmentChartText,
+  classifyEvents,
   verifyAndNormalize,
   mergeDedupe,
   type RawClassifiedEvent,
@@ -185,5 +189,156 @@ describe('mergeDedupe', () => {
     expect(mergeDedupe([], llm)).toHaveLength(1);
     expect(mergeDedupe(undefined, undefined)).toEqual([]);
     expect(mergeDedupe(llm, [])).toHaveLength(1);
+  });
+});
+
+// ───────────────────────── segmentation (Kimbrough >1M-token fix) ─────────────────────────
+
+describe('segmentChartText', () => {
+  it('returns the whole text as ONE segment when it fits under the cap', () => {
+    const text = '[p.1] short page\n[p.2] another';
+    expect(segmentChartText(text, 1_000)).toEqual([text]);
+  });
+
+  it('splits at [p.N] page-marker boundaries with FULL coverage (join === original) and every segment ≤ cap', () => {
+    const pages = Array.from({ length: 6 }, (_, i) => `[p.${i + 1}] ${'x'.repeat(20)}`);
+    const text = pages.join('\n'); // each block ~27 chars incl. trailing '\n'
+    const segments = segmentChartText(text, 60);
+    expect(segments.length).toBeGreaterThan(1);
+    expect(segments.join('')).toBe(text); // full coverage — nothing dropped or duplicated
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(60);
+    // every segment after the first starts at a page marker (never mid-page)
+    for (const s of segments.slice(1)) expect(s).toMatch(/^\[p\.\d+\]/);
+  });
+
+  it('hard-slices marker-less text (fallback) with full coverage', () => {
+    const text = 'no page markers here '.repeat(20); // 420 chars
+    const segments = segmentChartText(text, 100);
+    expect(segments.length).toBe(5);
+    expect(segments.join('')).toBe(text);
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(100);
+  });
+
+  it('hard-slices a SINGLE oversized page block while keeping neighbors on marker boundaries', () => {
+    const text = `[p.1] small\n[p.2] ${'y'.repeat(300)}\n[p.3] tail`;
+    const segments = segmentChartText(text, 100);
+    expect(segments.join('')).toBe(text);
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(100);
+  });
+
+  it('handles empty input', () => {
+    expect(segmentChartText('', 100)).toEqual([]);
+  });
+});
+
+// ───────────────────────── classifyEvents call-shape (mocked client) ─────────────────────────
+
+function toolUseResponse(events: RawClassifiedEvent[]): unknown {
+  return {
+    stop_reason: 'tool_use',
+    content: [{ type: 'tool_use', name: 'record_in_service_events', input: { events } }],
+  };
+}
+
+function mockAnthropic(create: ReturnType<typeof vi.fn>): Anthropic {
+  return { messages: { create } } as unknown as Anthropic;
+}
+
+// Build an over-cap chart: `pageTexts[i]` becomes page i+1, each padded to `padTo` chars of filler.
+function bigChart(pageTexts: string[], padTo: number): string {
+  return pageTexts
+    .map((t, i) => `[p.${i + 1}] ${t} ${'lorem ipsum dolor '.repeat(Math.ceil(padTo / 18)).slice(0, padTo)}`)
+    .join('\n');
+}
+
+describe('classifyEvents — below-cap single-call path (byte-identical no-regression pin)', () => {
+  it('under the cap → exactly ONE model call whose request is BYTE-IDENTICAL to the pre-segmentation shape', async () => {
+    const chartText = '[p.1] Veteran reports his ears rang for days after the range.\n[p.2] No hearing protection on the flight line.';
+    expect(chartText.length).toBeLessThanOrEqual(CLASSIFIER_MAX_INPUT_CHARS);
+    const create = vi.fn(async () => toolUseResponse([
+      { event_canonical: 'mos_acoustic_noise', evidence_span: 'ears rang for days after the range', confidence: 'high' },
+    ]));
+    const out = await classifyEvents({ chartText, anthropic: mockAnthropic(create) });
+    expect(create).toHaveBeenCalledTimes(1);
+    // The FULL request object, field for field — the exact request the pre-fix code sent. Any drift
+    // here is a below-cap regression.
+    expect((create.mock.calls[0] as unknown as [unknown])[0]).toEqual({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      system: EVENT_CLASSIFIER_SYSTEM_PROMPT,
+      tools: [EXTRACT_TOOL_EVENTS],
+      tool_choice: { type: 'tool', name: 'record_in_service_events' },
+      messages: [{ role: 'user', content: `RECORD TEXT:\n${chartText}` }],
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0]!.event_canonical).toBe('mos_acoustic_noise');
+  });
+
+  it('below-cap API failure still abstains to [] (fail-open contract unchanged)', async () => {
+    const create = vi.fn(async () => { throw new Error('prompt is too long'); });
+    const out = await classifyEvents({ chartText: '[p.1] some text', anthropic: mockAnthropic(create) });
+    expect(out).toEqual([]);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('classifyEvents — over-cap segmentation path', () => {
+  // ~2× the cap: 3 pages of ~cap*0.45 chars each → 2 segments at marker boundaries.
+  const PAD = Math.ceil(CLASSIFIER_MAX_INPUT_CHARS * 0.45);
+  const NOISE = 'his ears rang for days after the range';
+  const COLD = 'my feet rotted in my boots in the field';
+
+  it('runs N sequential calls (one per segment) and first-wins dedupes by event_canonical across segments', async () => {
+    // NOISE appears in page 1 (segment 1) AND page 3 (segment 2); COLD only in page 3 (segment 2).
+    const chartText = bigChart([NOISE, 'nothing here', `${NOISE} and ${COLD}`], PAD);
+    expect(chartText.length).toBeGreaterThan(CLASSIFIER_MAX_INPUT_CHARS);
+    const create = vi.fn()
+      .mockResolvedValueOnce(toolUseResponse([
+        { event_canonical: 'mos_acoustic_noise', evidence_span: NOISE, confidence: 'high' },
+      ]))
+      .mockResolvedValueOnce(toolUseResponse([
+        { event_canonical: 'mos_acoustic_noise', evidence_span: NOISE, confidence: 'low' }, // dup → dropped
+        { event_canonical: 'cold_injury', evidence_span: COLD, confidence: 'medium' },
+      ]));
+    const out = await classifyEvents({ chartText, anthropic: mockAnthropic(create) });
+    expect(create).toHaveBeenCalledTimes(2);
+    // Each call carried its OWN segment, and the segments tile the original text.
+    const sentTexts = create.mock.calls.map((c) => (c[0] as { messages: [{ content: string }] }).messages[0].content.slice('RECORD TEXT:\n'.length));
+    expect(sentTexts.join('')).toBe(chartText);
+    expect(out).toHaveLength(2);
+    const noise = out.find((e) => e.event_canonical === 'mos_acoustic_noise')!;
+    expect(noise.confidence).toBe('high'); // segment 1's copy won (first-wins)
+    expect(out.some((e) => e.event_canonical === 'cold_injury')).toBe(true);
+  });
+
+  it('verifies each segment against its OWN text — a span lifted from another segment is dropped', async () => {
+    const chartText = bigChart([NOISE, 'nothing here', COLD], PAD);
+    const create = vi.fn()
+      // Call 1 (segment 1): COLD is NOT in segment 1 → grounding must drop it there.
+      .mockResolvedValueOnce(toolUseResponse([
+        { event_canonical: 'cold_injury', evidence_span: COLD, confidence: 'high' },
+        { event_canonical: 'mos_acoustic_noise', evidence_span: NOISE, confidence: 'high' },
+      ]))
+      // Call 2 (segment 2): COLD is on-page here → survives.
+      .mockResolvedValueOnce(toolUseResponse([
+        { event_canonical: 'cold_injury', evidence_span: COLD, confidence: 'medium' },
+      ]));
+    const out = await classifyEvents({ chartText, anthropic: mockAnthropic(create) });
+    expect(out).toHaveLength(2);
+    const cold = out.find((e) => e.event_canonical === 'cold_injury')!;
+    expect(cold.confidence).toBe('medium'); // the SEGMENT-2 grounded copy, not segment 1's ungrounded claim
+  });
+
+  it('one segment THROWING still returns the other segments\' events (per-segment fail-open)', async () => {
+    const chartText = bigChart(['nothing here', 'still nothing', COLD], PAD);
+    const create = vi.fn()
+      .mockRejectedValueOnce(new Error('529 overloaded'))
+      .mockResolvedValueOnce(toolUseResponse([
+        { event_canonical: 'cold_injury', evidence_span: COLD, confidence: 'high' },
+      ]));
+    const out = await classifyEvents({ chartText, anthropic: mockAnthropic(create) });
+    expect(create).toHaveBeenCalledTimes(2); // the failure did not abort the loop
+    expect(out).toHaveLength(1);
+    expect(out[0]!.event_canonical).toBe('cold_injury');
   });
 });

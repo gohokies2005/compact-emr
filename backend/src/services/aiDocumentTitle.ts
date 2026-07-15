@@ -348,7 +348,7 @@ export function withCollisionSuffix(filename: string, existing: ReadonlySet<stri
 export interface TitlePersistResult {
   readonly documentId: string;
   readonly updated: boolean;
-  readonly skipped?: 'not_found' | 'already_titled' | 'no_text' | 'model_null' | 'error';
+  readonly skipped?: 'not_found' | 'system_artifact' | 'already_titled' | 'no_text' | 'model_null' | 'error';
   readonly autoTitle?: string;
   readonly docType?: string;
   readonly oldFilename?: string;
@@ -392,6 +392,16 @@ export async function generateAndPersistDocumentTitle(
     select: { id: true, filename: true, s3Key: true, autoTitle: true, caseId: true, case: { select: { veteran: { select: { lastName: true } } } } },
   });
   if (doc === null) return { documentId, updated: false, skipped: 'not_found' };
+  // NEVER RETITLE OUR OWN GENERATED ARTIFACTS (dup-mint incident 2026-07-14): the titler renaming the
+  // generated Intake_Summary.pdf's filename defeated the assign-time idempotency guard (which matched
+  // on filename equality) → duplicate summary mints ×2-4 on 7 cases incl. paid. System mints carry a
+  // reserved, immutable s3Key ('-Intake_Summary.pdf' suffix — the same anchor cases.ts /
+  // chart-readiness.ts / key-docs-classifier.ts trust; 'Doctor_Pack' for assembled packs): recognize
+  // it FIRST and skip before any model spend. The mint guard now matches on s3Key too — this is
+  // defense-in-depth plus cost hygiene, and applies even under `force`.
+  if (doc.s3Key.endsWith('-Intake_Summary.pdf') || doc.s3Key.includes('Doctor_Pack')) {
+    return { documentId, updated: false, skipped: 'system_artifact' };
+  }
   if (typeof doc.autoTitle === 'string' && doc.autoTitle.trim().length > 0 && opts.force !== true) {
     return { documentId, updated: false, skipped: 'already_titled' };
   }

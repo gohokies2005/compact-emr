@@ -177,7 +177,16 @@ export function createCaseViabilityRouter(db: AppDb): Router {
           const decision = decideServeStored(storedRow, fingerprint);
           if (decision) {
             if (decision.refresh && !firedRecompute && !draftingNow) void fireRecomputeViability(caseId);
-            res.json({ data: decision.note, fingerprint, stale: false, cached: true, grounded: routePickerFraming !== null, routePickerFraming });
+            // HONEST STALE FLAG (Ryan 2026-07-14, no-hard-refresh fix). This branch used to hardcode
+            // stale:false even when decision.refresh said the stored note's fingerprint had DRIFTED off the
+            // live inputs (an RN edit / a finished extraction) — so the FE's pollOnly auto-refresh loop never
+            // armed and the RN needed a hard refresh to see the recomputed note. Report the drift honestly so
+            // the card shows "Updating…" + polls until the background recompute (fired above / by the PATCH)
+            // lands the refreshed note. DRAFTING FREEZE KEPT INTACT: while status='drafting' the drafter
+            // rewrites the Case row every few seconds, so the fingerprint drifts artificially — reporting
+            // stale then would spin the chip/poll for the whole draft (the chip-wobble storm). Never stale
+            // during drafting.
+            res.json({ data: decision.note, fingerprint, stale: decision.refresh === true && !draftingNow, cached: true, grounded: routePickerFraming !== null, routePickerFraming });
             return;
           }
         } catch { /* fail-open: fall through to the assemble/generate path below */ }

@@ -169,6 +169,51 @@ def test_all_files_good_still_works(wired):
     assert all(not m.get("skipped") for m in body["fileManifest"])
 
 
+@pytest.mark.parametrize("junk", [
+    "--EYES--",                      # Greene CLM-1E3DF51DAA: selectable dropdown section header
+    "--MUSCLES, BONES & JOINTS--",   # header with interior punctuation
+    "----",                          # bare separator
+    "",                              # empty
+    "   ",                           # whitespace-only
+    "***",                           # punctuation-only
+])
+def test_separator_junk_condition_becomes_none(junk):
+    """A dropdown section header / separator must never become submittedCondition (Greene class).
+    Jotform can't make section headers unselectable, so the guard lives here — PURELY deterministic."""
+    parsed = handler._parse_submission({
+        "answers": {
+            "1": {"type": "control_dropdown", "name": "condition", "text": "Condition", "answer": junk},
+        },
+    })["parsed"]
+    assert parsed["condition"] is None
+
+
+@pytest.mark.parametrize("real", [
+    "Tinnitus (bilateral)",
+    "L5-S1 radiculopathy",            # interior dash — must NOT trip the separator pattern
+    "Post-traumatic stress disorder",  # leading-word dashes — must NOT trip either
+])
+def test_real_conditions_pass_through_unchanged(real):
+    parsed = handler._parse_submission({
+        "answers": {
+            "1": {"type": "control_dropdown", "name": "condition", "text": "Condition", "answer": real},
+        },
+    })["parsed"]
+    assert parsed["condition"] == real
+
+
+def test_junk_header_then_real_condition_field_wins():
+    """If the header slipped into one condition-ish field, a later REAL condition answer still fills
+    the slot (the or-chain no longer gets stuck on the junk value)."""
+    parsed = handler._parse_submission({
+        "answers": {
+            "1": {"type": "control_dropdown", "name": "condition_section", "text": "Condition", "answer": "--EYES--"},
+            "2": {"type": "control_textbox", "name": "condition_detail", "text": "Condition detail", "answer": "Dry eye syndrome"},
+        },
+    })["parsed"]
+    assert parsed["condition"] == "Dry eye syndrome"
+
+
 def test_streaming_does_not_buffer_whole_file_in_ram(wired):
     """The cap is enforced MID-stream (CappedReader), proving we stream rather than read() into RAM."""
     fake_s3, _ = wired

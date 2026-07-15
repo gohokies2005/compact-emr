@@ -11,8 +11,10 @@ import { parseVeteranCreate } from '../services/veteran-validation.js';
 import { parseCaseCreate } from '../services/case-validation.js';
 import { assignChartFilenames } from '../services/chart-filename.js';
 import { fillIntakeDerived, deriveIntakeFields } from '../services/intake-derive.js';
+import { isInvalidClaimLabel } from '../services/generic-claim-label.js';
 import { renderIntakeSummaryPdf } from '../services/intake-summary-pdf.js';
 import { writeDocumentPages } from '../services/document-pages-writer.js';
+import { maybeEnqueueChartExtract } from '../services/chart-extract-trigger.js';
 import { uploadReviewConversion } from '../services/google-ads-conversions.js';
 import { uploadReviewConversionMeta } from '../services/meta-conversions.js';
 
@@ -245,6 +247,17 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
         cond = (c as { claimedCondition?: string }).claimedCondition ?? '';
       } else if (body['newCase'] !== undefined && body['newCase'] !== null) {
         const parsed = parseCaseCreate(body['newCase']);
+        // TIER-A JUNK-LABEL GUARD (Greene `--EYES--`, 2026-07-14): a Jotform dropdown SEPARATOR row /
+        // punctuation-only drawer value must never persist as the claimed condition. claimedCondition
+        // is a REQUIRED column (String, no null in the schema), so persist '' — empty-safe everywhere
+        // downstream: isGenericClaimLabel('') === false (no AI-narrow misfire),
+        // abbreviateConditionForFile('') → 'Claim' (chart filenames), and the RN edits the claim on
+        // the case page as usual. Junk entries are also dropped from the claimedConditions array.
+        if (isInvalidClaimLabel(parsed.claimedCondition)) {
+          console.warn(JSON.stringify({ msg: 'claim_label_junk_refused', caseId: parsed.id, submitted: parsed.claimedCondition }));
+          parsed.claimedCondition = '';
+          parsed.claimedConditions = (parsed.claimedConditions ?? []).filter((x) => !isInvalidClaimLabel(x));
+        }
         const created = await tx.case.create({ data: {
           ...(derived.veteranTheory ? { veteranStatement: derived.veteranTheory } : {}),
           // The veteran's own stated secondary link -> upstream anchor + framing, so the case isn't
@@ -335,7 +348,10 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
         });
         if (intakePages.length > 0) {
           const pageCount = intakePages[0]?.pageCount ?? intakePages.length;
-          await writeDocumentPages(db, docId, intakePages.map((p) => ({ pageNumber: p.pageNumber, text: p.text, confidence: p.confidence })), pageCount);
+          // suppressChartExtractTrigger: BATCH BARRIER (Ryan 2026-07-14, $146 incident) — each per-file
+          // page write used to fire its own enqueue over a grown doc set (fresh triggerHash → one PAID
+          // extraction PER FILE; 22 runs in 49s on CLM-BBEE61BB70). One enqueue fires after the loop.
+          await writeDocumentPages(db, docId, intakePages.map((p) => ({ pageNumber: p.pageNumber, text: p.text, confidence: p.confidence })), pageCount, { suppressChartExtractTrigger: true });
         }
       } catch (err) {
         // Non-fatal — fall through to live OCR. Surface the reason (per-item-catch rule).
@@ -355,16 +371,26 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     // "why connected" narrative) reaches the chart, even when the submission carried no file uploads.
     // Same row-first-then-write discipline as the file copies so ocr-start resolves it by s3-key.
     const rawAnswers = (intake as { rawAnswersJson?: unknown }).rawAnswersJson;
-    // IDEMPOTENCY GUARD (Dick/Mittge stuck-gate, 2026-06-26). This handler ALWAYS minted a fresh
-    // Intake_Summary.pdf (new random s3Key). If it ran twice for the SAME case (re-assign / retry /
-    // two operators), a SECOND Intake_Summary.pdf was created; its ObjectCreated→ocr-start added a new
-    // `read` file_read_status row AFTER extraction had completed, drifting the chart-build trigger
-    // hash so the readiness gate stuck on `extracting` forever (no run matched the new hash). Skip the
-    // mint when this case already has an Intake_Summary.pdf — one summary per case, stable hash.
+    // IDEMPOTENCY GUARD (Dick/Mittge stuck-gate, 2026-06-26; s3Key-suffix form 2026-07-14). This
+    // handler ALWAYS minted a fresh Intake_Summary.pdf (new random s3Key). If it ran twice for the
+    // SAME case (re-assign / retry / two operators), a SECOND Intake_Summary.pdf was created; its
+    // ObjectCreated→ocr-start added a new `read` file_read_status row AFTER extraction had completed,
+    // drifting the chart-build trigger hash so the readiness gate stuck on `extracting` forever (no
+    // run matched the new hash). Skip the mint when this case already has a summary — one per case,
+    // stable hash.
+    // MATCH ON THE IMMUTABLE s3Key SUFFIX, NOT filename equality (dup-mint ×2-4 on 7 cases incl.
+    // paid, 2026-07-14): the AI titler renames Document.filename, which defeated the old
+    // filename==='Intake_Summary.pdf' check and re-minted on every re-assign. s3Key is never
+    // rewritten, and the generated summary is minted ONLY with the reserved '-Intake_Summary.pdf'
+    // suffix (cases.ts, chart-readiness.ts and key-docs-classifier.ts anchor on this same suffix).
+    // NOTE: ANY prior summary blocks a re-mint — a Stage-2 assign onto a case that already has the
+    // Stage-1 summary SKIPS. That is the CURRENT intended one-summary-per-case behavior (per the
+    // Dick/Mittge hash-drift guard); the per-intake key below merely future-proofs a
+    // Stage-2-mints-its-own design if that ever changes.
     const existingSummary = rawAnswers && typeof rawAnswers === 'object'
       ? await (docDb.document as unknown as {
-          findFirst: (a: { where: { caseId: string; filename: string }; select: { id: true } }) => Promise<{ id: string } | null>;
-        }).findFirst({ where: { caseId, filename: 'Intake_Summary.pdf' }, select: { id: true } })
+          findFirst: (a: { where: { caseId: string; s3Key: { endsWith: string } }; select: { id: true } }) => Promise<{ id: string } | null>;
+        }).findFirst({ where: { caseId, s3Key: { endsWith: '-Intake_Summary.pdf' } }, select: { id: true } })
       : null;
     if (existingSummary) {
       console.info(`[intake-summary] case ${caseId} already has an Intake_Summary.pdf (${existingSummary.id}); skipping duplicate mint (hash-drift guard).`);
@@ -373,7 +399,11 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
       // Fixed, distinctive name (no veteran lastname) so the chart-readiness exclusion can match the
       // GENERATED summary precisely (key ends '-Intake_Summary.pdf') and never a real uploaded record
       // that happens to be a "Nursing Intake Summary". (Architect QA finding #5.)
-      const summaryKey = `cases/${caseId}/${randomUUID()}-Intake_Summary.pdf`;
+      // Key prefix = the INTAKE id (not a random UUID, 2026-07-14): deterministic per intake, so a
+      // retried mint for the same intake lands on the same key, and a future Stage-2-mints-its-own
+      // design gets a distinct key per intake for free. The '-Intake_Summary.pdf' SUFFIX is the
+      // load-bearing contract — keep it EXACT.
+      const summaryKey = `cases/${caseId}/${intakeId}-Intake_Summary.pdf`;
       let summaryDocId: string | undefined;
       try {
         const im = intake as unknown as { submittedName?: string | null; submittedFormTitle?: string | null; submittedAt?: Date | string | null };
@@ -391,9 +421,23 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
         await s3.send(new PutObjectCommand({ Bucket: deps.bucketName, Key: summaryKey, Body: Buffer.from(pdf), ContentType: 'application/pdf', ServerSideEncryption: 'aws:kms' }));
         attached.push({ name: 'Intake_Summary.pdf', s3Key: summaryKey });
       } catch (err) {
+        // Log server-side too (2026-07-14) — this previously surfaced ONLY in the HTTP response's
+        // `failed` array, invisible to log-based triage of missing summaries.
+        console.error(JSON.stringify({ msg: 'intake_summary_mint_failed', caseId, intakeId, error: err instanceof Error ? err.message : String(err) }));
         if (summaryDocId) await docDb.document.delete({ where: { id: summaryDocId } }).catch(() => { /* best-effort */ });
         failed.push({ name: 'Intake_Summary.pdf', reason: `could not generate intake summary: ${err instanceof Error ? err.message : String(err)}` });
       }
+    }
+
+    // 2c) SINGLE chart-extract enqueue for the whole assign batch (the other half of the batch
+    // barrier in 2's per-file writeDocumentPages suppress). If the summary PDF (2b) is still mid-OCR
+    // this returns 'ocr_in_progress' and the summary's own /pages completion fires the real enqueue —
+    // either way exactly ONE run for the assign, never one per file. Log-only: never fails the assign.
+    try {
+      const trig = await maybeEnqueueChartExtract(db, caseId);
+      console.info(JSON.stringify({ msg: 'assign_batch_chart_extract_trigger', caseId, enqueued: trig.enqueued, ...(trig.reason !== undefined && { reason: trig.reason }) }));
+    } catch (err) {
+      console.error(JSON.stringify({ msg: 'assign_batch_chart_extract_trigger_failed', caseId, error: err instanceof Error ? err.message : String(err) }));
     }
 
     // 3) Mark 'assigned' once the work is genuinely complete — but DON'T silently swallow a total

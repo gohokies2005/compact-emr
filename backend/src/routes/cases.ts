@@ -24,6 +24,7 @@ import { computeApproveBlockers, type ApproveBlocker, type ApproveBlockerDeps } 
 import { resolveCurrentRefStrict, resolveViewableCurrentTxtKey, type CurrentRef } from '../services/letter-current.js';
 import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
 import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
+import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
 import * as quoClient from '../services/quoClient.js';
 
 const CASE_LITE_SELECT = {
@@ -623,6 +624,13 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
       const id = String(req.params.id);
       const parsed = parseCasePatch(req.body);
 
+      // Invalidate the persisted AI route-picker plan when an input-affecting field is edited, so Ask
+      // Aegis never narrates a stale plan as the "anticipated drafter framing" (QA 2026-06-19 blocker).
+      // Computed OUTSIDE the transaction (pure over changedFields) so the post-commit recompute dispatch
+      // below can key on the same decision. (The reader also has a claimed-condition staleness guard.)
+      const PLAN_INPUT_FIELDS = ['claimedCondition', 'framingChoice', 'upstreamScCondition', 'inServiceEvent', 'veteranStatement'];
+      const invalidatesPlan = parsed.changedFields.some((f) => PLAN_INPUT_FIELDS.includes(f));
+
       const updated = await db.$transaction(async (tx) => {
         const existing = await tx.case.findFirst({ where: { id }, select: { id: true, veteranId: true, version: true, claimedConditions: true } });
         if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
@@ -654,13 +662,6 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         // stamp 'manual' so the AI-narrow step (and any automated writer) can NEVER overwrite it afterwards.
         const touchesClaim = parsed.changedFields.includes('claimedCondition');
 
-        // Invalidate the persisted AI route-picker plan when an input-affecting field is edited, so Ask
-        // Aegis never narrates a stale plan as the "anticipated drafter framing" (QA 2026-06-19 blocker).
-        // The Overview card re-computes + re-persists on next view; until then the advisory falls back to
-        // its corpus-only answer. (The reader also has a claimed-condition staleness guard as backstop.)
-        const PLAN_INPUT_FIELDS = ['claimedCondition', 'framingChoice', 'upstreamScCondition', 'inServiceEvent', 'veteranStatement'];
-        const invalidatesPlan = parsed.changedFields.some((f) => PLAN_INPUT_FIELDS.includes(f));
-
         const row = await tx.case.update({
           where: { id },
           data: {
@@ -686,6 +687,23 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
 
         return row;
       });
+
+      // PROPAGATE THE EDIT WITHOUT A HARD REFRESH (Ryan 2026-07-14). The transaction above NULLED the
+      // persisted plan when a PLAN_INPUT_FIELD changed, but nothing regenerated it — it only happened lazily
+      // on the next card open, so the RN's edit never propagated to the SOAP/chip until a manual reload.
+      // Fire the SAME off-request recompute the card's open path uses (fire-and-forget, log-only failure —
+      // the PATCH response never blocks/fails on it). DRAFTING FREEZE KEPT: while status='drafting' the
+      // drafter mutates the Case row constantly; auto-fired recomputes then are the documented chip-wobble
+      // storm, so we skip (the next open after drafting recomputes normally).
+      if (invalidatesPlan && (updated as { status?: string }).status !== 'drafting') {
+        try {
+          void fireRecomputeViability(id).catch((e: unknown) => {
+            console.warn(JSON.stringify({ msg: 'case-patch: recompute dispatch failed open', caseId: id, error: e instanceof Error ? e.message : String(e) }));
+          });
+        } catch (e) {
+          console.warn(JSON.stringify({ msg: 'case-patch: recompute dispatch failed open', caseId: id, error: e instanceof Error ? e.message : String(e) }));
+        }
+      }
 
       res.json({ data: withRecordsSignal(updated as unknown as Record<string, unknown>) });
     }),

@@ -12,8 +12,14 @@ import io
 
 import pytest
 from pypdf import PdfReader, PdfWriter
+from pypdf._crypt_providers import crypt_provider
 
 from assemble import PACK_HARD_PAGE_CAP, assemble_pack
+
+# True when a real crypto provider (cryptography / pycryptodome) is importable locally. The VENDORED
+# Crypto/ in this dir is manylinux (Lambda) — it cannot import on Windows/mac, so local runs need
+# e.g. `pip install cryptography` for the encrypted-PDF test; it skips otherwise.
+CRYPTO_AVAILABLE = crypt_provider[0] != "local_crypt_fallback"
 
 
 def make_pdf(n: int) -> bytes:
@@ -70,7 +76,87 @@ def test_non_pdf_source_is_skipped_not_fatal():
     writer = PdfWriter()
     outcome = assemble_pack(writer, entries, fetch_from(sources))
     assert outcome["skipped_non_pdf"] == 1
+    assert outcome["skipped_unreadable_pdf"] == 0
     assert len(writer.pages) == 1  # only the cover
+
+
+# ---------------------------------------------------------------------------------------------------
+# Unreadable-PDF isolation (Kimbrough class, 2026-07): a source whose PdfReader raises — encrypted
+# without a crypto provider, corrupt body behind a valid %PDF- header — is skipped-not-fatal. Later
+# entries still merge, the counter increments, and the skipped entry's cover link/outline child is
+# DROPPED (its start index equals the NEXT entry's start, so a stamped link would hit the wrong doc).
+# ---------------------------------------------------------------------------------------------------
+
+def test_unreadable_pdf_entry_skipped_later_entries_still_merge():
+    # Valid %PDF- header (passes the non-PDF sniff) but garbage body -> PdfReader raises.
+    corrupt = b"%PDF-1.7 this is not really a pdf body, no xref, no EOF"
+    sources = {
+        "cover.pdf": make_pdf(1),
+        "corrupt.pdf": corrupt,
+        "doc2.pdf": make_pdf(2),
+    }
+    entries = [
+        {"filePath": "cover.pdf", "pageRanges": [{"from": 1, "to": 1}]},
+        {"filePath": "corrupt.pdf", "pageRanges": [{"from": 1, "to": 3}]},
+        {"filePath": "doc2.pdf", "pageRanges": [{"from": 1, "to": 2}]},
+    ]
+    cover_link_map = [
+        {"entryIndex": 1, "coverPageIndex": 0, "rect": [72, 700, 540, 716], "category": "clinical", "categoryLabel": "CLINICAL", "label": "Corrupt record"},
+        {"entryIndex": 2, "coverPageIndex": 0, "rect": [72, 680, 540, 696], "category": "sc_proof", "categoryLabel": "SERVICE-CONNECTION PROOF", "label": "VA rating decision"},
+    ]
+    writer = PdfWriter()
+    outcome = assemble_pack(writer, entries, fetch_from(sources), cover_link_map)
+
+    # The corrupt entry contributed zero pages: cover(1) + doc2(2).
+    assert outcome["skipped_unreadable_pdf"] == 1
+    assert outcome["skipped_non_pdf"] == 0
+    assert len(writer.pages) == 3
+    # Skipped entry's start index EQUALS the next entry's start (captured before append).
+    assert outcome["entry_start_page"] == [0, 1, 1]
+
+    # Exactly ONE link survives (the skipped entry's row is dropped) and it lands on doc2's first
+    # merged page — NOT on a page belonging to another document.
+    links = _link_annots(writer.pages[0])
+    assert len(links) == 1
+    assert _dest_target_index(writer, links[0]) == 1  # doc2 starts right after the 1-page cover
+
+    # Outline: the skipped entry's category/child is gone; doc2's parent points at page 1.
+    buf = io.BytesIO()
+    writer.write(buf)
+    buf.seek(0)
+    reader = PdfReader(buf)
+    parents = [node for node in reader.outline if not isinstance(node, list)]
+    titles = [str(p.title) for p in parents]
+    assert "SERVICE-CONNECTION PROOF" in titles
+    assert "CLINICAL" not in titles
+    assert reader.get_destination_page_number(parents[titles.index("SERVICE-CONNECTION PROOF")]) == 1
+
+
+@pytest.mark.skipif(not CRYPTO_AVAILABLE, reason="no local crypto provider (pip install cryptography)")
+def test_encrypted_empty_password_pdf_merges_normally():
+    """The Kimbrough source itself: an AES-encrypted PDF with an EMPTY user password (how VA docs
+    commonly ship). With a crypto provider vendored, pypdf's automatic empty-password decrypt makes
+    it merge like any other source — no skip, no failure."""
+    enc_writer = PdfWriter()
+    for _ in range(2):
+        enc_writer.add_blank_page(width=612, height=792)
+    enc_writer.encrypt("", algorithm="AES-256")
+    buf = io.BytesIO()
+    enc_writer.write(buf)
+    encrypted_bytes = buf.getvalue()
+    assert PdfReader(io.BytesIO(encrypted_bytes)).is_encrypted
+
+    sources = {"cover.pdf": make_pdf(1), "encrypted.pdf": encrypted_bytes}
+    entries = [
+        {"filePath": "cover.pdf", "pageRanges": [{"from": 1, "to": 1}]},
+        {"filePath": "encrypted.pdf", "pageRanges": [{"from": 1, "to": 2}]},
+    ]
+    writer = PdfWriter()
+    outcome = assemble_pack(writer, entries, fetch_from(sources))
+    assert outcome["skipped_unreadable_pdf"] == 0
+    assert outcome["skipped_non_pdf"] == 0
+    assert len(writer.pages) == 3  # cover + both encrypted pages
+    assert outcome["entry_start_page"] == [0, 1]
 
 
 # ---------------------------------------------------------------------------------------------------

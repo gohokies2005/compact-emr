@@ -64,11 +64,23 @@ export interface WriteDocumentPagesResult {
  * bridge are one transaction; the chart-extract enqueue runs AFTER commit in a log-only catch so it
  * can never roll back the OCR write.
  */
+export interface WriteDocumentPagesOptions {
+  /**
+   * Batch-assign barrier (Ryan 2026-07-14 — the $146 duplicate-extraction incident): the intake-assign
+   * loop copies N parse-at-intake files serially, and each per-file page write used to fire its own
+   * chart-extract enqueue with an all-terminal-but-GROWN doc set → a fresh triggerHash per file → one
+   * PAID extraction per file (22 runs in 49s on CLM-BBEE61BB70). The assign loop sets this so the
+   * per-file writes stay trigger-silent and the caller fires ONE enqueue after the last file lands.
+   */
+  readonly suppressChartExtractTrigger?: boolean;
+}
+
 export async function writeDocumentPages(
   db: AppDb,
   documentId: string,
   pages: readonly DocumentPageInput[],
   documentPageCount: number | null,
+  opts: WriteDocumentPagesOptions = {},
 ): Promise<WriteDocumentPagesResult> {
   const now = new Date();
 
@@ -216,8 +228,9 @@ export async function writeDocumentPages(
   }, { timeout: 30_000, maxWait: 10_000 });
 
   // Chart auto-extract trigger runs AFTER the page-write COMMITS, log-only so it can never roll back
-  // the OCR write. Fires exactly once per (case, doc-set) once all docs are OCR-terminal.
-  if (result.caseId !== null) {
+  // the OCR write. Fires exactly once per (case, doc-set) once all docs are OCR-terminal. The assign
+  // loop suppresses this per-file and fires ONE enqueue after its last file (see WriteDocumentPagesOptions).
+  if (result.caseId !== null && opts.suppressChartExtractTrigger !== true) {
     try {
       await maybeEnqueueChartExtract(db, result.caseId);
     } catch (err) {

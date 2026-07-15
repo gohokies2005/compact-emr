@@ -185,6 +185,12 @@ export interface SoapNote {
   readonly plan: string;
   readonly confidence: 'high' | 'moderate' | 'low';
   readonly action: 'draft' | 'get_records' | 'clarify' | 'physician_review' | 'reject';
+  /** CHIP DISAMBIGUATOR (Ryan 2026-07-14): the route-picker band the note was grounded on. 'marginal' and
+   *  'needs_physician_review' both persist action 'physician_review', but the chip renders marginal AMBER
+   *  ("Draftable — thin case") and needs_physician_review GREEN ("Ready to draft — doctor confirms theory at
+   *  signing"). Absent on older stored notes / ungrounded notes → the chip uses the green treatment (same
+   *  band family). Display-only. */
+  readonly viabilityBand?: RoutePickerViability;
   /** Deterministic grounding guard: a clinical value in the note not found in the source facts (verify). */
   readonly caveat?: string | null;
   /** Condition-relevant objective hard data pulled from the chart (#63). Absent/empty → no measurements line. */

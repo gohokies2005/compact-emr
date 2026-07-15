@@ -676,6 +676,63 @@ export class ApiStack extends Stack {
     });
     chartBuildStalledAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
 
+    // ===== chart-extract runaway-spend alarms (the $146/68-run incident, 2026-07-14) =====
+    // 68 duplicate PAID extractions ran in 18h with the DLQ empty and zero alarms — the per-file
+    // assign-loop detonation (INCIDENTS.md 2026-07-14). Two layers, both from the API log group
+    // (maybeEnqueueChartExtract runs in this Lambda for every producer):
+    // (a) BUDGET REFUSED — the hard per-case cap in chart-extract-trigger.ts refused a non-forced
+    //     enqueue past 6 runs/case/hour. ANY occurrence = an active runaway producer being contained;
+    //     page immediately so the producer bug gets fixed, not just contained.
+    const budgetRefusedFilter = new logs.MetricFilter(this, 'ChartExtractBudgetRefusedFilter', {
+      logGroup: apiLogGroup,
+      metricNamespace: `compact-emr-${props.config.envName}`,
+      metricName: 'ChartExtractBudgetRefused',
+      filterPattern: logs.FilterPattern.literal('{ $.event = "chart_extract_budget_refused" }'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const budgetRefusedAlarm = new cloudwatch.Alarm(this, 'ChartExtractBudgetRefusedAlarm', {
+      alarmName: `compact-emr-${props.config.envName}-chart-extract-budget-refused`,
+      alarmDescription:
+        'ACTION NEEDED — a case hit the hard chart-extraction budget (6 runs/hour) and further paid ' +
+        'runs were REFUSED. The spend is contained, but something is re-triggering extraction in a ' +
+        'loop (the class that burned $146 on 2026-07-14). Find the caseId in the ' +
+        `chart_extract_budget_refused line in /aws/lambda/compact-emr-${props.config.envName}-api and ` +
+        'fix the producer; a deliberate re-extract past the cap still works via force-extract.',
+      metric: budgetRefusedFilter.metric({ statistic: 'Sum', period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    budgetRefusedAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+    // (b) ENQUEUE RATE — coarse account-wide backstop for runaway shapes the per-case budget can't
+    //     see (many cases at once). Normal volume is a handful of enqueues/hour; 15+/hr ≈ the 7/14
+    //     flood's shape. chart_extract_enqueued is logged on EVERY successful enqueue (loud-success
+    //     line added in the same incident).
+    const extractEnqueuedFilter = new logs.MetricFilter(this, 'ChartExtractEnqueuedFilter', {
+      logGroup: apiLogGroup,
+      metricNamespace: `compact-emr-${props.config.envName}`,
+      metricName: 'ChartExtractEnqueued',
+      filterPattern: logs.FilterPattern.literal('{ $.event = "chart_extract_enqueued" }'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+    const extractRateAlarm = new cloudwatch.Alarm(this, 'ChartExtractEnqueueRateAlarm', {
+      alarmName: `compact-emr-${props.config.envName}-chart-extract-enqueue-rate`,
+      alarmDescription:
+        'ACTION NEEDED — 15+ paid chart extractions were enqueued in one hour (normal is a handful). ' +
+        'Either a genuinely heavy intake hour or a runaway producer across multiple cases (the 7/14 ' +
+        '$146 class). Check per-case counts of chart_extract_enqueued in ' +
+        `/aws/lambda/compact-emr-${props.config.envName}-api before assuming it is load.`,
+      metric: extractEnqueuedFilter.metric({ statistic: 'Sum', period: Duration.hours(1) }),
+      threshold: 15,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    extractRateAlarm.addAlarmAction(new cloudwatchActions.SnsAction(opsTopic));
+
     // ===== API-Lambda THROTTLES alarm (drafter scaling hardening 2026-06-29) =====
     // This one Lambda is the callback SINK for every drafter task: the Fargate worker POSTs job
     // lifecycle callbacks (/internal/drafter/jobs/:id/{progress,complete,halt}) here. Raising the drafter

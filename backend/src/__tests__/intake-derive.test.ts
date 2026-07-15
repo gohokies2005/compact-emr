@@ -53,6 +53,29 @@ describe('intake-derive', () => {
     expect(fillIntakeDerived(row).submittedDob).toBe('1990-01-01');
   });
 
+  it('refuses a JUNK condition answer (--EYES-- separator) as the drawer prefill (Greene guard)', () => {
+    // NOTE: fixture deliberately has ONLY one condition-labeled answer — the derive's loose
+    // /condition/ label match would otherwise fall back to the NEXT condition-labeled answer
+    // (e.g. the yes/no "denied for this condition?" — a pre-existing looseness, not this guard's).
+    const junk = {
+      q1: { type: 'control_textbox', name: 's2_condition_slug', text: 'Condition (from Stage 1)', answer: '--EYES--' },
+      q2: { type: 'control_email', name: 's2_confirm_email', text: 'Confirm email', answer: 'majusticemjustice@yahoo.com' },
+    };
+    const d = deriveIntakeFields(junk);
+    expect(d.condition).toBeUndefined(); // junk never offered as the prefill
+    // fillIntakeDerived consequently leaves a blank submittedCondition blank instead of junk-filling it
+    const filled = fillIntakeDerived({ id: 'i1', submittedCondition: null, rawAnswersJson: junk });
+    expect(filled.submittedCondition).toBeNull();
+  });
+
+  it('a junk condition answer does not block a LATER real condition answer from prefiling', () => {
+    const mixed = {
+      q1: { type: 'control_textbox', name: 's2_condition_slug', text: 'Condition (from Stage 1)', answer: '----' },
+      q2: { type: 'control_textbox', name: 's2_condition_final', text: 'Condition (confirmed)', answer: 'Foot Dysfunction' },
+    };
+    expect(deriveIntakeFields(mixed).condition).toBe('Foot Dysfunction');
+  });
+
   it('normalizeDob + toStateAbbr edge cases', () => {
     expect(normalizeDob('1985-8-13')).toBe('1985-08-13');
     expect(normalizeDob('August 13, 1985')).toBe('1985-08-13');

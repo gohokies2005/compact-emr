@@ -38,6 +38,17 @@ export interface ChartExtractTriggerOptions {
 // is exempt so failure-recovery can retry immediately.
 const RATE_WINDOW_MS = 5 * 60 * 1000;
 
+// HARD PER-CASE BUDGET (Ryan 2026-07-14 — "$146 in silent duplicate extractions; we need a real stop,
+// not an email"). The scoped rate guard above blocks same-hash hammers, but any producer that GROWS the
+// doc set per call (the assign loop pre-barrier; a future sweep/watcher bug) mints a fresh hash each
+// time and sails past it — 68 paid runs in 18h. This is the loop-shape-agnostic backstop: more than
+// MAX_RUNS_PER_BUDGET_WINDOW runs created for one case inside BUDGET_WINDOW_MS is not a workflow, it is
+// a runaway. Refuse NON-FORCED enqueues past the cap (loud log line feeds the runs-per-case alarm); a
+// FORCED re-extract (an explicit human action) passes the cap but still logs. Legit ceiling for real
+// work is ~2-3 runs/hr (initial + a late upload + a manual re-run) — 6 leaves generous headroom.
+const BUDGET_WINDOW_MS = 60 * 60 * 1000;
+const MAX_RUNS_PER_BUDGET_WINDOW = 6;
+
 export async function maybeEnqueueChartExtract(db: AppDb, caseId: string, opts: ChartExtractTriggerOptions = {}): Promise<{ enqueued: boolean; reason?: string }> {
   const c = (await db.case.findFirst({ where: { id: caseId } })) as { veteranId: string } | null;
   if (c === null) return { enqueued: false, reason: 'case_not_found' };
@@ -81,6 +92,19 @@ export async function maybeEnqueueChartExtract(db: AppDb, caseId: string, opts: 
       console.warn(JSON.stringify({ event: 'chart_extract_rate_limited', caseId, lastRunAgeMs: ageMs, lastStatus: recentRun.status, windowMs: RATE_WINDOW_MS, forced: opts.forceSalt !== undefined }));
       return { enqueued: false, reason: 'rate_limited_recent_run' };
     }
+  }
+
+  // HARD PER-CASE BUDGET — the loop-shape-agnostic runaway stop (see constant docs above).
+  const budgetWindowStart = new Date(Date.now() - BUDGET_WINDOW_MS);
+  const runsInWindow = await (db as unknown as {
+    chartExtractionRun: { count: (a: { where: { caseId: string; createdAt: { gte: Date } } }) => Promise<number> };
+  }).chartExtractionRun.count({ where: { caseId, createdAt: { gte: budgetWindowStart } } });
+  if (runsInWindow >= MAX_RUNS_PER_BUDGET_WINDOW) {
+    if (opts.forceSalt === undefined) {
+      console.error(JSON.stringify({ event: 'chart_extract_budget_refused', caseId, runsInWindow, windowMs: BUDGET_WINDOW_MS, cap: MAX_RUNS_PER_BUDGET_WINDOW }));
+      return { enqueued: false, reason: 'budget_refused_runaway' };
+    }
+    console.warn(JSON.stringify({ event: 'chart_extract_budget_forced_past_cap', caseId, runsInWindow, windowMs: BUDGET_WINDOW_MS, cap: MAX_RUNS_PER_BUDGET_WINDOW }));
   }
 
   const runId = randomUUID();

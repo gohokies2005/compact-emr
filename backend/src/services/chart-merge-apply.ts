@@ -10,6 +10,7 @@
  */
 
 import { planMerge, type ExistingChartRow } from './chart-merge.js';
+import { fireRecomputeViability } from './recompute-viability-trigger.js';
 import { EXTRACTED_SOURCE, EXTRACTOR_VERSION } from './chart-build-state.js';
 import type { FinalExtractedItem } from './chart-extract-llm.js';
 import type { AppDb, KeyDocType } from './db-types.js';
@@ -163,6 +164,28 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
       },
     });
   }, { timeout: 30_000, maxWait: 10_000 });
+
+  // TIER-B RECORDS-LANDED TRIGGER (2026-07-14): fire the SAME off-request recompute the viability-card
+  // open fires (fireRecomputeViability → placeholder-lambda self-invoke: narrowAndPersistClaim →
+  // deriveAiViability → precomputeSoapNoteForCase), so claim reconciliation + SOAP grounding happen the
+  // moment the extraction commits — not only when someone next opens the card. This runs in the API
+  // process (internal-worker merge callback), so the AWS_LAMBDA_FUNCTION_NAME self-invoke targets the
+  // right function, same as the card path.
+  // LOOP-SAFE by construction: nothing in the recompute job enqueues chart extraction
+  // (placeholder-lambda.ts runs narrow/plan/SOAP only — no maybeEnqueueChartExtract anywhere in that
+  // path), so an extract completion can never re-trigger an extract. Duplicate-compute-safe:
+  // deriveAiViability's own in-flight guard (a fresh 'computing' stamp for the same input hash)
+  // short-circuits, so this single dispatch per merge can't storm a compute already running.
+  // AWAITED dispatch (the InvokeCommand is itself InvocationType:'Event' — it returns as soon as the
+  // async invoke is accepted, ~ms) so a Lambda response can't freeze a floating promise; log-only
+  // catch — a dispatch failure must never fail the merge that already committed (fireRecomputeViability
+  // is additionally fail-open internally).
+  try {
+    const dispatched = await fireRecomputeViability(input.caseId);
+    console.log(JSON.stringify({ event: 'chart_merge_recompute_dispatched', caseId: input.caseId, runId: input.runId, dispatched }));
+  } catch (err) {
+    console.warn(JSON.stringify({ event: 'chart_merge_recompute_dispatch_failed', caseId: input.caseId, runId: input.runId, error: err instanceof Error ? err.message : String(err) }));
+  }
 
   return {
     autofill,

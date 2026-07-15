@@ -4,8 +4,10 @@ import {
   computeRelevanceSummary,
   isChartInputKey,
   isRenderedOutputKey,
+  selectAuthoritativeExtractionRun,
   type CoverageDocInput,
   type CoverageGap,
+  type ExtractionRunLite,
   type KeyDocClassInput,
 } from '../extraction-coverage.js';
 import type { FileReadAttempt, FileReadStatusRecord, FileTerminalStatus } from '../db-types.js';
@@ -542,5 +544,67 @@ describe('computeExtractionCoverage — relevance wiring + fail-open', () => {
     expect(cov.relevance!.allKeyDocsRead).toBe(true);
     expect(cov.relevance!.keyDocsRead.map((d) => d.fileName)).toEqual(['Rating Decision.pdf', 'STR.pdf']);
     expect(cov.relevance!.keyDocGaps).toHaveLength(0);
+  });
+});
+
+// ---- authoritative-run selection (Kimbrough CLM-41E9900FB8, 2026-07-14) -------
+// The UI's chart-analysis state must key on the AUTHORITATIVE run, not merely the latest-CREATED row.
+// During the 7/14 duplicate flood, watcher-failed duplicate rows were created AFTER the successful runs,
+// so a fully-complete chart showed "✗ analysis failed".
+
+describe('selectAuthoritativeExtractionRun — stale watcher-failure vs honest failure', () => {
+  const SHA = 'f'.repeat(64);
+  const OTHER_SHA = 'e'.repeat(64);
+  const run = (status: string, triggerHash: string | null, resultJson: unknown = null): ExtractionRunLite =>
+    ({ status, resultJson, triggerHash });
+
+  it('FLOOD SHAPE: completed at T, watcher-failed duplicate rows created later over the SAME doc set → shows COMPLETE', () => {
+    // The failed row is a forced-reprocess duplicate (`<sha>:manual:<requestId>`) of work the completed run covered.
+    const failedDup = run('failed', `${SHA}:manual:req-123`);
+    const completed = run('complete', SHA, { gaps: { uncoveredPages: 0, truncatedWindows: 0 } });
+    const chosen = selectAuthoritativeExtractionRun(failedDup, completed);
+    expect(chosen).toEqual({ status: 'complete', resultJson: { gaps: { uncoveredPages: 0, truncatedWindows: 0 } } });
+  });
+
+  it('FLOOD SHAPE end-to-end: the chosen completed run drives chartAnalysis.state = complete, never failed', () => {
+    const docs = [doc({ id: 'D1', s3Key: KEY1, pageCount: 5 })];
+    const rows = [frs({ filePath: KEY1, terminalStatus: 'read' })];
+    const chosen = selectAuthoritativeExtractionRun(
+      run('failed', `${SHA}:manual:req-9`),
+      run('complete', SHA, { gaps: { uncoveredPages: 0, truncatedWindows: 0 } }),
+    );
+    const cov = computeExtractionCoverage(docs, rows, chosen);
+    expect(cov.chartAnalysis.state).toBe('complete');
+  });
+
+  it('plain (unsuffixed) duplicate base hashes also match — completed wins', () => {
+    expect(selectAuthoritativeExtractionRun(run('failed', SHA), run('complete', `${SHA}:manual:req-1`))?.status).toBe('complete');
+  });
+
+  it('HONEST SHAPE: only failed runs (no completed run at all) → still FAILED', () => {
+    expect(selectAuthoritativeExtractionRun(run('failed', SHA), null)).toEqual({ status: 'failed', resultJson: null });
+  });
+
+  it('HONEST SHAPE: the failed run covers a STRICTLY NEWER doc set (base hash differs) → still FAILED', () => {
+    // Docs changed after the last success; the current doc set's analysis really failed — do not mask it.
+    expect(selectAuthoritativeExtractionRun(run('failed', OTHER_SHA), run('complete', SHA))?.status).toBe('failed');
+  });
+
+  it('a non-failed newest run passes straight through (running/queued/complete unchanged behavior)', () => {
+    expect(selectAuthoritativeExtractionRun(run('running', SHA), null)?.status).toBe('running');
+    expect(selectAuthoritativeExtractionRun(run('complete', SHA, { ok: 1 }), null)).toEqual({ status: 'complete', resultJson: { ok: 1 } });
+  });
+
+  it('no runs at all → null (not_analyzed resting state preserved)', () => {
+    expect(selectAuthoritativeExtractionRun(null, null)).toBeNull();
+  });
+
+  it('a defensive non-complete "completed" candidate never wins (where-clause belt-and-suspenders)', () => {
+    expect(selectAuthoritativeExtractionRun(run('failed', SHA), run('failed', SHA))?.status).toBe('failed');
+  });
+
+  it('missing/empty trigger hashes never match (conservative: honest failed)', () => {
+    expect(selectAuthoritativeExtractionRun(run('failed', null), run('complete', null))?.status).toBe('failed');
+    expect(selectAuthoritativeExtractionRun(run('failed', ''), run('complete', ''))?.status).toBe('failed');
   });
 });

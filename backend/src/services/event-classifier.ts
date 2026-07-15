@@ -235,22 +235,77 @@ const EVENT_CLASSIFIER_MODEL = process.env.EVENT_CLASSIFIER_MODEL ?? 'claude-son
 // max_tokens → ABSTAIN, events lost). 2048 gives ample headroom for ≤16 short {event, span} entries.
 const EVENT_CLASSIFIER_MAX_TOKENS = 2048;
 
+// ── segmentation (>1M-token failure fix, Kimbrough 2026-07-14) ─────────────────────────────
+// The worker joins EVERY page of every doc into ONE string; a large chart blew the 1M-token API cap
+// ("prompt is too long: 1061232 tokens > 1000000 maximum", 6× verbatim) and the fail-open catch
+// silently returned 0 events for the whole chart. Fix: over-cap input is segmented at [p.N] page-marker
+// boundaries and classified per segment; below-cap input takes the EXACT single-call path unchanged.
+// 700k chars ≈ 175-230k tokens for OCR'd medical text — far under the 1M cap with generous margin for
+// dense/token-heavy text, while keeping segment count low on real charts.
+export const CLASSIFIER_MAX_INPUT_CHARS = 700_000;
+// Hard bound on per-chart spend: at most 12 sequential Sonnet calls (~8.4M chars ≈ 2-3× the largest
+// chart seen). Beyond that we classify the first 12 segments and log LOUDLY — recall on a pathological
+// tail is worth less than an unbounded paid loop.
+export const CLASSIFIER_MAX_SEGMENTS = 12;
+
 /**
- * Run the conceded-first / LLM-residual flow over residual STR text (text NOT already covered by the
- * deterministic concession fields — the caller is responsible for passing the residual). ONE Sonnet 4.6
- * tool call, forced tool_choice, NO temperature, NO thinking. NEVER throws: on stop_reason !== 'tool_use'
- * (refusal / max_tokens / unexpected) it ABSTAINS (returns []), exactly like the chart-extract grounding
- * path treats a truncated window as "lost", never as a fatal error. Result passes through
- * verifyAndNormalize so the same enum + grounding gates apply to live output.
+ * PURE. Split chart text into segments of at most `maxChars`, cutting ONLY at `[p.N]` line-marker
+ * boundaries (the worker's page-join format: `[p.<n>] <text>` lines joined by '\n') so a page is never
+ * split mid-sentence when avoidable. FULL-COVERAGE invariant: segments.join('') === chartText — nothing
+ * is dropped or duplicated. Fallback: a single page block larger than maxChars, or marker-less text,
+ * is hard-sliced into maxChars chunks.
  */
-export async function classifyEvents(args: {
-  chartText: string;
+export function segmentChartText(chartText: string, maxChars: number): string[] {
+  if (chartText.length === 0) return [];
+  if (maxChars <= 0 || chartText.length <= maxChars) return [chartText];
+  // Page-block starts: every line beginning with "[p.<digits>]".
+  const marker = /(?:^|\n)\[p\.\d+\]/g;
+  const starts: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = marker.exec(chartText)) !== null) {
+    starts.push(m.index === 0 ? 0 : m.index + 1); // the block starts AT the marker (after the '\n')
+  }
+  // Blocks tile the whole string: [0, starts[0]) prefix, then [starts[i], starts[i+1]).
+  const blocks: string[] = [];
+  if (starts.length === 0) {
+    blocks.push(chartText); // marker-less text → one block → hard-slice below
+  } else {
+    if (starts[0]! > 0) blocks.push(chartText.slice(0, starts[0]!));
+    for (let i = 0; i < starts.length; i += 1) {
+      blocks.push(chartText.slice(starts[i]!, i + 1 < starts.length ? starts[i + 1]! : chartText.length));
+    }
+  }
+  // Greedy pack blocks into segments of ≤ maxChars; oversized single blocks hard-slice.
+  const segments: string[] = [];
+  let current = '';
+  const flush = (): void => { if (current.length > 0) { segments.push(current); current = ''; } };
+  for (const block of blocks) {
+    if (block.length > maxChars) {
+      flush();
+      for (let i = 0; i < block.length; i += maxChars) segments.push(block.slice(i, i + maxChars));
+      continue;
+    }
+    if (current.length + block.length > maxChars) flush();
+    current += block;
+  }
+  flush();
+  return segments;
+}
+
+/**
+ * One forced-tool classifier call over ONE text (the whole chart below the cap, or one segment above
+ * it). This is the EXACT pre-segmentation call — same request fields, same fail-open contract —
+ * factored out unchanged so the below-cap path stays byte-identical. NEVER throws: API error or
+ * stop_reason !== 'tool_use' → abstain ([]). Grounding runs against THIS text only, so a span the
+ * model lifted from a different segment can never survive.
+ */
+async function runClassifierCall(args: {
+  segmentText: string;
   anthropic: Anthropic;
-  model?: string;
+  model: string | undefined;
+  enumSet: ReadonlySet<string>;
 }): Promise<ClassifiedEvent[]> {
-  const { chartText, anthropic } = args;
-  if (!chartText || !chartText.trim()) return [];
-  const enumSet = new Set(loadEventCanon().EVENT_ENUM);
+  const { segmentText, anthropic } = args;
   let resp: Anthropic.Message;
   try {
     resp = await anthropic.messages.create({
@@ -259,7 +314,7 @@ export async function classifyEvents(args: {
       system: EVENT_CLASSIFIER_SYSTEM_PROMPT,
       tools: [EXTRACT_TOOL_EVENTS],
       tool_choice: { type: 'tool', name: 'record_in_service_events' },
-      messages: [{ role: 'user', content: `RECORD TEXT:\n${chartText}` }],
+      messages: [{ role: 'user', content: `RECORD TEXT:\n${segmentText}` }],
     });
   } catch (err) {
     // Network / API error — abstain, never throw. The deterministic floor still stands on its own.
@@ -274,5 +329,63 @@ export async function classifyEvents(args: {
   }
   const block = resp.content.find((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
   const input = block ? (block.input as { events?: RawClassifiedEvent[] }) : null;
-  return verifyAndNormalize(input?.events, chartText, enumSet);
+  return verifyAndNormalize(input?.events, segmentText, args.enumSet);
+}
+
+/**
+ * Run the conceded-first / LLM-residual flow over residual STR text (text NOT already covered by the
+ * deterministic concession fields — the caller is responsible for passing the residual). Forced
+ * tool_choice, NO temperature, NO thinking. NEVER throws: on any API failure / refusal it ABSTAINS
+ * (returns []), exactly like the chart-extract grounding path treats a truncated window as "lost",
+ * never as a fatal error. Result passes through verifyAndNormalize so the same enum + grounding gates
+ * apply to live output.
+ *
+ * SIZE CONTRACT (Kimbrough >1M-token fix, 2026-07-14):
+ *   - chartText ≤ CLASSIFIER_MAX_INPUT_CHARS → the EXACT single-call path (byte-identical request to
+ *     the pre-fix code) — the no-regression requirement for every normal chart.
+ *   - over the cap → segment at [p.N] page boundaries, run the SAME forced-tool call per segment
+ *     SEQUENTIALLY (bounded at CLASSIFIER_MAX_SEGMENTS, loud warn if truncating), verify each result
+ *     against its OWN segment text, then first-wins dedupe by event_canonical across segments (the
+ *     same first-wins semantics verifyAndNormalize/mergeDedupe already use). A failed segment abstains
+ *     alone; the other segments' events still return.
+ */
+export async function classifyEvents(args: {
+  chartText: string;
+  anthropic: Anthropic;
+  model?: string;
+}): Promise<ClassifiedEvent[]> {
+  const { chartText, anthropic } = args;
+  if (!chartText || !chartText.trim()) return [];
+  const enumSet = new Set(loadEventCanon().EVENT_ENUM);
+
+  // Below the cap: the EXACT current single-call path — byte-identical request.
+  if (chartText.length <= CLASSIFIER_MAX_INPUT_CHARS) {
+    return runClassifierCall({ segmentText: chartText, anthropic, model: args.model, enumSet });
+  }
+
+  // Over the cap: segment → sequential per-segment calls → cross-segment first-wins dedupe.
+  let segments = segmentChartText(chartText, CLASSIFIER_MAX_INPUT_CHARS);
+  if (segments.length > CLASSIFIER_MAX_SEGMENTS) {
+    const dropped = segments.slice(CLASSIFIER_MAX_SEGMENTS);
+    console.warn(JSON.stringify({
+      event: 'event_classifier_segments_truncated',
+      totalSegments: segments.length,
+      cap: CLASSIFIER_MAX_SEGMENTS,
+      droppedSegments: dropped.length,
+      droppedChars: dropped.reduce((n, s) => n + s.length, 0),
+    }));
+    segments = segments.slice(0, CLASSIFIER_MAX_SEGMENTS);
+  }
+  const seen = new Set<string>();
+  const out: ClassifiedEvent[] = [];
+  for (const segment of segments) {
+    // SEQUENTIAL by design: bounds concurrent token pressure and keeps per-segment failures isolated.
+    const events = await runClassifierCall({ segmentText: segment, anthropic, model: args.model, enumSet });
+    for (const e of events) {
+      if (seen.has(e.event_canonical)) continue; // first-wins across segments
+      seen.add(e.event_canonical);
+      out.push(e);
+    }
+  }
+  return out;
 }

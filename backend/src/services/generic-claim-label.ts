@@ -29,3 +29,29 @@ export function isGenericClaimLabel(label: string | null | undefined): boolean {
   if (MULTI_OPTION_PARENTHETICAL.test(v)) return true;
   return false;
 }
+
+// ── Tier A deterministic JUNK guard (Greene `--EYES--` incident, 2026-07-14) ──────────────────────────────
+// A Jotform dropdown SEPARATOR row ("--EYES--", "----") reached Case.claimedCondition verbatim. DISTINCT
+// from isGenericClaimLabel above: a GENERIC label is a real-but-vague claim worth AI-narrowing; JUNK is not a
+// claim at all and is refused at write time (persisted empty) and at prefill time (never offered).
+// Conservative: only unambiguous non-labels — separator tokens, empty/whitespace, punctuation-only. Real
+// conditions with internal hyphens/punctuation ("L5-S1 radiculopathy", "Tinnitus (bilateral)") never match.
+
+// Separator token: a LEADING and TRAILING run of 2+ dashes ("--EYES--", "----", "-- Knees --").
+const SEPARATOR_TOKEN = /^-{2,}[\s\S]*-{2,}$/;
+// Punctuation-only: contains no letter or digit in any script.
+const HAS_WORD_CHAR = /[\p{L}\p{N}]/u;
+
+/**
+ * True when `label` must NEVER be persisted or offered as a claimed condition: a dropdown separator
+ * token, empty/whitespace, punctuation-only, or a non-string. False for every real condition label
+ * (including ones this module would call generic — those go to the AI-narrow path instead).
+ */
+export function isInvalidClaimLabel(label: string | null | undefined): boolean {
+  if (typeof label !== 'string') return true;
+  const v = label.trim();
+  if (v.length === 0) return true;
+  if (SEPARATOR_TOKEN.test(v)) return true;
+  if (!HAS_WORD_CHAR.test(v)) return true;
+  return false;
+}

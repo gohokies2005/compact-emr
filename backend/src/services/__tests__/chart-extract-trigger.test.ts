@@ -16,7 +16,7 @@ const READ = [
   { filePath: 'cases/C-1/k2', terminalStatus: 'read' },
 ];
 
-function makeDb(opts: { docs?: typeof DOCS; readStatuses?: typeof READ; createThrowsP2002?: boolean; recentRun?: { createdAt: Date; status: string; triggerHash?: string } | null } = {}) {
+function makeDb(opts: { docs?: typeof DOCS; readStatuses?: typeof READ; createThrowsP2002?: boolean; recentRun?: { createdAt: Date; status: string; triggerHash?: string } | null; runsInWindow?: number } = {}) {
   const creates: Record<string, unknown>[] = [];
   const db = {
     case: { findFirst: vi.fn(async () => ({ veteranId: 'VET-1' })) },
@@ -25,6 +25,8 @@ function makeDb(opts: { docs?: typeof DOCS; readStatuses?: typeof READ; createTh
     chartExtractionRun: {
       // recentRun = the runaway-guard lookup; default null = no recent run (existing-contract tests).
       findFirst: vi.fn(async () => opts.recentRun ?? null),
+      // runsInWindow = the hard-budget lookup; default 0 = budget headroom (existing-contract tests).
+      count: vi.fn(async () => opts.runsInWindow ?? 0),
       create: vi.fn(async (args: { data: Record<string, unknown> }) => {
         if (opts.createThrowsP2002) { const err = new Error('unique'); (err as Error & { code?: string }).code = 'P2002'; throw err; }
         creates.push(args.data);
@@ -136,5 +138,42 @@ describe('maybeEnqueueChartExtract — runaway guard scoped to same-hash/forced 
     const out = await maybeEnqueueChartExtract(db, 'C-1', { forceSalt: 'manual:loop' });
     expect(out).toEqual({ enqueued: false, reason: 'rate_limited_recent_run' });
     expect(creates).toHaveLength(0);
+  });
+});
+
+// HARD PER-CASE BUDGET (Ryan 2026-07-14, the $146/68-run incident): the scoped rate guard passes any
+// enqueue whose doc set GREW (fresh hash) — which is exactly how the assign loop detonated one paid run
+// per file (22 in 49s on CLM-BBEE61BB70). The budget is the loop-shape-agnostic backstop: >cap runs
+// created for one case inside the window refuses NON-forced enqueues, loudly. These tests lock the stop.
+describe('maybeEnqueueChartExtract — hard per-case budget (the $146 runaway stop)', () => {
+  it('BUDGET: non-forced enqueue at the cap is REFUSED even with a grown doc set (fresh hash)', async () => {
+    // grown-hash scenario that sails past the scoped rate guard — the exact $146 shape.
+    const { db, creates } = makeDb({
+      recentRun: { createdAt: new Date(Date.now() - 60 * 1000), status: 'complete', triggerHash: 'PARTIAL_SUBSET_HASH' },
+      runsInWindow: 6,
+    });
+    const out = await maybeEnqueueChartExtract(db, 'C-1');
+    expect(out).toEqual({ enqueued: false, reason: 'budget_refused_runaway' });
+    expect(creates).toHaveLength(0); // no paid run
+  });
+
+  it('BUDGET: under the cap, a grown-doc-set enqueue still passes (wedge fix preserved)', async () => {
+    const { db, creates } = makeDb({
+      recentRun: { createdAt: new Date(Date.now() - 60 * 1000), status: 'queued', triggerHash: 'PARTIAL_SUBSET_HASH' },
+      runsInWindow: 5,
+    });
+    const out = await maybeEnqueueChartExtract(db, 'C-1');
+    expect(out.enqueued).toBe(true);
+    expect(creates).toHaveLength(1);
+  });
+
+  it('BUDGET: a FORCED re-extract passes the cap (explicit human action) — outside the rate window', async () => {
+    const { db, creates } = makeDb({
+      recentRun: { createdAt: new Date(Date.now() - 10 * 60 * 1000), status: 'complete', triggerHash: 'ANY' },
+      runsInWindow: 12,
+    });
+    const out = await maybeEnqueueChartExtract(db, 'C-1', { forceSalt: 'manual:human' });
+    expect(out.enqueued).toBe(true);
+    expect(creates).toHaveLength(1);
   });
 });

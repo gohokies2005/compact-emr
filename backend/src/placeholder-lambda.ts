@@ -37,7 +37,11 @@ export const handler = async (event: unknown, context: unknown): Promise<unknown
       // The discriminated STATE (not the null-collapsing deriveAiViability) so this job can tell "another
       // invocation is already mid-compute" ('computing', the in-flight guard short-circuit) apart from a
       // genuine result — see the skip below.
-      const planState = await getAiViabilityState(prisma as unknown as AppDb, event.caseId, { compute: true, timeoutMs: 75_000 });
+      // 110s plan budget (was 75s — Kimbrough CLM-41E9900FB8, 2026-07-15): a 2,345-page chart's route-picker
+      // call was killed at exactly the 75s client budget on EVERY attempt ("The analysis timed out (the chart
+      // is large)"), so the case could never get a plan. The Lambda timeout is now 210s (api-stack), leaving
+      // ~90s+ for the SOAP precompute after a full-length plan call.
+      const planState = await getAiViabilityState(prisma as unknown as AppDb, event.caseId, { compute: true, timeoutMs: 110_000 });
       const planMs = Date.now() - t0;
       // DUPLICATE-WRITE GUARD (Ryan 2026-07-14, "2 ungrounded Sonnet writes per edit"). When the plan compute
       // was SKIPPED because another invocation holds the in-flight guard (getAiViabilityState returned

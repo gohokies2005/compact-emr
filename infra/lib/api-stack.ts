@@ -178,8 +178,12 @@ export class ApiStack extends Stack {
       // LLM calls remain bounded by their own 26s timeoutMs — so this longer Lambda timeout is consumed ONLY
       // by the async self-invoke recompute path (InvocationType:'Event', see recompute-viability-trigger.ts),
       // which runs the route-picker OFF the API-Gateway request path. That async invoke needs the longer
-      // budget to complete the picker on large charts (Zimmelman); 120s leaves headroom over its 110s call.
-      timeout: Duration.seconds(120),
+      // budget to complete the picker on large charts (Zimmelman). 210s (2026-07-15, Kimbrough
+      // CLM-41E9900FB8): a 2,345-page chart's plan call runs past the old 75s client budget, and the
+      // grounded SOAP precompute in the SAME invocation needs ~50s more — 120s total forced a
+      // plan-vs-SOAP squeeze. 210 = 110s plan + ~90s SOAP + margin; sync requests are still capped
+      // far lower by API GW (~30s) and per-call client timeouts, so only the async recompute uses this.
+      timeout: Duration.seconds(210),
       memorySize: 512,
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },

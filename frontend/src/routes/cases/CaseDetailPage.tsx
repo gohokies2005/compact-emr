@@ -4,7 +4,6 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { CaseStatusBadge } from '../../components/ui/CaseStatusBadge';
 import { TabSection } from '../../components/ui/TabSection';
 import { DataRow } from '../../components/ui/DataRow';
 import { StatusChip, type ChipTone } from '../../components/ui/StatusChip';
@@ -475,7 +474,12 @@ export function CaseDetailPage() {
               {formatNameLastFirst(c.veteran?.firstName, c.veteran?.lastName, c.veteranId)}
             </Link>
           </h1>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-base text-slate-700"><EditableClaimCondition c={c} onSave={(v) => patch.mutate({ version: c.version, claimedCondition: v })} /><CaseStatusBadge status={c.status} /></div>
+          {/* Status badge REMOVED from the detail header (Ryan 2026-07-15): Case.status is a sticky
+              workflow column (a drafter halt wrote needs_records and nothing cleared it after the
+              chart healed), so the badge contradicted the live-derived SOAP chip below and confused
+              RNs. The status still shows in the Cases LIST for triage; on the detail page the SOAP
+              chip + action panels are the single source of state. */}
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-base text-slate-700"><EditableClaimCondition c={c} onSave={(v) => patch.mutate({ version: c.version, claimedCondition: v })} /></div>
           {(() => {
             const v = c.veteran;
             const age = v?.dob ? Math.floor((Date.now() - Date.parse(v.dob)) / 31557600000) : null;

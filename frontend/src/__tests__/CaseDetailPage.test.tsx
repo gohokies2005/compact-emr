@@ -113,7 +113,7 @@ describe('CaseDetailPage', () => {
   it('renders the case header and admin transition controls', async () => {
     renderPage();
     expect(await screen.findByText('Hypertension')).toBeInTheDocument();
-    expect(screen.getByText('Physician review')).toBeInTheDocument(); // status badge
+    expect(screen.queryByText('Physician review')).not.toBeInTheDocument(); // status badge REMOVED from detail header (Ryan 2026-07-15) — stale workflow status contradicted the live SOAP chip
     // From physician_review, an admin may move to delivered / correction_requested / rejected.
     // The 'delivered' enum displays as "Ready for delivery" (post-approve, pre-payment).
     expect(screen.getByRole('button', { name: /move to ready for delivery/i })).toBeInTheDocument();
@@ -178,7 +178,7 @@ describe('CaseDetailPage', () => {
     // status badge (both live ABOVE the tab bar now).
     await userEvent.click(screen.getByRole('tab', { name: 'Medications' }));
     expect(screen.getByRole('link', { name: /Doe, Jane/i })).toBeInTheDocument();
-    expect(screen.getByText('Physician review')).toBeInTheDocument(); // status badge, still pinned
+    expect(screen.queryByText('Physician review')).not.toBeInTheDocument(); // status badge REMOVED from detail header (Ryan 2026-07-15) — stale workflow status contradicted the live SOAP chip
     // And again on the SC Conditions tab — the header is tab-independent.
     await userEvent.click(screen.getByRole('tab', { name: 'SC Conditions' }));
     expect(screen.getByRole('link', { name: /Doe, Jane/i })).toBeInTheDocument();

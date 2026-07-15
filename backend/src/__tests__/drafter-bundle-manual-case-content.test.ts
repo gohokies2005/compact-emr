@@ -46,7 +46,7 @@ function makeDb(content: {
     },
     doctorPack: { findFirst: async () => null },
     draftJob: { findFirst: async () => null },
-    chartExtractionRun: { findFirst: async () => null },
+    chartExtractionRun: { findMany: async () => [] },
   };
 }
 
@@ -73,5 +73,83 @@ describe('buildDrafterBundle — manual case with 0 this-case docs but on-file c
     const db = makeDb({});
     const bundle = await buildDrafterBundle(db as never, 'CASE-NEW');
     expect(bundle.chartReadiness.extractionState).toBe('no_documents');
+  });
+});
+
+// ⭐ NEWEST-RUN POISON REGRESSION LOCK (Sheats CLM-4772FEF2A4 + Kimbrough CLM-41E9900FB8, 2026-07-15).
+// The bundle used to fetch ONLY the newest chartExtractionRun and wrap it in a one-element array —
+// starving deriveChartBuildState's sticky-completion precedence. When the newest row was a
+// watcher-failed duplicate of already-completed work, the Fargate drafter halted "chart extraction is
+// not ready (state: extract_failed)" on a COMPLETE chart. This locks the flood shape at the BUNDLE
+// level: the completed run must win over newer failed duplicates, and the drafter gate must open.
+describe('buildDrafterBundle — watcher-failed duplicate runs must not un-ready a complete chart', () => {
+  function makeFloodDb(runs: Array<{ triggerHash: string; status: string; resultJson?: unknown }>) {
+    const list = (rows?: unknown[]) => ({ findMany: async () => rows ?? [] });
+    return {
+      case: {
+        findFirst: async () => ({ id: 'CASE-F', veteranId: 'VET-1', claimedCondition: 'Migraine', claimedConditions: [], claimType: 'appeal_bva', status: 'records', currentVersion: 0 }),
+        findMany: async () => [{ id: 'CASE-F' }],
+      },
+      veteran: { findUnique: async () => ({ id: 'VET-1', firstName: 'Chelsea', lastName: 'Flood' }) },
+      scCondition: list([{ condition: 'PTSD', status: 'service_connected', ratingPct: 70 }]),
+      activeProblem: list([{ problem: 'Chronic migraine' }]),
+      activeMedication: list(),
+      chartNote: list(),
+      keyDoc: { findMany: async () => [] },
+      fileReadStatus: {
+        findMany: async () => [
+          { id: 'frs-f1', caseId: 'CASE-F', filePath: 'cases/CASE-F/records.pdf', fileSha256: 'a', terminalStatus: 'read', attemptsJson: [], manualSummary: null },
+        ],
+      },
+      document: {
+        findMany: async () => [{ id: 'doc-f1', caseId: 'CASE-F', s3Key: 'cases/CASE-F/records.pdf', filename: 'records.pdf', pages: [{ pageNumber: 1, text: 'migraine hx' }] }],
+      },
+      doctorPack: { findFirst: async () => null },
+      draftJob: { findFirst: async () => null },
+      // newest-first, exactly as the real query returns them
+      chartExtractionRun: { findMany: async () => runs },
+    };
+  }
+
+  it('FLOOD SHAPE: [watcher-failed newest ×3, complete older] same doc set → chart_ready (drafter gate opens)', async () => {
+    const { computeTriggerHash } = await import('../services/chart-build-state.js');
+    const h = computeTriggerHash(
+      [{ id: 'doc-f1', s3Key: 'cases/CASE-F/records.pdf' }],
+      [{ filePath: 'cases/CASE-F/records.pdf', terminalStatus: 'read' }],
+    );
+    const db = makeFloodDb([
+      { triggerHash: `${h}:manual:dup3`, status: 'failed' },
+      { triggerHash: `${h}:manual:dup2`, status: 'failed' },
+      { triggerHash: h, status: 'failed' },
+      { triggerHash: h, status: 'complete', resultJson: { items: 150 } },
+    ]);
+    const bundle = await buildDrafterBundle(db as never, 'CASE-F');
+    expect(bundle.chartReadiness.extractionState).toBe('chart_ready');
+  });
+
+  it('HONEST: only failed runs for the current doc set (no completed run) → extract_failed still halts', async () => {
+    const { computeTriggerHash } = await import('../services/chart-build-state.js');
+    const h = computeTriggerHash(
+      [{ id: 'doc-f1', s3Key: 'cases/CASE-F/records.pdf' }],
+      [{ filePath: 'cases/CASE-F/records.pdf', terminalStatus: 'read' }],
+    );
+    const db = makeFloodDb([{ triggerHash: h, status: 'failed' }]);
+    const bundle = await buildDrafterBundle(db as never, 'CASE-F');
+    expect(bundle.chartReadiness.extractionState).toBe('extract_failed');
+  });
+
+  it('gapped-complete run: extractionGaps read from the STICKY WINNER, not the newest failed row', async () => {
+    const { computeTriggerHash } = await import('../services/chart-build-state.js');
+    const h = computeTriggerHash(
+      [{ id: 'doc-f1', s3Key: 'cases/CASE-F/records.pdf' }],
+      [{ filePath: 'cases/CASE-F/records.pdf', terminalStatus: 'read' }],
+    );
+    const db = makeFloodDb([
+      { triggerHash: `${h}:manual:dup1`, status: 'failed' },
+      { triggerHash: h, status: 'complete_with_gaps', resultJson: { gaps: { truncatedWindows: 1, uncoveredPages: 3 } } },
+    ]);
+    const bundle = await buildDrafterBundle(db as never, 'CASE-F');
+    expect(bundle.chartReadiness.extractionState).toBe('chart_ready');
+    expect(bundle.chartReadiness.extractionGaps).toEqual({ truncatedWindows: 1, uncoveredPages: 3 });
   });
 });

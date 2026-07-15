@@ -2,7 +2,7 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { reconcileChartReadiness } from './chart-readiness.js';
 import { reconcileScConditions } from './sc-reconcile.js';
-import { deriveChartBuildState, type ChartBuildState } from './chart-build-state.js';
+import { deriveChartBuildState, runMatchesHash, type ChartBuildState } from './chart-build-state.js';
 import type { AppDb } from './db-types.js';
 import type { CaseFraming } from './case-framing.js';
 import type { CaseViability } from './case-viability.js';
@@ -159,7 +159,7 @@ export async function buildDrafterBundle(db: AppDb, caseId: string, opts: BuildD
     documents,
     latestDoctorPack,
     activeJob,
-    latestExtractionRun,
+    recentExtractionRuns,
   ] = await Promise.all([
     (db as unknown as { scCondition: { findMany: (args: { where: { veteranId: string } }) => Promise<unknown[]> } })
       .scCondition.findMany({ where: { veteranId: cw.veteranId } }),
@@ -193,13 +193,18 @@ export async function buildDrafterBundle(db: AppDb, caseId: string, opts: BuildD
       where: { caseId, state: { in: ['queued', 'running'] as const } },
       orderBy: { enqueuedAt: 'desc' },
     }),
-    // THIS case's latest extraction run, for the real build-state (extractionState below). Scoped to
-    // caseId (not the veteran) — a prior case's failed run must not taint this draft.
+    // THIS case's RECENT extraction runs (plural), for the real build-state (extractionState below).
+    // Scoped to caseId (not the veteran) — a prior case's failed run must not taint this draft.
     // resultJson added (P2-3, 2026-06-14): carries the worker-recorded gap counts for a
     // complete_with_gaps run so the drafter (not just the RN banner) learns the chart was gapped.
+    // ⛔ NEWEST-RUN POISON (Sheats CLM-4772FEF2A4 + Kimbrough CLM-41E9900FB8, 2026-07-15): this used
+    // to findFirst the single newest run and wrap it in an array — starving deriveChartBuildState's
+    // sticky-completion logic (Ewell fix) down to one row. When the newest row was a watcher-failed
+    // duplicate from the 7/14 flood, the drafter halted "no chart data was successfully extracted"
+    // on COMPLETE charts. Load the recent run history; the sticky latch picks the winner.
     (db as unknown as {
-      chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { triggerHash: true; status: true; resultJson: true } }) => Promise<{ triggerHash: string; status: string; resultJson: unknown } | null> };
-    }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true, status: true, resultJson: true } }),
+      chartExtractionRun: { findMany: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; take: number; select: { triggerHash: true; status: true; resultJson: true } }) => Promise<Array<{ triggerHash: string; status: string; resultJson: unknown }>> };
+    }).chartExtractionRun.findMany({ where: { caseId }, orderBy: { createdAt: 'desc' }, take: 20, select: { triggerHash: true, status: true, resultJson: true } }),
   ]);
 
   // Gate on THIS case's own files only (empty set = ready). The bundle payload still carries the
@@ -220,13 +225,14 @@ export async function buildDrafterBundle(db: AppDb, caseId: string, opts: BuildD
   const buildStateDocs = (documents as ReadonlyArray<{ id: string; s3Key: string; caseId: string }>)
     .filter((d) => d.caseId === caseId)
     .map((d) => ({ id: d.id, s3Key: d.s3Key }));
-  const rawExtractionState = deriveChartBuildState(
+  // Feed the FULL recent-runs list so the Ewell sticky-completion precedence actually applies —
+  // wrapping a single newest run defeated it (the 2026-07-15 Sheats/Kimbrough drafter halts).
+  const buildState = deriveChartBuildState(
     buildStateDocs,
     thisCaseReadStatuses.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })),
-    // deriveChartBuildState now takes the case's recent runs (sticky-completion fix, Ewell
-    // CLM-A867B8C128, 2026-06-14); this caller queries a single latest run → wrap to preserve behavior.
-    latestExtractionRun ? [latestExtractionRun] : [],
-  ).state;
+    recentExtractionRuns,
+  );
+  const rawExtractionState = buildState.state;
   // Reconcile the veteran's SC rows to the authoritative status (service_connected > pending >
   // denied) + fold synonyms — the drafter sees ONE clean anchor per condition (matches the UI). Lifted
   // above the return so it also feeds the manual-case content signal below. (2026-06-20)
@@ -252,11 +258,24 @@ export async function buildDrafterBundle(db: AppDb, caseId: string, opts: BuildD
     (chartNotes as readonly unknown[]).length > 0;
   const extractionState: ChartBuildState =
     rawExtractionState === 'no_documents' && hasDraftableChartContent ? 'chart_ready' : rawExtractionState;
-  // Extraction gap counts (P2-3, 2026-06-14). Mirrors chart-readiness.ts:175-178 exactly: only a
-  // `complete_with_gaps` run with a gaps block surfaces counts; everything else is null. The drafter
-  // can then note a gapped chart in the letter provenance instead of silently drafting on a partial read.
-  const rj = latestExtractionRun?.resultJson as { gaps?: { truncatedWindows?: number; uncoveredPages?: number } } | null | undefined;
-  const extractionGaps = (latestExtractionRun?.status === 'complete_with_gaps' && rj?.gaps)
+  // FAIL-LOUD TRIPWIRE (2026-07-15 drafter-halt postmortem): a not-ready extraction state on a case
+  // that plainly HAS extracted chart content is self-contradictory — either a poisoned run read (the
+  // Sheats/Kimbrough class) or a genuinely wedged pipeline. Either way it must never be silent again.
+  if ((extractionState === 'extract_failed' || extractionState === 'extracting') && hasDraftableChartContent) {
+    console.warn(JSON.stringify({ event: 'drafter_bundle_state_contradiction', caseId, extractionState, scConditions: reconciledScConditions.length, activeProblems: (activeProblems as readonly unknown[]).length }));
+  }
+  // Extraction gap counts (P2-3, 2026-06-14). Mirrors chart-readiness: only a `complete_with_gaps`
+  // run with a gaps block surfaces counts; everything else is null. Read from the STICKY WINNER —
+  // the newest run matching the current doc-set hash with a completed status — not the raw newest
+  // row (which can be a watcher-failed duplicate carrying no resultJson).
+  const isCompletedFamily = (s: string): boolean => s === 'complete' || s === 'complete_with_gaps';
+  const winningRun =
+    recentExtractionRuns.find((r) => runMatchesHash(r.triggerHash, buildState.currentHash) && isCompletedFamily(r.status))
+    // 0-this-case-docs manual class (currentHash '' — the Hackworth override path): no hash to match,
+    // so fall back to the newest completed-family run for the gap read (the pre-2026-07-15 contract).
+    ?? (buildStateDocs.length === 0 ? recentExtractionRuns.find((r) => isCompletedFamily(r.status)) : undefined);
+  const rj = winningRun?.resultJson as { gaps?: { truncatedWindows?: number; uncoveredPages?: number } } | null | undefined;
+  const extractionGaps = (winningRun?.status === 'complete_with_gaps' && rj?.gaps)
     ? { truncatedWindows: Number(rj.gaps.truncatedWindows ?? 0), uncoveredPages: Number(rj.gaps.uncoveredPages ?? 0) }
     : null;
 

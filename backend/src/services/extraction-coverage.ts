@@ -836,12 +836,17 @@ export function selectAuthoritativeExtractionRun(
 ): { status: string; resultJson: unknown } | null {
   if (newest === null) return null;
   if (newest.status !== 'failed') return { status: newest.status, resultJson: newest.resultJson };
-  if (latestCompleted === null || latestCompleted.status !== 'complete') {
+  // HARDENED 2026-07-15 (drafter-halt QA, hole #1): accept complete_with_gaps as a successful fallback —
+  // a gapped-but-complete chart (Reckart class) deserves the same duplicate-failure rescue as a clean one.
+  const completedOk = latestCompleted !== null && (latestCompleted.status === 'complete' || latestCompleted.status === 'complete_with_gaps');
+  if (!completedOk || latestCompleted === null) {
     return { status: newest.status, resultJson: newest.resultJson }; // no successful run to fall back on → honest failed
   }
   const failedBase = runBaseHash(newest.triggerHash);
   const completedBase = runBaseHash(latestCompleted.triggerHash);
-  if (failedBase.length > 0 && failedBase === completedBase) {
+  // HARDENED 2026-07-15 (hole #2): a failed row with an EMPTY/absent hash cannot represent newer work than
+  // the completed run — prefer the completed run rather than letting a hash-less failure mask real success.
+  if (failedBase.length === 0 || failedBase === completedBase) {
     return { status: latestCompleted.status, resultJson: latestCompleted.resultJson }; // duplicate failure of covered work
   }
   return { status: newest.status, resultJson: newest.resultJson }; // doc set moved on since the last success → honest failed
@@ -884,7 +889,8 @@ export async function loadExtractionCoverageForCase(db: AppDb, caseId: string): 
   }).chartExtractionRun;
   const newestRun = await runDelegate.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true, triggerHash: true } });
   const latestCompletedRun = newestRun?.status === 'failed'
-    ? await runDelegate.findFirst({ where: { caseId, status: 'complete' }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true, triggerHash: true } })
+    // complete_with_gaps included (hardened 2026-07-15): a gapped-complete chart must also rescue.
+    ? await runDelegate.findFirst({ where: { caseId, status: { in: ['complete', 'complete_with_gaps'] } }, orderBy: { createdAt: 'desc' }, select: { status: true, resultJson: true, triggerHash: true } })
     : null;
   const latestRun = selectAuthoritativeExtractionRun(newestRun, latestCompletedRun);
   const pageRows = (await db.documentPage.findMany({

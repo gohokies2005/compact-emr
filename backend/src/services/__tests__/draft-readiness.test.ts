@@ -327,7 +327,7 @@ describe('getDraftReadiness (db gather)', () => {
       activeProblem: { findMany: async () => opts.problems ?? [] },
       document: { findMany: async () => docs },
       fileReadStatus: { findMany: async () => readStatuses },
-      chartExtractionRun: { findFirst: async () => run },
+      chartExtractionRun: { findMany: async () => (run ? [run] : []) },
     } as unknown as AppDb;
   }
 

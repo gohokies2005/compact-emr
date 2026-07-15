@@ -603,8 +603,23 @@ describe('selectAuthoritativeExtractionRun — stale watcher-failure vs honest f
     expect(selectAuthoritativeExtractionRun(run('failed', SHA), run('failed', SHA))?.status).toBe('failed');
   });
 
-  it('missing/empty trigger hashes never match (conservative: honest failed)', () => {
-    expect(selectAuthoritativeExtractionRun(run('failed', null), run('complete', null))?.status).toBe('failed');
-    expect(selectAuthoritativeExtractionRun(run('failed', ''), run('complete', ''))?.status).toBe('failed');
+  // HARDENED 2026-07-15 (drafter-halt postmortem, hole #2 — REVERSES the prior conservative rule):
+  // a failed row with an EMPTY/absent hash cannot represent NEWER work than a completed run, so the
+  // completed run wins. The old "empty never matches → honest failed" reading let a hash-less
+  // watcher-failed duplicate mask a genuinely complete chart.
+  it('a failed row with an empty/absent hash never masks a completed run — completed wins', () => {
+    expect(selectAuthoritativeExtractionRun(run('failed', null), run('complete', null))?.status).toBe('complete');
+    expect(selectAuthoritativeExtractionRun(run('failed', ''), run('complete', ''))?.status).toBe('complete');
+    expect(selectAuthoritativeExtractionRun(run('failed', ''), run('complete', SHA))?.status).toBe('complete');
+  });
+
+  // HARDENED 2026-07-15 (hole #1): complete_with_gaps is a SUCCESSFUL analysis (Reckart-class gapped
+  // charts) and rescues a duplicate failure exactly like a clean complete.
+  it('a complete_with_gaps run also rescues a duplicate failure', () => {
+    const chosen = selectAuthoritativeExtractionRun(
+      run('failed', `${SHA}:manual:req-7`),
+      run('complete_with_gaps', SHA, { gaps: { uncoveredPages: 3, truncatedWindows: 1 } }),
+    );
+    expect(chosen?.status).toBe('complete_with_gaps');
   });
 });

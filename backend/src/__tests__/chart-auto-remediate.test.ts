@@ -28,7 +28,7 @@ function makeDb(state: FakeDbState) {
   return {
     document: { findMany: async () => state.docs },
     fileReadStatus: { findMany: async () => state.readStatuses },
-    chartExtractionRun: { findFirst: async () => state.latestRun },
+    chartExtractionRun: { findMany: async () => (state.latestRun ? [state.latestRun] : []) },
     activityLog: {
       findMany: async () => state.markers,
       create: async (a: { data: { action: string; detailsJson: unknown } }) => {

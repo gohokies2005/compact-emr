@@ -82,16 +82,15 @@ export async function autoRemediateChartForDraft(
 
   // Build-state inputs exclude the screening-summary OUTPUT (same as every other consumer).
   const buildDocs = allDocs.filter((d) => !isScreeningSummaryKey(d.s3Key)).map((d) => ({ id: d.id, s3Key: d.s3Key }));
-  const latestRun = await (db as unknown as {
-    chartExtractionRun: { findFirst: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { triggerHash: true; status: true } }) => Promise<{ triggerHash: string; status: string } | null> };
-  }).chartExtractionRun.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true, status: true } });
+  const recentRuns = await (db as unknown as {
+    chartExtractionRun: { findMany: (a: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; take: number; select: { triggerHash: true; status: true } }) => Promise<Array<{ triggerHash: string; status: string }>> };
+  }).chartExtractionRun.findMany({ where: { caseId }, orderBy: { createdAt: 'desc' }, take: 20, select: { triggerHash: true, status: true } });
   const build = deriveChartBuildState(
     buildDocs,
     readStatuses.map((r) => ({ filePath: r.filePath, terminalStatus: r.terminalStatus })),
-    // deriveChartBuildState now takes the case's recent runs (sticky-completion fix, Ewell
-    // CLM-A867B8C128, 2026-06-14). This caller queries a single latest run; wrapping it preserves
-    // the prior single-run behavior exactly.
-    latestRun ? [latestRun] : [],
+    // FULL recent-runs list (2026-07-15 newest-run-poison fix): a single wrapped newest run starved
+    // the Ewell sticky precedence — a watcher-failed duplicate misread a COMPLETE chart as failed.
+    recentRuns,
   );
   const triggerHash = computeTriggerHash(buildDocs, readStatuses);
 

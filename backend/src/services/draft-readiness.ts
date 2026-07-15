@@ -515,23 +515,24 @@ export async function getDraftReadiness(db: AppDb, caseId: string): Promise<Draf
     veteran: { findFirst: (args: { where: { id: string }; select: { noScConditionsConfirmed: true } }) => Promise<{ noScConditionsConfirmed: boolean } | null> };
   }).veteran;
   const runDelegate = (db as unknown as {
-    chartExtractionRun: { findFirst: (args: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; select: { triggerHash: true; status: true } }) => Promise<{ triggerHash: string; status: string } | null> };
+    chartExtractionRun: { findMany: (args: { where: { caseId: string }; orderBy: { createdAt: 'desc' }; take: number; select: { triggerHash: true; status: true } }) => Promise<Array<{ triggerHash: string; status: string }>> };
   }).chartExtractionRun;
 
-  const [grantedSc, problems, documents, vet, readStatuses, latestRun] = await Promise.all([
+  const [grantedSc, problems, documents, vet, readStatuses, recentRuns] = await Promise.all([
     scDelegate.findMany({ where: { veteranId: c.veteranId, status: 'service_connected' }, select: { condition: true } }),
     db.activeProblem.findMany({ where: { veteranId: c.veteranId } }),
     docDelegate.findMany({ where: { caseId }, select: { id: true, s3Key: true, filename: true, docTag: true } }),
     vetDelegate.findFirst({ where: { id: c.veteranId }, select: { noScConditionsConfirmed: true } }),
     db.fileReadStatus.findMany({ where: { caseId } }) as unknown as Promise<{ filePath: string; terminalStatus: string }[]>,
-    runDelegate.findFirst({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { triggerHash: true, status: true } }),
+    runDelegate.findMany({ where: { caseId }, orderBy: { createdAt: 'desc' }, take: 20, select: { triggerHash: true, status: true } }),
   ]);
 
   // The door: only evaluate real missing-docs once the chart is actually built. Before that, say
   // "still building" — never a false "documents missing" while OCR/extraction are still running.
-  // deriveChartBuildState now takes the case's recent runs (sticky-completion fix, Ewell
-  // CLM-A867B8C128, 2026-06-14); this caller queries a single latest run → wrap to preserve behavior.
-  const { state } = deriveChartBuildState(documents, readStatuses, latestRun ? [latestRun] : []);
+  // FULL recent-runs list (2026-07-15 newest-run-poison fix): wrapping a single newest run starved
+  // the Ewell sticky-completion precedence — a watcher-failed duplicate row read as extract_failed
+  // on a COMPLETE chart (the Sheats/Kimbrough drafter-halt class).
+  const { state } = deriveChartBuildState(documents, readStatuses, recentRuns);
   if (state !== 'chart_ready') return buildingResult(state);
 
   // SAME-BRAIN feed (2026-06-21): the Gate-1 readiness reads the ONE brain — the persisted route-picker plan

@@ -45,7 +45,7 @@ function makeDb(opts: {
     doctorPack: { findFirst: async () => null },
     draftJob: { findFirst: async () => null },
     // extractionState derivation (Ryan 2026-06-13): latest run for this case; null = no run yet.
-    chartExtractionRun: { findFirst: async () => opts.extractionRun ?? null },
+    chartExtractionRun: { findMany: async () => (opts.extractionRun ? [opts.extractionRun] : []) },
   };
 }
 
@@ -95,7 +95,7 @@ function makeReconcileDb(opts: { thisCaseDocKeys: string[] }) {
     },
     doctorPack: { findFirst: async () => null },
     draftJob: { findFirst: async () => null },
-    chartExtractionRun: { findFirst: async () => null },
+    chartExtractionRun: { findMany: async () => [] },
   };
 }
 

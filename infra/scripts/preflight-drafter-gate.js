@@ -53,6 +53,12 @@ export const FUTURE_SKEW_MS = 60 * 60 * 1000; // 1h
 // (after cavcRegistry.js), draftBodyQualityGate.js (after deprecatedPhrases.js), foldRenderable.js
 // (after draftingGuidance.js). Positions match producer/alphabetical order so the recomputed hash
 // matches the artifact's d625a1f7…. directSc/eventCanon/pactPresumptive remain EXCLUDED (dark, flag-OFF).
+// SYNCED 33→36 (2026-07-16): producer added three pipeline-reachable, fail-safe-gated
+// modules that were never mirrored here — transientRetry.js (after framingGate.js),
+// citationFallback.js (after citationAuditor.js), planValidityGate.js (after pipelineCheck.js).
+// Positions match producer/canonical order so the per-file R4 comparison covers all 36 the
+// gate artifact (gated_sha 1bce24f, fileset_hash a4e9e067…) lists. The stale 33 hard-blocked
+// the 1bce24f-pathway deploy on R4 ("fileset path not found") for exactly these 3 files.
 // Producer remains the SSOT for this list; re-sync on every producer fileset change.
 export const GATED_FILESET = [
   'app/scripts/run-letter-pipeline.js',
@@ -63,6 +69,7 @@ export const GATED_FILESET = [
   'app/services/coverMemo.js',
   'app/services/autoPatch.js',
   'app/services/framingGate.js',
+  'app/services/transientRetry.js',
   'app/services/templatePicker.js',
   'app/services/routingResolver.js',
   'app/services/aggravationTriggers.js',
@@ -71,6 +78,7 @@ export const GATED_FILESET = [
   'app/services/cavcRegistry.js',
   'app/services/checkpointManifest.js',
   'app/services/citationAuditor.js',
+  'app/services/citationFallback.js',
   'app/services/citationRegistry.js',
   'app/services/conditionCanon.js',
   'app/services/conditionFormat.js',
@@ -84,6 +92,7 @@ export const GATED_FILESET = [
   'app/services/llm/client.js',
   'app/services/opinionSentence.js',
   'app/services/pipelineCheck.js',
+  'app/services/planValidityGate.js',
   'app/services/roleRunnerApi.js',
   'app/services/sectionAssembler.js',
   'app/services/veteranFactLedger.js',

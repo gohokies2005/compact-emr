@@ -25,6 +25,17 @@ export class AuthStack extends Stack {
       autoVerify: { email: true },
       mfa: cognito.Mfa.REQUIRED,
       mfaSecondFactor: { sms: false, otp: true },
+      // Remember-this-device (Ryan 2026-07-17): the 30-min idle logout forced Google-Authenticator
+      // re-entry on EVERY re-login because Cognito never remembered the device. With device tracking,
+      // a device the user OPTS IN to trust (deviceOnlyRememberedOnUserPrompt:true — user-prompted, NOT
+      // auto, so a shared/public machine is never silently trusted) skips the OTP challenge on
+      // subsequent logins; a NEW/untrusted device still gets the full OTP (challengeRequiredOnNewDevice).
+      // HIPAA-safe: only user-chosen personal devices are remembered; the 30-min idle lock + 24h refresh
+      // cap still apply. In-place UserPool update (no pool replacement, no user loss).
+      deviceTracking: {
+        challengeRequiredOnNewDevice: true,
+        deviceOnlyRememberedOnUserPrompt: true,
+      },
       passwordPolicy: {
         minLength: 12,
         requireDigits: true,
@@ -49,14 +60,16 @@ export class AuthStack extends Stack {
       userPoolClientName: `compact-emr-${props.config.envName}-web`,
       authFlows: { userPassword: true, userSrp: true },
       preventUserExistenceErrors: true,
-      // HIPAA session caps (Ryan 2026-07-10). Access/ID tokens live 1h (the frontend silently refreshes),
-      // but the REFRESH token is capped at 12h (was the 30-day Cognito default) — so even a session left
-      // ACTIVE forces a fresh login + MFA at least daily. The 30-min idle auto-logout (frontend) handles
-      // walked-away sessions. Changing these updates the existing client in place (no client-id change,
-      // no forced logout of live sessions — the new validity applies to newly issued tokens).
+      // HIPAA session caps (Ryan 2026-07-10; refresh 12h→24h 2026-07-17). Access/ID tokens live 1h (the
+      // frontend silently refreshes), but the REFRESH token is capped at 24h (was the 30-day Cognito
+      // default) — so even a session left ACTIVE forces a fresh login at least daily. On a trusted device
+      // (deviceTracking above) that daily re-login skips the OTP; a new device still gets full OTP. The
+      // 30-min idle auto-logout (frontend) handles walked-away sessions. Changing these updates the
+      // existing client in place (no client-id change, no forced logout of live sessions — the new
+      // validity applies to newly issued tokens).
       accessTokenValidity: Duration.hours(1),
       idTokenValidity: Duration.hours(1),
-      refreshTokenValidity: Duration.hours(12),
+      refreshTokenValidity: Duration.hours(24),
     });
 
     for (const groupName of ['physician', 'ops_staff', 'admin']) {

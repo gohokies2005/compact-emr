@@ -27,7 +27,11 @@ import { isDrafterArtifactS3Key, buildLetterRevisionKey } from '../services/s3-k
 import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import type { RenderInvoker } from './letter.js';
+import type { RenderInvoker, EnrichVerifier } from './letter.js';
+import { cleanProseForSave, sanityCheckLetterText, type SanityFinding } from '../services/letter-sanity.js';
+import { extractCitationTokenMap } from '../services/letter-citation-integrity.js';
+import { isValidCaseStatusTransition } from '../services/case-status-transitions.js';
+import { STALE_THRESHOLD_MS } from '../services/draft-job-constants.js';
 
 let cachedS3Client: S3Client | null = null;
 function getS3ForArtifacts(): S3Client {
@@ -1197,6 +1201,11 @@ export interface DrafterWorkerRouterDeps {
   renderLetter?: RenderInvoker;
   s3?: S3Client;
   bucketName?: string;
+  // Revised-letter recovery (2026-07-16): APPLY-time server-side re-verify of a single PMID against
+  // NCBI (verifyPmidById). Injected so the router carries no NCBI dependency at type-check time and so
+  // unit tests stub it. The revised-letter push FAILS CLOSED when this is absent but the pushed letter
+  // carries PMIDs (a recovery push must never smuggle an unverified cite through an unconfigured env).
+  verifyPmid?: EnrichVerifier;
 }
 
 /**
@@ -1842,5 +1851,213 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
     }),
   );
 
+  /**
+   * POST /api/v1/internal/drafter/cases/:id/revised-letter   (drafter-principal)
+   *
+   * REVISED-LETTER RECOVERY (2026-07-16). Push an OUT-OF-BAND, physician-corrected nexus-letter TXT
+   * into the physician-review queue WITHOUT a full re-draft. Used when a letter was fixed outside the
+   * pipeline (e.g. a hand-corrected TXT) and must become the current, editor-resolvable letter that
+   * the physician signs — cheaply, and without spending drafting tokens.
+   *
+   * Fail-safe, waste-minimal ordering (see the numbered steps inline):
+   *   - EVERY blocking check that can reject a bad push runs BEFORE the render, so a bad push costs
+   *     ZERO render spend (PMID fabrication + SSN-PHI + status + in-flight all gate pre-render).
+   *   - The PMID gate + NCBI verify FAILS CLOSED (a verify error or an unconfigured verifier BLOCKS)
+   *     — a recovery push must never smuggle an unverified/fabricated citation through a transient
+   *     NCBI outage.
+   *   - A 409 draft_in_flight guard is LOAD-BEARING: without it a later /complete for an in-flight run
+   *     would move Case.currentVersion backward and BURY the recovery letter.
+   *   - The unique [caseId,version] backstop yields 409 version_conflict (NOT an idempotent no-op):
+   *     two DIFFERENT revised bodies at the same version must never silently collapse into one.
+   */
+  router.post(
+    '/internal/drafter/cases/:id/revised-letter',
+    asyncHandler(async (req: Request, res: Response) => {
+      const caseId = String(req.params.id);
+
+      // 1. Auth is the requireDrafterPrincipal middleware (mounted in front of this router); actor is
+      //    the drafter service principal. 2. Parse + bound the body.
+      const body = req.body;
+      if (!isRecord(body)) badRequest('Request body must be an object');
+      const b = body as Record<string, unknown>;
+      const rawLetter = b['letterText'];
+      if (typeof rawLetter !== 'string' || rawLetter.trim().length === 0) {
+        badRequest('letterText is required (non-empty)', { field: 'letterText' });
+      }
+      const letterText = rawLetter as string;
+      // ~200KB ceiling: a finished nexus letter is a few KB of prose; 200KB is far past any real letter
+      // but bounds a pathological payload (the internal JSON parser already caps at 50mb).
+      if (letterText.length > 200_000) {
+        badRequest('letterText exceeds the 200KB limit', { field: 'letterText', max: 200_000 });
+      }
+      let reason: string | undefined;
+      const rawReason = b['reason'];
+      if (rawReason !== undefined && rawReason !== null) {
+        if (typeof rawReason !== 'string' || rawReason.length > 2000) {
+          badRequest('reason must be a string under 2000 chars', { field: 'reason' });
+        }
+        if ((rawReason as string).trim().length > 0) reason = (rawReason as string).trim();
+      }
+
+      // Config guards (fail fast, before any DB read or NCBI spend). renderLetter + bucket are required
+      // to produce the triple artifact; a render-less env cannot accept a recovery push.
+      const bucketName = deps.bucketName ?? process.env.PHI_BUCKET_NAME;
+      if (deps.renderLetter === undefined || bucketName === undefined || bucketName.length === 0) {
+        throw new HttpError(503, 'internal_error', 'Revised-letter recovery is not configured in this environment (render/bucket).', { reason: 'render_unavailable', caseId });
+      }
+
+      // 3. Load Case + Veteran (name/last/claimedCondition for the render caseData).
+      const c = await db.case.findFirst({ where: { id: caseId } });
+      if (c === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId });
+      const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
+      if (veteran === null) throw new HttpError(404, 'not_found', 'Veteran not found for case', { caseId });
+
+      // 4. 409 draft_in_flight — an active DraftJob (queued, or running+heartbeating within the stale
+      //    window) is still producing/racing a letter. Accepting a recovery push now would be clobbered
+      //    when that run's /complete later advances currentVersion (possibly BACKWARD onto its version),
+      //    burying the recovery letter. A stale/crashed run (heartbeat past the window) is NOT active —
+      //    the watcher will sweep it — so recovery may proceed over it.
+      const staleBoundary = new Date(Date.now() - STALE_THRESHOLD_MS);
+      const activeJob = await db.draftJob.findFirst({
+        where: {
+          caseId,
+          OR: [
+            { state: 'queued' },
+            { state: 'running', lastHeartbeatAt: { gte: staleBoundary } },
+          ],
+        },
+      });
+      if (activeJob !== null) {
+        throw new HttpError(409, 'conflict', 'A draft is currently in flight for this case; retry the revised-letter push once it settles.', { reason: 'draft_in_flight', caseId, jobId: activeJob.id, state: activeJob.state });
+      }
+
+      // 5. 409 on an illegal case-status transition — the push lands the case in physician_review, so
+      //    the current status must legally reach it (e.g. a 'rejected' case cannot).
+      if (!isValidCaseStatusTransition(c.status, 'physician_review')) {
+        throw new HttpError(409, 'conflict', `Case cannot move to physician_review from status '${c.status}'.`, { reason: 'illegal_status_transition', caseId, from: c.status });
+      }
+
+      // 6. Deterministic FRN-style prose cleanup (em dashes, smart quotes, ...). Same as every editor save.
+      const cleaned = cleanProseForSave(letterText);
+
+      // 7. PMID GATE + SSN — MUST BLOCK, and BEFORE the render so a bad push costs zero render spend.
+      //    7a. SSN scan (cheap, local) first.
+      if (/\b\d{3}-\d{2}-\d{4}\b/.test(cleaned)) {
+        // 'unprocessable_entity' is not in the ErrorCode union — 422 + 'bad_request' + a reason detail.
+        throw new HttpError(422, 'bad_request', 'The revised letter appears to contain an SSN; nothing was saved.', { reason: 'phi_ssn_detected', caseId });
+      }
+      //    7b. Every PMID in the letter is re-verified against NCBI. FAIL CLOSED: any verified===false
+      //        OR a verify error (transient NCBI outage) blocks the whole push; an unconfigured verifier
+      //        with PMIDs present also blocks. We stop at the FIRST bad PMID (each verify is throttled
+      //        NCBI round-trips — no point paying for the rest once the push is doomed).
+      const pmids = [...extractCitationTokenMap(cleaned).values()]
+        .filter((t) => t.kind === 'pmid')
+        .map((t) => t.key.replace(/^pmid:/, ''));
+      const verifiedPmids: string[] = [];
+      if (pmids.length > 0) {
+        if (deps.verifyPmid === undefined) {
+          throw new HttpError(503, 'internal_error', 'Citation verification is not configured; refusing to accept a revised letter that carries citations.', { reason: 'verifier_not_configured', caseId });
+        }
+        for (const pmid of pmids) {
+          let ok = false;
+          try {
+            const v = await deps.verifyPmid(pmid, c.claimedCondition);
+            ok = v.verified === true;
+          } catch {
+            ok = false; // fail CLOSED on NCBI/transient error — never smuggle an unconfirmed cite through
+          }
+          if (!ok) {
+            throw new HttpError(422, 'bad_request', `The revised letter cites PMID ${pmid}, which could not be verified against PubMed; nothing was saved.`, { reason: 'fabricated_pmid', caseId, pmid });
+          }
+          verifiedPmids.push(pmid);
+        }
+      }
+
+      // 8. Next version = one past the highest of (the latest DraftJob version, Case.currentVersion).
+      const maxJob = await db.draftJob.findFirst({ where: { caseId }, orderBy: { version: 'desc' } });
+      const parentVersion = c.currentVersion ?? 0;
+      const version = Math.max(maxJob?.version ?? 0, c.currentVersion ?? 0) + 1;
+
+      // 9. Render the triple artifact into the letter-revisions keyspace, then assert all three landed.
+      const keys = {
+        txtKey: buildLetterRevisionKey(caseId, version, 'txt'),
+        pdfKey: buildLetterRevisionKey(caseId, version, 'pdf'),
+        docxKey: buildLetterRevisionKey(caseId, version, 'docx'),
+      };
+      const caseData = {
+        id: caseId,
+        veteran_name: `${veteran.firstName} ${veteran.lastName}`.trim(),
+        veteran_last: veteran.lastName,
+        claimed_condition: c.claimedCondition,
+      };
+      const rendered = await deps.renderLetter({ caseData, letterText: cleaned, version, draft: true, bucket: bucketName, keys });
+      if (!rendered.ok) throw new HttpError(502, 'internal_error', 'Render failed; nothing saved.', { reason: 'render_failed', caseId, version });
+      assertTripleArtifacts(keys, { caseId, version });
+
+      // 10. Warn-only sanity findings (never block; stored on the revision for the UI). No prior text
+      //     to diff against on an out-of-band import, so compare the cleaned letter to an empty base.
+      const warnings: SanityFinding[] = sanityCheckLetterText('', cleaned);
+
+      // 11. Persist atomically: the revision, the case pointer/status advance, and the audit row. The
+      //     unique [caseId,version] backstop → 409 version_conflict (two different revised bodies at the
+      //     same version must not silently collapse — deliberately NOT an idempotent no-op).
+      try {
+        await db.$transaction(async (tx) => {
+          await tx.letterRevision.create({
+            data: {
+              caseId,
+              version,
+              parentVersion,
+              source: 'revised_import',
+              artifactTxtS3Key: keys.txtKey,
+              artifactPdfS3Key: keys.pdfKey,
+              artifactDocxS3Key: keys.docxKey,
+              editedBy: SERVICE_ACTORS.DRAFTER,
+              editorRole: 'drafter',
+              sanityJson: warnings,
+            },
+          });
+          await tx.case.update({
+            where: { id: caseId },
+            data: {
+              currentVersion: version,
+              status: 'physician_review',
+              version: { increment: 1 },
+            },
+          });
+          await tx.activityLog.create({
+            data: {
+              actorUserId: SERVICE_ACTORS.DRAFTER,
+              caseId,
+              action: 'revised_letter_imported',
+              detailsJson: { version, parentVersion, ...(reason !== undefined ? { reason } : {}), verifiedPmids },
+            },
+          });
+        });
+      } catch (err) {
+        if (typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === 'P2002') {
+          throw new HttpError(409, 'conflict', 'Another revision already claimed this version; reload and retry.', { reason: 'version_conflict', caseId, version });
+        }
+        throw err;
+      }
+
+      res.json({ ok: true, version, warnings, verifiedPmids });
+    }),
+  );
+
   return router;
+}
+
+// Atomic triple-artifact invariant (mirrors letter.ts assertTripleArtifacts): a LetterRevision MUST
+// point at all three non-null/non-empty artifact keys. Throw 502 BEFORE any persist so a partial
+// render can never produce a revision row pointing at a missing artifact. A structural belt — the keys
+// are always built by buildLetterRevisionKey — but it makes the invariant impossible to regress.
+function assertTripleArtifacts(
+  keys: { txtKey?: string | null; pdfKey?: string | null; docxKey?: string | null },
+  ctx: { caseId: string; version: number },
+): asserts keys is { txtKey: string; pdfKey: string; docxKey: string } {
+  const missing = (['txtKey', 'pdfKey', 'docxKey'] as const).filter((k) => typeof keys[k] !== 'string' || (keys[k] as string).trim() === '');
+  if (missing.length > 0) {
+    throw new HttpError(502, 'internal_error', 'Refusing to persist a letter revision with a missing artifact key.', { reason: 'partial_artifacts', caseId: ctx.caseId, version: ctx.version, missing });
+  }
 }

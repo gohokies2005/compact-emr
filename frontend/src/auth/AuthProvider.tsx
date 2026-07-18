@@ -1,5 +1,5 @@
 import { createContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { confirmSignIn as amplifyConfirmSignIn, fetchAuthSession, fetchUserAttributes, getCurrentUser, signIn as amplifySignIn, signOut as amplifySignOut } from 'aws-amplify/auth';
+import { confirmSignIn as amplifyConfirmSignIn, fetchAuthSession, fetchUserAttributes, getCurrentUser, rememberDevice as amplifyRememberDevice, signIn as amplifySignIn, signOut as amplifySignOut } from 'aws-amplify/auth';
 import type { Role } from '../types/prisma';
 import { env } from '../env';
 import { IdleWarningModal } from './IdleWarningModal';
@@ -204,7 +204,15 @@ export function AuthProvider({
       }
       return;
     }
-    if (step === 'signed_in') await refreshUser();
+    if (step === 'signed_in') {
+      // Remember THIS device so future logins on it skip the TOTP challenge (Ryan 2026-07-18:
+      // "still needing google authenticator to login"). Best-effort — a failure here must NEVER
+      // block sign-in. The pool keeps ChallengeRequiredOnNewDevice=true, so a brand-new device
+      // still gets exactly one OTP; after that it's remembered (Cognito uses DEVICE_SRP_AUTH and
+      // does not re-challenge MFA). Opt-in device mode requires this explicit call to mark it.
+      try { await amplifyRememberDevice(); } catch { /* non-fatal: device just won't be remembered */ }
+      await refreshUser();
+    }
   }, [refreshUser]);
 
   const signIn = useCallback(async (email: string, password: string) => {

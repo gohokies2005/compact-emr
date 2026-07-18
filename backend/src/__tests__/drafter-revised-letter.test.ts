@@ -199,6 +199,23 @@ describe('happy path', () => {
     expect((logData.detailsJson as Record<string, unknown>).reason).toBe('physician hand-fix');
     expect((logData.detailsJson as Record<string, unknown>).verifiedPmids).toEqual(['12345678']);
   });
+
+  // (b2) DAVIS THYROID (2026-07-18): a case ALREADY in physician_review must accept a corrected-letter
+  // replace. Pre-fix this 409'd ("cannot move to physician_review from status 'physician_review'") because
+  // the transition table omits the self-edge — but replacing a letter already in the doctor's queue is the
+  // ENTIRE POINT of this recovery endpoint. Must succeed, land a new revision, and stay in physician_review.
+  it('accepts a corrected-letter push for a case ALREADY in physician_review (self-replace, not a 409)', async () => {
+    const { db, store, caseRow } = makeDb({ caseRow: defaultCase({ status: 'physician_review', currentVersion: 5, version: 9 }), maxJob: { id: 'J9', version: 5, state: 'done', lastHeartbeatAt: null } });
+    if (caseRow === null) throw new Error('caseRow was null');
+    const res = await request(appFor(db, deps())).post(URL).send({ letterText: GOOD_LETTER, reason: 'physician hand-fix on a case already in review' });
+
+    expect(res.status).toBe(200); // NOT 409 illegal_status_transition
+    expect(res.body.ok).toBe(true);
+    expect(res.body.version).toBe(6);
+    expect(store.letterRevision.create).toHaveBeenCalledTimes(1);
+    expect(caseRow.currentVersion).toBe(6);
+    expect(caseRow.status).toBe('physician_review'); // stays in the doctor's queue with the new letter
+  });
 });
 
 // (c) FABRICATED PMID — 422, nothing persisted, render NEVER called (pre-render gate).
@@ -216,14 +233,83 @@ describe('fabricated PMID', () => {
     expect(store.case.update).not.toHaveBeenCalled();
   });
 
-  it('422 fail-CLOSED when the NCBI verifier THROWS (transient outage must not smuggle a cite through)', async () => {
+  it('422 ncbi_unavailable when the verifier keeps failing transiently — retried, then still fail-CLOSED', async () => {
     const { db, store } = makeDb();
+    // A persistent transient outage (throw → caught as verify_error → retried with backoff) must still
+    // BLOCK the push — but as ncbi_unavailable ("retry in a moment"), NOT fabricated_pmid, which would
+    // falsely brand a real PMID fake. Render still never runs; nothing is persisted (fail-closed holds).
     const d = deps({ verifyPmid: vi.fn(async () => { throw new Error('ETIMEDOUT eutils'); }) });
     const res = await request(appFor(db, d)).post(URL).send({ letterText: GOOD_LETTER });
     expect(res.status).toBe(422);
-    expect(res.body.error.details.reason).toBe('fabricated_pmid');
+    expect(res.body.error.details.reason).toBe('ncbi_unavailable');
     expect((d.renderLetter as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
     expect(store.letterRevision.create).not.toHaveBeenCalled();
+  });
+
+  it('422 fabricated_pmid (NOT ncbi_unavailable) when no_summary PERSISTS — retried defensively, then branded fabricated', async () => {
+    const { db, store } = makeDb();
+    // no_summary = esummary returned 200-OK with no record for the PMID = the paper does not exist.
+    // We retry it (in case a masked rate-limit body ever reads empty — the Tanner defensive path), but a
+    // reason that PERSISTS across all attempts must be reported as fabricated, never as a false "outage"
+    // that would loop the physician forever on a dead PMID. (architect QA 2026-07-18)
+    const verifyPmid = vi.fn(async (): Promise<VerifyResult> => ({ verified: false, pmid: '12345678', title: '', journal: '', year: '', killer_finding: '', reason: 'no_summary' }));
+    const d = deps({ verifyPmid });
+    const res = await request(appFor(db, d)).post(URL).send({ letterText: GOOD_LETTER });
+    expect(res.status).toBe(422);
+    expect(res.body.error.details.reason).toBe('fabricated_pmid'); // NOT ncbi_unavailable
+    expect(verifyPmid.mock.calls.length).toBe(3); // was retried (Tanner-safe), not failed on first read
+    expect((d.renderLetter as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(store.letterRevision.create).not.toHaveBeenCalled();
+  });
+
+  // (c2) MOLE 11-13 (Davis thyroid, 2026-07-18): a REAL, non-retracted, physician-CHOSEN paper that merely
+  // fails the retrieval-grade grounding heuristics (no verbatim killer stat / short abstract / off-topic
+  // token-match) is NOT fabrication — it must be ACCEPTED. Pre-fix these definitive real-paper reasons were
+  // branded fabricated_pmid and blocked the push. The physician's citation choice is the relevance authority
+  // (same policy as the by-PMID enricher, which passes no condition).
+  it('ACCEPTS a real physician-chosen paper that lacks a grounded killer stat (no_grounded_stat -> 200, not fabricated)', async () => {
+    const { db, store } = makeDb({ caseRow: defaultCase({ currentVersion: 5, version: 9 }), maxJob: { id: 'J9', version: 5, state: 'done', lastHeartbeatAt: null } });
+    // Real paper: esummary + efetch succeeded (has title/abstract), just no verbatim CONCLUSIONS-style stat.
+    const verifyPmid = vi.fn(async (_pmid: string, _condition?: string): Promise<VerifyResult> => ({ verified: false, pmid: '12345678', title: 'Thyroid dysfunction after service exposure', journal: 'Thyroid', year: '2019', killer_finding: '', reason: 'no_grounded_stat' }));
+    const d = deps({ verifyPmid });
+    const res = await request(appFor(db, d)).post(URL).send({ letterText: GOOD_LETTER, reason: 'physician-chosen mechanistic cite' });
+
+    expect(res.status).toBe(200); // accepted, NOT 422 fabricated_pmid
+    expect(res.body.ok).toBe(true);
+    expect(store.letterRevision.create).toHaveBeenCalledTimes(1);
+    // On-topic gate skipped: the verifier is called WITHOUT the claimed condition (empty 2nd arg).
+    expect(verifyPmid.mock.calls[0]?.[1]).toBe('');
+  });
+
+  // (c3) RETRACTED still fails closed — but with an HONEST label, not "fabricated". A retracted paper is
+  // real; branding it fabricated would be wrong, and citing retracted science in a nexus letter is unsafe.
+  it('BLOCKS a retracted paper as cites_retracted_paper (not fabricated_pmid), fail-closed', async () => {
+    const { db, store } = makeDb();
+    const d = deps({ verifyPmid: vi.fn(async (): Promise<VerifyResult> => ({ verified: false, pmid: '12345678', title: 'Retracted study', journal: 'J', year: '2015', killer_finding: '', reason: 'retracted' })) });
+    const res = await request(appFor(db, d)).post(URL).send({ letterText: GOOD_LETTER });
+    expect(res.status).toBe(422);
+    expect(res.body.error.details.reason).toBe('cites_retracted_paper');
+    expect((d.renderLetter as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(store.letterRevision.create).not.toHaveBeenCalled();
+  });
+
+  it('RETRIES a transient NCBI error and SUCCEEDS when the verifier recovers (the throttle fix)', async () => {
+    const { db, store } = makeDb();
+    let n = 0;
+    // First verify = a transient efetch_error (a throttled NCBI round-trip); it recovers on retry, the
+    // real citation verifies, and the push goes through. This is the exact 5-citation throttle failure
+    // the fix targets — a real PMID must not be blocked by NCBI rate-limiting.
+    const verifyPmid = vi.fn(async (): Promise<VerifyResult> => {
+      n += 1;
+      return n === 1
+        ? { verified: false, pmid: '12345678', title: '', journal: '', year: '', killer_finding: '', reason: 'efetch_error' }
+        : OK_VERIFY;
+    });
+    const d = deps({ verifyPmid });
+    const res = await request(appFor(db, d)).post(URL).send({ letterText: GOOD_LETTER, reason: 'physician hand-fix' });
+    expect(res.status).toBeLessThan(300);                          // push went through after the retry
+    expect(verifyPmid.mock.calls.length).toBeGreaterThanOrEqual(2); // failed once (transient), retried
+    expect(store.letterRevision.create).toHaveBeenCalled();
   });
 });
 

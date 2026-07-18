@@ -1195,6 +1195,87 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
     }),
   );
 
+  // ── "Text: email waiting" nudge (Dr. Kasky 2026-07-16) ──────────────────────────────────────────────
+  // One-tap RN/admin/physician button on the case page texts the veteran ONE SMS asking them to go read the
+  // email we already sent (invoice link, a question, the delivered letter — the RN picks the moment). The
+  // send rides the existing fire-and-forget Quo transport (quoClient.sendSms NEVER throws — it degrades to
+  // {sent:false,reason}); this handler turns a failure into an actionable 4xx/5xx instead so the RN sees a
+  // real reason. Every attempt (success OR failure) is logged to activity_log with the phone last-4. A
+  // 2-minute server-side cooldown backs up the client's button-disable so a double-click or two RNs on the
+  // same case can't spam the veteran. Strictly a notification — touches no case status, letter, or payment.
+  router.post(
+    '/cases/:id/notify-email-waiting',
+    requireRole(['admin', 'ops_staff', 'physician']),
+    asyncHandler(async (req: Request, res: Response) => {
+      const user = currentUser(req);
+      const id = String(req.params.id);
+      const EMAIL_WAITING_SMS_COOLDOWN_MS = 2 * 60 * 1000;
+
+      const existing = await db.case.findFirst({
+        where: { id },
+        select: { id: true, veteranId: true },
+      });
+      if (existing === null) throw new HttpError(404, 'not_found', 'Case not found', { caseId: id });
+
+      // Phone lives on the Veteran (nullable, prefilled from the Jotform intake's submittedPhone). Fetch it
+      // separately — the typed AppDb.case delegate doesn't expose the veteran relation (same idiom delivery.ts
+      // uses to read the phone for the Tier-1 letter-ready SMS).
+      const veteran = await db.veteran.findUnique({ where: { id: existing.veteranId } });
+      const phone = (veteran as { phone?: string | null } | null)?.phone ?? null;
+      if (phone === null || phone.trim() === '') {
+        throw new HttpError(422, 'bad_request', 'No phone number is on file for this veteran — add one to the chart before texting.', { caseId: id });
+      }
+
+      // Server-side double-send guard (the button also disables while pending): refuse if this case was
+      // texted the "email waiting" nudge SUCCESSFULLY within the cooldown window. Reads the activity log via a
+      // JSON-path filter (detailsJson.sent === true) rather than a dedicated column — a low-frequency manual
+      // action. A prior FAILED attempt does NOT lock a retry (only sent===true counts).
+      const since = new Date(Date.now() - EMAIL_WAITING_SMS_COOLDOWN_MS);
+      const recentSuccess = await db.activityLog.findFirst({
+        where: {
+          caseId: id,
+          action: 'sms_email_waiting_sent',
+          ts: { gt: since },
+          detailsJson: { path: ['sent'], equals: true },
+        },
+      });
+      if (recentSuccess !== null) {
+        throw new HttpError(429, 'conflict', 'This veteran was already texted in the last couple of minutes. Please wait before sending again.', { caseId: id });
+      }
+
+      const smsResult = await quoClient.sendSms(phone, quoClient.emailWaitingText());
+      const phoneLast4 = phone.replace(/[^\d]/g, '').slice(-4);
+
+      // Audit EVERY attempt (success and failure), with the phone last-4 for a legible trail.
+      await db.activityLog.create({
+        data: {
+          actorUserId: user.id,
+          action: 'sms_email_waiting_sent',
+          caseId: id,
+          veteranId: existing.veteranId,
+          detailsJson: {
+            sent: smsResult.sent,
+            phoneLast4,
+            ...(smsResult.reason !== undefined ? { reason: smsResult.reason } : {}),
+            ...(smsResult.code !== undefined ? { code: smsResult.code } : {}),
+          },
+        },
+      });
+
+      if (!smsResult.sent) {
+        const reason = smsResult.reason ?? 'unknown';
+        const msg =
+          reason === 'invalid_number' ? 'The phone number on file isn’t a valid US mobile number.'
+          : reason === 'no_api_key' ? 'The SMS service isn’t configured yet — please flag Dr. Ryan.'
+          : (reason.startsWith('http_') || reason === 'network' || reason === 'exception') ? 'The SMS service could not send the text right now. Please try again shortly.'
+          : 'The text could not be sent.';
+        throw new HttpError(502, 'provider_unavailable', msg, { caseId: id, reason });
+      }
+
+      res.json({ data: { sent: true, phoneLast4 } });
+    }),
+  );
+
   router.post(
     '/cases/:id/assign-physician',
     requireRole(['admin', 'ops_staff']),

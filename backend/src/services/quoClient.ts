@@ -205,3 +205,12 @@ export function letterReadyText(): string {
 export function needInfoText(): string {
   return 'Flat Rate Nexus: we have a question we need answered to finish your letter. Please check your email and reply, or contact info@flatratenexus.com. Reply STOP to opt out.';
 }
+
+// "Your email is waiting" nudge (Dr. Kasky 2026-07-16): a one-tap RN button on the case page texts the
+// veteran to go read the email we already sent (invoice link, a question, a delivered letter — the RN
+// decides context). EXACT wording is locked by product — do NOT reword. Unlike letterReadyText/needInfoText
+// this one intentionally omits "Reply STOP" because it explicitly tells them the line isn't monitored and to
+// reply to email, not the number.
+export function emailWaitingText(): string {
+  return 'Flat Rate Nexus here — you have an email from us waiting in your inbox. Please check it (and your spam folder) and reply when you can. This text line isn\'t monitored, so please reply to our email, not this number.';
+}

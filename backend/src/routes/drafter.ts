@@ -1932,8 +1932,14 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
       }
 
       // 5. 409 on an illegal case-status transition — the push lands the case in physician_review, so
-      //    the current status must legally reach it (e.g. a 'rejected' case cannot).
-      if (!isValidCaseStatusTransition(c.status, 'physician_review')) {
+      //    the current status must legally reach it (e.g. a 'rejected' case cannot). A case ALREADY in
+      //    physician_review is the norm for this endpoint (Davis thyroid, 2026-07-18): replacing the
+      //    letter under a case that is already in the doctor's queue is the ENTIRE POINT of the recovery
+      //    endpoint, so a physician_review->physician_review self-replace is legal even though the generic
+      //    transition table (correctly) omits the self-edge for the /status route. Only a status that can
+      //    neither reach nor already BE physician_review is refused.
+      const alreadyInReview = c.status === 'physician_review';
+      if (!alreadyInReview && !isValidCaseStatusTransition(c.status, 'physician_review')) {
         throw new HttpError(409, 'conflict', `Case cannot move to physician_review from status '${c.status}'.`, { reason: 'illegal_status_transition', caseId, from: c.status });
       }
 
@@ -1946,10 +1952,17 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
         // 'unprocessable_entity' is not in the ErrorCode union — 422 + 'bad_request' + a reason detail.
         throw new HttpError(422, 'bad_request', 'The revised letter appears to contain an SSN; nothing was saved.', { reason: 'phi_ssn_detected', caseId });
       }
-      //    7b. Every PMID in the letter is re-verified against NCBI. FAIL CLOSED: any verified===false
-      //        OR a verify error (transient NCBI outage) blocks the whole push; an unconfigured verifier
-      //        with PMIDs present also blocks. We stop at the FIRST bad PMID (each verify is throttled
-      //        NCBI round-trips — no point paying for the rest once the push is doomed).
+      //    7b. Re-verify every PMID against NCBI. Still FAILS CLOSED on a genuinely unverifiable /
+      //        retracted citation, but is now THROTTLE-RESILIENT. verifyPmidById makes ~2 unkeyed NCBI
+      //        calls per PMID (esummary + efetch), so firing N citations back-to-back trips NCBI's
+      //        ~3 req/s unkeyed cap; the later calls error out and the verifier returns verified:false
+      //        with a TRANSIENT reason (efetch_error / no_summary), which the old loop misread as a
+      //        fabricated PMID and blocked valid 5-citation letters (PMID 20086074 on the Tanner push,
+      //        2026-07-17; shared/outbox/20260717_EMR_revised_letter_pmid_verifier_throttle_bypass.md).
+      //        Fix, endpoint-side only (the vendored verifier is untouched): (a) a delay BETWEEN
+      //        citations keeps us under the rate cap; (b) a TRANSIENT failure is retried with backoff
+      //        before we fail closed. A DEFINITIVE reject (invalid_pmid / retracted / real-but-
+      //        ungroundable) still fails closed on the first answer, so nothing fabricated slips through.
       const pmids = [...extractCitationTokenMap(cleaned).values()]
         .filter((t) => t.kind === 'pmid')
         .map((t) => t.key.replace(/^pmid:/, ''));
@@ -1958,16 +1971,61 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
         if (deps.verifyPmid === undefined) {
           throw new HttpError(503, 'internal_error', 'Citation verification is not configured; refusing to accept a revised letter that carries citations.', { reason: 'verifier_not_configured', caseId });
         }
-        for (const pmid of pmids) {
+        const verifyPmid = deps.verifyPmid;
+        const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+        // This push carries a PHYSICIAN'S deliberately-chosen citations (the ops window pre-verifies each
+        // one). So this gate is NOT the auto-RETRIEVAL grounding contract — it is a narrow anti-FABRICATION
+        // floor: block ONLY a PMID that does not resolve to a REAL, non-retracted PubMed record. This
+        // mirrors the by-PMID Citation Enricher picker, which DELIBERATELY passes no condition so
+        // verifyPmidById skips the on-topic gate ("the physician's explicit choice is the relevance
+        // authority"). Reusing the full retrieval-grade gate here branded REAL physician-chosen papers as
+        // "fabricated" and blocked legit pushes (Davis thyroid moles 11-13; architect QA 2026-07-18).
+        // Reason taxonomy — ground truth = citationFallback.cjs verifyPmidById L318-352:
+        //   ACCEPT — a REAL, non-retracted paper that merely fails the retrieval-grade grounding heuristics
+        //     (short/absent abstract, no verbatim killer stat, off-topic token-match). These are NOT
+        //     fabrication and MUST NOT block a physician's chosen citation. (off_topic can't even fire now
+        //     — we pass no condition — but is kept here for defence-in-depth.)
+        const ACCEPT_ANYWAY = new Set(['no_abstract', 'no_grounded_stat', 'off_topic']);
+        //   RETRYABLE — a possibly-transient NCBI hiccup; retry with backoff. verify_error/efetch_error are
+        //     the real throttle/transport paths (a sustained 429 throws → surfaces as verify_error).
+        //     no_summary (200-OK, no record) usually means the PMID does not exist, but we retry it
+        //     defensively in case a rate-limit body ever reads empty (Tanner-safe); if it persists it is
+        //     branded fabricated below, never a false outage.
+        const RETRYABLE = new Set(['efetch_error', 'verify_error', 'no_summary']);
+        //   OUTAGE — of the retryable reasons, the genuine TRANSPORT failures worth a "retry in a moment".
+        const OUTAGE = new Set(['efetch_error', 'verify_error']);
+        for (let i = 0; i < pmids.length; i++) {
+          if (i > 0) await sleep(800); // keep under NCBI's unkeyed ~3 req/s between citations
+          const pmid = pmids[i];
           let ok = false;
-          try {
-            const v = await deps.verifyPmid(pmid, c.claimedCondition);
-            ok = v.verified === true;
-          } catch {
-            ok = false; // fail CLOSED on NCBI/transient error — never smuggle an unconfirmed cite through
+          let lastReason: string | undefined;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) await sleep(700 * attempt); // 700ms, then 1400ms backoff on retry
+            let v: { verified?: boolean; reason?: string };
+            // No condition arg — skip the on-topic gate; the physician's citation choice is the relevance
+            // authority (identical policy to the by-PMID enricher). '' explicitly skips it in the verifier.
+            try { v = await verifyPmid(pmid, ''); }
+            catch { v = { verified: false, reason: 'verify_error' }; } // verifier never throws, but guard
+            if (v.verified === true || ACCEPT_ANYWAY.has(v.reason ?? '')) { ok = true; break; } // real paper → accept
+            lastReason = v.reason;
+            if (!RETRYABLE.has(v.reason ?? '')) break; // definitive reject (invalid_pmid / retracted / persistent no_summary) → fail closed
+            // else: possibly-transient → loop and retry with backoff
           }
           if (!ok) {
-            throw new HttpError(422, 'bad_request', `The revised letter cites PMID ${pmid}, which could not be verified against PubMed; nothing was saved.`, { reason: 'fabricated_pmid', caseId, pmid });
+            // Classify the definitive/persistent failure into an honest reason + message.
+            let reason: string;
+            let message: string;
+            if (lastReason === 'retracted') {
+              reason = 'cites_retracted_paper';
+              message = `The revised letter cites PMID ${pmid}, which PubMed lists as RETRACTED; nothing was saved.`;
+            } else if (OUTAGE.has(lastReason ?? '')) {
+              reason = 'ncbi_unavailable';
+              message = `PubMed verification is temporarily unavailable for PMID ${pmid} (${lastReason ?? 'ncbi_error'}); nothing was saved — please retry in a moment.`;
+            } else {
+              reason = 'fabricated_pmid';
+              message = `The revised letter cites PMID ${pmid}, which does not resolve to a real PubMed record; nothing was saved.`;
+            }
+            throw new HttpError(422, 'bad_request', message, { reason, caseId, pmid, verifyReason: lastReason });
           }
           verifiedPmids.push(pmid);
         }

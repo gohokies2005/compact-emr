@@ -371,19 +371,43 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
     }),
   );
 
+  // PATCH: edit a staff member's display NAME and/or ACTIVE status (admin-only, optimistic-concurrency
+  // via version). At least one of {name, active} must be supplied.
+  //   - `active` toggles the login: Cognito enable/disable (the real access gate) + the DB flag (pickers).
+  //   - `name` renames the display name across the staff directory / assignment pickers / actor-name
+  //     resolver / staff messages. For a physician-linked row we ALSO sync Physician.fullName so the
+  //     physician picker (which reads fullName, not AppUser.name) stays consistent — but we deliberately
+  //     do NOT touch the LETTER credential block (credentialBlockJson): a signed-letter credential is a
+  //     deliberate physician-profile edit, never a quick typo-fix. Name lives in the DB, so a name-only
+  //     edit needs no Cognito call (works even where Cognito is unconfigured).
+  // Added 2026-07-17 (Ryan: a staff last name was misspelled at onboarding and needed a correction path).
   router.patch(
     '/users/:id',
     requireRole(['admin']),
     asyncHandler(async (req: Request, res: Response) => {
       const cognito = deps.cognito;
-      if (cognito === undefined) throw new HttpError(503, 'internal_error', 'Staff provisioning is not configured in this environment.', { reason: 'cognito_unconfigured' });
       const id = String(req.params.id);
       const body = isRecord(req.body) ? req.body : {};
       const version = body.version;
       if (typeof version !== 'number' || !Number.isInteger(version) || version < 1) {
         throw new HttpError(400, 'bad_request', 'version is required and must be a positive integer', { field: 'version' });
       }
-      if (typeof body.active !== 'boolean') throw new HttpError(400, 'bad_request', 'active (boolean) is required', { field: 'active' });
+
+      const hasActive = body.active !== undefined;
+      const hasName = body.name !== undefined;
+      if (!hasActive && !hasName) {
+        throw new HttpError(400, 'bad_request', 'Provide at least one of: name (non-empty string) or active (boolean)', { fields: ['name', 'active'] });
+      }
+      if (hasActive && typeof body.active !== 'boolean') {
+        throw new HttpError(400, 'bad_request', 'active must be a boolean', { field: 'active' });
+      }
+      // reqStr trims + rejects empty / >120 (same rule as staff-create), so a whitespace-only rename 400s.
+      const newName = hasName ? reqStr(body, 'name', 120) : undefined;
+
+      // Toggling the login is the only path that needs Cognito; a rename is DB-only.
+      if (hasActive && cognito === undefined) {
+        throw new HttpError(503, 'internal_error', 'Staff provisioning is not configured in this environment.', { reason: 'cognito_unconfigured' });
+      }
 
       const current = await db.appUser.findUnique({ where: { id }, include: { roles: true } });
       if (current === null) throw new HttpError(404, 'not_found', 'Staff user not found', { userId: id });
@@ -392,7 +416,7 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
       }
 
       // Don't strand in-flight work: refuse to deactivate an RN assigned to an active case.
-      if (body.active === false && current.active === true) {
+      if (hasActive && body.active === false && current.active === true) {
         const inFlight = await db.case.count({ where: { assignedRnId: id, status: { in: [...IN_FLIGHT_CASE_STATUSES] } } });
         if (inFlight > 0) {
           throw new HttpError(409, 'conflict', `Cannot deactivate: this user is the RN liaison on ${inFlight} in-flight case(s). Reassign them first.`, { userId: id, inFlightCount: inFlight });
@@ -400,11 +424,35 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
       }
 
       // Cognito is the real access gate (disabling stops the JWT); the DB flag removes them from pickers.
-      await cognito.setUserEnabled(current.email, body.active);
-      const updated = await db.appUser.update({ where: { id }, data: { active: body.active, version: { increment: 1 } } });
-      await db.activityLog.create({
-        data: { actorUserId: currentActor(req).id, action: body.active ? 'staff_reactivated' : 'staff_deactivated', detailsJson: { userId: id, email: current.email } },
-      });
+      if (hasActive) await cognito!.setUserEnabled(current.email, body.active as boolean);
+
+      const data: { active?: boolean; name?: string; version: { increment: number } } = { version: { increment: 1 } };
+      if (hasActive) data.active = body.active as boolean;
+      if (hasName) data.name = newName;
+      const updated = await db.appUser.update({ where: { id }, data });
+
+      // Sync the linked physician's DISPLAY name only (credential block untouched — see header).
+      let physicianNameSynced = false;
+      if (hasName && current.cognitoSub) {
+        const linkedPhysician = await db.physician.findUnique({ where: { cognitoSub: current.cognitoSub } });
+        if (linkedPhysician !== null && linkedPhysician.fullName !== newName) {
+          await db.physician.update({ where: { id: linkedPhysician.id }, data: { fullName: newName as string } });
+          physicianNameSynced = true;
+        }
+      }
+
+      // Distinct audit actions so the log reads cleanly; a combined edit logs both.
+      if (hasName && newName !== current.name) {
+        await db.activityLog.create({
+          data: { actorUserId: currentActor(req).id, action: 'staff_name_edited', detailsJson: { userId: id, email: current.email, oldName: current.name, newName, physicianNameSynced } },
+        });
+      }
+      if (hasActive && body.active !== current.active) {
+        await db.activityLog.create({
+          data: { actorUserId: currentActor(req).id, action: body.active ? 'staff_reactivated' : 'staff_deactivated', detailsJson: { userId: id, email: current.email } },
+        });
+      }
+
       res.json({ data: { id: updated.id, email: updated.email, name: updated.name, active: updated.active, roles: current.roles.map((r) => r.role), version: updated.version } });
     }),
   );

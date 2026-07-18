@@ -204,6 +204,14 @@ export async function returnCaseToPhysician(id: string, input: ReturnToPhysician
   return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/return-to-physician`, input);
 }
 
+// "Text: email waiting" (Dr. Kasky 2026-07-16): one SMS to the veteran asking them to go check the email we
+// already sent. Server sends via Quo, logs to activity_log, and enforces a 2-min cooldown. Returns the
+// phone last-4 on success; a 422 (no phone), 429 (cooldown), or 502 (send failed) carries an RN-readable
+// message the caller surfaces via describeApiError.
+export async function notifyEmailWaiting(id: string): Promise<{ data: { sent: boolean; phoneLast4: string } }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(id)}/notify-email-waiting`, {});
+}
+
 // "Revise letter" (Ryan 2026-07-03): RN reopens a DELIVERED or PAID letter for a surgical edit — moves it
 // to correction_requested (the RN-editable state) with a MANDATORY note. NOT a redraft; the signed letter
 // stays current until the RN edits it. Dedicated route (no billing change; physician still re-signs).

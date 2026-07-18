@@ -36,6 +36,8 @@ interface GuidedRevisionPanelProps {
 interface Rejection {
   readonly reason: string;
   readonly addedCitations: readonly string[];
+  // citation_invented only: the backend flags a physician may confirm + add the citation deliberately.
+  readonly physicianOverridable?: boolean;
 }
 
 function rejectionCopy(r: Rejection): string {
@@ -86,12 +88,12 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
     setError(null);
   }
 
-  async function onPropose() {
+  async function onPropose(confirmAddedCitations = false) {
     if (passage === null || instruction.trim().length === 0) return;
     reset();
     setProposing(true);
     try {
-      const res = await proposeGuidedRevision(caseId, { passage, instruction: instruction.trim() });
+      const res = await proposeGuidedRevision(caseId, { passage, instruction: instruction.trim(), ...(confirmAddedCitations ? { confirmAddedCitations: true } : {}) });
       setResult(res.data);
     } catch (err: unknown) {
       // 503 → the feature flag is off; disable the entry point (no point retrying this session).
@@ -106,7 +108,8 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
         const added = (err.details?.citationDiff?.added ?? [])
           .map((t) => (typeof t?.raw === 'string' ? t.raw : ''))
           .filter((s) => s.length > 0);
-        setRejection({ reason, addedCitations: added });
+        const physicianOverridable = (err.details as { physicianOverridable?: unknown } | undefined)?.physicianOverridable === true;
+        setRejection({ reason, addedCitations: added, physicianOverridable });
         return;
       }
       setError('Guided revision could not be generated. Refine your instruction and try again.');
@@ -193,6 +196,19 @@ export function GuidedRevisionPanel({ caseId, passage, onApply, disabledByFlag, 
       {rejection ? (
         <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">
           {rejectionCopy(rejection)}
+          {/* PHYSICIAN OVERRIDE (Ryan 2026-07-18): the signing physician may confirm the added
+              citation/statistic is accurate and add it deliberately. Backend enforces physician/admin
+              role + audits; an RN who clicks this is re-rejected. */}
+          {rejection.reason === 'citation_invented' && rejection.physicianOverridable ? (
+            <div className="mt-2 border-t border-red-200 pt-2">
+              <div className="text-xs text-red-700">
+                If you are the signing physician and have verified this citation/statistic is accurate and supports the passage, you may add it deliberately.
+              </div>
+              <Button type="button" variant="secondary" className="mt-2" loading={proposing} disabled={proposing} onClick={() => void onPropose(true)}>
+                I’ve verified it — add it anyway
+              </Button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

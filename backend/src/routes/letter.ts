@@ -660,7 +660,7 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const user = currentActor(req);
       const caseId = String(req.params.id);
-      const body = (req.body ?? {}) as { instruction?: unknown; apply?: unknown; proposal?: EditProposal; mode?: unknown; passage?: unknown };
+      const body = (req.body ?? {}) as { instruction?: unknown; apply?: unknown; proposal?: EditProposal; mode?: unknown; passage?: unknown; confirmAddedCitations?: unknown };
       const isGuided = body.mode === 'guided_revision';
 
       const c = await db.case.findFirst({ where: { id: caseId } });
@@ -822,8 +822,35 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         //  2) the revision would weaken/remove the §VII >50% holding conclusion;
         //  3) the edit does not deterministically apply.
         if (citationDiff.added.length > 0) {
-          res.status(422).json({ error: { code: 'conflict', message: `Guided revision rejected: the revised passage introduces ${citationDiff.added.length} citation/statistic not present in the original (${citationDiff.added.map(describeToken).join(', ')}). A revision may reword prose around the cited facts but must never add a new citation or statistic.`, details: { reason: 'citation_invented', caseId, proposal: out.proposal, citationDiff, costUsd: out.costUsd } } });
-          return;
+          // PHYSICIAN-ATTESTATION OVERRIDE (Ryan 2026-07-18): the DEFAULT is still to BLOCK a net-new
+          // citation/statistic (anti-fabrication — the LLM must never smuggle one in). But the SIGNING
+          // PHYSICIAN may have verified that a citation/stat is accurate and supports the passage and
+          // want to add it deliberately. So a physician/admin who passes confirmAddedCitations:true is
+          // allowed through; an RN (ops_staff) cannot attest (mirrors the §VII + Citation-Enricher
+          // physician-only rule). Nothing is written here (propose-only) — the added tokens are surfaced
+          // to the physician as a WARNING on the preview, and the attestation is AUDITED for the record.
+          const isPhysician = user.role === 'physician' || user.role === 'admin';
+          const physicianConfirmed = body.confirmAddedCitations === true && isPhysician;
+          if (!physicianConfirmed) {
+            // physicianOverridable is role-derived so an RN never sees an override button that can't work.
+            res.status(422).json({ error: { code: 'conflict', message: `Guided revision rejected: the revised passage introduces ${citationDiff.added.length} citation/statistic not present in the original (${citationDiff.added.map(describeToken).join(', ')}). A revision may reword prose around the cited facts but must never add a new citation or statistic.${isPhysician ? ' A physician may confirm and add a statistic or author-year deliberately.' : ''}`, details: { reason: 'citation_invented', caseId, proposal: out.proposal, citationDiff, costUsd: out.costUsd, physicianOverridable: isPhysician } } });
+            return;
+          }
+          // HARDENING (QA anthropic-ai-sme 2026-07-18): a physician can attest a STATISTIC or AUTHOR-YEAR
+          // by eye (they hold the source). A net-new PMID is different in kind — an LLM can fabricate a
+          // syntactically valid PMID that resolves to nothing or to an unrelated paper, which no human
+          // can catch by inspection; only NCBI can. So even under a physician override, a net-new PMID is
+          // NOT allowed through this door: the physician adds a verified PMID via the Citation Enricher
+          // (which re-verifies it against PubMed). Attestation covers stats + author-year; existence of a
+          // PMID is a machine check. This keeps the override from becoming a weaker door than the enricher.
+          const addedPmids = citationDiff.added.filter((t) => typeof t.key === 'string' && t.key.startsWith('pmid:'));
+          if (addedPmids.length > 0) {
+            res.status(422).json({ error: { code: 'conflict', message: `A physician may confirm and add a statistic or author-year, but a net-new PMID (${addedPmids.map(describeToken).join(', ')}) must be added through the Citation Enricher, which verifies it against PubMed. Reword to cite an existing reference, or add the PMID via the enricher.`, details: { reason: 'citation_pmid_needs_enricher', caseId, addedPmids: addedPmids.map((t) => t.key), costUsd: out.costUsd } } });
+            return;
+          }
+          await db.activityLog.create({ data: { actorUserId: user.sub, action: 'letter_guided_revision_citation_override', caseId, veteranId: c.veteranId, detailsJson: { addedCitations: citationDiff.added.map(describeToken), instruction: body.instruction.slice(0, 500) } } });
+          // fall through — the added citation(s) are surfaced as a warning below; the physician still
+          // reviews the preview and saves through the editor (the PUT save carries no citation block).
         }
         if (holdingWouldChange) {
           res.status(422).json({ error: { code: 'conflict', message: "This edit would weaken or remove the 'more likely than not (>50%)' opinion, which is locked. You may change the causal theory wording, but the >50% conclusion must remain.", details: { reason: 'holding_changed', caseId, proposal: out.proposal, costUsd: out.costUsd } } });
@@ -839,6 +866,10 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         //    physician decides);
         //  - letter-sanity findings on the would-be revised letter.
         const warnings: string[] = [];
+        if (citationDiff.added.length > 0) {
+          // Only reachable when a physician confirmed the override above (else it 422'd). Surface it.
+          warnings.push(`You confirmed adding ${citationDiff.added.length} citation/statistic not in the original (${citationDiff.added.map(describeToken).join(', ')}). As the signing physician you have attested it is accurate and supports the passage.`);
+        }
         if (citationDiff.removed.length > 0) {
           warnings.push(`This revision removes ${citationDiff.removed.length} citation/statistic from the passage (${citationDiff.removed.map(describeToken).join(', ')}). Confirm this is intended before accepting.`);
         }

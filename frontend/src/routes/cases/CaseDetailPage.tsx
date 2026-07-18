@@ -68,7 +68,7 @@ import { documentDisplayName } from '../../lib/docName';
 import { formatDateOnly, formatPhone, formatNameLastFirst, formatPhysicianLastName } from '../../lib/format';
 import {
   archiveCase, deleteCase, getCase, listDraftJobs, patchCase, restoreCase, returnCaseToPhysician, transitionCaseStatus,
-  reviseLetter, publishCorrection,
+  reviseLetter, publishCorrection, notifyEmailWaiting,
   type CaseDetail, type PatchCaseInput, type TransitionInput,
 } from '../../api/cases';
 import type { CaseStatus, Role } from '../../types/prisma';
@@ -134,6 +134,10 @@ export function CaseDetailPage() {
   const qc = useQueryClient();
   const [tab, setTab] = useState<TabId>('action');
   const [pendingTo, setPendingTo] = useState<CaseStatus | null>(null);
+  // Self-dismissing toast for the "Text: email waiting" action (no toast lib in this app — the codebase
+  // otherwise uses window.alert, but a transient confirmation reads far better for a fire-and-forget send).
+  const [emailWaitingToast, setEmailWaitingToast] = useState<{ tone: 'ok' | 'err'; msg: string } | null>(null);
+  const emailWaitingToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [signOffOpen, setSignOffOpen] = useState(false);
   const [redraftGate1Open, setRedraftGate1Open] = useState(false); // Gate-1 checklist before a redraft
 
@@ -358,6 +362,20 @@ export function CaseDetailPage() {
     onError: (e: unknown) => window.alert(`Could not import the letter — ${describeApiError(e)}. Please retry or flag to Dr. Ryan.`),
   });
 
+  // "Text: email waiting" (Dr. Kasky 2026-07-16): one SMS nudging the veteran to read the email we sent.
+  // A self-dismissing toast confirms/errors; the button also disables while pending (mutation.isPending) and
+  // when no phone is on file, and the server enforces a 2-min cooldown — three layers against a double-send.
+  const showEmailWaitingToast = (tone: 'ok' | 'err', msg: string) => {
+    if (emailWaitingToastTimer.current) clearTimeout(emailWaitingToastTimer.current);
+    setEmailWaitingToast({ tone, msg });
+    emailWaitingToastTimer.current = setTimeout(() => setEmailWaitingToast(null), 6000);
+  };
+  const notifyEmailWaitingMut = useMutation({
+    mutationFn: () => notifyEmailWaiting(caseId),
+    onSuccess: (res) => showEmailWaitingToast('ok', `Text sent to the number ending ${res.data.phoneLast4}.`),
+    onError: (e: unknown) => showEmailWaitingToast('err', describeApiError(e)),
+  });
+
   if (caseQuery.isLoading) return <AppShell><div className="text-sm text-slate-500">Loading case…</div></AppShell>;
   if (!caseQuery.data) return <AppShell><EmptyState title="Case not found" message="The requested case could not be loaded." /></AppShell>;
   const c = caseQuery.data.data;
@@ -438,6 +456,17 @@ export function CaseDetailPage() {
   }
 
   return <AppShell><div className="space-y-6">
+    {/* Self-dismissing toast for the "Text: email waiting" send (success green / error rose). Fixed
+        bottom-right, polite live-region for a11y; auto-clears after 6s (see notifyEmailWaitingMut). */}
+    {emailWaitingToast ? (
+      <div
+        role="status"
+        aria-live="polite"
+        className={`fixed bottom-4 right-4 z-50 max-w-sm rounded-lg px-4 py-3 text-sm font-medium shadow-lg ${emailWaitingToast.tone === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'}`}
+      >
+        {emailWaitingToast.msg}
+      </div>
+    ) : null}
     {/* Archived banner (C6 lifecycle, 2026-06-13): an archived claim is reachable by direct link but
         hidden from the active list — make that obvious, and offer Reopen inline for RN/admin. */}
     {isArchived ? (
@@ -547,6 +576,20 @@ export function CaseDetailPage() {
             ) : null
           ) : (
             <>
+              {/* "Text: email waiting" (Dr. Kasky 2026-07-16): one-tap SMS telling the veteran to go read the
+                  email we already sent. Available at any live status (RN decides the moment). Disabled with an
+                  explanatory tooltip when no phone is on file; disabled while the send is in flight. Server
+                  enforces a 2-min cooldown on top. */}
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={notifyEmailWaitingMut.isPending}
+                disabled={notifyEmailWaitingMut.isPending || !c.veteran?.phone}
+                title={c.veteran?.phone
+                  ? `Text ${formatPhone(c.veteran.phone)}: "you have an email from us waiting"`
+                  : 'No phone number on file for this veteran'}
+                onClick={() => notifyEmailWaitingMut.mutate()}
+              >Text: email waiting</Button>
               {/* View letter only when the review panel (which has its own "Open PDF") isn't showing —
                   no duplicate view button (Ryan 2026-06-05). */}
               {viewableLetterJob && c.status !== 'rn_review' && c.status !== 'physician_review' ? <Button variant="secondary" size="sm" onClick={openLetterPdf}>View letter</Button> : null}

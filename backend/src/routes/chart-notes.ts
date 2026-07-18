@@ -84,9 +84,13 @@ export function createChartNotesRouter(db: AppDb): Router {
       const parsed = parseChartNotePatch(req.body);
 
       const updated = await db.$transaction(async (tx) => {
-        const existing = await tx.chartNote.findFirst({ where: { id }, select: { id: true, veteranId: true, createdBy: true, version: true } });
+        const existing = await tx.chartNote.findFirst({ where: { id }, select: { id: true, veteranId: true, createdBy: true, version: true, isQuickNote: true } });
         if (existing === null) throw new HttpError(404, 'not_found', 'Chart note not found', { noteId: id });
-        if (user.role !== 'admin' && existing.createdBy !== user.sub) {
+        // A QUICK note is a SHARED operational scratchpad (the case-header tag, e.g. "Free intake-
+        // Facebook."), so ANY ops_staff/admin may edit it regardless of who wrote it — an RN must be able
+        // to fix another RN's or the system's quick note (Ryan 2026-07-18, 403 on a free-FB intake).
+        // A regular clinical chart note stays author-or-admin for documentation-integrity.
+        if (!existing.isQuickNote && user.role !== 'admin' && existing.createdBy !== user.sub) {
           throw new HttpError(403, 'forbidden', 'Only the author or an admin may edit this note', { noteId: id });
         }
         if (existing.version !== parsed.version) {

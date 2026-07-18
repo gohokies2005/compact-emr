@@ -179,11 +179,21 @@ describe('chart-notes routes', () => {
     expect(spies.chartNoteUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ version: { increment: 1 } }) }));
   });
 
-  it("forbids ops_staff editing another user's note", async () => {
+  it("forbids ops_staff editing another user's REGULAR (non-quick) note", async () => {
     mockUser = { sub: 'OPS', roles: ['ops_staff'] };
-    const { db } = makeDb(note({ createdBy: 'SOMEONE-ELSE', version: 1 }));
+    const { db } = makeDb(note({ createdBy: 'SOMEONE-ELSE', isQuickNote: false, version: 1 }));
     const res = await request(appFor(db)).patch('/api/v1/chart-notes/NOTE-1').send({ version: 1, body: 'updated' });
     expect(res.status).toBe(403);
+  });
+
+  // Quick notes are a SHARED scratchpad — any ops_staff edits any author's quick note (Ryan 2026-07-18:
+  // an RN got 403 editing the "Free intake- Facebook." tag another user/the system wrote). Pre-fix: 403.
+  it("lets ops_staff edit ANOTHER user's QUICK note (shared scratchpad)", async () => {
+    mockUser = { sub: 'OPS', roles: ['ops_staff'] };
+    const { db, spies } = makeDb(note({ createdBy: 'SOMEONE-ELSE', isQuickNote: true, version: 1 }));
+    const res = await request(appFor(db)).patch('/api/v1/chart-notes/NOTE-1').send({ version: 1, body: 'Free intake- Facebook. (edited)' });
+    expect(res.status).toBe(200);
+    expect(spies.chartNoteUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ version: { increment: 1 } }) }));
   });
 
   it('lets an admin edit any note', async () => {

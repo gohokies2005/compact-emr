@@ -7,7 +7,7 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import axios from 'axios';
 import { ConflictError, ForbiddenError, ServiceUnavailableError } from '../../api/client';
-import { listUsers, createStaff, setStaffActive, resetStaffPassword, unlockStaff, type StaffRole, type CreateStaffInput, type StaffUser } from '../../api/users';
+import { listUsers, createStaff, setStaffActive, renameStaff, resetStaffPassword, unlockStaff, type StaffRole, type CreateStaffInput, type StaffUser } from '../../api/users';
 
 // Mirrors the backend Cognito password policy (assertCognitoPasswordPolicy) so the temp-password
 // branch of the reset dialog blocks client-side instead of bouncing off a server 400.
@@ -120,10 +120,13 @@ export function StaffPage() {
   const [resetTempPassword, setResetTempPassword] = useState('');
   const [unlockTarget, setUnlockTarget] = useState<StaffUser | null>(null);
   const [unlockEmailConfirm, setUnlockEmailConfirm] = useState('');
+  const [renameTarget, setRenameTarget] = useState<StaffUser | null>(null);
+  const [renameValue, setRenameValue] = useState('');
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => { setForm((c) => ({ ...c, [k]: v })); setMessage(null); };
 
   function closeReset() { setResetTarget(null); setResetMode('email_code'); setResetTempPassword(''); }
   function closeUnlock() { setUnlockTarget(null); setUnlockEmailConfirm(''); }
+  function closeRename() { setRenameTarget(null); setRenameValue(''); }
 
   const usersQuery = useQuery({ queryKey: ['users', 'all'], queryFn: () => listUsers({ includeInactive: true }) });
   const staff = useMemo(() => usersQuery.data?.data ?? [], [usersQuery.data]);
@@ -174,6 +177,15 @@ export function StaffPage() {
       closeUnlock();
     },
     onError: (e: unknown) => setMessage(accountActionError(e, 'Unlock')),
+  });
+
+  const renameMutation = useMutation({
+    mutationFn: (vars: { user: StaffUser; name: string }) => renameStaff(vars.user.id, vars.user.version, vars.name),
+    onSuccess: async (res) => { setMessage(`Name updated to "${res.data.name}".`); closeRename(); await qc.invalidateQueries({ queryKey: ['users'] }); },
+    onError: (e: unknown) => {
+      if (e instanceof ConflictError) { setMessage('This user changed elsewhere. Reload the page and try again.'); return; }
+      setMessage(accountActionError(e, 'Rename'));
+    },
   });
 
   function handleCreate(e: FormEvent<HTMLFormElement>) {
@@ -267,6 +279,7 @@ export function StaffPage() {
                       <td className="px-4 py-3">{s.active ? <span className="text-emerald-700">Active</span> : <span className="text-slate-400">Inactive</span>}</td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap justify-end gap-2">
+                          <Button type="button" variant="secondary" onClick={() => { setMessage(null); setRenameValue(s.name ?? ''); setRenameTarget(s); }}>Edit name</Button>
                           <Button type="button" variant="secondary" onClick={() => { setMessage(null); setResetMode('email_code'); setResetTempPassword(''); setResetTarget(s); }}>Reset password</Button>
                           <Button type="button" variant="secondary" onClick={() => { setMessage(null); setUnlockEmailConfirm(''); setUnlockTarget(s); }}>Unlock / clear MFA</Button>
                           <Button type="button" variant="ghost" disabled={toggleMutation.isPending} onClick={() => toggleMutation.mutate({ user: s, active: !s.active })}>{s.active ? 'Deactivate' : 'Reactivate'}</Button>
@@ -323,6 +336,24 @@ export function StaffPage() {
               <div className="mt-6 flex justify-end gap-2">
                 <Button type="button" variant="secondary" onClick={closeUnlock}>Cancel</Button>
                 <Button type="button" variant="destructive" loading={unlockMutation.isPending} disabled={unlockMutation.isPending || unlockEmailConfirm.trim().toLowerCase() !== unlockTarget.email.toLowerCase()} onClick={() => unlockMutation.mutate(unlockTarget)}>Clear MFA &amp; unlock</Button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {renameTarget ? (
+          <div role="dialog" aria-modal="true" aria-labelledby="rename-title">
+            <div className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm" onClick={closeRename} />
+            <div className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl bg-white p-6 shadow-2xl">
+              <h2 id="rename-title" className="text-lg font-semibold text-slate-900">Edit name</h2>
+              <p className="mt-1 text-sm text-slate-600">Correct the display name for <span className="font-medium text-slate-900">{renameTarget.email}</span>. Updates the staff directory and assignment pickers.{renameTarget.roles.includes('physician') ? ' Their signed-letter credential block is NOT changed here — edit that on the Physician credentials page.' : ''}</p>
+              <label className="mt-4 block">
+                <span className="text-sm font-medium text-slate-800">Full name</span>
+                <input type="text" autoFocus value={renameValue} onChange={(e) => setRenameValue(e.target.value)} placeholder="e.g. Kimberly Maribao" className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200" />
+              </label>
+              <div className="mt-6 flex justify-end gap-2">
+                <Button type="button" variant="secondary" onClick={closeRename}>Cancel</Button>
+                <Button type="button" variant="primary" loading={renameMutation.isPending} disabled={renameMutation.isPending || renameValue.trim().length === 0 || renameValue.trim() === (renameTarget.name ?? '')} onClick={() => renameMutation.mutate({ user: renameTarget, name: renameValue.trim() })}>Save name</Button>
               </div>
             </div>
           </div>

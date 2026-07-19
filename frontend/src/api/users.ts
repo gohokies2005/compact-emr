@@ -137,6 +137,13 @@ export async function setStaffActive(id: string, version: number, active: boolea
   return apiPatch<{ data: StaffUser }, { version: number; active: boolean }>(`/api/v1/users/${encodeURIComponent(id)}`, { version, active });
 }
 
+// Correct a staff member's display name (e.g. a surname misspelled at onboarding). DB-only rename —
+// updates the directory/picker name and, for a physician-linked account, Physician.fullName too; the
+// signed-letter credential block is intentionally left untouched by this path.
+export async function renameStaff(id: string, version: number, name: string): Promise<{ data: StaffUser }> {
+  return apiPatch<{ data: StaffUser }, { version: number; name: string }>(`/api/v1/users/${encodeURIComponent(id)}`, { version, name });
+}
+
 export interface ResetPasswordResult {
   readonly id: string;
   readonly email: string;

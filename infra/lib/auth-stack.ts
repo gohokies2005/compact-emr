@@ -25,6 +25,21 @@ export class AuthStack extends Stack {
       autoVerify: { email: true },
       mfa: cognito.Mfa.REQUIRED,
       mfaSecondFactor: { sms: false, otp: true },
+      // Remember-this-device (Ryan 2026-07-17): the 30-min idle logout forced Google-Authenticator
+      // re-entry on EVERY re-login because Cognito never remembered the device. With device tracking,
+      // AUTO-REMEMBER (Ryan 2026-07-19): a device that clears one full OTP is AUTOMATICALLY remembered
+      // and skips the TOTP challenge on every subsequent login; a NEW device still gets exactly one OTP
+      // (challengeRequiredOnNewDevice). Was deviceOnlyRememberedOnUserPrompt:true (opt-in), but that
+      // required the Amplify client to persist a device key via rememberDevice() — which never reliably
+      // landed (esp. on admin-created forced-password-reset accounts), so users got the OTP EVERY login
+      // (aws-cloud-sme diagnosis 2026-07-19). With false, Cognito auto-remembers server-side; no fragile
+      // client step. In-place UserPool update (no pool replacement, no user loss). TRADEOFF (Ryan OK'd):
+      // auto-remember trusts every device it sees — acceptable for staff-only clinical software guarded by
+      // the 30-min idle lock + 24h refresh cap.
+      deviceTracking: {
+        challengeRequiredOnNewDevice: true,
+        deviceOnlyRememberedOnUserPrompt: false,
+      },
       passwordPolicy: {
         minLength: 12,
         requireDigits: true,
@@ -49,14 +64,16 @@ export class AuthStack extends Stack {
       userPoolClientName: `compact-emr-${props.config.envName}-web`,
       authFlows: { userPassword: true, userSrp: true },
       preventUserExistenceErrors: true,
-      // HIPAA session caps (Ryan 2026-07-10). Access/ID tokens live 1h (the frontend silently refreshes),
-      // but the REFRESH token is capped at 12h (was the 30-day Cognito default) — so even a session left
-      // ACTIVE forces a fresh login + MFA at least daily. The 30-min idle auto-logout (frontend) handles
-      // walked-away sessions. Changing these updates the existing client in place (no client-id change,
-      // no forced logout of live sessions — the new validity applies to newly issued tokens).
+      // HIPAA session caps (Ryan 2026-07-10; refresh 12h→24h 2026-07-17). Access/ID tokens live 1h (the
+      // frontend silently refreshes), but the REFRESH token is capped at 24h (was the 30-day Cognito
+      // default) — so even a session left ACTIVE forces a fresh login at least daily. On a trusted device
+      // (deviceTracking above) that daily re-login skips the OTP; a new device still gets full OTP. The
+      // 30-min idle auto-logout (frontend) handles walked-away sessions. Changing these updates the
+      // existing client in place (no client-id change, no forced logout of live sessions — the new
+      // validity applies to newly issued tokens).
       accessTokenValidity: Duration.hours(1),
       idTokenValidity: Duration.hours(1),
-      refreshTokenValidity: Duration.hours(12),
+      refreshTokenValidity: Duration.hours(24),
     });
 
     for (const groupName of ['physician', 'ops_staff', 'admin']) {

@@ -1,5 +1,5 @@
 import { createContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { confirmSignIn as amplifyConfirmSignIn, fetchAuthSession, fetchUserAttributes, getCurrentUser, signIn as amplifySignIn, signOut as amplifySignOut } from 'aws-amplify/auth';
+import { confirmSignIn as amplifyConfirmSignIn, fetchAuthSession, fetchUserAttributes, getCurrentUser, rememberDevice as amplifyRememberDevice, signIn as amplifySignIn, signOut as amplifySignOut } from 'aws-amplify/auth';
 import type { Role } from '../types/prisma';
 import { env } from '../env';
 import { IdleWarningModal } from './IdleWarningModal';
@@ -204,7 +204,15 @@ export function AuthProvider({
       }
       return;
     }
-    if (step === 'signed_in') await refreshUser();
+    if (step === 'signed_in') {
+      // Remember THIS device so future logins skip the TOTP challenge. The pool now AUTO-remembers
+      // (deviceOnlyRememberedOnUserPrompt:false, Ryan 2026-07-19), so Cognito confirms + remembers the
+      // device server-side and this call is redundant — kept as a belt-and-suspenders + a diagnostic
+      // signal. Best-effort: a failure here must NEVER block sign-in, but we LOG it (was silently
+      // swallowed, which hid why remember-device wasn't taking — aws-cloud-sme 2026-07-19).
+      try { await amplifyRememberDevice(); } catch (e) { console.warn('[auth] rememberDevice failed (non-fatal; pool auto-remembers)', e); }
+      await refreshUser();
+    }
   }, [refreshUser]);
 
   const signIn = useCallback(async (email: string, password: string) => {

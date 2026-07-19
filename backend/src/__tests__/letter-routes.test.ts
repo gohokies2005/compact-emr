@@ -266,6 +266,42 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
       expect(res.body.error.details.citationDiff.added.map((t: { key: string }) => t.key)).toContain('pmid:31234567');
     });
 
+    it('ALLOWS a PHYSICIAN who confirms an added STATISTIC/author-year (200 + audited warning) — override', async () => {
+      // A physician confirms a net-new author-year + statistic (NO PMID — that path stays blocked below).
+      // The citation block downgrades to an audited warning; the proposal returns 200 for the physician.
+      const newText = 'The mechanism is supported by Jones 2020, which reported a 30% prevalence.';
+      const d = grDeps({ proposeSurgicalEdit: grProposer(newText) });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'add this stat I verified', confirmAddedCitations: true });
+      expect(res.status).toBe(200);
+      expect(res.body.data.mode).toBe('guided_revision');
+      expect((res.body.data.warnings as string[]).some((w) => /confirmed adding/i.test(w))).toBe(true);
+    });
+
+    it('STILL BLOCKS a net-new PMID even under physician confirm — must use the Citation Enricher (QA hardening)', async () => {
+      const newText = 'The mechanism is supported by Smith 2019 (PMID: 31234567), which reported a 22% prevalence.';
+      const d = grDeps({ proposeSurgicalEdit: grProposer(newText) });
+      const res = await request(appFor(makeDb().db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'add this paper', confirmAddedCitations: true });
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('citation_pmid_needs_enricher');
+    });
+
+    it('an RN (ops_staff) cannot override — confirmAddedCitations ignored, still 422, physicianOverridable false', async () => {
+      const prev = mockUser;
+      mockUser = { sub: 'OPS-SUB', roles: ['ops_staff'] };
+      const newText = 'The mechanism is supported by Jones 2020, which reported a 30% prevalence.';
+      const d = grDeps({ proposeSurgicalEdit: grProposer(newText) });
+      // rn_review is editable AND not physician_review, so the RN clears the role-lock and actually
+      // reaches the citation gate — proving an RN cannot override even with confirmAddedCitations:true.
+      const res = await request(appFor(makeDb(baseCase({ status: 'rn_review' })).db, d)).post('/api/v1/cases/CASE-1/letter/surgical-ai')
+        .send({ mode: 'guided_revision', passage: GR_PASSAGE, instruction: 'add this', confirmAddedCitations: true });
+      mockUser = prev;
+      expect(res.status).toBe(422);
+      expect(res.body.error.details.reason).toBe('citation_invented');
+      expect(res.body.error.details.physicianOverridable).toBe(false);
+    });
+
     it('REJECTS (422 citation_invented) a revision that invents a new statistic', async () => {
       const newText = 'The mechanism is supported by Smith 2019, which reported a 22% prevalence (OR 3.1).';
       const d = grDeps({ proposeSurgicalEdit: grProposer(newText) });

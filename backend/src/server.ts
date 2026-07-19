@@ -111,6 +111,10 @@ export function createApp(options: CreateAppOptions = {}) {
     ...(drafterRenderLambdaName ? { renderLetter: makeRenderInvoker(drafterRenderLambdaName) } : {}),
     s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
     bucketName: process.env.PHI_BUCKET_NAME,
+    // Revised-letter recovery (2026-07-16): APPLY-time single-PMID NCBI re-verify. Same verifier the
+    // letter router wires (below) — only outbound HTTPS to eutils, no Anthropic key. The revised-letter
+    // push fails CLOSED when a pushed letter carries an unverifiable PMID.
+    verifyPmid: verifyPmidById,
   }));
 
   // Public, secret-gated Jotform webhook (doorbell). Mounted BEFORE the authenticateJwt client

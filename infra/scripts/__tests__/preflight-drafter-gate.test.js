@@ -326,21 +326,26 @@ describe('unit: helpers', () => {
     expect(validateSchema(artifact)).toEqual([]);
   });
 
-  it('GATED_FILESET is the producer-synced v1.1 set (33, 2026-06-22 sync) in order', () => {
-    expect(GATED_FILESET).toHaveLength(33);
+  it('GATED_FILESET is the producer-synced v1.1 set (36, 2026-07-16 sync) in order', () => {
+    expect(GATED_FILESET).toHaveLength(36);
     expect(GATED_FILESET[0]).toBe('app/scripts/run-letter-pipeline.js');
-    expect(GATED_FILESET[9]).toBe('app/services/routingResolver.js'); // last of the original 10
+    // The 3 modules the 2026-07-16 sync added (33→36, R4 drift fix) at canonical positions:
+    expect(GATED_FILESET[8]).toBe('app/services/transientRetry.js');       // after framingGate.js
+    expect(GATED_FILESET[17]).toBe('app/services/citationFallback.js');    // after citationAuditor.js
+    expect(GATED_FILESET[31]).toBe('app/services/planValidityGate.js');    // after pipelineCheck.js
+    // Original-10 tail + surrounding anchors, shifted by the transientRetry insertion:
+    expect(GATED_FILESET[10]).toBe('app/services/routingResolver.js');     // last of the original 10
     // The 4 promotions the 2026-06-11 sync added (R4 drift fix):
-    expect(GATED_FILESET[17]).toBe('app/services/conditionCanon.js');
-    expect(GATED_FILESET[22]).toBe('app/services/draftingGuidance.js');
-    expect(GATED_FILESET[24]).toBe('app/services/forbiddenWordPass.js');
-    expect(GATED_FILESET[27]).toBe('app/services/opinionSentence.js');
+    expect(GATED_FILESET[19]).toBe('app/services/conditionCanon.js');
+    expect(GATED_FILESET[24]).toBe('app/services/draftingGuidance.js');
+    expect(GATED_FILESET[26]).toBe('app/services/forbiddenWordPass.js');
+    expect(GATED_FILESET[29]).toBe('app/services/opinionSentence.js');
     // The 4 promotions the 2026-06-22 cutover (52297d4) added (route-picker/checkpoint/body-quality/fold):
-    expect(GATED_FILESET[11]).toBe('app/services/aiRoutePicker.js');        // after aggravationTriggers.js
-    expect(GATED_FILESET[14]).toBe('app/services/checkpointManifest.js');   // after cavcRegistry.js
-    expect(GATED_FILESET[21]).toBe('app/services/draftBodyQualityGate.js'); // after deprecatedPhrases.js
-    expect(GATED_FILESET[23]).toBe('app/services/foldRenderable.js');       // after draftingGuidance.js
-    expect(GATED_FILESET[32]).toBe('references/medical_literature/curated/routing.json'); // data file LAST
+    expect(GATED_FILESET[12]).toBe('app/services/aiRoutePicker.js');        // after aggravationTriggers.js
+    expect(GATED_FILESET[15]).toBe('app/services/checkpointManifest.js');   // after cavcRegistry.js
+    expect(GATED_FILESET[23]).toBe('app/services/draftBodyQualityGate.js'); // after deprecatedPhrases.js
+    expect(GATED_FILESET[25]).toBe('app/services/foldRenderable.js');       // after draftingGuidance.js
+    expect(GATED_FILESET[35]).toBe('references/medical_literature/curated/routing.json'); // data file LAST
   });
 
   it('ENFORCER_GATE_MAJOR is 1', () => {

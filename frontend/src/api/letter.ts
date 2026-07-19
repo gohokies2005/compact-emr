@@ -141,10 +141,12 @@ export function previewSurgicalAi(caseId: string, input: { instruction: string }
 // 70s per-request timeout (over the 45s global default): the backend surgical/guided proposer runs an
 // Anthropic SDK call with a 60s timeout + maxRetries:4, so the client MUST outlast it or it falsely
 // times out before the backend finishes (2026-06-25).
-export function proposeGuidedRevision(caseId: string, input: { passage: string; instruction: string }): Promise<{ data: GuidedRevisionResult }> {
-  return apiPost<{ data: GuidedRevisionResult }, { mode: 'guided_revision'; passage: string; instruction: string }>(
+export function proposeGuidedRevision(caseId: string, input: { passage: string; instruction: string; confirmAddedCitations?: boolean }): Promise<{ data: GuidedRevisionResult }> {
+  // confirmAddedCitations: the physician attests a net-new citation/statistic is accurate + supports
+  // the passage, overriding the citation_invented block (backend enforces physician/admin role + audits).
+  return apiPost<{ data: GuidedRevisionResult }, { mode: 'guided_revision'; passage: string; instruction: string; confirmAddedCitations?: boolean }>(
     caseLetterPath(caseId, '/surgical-ai'),
-    { mode: 'guided_revision', passage: input.passage, instruction: input.instruction },
+    { mode: 'guided_revision', passage: input.passage, instruction: input.instruction, ...(input.confirmAddedCitations === true ? { confirmAddedCitations: true } : {}) },
     { timeout: 70000 },
   );
 }

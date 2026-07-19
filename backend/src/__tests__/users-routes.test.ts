@@ -269,6 +269,66 @@ describe('PATCH /users/:id — deactivate', () => {
     const res = await request(appFor(makeDb({ byId: null }).db, makeCognito())).patch('/api/v1/users/NOPE').send({ version: 1, active: false });
     expect(res.status).toBe(404);
   });
+
+  it('renames an RN -> 200, updates name + version, audits staff_name_edited, NO Cognito call', async () => {
+    const { db, appUser, physician, activityLog } = makeDb({ byId: u({ id: 'U-RN', cognitoSub: 'rn-sub', email: 'rn@x.test', name: 'Kim Maribo', active: true, version: 4 }) });
+    physician.findUnique.mockResolvedValue(null); // an RN has no physician credential row
+    appUser.update.mockResolvedValue(u({ id: 'U-RN', email: 'rn@x.test', name: 'Kim Maribao', active: true, version: 5 }));
+    const cognito = makeCognito();
+    const res = await request(appFor(db, cognito)).patch('/api/v1/users/U-RN').send({ version: 4, name: 'Kim Maribao' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.name).toBe('Kim Maribao');
+    expect(appUser.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ name: 'Kim Maribao', version: { increment: 1 } }) }));
+    expect(cognito.setUserEnabled).not.toHaveBeenCalled(); // a rename is DB-only, never touches the login
+    expect(activityLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'staff_name_edited' }) }));
+  });
+
+  it('renaming a physician-linked user syncs Physician.fullName but NOT the credential block', async () => {
+    const { db, appUser, physician } = makeDb({ byId: u({ id: 'U-DOC', cognitoSub: 'd-sub', email: 'doc@x.test', name: 'Old Name, DO', active: true, version: 2, roles: [{ role: 'physician' }] }) });
+    physician.findUnique.mockResolvedValue({ id: 'PH-9', cognitoSub: 'd-sub', fullName: 'Old Name, DO' });
+    physician.update.mockResolvedValue({ id: 'PH-9' });
+    appUser.update.mockResolvedValue(u({ id: 'U-DOC', name: 'New Name, DO', version: 3 }));
+    const res = await request(appFor(db, makeCognito())).patch('/api/v1/users/U-DOC').send({ version: 2, name: 'New Name, DO' });
+    expect(res.status).toBe(200);
+    expect(physician.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'PH-9' }, data: { fullName: 'New Name, DO' } }));
+    expect(physician.update.mock.calls[0][0].data).not.toHaveProperty('credentialBlockJson');
+  });
+
+  it('name-only rename works even when Cognito is unconfigured', async () => {
+    const { db, appUser, physician } = makeDb({ byId: u({ id: 'U-RN', cognitoSub: 'rn-sub', name: 'Typo', active: true, version: 1 }) });
+    physician.findUnique.mockResolvedValue(null);
+    appUser.update.mockResolvedValue(u({ id: 'U-RN', name: 'Fixed', version: 2 }));
+    const res = await request(appFor(db)).patch('/api/v1/users/U-RN').send({ version: 1, name: 'Fixed' }); // no cognito dep
+    expect(res.status).toBe(200);
+    expect(res.body.data.name).toBe('Fixed');
+  });
+
+  it('400 when neither name nor active is provided', async () => {
+    const { db } = makeDb({ byId: u({ id: 'U-RN', version: 1 }) });
+    const res = await request(appFor(db, makeCognito())).patch('/api/v1/users/U-RN').send({ version: 1 });
+    expect(res.status).toBe(400);
+  });
+
+  it('400 on a whitespace-only name', async () => {
+    const { db } = makeDb({ byId: u({ id: 'U-RN', version: 1 }) });
+    const res = await request(appFor(db, makeCognito())).patch('/api/v1/users/U-RN').send({ version: 1, name: '   ' });
+    expect(res.status).toBe(400);
+  });
+
+  it('combined {name, active} edit: renames, toggles the login, syncs the physician, writes BOTH audit rows', async () => {
+    const { db, appUser, physician, activityLog } = makeDb({ byId: u({ id: 'U-DOC', cognitoSub: 'd-sub', email: 'doc@x.test', name: 'Old, DO', active: true, version: 2, roles: [{ role: 'physician' }] }) });
+    physician.findUnique.mockResolvedValue({ id: 'PH-9', cognitoSub: 'd-sub', fullName: 'Old, DO' });
+    physician.update.mockResolvedValue({ id: 'PH-9' });
+    appUser.update.mockResolvedValue(u({ id: 'U-DOC', name: 'New, DO', active: false, version: 3 }));
+    const cognito = makeCognito();
+    const res = await request(appFor(db, cognito)).patch('/api/v1/users/U-DOC').send({ version: 2, name: 'New, DO', active: false });
+    expect(res.status).toBe(200);
+    expect(cognito.setUserEnabled).toHaveBeenCalledWith('doc@x.test', false);
+    expect(physician.update).toHaveBeenCalledWith(expect.objectContaining({ data: { fullName: 'New, DO' } }));
+    const actions = activityLog.create.mock.calls.map((c) => ((c as unknown[])[0] as { data: { action: string } }).data.action);
+    expect(actions).toContain('staff_name_edited');
+    expect(actions).toContain('staff_deactivated');
+  });
 });
 
 describe('POST /physicians/:id/link-login — link an orphaned credential profile to a login', () => {

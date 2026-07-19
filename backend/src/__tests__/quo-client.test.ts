@@ -1,7 +1,7 @@
 import https from 'node:https';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readSecretByName } from '../services/mailer.js';
-import { toE164, sendSms, createContact, __resetKeyCacheForTests } from '../services/quoClient.js';
+import { toE164, sendSms, createContact, emailWaitingText, __resetKeyCacheForTests } from '../services/quoClient.js';
 
 // The EMR key-resolution seam is mailer.readSecretByName. Mock it so no Secrets Manager / SES client is
 // ever constructed; each test programs it (resolve a key / resolve '' to exercise the env fallback).
@@ -161,6 +161,16 @@ describe('sendSms', () => {
     const r = await sendSms('7035551234', 'hi'); // if the fix regressed, this await never resolves → test times out
     expect(r.sent).toBe(false);
     expect(r.reason).toBe('network');
+  });
+});
+
+describe('emailWaitingText', () => {
+  // The wording is LOCKED by product (Dr. Kasky 2026-07-16) — this pins the exact bytes so a well-meaning
+  // reword is caught in CI. Uses an em-dash after "here" and a straight apostrophe in "isn't".
+  it('returns the exact locked copy', () => {
+    expect(emailWaitingText()).toBe(
+      'Flat Rate Nexus here — you have an email from us waiting in your inbox. Please check it (and your spam folder) and reply when you can. This text line isn\'t monitored, so please reply to our email, not this number.',
+    );
   });
 });
 

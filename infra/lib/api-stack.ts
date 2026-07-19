@@ -363,7 +363,19 @@ export class ApiStack extends Stack {
       bundling: {
         externalModules: ['@prisma/client', '@prisma/engines', 'pg-native'], // pg-native is pg's optional native client; keep it external so esbuild uses the pure-JS path
         commandHooks: {
-          beforeBundling: () => [],
+          // Regenerate the Prisma client from schema.prisma AT BUNDLE TIME so the copied
+          // backend/node_modules/.prisma (afterBundling) is ALWAYS current. Without this, a schema
+          // enum/model change not followed by a manual `prisma generate` ships a STALE client and the
+          // deployed client rejects new values with a client-side PrismaClientValidationError even
+          // though the source schema + DB have them (Davis `revised_import`, 2026-07-18). It ALSO closes
+          // the asset-hash blind spot: node_modules changes don't bump the source hash, so regenerating
+          // locally never forced a redeploy on its own — adding this generate to the bundling spec does.
+          beforeBundling: (inputDir: string) => {
+            const q = (s: string) => `"${s}"`;
+            return [
+              `node ${q(inputDir + '/backend/node_modules/prisma/build/index.js')} generate --schema=${q(inputDir + '/backend/prisma/schema.prisma')}`,
+            ];
+          },
           beforeInstall: () => [],
           afterBundling: (inputDir: string, outputDir: string) => {
             // Cross-platform bundling via Node fs.cpSync. Prior code used POSIX `mkdir -p` +

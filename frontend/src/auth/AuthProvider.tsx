@@ -205,12 +205,12 @@ export function AuthProvider({
       return;
     }
     if (step === 'signed_in') {
-      // Remember THIS device so future logins on it skip the TOTP challenge (Ryan 2026-07-18:
-      // "still needing google authenticator to login"). Best-effort — a failure here must NEVER
-      // block sign-in. The pool keeps ChallengeRequiredOnNewDevice=true, so a brand-new device
-      // still gets exactly one OTP; after that it's remembered (Cognito uses DEVICE_SRP_AUTH and
-      // does not re-challenge MFA). Opt-in device mode requires this explicit call to mark it.
-      try { await amplifyRememberDevice(); } catch { /* non-fatal: device just won't be remembered */ }
+      // Remember THIS device so future logins skip the TOTP challenge. The pool now AUTO-remembers
+      // (deviceOnlyRememberedOnUserPrompt:false, Ryan 2026-07-19), so Cognito confirms + remembers the
+      // device server-side and this call is redundant — kept as a belt-and-suspenders + a diagnostic
+      // signal. Best-effort: a failure here must NEVER block sign-in, but we LOG it (was silently
+      // swallowed, which hid why remember-device wasn't taking — aws-cloud-sme 2026-07-19).
+      try { await amplifyRememberDevice(); } catch (e) { console.warn('[auth] rememberDevice failed (non-fatal; pool auto-remembers)', e); }
       await refreshUser();
     }
   }, [refreshUser]);

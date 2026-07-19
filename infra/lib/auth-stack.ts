@@ -27,14 +27,18 @@ export class AuthStack extends Stack {
       mfaSecondFactor: { sms: false, otp: true },
       // Remember-this-device (Ryan 2026-07-17): the 30-min idle logout forced Google-Authenticator
       // re-entry on EVERY re-login because Cognito never remembered the device. With device tracking,
-      // a device the user OPTS IN to trust (deviceOnlyRememberedOnUserPrompt:true — user-prompted, NOT
-      // auto, so a shared/public machine is never silently trusted) skips the OTP challenge on
-      // subsequent logins; a NEW/untrusted device still gets the full OTP (challengeRequiredOnNewDevice).
-      // HIPAA-safe: only user-chosen personal devices are remembered; the 30-min idle lock + 24h refresh
-      // cap still apply. In-place UserPool update (no pool replacement, no user loss).
+      // AUTO-REMEMBER (Ryan 2026-07-19): a device that clears one full OTP is AUTOMATICALLY remembered
+      // and skips the TOTP challenge on every subsequent login; a NEW device still gets exactly one OTP
+      // (challengeRequiredOnNewDevice). Was deviceOnlyRememberedOnUserPrompt:true (opt-in), but that
+      // required the Amplify client to persist a device key via rememberDevice() — which never reliably
+      // landed (esp. on admin-created forced-password-reset accounts), so users got the OTP EVERY login
+      // (aws-cloud-sme diagnosis 2026-07-19). With false, Cognito auto-remembers server-side; no fragile
+      // client step. In-place UserPool update (no pool replacement, no user loss). TRADEOFF (Ryan OK'd):
+      // auto-remember trusts every device it sees — acceptable for staff-only clinical software guarded by
+      // the 30-min idle lock + 24h refresh cap.
       deviceTracking: {
         challengeRequiredOnNewDevice: true,
-        deviceOnlyRememberedOnUserPrompt: true,
+        deviceOnlyRememberedOnUserPrompt: false,
       },
       passwordPolicy: {
         minLength: 12,

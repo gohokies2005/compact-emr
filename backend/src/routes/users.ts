@@ -93,10 +93,16 @@ interface ParsedStaffCreate {
  * targetPhysicianId is null on create (the provider row does not exist yet, so self-cosign is
  * structurally impossible); it is the provider's id on edit (where self-cosign must be rejected).
  */
-async function resolveOwnerCoSignerId(db: AppDb, actorSub: string, targetPhysicianId: string | null): Promise<string> {
-  const owner = await db.physician.findUnique({ where: { cognitoSub: actorSub } });
+async function resolveOwnerCoSignerId(db: AppDb, _actorSub: string, targetPhysicianId: string | null): Promise<string> {
+  // The "Dr. Kasky co-signs for this provider" checkbox ALWAYS designates the account-owner physician
+  // as the co-signer — independent of which admin ticks it. Resolve by the OWNER's NPI, NOT the acting
+  // admin's login: the owner signs from the info@ admin account (Ryan 2026-07-19, adding Kevin Luiz DPT),
+  // which is NOT linked to the Kasky physician row, so the old cognitoSub lookup 400'd. NPI is the stable
+  // identifier (Kasky = 1073018958, CLAUDE.md IDENTITY); env-overridable for a future different owner.
+  const ownerNpi = process.env.OWNER_COSIGNER_NPI ?? '1073018958';
+  const owner = await db.physician.findUnique({ where: { npi: ownerNpi } });
   if (owner === null) {
-    throw new HttpError(400, 'bad_request', 'Co-sign requires your login to be a signing physician, but no physician profile is linked to it.', { field: 'coSignByOwner' });
+    throw new HttpError(400, 'bad_request', `Co-sign is not configured: no owner co-signer physician found (NPI ${ownerNpi}). Create the owner's physician profile (with a signature on file) first.`, { field: 'coSignByOwner' });
   }
   if (targetPhysicianId !== null && owner.id === targetPhysicianId) {
     throw new HttpError(400, 'bad_request', 'A physician cannot be their own co-signer.', { field: 'coSignByOwner' });

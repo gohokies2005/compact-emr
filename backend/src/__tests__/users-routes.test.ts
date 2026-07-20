@@ -355,7 +355,7 @@ describe('PATCH /users/:id — deactivate', () => {
 
 describe('CO-SIGN (DPT docket 2026-07-19) — create + edit provider co-sign', () => {
   // The requesting admin (a-sub) is also the account-owner physician who co-signs.
-  const OWNER = { id: 'PH-OWNER', cognitoSub: 'a-sub', fullName: 'Ryan J. Kasky, DO', active: true, signatureImageS3Key: 'sig/kasky.png' };
+  const OWNER = { id: 'PH-OWNER', cognitoSub: 'a-sub', npi: '1073018958', fullName: 'Ryan J. Kasky, DO', active: true, signatureImageS3Key: 'sig/kasky.png' };
   const physCreateData = (physician: { create: ReturnType<typeof vi.fn> }) =>
     (physician.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data;
 
@@ -408,10 +408,11 @@ describe('CO-SIGN (DPT docket 2026-07-19) — create + edit provider co-sign', (
 
   it('EDIT: coSignByOwner=true sets coSignedByPhysicianId on the linked physician + audits', async () => {
     const { db, appUser, physician, activityLog } = makeDb({ byId: u({ id: 'U-DOC', cognitoSub: 'd-sub', email: 'doc@x.test', name: 'DPT Provider', active: true, version: 2, roles: [{ role: 'physician' }] }) });
-    // The provider being edited resolves by cognitoSub d-sub; the owner resolves by a-sub.
-    physician.findUnique.mockImplementation(async (a: { where?: { cognitoSub?: string } }) => {
+    // The provider being edited resolves by cognitoSub d-sub; the owner co-signer resolves by NPI
+    // (the account owner, NOT the acting admin's login — an admin on info@ isn't a physician).
+    physician.findUnique.mockImplementation(async (a: { where?: { cognitoSub?: string; npi?: string } }) => {
       if (a.where?.cognitoSub === 'd-sub') return { id: 'PH-DPT', cognitoSub: 'd-sub', fullName: 'DPT Provider', active: true, signatureImageS3Key: 'sig/dpt.png' };
-      if (a.where?.cognitoSub === 'a-sub') return OWNER;
+      if (a.where?.npi === '1073018958') return OWNER;
       return null;
     });
     appUser.update.mockResolvedValue(u({ id: 'U-DOC', name: 'DPT Provider', version: 3 }));

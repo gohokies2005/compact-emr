@@ -69,7 +69,9 @@ function validationError(f: FormState): string | null {
   }
   if (f.roles.includes('physician')) {
     if (!/^\d{10}$/.test(f.npi.trim())) return 'Physician NPI must be exactly 10 digits.';
-    for (const [label, v] of [['Specialty', f.specialty], ['Medical license', f.medicalLicense], ['Certifying board', f.boardName], ['Board abbreviation', f.boardAbbreviation], ['License state', f.licenseState], ['License number', f.licenseNumber]] as const) {
+    // Certifying board + Board abbreviation are OPTIONAL (a DPT has no board certification; leave
+    // them blank → the letter omits the "Board-Certified in …" line). MD/DO fills them.
+    for (const [label, v] of [['Specialty', f.specialty], ['Medical license', f.medicalLicense], ['License state', f.licenseState], ['License number', f.licenseNumber]] as const) {
       if (v.trim().length === 0) return `Physician ${label} is required.`;
     }
   }
@@ -251,8 +253,8 @@ export function StaffPage() {
                 <Field label="NPI" value={form.npi} onChange={(v) => set('npi', v)} required placeholder="10 digits" />
                 <Field label="Specialty" value={form.specialty} onChange={(v) => set('specialty', v)} required />
                 <Field label="Medical license" value={form.medicalLicense} onChange={(v) => set('medicalLicense', v)} required />
-                <Field label="Certifying board" value={form.boardName} onChange={(v) => set('boardName', v)} required placeholder="e.g. American Board of Osteopathic Family Physicians" />
-                <Field label="Board abbreviation" value={form.boardAbbreviation} onChange={(v) => set('boardAbbreviation', v)} required placeholder="e.g. ABOFP" />
+                <Field label="Certifying board" value={form.boardName} onChange={(v) => set('boardName', v)} placeholder="MD/DO only — leave blank for a DPT" />
+                <Field label="Board abbreviation" value={form.boardAbbreviation} onChange={(v) => set('boardAbbreviation', v)} placeholder="MD/DO only — blank for a DPT (omits the board line)" />
                 <Field label="License state" value={form.licenseState} onChange={(v) => set('licenseState', v)} required placeholder="e.g. Nevada" />
                 <Field label="License number" value={form.licenseNumber} onChange={(v) => set('licenseNumber', v)} required placeholder="e.g. DO2996" />
                 <Field label="Phone" value={form.phone} onChange={(v) => set('phone', v)} />

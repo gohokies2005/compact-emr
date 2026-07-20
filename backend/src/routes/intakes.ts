@@ -371,39 +371,39 @@ export function createIntakesRouter(db: AppDb, deps: IntakesRouterDeps = {}): Ro
     // "why connected" narrative) reaches the chart, even when the submission carried no file uploads.
     // Same row-first-then-write discipline as the file copies so ocr-start resolves it by s3-key.
     const rawAnswers = (intake as { rawAnswersJson?: unknown }).rawAnswersJson;
-    // IDEMPOTENCY GUARD (Dick/Mittge stuck-gate, 2026-06-26; s3Key-suffix form 2026-07-14). This
-    // handler ALWAYS minted a fresh Intake_Summary.pdf (new random s3Key). If it ran twice for the
-    // SAME case (re-assign / retry / two operators), a SECOND Intake_Summary.pdf was created; its
-    // ObjectCreated→ocr-start added a new `read` file_read_status row AFTER extraction had completed,
-    // drifting the chart-build trigger hash so the readiness gate stuck on `extracting` forever (no
-    // run matched the new hash). Skip the mint when this case already has a summary — one per case,
-    // stable hash.
-    // MATCH ON THE IMMUTABLE s3Key SUFFIX, NOT filename equality (dup-mint ×2-4 on 7 cases incl.
-    // paid, 2026-07-14): the AI titler renames Document.filename, which defeated the old
-    // filename==='Intake_Summary.pdf' check and re-minted on every re-assign. s3Key is never
-    // rewritten, and the generated summary is minted ONLY with the reserved '-Intake_Summary.pdf'
-    // suffix (cases.ts, chart-readiness.ts and key-docs-classifier.ts anchor on this same suffix).
-    // NOTE: ANY prior summary blocks a re-mint — a Stage-2 assign onto a case that already has the
-    // Stage-1 summary SKIPS. That is the CURRENT intended one-summary-per-case behavior (per the
-    // Dick/Mittge hash-drift guard); the per-intake key below merely future-proofs a
-    // Stage-2-mints-its-own design if that ever changes.
+    // The generated summary's deterministic, immutable key — ONE per intake. Fixed prefix = the INTAKE
+    // id (not a random UUID): a retried/re-assigned mint for the SAME intake lands on the SAME key, and
+    // each DISTINCT submission (a Stage-2 follow-up) gets its own key. The '-Intake_Summary.pdf' SUFFIX
+    // is the load-bearing contract (cases.ts, chart-readiness.ts, key-docs-classifier.ts, aiDocumentTitle
+    // all anchor on it to exclude the generated summary from the record count / never rename its s3Key).
+    const summaryKey = `cases/${caseId}/${intakeId}-Intake_Summary.pdf`;
+    // IDEMPOTENCY GUARD — PER-INTAKE (2026-07-19, Davis CLM-BBEE61BB70 Stage-2 intent loss). Match on
+    // THIS intake's exact immutable key so:
+    //  - a re-assign / retry / two-operator race on the SAME intake finds its own summary and SKIPS
+    //    (the Dick/Mittge hash-drift guard: never mint a DUPLICATE summary for one intake — a second
+    //    Intake_Summary.pdf with a different key drifts the chart-build trigger hash and wedged the
+    //    readiness gate on 'extracting'), while
+    //  - a genuinely DIFFERENT submission (Stage-2 is a SEPARATE Jotform form → SEPARATE Intake row with
+    //    its OWN rawAnswersJson holding the "anything else about your condition" free-text) MINTS ITS
+    //    OWN summary, so 100% of what the veteran typed across Stage 1 AND Stage 2 becomes a chart
+    //    document the drafter reads.
+    // The OLD guard matched the case-wide '-Intake_Summary.pdf' SUFFIX, so once the Stage-1 summary
+    // existed a Stage-2 assign onto the same case SKIPPED the mint — the Stage-2 Q&A (incl. the veteran's
+    // actual claimed condition) never reached the drafter → wrong-condition letters (Davis typed MPN,
+    // we drafted thyroid). Exact-key equality is inherently rename-proof (the AI titler rewrites
+    // Document.filename, never the s3Key). Minting a 2nd summary is safe: the assign-batch chart-extract
+    // trigger (2c below), the summary's own /pages OCR-completion trigger, AND the chart-readiness
+    // hash-drift self-heal (chart-readiness.ts ~:219) each re-enqueue a fresh extract for the grown doc
+    // set, so no run-hash mismatch can wedge the gate.
     const existingSummary = rawAnswers && typeof rawAnswers === 'object'
       ? await (docDb.document as unknown as {
-          findFirst: (a: { where: { caseId: string; s3Key: { endsWith: string } }; select: { id: true } }) => Promise<{ id: string } | null>;
-        }).findFirst({ where: { caseId, s3Key: { endsWith: '-Intake_Summary.pdf' } }, select: { id: true } })
+          findFirst: (a: { where: { caseId: string; s3Key: string }; select: { id: true } }) => Promise<{ id: string } | null>;
+        }).findFirst({ where: { caseId, s3Key: summaryKey }, select: { id: true } })
       : null;
     if (existingSummary) {
-      console.info(`[intake-summary] case ${caseId} already has an Intake_Summary.pdf (${existingSummary.id}); skipping duplicate mint (hash-drift guard).`);
+      console.info(`[intake-summary] intake ${intakeId} already minted its Intake_Summary.pdf on case ${caseId} (${existingSummary.id}); skipping duplicate mint (per-intake idempotency).`);
     }
     if (rawAnswers && typeof rawAnswers === 'object' && !existingSummary) {
-      // Fixed, distinctive name (no veteran lastname) so the chart-readiness exclusion can match the
-      // GENERATED summary precisely (key ends '-Intake_Summary.pdf') and never a real uploaded record
-      // that happens to be a "Nursing Intake Summary". (Architect QA finding #5.)
-      // Key prefix = the INTAKE id (not a random UUID, 2026-07-14): deterministic per intake, so a
-      // retried mint for the same intake lands on the same key, and a future Stage-2-mints-its-own
-      // design gets a distinct key per intake for free. The '-Intake_Summary.pdf' SUFFIX is the
-      // load-bearing contract — keep it EXACT.
-      const summaryKey = `cases/${caseId}/${intakeId}-Intake_Summary.pdf`;
       let summaryDocId: string | undefined;
       try {
         const im = intake as unknown as { submittedName?: string | null; submittedFormTitle?: string | null; submittedAt?: Date | string | null };

@@ -121,6 +121,18 @@ function reqStr(obj: Record<string, unknown>, key: string, max: number): string 
   }
   return v.trim();
 }
+// OPTIONAL string (empty allowed → ''). For provider credential fields a non-physician-board
+// provider may lack — a DPT (Doctor of Physical Therapy) has NPI + a PT license but NO certifying
+// board (Ryan 2026-07-19, onboarding Kevin Luiz, DPT). An empty boardAbbreviation makes the letter
+// signature block correctly OMIT the "Board-Certified in …" line (buildRendererCredentialLines).
+function optStr(obj: Record<string, unknown>, key: string, max: number): string {
+  const v = obj[key];
+  if (v === undefined || v === null || v === '') return '';
+  if (typeof v !== 'string' || v.length > max) {
+    throw new HttpError(400, 'bad_request', `${key} must be a string under ${max} chars`, { field: key });
+  }
+  return v.trim();
+}
 
 /** Map a Prisma unique-constraint violation (P2002 on npi / cognito_sub) to a clear 409. */
 function rethrowUnique(err: unknown): never {
@@ -175,8 +187,10 @@ function parseStaffCreate(body: unknown): ParsedStaffCreate {
       npi,
       specialty: reqStr(p, 'specialty', 120),
       medicalLicense: reqStr(p, 'medicalLicense', 60),
-      boardName: reqStr(p, 'boardName', 160),
-      boardAbbreviation: reqStr(p, 'boardAbbreviation', 24),
+      // Board certification is OPTIONAL — a DPT/other non-board provider leaves these blank, and the
+      // letter omits the "Board-Certified in …" line (buildRendererCredentialLines). An MD/DO fills them.
+      boardName: optStr(p, 'boardName', 160),
+      boardAbbreviation: optStr(p, 'boardAbbreviation', 24),
       licenseState: reqStr(p, 'licenseState', 60),
       licenseNumber: reqStr(p, 'licenseNumber', 60),
       phone: typeof phoneRaw === 'string' && phoneRaw.trim().length > 0 ? phoneRaw.trim() : null,

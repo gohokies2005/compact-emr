@@ -253,12 +253,13 @@ describe('intakes assign', () => {
     expect(s3send).toHaveBeenCalled(); // PutObject of the PDF bytes
   });
 
-  it('does NOT mint a second Intake_Summary.pdf when one already exists (hash-drift idempotency, s3Key-suffix guard)', async () => {
-    // Dick/Mittge stuck-gate, 2026-06-26: a duplicate Intake_Summary.pdf drifted the chart-build
-    // trigger hash → readiness wedged on 'extracting'. The mint must be skipped when one exists.
-    // Since 2026-07-14 the guard matches the IMMUTABLE s3Key suffix, not filename equality.
+  it('does NOT re-mint the SAME intake\'s Intake_Summary.pdf on re-assign (per-intake idempotency, exact s3Key guard)', async () => {
+    // Dick/Mittge stuck-gate, 2026-06-26: a duplicate summary for the SAME intake drifts the
+    // chart-build trigger hash → readiness wedges on 'extracting'. Re-assigning / retrying intake i1
+    // must find i1's OWN summary and skip. Since 2026-07-19 the guard matches the exact per-intake
+    // key, not a case-wide suffix (so a Stage-2 submission can still mint its own — next test).
     const docCreate = vi.fn(async () => ({ id: 'doc-s' }));
-    const docFindFirst = vi.fn(async () => ({ id: 'existing-summary' }));
+    const docFindFirst = vi.fn(async () => ({ id: 'existing-summary' })); // i1's summary already exists
     const s3send = vi.fn(async () => ({}));
     const intakeUpdate = vi.fn(async () => ({}));
     const db = {
@@ -270,13 +271,13 @@ describe('intakes assign', () => {
         update: intakeUpdate,
       },
       $transaction: txWithExisting(),
-      // A generated summary ALREADY exists on this case → the mint must be skipped.
+      // THIS intake's generated summary ALREADY exists → the mint must be skipped.
       document: { create: docCreate, delete: vi.fn(), findFirst: docFindFirst },
     };
     const res = await request(assignApp(db, s3send)).post('/api/v1/intakes/i1/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
-    // The guard queries by caseId + the reserved immutable s3Key suffix (NOT filename equality).
+    // The guard queries by caseId + THIS intake's EXACT immutable key (not a case-wide suffix).
     expect(docFindFirst).toHaveBeenCalledWith({
-      where: { caseId: 'CLM-1', s3Key: { endsWith: '-Intake_Summary.pdf' } },
+      where: { caseId: 'CLM-1', s3Key: 'cases/CLM-1/i1-Intake_Summary.pdf' },
       select: { id: true },
     });
     const calls = docCreate.mock.calls as unknown as Array<[{ data: { filename: string } }]>;
@@ -285,18 +286,17 @@ describe('intakes assign', () => {
     expect(res.body.data.assigned).toBe(true); // still assigns
   });
 
-  it('does NOT re-mint when the AI titler RENAMED the existing summary (filename changed, s3Key intact)', async () => {
-    // The dup-mint incident (×2-4 on 7 cases incl. paid): aiDocumentTitle renamed the summary's
-    // filename, defeating the old filename==='Intake_Summary.pdf' guard. Emulate a DB whose only
-    // summary row has a titler-renamed filename but the immutable generated s3Key: the suffix guard
-    // must still find it. (A filename-equality query against this store returns null → would re-mint.)
-    const existingDocs = [{ id: 'doc-old', caseId: 'CLM-1', filename: 'Justice_intake-summary.pdf', s3Key: 'cases/CLM-1/i0-Intake_Summary.pdf' }];
-    const docFindFirst = vi.fn(async (args: { where: { caseId?: string; filename?: string; s3Key?: { endsWith?: string } } }) => {
+  it('re-mint of the SAME intake stays blocked even if the AI titler RENAMED its summary (exact s3Key match is rename-proof)', async () => {
+    // aiDocumentTitle rewrites Document.filename but never the s3Key. Emulate a DB whose i1 summary row
+    // has a titler-renamed filename but the immutable per-intake key: exact-key equality still finds it
+    // (a filename-equality query would return null → wrongly re-mint).
+    const existingDocs = [{ id: 'doc-old', caseId: 'CLM-1', filename: 'Justice_intake-summary.pdf', s3Key: 'cases/CLM-1/i1-Intake_Summary.pdf' }];
+    const docFindFirst = vi.fn(async (args: { where: { caseId?: string; filename?: string; s3Key?: string } }) => {
       const w = args?.where ?? {};
       return existingDocs.find((d) =>
         (w.caseId === undefined || d.caseId === w.caseId)
         && (w.filename === undefined || d.filename === w.filename)
-        && (w.s3Key?.endsWith === undefined || d.s3Key.endsWith(w.s3Key.endsWith)),
+        && (w.s3Key === undefined || d.s3Key === w.s3Key),
       ) ?? null;
     });
     const docCreate = vi.fn(async () => ({ id: 'doc-s' }));
@@ -315,6 +315,49 @@ describe('intakes assign', () => {
     const calls = docCreate.mock.calls as unknown as Array<[{ data: { filename: string } }]>;
     expect(calls.find((c) => c[0].data.filename === 'Intake_Summary.pdf')).toBeFalsy(); // renamed summary still blocks the re-mint
     expect(res.body.data.assigned).toBe(true);
+  });
+
+  it('MINTS a SEPARATE Intake_Summary.pdf for a Stage-2 submission even when the Stage-1 summary exists (Davis CLM-BBEE61BB70 wrong-condition fix)', async () => {
+    // Stage-2 is a SEPARATE Jotform form → SEPARATE Intake row (here intake i2) whose rawAnswers hold
+    // the "anything else about your condition" free-text. The OLD case-wide suffix guard SKIPPED this
+    // mint because the case already had the Stage-1 summary (i1), so the Stage-2 Q&A — including the
+    // veteran's actual claimed condition — never reached the drafter (Davis typed MPN, we drafted
+    // thyroid). Per-intake keying: i2 mints its OWN summary so the Stage-2 answers reach the chart.
+    const existingDocs = [{ id: 'doc-stage1', caseId: 'CLM-1', s3Key: 'cases/CLM-1/i1-Intake_Summary.pdf' }]; // Stage-1 summary only
+    const docFindFirst = vi.fn(async (args: { where: { caseId?: string; s3Key?: string } }) => {
+      const w = args?.where ?? {};
+      return existingDocs.find((d) => (w.caseId === undefined || d.caseId === w.caseId) && (w.s3Key === undefined || d.s3Key === w.s3Key)) ?? null;
+    });
+    const docCreate = vi.fn(async () => ({ id: 'doc-stage2' }));
+    const s3send = vi.fn(async () => ({}));
+    const db = {
+      intake: {
+        findUnique: async () => ({
+          id: 'i2', status: 'ready', fileManifestJson: [], submittedName: 'Jason Davis',
+          rawAnswersJson: {
+            q1: {
+              type: 'control_textarea', name: 's2_anything_else',
+              text: 'Anything else about your condition you think we should know?',
+              answer: 'Im wanting this report to cover my Myeloproliferative neoplasms (MPNs). I do also have a Thyroid issue but I dont have all the paperwork for it.',
+            },
+          },
+        }),
+        update: vi.fn(async () => ({})),
+      },
+      $transaction: txWithExisting(),
+      document: { create: docCreate, delete: vi.fn(), findFirst: docFindFirst },
+    };
+    const res = await request(assignApp(db, s3send)).post('/api/v1/intakes/i2/assign').send({ veteranId: 'VET-1', caseId: 'CLM-1' }).expect(200);
+    // It looked up ONLY intake i2's own key (found nothing → mints), NOT the case-wide suffix.
+    expect(docFindFirst).toHaveBeenCalledWith({
+      where: { caseId: 'CLM-1', s3Key: 'cases/CLM-1/i2-Intake_Summary.pdf' },
+      select: { id: true },
+    });
+    const calls = docCreate.mock.calls as unknown as Array<[{ data: { filename: string; s3Key: string } }]>;
+    const summary = calls.find((c) => c[0].data.filename === 'Intake_Summary.pdf');
+    expect(summary).toBeTruthy(); // Stage-2 minted its OWN summary despite the Stage-1 summary existing
+    expect(summary![0].data.s3Key).toBe('cases/CLM-1/i2-Intake_Summary.pdf');
+    expect(res.body.data.attached.some((a: { name: string }) => a.name === 'Intake_Summary.pdf')).toBe(true);
   });
 
   it('refuses a JUNK claim label (--EYES-- separator) at case create — persists empty + logs the refusal', async () => {

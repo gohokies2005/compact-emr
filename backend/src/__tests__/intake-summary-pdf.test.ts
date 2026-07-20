@@ -44,6 +44,39 @@ describe('intake-summary-pdf', () => {
     expect(Buffer.from(bytes.slice(0, 5)).toString('latin1')).toBe('%PDF-');
   });
 
+  // Davis CLM-BBEE61BB70: the veteran typed his ACTUAL claimed condition into the Stage-2
+  // "anything else about your condition" free-text field. The old promotion path (intake-derive's
+  // /why|connect|.../ regex) dropped it because that label matches none of those tokens — so the
+  // drafter never saw "MPN" and drafted thyroid. The summary renderer has NO allowlist: it emits
+  // every answered, non-tracking Q&A verbatim, so this free-text now reaches the chart document.
+  const DAVIS_STAGE2_ANYTHING_ELSE = {
+    q1: { type: 'control_textbox', name: 's2_condition_slug', text: 'Condition (from Stage 1)', answer: 'Thyroid Disorder', order: 1 },
+    q2: {
+      type: 'control_textarea', name: 's2_anything_else',
+      text: 'Anything else about your condition you think we should know?',
+      answer: 'Im wanting this report to cover my Myeloproliferative neoplasms (MPNs). I do also have a Thyroid issue but I dont have all the paperwork for it.',
+      order: 2,
+    },
+  };
+
+  it('the Stage-2 "anything else" free-text (the field the old regex dropped) reaches the summary content verbatim', () => {
+    const pairs = intakeQuestionPairs(DAVIS_STAGE2_ANYTHING_ELSE);
+    const anythingElse = pairs.find((p) => p.q.startsWith('Anything else about your condition'));
+    expect(anythingElse).toBeTruthy(); // the label the derive regex never promoted is present…
+    expect(anythingElse!.a).toContain('Myeloproliferative neoplasms'); // …with the veteran's real claim
+    expect(anythingElse!.a).toContain('MPNs');
+  });
+
+  it('renders the Davis free-text into a real PDF (bytes reflect the extra Q&A the drafter needed)', async () => {
+    // pdf-lib compresses content streams (object streams), so the drawn glyphs are not greppable in the
+    // raw bytes — intakeQuestionPairs (asserted above) is the SSOT of what gets drawn. Here we prove the
+    // render succeeds and the MPN answer materially grows the PDF vs. dropping it (the old behavior).
+    const withMpn = await renderIntakeSummaryPdf(DAVIS_STAGE2_ANYTHING_ELSE, { veteranName: 'Jason Davis', condition: 'Thyroid Disorder' });
+    const withoutMpn = await renderIntakeSummaryPdf({ q1: DAVIS_STAGE2_ANYTHING_ELSE.q1 }, { veteranName: 'Jason Davis', condition: 'Thyroid Disorder' });
+    expect(Buffer.from(withMpn.slice(0, 5)).toString('latin1')).toBe('%PDF-');
+    expect(withMpn.length).toBeGreaterThan(withoutMpn.length); // the MPN free-text is actually rendered
+  });
+
   // FIX 2 (2026-06-14): the raw Jotform payment/tracking block (payment <table>, Stripe Transaction ID,
   // Google gclid) was pasted into the CLINICAL summary — PII that does not belong in a clinical doc AND
   // the 2nd false-garble trigger. The summary must carry the veteran Q&A only, no payment/tracking markup.

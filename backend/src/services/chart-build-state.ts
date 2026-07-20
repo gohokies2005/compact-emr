@@ -27,9 +27,13 @@ export const EXTRACTED_SOURCE = 'extracted';
  * 2026-06-20). Deliberately NOT folded into computeTriggerHash: a hash change would wedge every
  * case at 'extracting' (deriveChartBuildState returns 'extracting' with no run queued) — this
  * version-stamp approach refreshes on the NEXT reprocess/draft instead, never wedging.
- *   v1 (implicit) → original; v2 = deterministic rating-decision grant authority (commit b02a597).
+ *   v1 (implicit) → original; v2 = deterministic rating-decision grant authority (commit b02a597);
+ *   v3 = continuation-grant fix (2026-07-19) — deterministic + LLM now read a CONTINUATION/INCREASE grant
+ *        ("Evaluation of X … is continued/increased/decreased") as service_connected, and upgrade-on-merge
+ *        promotes a stale pending row when the grant lands later. BUMPED so the incident case + cohort
+ *        (extracted BEFORE this fix) are treated as stale and RE-EXTRACT on the next reprocess/draft.
  */
-export const EXTRACTOR_VERSION = 2;
+export const EXTRACTOR_VERSION = 3;
 
 /**
  * file_read_status.terminalStatus values that mean a document is DONE being read — success,

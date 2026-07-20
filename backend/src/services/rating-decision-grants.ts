@@ -34,6 +34,36 @@ const GRANT_PATTERNS: GrantPattern[] = [
   { re: /([A-Z][\s\S]{2,70}?) is \d{1,3}\s*percent disabling/gi, nameGroup: 1 },
 ];
 
+// CONTINUATION / INCREASE / DECREASE grants (continuation-grant fix, Ryan 2026-07-19). ROOT CAUSE of the
+// bronchitis incident: a rating decision reciting "Evaluation of chronic bronchitis, which is currently 10
+// percent disabling, is continued" was misread as "pending" — a CONTINUATION of an existing grant is a form
+// neither the initial-grant regex above nor the LLM covered. Because an *evaluation* only exists ONCE a
+// condition is already service-connected, "…is continued/increased/decreased" PRESUPPOSES a grant → the
+// condition is service_connected. Two accepted shapes (name-capturing):
+//   (a) evaluation-lead: "Evaluation of X[, which is][ currently] N percent[ disabling], is continued"
+//   (b) reverse-lead:    "X, currently N percent, is continued"
+// The percentage is OPTIONAL (it may sit on an adjacent OCR line); pctGroup 0 means "no % on this line".
+// 'deferred' is deliberately EXCLUDED (that disposition is pending, not a grant).
+//
+// DENIAL-CONTINUATION GUARD (CRITICAL): "The previous denial of service connection for X is confirmed and
+// continued" must NEVER be captured as a grant. Two independent fences: (1) the evaluation-lead form
+// requires the literal "Evaluation of" (a *denial* has no evaluation), and the reverse-lead form requires
+// "currently N percent" (a % presupposes a grant) — a denial-continuation recital has neither; (2) a
+// belt-and-suspenders denial-token check over each match's lead-in (see DENIAL_LEADIN_RE) rejects anything
+// whose surrounding text carries denial/denied/not warranted/not established.
+interface ContinuationPattern { re: RegExp; nameGroup: number; pctGroup: number }
+const CONTINUATION_PATTERNS: ContinuationPattern[] = [
+  // (a) "Evaluation of chronic bronchitis, which is currently 10 percent disabling, is continued/increased/decreased"
+  { re: /evaluation of ([\s\S]{2,80}?)(?:,\s*which is)?(?:\s+currently)?(?:\s+(\d{1,3})\s*percent(?:\s+disabling)?)?,?\s+is\s+(?:continued|increased|decreased)\b/gi, nameGroup: 1, pctGroup: 2 },
+  // (b) reverse lead: "chronic bronchitis, currently 10 percent, is continued/increased/decreased"
+  { re: /([A-Za-z][\s\S]{1,70}?),\s+currently\s+(\d{1,3})\s*percent,?\s+is\s+(?:continued|increased|decreased)\b/gi, nameGroup: 1, pctGroup: 2 },
+];
+
+// A denial token anywhere in a continuation match's lead-in unmasks a denial-CONTINUATION ("the previous
+// denial of service connection for X is confirmed and continued") — the continuation of a DENIAL is not a
+// grant. Checked over the ~80 chars before the match plus the match body.
+const DENIAL_LEADIN_RE = /\b(?:denial|denied|not warranted|not established)\b/i;
+
 // After a grant recital, the percentage usually follows within ~160 chars as "evaluation of N
 // percent" / "N% disabling" / "rated at N percent". OCR may bracket a digit ("5[0]") — tolerate it.
 const PCT_AFTER = /(?:evaluation of|rated(?:\s+at)?|assigned)\D{0,40}?(\d{1,3})(?:\s*\[?\d?\]?)?\s*(?:percent|%)/i;
@@ -102,6 +132,40 @@ export function extractRatingDecisionGrants(documents: BundleDocument[]): RawExt
             sourcePage: page.pageNumber,
             sourceQuote: quoteWindow(text, m.index, m[0].length),
             confidence: 0.98, // deterministic regex over the rigid rating-decision form
+          });
+        }
+      }
+      // CONTINUATION / INCREASE / DECREASE grants — captured with their own inline % (the percentage sits
+      // BEFORE "is continued", not after, so findPctNear can't reach it) and the denial-continuation guard.
+      for (const { re, nameGroup, pctGroup } of CONTINUATION_PATTERNS) {
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text)) !== null) {
+          const matchEnd = m.index + m[0].length;
+          // DENIAL-CONTINUATION GUARD: a denial token in the lead-in means "the previous denial … is
+          // confirmed and continued" — NOT a grant. Reject before it can become an SC row.
+          if (DENIAL_LEADIN_RE.test(text.slice(Math.max(0, m.index - 80), matchEnd))) continue;
+          const name = cleanName(m[nameGroup] ?? '');
+          if (!name) continue;
+          let ratingPct: number | undefined;
+          const pctRaw = m[pctGroup];
+          if (pctRaw !== undefined) {
+            const n = parseInt(pctRaw, 10);
+            if (Number.isInteger(n) && n >= 0 && n <= 100) ratingPct = n;
+          }
+          const key = `${doc.id}:${page.pageNumber}:${name.toLowerCase()}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({
+            category: 'sc_condition',
+            name,
+            status: 'service_connected', // a continuation/increase presupposes an existing grant
+            ...(ratingPct !== undefined ? { ratingPct } : {}),
+            sourceDocumentId: doc.id,
+            sourcePage: page.pageNumber,
+            sourceQuote: quoteWindow(text, m.index, m[0].length),
+            confidence: 0.98,
+            grantForm: 'continued', // provenance: sourced from a continuation recital (auditability)
           });
         }
       }

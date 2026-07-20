@@ -20,13 +20,15 @@
 import { normalizeName } from './chart-extractor.js';
 
 // Authoritative-status precedence. Higher wins. An unknown/null status ranks 0.
-const STATUS_RANK: Record<string, number> = {
+// EXPORTED (continuation-grant fix, 2026-07-19): chart-merge.ts reuses this SINGLE ranking to gate the
+// upgrade-on-merge promotion (pending → service_connected) — do NOT invent a second ranking anywhere.
+export const STATUS_RANK: Record<string, number> = {
   service_connected: 3,
   pending: 2,
   denied: 1,
 };
 
-function statusRank(status: unknown): number {
+export function statusRank(status: unknown): number {
   return typeof status === 'string' ? (STATUS_RANK[status] ?? 0) : 0;
 }
 

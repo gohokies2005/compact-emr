@@ -47,7 +47,7 @@ export interface DraftHaltSummary {
 
 // The 6 RN-friendly stages, each grouping the underlying pipeline phases. Order = pipeline order.
 const STAGES: ReadonlyArray<{ label: string; phases: readonly string[] }> = [
-  { label: 'Wrote the draft', phases: ['preflight', 'index_consult', 'framing_gate', 'cover_memo', 'source_lock', 'drafter'] },
+  { label: 'Wrote the draft', phases: ['preflight', 'index_consult', 'framing_gate', 'plan_validity', 'cover_memo', 'source_lock', 'drafter'] },
   { label: 'Specialist review panel', phases: ['adversary_panel', 'specialist_gate'] },
   { label: 'Automatic fixes', phases: ['refine_loop', 'surgical_edit'] },
   { label: 'Quality checks', phases: ['citation_scoring', 'pmid_verify', 'linter'] },
@@ -145,6 +145,10 @@ function plainPhaseReason(phaseId: string | null, phases: Record<string, Manifes
   const msg = (p?.operator_message ?? p?.summary ?? '').trim();
   if (msg && !/threw|exception|stack|rule_id|[{}]|error:/i.test(msg)) return msg;
   switch (phaseId) {
+    case 'plan_validity':
+      // Fix C (2026-07-19): the Phase 0.5a plan-validity park. General on purpose — it covers any
+      // secondary-with-unverified-upstream hold, not one condition. Names the real, actionable step.
+      return 'Secondary theory needs the service-connected primary confirmed on file. The named upstream condition is not marked Service-connected (it may be Pending). A rating decision in the chart may grant it — confirm the SC-Conditions status, then re-run.';
     case 'render':
     case 'render_parity':
       return 'A small formatting difference in the PDF (a line-wrap). The letter content is unchanged.';

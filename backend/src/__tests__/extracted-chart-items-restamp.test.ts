@@ -57,7 +57,7 @@ beforeEach(() => {
 
 describe('extracted-chart-items → post-merge restamp hook', () => {
   it('fires the restamp when the merge WROTE rows (written > 0)', async () => {
-    mergeMock.mockResolvedValueOnce({ autofill: true, written: 2, skippedManual: 0, skippedPriorExtracted: 0, skippedDuplicate: 0 });
+    mergeMock.mockResolvedValueOnce({ autofill: true, written: 2, promoted: 0, skippedManual: 0, skippedPriorExtracted: 0, skippedDuplicate: 0 });
     const res = await post(appFor()).expect(200);
     expect(res.body.data.written).toBe(2);
     expect(refreshMock).toHaveBeenCalledTimes(1);
@@ -65,13 +65,13 @@ describe('extracted-chart-items → post-merge restamp hook', () => {
   });
 
   it('does NOT fire in shadow mode / when nothing was written (written = 0)', async () => {
-    mergeMock.mockResolvedValueOnce({ autofill: false, written: 0, skippedManual: 0, skippedPriorExtracted: 0, skippedDuplicate: 0 });
+    mergeMock.mockResolvedValueOnce({ autofill: false, written: 0, promoted: 0, skippedManual: 0, skippedPriorExtracted: 0, skippedDuplicate: 0 });
     await post(appFor()).expect(200);
     expect(refreshMock).not.toHaveBeenCalled();
   });
 
   it('a restamp throw never fails the callback — the merge result still returns 200', async () => {
-    mergeMock.mockResolvedValueOnce({ autofill: true, written: 1, skippedManual: 0, skippedPriorExtracted: 0, skippedDuplicate: 0 });
+    mergeMock.mockResolvedValueOnce({ autofill: true, written: 1, promoted: 0, skippedManual: 0, skippedPriorExtracted: 0, skippedDuplicate: 0 });
     refreshMock.mockRejectedValueOnce(new Error('stamp refresh exploded'));
     const res = await post(appFor()).expect(200);
     expect(res.body.data.written).toBe(1); // the worker callback is unharmed
@@ -81,7 +81,7 @@ describe('extracted-chart-items → post-merge restamp hook', () => {
   // and previously DROPPED medStatus/startDate/lastSeenDate, so every full-read med would write as
   // 'active' and the timeline would collapse at dedup. Guard the boundary passthrough.
   it('passes medication temporality through to the merge (no HTTP-boundary drop)', async () => {
-    mergeMock.mockResolvedValueOnce({ autofill: false, written: 0, skippedManual: 0, skippedPriorExtracted: 0, skippedDuplicate: 0 });
+    mergeMock.mockResolvedValueOnce({ autofill: false, written: 0, promoted: 0, skippedManual: 0, skippedPriorExtracted: 0, skippedDuplicate: 0 });
     const med = {
       category: 'active_medication', name: 'escitalopram', medStatus: 'historical',
       startDate: '03/12/2015', lastSeenDate: '06/14/2022',

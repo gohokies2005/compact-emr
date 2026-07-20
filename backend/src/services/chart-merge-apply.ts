@@ -34,6 +34,8 @@ export interface ApplyExtractionInput {
 export interface ApplyExtractionResult {
   autofill: boolean;
   written: number;
+  /** prior-extracted pending SC rows promoted to service_connected by a later authoritative grant. */
+  promoted: number;
   skippedManual: number;
   skippedPriorExtracted: number;
   skippedDuplicate: number;
@@ -47,7 +49,7 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
 
   const scDelegate = (db as unknown as {
     scCondition: {
-      findMany: (a: { where: { veteranId: string }; select: { condition: true; source: true } }) => Promise<NameSource[] | { condition: string; source: string }[]>;
+      findMany: (a: { where: { veteranId: string }; select: { id: true; condition: true; source: true; status: true } }) => Promise<{ id: string; condition: string; source: string; status: string | null }[]>;
       create: (a: { data: Record<string, unknown> }) => Promise<unknown>;
     };
   }).scCondition;
@@ -63,28 +65,28 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
 
   // Load existing chart rows (with source) so the merge can protect manual + prior-extracted rows.
   const [scRows, problemRows, medRows] = await Promise.all([
-    scDelegate.findMany({ where: { veteranId: input.veteranId }, select: { condition: true, source: true } }) as Promise<{ condition: string; source: string }[]>,
+    scDelegate.findMany({ where: { veteranId: input.veteranId }, select: { id: true, condition: true, source: true, status: true } }),
     (db as unknown as { activeProblem: { findMany: (a: { where: { veteranId: string }; select: { problem: true; source: true } }) => Promise<{ problem: string; source: string }[]> } })
       .activeProblem.findMany({ where: { veteranId: input.veteranId }, select: { problem: true, source: true } }),
     medDelegate.findMany({ where: { veteranId: input.veteranId }, select: { drugName: true, source: true, medStatus: true, startDate: true, lastSeenDate: true } }),
   ]);
   const existing: ExistingChartRow[] = [
-    ...scRows.map((r) => ({ category: 'sc_condition' as const, name: r.condition, source: r.source })),
+    // Carry id + status so the upgrade-on-merge promotion can target the row for an UPDATE + gate on pending.
+    ...scRows.map((r) => ({ category: 'sc_condition' as const, name: r.condition, source: r.source, id: r.id, status: r.status })),
     ...problemRows.map((r) => ({ category: 'active_problem' as const, name: r.problem, source: r.source })),
     // Carry med temporality so the merge key matches the extracted key (active vs historical/year).
     ...medRows.map((r) => ({ category: 'active_medication' as const, name: r.drugName, source: r.source, medStatus: r.medStatus, startDate: r.startDate, lastSeenDate: r.lastSeenDate })),
   ];
 
-  const plan = planMerge(existing, input.items);
-
   // SC-PROVENANCE (Woodley fix): classify the AUTHORITY of each SC row's source document over service-
   // connection (a VA rating decision is authoritative; a veteran goal-doc / lay statement / clinical note
   // is not). Computed deterministically from the Document (filename + docTag) — NEVER the model's judgment.
-  // Build a documentId → tier map for the SC inserts; fail-open to 'unknown' (non-authoritative) on any
-  // lookup miss. The DOWNGRADE (a non-authoritative service_connected → pending) only bites when
-  // SC_PROVENANCE_ENFORCED is on; the tier is ALWAYS stamped so the flip is data-ready.
+  // Build a documentId → tier map over ALL incoming SC items (both inserts AND promotion candidates); fail-
+  // open to 'unknown' (non-authoritative) on any lookup miss. The DOWNGRADE (a non-authoritative
+  // service_connected → pending) only bites when SC_PROVENANCE_ENFORCED is on; the tier is ALWAYS stamped so
+  // the flip is data-ready. Computed BEFORE planMerge so the upgrade-on-merge gate can read the authority.
   const enforceProvenance = isScProvenanceEnforced();
-  const scDocIds = Array.from(new Set(plan.toInsert.filter((i) => i.category === 'sc_condition' && i.sourceDocumentId).map((i) => i.sourceDocumentId as string)));
+  const scDocIds = Array.from(new Set(input.items.filter((i) => i.category === 'sc_condition' && i.sourceDocumentId).map((i) => i.sourceDocumentId as string)));
   const tierByDocId = new Map<string, ScAuthorityTier>();
   if (scDocIds.length > 0) {
     try {
@@ -95,13 +97,62 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
   }
   const scTierFor = (docId: string | null | undefined): ScAuthorityTier => (docId && tierByDocId.get(docId)) || 'unknown';
 
+  // Stamp the source-authority tier onto each incoming SC item so planMerge's upgrade-on-merge gate can see
+  // whether a service_connected proposal comes from an authoritative rating decision (single source of the
+  // tier — the insert path below reads the same stamp). Non-SC items are untouched.
+  for (const it of input.items) {
+    if (it.category === 'sc_condition') {
+      const tier = scTierFor(it.sourceDocumentId);
+      it.sourceAuthorityTier = tier;
+      it.scStatusAuthoritative = scStatusAuthoritativeFor(tier);
+    }
+  }
+
+  const plan = planMerge(existing, input.items);
+
   await db.$transaction(async (tx) => {
     if (autofill) {
       const txAny = tx as unknown as {
-        scCondition: { create: (a: { data: Record<string, unknown> }) => Promise<unknown> };
+        scCondition: {
+          create: (a: { data: Record<string, unknown> }) => Promise<unknown>;
+          update: (a: { where: { id: string }; data: Record<string, unknown> }) => Promise<unknown>;
+        };
         activeProblem: { create: (a: { data: Record<string, unknown> }) => Promise<unknown> };
         activeMedication: { create: (a: { data: Record<string, unknown> }) => Promise<unknown> };
       };
+
+      // UPGRADE-ON-MERGE (continuation-grant fix, 2026-07-19): PROMOTE a prior-extracted `pending` SC row to
+      // `service_connected` when a later authoritative rating-decision grant lands (the bronchitis incident:
+      // extracted pending, later granted → the grant row used to be skipped, leaving the stale pending). This
+      // is an UPDATE, gated in planMerge (never manual, only pending → service_connected, authoritative tier,
+      // monotonic up). Carry the grant's rating %/dcCode + refresh SC-provenance so the row reflects the VA
+      // decision. version increments (optimistic-concurrency, mirrors the RN edit path).
+      for (const promo of plan.toPromote) {
+        if (!promo.target.id) continue; // no PK to target (defensive) — leave the row as-is
+        const it = promo.incoming;
+        const tier = scTierFor(it.sourceDocumentId);
+        await txAny.scCondition.update({
+          where: { id: promo.target.id },
+          data: {
+            status: 'service_connected',
+            ...(it.ratingPct != null ? { ratingPct: it.ratingPct } : {}),
+            ...(it.dcCode ? { dcCode: it.dcCode } : {}),
+            source: EXTRACTED_SOURCE,
+            sourceDocumentId: it.sourceDocumentId,
+            sourcePage: it.sourcePage,
+            sourceQuote: it.sourceQuote,
+            confidence: it.confidence,
+            needsReview: it.needsReview,
+            extractedAt: now,
+            extractionRunId: input.runId,
+            sourceAuthorityTier: tier,
+            scStatusAuthoritative: scStatusAuthoritativeFor(tier),
+            version: { increment: 1 },
+          },
+        });
+        console.warn(JSON.stringify({ event: 'sc_status_promoted_on_merge', veteranId: input.veteranId, condition: promo.target.name, from: 'pending', to: 'service_connected', tier, sourceDocumentId: it.sourceDocumentId }));
+      }
+
       for (const it of plan.toInsert) {
         const prov = {
           source: EXTRACTED_SOURCE,
@@ -148,7 +199,7 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
       where: { id: input.runId },
       data: {
         status: hasGaps ? 'complete_with_gaps' : 'complete',
-        itemsWritten: autofill ? plan.toInsert.length : 0,
+        itemsWritten: autofill ? plan.toInsert.length + plan.toPromote.length : 0,
         itemsSkipped: plan.skippedManual + plan.skippedPriorExtracted + plan.skippedDuplicate,
         resultJson: {
           autofill,
@@ -157,6 +208,7 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
           extractorVersion: EXTRACTOR_VERSION,
           costUsd: input.costUsd ?? null,
           items: input.items,
+          promoted: autofill ? plan.toPromote.length : 0,
           skipped: { manual: plan.skippedManual, priorExtracted: plan.skippedPriorExtracted, duplicate: plan.skippedDuplicate },
           gaps: { truncatedWindows: input.truncatedWindows ?? 0, uncoveredPages: input.uncoveredPages ?? 0, fullRead: input.fullRead ?? null },
         },
@@ -189,7 +241,8 @@ export async function applyExtractionMerge(db: AppDb, input: ApplyExtractionInpu
 
   return {
     autofill,
-    written: autofill ? plan.toInsert.length : 0,
+    written: autofill ? plan.toInsert.length + plan.toPromote.length : 0,
+    promoted: autofill ? plan.toPromote.length : 0,
     skippedManual: plan.skippedManual,
     skippedPriorExtracted: plan.skippedPriorExtracted,
     skippedDuplicate: plan.skippedDuplicate,

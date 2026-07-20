@@ -92,7 +92,10 @@ export function classifyDocument(input: { filename?: string | null; text?: strin
   if (/rating decision|we made a decision on your va benefits|reasons for decision|favorable findings/i.test(w)) {
     const cond = detectCondition(w);
     const denied = /\b(is denied|denial of service connection|previous denial[^.]*confirmed)/i.test(w);
-    const granted = /\b(service connection[^.]*is granted|is granted|evaluation of \d{1,3} percent)/i.test(w);
+    // A CONTINUATION/INCREASE recital ("Evaluation of X … is continued/increased/decreased") also marks a
+    // granted rating doc (continuation-grant fix, 2026-07-19) — keep grant-outcome detection aligned with
+    // the extractor. Ordered AFTER `denied` so "previous denial … confirmed and continued" reads as denied.
+    const granted = /\b(service connection[^.]*is granted|is granted|evaluation of \d{1,3} percent|evaluation of [\s\S]{2,80}? is (?:continued|increased|decreased))/i.test(w);
     const outcome = denied ? 'denied' : granted ? 'granted' : null;
     const parts = ['VA Rating Decision'];
     if (cond) parts.push(`— ${cond}${outcome ? ` ${outcome}` : ''}`);

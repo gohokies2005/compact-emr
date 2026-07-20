@@ -256,7 +256,30 @@ export class DrafterStack extends Stack {
         // letter, no regression). A parked case surfaces a named human-actionable send_back_reason +
         // SC-grounded alternatives to the RN/physician (pre-draft, so no existing draft is blocked).
         // Revert: set to 'off' (or remove this line) + redeploy the drafter while the SQS queue is idle.
-        PLAN_VALIDITY_PARK: 'on',
+        // 2026-07-20 (Ryan, "ALWAYS DRAFT"): flipped 'on' → 'off'. A pre-draft hard PARK produces NO
+        // letter to review — worst possible outcome, and it dead-ended a CORRECTLY-framed OSA-secondary
+        // theory (Hoffmiller CLM-EFDCD65A3F) purely on STALE structured data (bronchitis mis-marked
+        // Pending; the rating decision in the chart plainly granted it). Both SME agents recommended
+        // advisory. With 'off' the identical grounded=false/high verdict becomes ADVISORY: it warns via
+        // deferAdvisory and PROCEEDS to a full graded draft (run-letter-pipeline.js:711-713), consistent
+        // with feedback_never_block_viewing_or_editing_a_draft. Fix A (continuation-grant extraction) is
+        // the root fix so the list is correct in the first place; this flag just guarantees a draft always.
+        PLAN_VALIDITY_PARK: 'off',
+        // FRN_AI_FOLDER_PICKER (Ryan 2026-07-19): pure-AI citation folder selection (Sonnet picks from
+        // the real routing catalog, Opus independently verifies; disk-existence-checked) + a live NCBI
+        // bridge search — replaces the too-rigid deterministic substring routing that missed phrasing
+        // variants (Washington "Traumatic brain disease" never matched folder tbi). ALL three behaviors
+        // (pick, upstream-SC folder append, bridge) are gated behind this flag; OFF is proven
+        // sha256-byte-identical to the pre-change step0 on both a direct and the OCD->TBI secondary class.
+        // Stress-test defects (2026-07-19) FIXED + proven (FRN commit 9ac2058, image 9ac2058-pathway):
+        //   Finding 1 (grouped-folder drop): verifyReal splits the '+'-joined group token and keeps every
+        //     member folder on disk → curated coverage retained for OSA/HTN/GERD/IBS/lumbar/anxiety-OCD/etc.
+        //     Proven live: picker-vs-deterministic = 0 regressions across Washington + 5 grouped conditions.
+        //   Finding 2 (false TBI->OCD bridge): bridgeRelates requires a directional linker between the two
+        //     conditions in close proximity → rejects the NAC review (25957927) + DBS-indication list
+        //     (29332084); live Washington bridge now returns 3 real "OCD after TBI" papers.
+        // Flag OFF stays byte-identical/safe as the instant kill-switch if anything regresses.
+        FRN_AI_FOLDER_PICKER: 'on',
         // DRAFTER_TRANSIENT_RESILIENCE (Ryan 2026-07-05): #3/#4 hardening — a TRANSIENT LLM hiccup
         // (overload/timeout) or a DIRECT/zero-granted-SC claim (Scott/Drummond class) must NEVER fatal-with-
         // no-letter. ON: (#3) the framing self-heal degrades to a conservative DIRECT 3.303 holding when zero

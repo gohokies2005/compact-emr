@@ -1123,6 +1123,15 @@ const HALT_REASON_CODES = [
   // dedicated code here AND that legacy verify_error+body_quality path are accepted (see isBodyQualityHalt
   // on the frontend). DO NOT remove verify_error.
   'body_quality_critical',
+  // Plan-validity park (FRN cloud drafter Phase 0.5a planValidityGate): the chosen lead theory
+  // was not confirmed GROUNDED in this record (e.g. a SECONDARY theory whose upstream primary is
+  // not yet marked Service-connected). The pipeline exits 3 BEFORE any letter is drafted, and the
+  // FRN worker posts /halt with reasonCode 'plan_validity' + haltGate 'plan_validity'. Maps (via the
+  // existing handler) to case status 'needs_rn_decision' + a draft_decisions 'no'. No handler change:
+  // this allowlist entry lets parseHaltBody accept the code instead of 400-rejecting it (which would
+  // DLQ the job and leave the case unparked). This is a NO-DRAFT hold (haltShouldCarryDraft stays
+  // false → no artifact preserved). Fix C 2026-07-19 — surface-the-real-halt-reason.
+  'plan_validity',
 ] as const;
 
 // A halt reasonCode that maps to a draft_decisions 'pause' (a verification/quality step found a

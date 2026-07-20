@@ -169,6 +169,16 @@ export interface RawExtractedItem {
   status?: 'service_connected' | 'pending' | 'denied';
   dcCode?: string;
   ratingPct?: number;
+  // Continuation-grant provenance (continuation-grant fix, 2026-07-19). Set to 'continued' on an SC row
+  // captured deterministically from a rating-decision CONTINUATION/INCREASE recital ("Evaluation of X …
+  // is continued/increased/decreased") — a form that presupposes an existing grant. Audit-only; consumers
+  // treat it exactly like any other service_connected row.
+  grantForm?: 'continued';
+  // SC-status source-authority provenance (Woodley fix). Optional so untyped callers compile unchanged;
+  // stamped by the merge layer (chart-merge-apply) before planMerge so the upgrade-on-merge promotion can
+  // gate strictly on an authoritative rating-decision source. Never the model's judgment.
+  sourceAuthorityTier?: string;
+  scStatusAuthoritative?: boolean;
   icd10?: string;
   notes?: string;
   dose?: string;
@@ -392,7 +402,12 @@ export function combinedSystemPrompt(): string {
     // clinical diagnosis with no such signal is a problem, not an SC condition.
     'CAPTURE AS sc_condition: every condition that appears next to a VA BENEFIT-STATUS SIGNAL. The signal is what makes it service-connection, not the diagnosis itself. Signals — capture the condition whenever you see one beside it:',
     '  - granted  → "Service connection for X is granted / has been established", "Service connection for X is granted with an evaluation of N percent", "an evaluation of N percent is assigned for X", "X is N percent disabling", "service-connected", "SC", a rating % or diagnostic code shown for the condition. A 0 percent GRANT ("granted with an evaluation of 0 percent") is STILL service_connected — a grant at a noncompensable rating, NOT a denial.',
+    // CONTINUATION-GRANT form (continuation-grant fix, Ryan 2026-07-19). A rating decision that CONTINUES /
+    // CHANGES an already-granted evaluation ("Evaluation of X … is continued/increased/decreased") was being
+    // misread as pending. An *evaluation* only exists once granted, so this CONFIRMS an existing grant.
+    '  - granted (continued) → "Evaluation of X, [which is] currently N percent [disabling], is continued / increased / decreased" CONFIRMS an EXISTING grant → service_connected (carry the N% into ratingPct). An evaluation exists only after a grant, so a continuation/increase/decrease of one is service_connected, NOT pending.',
     '  - denied   → "Service connection for X is denied / is not warranted / is not established", "X (denied)".',
+    '  - BUT "the previous denial of service connection for X is confirmed and continued" or "X remains denied" is a CONTINUED DENIAL → denied (NOT a grant): a denial has no evaluation, so "confirmed and continued" here continues the denial, not a grant.',
     '  - pending  → a claim list or intake summary — "Claimed conditions", "Conditions claimed", a claim-status / "Your claims" page — listing the condition as claimed / pending / under review / received.',
     '  - deferred → "Service connection for X is deferred", "X — deferred pending ...".',
     'These live in MANY document types — rating decisions, code sheets, benefit/award letters, the 21-526EZ claim, AND claim-status / intake-summary lists. A claim that is only pending or denied is STILL an sc_condition; do not wait for a "granted" sentence. Capture EACH listed condition as its own row with its own status (+ ratingPct + dcCode when shown), even when a single rating-decision page itemizes many.',

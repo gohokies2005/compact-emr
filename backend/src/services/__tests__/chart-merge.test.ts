@@ -112,4 +112,51 @@ describe('planMerge (non-destructive)', () => {
     expect(p.toInsert).toHaveLength(2);
     expect(p.skippedDuplicate).toBe(1);
   });
+
+  // ── UPGRADE-ON-MERGE promotion (continuation-grant fix, Ryan 2026-07-19) ──
+  // THE BRONCHITIS INCIDENT: a condition extracted earlier as `pending` is later GRANTED by a rating
+  // decision. The grant row used to be skipped (skippedPriorExtracted), leaving the stale pending forever.
+  describe('upgrade-on-merge: prior-extracted pending → service_connected on a later authoritative grant', () => {
+    // An authoritative rating-decision grant for the incoming side.
+    const grant = (over: Partial<FinalExtractedItem> = {}): FinalExtractedItem =>
+      item({ name: 'chronic bronchitis', status: 'service_connected', ratingPct: 10, sourceAuthorityTier: 'va_decision', scStatusAuthoritative: true, ...over });
+
+    it('PROMOTES an earlier extracted pending bronchitis when the rating-decision grant lands later', () => {
+      const existing: ExistingChartRow[] = [{ category: 'sc_condition', name: 'chronic bronchitis', source: 'extracted', id: 'sc-1', status: 'pending' }];
+      const p = planMerge(existing, [grant()]);
+      expect(p.toInsert).toHaveLength(0);
+      expect(p.skippedPriorExtracted).toBe(0);
+      expect(p.toPromote).toHaveLength(1);
+      expect(p.toPromote[0]!.target.id).toBe('sc-1');
+      expect(p.toPromote[0]!.incoming.status).toBe('service_connected');
+      expect(p.toPromote[0]!.incoming.ratingPct).toBe(10);
+    });
+
+    it('NEVER promotes a manual pending row (RN values immutable — still skippedManual)', () => {
+      const existing: ExistingChartRow[] = [{ category: 'sc_condition', name: 'chronic bronchitis', source: 'manual', id: 'sc-1', status: 'pending' }];
+      const p = planMerge(existing, [grant()]);
+      expect(p.toPromote).toHaveLength(0);
+      expect(p.skippedManual).toBe(1);
+    });
+
+    it('does NOT promote from a NON-authoritative source (clinical/veteran tier) — stays skipped', () => {
+      const existing: ExistingChartRow[] = [{ category: 'sc_condition', name: 'chronic bronchitis', source: 'extracted', id: 'sc-1', status: 'pending' }];
+      const p = planMerge(existing, [grant({ sourceAuthorityTier: 'clinical', scStatusAuthoritative: false })]);
+      expect(p.toPromote).toHaveLength(0);
+      expect(p.skippedPriorExtracted).toBe(1);
+    });
+
+    it('MONOTONIC UP ONLY: never demotes an existing service_connected row toward a lower incoming status', () => {
+      const existing: ExistingChartRow[] = [{ category: 'sc_condition', name: 'chronic bronchitis', source: 'extracted', id: 'sc-1', status: 'service_connected' }];
+      const p = planMerge(existing, [grant({ status: 'pending', scStatusAuthoritative: false })]);
+      expect(p.toPromote).toHaveLength(0);
+      expect(p.skippedPriorExtracted).toBe(1); // the already-SC row is untouched
+    });
+
+    it('promotes via the scStatusAuthoritative bit alone (no tier string)', () => {
+      const existing: ExistingChartRow[] = [{ category: 'sc_condition', name: 'chronic bronchitis', source: 'extracted', id: 'sc-1', status: 'pending' }];
+      const p = planMerge(existing, [grant({ sourceAuthorityTier: undefined, scStatusAuthoritative: true })]);
+      expect(p.toPromote).toHaveLength(1);
+    });
+  });
 });

@@ -7,7 +7,7 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { Spinner } from '../../components/ui/Spinner';
 import axios from 'axios';
 import { ConflictError, ForbiddenError, ServiceUnavailableError } from '../../api/client';
-import { listUsers, createStaff, setStaffActive, renameStaff, resetStaffPassword, unlockStaff, type StaffRole, type CreateStaffInput, type StaffUser } from '../../api/users';
+import { listUsers, createStaff, setStaffActive, updateStaffProfile, resetStaffPassword, unlockStaff, type StaffRole, type CreateStaffInput, type StaffUser } from '../../api/users';
 
 // Mirrors the backend Cognito password policy (assertCognitoPasswordPolicy) so the temp-password
 // branch of the reset dialog blocks client-side instead of bouncing off a server 400.
@@ -26,10 +26,12 @@ interface FormState {
   credential: 'invite' | 'temp_password'; tempPassword: string;
   npi: string; specialty: string; medicalLicense: string;
   boardName: string; boardAbbreviation: string; licenseState: string; licenseNumber: string; phone: string;
+  coSignByOwner: boolean;
 }
 const EMPTY: FormState = {
   email: '', name: '', roles: ['ops_staff'], credential: 'invite', tempPassword: '',
   npi: '', specialty: '', medicalLicense: '', boardName: '', boardAbbreviation: '', licenseState: '', licenseNumber: '', phone: '',
+  coSignByOwner: false,
 };
 
 function toInput(f: FormState): CreateStaffInput {
@@ -49,6 +51,7 @@ function toInput(f: FormState): CreateStaffInput {
       licenseState: f.licenseState.trim(), licenseNumber: f.licenseNumber.trim(),
       ...(f.phone.trim() ? { phone: f.phone.trim() } : {}),
     },
+    ...(f.coSignByOwner ? { coSignByOwner: true } : {}),
   };
 }
 
@@ -122,11 +125,12 @@ export function StaffPage() {
   const [unlockEmailConfirm, setUnlockEmailConfirm] = useState('');
   const [renameTarget, setRenameTarget] = useState<StaffUser | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [renameCoSign, setRenameCoSign] = useState(false);
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => { setForm((c) => ({ ...c, [k]: v })); setMessage(null); };
 
   function closeReset() { setResetTarget(null); setResetMode('email_code'); setResetTempPassword(''); }
   function closeUnlock() { setUnlockTarget(null); setUnlockEmailConfirm(''); }
-  function closeRename() { setRenameTarget(null); setRenameValue(''); }
+  function closeRename() { setRenameTarget(null); setRenameValue(''); setRenameCoSign(false); }
 
   const usersQuery = useQuery({ queryKey: ['users', 'all'], queryFn: () => listUsers({ includeInactive: true }) });
   const staff = useMemo(() => usersQuery.data?.data ?? [], [usersQuery.data]);
@@ -180,11 +184,12 @@ export function StaffPage() {
   });
 
   const renameMutation = useMutation({
-    mutationFn: (vars: { user: StaffUser; name: string }) => renameStaff(vars.user.id, vars.user.version, vars.name),
-    onSuccess: async (res) => { setMessage(`Name updated to "${res.data.name}".`); closeRename(); await qc.invalidateQueries({ queryKey: ['users'] }); },
+    mutationFn: (vars: { user: StaffUser; name: string; coSignByOwner?: boolean }) =>
+      updateStaffProfile(vars.user.id, vars.user.version, { name: vars.name, ...(vars.coSignByOwner !== undefined ? { coSignByOwner: vars.coSignByOwner } : {}) }),
+    onSuccess: async (res) => { setMessage(`Provider updated: "${res.data.name}".`); closeRename(); await qc.invalidateQueries({ queryKey: ['users'] }); },
     onError: (e: unknown) => {
       if (e instanceof ConflictError) { setMessage('This user changed elsewhere. Reload the page and try again.'); return; }
-      setMessage(accountActionError(e, 'Rename'));
+      setMessage(accountActionError(e, 'Save'));
     },
   });
 
@@ -251,6 +256,10 @@ export function StaffPage() {
                 <Field label="License state" value={form.licenseState} onChange={(v) => set('licenseState', v)} required placeholder="e.g. Nevada" />
                 <Field label="License number" value={form.licenseNumber} onChange={(v) => set('licenseNumber', v)} required placeholder="e.g. DO2996" />
                 <Field label="Phone" value={form.phone} onChange={(v) => set('phone', v)} />
+                <label className="md:col-span-2 xl:col-span-3 flex items-start gap-2 border-t border-slate-200 pt-3 text-sm text-slate-700">
+                  <input type="checkbox" className="mt-0.5" checked={form.coSignByOwner} onChange={(e) => set('coSignByOwner', e.target.checked)} />
+                  <span><span className="font-medium text-slate-900">Dr. Kasky co-signs for this provider</span><br /><span className="text-xs text-slate-500">Every signed letter carries a second "independently reviewed and concurred in by" signature from the account owner. Requires the owner to have a signature on file.</span></span>
+                </label>
               </div>
             ) : null}
 
@@ -279,7 +288,7 @@ export function StaffPage() {
                       <td className="px-4 py-3">{s.active ? <span className="text-emerald-700">Active</span> : <span className="text-slate-400">Inactive</span>}</td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap justify-end gap-2">
-                          <Button type="button" variant="secondary" onClick={() => { setMessage(null); setRenameValue(s.name ?? ''); setRenameTarget(s); }}>Edit name</Button>
+                          <Button type="button" variant="secondary" onClick={() => { setMessage(null); setRenameValue(s.name ?? ''); setRenameCoSign(s.coSigned ?? false); setRenameTarget(s); }}>{s.roles.includes('physician') ? 'Edit provider' : 'Edit name'}</Button>
                           <Button type="button" variant="secondary" onClick={() => { setMessage(null); setResetMode('email_code'); setResetTempPassword(''); setResetTarget(s); }}>Reset password</Button>
                           <Button type="button" variant="secondary" onClick={() => { setMessage(null); setUnlockEmailConfirm(''); setUnlockTarget(s); }}>Unlock / clear MFA</Button>
                           <Button type="button" variant="ghost" disabled={toggleMutation.isPending} onClick={() => toggleMutation.mutate({ user: s, active: !s.active })}>{s.active ? 'Deactivate' : 'Reactivate'}</Button>
@@ -345,15 +354,31 @@ export function StaffPage() {
           <div role="dialog" aria-modal="true" aria-labelledby="rename-title">
             <div className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-sm" onClick={closeRename} />
             <div className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl bg-white p-6 shadow-2xl">
-              <h2 id="rename-title" className="text-lg font-semibold text-slate-900">Edit name</h2>
+              <h2 id="rename-title" className="text-lg font-semibold text-slate-900">{renameTarget.roles.includes('physician') ? 'Edit provider' : 'Edit name'}</h2>
               <p className="mt-1 text-sm text-slate-600">Correct the display name for <span className="font-medium text-slate-900">{renameTarget.email}</span>. Updates the staff directory and assignment pickers.{renameTarget.roles.includes('physician') ? ' Their signed-letter credential block is NOT changed here — edit that on the Physician credentials page.' : ''}</p>
               <label className="mt-4 block">
                 <span className="text-sm font-medium text-slate-800">Full name</span>
                 <input type="text" autoFocus value={renameValue} onChange={(e) => setRenameValue(e.target.value)} placeholder="e.g. Kimberly Maribao" className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200" />
               </label>
+              {renameTarget.roles.includes('physician') ? (
+                <label className="mt-4 flex items-start gap-2 border-t border-slate-200 pt-4 text-sm text-slate-700">
+                  <input type="checkbox" className="mt-0.5" checked={renameCoSign} onChange={(e) => setRenameCoSign(e.target.checked)} />
+                  <span><span className="font-medium text-slate-900">Dr. Kasky co-signs for this provider</span><br /><span className="text-xs text-slate-500">Adds a second "independently reviewed and concurred in by" signature from the account owner to every signed letter.</span></span>
+                </label>
+              ) : null}
               <div className="mt-6 flex justify-end gap-2">
                 <Button type="button" variant="secondary" onClick={closeRename}>Cancel</Button>
-                <Button type="button" variant="primary" loading={renameMutation.isPending} disabled={renameMutation.isPending || renameValue.trim().length === 0 || renameValue.trim() === (renameTarget.name ?? '')} onClick={() => renameMutation.mutate({ user: renameTarget, name: renameValue.trim() })}>Save name</Button>
+                <Button
+                  type="button"
+                  variant="primary"
+                  loading={renameMutation.isPending}
+                  disabled={
+                    renameMutation.isPending ||
+                    renameValue.trim().length === 0 ||
+                    (renameValue.trim() === (renameTarget.name ?? '') && (!renameTarget.roles.includes('physician') || renameCoSign === (renameTarget.coSigned ?? false)))
+                  }
+                  onClick={() => renameMutation.mutate({ user: renameTarget, name: renameValue.trim(), ...(renameTarget.roles.includes('physician') ? { coSignByOwner: renameCoSign } : {}) })}
+                >Save</Button>
               </div>
             </div>
           </div>

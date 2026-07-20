@@ -577,6 +577,10 @@ export interface PhysicianRecord {
   // Prisma Json? — render-authoritative per-signer credential facts (D2). Untrusted at this
   // boundary; narrow with credential-block.parseCredentialBlock before use.
   credentialBlockJson: unknown;
+  // CO-SIGN (DPT docket 2026-07-19): the physician (account owner) who co-signs THIS provider's
+  // signed letters. Null = signs alone (single-signer path, MUST render byte-identical). Optional
+  // so the many test factories that mirror this projection stay valid (like avatarS3Key).
+  coSignedByPhysicianId?: string | null;
   active: boolean;
   createdAt: Date;
   updatedAt: Date;

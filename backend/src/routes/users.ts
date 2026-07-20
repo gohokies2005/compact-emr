@@ -74,6 +74,41 @@ interface ParsedStaffCreate {
   email: string; name: string; roles: Role[];
   credential: StaffCredential;
   physician: PhysicianProfileInput | null;
+  // CO-SIGN (DPT docket 2026-07-19): "I (the account owner) co-sign for this provider" checkbox.
+  // Resolved server-side to the requesting admin's OWN physician id (see resolveOwnerCoSignerId).
+  // Only meaningful when the created row is itself a physician.
+  coSignByOwner: boolean;
+}
+
+/**
+ * Resolve the co-signer id for a "co-sign by owner" request. The co-signer is the requesting
+ * admin's OWN physician profile (the account owner, Dr. Kasky) — a boolean checkbox rather than a
+ * physician-picker, matching the UI intent "I co-sign for this provider." The FK column is
+ * future-flexible (a senior co-signing for a junior via an explicit id) without a migration, but
+ * Phase 1 only wires the owner path. Validation (all → clean 400, never a 500):
+ *   - the requesting login MUST itself be a signing physician (has a Physician row),
+ *   - a physician can never be their OWN co-signer (owner.id !== the target provider's id),
+ *   - the co-signer must be ACTIVE and have a signature on file (else the concurrence block would
+ *     render signature-less — the whole point of the co-sign).
+ * targetPhysicianId is null on create (the provider row does not exist yet, so self-cosign is
+ * structurally impossible); it is the provider's id on edit (where self-cosign must be rejected).
+ */
+async function resolveOwnerCoSignerId(db: AppDb, actorSub: string, targetPhysicianId: string | null): Promise<string> {
+  const owner = await db.physician.findUnique({ where: { cognitoSub: actorSub } });
+  if (owner === null) {
+    throw new HttpError(400, 'bad_request', 'Co-sign requires your login to be a signing physician, but no physician profile is linked to it.', { field: 'coSignByOwner' });
+  }
+  if (targetPhysicianId !== null && owner.id === targetPhysicianId) {
+    throw new HttpError(400, 'bad_request', 'A physician cannot be their own co-signer.', { field: 'coSignByOwner' });
+  }
+  if (!owner.active) {
+    throw new HttpError(400, 'bad_request', 'Cannot enable co-sign: the co-signing physician is inactive.', { field: 'coSignByOwner' });
+  }
+  const sig = owner.signatureImageS3Key;
+  if (sig === null || sig.trim() === '') {
+    throw new HttpError(400, 'bad_request', `Cannot enable co-sign: the co-signing physician (${owner.fullName}) has no signature image on file. Upload it on the Physicians page, then enable co-sign.`, { field: 'coSignByOwner' });
+  }
+  return owner.id;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -150,7 +185,15 @@ function parseStaffCreate(body: unknown): ParsedStaffCreate {
     throw new HttpError(400, 'bad_request', 'physician block is only allowed when roles includes physician', { field: 'physician' });
   }
 
-  return { email, name, roles, credential, physician };
+  // CO-SIGN checkbox — optional boolean, only allowed on a physician row (the thing being co-signed).
+  let coSignByOwner = false;
+  if (body.coSignByOwner !== undefined) {
+    if (typeof body.coSignByOwner !== 'boolean') throw new HttpError(400, 'bad_request', 'coSignByOwner must be a boolean', { field: 'coSignByOwner' });
+    if (body.coSignByOwner && !wantsPhysician) throw new HttpError(400, 'bad_request', 'coSignByOwner is only allowed when roles includes physician', { field: 'coSignByOwner' });
+    coSignByOwner = body.coSignByOwner;
+  }
+
+  return { email, name, roles, credential, physician, coSignByOwner };
 }
 
 /**
@@ -193,7 +236,21 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
         where.roles = { some: { role: roleParam } };
       }
       const users = await db.appUser.findMany({ where, include: { roles: true }, orderBy: { email: 'asc' } });
-      res.json({ data: users.map((u) => ({ id: u.id, email: u.email, name: u.name, active: u.active, roles: u.roles.map((r) => r.role), version: u.version })) });
+      // CO-SIGN surfacing (DPT docket 2026-07-19): mark physician-linked rows whose provider is
+      // co-signed, so the edit form can PRE-FILL the "Dr. Kasky co-signs for this provider" checkbox
+      // (an edit toggle with no current state would silently clear co-sign on save). ONE extra query,
+      // not N+1. FAIL-OPEN: a physician-table hiccup must never break the staff directory → coSigned:false.
+      const coSignBySub = new Map<string, boolean>();
+      try {
+        const subs = users.map((u) => u.cognitoSub).filter((s): s is string => typeof s === 'string' && s.length > 0);
+        if (subs.length > 0) {
+          const phys = await db.physician.findMany({ where: { cognitoSub: { in: subs } } });
+          for (const p of phys) {
+            if (typeof p.cognitoSub === 'string') coSignBySub.set(p.cognitoSub, p.coSignedByPhysicianId != null);
+          }
+        }
+      } catch { /* fail-open: leave the map empty (coSigned:false everywhere) */ }
+      res.json({ data: users.map((u) => ({ id: u.id, email: u.email, name: u.name, active: u.active, roles: u.roles.map((r) => r.role), version: u.version, coSigned: u.cognitoSub ? (coSignBySub.get(u.cognitoSub) ?? false) : false })) });
     }),
   );
 
@@ -297,6 +354,11 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
       const actor = currentActor(req);
       const parsed = parseStaffCreate(req.body);
 
+      // CO-SIGN: resolve + validate the co-signer BEFORE any Cognito/DB provisioning so a bad
+      // co-sign request 400s with no partial side-effects. targetPhysicianId is null (the provider
+      // row does not exist yet). Kept as its own step so the physician.create stays a single write.
+      const coSignerId = parsed.coSignByOwner ? await resolveOwnerCoSignerId(db, actor.sub, null) : null;
+
       // Pre-check by email (unique). A live user is a 409; an inactive one is a reactivation.
       const existing = await db.appUser.findUnique({ where: { email: parsed.email }, include: { roles: true } });
       if (existing !== null && existing.active) {
@@ -350,6 +412,7 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
             email: parsed.email,
             phone: parsed.physician.phone,
             credentialBlockJson: block,
+            coSignedByPhysicianId: coSignerId,
           },
         }).catch(rethrowUnique);
         physicianId = physician.id;
@@ -360,13 +423,13 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
         data: {
           actorUserId: actor.id,
           action: 'staff_provisioned',
-          detailsJson: { targetSub: sub, email: parsed.email, roles: parsed.roles, credential: parsed.credential.kind, grantsAdmin: parsed.roles.includes('admin'), reactivated: existing !== null },
+          detailsJson: { targetSub: sub, email: parsed.email, roles: parsed.roles, credential: parsed.credential.kind, grantsAdmin: parsed.roles.includes('admin'), reactivated: existing !== null, coSigned: coSignerId !== null },
         },
       });
 
       res.status(201).json({ data: {
         id: user.id, cognitoSub: sub, email: user.email, name: user.name, roles: parsed.roles, active: true,
-        credential: parsed.credential.kind, physicianId, physicianReadyToSign,
+        credential: parsed.credential.kind, physicianId, physicianReadyToSign, coSigned: coSignerId !== null,
       } });
     }),
   );
@@ -395,11 +458,15 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
 
       const hasActive = body.active !== undefined;
       const hasName = body.name !== undefined;
-      if (!hasActive && !hasName) {
-        throw new HttpError(400, 'bad_request', 'Provide at least one of: name (non-empty string) or active (boolean)', { fields: ['name', 'active'] });
+      const hasCoSign = body.coSignByOwner !== undefined;
+      if (!hasActive && !hasName && !hasCoSign) {
+        throw new HttpError(400, 'bad_request', 'Provide at least one of: name (non-empty string), active (boolean), or coSignByOwner (boolean)', { fields: ['name', 'active', 'coSignByOwner'] });
       }
       if (hasActive && typeof body.active !== 'boolean') {
         throw new HttpError(400, 'bad_request', 'active must be a boolean', { field: 'active' });
+      }
+      if (hasCoSign && typeof body.coSignByOwner !== 'boolean') {
+        throw new HttpError(400, 'bad_request', 'coSignByOwner must be a boolean', { field: 'coSignByOwner' });
       }
       // reqStr trims + rejects empty / >120 (same rule as staff-create), so a whitespace-only rename 400s.
       const newName = hasName ? reqStr(body, 'name', 120) : undefined;
@@ -423,6 +490,26 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
         }
       }
 
+      // Resolve the linked physician ONCE (both the name-sync and the co-sign edit need it). A
+      // rename touches Physician.fullName; a co-sign edit touches Physician.coSignedByPhysicianId.
+      const linkedPhysician = ((hasName || hasCoSign) && current.cognitoSub)
+        ? await db.physician.findUnique({ where: { cognitoSub: current.cognitoSub } })
+        : null;
+
+      // CO-SIGN edit — validate BEFORE any write so a bad request 400s with no partial side-effects.
+      // coSignByOwner=true sets the co-signer to the requesting admin's own physician id (self-cosign
+      // rejected against the TARGET provider); false clears it. Only a physician-linked row can be
+      // co-signed. Computed here; the write is applied after appUser.update.
+      let coSignUpdate: { coSignedByPhysicianId: string | null } | null = null;
+      if (hasCoSign) {
+        if (linkedPhysician === null) {
+          throw new HttpError(400, 'bad_request', 'Co-sign only applies to a physician-linked account.', { field: 'coSignByOwner', userId: id });
+        }
+        coSignUpdate = body.coSignByOwner === true
+          ? { coSignedByPhysicianId: await resolveOwnerCoSignerId(db, currentActor(req).sub, linkedPhysician.id) }
+          : { coSignedByPhysicianId: null };
+      }
+
       // Cognito is the real access gate (disabling stops the JWT); the DB flag removes them from pickers.
       if (hasActive) await cognito!.setUserEnabled(current.email, body.active as boolean);
 
@@ -433,12 +520,15 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
 
       // Sync the linked physician's DISPLAY name only (credential block untouched — see header).
       let physicianNameSynced = false;
-      if (hasName && current.cognitoSub) {
-        const linkedPhysician = await db.physician.findUnique({ where: { cognitoSub: current.cognitoSub } });
-        if (linkedPhysician !== null && linkedPhysician.fullName !== newName) {
-          await db.physician.update({ where: { id: linkedPhysician.id }, data: { fullName: newName as string } });
-          physicianNameSynced = true;
-        }
+      if (hasName && linkedPhysician !== null && linkedPhysician.fullName !== newName) {
+        await db.physician.update({ where: { id: linkedPhysician.id }, data: { fullName: newName as string } });
+        physicianNameSynced = true;
+      }
+
+      // Apply the validated co-sign write (own physician.update so the name-sync payload stays
+      // exactly { fullName } — no drift for the credential-block guarantee).
+      if (coSignUpdate !== null && linkedPhysician !== null) {
+        await db.physician.update({ where: { id: linkedPhysician.id }, data: coSignUpdate });
       }
 
       // Distinct audit actions so the log reads cleanly; a combined edit logs both.
@@ -452,8 +542,13 @@ export function createUsersRouter(db: AppDb, deps: UsersRouterDeps = {}): Router
           data: { actorUserId: currentActor(req).id, action: body.active ? 'staff_reactivated' : 'staff_deactivated', detailsJson: { userId: id, email: current.email } },
         });
       }
+      if (coSignUpdate !== null) {
+        await db.activityLog.create({
+          data: { actorUserId: currentActor(req).id, action: 'staff_cosign_edited', detailsJson: { userId: id, email: current.email, coSigned: coSignUpdate.coSignedByPhysicianId !== null, coSignerId: coSignUpdate.coSignedByPhysicianId } },
+        });
+      }
 
-      res.json({ data: { id: updated.id, email: updated.email, name: updated.name, active: updated.active, roles: current.roles.map((r) => r.role), version: updated.version } });
+      res.json({ data: { id: updated.id, email: updated.email, name: updated.name, active: updated.active, roles: current.roles.map((r) => r.role), version: updated.version, ...(coSignUpdate !== null ? { coSigned: coSignUpdate.coSignedByPhysicianId !== null } : {}) } });
     }),
   );
 

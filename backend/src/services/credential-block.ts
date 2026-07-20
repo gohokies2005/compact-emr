@@ -80,6 +80,27 @@ export function renderSignatureBlock(c: SignerCredentials): string {
 }
 
 /**
+ * The credential lines the PDF/DOCX RENDERER stamps in the header + signature block, as a
+ * newline-joined multi-line string (the renderer splits on \n). NPI-ONLY — the medical-license
+ * line was removed from rendered letters 2026-06-10 (INCIDENTS), so this deliberately does NOT
+ * include it (unlike renderSignatureBlock, which is the letter-BODY sentinel and is stripped
+ * before render). For Dr. Kasky this reproduces the historically-hardcoded pdfgen/docxgen lines
+ * EXACTLY: "Ryan J. Kasky, DO" / "Board-Certified in Family Medicine, ABOFP" / "NPI: 1073018958".
+ * The board-cert line is omitted for a provider without a board certification (e.g. a DPT), so a
+ * DPT renders name + NPI. Used by routes/letter.ts to pass signer_name / cosigner_name to the
+ * renderer (was single-line fullNameWithCredential → the board-cert + NPI lines silently vanished
+ * from every approved letter; regression caught by QA 2026-07-19).
+ */
+export function buildRendererCredentialLines(c: SignerCredentials): string {
+  const lines = [c.fullNameWithCredential];
+  if (c.specialty.trim() !== '' && c.boardAbbreviation.trim() !== '') {
+    lines.push(`Board-Certified in ${c.specialty}, ${c.boardAbbreviation}`);
+  }
+  lines.push(`NPI: ${c.npi}`);
+  return lines.join('\n');
+}
+
+/**
  * Replace the signer sentinels in a letter with the assigned physician's rendered blocks. A
  * no-op when no sentinel is present (the legacy hardcoded-credential letters that exist today
  * pass through byte-identical). Idempotent. split().join() rather than replaceAll so a `$` in a

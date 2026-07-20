@@ -40,6 +40,7 @@ import {
   substituteSignerSentinels,
   findForeignSignerNames,
   signerNameAppears,
+  buildRendererCredentialLines,
 } from '../services/credential-block.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -117,6 +118,13 @@ export interface RenderInvokeInput {
     // signature PNG key (to composite the image) and the signer name (artifact metadata).
     signer_name?: string;
     signature_image_s3_key?: string;
+    // CO-SIGN (DPT docket 2026-07-19) — optional + additive, exactly like the signer fields above.
+    // Present ONLY when the assigned signer has a co-signer (coSignedByPhysicianId); the renderer
+    // draws a second "Independently reviewed and concurred in by" block. ABSENT for a solo signer
+    // (byte-identical single-signer render path — the c0-A regression guard). The co-signer's name
+    // appears ONLY in the render signature block, never in the letter body / §I.
+    cosigner_name?: string;
+    cosigner_signature_image_s3_key?: string;
   };
   letterText: string;
   version: number;
@@ -1030,6 +1038,36 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         throw new HttpError(409, 'conflict', `Cannot approve: ${signer.fullName} has no signature image on file. An administrator must upload the physician's signature on the Physicians admin page, then re-approve.`, { reason: 'signer_signature_missing', caseId, physicianId: signer.id });
       }
 
+      // ── CO-SIGN (DPT docket 2026-07-19) ── When the assigned signer is co-signed, resolve the
+      // co-signer (the account owner) and thread its name + signature key so the renderer draws the
+      // second "Independently reviewed and concurred in by" block. The co-signer must clear the SAME
+      // preconditions as the primary signer (exists / active / complete credential block / signature
+      // on file) — otherwise the concurrence block would render signature-less or mis-credentialed.
+      // A signer with NO co-signer passes NOTHING new: the single-signer render payload below is
+      // byte-identical (the c0-A regression guard).
+      let cosignerFields: { cosigner_name: string; cosigner_signature_image_s3_key: string } | undefined;
+      if (signer.coSignedByPhysicianId != null) {
+        const coSigner = await db.physician.findFirst({ where: { id: signer.coSignedByPhysicianId } });
+        if (coSigner === null) {
+          throw new HttpError(409, 'conflict', `Cannot approve: the co-signing physician for ${signer.fullName} was not found. Reassign the co-signer on the Staff admin page, then re-approve.`, { reason: 'co_signer_not_found', caseId, physicianId: signer.id, coSignerId: signer.coSignedByPhysicianId });
+        }
+        if (!coSigner.active) {
+          throw new HttpError(409, 'conflict', `Cannot approve: the co-signing physician ${coSigner.fullName} is inactive. Reactivate them or remove the co-sign on the Staff admin page, then re-approve.`, { reason: 'co_signer_inactive', caseId, coSignerId: coSigner.id });
+        }
+        const coSignerCreds = parseCredentialBlock(coSigner.credentialBlockJson);
+        if (coSignerCreds === null) {
+          throw new HttpError(409, 'conflict', `Cannot approve: the co-signing physician ${coSigner.fullName}'s credential profile is incomplete. Complete their credential block on the Physicians admin page, then re-approve.`, { reason: 'co_signer_credentials_incomplete', caseId, coSignerId: coSigner.id });
+        }
+        const coSignatureKey = coSigner.signatureImageS3Key;
+        if (coSignatureKey === null || coSignatureKey.trim() === '') {
+          throw new HttpError(409, 'conflict', `Cannot approve: the co-signing physician ${coSigner.fullName} has no signature image on file. Upload it on the Physicians admin page, then re-approve.`, { reason: 'co_signer_signature_missing', caseId, coSignerId: coSigner.id });
+        }
+        // Multi-line NPI-only credential block (name + board-cert + NPI) — NOT single-line
+        // fullNameWithCredential, or the board-cert + NPI lines vanish from the rendered co-sign
+        // block (regression caught by QA 2026-07-19).
+        cosignerFields = { cosigner_name: buildRendererCredentialLines(coSignerCreds), cosigner_signature_image_s3_key: coSignatureKey };
+      }
+
       // Substitute any signer sentinels with the assigned signer's rendered blocks (no-op on the
       // legacy hardcoded-credential letters). Pronoun defaults to "their" (gender-neutral; no
       // veteran-pronoun field exists yet) and is irrelevant to no-sentinel letters.
@@ -1039,11 +1077,17 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       if (!signerNameAppears(finalText, signerCreds.fullNameWithCredential)) {
         throw new HttpError(409, 'conflict', `Cannot approve: the letter does not name the assigned signing physician (${signerCreds.fullNameWithCredential}). Regenerate or correct the letter so it is authored under the assigned physician, then approve.`, { reason: 'signer_name_absent', caseId, physicianId: signer.id });
       }
-      // Anti-fraud: no OTHER known physician's credentialed name may appear in the letter body.
+      // Anti-fraud: no OTHER known physician's credentialed name may appear in the letter body. The
+      // assigned signer's own name is masked inside findForeignSignerNames; the co-signer (a legit
+      // second signer) is additionally excluded so a letter that legitimately concurs is never
+      // false-blocked — WITHOUT weakening detection of the primary signer or any unrelated physician.
+      // (Per spec the co-signer name appears only in the render signature block, not the body, so this
+      // is a defensive exclusion; it never lets an unauthorized name through.)
       const roster = await db.physician.findMany({ where: { active: true } });
       const rosterNames = roster
         .map((p) => parseCredentialBlock(p.credentialBlockJson)?.fullNameWithCredential)
-        .filter((n): n is string => typeof n === 'string');
+        .filter((n): n is string => typeof n === 'string')
+        .filter((n) => cosignerFields === undefined || n !== cosignerFields.cosigner_name);
       const foreign = findForeignSignerNames(finalText, rosterNames, signerCreds.fullNameWithCredential);
       if (foreign.length > 0) {
         throw new HttpError(409, 'conflict', `Cannot approve: the letter names ${foreign.join(', ')} but the assigned signing physician is ${signerCreds.fullNameWithCredential}. A letter must be signed by the physician it is authored under. Reassign the case to the named physician or regenerate the letter, then approve.`, { reason: 'foreign_signer_name', caseId, physicianId: signer.id, foreignNames: foreign });
@@ -1054,7 +1098,11 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       }
 
       // Render FINAL (no DRAFT watermark) at the new version.
-      const rendered = await deps.renderLetter({ caseData: { ...caseData, signer_name: signerCreds.fullNameWithCredential, signature_image_s3_key: signatureKey }, letterText: finalText, version: newVersion, draft: false, bucket: bucketName, keys });
+      // signer_name = the multi-line NPI-only credential block (name + board-cert + NPI), NOT the
+      // single-line fullNameWithCredential — the renderer stamps every line into the header + sig
+      // block; passing one line silently dropped the board-cert + NPI from EVERY approved letter
+      // (QA 2026-07-19). buildRendererCredentialLines reproduces today's Kasky lines byte-for-byte.
+      const rendered = await deps.renderLetter({ caseData: { ...caseData, signer_name: buildRendererCredentialLines(signerCreds), signature_image_s3_key: signatureKey, ...(cosignerFields ?? {}) }, letterText: finalText, version: newVersion, draft: false, bucket: bucketName, keys });
       if (!rendered.ok) throw new HttpError(502, 'internal_error', 'Final render failed; not approved.', { reason: 'render_failed', caseId });
       // Version-match guard (Ryan's safety requirement): the final artifact MUST be the version
       // we're advancing to — never a stale one.

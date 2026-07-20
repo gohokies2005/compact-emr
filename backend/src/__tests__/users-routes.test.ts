@@ -106,6 +106,28 @@ describe('GET /users — directory', () => {
     const res = await request(appFor(makeDb().db, makeCognito())).get('/api/v1/users?role=superuser');
     expect(res.status).toBe(400);
   });
+
+  it('CO-SIGN: surfaces coSigned:true for a co-signed physician-linked row (edit-form pre-fill)', async () => {
+    mockUser = { sub: 'a-sub', roles: ['admin'] };
+    const { db, physician } = makeDb();
+    // DOC (cognitoSub d-sub) is co-signed; the others are not physician-linked here.
+    physician.findMany.mockResolvedValue([{ cognitoSub: 'd-sub', coSignedByPhysicianId: 'PH-OWNER' }]);
+    const res = await request(appFor(db, makeCognito())).get('/api/v1/users');
+    expect(res.status).toBe(200);
+    const doc = (res.body.data as { id: string; coSigned: boolean }[]).find((r) => r.id === 'U-DOC');
+    expect(doc?.coSigned).toBe(true);
+    // A non-physician row is coSigned:false.
+    expect((res.body.data as { id: string; coSigned: boolean }[]).find((r) => r.id === 'U-RN')?.coSigned).toBe(false);
+  });
+
+  it('CO-SIGN: GET stays up (fail-open) when the physician lookup throws — coSigned:false, list still served', async () => {
+    mockUser = { sub: 'a-sub', roles: ['admin'] };
+    const { db, physician } = makeDb();
+    physician.findMany.mockRejectedValue(new Error('relation "physicians" does not exist'));
+    const res = await request(appFor(db, makeCognito())).get('/api/v1/users');
+    expect(res.status).toBe(200);
+    expect((res.body.data as { coSigned: boolean }[]).every((r) => r.coSigned === false)).toBe(true);
+  });
 });
 
 describe('GET /users/directory — messaging recipient picker (physician-readable, keyed by cognito sub)', () => {
@@ -328,6 +350,116 @@ describe('PATCH /users/:id — deactivate', () => {
     const actions = activityLog.create.mock.calls.map((c) => ((c as unknown[])[0] as { data: { action: string } }).data.action);
     expect(actions).toContain('staff_name_edited');
     expect(actions).toContain('staff_deactivated');
+  });
+});
+
+describe('CO-SIGN (DPT docket 2026-07-19) — create + edit provider co-sign', () => {
+  // The requesting admin (a-sub) is also the account-owner physician who co-signs.
+  const OWNER = { id: 'PH-OWNER', cognitoSub: 'a-sub', fullName: 'Ryan J. Kasky, DO', active: true, signatureImageS3Key: 'sig/kasky.png' };
+  const physCreateData = (physician: { create: ReturnType<typeof vi.fn> }) =>
+    (physician.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data;
+
+  beforeEach(() => { mockUser = { sub: 'a-sub', roles: ['admin'] }; });
+
+  it('CREATE: coSignByOwner resolves the owner + stamps coSignedByPhysicianId on the new physician', async () => {
+    const { db, physician } = makeDb();
+    physician.findUnique.mockResolvedValue(OWNER); // owner (a-sub) is a signing physician w/ a signature
+    const res = await request(appFor(db, makeCognito())).post('/api/v1/users').send({ ...VALID_DOC, coSignByOwner: true });
+    expect(res.status).toBe(201);
+    expect(physCreateData(physician).coSignedByPhysicianId).toBe('PH-OWNER');
+    expect(res.body.data.coSigned).toBe(true);
+  });
+
+  it('CREATE: no coSignByOwner => coSignedByPhysicianId null (byte-identical solo path)', async () => {
+    const { db, physician } = makeDb();
+    const res = await request(appFor(db, makeCognito())).post('/api/v1/users').send(VALID_DOC);
+    expect(res.status).toBe(201);
+    expect(physCreateData(physician).coSignedByPhysicianId).toBeNull();
+    expect(res.body.data.coSigned).toBe(false);
+  });
+
+  it('CREATE 400: coSignByOwner on a NON-physician row (validation, before any provisioning)', async () => {
+    const { db, physician } = makeDb();
+    const cognito = makeCognito();
+    const res = await request(appFor(db, cognito)).post('/api/v1/users').send({ ...VALID_RN, coSignByOwner: true });
+    expect(res.status).toBe(400);
+    expect(cognito.provisionUser).not.toHaveBeenCalled();
+    expect(physician.create).not.toHaveBeenCalled();
+  });
+
+  it('CREATE 400: the requesting login has NO physician profile (cannot co-sign)', async () => {
+    const { db, physician } = makeDb();
+    physician.findUnique.mockResolvedValue(null);
+    const cognito = makeCognito();
+    const res = await request(appFor(db, cognito)).post('/api/v1/users').send({ ...VALID_DOC, coSignByOwner: true });
+    expect(res.status).toBe(400);
+    // Resolved + rejected BEFORE any Cognito/DB provisioning side-effects.
+    expect(cognito.provisionUser).not.toHaveBeenCalled();
+    expect(physician.create).not.toHaveBeenCalled();
+  });
+
+  it('CREATE 400: the co-signer (owner) has NO signature image on file', async () => {
+    const { db, physician } = makeDb();
+    physician.findUnique.mockResolvedValue({ ...OWNER, signatureImageS3Key: null });
+    const res = await request(appFor(db, makeCognito())).post('/api/v1/users').send({ ...VALID_DOC, coSignByOwner: true });
+    expect(res.status).toBe(400);
+    expect(physician.create).not.toHaveBeenCalled();
+  });
+
+  it('EDIT: coSignByOwner=true sets coSignedByPhysicianId on the linked physician + audits', async () => {
+    const { db, appUser, physician, activityLog } = makeDb({ byId: u({ id: 'U-DOC', cognitoSub: 'd-sub', email: 'doc@x.test', name: 'DPT Provider', active: true, version: 2, roles: [{ role: 'physician' }] }) });
+    // The provider being edited resolves by cognitoSub d-sub; the owner resolves by a-sub.
+    physician.findUnique.mockImplementation(async (a: { where?: { cognitoSub?: string } }) => {
+      if (a.where?.cognitoSub === 'd-sub') return { id: 'PH-DPT', cognitoSub: 'd-sub', fullName: 'DPT Provider', active: true, signatureImageS3Key: 'sig/dpt.png' };
+      if (a.where?.cognitoSub === 'a-sub') return OWNER;
+      return null;
+    });
+    appUser.update.mockResolvedValue(u({ id: 'U-DOC', name: 'DPT Provider', version: 3 }));
+    const res = await request(appFor(db, makeCognito())).patch('/api/v1/users/U-DOC').send({ version: 2, coSignByOwner: true });
+    expect(res.status).toBe(200);
+    expect(physician.update).toHaveBeenCalledWith({ where: { id: 'PH-DPT' }, data: { coSignedByPhysicianId: 'PH-OWNER' } });
+    expect(res.body.data.coSigned).toBe(true);
+    const actions = activityLog.create.mock.calls.map((c) => ((c as unknown[])[0] as { data: { action: string } }).data.action);
+    expect(actions).toContain('staff_cosign_edited');
+  });
+
+  it('EDIT: coSignByOwner=false CLEARS the co-signer (no owner lookup)', async () => {
+    const { db, appUser, physician } = makeDb({ byId: u({ id: 'U-DOC', cognitoSub: 'd-sub', active: true, version: 2, roles: [{ role: 'physician' }] }) });
+    physician.findUnique.mockResolvedValue({ id: 'PH-DPT', cognitoSub: 'd-sub', fullName: 'DPT', active: true, signatureImageS3Key: 'sig/dpt.png' });
+    appUser.update.mockResolvedValue(u({ id: 'U-DOC', version: 3 }));
+    const res = await request(appFor(db, makeCognito())).patch('/api/v1/users/U-DOC').send({ version: 2, coSignByOwner: false });
+    expect(res.status).toBe(200);
+    expect(physician.update).toHaveBeenCalledWith({ where: { id: 'PH-DPT' }, data: { coSignedByPhysicianId: null } });
+    expect(res.body.data.coSigned).toBe(false);
+  });
+
+  it('EDIT 400: a physician cannot be their OWN co-signer (self-cosign)', async () => {
+    mockUser = { sub: 'd-sub', roles: ['admin', 'physician'] }; // the owner IS the provider being edited
+    const { db, physician } = makeDb({ byId: u({ id: 'U-DOC', cognitoSub: 'd-sub', active: true, version: 2, roles: [{ role: 'physician' }] }) });
+    physician.findUnique.mockResolvedValue({ id: 'PH-DPT', cognitoSub: 'd-sub', fullName: 'Doc', active: true, signatureImageS3Key: 'sig/dpt.png' });
+    const res = await request(appFor(db, makeCognito())).patch('/api/v1/users/U-DOC').send({ version: 2, coSignByOwner: true });
+    expect(res.status).toBe(400);
+    expect(physician.update).not.toHaveBeenCalled();
+  });
+
+  it('EDIT 400: the co-signer (owner) has NO signature on file', async () => {
+    const { db, physician } = makeDb({ byId: u({ id: 'U-DOC', cognitoSub: 'd-sub', active: true, version: 2, roles: [{ role: 'physician' }] }) });
+    physician.findUnique.mockImplementation(async (a: { where?: { cognitoSub?: string } }) => {
+      if (a.where?.cognitoSub === 'd-sub') return { id: 'PH-DPT', cognitoSub: 'd-sub', fullName: 'DPT', active: true, signatureImageS3Key: 'sig/dpt.png' };
+      if (a.where?.cognitoSub === 'a-sub') return { ...OWNER, signatureImageS3Key: null };
+      return null;
+    });
+    const res = await request(appFor(db, makeCognito())).patch('/api/v1/users/U-DOC').send({ version: 2, coSignByOwner: true });
+    expect(res.status).toBe(400);
+    expect(physician.update).not.toHaveBeenCalled();
+  });
+
+  it('EDIT 400: co-sign on a NON-physician-linked account', async () => {
+    const { db, physician } = makeDb({ byId: u({ id: 'U-RN', cognitoSub: 'rn-sub', active: true, version: 1, roles: [{ role: 'ops_staff' }] }) });
+    physician.findUnique.mockResolvedValue(null); // an RN has no physician row
+    const res = await request(appFor(db, makeCognito())).patch('/api/v1/users/U-RN').send({ version: 1, coSignByOwner: true });
+    expect(res.status).toBe(400);
+    expect(physician.update).not.toHaveBeenCalled();
   });
 });
 

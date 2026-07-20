@@ -113,6 +113,43 @@ export async function computeApproveBlockers(
     });
   }
 
+  // ── CO-SIGN preconditions (DPT docket 2026-07-19) ── Mirror the approve route's co-signer gates:
+  // if the assigned provider is co-signed, the co-signer must exist, be active, carry a complete
+  // credential block, and have a signature on file (else the render's concurrence block would be
+  // signature-less or mis-credentialed). coSignerName (when resolvable) is also excluded from the
+  // foreign-name check below. A provider with NO co-signer skips all of this (single-signer path).
+  let coSignerName: string | null = null;
+  if (signer.coSignedByPhysicianId != null) {
+    const coSigner = await db.physician.findFirst({ where: { id: signer.coSignedByPhysicianId } });
+    if (coSigner === null) {
+      blockers.push({
+        code: 'co_signer_not_found',
+        message: `Approve will be blocked: the co-signing physician for ${signer.fullName} was not found. Reassign the co-signer on the Staff admin page.`,
+      });
+    } else {
+      if (!coSigner.active) {
+        blockers.push({
+          code: 'co_signer_inactive',
+          message: `Approve will be blocked: the co-signing physician ${coSigner.fullName} is inactive. Reactivate them or remove the co-sign on the Staff admin page.`,
+        });
+      }
+      if (parseCredentialBlock(coSigner.credentialBlockJson) === null) {
+        blockers.push({
+          code: 'co_signer_credentials_incomplete',
+          message: `Approve will be blocked: the co-signing physician ${coSigner.fullName}'s credential profile is incomplete. Complete their credential block on the Physicians admin page.`,
+        });
+      }
+      const coSignatureKey = coSigner.signatureImageS3Key;
+      if (coSignatureKey === null || coSignatureKey.trim() === '') {
+        blockers.push({
+          code: 'co_signer_signature_missing',
+          message: `Approve will be blocked: the co-signing physician ${coSigner.fullName} has no signature image on file. Upload it on the Physicians admin page.`,
+        });
+      }
+      coSignerName = parseCredentialBlock(coSigner.credentialBlockJson)?.fullNameWithCredential ?? null;
+    }
+  }
+
   // ── Letter-text checks (the gate that burned the hour: signer_name_absent). Needs the creds,
   // a current letter, and S3 wired; when any is missing the text checks are SKIPPED (fail-open —
   // never block the GET; approve itself still enforces them authoritatively). ──
@@ -130,7 +167,10 @@ export async function computeApproveBlockers(
       const roster = await db.physician.findMany({ where: { active: true } });
       const rosterNames = roster
         .map((p) => parseCredentialBlock(p.credentialBlockJson)?.fullNameWithCredential)
-        .filter((n): n is string => typeof n === 'string');
+        .filter((n): n is string => typeof n === 'string')
+        // Exclude the legit co-signer (see the CO-SIGN block above) so a concurring letter is not
+        // false-flagged — without weakening detection of the primary signer or any other physician.
+        .filter((n) => coSignerName === null || n !== coSignerName);
       const foreign = findForeignSignerNames(finalText, rosterNames, signerCreds.fullNameWithCredential);
       if (foreign.length > 0) {
         blockers.push({

@@ -76,7 +76,7 @@ function currentRevision(version = 1): LetterRevisionRecord {
 
 function makeDb(
   initialCase: CaseRecord = baseCase(),
-  opts: { signOffs?: unknown[]; signer?: PhysicianRecord; self?: PhysicianRecord; roster?: PhysicianRecord[]; currentRevisionOverride?: Partial<LetterRevisionRecord> } = {},
+  opts: { signOffs?: unknown[]; signer?: PhysicianRecord; self?: PhysicianRecord; coSigner?: PhysicianRecord; roster?: PhysicianRecord[]; currentRevisionOverride?: Partial<LetterRevisionRecord> } = {},
 ) {
   const signOffs = opts.signOffs ?? [{
     id: 'SO-1', createdAt: new Date('2026-05-30T00:00:00.000Z'),
@@ -106,7 +106,12 @@ function makeDb(
     },
     physician: {
       findUnique: vi.fn(async (a: { where?: { cognitoSub?: string } }) => (a.where?.cognitoSub === self.cognitoSub ? self : null)),
-      findFirst: vi.fn(async (a: { where?: { id?: string } }) => (a.where?.id === signer.id ? signer : null)),
+      // Resolve the assigned signer by id, and (co-sign) the co-signer by id when provided.
+      findFirst: vi.fn(async (a: { where?: { id?: string } }) => {
+        if (a.where?.id === signer.id) return signer;
+        if (opts.coSigner !== undefined && a.where?.id === opts.coSigner.id) return opts.coSigner;
+        return null;
+      }),
       findMany: vi.fn(async () => roster),
       create: vi.fn(), update: vi.fn(),
     },
@@ -843,7 +848,9 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     const renderArg = (d.renderLetter as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(renderArg.draft).toBe(false);
     // D2: signer name + signature key threaded into the render payload.
-    expect(renderArg.caseData.signer_name).toBe('Ryan J. Kasky, DO');
+    // Multi-line NPI-only credential block (name + board-cert + NPI) — mirrors what production
+    // actually sends the renderer (QA 2026-07-19 regression fix); single-line dropped board-cert+NPI.
+    expect(renderArg.caseData.signer_name).toBe('Ryan J. Kasky, DO\nBoard-Certified in Family Medicine, ABOFP\nNPI: 1073018958');
     expect(renderArg.caseData.signature_image_s3_key).toBe('physician-signatures/PHYS-001/abc-signature.png');
     const caseUpdate = (tx.case.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(caseUpdate.data.status).toBe('delivered');
@@ -989,6 +996,52 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     const d = deps({ renderLetter: vi.fn(async (i) => ({ ok: true, version: i.version - 1, keys: i.keys, sizes: { txt: 1, pdf: 1, docx: 1 } })) });
     const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
     expect(res.status).toBe(500);
+  });
+
+  // ── CO-SIGN (DPT docket 2026-07-19) ──────────────────────────────────────────
+  it('approve does NOT thread cosigner fields for a SOLO (non-co-signed) signer (byte-identical payload)', async () => {
+    // Default signer (Kasky) has no coSignedByPhysicianId → the render payload must carry NOTHING new.
+    const { db } = makeDb();
+    const d = deps();
+    const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(200);
+    const caseData = (d.renderLetter as ReturnType<typeof vi.fn>).mock.calls[0][0].caseData;
+    expect(caseData).not.toHaveProperty('cosigner_name');
+    expect(caseData).not.toHaveProperty('cosigner_signature_image_s3_key');
+  });
+
+  it('approve threads cosigner_name + cosigner_signature_image_s3_key when the signer is co-signed', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const coSigner = janePhysician({ id: 'PHYS-OWNER', signatureImageS3Key: 'physician-signatures/PHYS-OWNER/kasky.png' });
+    const signerCoSigned = physician({ coSignedByPhysicianId: 'PHYS-OWNER' });
+    const { db } = makeDb(baseCase(), { signer: signerCoSigned, coSigner, roster: [signerCoSigned, coSigner] });
+    const d = deps();
+    const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(200);
+    const caseData = (d.renderLetter as ReturnType<typeof vi.fn>).mock.calls[0][0].caseData;
+    expect(caseData.cosigner_name).toBe('Jane A. Doe, MD\nBoard-Certified in Internal Medicine, ABIM\nNPI: 1999999999');
+    expect(caseData.cosigner_signature_image_s3_key).toBe('physician-signatures/PHYS-OWNER/kasky.png');
+    // Primary signer fields still present + unchanged.
+    expect(caseData.signer_name).toBe('Ryan J. Kasky, DO\nBoard-Certified in Family Medicine, ABOFP\nNPI: 1073018958');
+  });
+
+  it('approve 409 (co_signer_signature_missing) when the co-signer has no signature on file', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const coSigner = janePhysician({ id: 'PHYS-OWNER', signatureImageS3Key: null });
+    const signerCoSigned = physician({ coSignedByPhysicianId: 'PHYS-OWNER' });
+    const { db } = makeDb(baseCase(), { signer: signerCoSigned, coSigner, roster: [signerCoSigned, coSigner] });
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('co_signer_signature_missing');
+  });
+
+  it('approve 409 (co_signer_not_found) when the co-signer physician row is missing', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const signerCoSigned = physician({ coSignedByPhysicianId: 'PHYS-GONE' });
+    const { db } = makeDb(baseCase(), { signer: signerCoSigned }); // no coSigner opt → findFirst returns null
+    const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.details.reason).toBe('co_signer_not_found');
   });
 
   // ── Chart-readiness machine-read gate at approve: descriptive 409 + honored override

@@ -49,6 +49,7 @@ interface DbOpts {
   readonly documentRows?: { s3Key: string }[];
   readonly revision?: { version: number; artifactTxtS3Key: string } | null;
   readonly signer?: PhysicianRecord | null;
+  readonly coSigner?: PhysicianRecord;
   readonly roster?: PhysicianRecord[];
   readonly chartReadinessOverride?: { id: string; chartReadinessOverrideReason: string | null } | null;
   // STRANDED-RECOVERY (CLM-8EC828F1D7, 2026-07-01): draft-job rows the DESC-walk sees. When the strict
@@ -80,7 +81,11 @@ function makeDb(opts: DbOpts = {}) {
     // chart_not_ready banner when an override sign-off exists. Default: no override.
     signOff: { findFirst: vi.fn(async () => opts.chartReadinessOverride ?? null) },
     physician: {
-      findFirst: vi.fn(async (a: { where?: { id?: string } }) => (signer !== null && a.where?.id === signer.id ? signer : null)),
+      findFirst: vi.fn(async (a: { where?: { id?: string } }) => {
+        if (signer !== null && a.where?.id === signer.id) return signer;
+        if (opts.coSigner !== undefined && a.where?.id === opts.coSigner.id) return opts.coSigner;
+        return null;
+      }),
       findMany: vi.fn(async () => roster),
       findUnique: vi.fn(async () => null),
     },
@@ -234,6 +239,27 @@ describe('computeApproveBlockers (advisory pre-flight mirror of the approve gate
     const { db } = makeDb({ signer: physician({ signatureImageS3Key: null }) });
     const blockers = await computeApproveBlockers(db, caseRow() as never, {});
     expect(blockers.map((b) => b.code)).toEqual(['signer_signature_missing']); // no signer_name_absent
+  });
+
+  // ── CO-SIGN (DPT docket 2026-07-19) — advisory mirror of the approve route's co-signer gates ──
+  it('flags co_signer_signature_missing when the co-signed provider\'s co-signer has no signature', async () => {
+    const coSigner = physician({ id: 'PHYS-OWNER', cognitoSub: 'OWNER-SUB', fullName: 'Ryan J. Kasky, DO', signatureImageS3Key: null });
+    const signer = physician({ coSignedByPhysicianId: 'PHYS-OWNER' });
+    const { db } = makeDb({ signer, coSigner });
+    const blockers = await computeApproveBlockers(db, caseRow() as never, s3Deps(LETTER_NAMES_KASKY));
+    expect(blockers.map((b) => b.code)).toContain('co_signer_signature_missing');
+  });
+
+  it('a fully-provisioned co-signer produces NO co-sign blocker (clean pass)', async () => {
+    const coSigner = physician({
+      id: 'PHYS-OWNER', cognitoSub: 'OWNER-SUB', fullName: 'Ada Owner, MD',
+      signatureImageS3Key: 'sig/owner.png',
+      credentialBlockJson: { ...KASKY_CREDENTIALS, fullNameWithCredential: 'Ada Owner, MD' },
+    });
+    const signer = physician({ coSignedByPhysicianId: 'PHYS-OWNER' });
+    const { db } = makeDb({ signer, coSigner, roster: [signer, coSigner] });
+    const blockers = await computeApproveBlockers(db, caseRow() as never, s3Deps(LETTER_NAMES_KASKY));
+    expect(blockers).toEqual([]);
   });
 });
 

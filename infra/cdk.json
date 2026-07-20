@@ -3,7 +3,7 @@
   "context": {
     "drafter_image_tag": "1bce24f-pathway",
     "email_redirect_all_to": "",
-    "render_image_tag": "0fa7a8b-render-lambda",
+    "render_image_tag": "96f73fa-render-lambda",
     "chart_autofill": "on",
     "sc_provenance_enforced": "on",
     "doctor_pack_category_floors": "on",

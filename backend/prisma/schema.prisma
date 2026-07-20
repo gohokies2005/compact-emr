@@ -845,6 +845,14 @@ model Physician {
   avatarS3Key          String?  @map("avatar_s3_key")
   credentialBlockJson  Json?    @map("credential_block_json")
   active               Boolean  @default(true)
+  // CO-SIGN (DPT docket 2026-07-19): when set, this provider's SIGNED letters are co-signed by the
+  // referenced physician (the account owner, Dr. Kasky) — rendered as a second "Independently reviewed
+  // and concurred in by" signature/credential block below the provider's. Null = provider signs alone
+  // (the historical single-signer path; MUST render byte-identical). Set via the "I co-sign for this
+  // provider" checkbox on the add/edit-provider form. A physician (Kasky) is never their OWN co-signer.
+  coSignedByPhysicianId String?     @map("cosigned_by_physician_id")
+  coSignedByPhysician    Physician?  @relation("PhysicianCoSign", fields: [coSignedByPhysicianId], references: [id], onDelete: SetNull)
+  coSignsFor             Physician[] @relation("PhysicianCoSign")
   createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
   version              Int      @default(1)
@@ -856,6 +864,7 @@ model Physician {
   @@index([npi])
   @@index([email])
   @@index([cognitoSub])
+  @@index([coSignedByPhysicianId])
 
   @@map("physicians")
 }

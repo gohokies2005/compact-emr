@@ -9,6 +9,10 @@ export interface StaffUser {
   readonly active: boolean;
   readonly roles: readonly string[];
   readonly version: number;
+  // CO-SIGN (DPT docket 2026-07-19): true when this provider's signed letters are co-signed by the
+  // account owner (Dr. Kasky). Physician-linked rows only; false/undefined otherwise. Lets the edit
+  // form PRE-FILL the "Dr. Kasky co-signs" checkbox. Optional so pre-feature responses stay valid.
+  readonly coSigned?: boolean;
 }
 
 export type StaffRole = 'admin' | 'ops_staff' | 'physician';
@@ -31,6 +35,9 @@ export interface CreateStaffInput {
   readonly credential: 'invite' | 'temp_password';
   readonly tempPassword?: string;
   readonly physician?: CreateStaffPhysician;
+  // "I (the account owner) co-sign for this provider." Only honored when roles includes physician;
+  // resolved server-side to the requesting admin's own physician id.
+  readonly coSignByOwner?: boolean;
 }
 
 export interface CreatedStaff {
@@ -43,6 +50,7 @@ export interface CreatedStaff {
   readonly credential: string;
   readonly physicianId: string | null;
   readonly physicianReadyToSign: boolean;
+  readonly coSigned?: boolean;
 }
 
 export async function listUsers(params: { role?: StaffRole; includeInactive?: boolean } = {}): Promise<{ data: readonly StaffUser[] }> {
@@ -142,6 +150,14 @@ export async function setStaffActive(id: string, version: number, active: boolea
 // signed-letter credential block is intentionally left untouched by this path.
 export async function renameStaff(id: string, version: number, name: string): Promise<{ data: StaffUser }> {
   return apiPatch<{ data: StaffUser }, { version: number; name: string }>(`/api/v1/users/${encodeURIComponent(id)}`, { version, name });
+}
+
+// Edit a provider's profile: display name and/or the "Dr. Kasky co-signs" toggle, in ONE PATCH.
+// coSignByOwner is honored only for a physician-linked account (server-validated: the co-signer must
+// be an active physician with a signature on file, and never the provider themselves).
+export interface UpdateStaffProfileInput { readonly name?: string; readonly coSignByOwner?: boolean }
+export async function updateStaffProfile(id: string, version: number, patch: UpdateStaffProfileInput): Promise<{ data: StaffUser }> {
+  return apiPatch<{ data: StaffUser }, { version: number } & UpdateStaffProfileInput>(`/api/v1/users/${encodeURIComponent(id)}`, { version, ...patch });
 }
 
 export interface ResetPasswordResult {

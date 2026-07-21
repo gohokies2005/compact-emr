@@ -138,7 +138,9 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
   // Observability (Ryan 2026-07-21): log WHAT the retrieval did — coverage via the LLM folder-picker vs
   // the cosine floor, whether live PubMed fired, and which folders were picked — so "did it pull from our
   // curated library or from PubMed?" is answerable from the logs on any question.
-  const pickerNote = retrieval.notes.find((n) => n.startsWith('folder-picker:')) ?? null;
+  // Exclude the "undecided" note: it means the picker FAILED and cosine actually decided coverage, so
+  // labeling coverageVia 'folder_picker' there is backwards (QA 2026-07-21).
+  const pickerNote = retrieval.notes.find((n) => n.startsWith('folder-picker:') && !n.startsWith('folder-picker: undecided')) ?? null;
   const semanticNote = retrieval.notes.find((n) => n.startsWith('semantic:')) ?? null;
   const coverageGap = (retrieval as unknown as { coverage_gap?: { reason?: string; condition?: string; pubmed_pmids?: string[] } }).coverage_gap ?? null;
   console.warn(JSON.stringify({

@@ -223,9 +223,12 @@ async function retrieve(input, clients = {}) {
             const claimed = pair.claimed || caseConditions[caseConditions.length - 1] || question;
             const pick = await pickAdvisoryFolders(claimed, pair.upstream, { pgClient, bedrockClient, InvokeModelCommand });
             if (pick.ok) {
-              pickerDecided = true;
               if (pick.folders.length && !pick.noCuratedBridge) {
                 const scoped = await semanticSearchInFolders(pgClient, qvec, pick.folders);
+                // Commit the picker decision ONLY after the scoped fetch succeeds. If it throws, the catch
+                // fires with pickerDecided still false → the legacy cosine path below genuinely runs (the
+                // fail-open the comment promises). Setting this before the await broke that (QA 2026-07-21).
+                pickerDecided = true;
                 covered = scoped.length > 0;
                 if (covered) {
                   const quotas = (routed.recipe && routed.recipe.quotas) || null;
@@ -236,6 +239,7 @@ async function retrieve(input, clients = {}) {
                   notes.push(`folder-picker: picked [${pick.folders.join(', ')}] but no chunks loaded — treating as no coverage`);
                 }
               } else {
+                pickerDecided = true; // a no-bridge decision doesn't await anything and cannot throw
                 covered = false;
                 notes.push(`folder-picker: no curated folder for this pairing -> live PubMed (${pick.reasoning || pick.error || ''})`);
               }

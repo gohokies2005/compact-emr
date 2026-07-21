@@ -202,6 +202,9 @@ async function retrieve(input, clients = {}) {
   // --- semantic (LIVE pgvector) ---
   let covered = true;
   let semanticRan = false; // did the semantic backend actually execute? (vs. missing/errored)
+  // The LLM-extracted pair from the folder-picker (when it ran) — reused by the PubMed fallback so it
+  // searches the ASKED bridge with the SAME understanding of the question the picker used (not a re-parse).
+  let pickedClaimed = null, pickedUpstream = null;
   if (sources.includes('library') || sources.includes('cfr') || sources.includes('case_law')) {
     mode_ran.push('semantic');
     if (!pgClient || !bedrockClient) {
@@ -219,10 +222,10 @@ async function retrieve(input, clients = {}) {
         let pickerDecided = false;
         if (FOLDER_PICKER_ON) {
           try {
-            const pair = parsePair(question);
-            const claimed = pair.claimed || caseConditions[caseConditions.length - 1] || question;
-            const pick = await pickAdvisoryFolders(claimed, pair.upstream, { pgClient, bedrockClient, InvokeModelCommand });
+            const pick = await pickAdvisoryFolders(question, { pgClient, bedrockClient, InvokeModelCommand });
             if (pick.ok) {
+              pickedClaimed = pick.claimed || null;
+              pickedUpstream = pick.upstream || null;
               if (pick.folders.length && !pick.noCuratedBridge) {
                 const scoped = await semanticSearchInFolders(pgClient, qvec, pick.folders);
                 // Commit the picker decision ONLY after the scoped fetch succeeds. If it throws, the catch
@@ -274,10 +277,15 @@ async function retrieve(input, clients = {}) {
       // searched the wrong condition for any bound case. Now: a secondary/aggravation pair searches the
       // BRIDGE (upstream + claimed); a direct ask searches the claimed condition; only fall back to the
       // chart / raw text when the question names nothing parseable.
-      const askedPair = parsePair(question);
-      const cond = (askedPair.upstream && askedPair.claimed)
-        ? `${askedPair.upstream} ${askedPair.claimed}`
-        : (askedPair.claimed || resolveCondition(question) || caseConditions[caseConditions.length - 1] || question);
+      // PREFER the folder-picker's LLM-extracted pair (it read the raw question and gets phrasing the regex
+      // parsePair misses, e.g. "IBS worsening OSA"); fall back to parsePair only when the picker didn't run
+      // (flag off / undecided) or extracted nothing.
+      const reParsed = parsePair(question);
+      const claimed = pickedClaimed || reParsed.claimed;
+      const upstream = pickedUpstream || reParsed.upstream;
+      const cond = (upstream && claimed)
+        ? `${upstream} ${claimed}`
+        : (claimed || resolveCondition(question) || caseConditions[caseConditions.length - 1] || question);
       try {
         const pm = await livePubmedLookup(cond);
         if (pm.chunks.length) { chunks.push(...pm.chunks); notes.push(...pm.notes); mode_ran.push('pubmed_live'); }

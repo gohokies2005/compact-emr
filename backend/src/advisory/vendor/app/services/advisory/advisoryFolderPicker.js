@@ -78,6 +78,10 @@ async function loadCatalog(pgClient) {
 }
 
 // One Haiku pick via the injected Bedrock client. Returns the raw assistant text (JSON expected).
+// LATENCY GUARD: the pick is a small keep-list task (~1-3s), but a slow/throttled Bedrock call must NEVER
+// hang the synchronous advisory request toward the API-Gateway ceiling. Race it against a hard timeout;
+// on timeout this throws -> pickAdvisoryFolders fails-open -> retrieve.js falls back to the cosine path.
+const PICKER_TIMEOUT_MS = Number(process.env.ADVISORY_PICKER_TIMEOUT_MS || 9000);
 async function callHaiku(bedrockClient, InvokeModelCommand, system, user) {
   const body = JSON.stringify({
     anthropic_version: 'bedrock-2023-05-31',
@@ -86,9 +90,13 @@ async function callHaiku(bedrockClient, InvokeModelCommand, system, user) {
     system: [{ type: 'text', text: system }],
     messages: [{ role: 'user', content: user }],
   });
-  const res = await bedrockClient.send(new InvokeModelCommand({
+  const send = bedrockClient.send(new InvokeModelCommand({
     modelId: HAIKU_MODEL_ID, contentType: 'application/json', accept: 'application/json', body,
   }));
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`picker_timeout_${PICKER_TIMEOUT_MS}ms`)), PICKER_TIMEOUT_MS); });
+  let res;
+  try { res = await Promise.race([send, timeout]); } finally { clearTimeout(timer); }
   const parsed = JSON.parse(Buffer.from(res.body).toString('utf8'));
   return (parsed.content || []).filter((b) => b.type === 'text').map((b) => b.text || '').join('').trim();
 }

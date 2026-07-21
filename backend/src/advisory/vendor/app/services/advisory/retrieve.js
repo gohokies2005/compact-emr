@@ -54,6 +54,12 @@ function parsePair(question) {
   // "claimed secondary to / due to / from / caused by / aggravated by upstream"  (left=claimed, right=upstream)
   let m = q.match(/(.*?)\b(?:secondary to|due to|from|caused by|aggravated by|proximately due to)\s+(.*)/i);
   if (m) return { claimed: resolveCondition(m[1]), upstream: resolveCondition(m[2]) };
+  // "upstream worsening/aggravating/exacerbating/contributing to claimed"  (left=upstream, right=claimed) —
+  // an aggravation question phrased action-first ("migraine worsening OSA", "IBS aggravating sleep apnea").
+  // Without this the picker + PubMed fallback saw NO upstream and treated a secondary ask as a direct claim
+  // (2026-07-21: "arguing IBS worsening OSA" parsed to a bare OSA direct claim).
+  m = q.match(/(.*?)\b(?:worsening|worsens|aggravating|aggravates|exacerbating|exacerbates|contributing to|contributes to)\s+(.*)/i);
+  if (m) { const up = resolveCondition(m[1]); const cl = resolveCondition(m[2]); if (up && cl) return { claimed: cl, upstream: up }; }
   // "upstream to / -> claimed"  (stats phrasing, e.g. "win rate for PTSD to OSA")  (left=upstream, right=claimed)
   m = q.match(/(.*?)\s+(?:->|→|\bto\b)\s+(.*)/i);
   if (m) { const up = resolveCondition(m[1]); const cl = resolveCondition(m[2]); if (up && cl && up !== cl) return { claimed: cl, upstream: up }; }
@@ -258,7 +264,16 @@ async function retrieve(input, clients = {}) {
     // --- CONFIRMED no curated coverage (semantic ran, found nothing) -> live PubMed + gap.
     // Do NOT fire on a backend outage — that would mask a wiring bug as a no-coverage condition.
     if (semanticRan && !covered) {
-      const cond = (caseConditions[caseConditions.length - 1]) || resolveCondition(question) || question;
+      // Search PubMed for what was ASKED, not the bound chart's incidental problem. Before 2026-07-21 this
+      // took caseConditions[last] FIRST, so an "IBS worsening OSA" question on a case whose chart lists dry
+      // eye searched PubMed for DRY EYE and found nothing — the whole "no folder -> PubMed" path silently
+      // searched the wrong condition for any bound case. Now: a secondary/aggravation pair searches the
+      // BRIDGE (upstream + claimed); a direct ask searches the claimed condition; only fall back to the
+      // chart / raw text when the question names nothing parseable.
+      const askedPair = parsePair(question);
+      const cond = (askedPair.upstream && askedPair.claimed)
+        ? `${askedPair.upstream} ${askedPair.claimed}`
+        : (askedPair.claimed || resolveCondition(question) || caseConditions[caseConditions.length - 1] || question);
       try {
         const pm = await livePubmedLookup(cond);
         if (pm.chunks.length) { chunks.push(...pm.chunks); notes.push(...pm.notes); mode_ran.push('pubmed_live'); }

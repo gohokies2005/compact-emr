@@ -148,12 +148,33 @@ describe('physician profile routes (D1)', () => {
     expect(block.boardAbbreviation).toBe('ABFM'); // unchanged fields survive
   });
 
-  it('PATCH an unrelated field on a no-block profile leaves credentialBlockJson untouched (no half-build)', async () => {
+  it('PATCH on a no-block profile that has name+NPI recomposes a COMPLETE block (name+NPI is a complete credential under the NPI-only model, 2026-07-20)', async () => {
+    // Was "no half-build → stays null". Under the NPI-only credential model (REQUIRED_CREDENTIAL_FIELDS
+    // = name + NPI) a profile with fullName + NPI IS complete, so any save recomposes a signable block.
+    // This is what lets a DPT (blank board/license) become signable after one profile save.
     const { db, store } = makeDb();
     seedPhysician(store, { id: 'LEGACY', cognitoSub: null, fullName: 'Dr. Old, MD', npi: '5555555555', specialty: 'FM', medicalLicense: 'NV-9', email: 'old@x.test', credentialBlockJson: null });
     const res = await request(appFor(db)).patch('/api/v1/physicians/LEGACY').send({ version: 1, fields: { email: 'new@x.test' } });
     expect(res.status).toBe(200);
-    expect(store.get('LEGACY')!.credentialBlockJson).toBeNull();
+    const block = store.get('LEGACY')!.credentialBlockJson as { fullNameWithCredential: string; npi: string } | null;
+    expect(block?.fullNameWithCredential).toBe('Dr. Old, MD');
+    expect(block?.npi).toBe('5555555555');
+  });
+
+  it('PATCH a DPT profile with BLANK board/license saves 200 and recomposes a signable block (Kevin Luiz, DPT — the 400-trap)', async () => {
+    // The exact failure from the API logs 2026-07-21: the DPT edit form submits board/license as
+    // empty strings; requiredNonEmptyString 400'd the save, so the credential block stayed null and
+    // approve 409'd forever. Blank board/license must now be accepted.
+    const { db, store } = makeDb();
+    seedPhysician(store, { id: 'DPT-1', cognitoSub: 'DPT-SUB', fullName: 'Kevin Luiz, DPT', npi: '1861292955', specialty: 'Doctor of Physical Therapy', medicalLicense: '1861292955', email: 'luizkevin11@x.test', credentialBlockJson: null });
+    const res = await request(appFor(db)).patch('/api/v1/physicians/DPT-1').send({
+      version: 1,
+      fields: { fullName: 'Kevin Luiz, DPT', npi: '1861292955', specialty: 'Doctor of Physical Therapy', medicalLicense: '1861292955', boardName: '', boardAbbreviation: '', licenseState: '', licenseNumber: '' },
+    });
+    expect(res.status).toBe(200);
+    const block = store.get('DPT-1')!.credentialBlockJson as { fullNameWithCredential: string; npi: string } | null;
+    expect(block?.fullNameWithCredential).toBe('Kevin Luiz, DPT');
+    expect(block?.npi).toBe('1861292955');
   });
 
   it('PATCH stale version -> 409', async () => {

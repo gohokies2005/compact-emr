@@ -74,7 +74,7 @@ function parseVersion(body: Record<string, unknown>): number {
 
 export interface ParsedPhysicianPatch {
   version: number;
-  data: { fullName?: string; npi?: string; specialty?: string; medicalLicense?: string; email?: string; phone?: string | null; cognitoSub?: string | null; active?: boolean; boardName?: string; boardAbbreviation?: string; licenseState?: string; licenseNumber?: string };
+  data: { fullName?: string; npi?: string; specialty?: string; medicalLicense?: string; email?: string; phone?: string | null; cognitoSub?: string | null; active?: boolean; boardName?: string | null; boardAbbreviation?: string | null; licenseState?: string | null; licenseNumber?: string | null };
   changedFields: string[];
 }
 
@@ -92,10 +92,16 @@ export function parsePhysicianPatch(body: unknown): ParsedPhysicianPatch {
   if (fields.email !== undefined) { data.email = parseEmail(fields); changed.push('email'); }
   if (fields.phone !== undefined) { data.phone = optionalString(fields, 'phone', MAX_PHONE); changed.push('phone'); }
   if (fields.cognitoSub !== undefined) { data.cognitoSub = optionalString(fields, 'cognitoSub', MAX_SUB); changed.push('cognitoSub'); }
-  if (fields.boardName !== undefined) { data.boardName = requiredNonEmptyString(fields, 'boardName', MAX_BOARD); changed.push('boardName'); }
-  if (fields.boardAbbreviation !== undefined) { data.boardAbbreviation = requiredNonEmptyString(fields, 'boardAbbreviation', MAX_BOARD_ABBR); changed.push('boardAbbreviation'); }
-  if (fields.licenseState !== undefined) { data.licenseState = requiredNonEmptyString(fields, 'licenseState', MAX_LICENSE_STATE); changed.push('licenseState'); }
-  if (fields.licenseNumber !== undefined) { data.licenseNumber = requiredNonEmptyString(fields, 'licenseNumber', MAX_LICENSE_NUMBER); changed.push('licenseNumber'); }
+  // Board cert + state license are OPTIONAL and may be submitted BLANK — a Doctor of Physical
+  // Therapy (DPT) carries no board certification and no state medical license, and letters render
+  // NPI-only (credential-block.ts REQUIRED_CREDENTIAL_FIELDS = name + NPI). Requiring these here
+  // 400'd every DPT profile save, which left the credential block null and blocked signing
+  // (Kevin Luiz, DPT — 400s confirmed in the API access logs 2026-07-21). Blank is stored as '' in
+  // the recomposed block; the renderer already omits the board/license lines when they are blank.
+  if (fields.boardName !== undefined) { data.boardName = optionalString(fields, 'boardName', MAX_BOARD); changed.push('boardName'); }
+  if (fields.boardAbbreviation !== undefined) { data.boardAbbreviation = optionalString(fields, 'boardAbbreviation', MAX_BOARD_ABBR); changed.push('boardAbbreviation'); }
+  if (fields.licenseState !== undefined) { data.licenseState = optionalString(fields, 'licenseState', MAX_LICENSE_STATE); changed.push('licenseState'); }
+  if (fields.licenseNumber !== undefined) { data.licenseNumber = optionalString(fields, 'licenseNumber', MAX_LICENSE_NUMBER); changed.push('licenseNumber'); }
   if (fields.active !== undefined) {
     if (typeof fields.active !== 'boolean') badRequest('active must be a boolean', { field: 'active' });
     data.active = fields.active;

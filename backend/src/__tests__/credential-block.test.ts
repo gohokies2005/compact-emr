@@ -6,6 +6,7 @@ import {
   renderSection1Credentials,
   renderSignatureBlock,
   parseCredentialBlock,
+  buildRendererCredentialLines,
   substituteSignerSentinels,
   findForeignSignerNames,
   signerNameAppears,
@@ -78,17 +79,42 @@ describe('credential-block — parseCredentialBlock validation', () => {
     expect(parseCredentialBlock([KASKY_CREDENTIALS])).toBeNull();
   });
 
-  it('rejects a block missing any required field', () => {
-    for (const field of Object.keys(KASKY_CREDENTIALS) as (keyof SignerCredentials)[]) {
+  it('rejects a block missing a REQUIRED field (name-with-credential or NPI)', () => {
+    for (const field of ['fullNameWithCredential', 'npi'] as (keyof SignerCredentials)[]) {
       const partial: Record<string, unknown> = { ...KASKY_CREDENTIALS };
       delete partial[field];
-      expect(parseCredentialBlock(partial), `missing ${field} must be rejected`).toBeNull();
+      expect(parseCredentialBlock(partial), `missing required ${field} must be rejected`).toBeNull();
     }
   });
 
-  it('rejects a block with a blank or non-string field', () => {
-    expect(parseCredentialBlock({ ...KASKY_CREDENTIALS, licenseNumber: '   ' })).toBeNull();
-    expect(parseCredentialBlock({ ...KASKY_CREDENTIALS, npi: 1073018958 })).toBeNull();
+  it('accepts a block missing OPTIONAL board/license fields (DPT co-sign, 2026-07-20)', () => {
+    for (const field of ['specialty', 'boardName', 'boardAbbreviation', 'licenseState', 'licenseNumber'] as (keyof SignerCredentials)[]) {
+      const partial: Record<string, unknown> = { ...KASKY_CREDENTIALS };
+      delete partial[field];
+      expect(parseCredentialBlock(partial), `missing optional ${field} must still parse`).not.toBeNull();
+    }
+  });
+
+  it('rejects a REQUIRED field blank/non-string; a blank OPTIONAL field is fine', () => {
+    expect(parseCredentialBlock({ ...KASKY_CREDENTIALS, npi: '   ' })).toBeNull(); // required blank
+    expect(parseCredentialBlock({ ...KASKY_CREDENTIALS, npi: 1073018958 })).toBeNull(); // required non-string
+    expect(parseCredentialBlock({ ...KASKY_CREDENTIALS, fullNameWithCredential: '' })).toBeNull(); // required blank
+    expect(parseCredentialBlock({ ...KASKY_CREDENTIALS, licenseNumber: '   ' })).not.toBeNull(); // optional blank → OK
+  });
+
+  it('parses a DPT block (name + NPI, no board/license) as COMPLETE — Kevin Luiz DPT sign path', () => {
+    const dpt = {
+      fullNameWithCredential: 'Kevin Luiz, DPT',
+      specialty: '', boardName: '', boardAbbreviation: '', licenseState: '', licenseNumber: '',
+      npi: '1861292955',
+    };
+    const parsed = parseCredentialBlock(dpt);
+    expect(parsed, 'a DPT block with name + NPI must be COMPLETE (signable)').not.toBeNull();
+    expect(parsed?.npi).toBe('1861292955');
+    const lines = buildRendererCredentialLines(parsed!);
+    expect(lines).toContain('Kevin Luiz, DPT');
+    expect(lines).toContain('NPI: 1861292955');
+    expect(lines, 'DPT renders no board-cert line').not.toContain('Board-Certified');
   });
 });
 

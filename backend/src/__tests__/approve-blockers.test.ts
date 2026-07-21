@@ -208,6 +208,26 @@ describe('computeApproveBlockers (advisory pre-flight mirror of the approve gate
     expect(getObjectCalls).toHaveLength(0);
   });
 
+  it('DPT signer (name + NPI, blank board/license, signature on file) is NOT flagged credentials-incomplete — the Kevin Luiz, DPT sign path (2026-07-21)', async () => {
+    const dpt = physician({
+      id: 'PHYS-DPT', cognitoSub: 'DPT-SUB', fullName: 'Kevin Luiz, DPT', npi: '1861292955',
+      specialty: '', medicalLicense: '',
+      signatureImageS3Key: 'physician-signatures/PHYS-DPT/sig.png',
+      credentialBlockJson: {
+        fullNameWithCredential: 'Kevin Luiz, DPT', specialty: '', boardName: '', boardAbbreviation: '',
+        licenseState: '', licenseNumber: '', npi: '1861292955',
+      },
+    });
+    const LETTER_NAMES_DPT = 'I, Kevin Luiz, DPT, prepared this independent medical opinion.\n\nThe veteran has lumbosacral strain.';
+    const { db } = makeDb({ signer: dpt, roster: [dpt] });
+    // The case must actually ASSIGN the DPT, else findFirst misses and the gate early-returns
+    // assigned_physician_not_found before ever reaching the credential check (the bug that made
+    // the first cut of this test pass trivially under both behaviors).
+    const blockers = await computeApproveBlockers(db, caseRow({ assignedPhysicianId: 'PHYS-DPT' }) as never, s3Deps(LETTER_NAMES_DPT));
+    const codes = blockers.map((b) => b.code);
+    expect(codes, `DPT must not be credentials-incomplete; got: ${JSON.stringify(codes)}`).not.toContain('signer_credentials_incomplete');
+  });
+
   it('flags signer_name_absent — the exact gate that burned the hour — with the gate\'s own message', async () => {
     const { db } = makeDb();
     const blockers = await computeApproveBlockers(db, caseRow() as never, s3Deps(LETTER_NO_NAME));

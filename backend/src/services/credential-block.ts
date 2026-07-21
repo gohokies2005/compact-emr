@@ -45,15 +45,15 @@ export const SECTION1_CREDENTIALS_SENTINEL = '[[SIGNER_CREDENTIALS]]';
 /** Sentinel the drafter emits where the closing signature block belongs. */
 export const SIGNATURE_BLOCK_SENTINEL = '[[SIGNER_BLOCK]]';
 
-const CREDENTIAL_FIELDS: readonly (keyof SignerCredentials)[] = [
-  'fullNameWithCredential',
-  'specialty',
-  'boardName',
-  'boardAbbreviation',
-  'licenseState',
-  'licenseNumber',
-  'npi',
-];
+// A credential block is COMPLETE (signable) when the two UNIVERSAL fields are present: a printable
+// name-with-credential and an NPI. Every provider — MD, DO, or DPT — has both. The board-certification
+// pair (specialty/boardName/boardAbbreviation) and the state-license pair (licenseState/licenseNumber)
+// are OPTIONAL (DPT co-sign, 2026-07-20): a Doctor of Physical Therapy carries no board certification,
+// and letters render NPI-only (the license line was removed 2026-06-10). buildRendererCredentialLines
+// already OMITS the board line when specialty/boardAbbreviation are blank, so a name+NPI block renders a
+// valid DPT credential. Requiring the board/license fields here blocked DPT letter SIGNING even though
+// the profile-save path + the renderer both support DPT — the exact bug Kevin Luiz, DPT hit.
+const REQUIRED_CREDENTIAL_FIELDS: readonly (keyof SignerCredentials)[] = ['fullNameWithCredential', 'npi'];
 
 /**
  * Section I qualifications sentence. The veteran's possessive pronoun ("his"/"her"/"their") is
@@ -202,17 +202,18 @@ export function findForeignSignerNames(
 export function parseCredentialBlock(value: unknown): SignerCredentials | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const v = value as Record<string, unknown>;
-  for (const field of CREDENTIAL_FIELDS) {
+  for (const field of REQUIRED_CREDENTIAL_FIELDS) {
     const fieldValue = v[field];
     if (typeof fieldValue !== 'string' || fieldValue.trim().length === 0) return null;
   }
+  const opt = (k: keyof SignerCredentials): string => (typeof v[k] === 'string' ? (v[k] as string) : '');
   return {
     fullNameWithCredential: v.fullNameWithCredential as string,
-    specialty: v.specialty as string,
-    boardName: v.boardName as string,
-    boardAbbreviation: v.boardAbbreviation as string,
-    licenseState: v.licenseState as string,
-    licenseNumber: v.licenseNumber as string,
+    specialty: opt('specialty'),
+    boardName: opt('boardName'),
+    boardAbbreviation: opt('boardAbbreviation'),
+    licenseState: opt('licenseState'),
+    licenseNumber: opt('licenseNumber'),
     npi: v.npi as string,
   };
 }

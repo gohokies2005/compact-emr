@@ -135,6 +135,23 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
   if (slice === null || slice.found === false) return { ok: false, reason: 'case_not_found' };
 
   const retrieval = await deps.retrieve({ question, caseConditions: slice.conditions });
+  // Observability (Ryan 2026-07-21): log WHAT the retrieval did — coverage via the LLM folder-picker vs
+  // the cosine floor, whether live PubMed fired, and which folders were picked — so "did it pull from our
+  // curated library or from PubMed?" is answerable from the logs on any question.
+  const pickerNote = retrieval.notes.find((n) => n.startsWith('folder-picker:')) ?? null;
+  const semanticNote = retrieval.notes.find((n) => n.startsWith('semantic:')) ?? null;
+  const coverageGap = (retrieval as unknown as { coverage_gap?: { reason?: string; condition?: string; pubmed_pmids?: string[] } }).coverage_gap ?? null;
+  console.warn(JSON.stringify({
+    msg: 'advisory_retrieval',
+    caseId: args.caseId,
+    status: retrieval.status,
+    modeRan: retrieval.mode_ran,
+    usedPubmed: retrieval.mode_ran.includes('pubmed_live'),
+    coverageVia: pickerNote ? 'folder_picker' : (semanticNote ? 'cosine' : 'other'),
+    folderPicker: pickerNote,
+    semantic: semanticNote,
+    coverageGap, // { reason, condition, pubmed_pmids } — tells us if PubMed fired, returned PMIDs, or errored
+  }));
   const corpusContent = assembleUserContent(retrieval.chunks, slice.text, question);
   // Prepend the route-picker plan block (if present) as the FIRST thing the model sees — it's the
   // authoritative ground-truth framing for a viability question (the same brain the drafter/card use).

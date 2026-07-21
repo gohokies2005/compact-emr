@@ -27,6 +27,11 @@ const { classify } = require('./intentRouter');
 const { resolveCondition } = require('./bvaConditionMatch');
 const { pairLookup, psychRollup } = require('./bvaPairLookup');
 const { livePubmedLookup } = require('./advisoryLiteratureLookup');
+const { pickAdvisoryFolders } = require('./advisoryFolderPicker');
+// COVERAGE-GATE MODE. Off (default) = the legacy cosine RELEVANCE_FLOOR decides curated coverage. On =
+// an LLM (Haiku) picks the library folder(s) by meaning (synonym/alt-name robust) — folder hit => use it,
+// miss => live PubMed. Fail-open to the cosine path, so flipping this on can only ADD decisions.
+const FOLDER_PICKER_ON = process.env.ADVISORY_FOLDER_PICKER === 'on';
 const { isViabilityQuery, buildViabilityFacts } = require('./viabilityGrounding');
 const { selectByQuota } = require('./sourceQuota');
 
@@ -123,11 +128,30 @@ async function semanticSearch(pgClient, qvec) {
   const topScore = chunks.length ? chunks[0].metadata.score : 0;
   return { chunks, topScore };
 }
+// Same kNN as semanticSearch but SCOPED to the LLM-picked folder(s): the picker decided coverage, so we
+// take the best chunks WITHIN those folders, ranked by the question embedding. No cosine floor applies —
+// coverage was already decided by the folder pick, not by similarity.
+async function semanticSearchInFolders(pgClient, qvec, folders) {
+  const qstr = '[' + qvec.join(',') + ']';
+  const sql = `SELECT id, text, source, citation, condition, library_path, letter_citable, `
+    + `1 - (embedding <=> $1::vector) AS score FROM advisory.ref_chunk `
+    + `WHERE library_path = ANY($2) ORDER BY embedding <=> $1::vector LIMIT ${SEM_CANDIDATES}`;
+  const res = await pgClient.query(sql, [qstr, folders]);
+  return (res.rows || []).map((row) => ({
+    text: row.text, source: row.source || 'semantic', citation: row.citation,
+    metadata: { id: row.id, condition: row.condition, library_path: row.library_path, score: Number(row.score) },
+    letter_citable: row.letter_citable !== false,
+  }));
+}
 
 // ---- main ------------------------------------------------------------------
 async function retrieve(input, clients = {}) {
   const { question = '', caseConditions = [] } = input || {};
   const { pgClient, bedrockClient } = clients;
+  // Injected by realRetrieve (kept out of a top-level require so the vendored module doesn't hard-depend
+  // on @aws-sdk at load). Fall back to a local require for the standalone/test path.
+  const InvokeModelCommand = clients.InvokeModelCommand
+    || (() => { try { return require('@aws-sdk/client-bedrock-runtime').InvokeModelCommand; } catch (_) { return null; } })();
   const errors = [], notes = [], chunks = [], mode_ran = [];
   let stats, coverage_gap;
 
@@ -179,21 +203,54 @@ async function retrieve(input, clients = {}) {
     } else {
       try {
         const qvec = await embedQuery(bedrockClient, question);
-        const sem = await semanticSearch(pgClient, qvec);
         semanticRan = true;
-        covered = sem.topScore >= RELEVANCE_FLOOR;   // UNCHANGED: judged on the FULL candidate set (top chunk always present)
-        if (covered) {
-          // Per-source-type quota selection so VA-authority chunks (M21-1/CFR/DBQ) get a guaranteed slot
-          // when above floor and are never padded in when below. quotas come from the resolved intent
-          // recipe; absent -> degrades to top-cap-above-floor (≈ legacy). Bucketing is by id-prefix
-          // (no citation_type column dependency). topScore/coverage already computed above, so the
-          // PubMed-fallback + coverage_gap logic below is untouched.
-          const quotas = (routed.recipe && routed.recipe.quotas) || null;
-          const picked = selectByQuota(sem.chunks, { quotas, floor: RELEVANCE_FLOOR, cap: SEM_CAP });
-          chunks.push(...picked);
-          notes.push(`semantic: ${picked.length}/${sem.chunks.length} chunks (quota), top=${sem.topScore.toFixed(3)}`);
-        } else {
-          notes.push(`semantic: weak (top=${sem.topScore.toFixed(3)} < ${RELEVANCE_FLOOR}) — treating as no coverage`);
+
+        // COVERAGE GATE. When ADVISORY_FOLDER_PICKER is on, an LLM (Haiku) picks the library folder(s)
+        // for the asked pair BY MEANING (synonym/alt-name robust) — folder hit => use that folder; no
+        // folder => coverage=false => the live-PubMed block below fires. FAIL-OPEN: if the picker can't
+        // decide (ok:false) OR the flag is off, fall through to the exact legacy cosine path below, so
+        // this only ever ADDS a decision and never breaks retrieval.
+        let pickerDecided = false;
+        if (FOLDER_PICKER_ON) {
+          try {
+            const pair = parsePair(question);
+            const claimed = pair.claimed || caseConditions[caseConditions.length - 1] || question;
+            const pick = await pickAdvisoryFolders(claimed, pair.upstream, { pgClient, bedrockClient, InvokeModelCommand });
+            if (pick.ok) {
+              pickerDecided = true;
+              if (pick.folders.length && !pick.noCuratedBridge) {
+                const scoped = await semanticSearchInFolders(pgClient, qvec, pick.folders);
+                covered = scoped.length > 0;
+                if (covered) {
+                  const quotas = (routed.recipe && routed.recipe.quotas) || null;
+                  const picked = selectByQuota(scoped, { quotas, floor: 0, cap: SEM_CAP }); // LLM already decided coverage → no cosine floor
+                  chunks.push(...picked);
+                  notes.push(`folder-picker: [${pick.folders.join(', ')}] -> ${picked.length} chunks (${pick.reasoning})`);
+                } else {
+                  notes.push(`folder-picker: picked [${pick.folders.join(', ')}] but no chunks loaded — treating as no coverage`);
+                }
+              } else {
+                covered = false;
+                notes.push(`folder-picker: no curated folder for this pairing -> live PubMed (${pick.reasoning || pick.error || ''})`);
+              }
+            } else {
+              notes.push(`folder-picker: undecided (${pick.error || 'no verdict'}) — using cosine floor`);
+            }
+          } catch (e) { errors.push(`folder-picker failed (fail-open to cosine): ${e.message}`); }
+        }
+
+        // LEGACY cosine path — the default, and the fail-open fallback when the picker is off/undecided.
+        if (!pickerDecided) {
+          const sem = await semanticSearch(pgClient, qvec);
+          covered = sem.topScore >= RELEVANCE_FLOOR;   // UNCHANGED: judged on the FULL candidate set (top chunk always present)
+          if (covered) {
+            const quotas = (routed.recipe && routed.recipe.quotas) || null;
+            const picked = selectByQuota(sem.chunks, { quotas, floor: RELEVANCE_FLOOR, cap: SEM_CAP });
+            chunks.push(...picked);
+            notes.push(`semantic: ${picked.length}/${sem.chunks.length} chunks (quota), top=${sem.topScore.toFixed(3)}`);
+          } else {
+            notes.push(`semantic: weak (top=${sem.topScore.toFixed(3)} < ${RELEVANCE_FLOOR}) — treating as no coverage`);
+          }
         }
       } catch (e) { errors.push(`semantic failed: ${e.message}`); } // errored, NOT confirmed no-coverage
     }

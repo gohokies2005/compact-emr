@@ -335,6 +335,10 @@ export class ApiStack extends Stack {
           `postgresql://advisory_ro:{{resolve:secretsmanager:compact-emr-${props.config.envName}/advisory-ro-db:SecretString:password}}@\${host}:\${port}/compact_emr`,
           { host: props.database.dbInstanceEndpointAddress, port: props.database.dbInstanceEndpointPort },
         ),
+        // Ask Aegis coverage gate = LLM (Haiku) folder-picker instead of the cosine floor: a folder hit
+        // (synonym/alt-name robust) uses that library folder, a miss falls to live PubMed. Fail-open to
+        // the legacy cosine path, so 'off' or any picker error restores prior behavior. (Ryan 2026-07-21.)
+        ADVISORY_FOLDER_PICKER: 'on',
         // Letter editor: surgical-AI key (runtime-fetched from this ARN) + render Lambda name
         // (only set once the render image exists, so the mount wires the invoker only then).
         API_ANTHROPIC_KEY_SECRET_ARN: apiAnthropicSecret.secretArn,

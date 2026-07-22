@@ -483,10 +483,10 @@ export function SoapOverviewCard({ caseId, claimedCondition, veteranStatement, h
           {/* Chip color + label are LOCKED to the persisted SOAP verdict (soapChipFromNote) so they cannot
               recompute/flicker across loads. The chart-analysis "provisional" caution stays loud in the banner
               + the headline below — it is a separate honesty layer, not a chip-color signal. */}
-          <span title={SOAP_CHIP_TOOLTIP} className="inline-flex items-center gap-1.5">
-            <span className={`inline-block h-2 w-2 rounded-full ${L.dot}`} />
-            {chip.label}
-          </span>
+          {/* Status chip ("Ready to draft" etc.) REMOVED (Ryan 2026-07-22): redundant + confusing next to the
+              SOAP note's own viability verdict. Lean on the SOAP note. The `chip` value is still computed and
+              still drives the red full-card treatment for a TRUE reject (a real STOP, not redundant) — see
+              cardRule/cardTint above. */}
         </span>
       </div>
       <p className="mt-2 text-lg font-semibold leading-snug text-slate-900">

@@ -6,9 +6,11 @@ import { Button } from './ui/Button';
 import { Card } from './ui/Card';
 
 // Async submit→poll ask (Ryan 2026-07-21): submit returns a queryId immediately, then we poll until the
-// answer lands — so a slow (20-40s) Opus answer never hits the API-Gateway 30s cap and 504s. Flag-gated so
-// rollback is one env flip; when off, the sync askAdvisory + task-#189 poll-fallback below is unchanged.
-const ASYNC_ASK = import.meta.env.VITE_ADVISORY_ASYNC === 'on';
+// answer lands — so a slow (20-40s) Opus answer never hits the API-Gateway 30s cap and 504s. Hardcoded ON:
+// the VITE_ADVISORY_ASYNC build-flag proved unreliable to bake in (a same-hash rebuild kept shipping sync),
+// and async is the intended permanent behavior — rollback is a git revert. The sync askAdvisory + task-#189
+// poll-fallback below remain as the dead-branch reference only.
+const ASYNC_ASK = true;
 
 // "Ask Aegis" — read-only advisory Q&A about this case, grounded in FRN's reference library + Board data.
 // Decision support ONLY: the model gets no tools, can't change anything, the human is the overseer.

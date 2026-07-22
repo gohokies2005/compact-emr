@@ -8,6 +8,10 @@ import { isTitleDocumentEvent } from './services/document-title-trigger.js';
 import { generateAndPersistDocumentTitle } from './services/aiDocumentTitle.js';
 import { isNarrowClaimEvent } from './services/claim-narrow-trigger.js';
 import { narrowAndPersistClaim } from './services/aiClaimNarrow.js';
+import { isAdvisoryAnswerEvent } from './services/advisory-answer-trigger.js';
+import { computeAdvisoryOutcome, buildRealAdvisoryDeps } from './advisory/runAdvisoryAnswer.js';
+import { buildLetterFetcher } from './routes/advisory.js';
+import { S3Client } from '@aws-sdk/client-s3';
 import type { AppDb } from './services/db-types.js';
 
 const expressHandler = serverless(createApp());
@@ -86,6 +90,56 @@ export const handler = async (event: unknown, context: unknown): Promise<unknown
       console.warn(JSON.stringify({ msg: 'ai-document-title done', documentId: event.documentId, updated: r.updated, skipped: r.skipped ?? null }));
     } catch (e) {
       console.warn(JSON.stringify({ msg: 'ai-document-title failed open', documentId: event.documentId, error: e instanceof Error ? e.message : String(e) }));
+    }
+    return { ok: true };
+  }
+  // OFF-REQUEST async self-invoke to compute an Ask Aegis advisory ANSWER off the API-GW 30s cap
+  // (advisory-answer-trigger.ts, Ryan 2026-07-21). The submit endpoint inserted a `pending` advisory_queries
+  // row; this fresh invocation reads its question, runs the SAME answerQuestion() the sync /ask uses (so the
+  // self-check/sanitize gate runs BEFORE we write `answer` — an unsafe answer is never persisted), and
+  // UPDATEs the row to a terminal status. Bounded only by the 210s Lambda timeout, so a 20-40s Opus answer
+  // finishes. Fail-open: any failure marks the row 'error' so the client poll ends (never leaves it pending
+  // forever on a hard error). Touches ONLY advisory_queries — no drafter/render table.
+  if (isAdvisoryAnswerEvent(event)) {
+    const db = prisma as unknown as AppDb;
+    const t0 = Date.now();
+    try {
+      const row = await db.advisoryQuery.findFirst({ where: { id: event.queryId } });
+      if (row === null) {
+        console.warn(JSON.stringify({ msg: 'advisory-answer async: pending row not found', queryId: event.queryId, caseId: event.caseId }));
+        return { ok: true, skipped: 'row_not_found' };
+      }
+      const bucket = process.env.PHI_BUCKET_NAME;
+      const s3 = bucket ? new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) : undefined;
+      const deps = buildRealAdvisoryDeps(db);
+      const fetchLetterText = buildLetterFetcher(db, s3, bucket);
+      const outcome = await computeAdvisoryOutcome(db, deps, fetchLetterText, event.caseId, row.question);
+      if (outcome.ok === false) {
+        await db.advisoryQuery.update({
+          where: { id: event.queryId },
+          data: { status: outcome.reason === 'case_not_found' ? 'error' : 'refused', citationsJson: { refused: outcome.reason } },
+        });
+      } else {
+        const coverageGap = outcome.status === 'empty' ? { reason: 'no_library_match', notes: outcome.notes } : null;
+        await db.advisoryQuery.update({
+          where: { id: event.queryId },
+          data: {
+            status: outcome.status,
+            modeRan: outcome.modeRan,
+            citationsJson: outcome.citations,
+            coverageGap,
+            costUsd: outcome.costUsd,
+            answerChars: outcome.answer.length,
+            answer: outcome.answer,
+          },
+        });
+      }
+      console.warn(JSON.stringify({ msg: 'advisory-answer async done', queryId: event.queryId, caseId: event.caseId, status: outcome.ok ? outcome.status : `refused:${outcome.reason}`, ms: Date.now() - t0 }));
+    } catch (e) {
+      await db.advisoryQuery
+        .update({ where: { id: event.queryId }, data: { status: 'error', citationsJson: { error: (e instanceof Error ? e.message : String(e)).slice(0, 300) } } })
+        .catch(() => undefined);
+      console.warn(JSON.stringify({ msg: 'advisory-answer async failed open', queryId: event.queryId, caseId: event.caseId, error: e instanceof Error ? e.message : String(e) }));
     }
     return { ok: true };
   }

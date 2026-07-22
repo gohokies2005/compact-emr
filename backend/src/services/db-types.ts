@@ -998,7 +998,9 @@ export interface AdvisoryQueryRecord {
 }
 export interface AdvisoryQueryDelegate {
   create(args: unknown): Promise<AdvisoryQueryRecord>;
+  findFirst(args?: unknown): Promise<AdvisoryQueryRecord | null>;
   findMany(args?: unknown): Promise<readonly AdvisoryQueryRecord[]>;
+  update(args: unknown): Promise<AdvisoryQueryRecord>;
   count(args?: unknown): Promise<number>;
 }
 

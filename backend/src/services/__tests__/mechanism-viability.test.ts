@@ -8,14 +8,30 @@
 // The LIVE model judgment (does Opus 4.6 actually read burn-pit->OSA as no-mechanism on real excerpts) is
 // validated separately by scripts/smoke-mechanism-viability.mjs, which hits real Bedrock — see that file.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   assessMechanismViability,
   parseMechanismVerdict,
   buildMechanismUserContent,
+  parseVeteranUpstream,
+  sameUpstream,
+  deriveDualMechanismVerdict,
   type MechanismInvokeFn,
+  type MechanismVerdict,
+  type DualMechanismVerdict,
+  type MechanismPairing,
 } from '../mechanism-viability.js';
-import { withMechanismVerdictLead, formatMechanismVerdictLead, withMechanismVerdictPlan, formatMechanismVerdictPlanLine, type SoapNote } from '../soap-overview.js';
+import type { RetrieveFn } from '../../advisory/retrieveContract.js';
+import {
+  withMechanismVerdictLead,
+  formatMechanismVerdictLead,
+  withMechanismVerdictPlan,
+  formatMechanismVerdictPlanLine,
+  withDualMechanismVerdict,
+  formatDualMechanismAssessmentLead,
+  formatDualMechanismPlanLine,
+  type SoapNote,
+} from '../soap-overview.js';
 
 /** An injected invoke that returns a canned model reply AND captures the exact (system,user) it was given,
  *  so we can assert the prompt carried the fed chunks + claimed + upstream. */
@@ -252,5 +268,220 @@ describe('buildMechanismUserContent handles the no-excerpts case gracefully', ()
   it('notes when no excerpts were retrieved (still lets the model judge)', () => {
     const u = buildMechanismUserContent('osa', 'burn pit', []);
     expect(u).toMatch(/no literature excerpts were retrieved/i);
+  });
+});
+
+// ── DUAL VERDICT (Ryan 2026-07-22) — the veteran's OWN theory alongside the route-picker LEAD ─────────────
+
+// The veteran-upstream extractor's reply shape (a JSON object grounded in the statement).
+const LYNAUGH_STATEMENT = 'Exposure to burn pits in the gulf war';
+const VET_BURN_PIT_REPLY = '{"upstream":"burn-pit exposure","echo":"Exposure to burn pits","framing":"direct"}';
+// A not_viable reply for the LEAD pairing (Impaired Hearing -> OSA).
+const HEARING_OSA_REPLY = [
+  'VERDICT: not_viable',
+  'HEADLINE: Impaired hearing does not cause or aggravate obstructive sleep apnea.',
+  'REASON: Sensorineural hearing loss is a cochlear / auditory-nerve disorder; OSA is an upper-airway ' +
+    'anatomic and ventilatory-control disorder. No physiologic pathway connects auditory dysfunction to ' +
+    'pharyngeal airway collapse.',
+  'COUNTER: Both are common in aging veterans, but co-occurrence is not a mechanism.',
+].join('\n');
+
+describe('parseVeteranUpstream — grounded extraction of the veteran\'s OWN stated cause', () => {
+  it('extracts a burn-pit EXPOSURE upstream (the case veteran-theory-ai structurally cannot supply)', () => {
+    const v = parseVeteranUpstream(VET_BURN_PIT_REPLY, LYNAUGH_STATEMENT);
+    expect(v).not.toBeNull();
+    expect(v!.upstream).toBe('burn-pit exposure');
+    expect(v!.framing).toBe('direct');
+  });
+
+  it('extracts a secondary CONDITION upstream', () => {
+    const v = parseVeteranUpstream('{"upstream":"PTSD","echo":"because of the PTSD","framing":"secondary"}', 'my sleep apnea is because of the PTSD from deployment');
+    expect(v!.upstream).toBe('PTSD');
+    expect(v!.framing).toBe('secondary');
+  });
+
+  it('drops an UNGROUNDED echo (echo not in the statement) → null', () => {
+    expect(parseVeteranUpstream('{"upstream":"asbestos exposure","echo":"exposed to asbestos aboard ship","framing":"direct"}', LYNAUGH_STATEMENT)).toBeNull();
+  });
+
+  it('drops an upstream whose tokens are NOT corroborated by the statement (Ankle defense) → null', () => {
+    // echo is verbatim, but the named upstream ("ankle") shares no significant token with the statement.
+    expect(parseVeteranUpstream('{"upstream":"ankle instability","echo":"Exposure to burn pits","framing":"secondary"}', LYNAUGH_STATEMENT)).toBeNull();
+  });
+
+  it('returns null on no-cause / no-JSON / null upstream', () => {
+    expect(parseVeteranUpstream('{"upstream":null,"echo":null,"framing":"unclear"}', LYNAUGH_STATEMENT)).toBeNull();
+    expect(parseVeteranUpstream('I could not determine a cause.', LYNAUGH_STATEMENT)).toBeNull();
+  });
+});
+
+describe('sameUpstream — collapse to ONE verdict when the pairings match', () => {
+  it('treats "hearing loss" ~ "Impaired Hearing" as the SAME pairing (shared significant token)', () => {
+    expect(sameUpstream('hearing loss', 'Impaired Hearing')).toBe(true);
+  });
+  it('treats burn-pit exposure vs Impaired Hearing as DIFFERENT pairings', () => {
+    expect(sameUpstream('burn-pit exposure', 'Impaired Hearing')).toBe(false);
+  });
+});
+
+// A minimal empty retriever so deriveMechanismVerdict never touches pg / the vendor tree in tests.
+const emptyRetrieve: RetrieveFn = () => ({ status: 'empty', mode_ran: [], errors: [], chunks: [], notes: [] });
+
+function mkVerdict(band: MechanismVerdict['verdict'], headline: string, reason: string): MechanismVerdict {
+  return { verdict: band, headline, reason, strongestCounterargument: 'c' };
+}
+function mkPairing(upstream: string, band: MechanismVerdict['verdict'], headline = 'h', reason = 'r'): MechanismPairing {
+  return { upstream, verdict: mkVerdict(band, headline, reason) };
+}
+/** Two-arg note builder (the file-level `note()` only takes an assessment) — dual tests set the plan too. */
+function dnote(assessment: string, plan = 'p'): SoapNote {
+  return { subjective: 's', objective: 'o', assessment, plan, confidence: 'moderate', action: 'draft', caveat: null };
+}
+describe('deriveDualMechanismVerdict — orchestration (flag-gated, injected invokers, offline)', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  // Branch the mechanism invoker on the UPSTREAM carried in the user content, so the lead and veteran calls
+  // each get their own per-pairing reply.
+  function mechInvoke(counter: { n: number }): MechanismInvokeFn {
+    return async (_system, user) => {
+      counter.n += 1;
+      if (/burn[- ]?pit/i.test(user)) return { text: BURN_PIT_OSA_REPLY };
+      return { text: HEARING_OSA_REPLY };
+    };
+  }
+
+  it('flag OFF → both null, NO model calls (byte-identical note downstream)', async () => {
+    vi.stubEnv('SOAP_MECHANISM_VERDICT_ENABLED', 'false');
+    const mech = { n: 0 };
+    const vet = { n: 0 };
+    const dual = await deriveDualMechanismVerdict('obstructive sleep apnea', 'Impaired Hearing', LYNAUGH_STATEMENT, {
+      mechanismInvoke: mechInvoke(mech),
+      veteranInvoke: async () => { vet.n += 1; return { text: VET_BURN_PIT_REPLY }; },
+      retrieve: emptyRetrieve,
+    });
+    expect(dual).toEqual({ claimed: 'obstructive sleep apnea', lead: null, veteran: null });
+    expect(mech.n).toBe(0);
+    expect(vet.n).toBe(0);
+  });
+
+  it('LYNAUGH: veteran theory (burn-pit) DIFFERS from the lead (Impaired Hearing) → BOTH assessed', async () => {
+    vi.stubEnv('SOAP_MECHANISM_VERDICT_ENABLED', 'true');
+    const mech = { n: 0 };
+    const dual = await deriveDualMechanismVerdict('obstructive sleep apnea', 'Impaired Hearing', LYNAUGH_STATEMENT, {
+      mechanismInvoke: mechInvoke(mech),
+      veteranInvoke: async () => ({ text: VET_BURN_PIT_REPLY }),
+      retrieve: emptyRetrieve,
+    });
+    expect(dual.lead).not.toBeNull();
+    expect(dual.lead!.upstream).toBe('Impaired Hearing');
+    expect(dual.lead!.verdict.verdict).toBe('not_viable');
+    expect(dual.veteran).not.toBeNull();
+    expect(dual.veteran!.upstream).toBe('burn-pit exposure');
+    expect(dual.veteran!.verdict.verdict).toBe('not_viable');
+    expect(mech.n).toBe(2); // one grounded verdict per pairing
+  });
+
+  it('SAME pairing (veteran ~ lead) → veteran stays null → single-lead only', async () => {
+    vi.stubEnv('SOAP_MECHANISM_VERDICT_ENABLED', 'true');
+    const mech = { n: 0 };
+    const dual = await deriveDualMechanismVerdict('obstructive sleep apnea', 'Impaired Hearing', 'my hearing loss caused my sleep apnea', {
+      mechanismInvoke: mechInvoke(mech),
+      veteranInvoke: async () => ({ text: '{"upstream":"hearing loss","echo":"my hearing loss","framing":"secondary"}' }),
+      retrieve: emptyRetrieve,
+    });
+    expect(dual.lead).not.toBeNull();
+    expect(dual.veteran).toBeNull(); // same pairing → no redundant second verdict
+    expect(mech.n).toBe(1); // only the lead verdict ran
+  });
+
+  it('fail-open: veteran extraction throws → veteran null, lead verdict still returned', async () => {
+    vi.stubEnv('SOAP_MECHANISM_VERDICT_ENABLED', 'true');
+    const dual = await deriveDualMechanismVerdict('obstructive sleep apnea', 'Impaired Hearing', LYNAUGH_STATEMENT, {
+      mechanismInvoke: mechInvoke({ n: 0 }),
+      veteranInvoke: async () => { throw new Error('bedrock timeout'); },
+      retrieve: emptyRetrieve,
+    });
+    expect(dual.lead).not.toBeNull();
+    expect(dual.veteran).toBeNull();
+  });
+});
+
+describe('withDualMechanismVerdict / dual formatters (render)', () => {
+  const CLAIMED = 'obstructive sleep apnea';
+
+  it('BYTE-IDENTICAL to the single-lead path when there is no distinct veteran theory', () => {
+    const leadV = mkVerdict('not_viable', 'lead headline', 'lead reason');
+    const dual: DualMechanismVerdict = { claimed: CLAIMED, lead: { upstream: 'Impaired Hearing', verdict: leadV }, veteran: null };
+    const n = dnote('Original assessment.', 'Original plan.');
+    const viaDual = withDualMechanismVerdict(n, dual);
+    const viaSingle = withMechanismVerdictPlan(withMechanismVerdictLead(n, leadV), leadV);
+    expect(viaDual).toEqual(viaSingle);
+  });
+
+  it('null dual leaves the note untouched (same reference)', () => {
+    const n = dnote('a');
+    expect(withDualMechanismVerdict(n, null)).toBe(n);
+  });
+
+  it('both NOT_VIABLE (Lynaugh) → both clauses on the Assessment + not-supportable Plan; decision fields untouched', () => {
+    const dual: DualMechanismVerdict = {
+      claimed: CLAIMED,
+      lead: mkPairing('Impaired Hearing', 'not_viable', 'Impaired hearing does not cause OSA.', 'auditory vs upper-airway'),
+      veteran: mkPairing('burn-pit exposure', 'not_viable', 'Burn-pit exposure does not cause OSA.', 'lower-airway vs upper-airway'),
+    };
+    const out = withDualMechanismVerdict(dnote('Base assessment.', 'Base plan.'), dual);
+    expect(out.assessment.startsWith("⚠ MECHANISM CHECK — VETERAN'S THEORY (burn-pit exposure → obstructive sleep apnea): NOT SUPPORTABLE")).toBe(true);
+    expect(out.assessment).toContain('LEAD ALTERNATIVE ASSESSED (Impaired Hearing → obstructive sleep apnea): NOT SUPPORTABLE');
+    expect(out.assessment).toContain('Base assessment.');
+    expect(out.plan.startsWith('⚠ Viability: NOT SUPPORTABLE AS FRAMED')).toBe(true);
+    expect(out.plan).toContain('neither');
+    expect(out.plan).toContain('Base plan.');
+    // recommendation-only — decision fields untouched
+    expect(out.action).toBe('draft');
+    expect(out.confidence).toBe('moderate');
+    expect(out.subjective).toBe('s');
+    expect(out.objective).toBe('o');
+  });
+
+  it('veteran NOT_VIABLE but lead VIABLE → both shown; Plan says a supportable alternative exists', () => {
+    const dual: DualMechanismVerdict = {
+      claimed: CLAIMED,
+      lead: mkPairing('obesity', 'viable', 'Obesity drives OSA.', 'para-pharyngeal fat load'),
+      veteran: mkPairing('burn-pit exposure', 'not_viable', 'Burn-pit exposure does not cause OSA.', 'lower vs upper airway'),
+    };
+    const out = withDualMechanismVerdict(dnote('Base.', 'Plan.'), dual);
+    // both pairings appear (the RN sees the veteran's theory WAS addressed AND that a supportable path exists)
+    expect(out.assessment).toContain("VETERAN'S THEORY (burn-pit exposure → obstructive sleep apnea): NOT SUPPORTABLE");
+    expect(out.assessment).toContain('LEAD ALTERNATIVE ASSESSED (obesity → obstructive sleep apnea): SUPPORTABLE');
+    expect(out.plan).toContain('is supportable, but');
+    expect(out.plan).toContain('confirm which theory to plead');
+  });
+
+  it('BOTH VIABLE → no Assessment warning (never scare a sound draft) but a supportable Plan line', () => {
+    const dual: DualMechanismVerdict = {
+      claimed: CLAIMED,
+      lead: mkPairing('obesity', 'viable'),
+      veteran: mkPairing('PTSD', 'viable'),
+    };
+    const out = withDualMechanismVerdict(dnote('Base assessment.', 'Base plan.'), dual);
+    expect(out.assessment).toBe('Base assessment.'); // no warning prepended
+    expect(formatDualMechanismAssessmentLead(dual)).toBeNull();
+    expect(out.plan.startsWith('Viability: supportable as framed')).toBe(true);
+  });
+
+  it('dual folds are idempotent (no double-prepend on re-apply)', () => {
+    const dual: DualMechanismVerdict = {
+      claimed: CLAIMED,
+      lead: mkPairing('Impaired Hearing', 'not_viable'),
+      veteran: mkPairing('burn-pit exposure', 'not_viable'),
+    };
+    const once = withDualMechanismVerdict(dnote('b', 'q'), dual);
+    const twice = withDualMechanismVerdict(once, dual);
+    expect(twice.assessment).toBe(once.assessment);
+    expect(twice.plan).toBe(once.plan);
+  });
+
+  it('formatDualMechanismPlanLine returns null when there is no distinct veteran theory', () => {
+    expect(formatDualMechanismPlanLine({ claimed: CLAIMED, lead: mkPairing('x', 'not_viable'), veteran: null })).toBeNull();
   });
 });

@@ -26,7 +26,7 @@ import { planViabilityToAction, type SoapAction, type RoutePickerViability } fro
 import { SEVERITY_LINE_RE } from '../advisory/documentDigest.js';
 // Mechanism-grounded viability verdict (Ryan 2026-07-21) — an ADDITIVE, recommendation-only lead line on the
 // Assessment. Type-only import so this module never pulls the Bedrock caller into the SOAP build path.
-import type { MechanismVerdict } from './mechanism-viability.js';
+import type { MechanismVerdict, DualMechanismVerdict, MechanismPairing } from './mechanism-viability.js';
 export { planViabilityToAction };
 export type { SoapAction, RoutePickerViability };
 
@@ -545,6 +545,133 @@ export function withMechanismVerdictPlan(note: SoapNote, verdict: MechanismVerdi
   const plan = (note.plan ?? '').trim();
   if (plan.startsWith(line)) return note; // already prefixed (idempotent) — never double-prepend
   return { ...note, plan: plan.length > 0 ? `${line}\n\n${plan}` : line };
+}
+
+// ── DUAL MECHANISM VERDICT (Ryan 2026-07-22) — render the VETERAN'S theory AND the LEAD alternative ─────────
+//
+// Extends the single-verdict lead/plan above so an RN never sees a "not supportable" for a pairing the veteran
+// never raised (Lynaugh: burn-pit -> OSA is the veteran's theory; "Impaired Hearing -> OSA" is the lead). When
+// there is NO distinct veteran theory (veteran===null: same pairing / no statement / extraction failed / flag
+// off), this delegates to the SINGLE-verdict functions with the lead verdict, so the note is BYTE-IDENTICAL to
+// today. When the veteran pairing differs, it renders BOTH verdicts on the Assessment (only when at least one
+// is non-viable — a sound draft is never scared) and an overall viability read on the Plan.
+//
+// ADDITIVE + RECOMMENDATION-ONLY, exactly as the single path: touches ONLY note.assessment + note.plan prose,
+// never action/confidence/viabilityBand or the route-picker band the drafter reads.
+
+/** The plain word for a band on a dual line. `viable` reads SUPPORTABLE (shown only for contrast in dual mode,
+ *  never as a standalone warning). */
+function dualVerdictWord(band: MechanismVerdict['verdict']): string {
+  return band === 'not_viable' ? 'NOT SUPPORTABLE' : band === 'borderline' ? 'BORDERLINE' : 'SUPPORTABLE';
+}
+/** "<prefix> (upstream → claimed): WORD — headline, reason" for one pairing — the parenthetical carries only
+ *  the pairing; the verdict word + body follow after the colon (the RN-readable shape in the spec example).
+ *  Headline/reason are joined like the single lead so the mechanism (or the gap) reads inline. Pure. */
+function dualPairingClause(prefix: string, pairing: MechanismPairing, claimed: string): string {
+  const label = `${pairing.upstream} → ${claimed || 'the claimed condition'}`;
+  // Strip the headline's terminal period so "…apnea — reason" reads cleanly (not "…apnea. — reason").
+  const head = (pairing.verdict.headline || '').trim().replace(/\.\s*$/, '');
+  const reason = (pairing.verdict.reason || '').trim();
+  const body = [head, reason].filter((s) => s.length > 0).join(' — ');
+  return `${prefix} (${label}): ${dualVerdictWord(pairing.verdict.verdict)}${body ? ` — ${body}` : ''}`;
+}
+function isNonViable(p: MechanismPairing | null): boolean {
+  return !!p && p.verdict.verdict !== 'viable';
+}
+
+/**
+ * Build the dual Assessment lead (Ryan 2026-07-22). Emits a ⚠ MECHANISM CHECK line naming BOTH pairings —
+ * "Veteran's theory (…)" then "Lead alternative assessed (…)" — but ONLY when at least one pairing is
+ * non-viable (both viable → null, we never scare a sound draft, mirroring the single path). Returns null when
+ * there is nothing to warn about. Pure.
+ */
+export function formatDualMechanismAssessmentLead(dual: DualMechanismVerdict): string | null {
+  const { veteran, lead, claimed } = dual;
+  if (!veteran) return null; // no distinct veteran theory — caller uses the single-verdict path
+  if (!isNonViable(veteran) && !isNonViable(lead)) return null; // both sound → no warning
+  // Labels UPPERCASED (Ryan 2026-07-22) so the two verdict lines stand out — the SOAP card renders the
+  // Assessment as plain text (no markdown), so caps are the plain-text equivalent of bolding.
+  const parts: string[] = [dualPairingClause("VETERAN'S THEORY", veteran, claimed)];
+  if (lead) parts.push(dualPairingClause('LEAD ALTERNATIVE ASSESSED', lead, claimed));
+  // Strip each clause's trailing period before the '. ' join so two clauses never produce "collapse.. Lead".
+  const joined = parts.map((p) => p.replace(/\.+\s*$/, '')).join('. ');
+  const lead2 = `⚠ MECHANISM CHECK — ${joined}`;
+  return /[.!?]$/.test(lead2) ? lead2 : `${lead2}.`;
+}
+
+/**
+ * Build the dual Plan viability line (Ryan 2026-07-22) — the overall read the RN/physician acts on:
+ *   both supportable            → supportable, good to draft
+ *   one supportable, one not    → a supportable pathway exists, but the other theory is not — provider confirms which to plead
+ *   both not supportable        → not supportable as framed — provider review first
+ *   borderline (no supportable) → provider review the viability first
+ * Names both pairings so the human sees the veteran's theory WAS addressed. Pure.
+ */
+export function formatDualMechanismPlanLine(dual: DualMechanismVerdict): string | null {
+  const { veteran, lead, claimed } = dual;
+  if (!veteran) return null; // caller uses the single-verdict plan line
+  const c = claimed || 'the claimed condition';
+  const vBand = veteran.verdict.verdict;
+  const lBand = lead?.verdict.verdict ?? null;
+  const vSupportable = vBand === 'viable';
+  const lSupportable = lBand === 'viable';
+  const vLabel = `the veteran's theory (${veteran.upstream} → ${c})`;
+  const lLabel = lead ? `the lead alternative (${lead.upstream} → ${c})` : null;
+
+  // Both supportable → good to draft.
+  if (vSupportable && (lSupportable || lBand === null)) {
+    return 'Viability: supportable as framed — records permitting, good to draft.';
+  }
+  // A supportable pathway exists on exactly one side → name it, flag the other, ask the provider to choose.
+  if (vSupportable || lSupportable) {
+    const supportable = vSupportable ? vLabel : lLabel;
+    const other = vSupportable ? lLabel : vLabel;
+    const otherBand = vSupportable ? lBand : vBand;
+    const otherWord = otherBand === 'not_viable' ? 'not supportable' : 'borderline';
+    return `⚠ Viability: ${supportable} is supportable, but ${other} is ${otherWord} — recommend a provider confirm which theory to plead before drafting.`;
+  }
+  // No supportable pathway. Both not_viable → not supportable; otherwise borderline involved → provider review.
+  const bothNotViable = vBand === 'not_viable' && (lBand === 'not_viable' || lBand === null);
+  if (bothNotViable) {
+    const neither = lLabel ? `neither ${vLabel} nor ${lLabel}` : vLabel;
+    return `⚠ Viability: NOT SUPPORTABLE AS FRAMED — the records may be complete, but ${neither} has a supportable mechanism; recommend a provider review the viability before drafting.`;
+  }
+  return `⚠ Viability: BORDERLINE — recommend a provider review the viability before drafting (${vLabel}: ${dualVerdictWord(vBand).toLowerCase()}${lLabel ? `; ${lLabel}: ${dualVerdictWord(lBand!).toLowerCase()}` : ''}).`;
+}
+
+/**
+ * Fold BOTH mechanism verdicts into a SOAP note's Assessment + Plan (Ryan 2026-07-22). The ONE entry point the
+ * SOAP precompute uses. Behavior:
+ *   - dual === null → note unchanged (defensive).
+ *   - no distinct veteran theory (dual.veteran === null) → delegate to the SINGLE-verdict functions with the
+ *     lead verdict, so the note is BYTE-IDENTICAL to today (same output as before this feature).
+ *   - veteran pairing differs → render both verdicts (Assessment) + the overall read (Plan).
+ * ADDITIVE + RECOMMENDATION-ONLY: touches ONLY assessment + plan prose. Idempotent-safe (startsWith guards).
+ */
+export function withDualMechanismVerdict(note: SoapNote, dual: DualMechanismVerdict | null): SoapNote {
+  if (!dual) return note;
+  const leadVerdict = dual.lead?.verdict ?? null;
+  // No distinct veteran theory → EXACTLY today's single-lead behavior (byte-identical).
+  if (!dual.veteran) {
+    return withMechanismVerdictPlan(withMechanismVerdictLead(note, leadVerdict), leadVerdict);
+  }
+  // Dual render. Assessment lead (only when a non-viable pairing exists) then the overall Plan line.
+  let out = note;
+  const assessmentLead = formatDualMechanismAssessmentLead(dual);
+  if (assessmentLead !== null) {
+    const assessment = (out.assessment ?? '').trim();
+    if (!assessment.startsWith(assessmentLead)) {
+      out = { ...out, assessment: assessment.length > 0 ? `${assessmentLead}\n\n${assessment}` : assessmentLead };
+    }
+  }
+  const planLine = formatDualMechanismPlanLine(dual);
+  if (planLine !== null) {
+    const plan = (out.plan ?? '').trim();
+    if (!plan.startsWith(planLine)) {
+      out = { ...out, plan: plan.length > 0 ? `${planLine}\n\n${plan}` : planLine };
+    }
+  }
+  return out;
 }
 
 export interface SoapContext {

@@ -245,7 +245,22 @@ export async function assessMechanismViability(
   const invoke: MechanismInvokeFn = deps?.invoke ?? ((s, x) => invokeAdvisory(s, x, { maxTokens: MAX_OUTPUT_TOKENS }));
   try {
     const res = await invoke(SYSTEM, buildMechanismUserContent(c, u, groundingChunks, guidance));
-    return parseMechanismVerdict(res?.text ?? '');
+    const verdict = parseMechanismVerdict(res?.text ?? '');
+    // OBSERVABILITY (Ryan 2026-07-22, "smoke detector"): emit the verdict + the preset grade that guided it so a
+    // wrong verdict is visible in CloudWatch (not only by eye in the UI). A metric filter on
+    // { $.msg="mechanism-verdict" && $.verdict="not_viable" } becomes a cheap regression tripwire. PHI-safe:
+    // generic condition labels + enums only, no patient identity.
+    if (verdict) {
+      console.warn(JSON.stringify({
+        msg: 'mechanism-verdict',
+        claimed: c,
+        upstream: u,
+        guidance: guidance?.kind ?? 'none',
+        gradeTier: guidance?.kind === 'grade' ? guidance.grade_tier : guidance?.kind === 'not_supportable' ? 'curated-dead-end' : 'none',
+        verdict: verdict.verdict,
+      }));
+    }
+    return verdict;
   } catch {
     return null; // fail-open: the SOAP note renders exactly as today
   }

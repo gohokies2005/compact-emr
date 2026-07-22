@@ -1,9 +1,14 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { askAdvisory, getAdvisoryThread, pollForCompletedAnswer, type AdvisoryThreadItem } from '../api/advisory';
+import { askAdvisory, getAdvisoryThread, pollForCompletedAnswer, submitAdvisory, pollAdvisoryQuery, type AdvisoryThreadItem } from '../api/advisory';
 import { describeAdvisoryError, describeApiError, isAdvisoryAnswerLikelyCompleting } from '../api/client';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
+
+// Async submit→poll ask (Ryan 2026-07-21): submit returns a queryId immediately, then we poll until the
+// answer lands — so a slow (20-40s) Opus answer never hits the API-Gateway 30s cap and 504s. Flag-gated so
+// rollback is one env flip; when off, the sync askAdvisory + task-#189 poll-fallback below is unchanged.
+const ASYNC_ASK = import.meta.env.VITE_ADVISORY_ASYNC === 'on';
 
 // "Ask Aegis" — read-only advisory Q&A about this case, grounded in FRN's reference library + Board data.
 // Decision support ONLY: the model gets no tools, can't change anything, the human is the overseer.
@@ -58,6 +63,18 @@ export function AdvisoryPanel({ caseId, alwaysOpen = false }: { readonly caseId:
       const askedAt = Date.now();
       // The rows already on screen BEFORE this ask — used to identify the NEW answer if we have to poll.
       const knownIds = new Set(items.map((it) => it.id));
+
+      // ASYNC path: submit returns a queryId instantly (no 30s wall), then poll that id until terminal.
+      // A landed answer (any status that carries text) renders via the thread on onSuccess; a terminal
+      // error/refused (no answer) or a poll timeout throws → onError shows the calm message.
+      if (ASYNC_ASK) {
+        setStillWorking(true);
+        const sub = await submitAdvisory(caseId, askedQuestion);
+        const done = await pollAdvisoryQuery(caseId, sub.data.queryId);
+        if (done && done.answer !== null && done.answer.length > 0) return;
+        throw new Error(done ? 'advisory_terminal_no_answer' : 'advisory_poll_timeout');
+      }
+
       try {
         await askAdvisory(caseId, askedQuestion);
         return; // happy path (sub-30s): onSuccess invalidates the thread, which renders the answer.

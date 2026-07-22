@@ -82,3 +82,48 @@ export async function pollForCompletedAnswer(
   }
   return null;
 }
+
+// ── ASYNC ask (Ryan 2026-07-21): submit → poll by queryId, so a 20-40s Opus answer never 504s at the
+// API-Gateway 30s cap. Gated in the panel by VITE_ADVISORY_ASYNC; the sync askAdvisory above is the fallback.
+export interface AdvisorySubmitResult {
+  queryId: string;
+  status: string;
+}
+export async function submitAdvisory(caseId: string, question: string): Promise<{ data: AdvisorySubmitResult }> {
+  return apiPost(`/api/v1/cases/${encodeURIComponent(caseId)}/advisory/ask-async`, { question });
+}
+
+export interface AdvisoryQueryPoll {
+  id: string;
+  question: string;
+  status: string; // pending | ok | thin | empty | degraded | error | refused
+  answer: string | null;
+  citations: AdvisoryCitation[] | null;
+  createdAt: string;
+}
+export async function getAdvisoryQuery(caseId: string, queryId: string): Promise<{ data: AdvisoryQueryPoll }> {
+  return apiGet(`/api/v1/cases/${encodeURIComponent(caseId)}/advisory/queries/${encodeURIComponent(queryId)}`);
+}
+
+// Poll ONE query until it is terminal (status !== 'pending'). Returns the terminal row, or null if it
+// never left 'pending' within the window (caller then shows the calm retry message). 90s window covers a
+// cold-start self-invoke + a 40s answer + margin.
+export async function pollAdvisoryQuery(
+  caseId: string,
+  queryId: string,
+  opts?: { readonly intervalMs?: number; readonly timeoutMs?: number },
+): Promise<AdvisoryQueryPoll | null> {
+  const intervalMs = opts?.intervalMs ?? 3000;
+  const timeoutMs = opts?.timeoutMs ?? 90000;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await delay(intervalMs);
+    try {
+      const r = await getAdvisoryQuery(caseId, queryId);
+      if (r.data.status !== 'pending') return r.data;
+    } catch {
+      continue; // transient GET failure — keep polling until the deadline
+    }
+  }
+  return null;
+}

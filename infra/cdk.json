@@ -1,7 +1,7 @@
 {
   "app": "npx tsx bin/compact-emr.ts",
   "context": {
-    "drafter_image_tag": "39b8c31-pathway",
+    "drafter_image_tag": "39b8c31-pairstr-pathway",
     "email_redirect_all_to": "",
     "render_image_tag": "96f73fa-render-lambda",
     "chart_autofill": "on",

@@ -17,6 +17,7 @@
 import type { AppDb } from '../services/db-types.js';
 import { type AiViabilityCard, AI_VIABILITY_PLAN_SCHEMA_VERSION } from '../services/ai-viability.js';
 import { lookupNegativePairings, formatNegativePairingBlock } from './negativePairingLookup.js';
+import { lookupPairingStrengths, formatPairingStrengthBlock } from './pairingStrengthLookup.js';
 
 // Gate: only ground a question that is actually about whether a claim/pairing works / how it anchors.
 // Tightened (QA 2026-06-19): dropped the bare "support(ed)?" token (matched "what records SUPPORT the dx")
@@ -69,9 +70,16 @@ export interface PlanGrounding {
    * augments the answer with the crisp mechanism reason + VA counterargument + deciding PMIDs. Fail-open.
    */
   readonly negativePairingBlock: string | null;
+  /**
+   * Deterministic CURATED PAIRING STRENGTH block (from the library [STRENGTH:] anchors), or null when no
+   * candidate upstream for this claim carries a graded pathway. RECOMMENDATION-ONLY — surfaces the physician-
+   * graded strength + deciding PMIDs so Ask-Aegis treats an established pairing as strong-by-default instead of
+   * talking the human out of it on thin excerpts. The grade is the GENERAL pairing strength, never a directive.
+   */
+  readonly pairingStrengthBlock: string | null;
 }
 
-const EMPTY: PlanGrounding = { block: null, excludedHints: [], negativePairingBlock: null };
+const EMPTY: PlanGrounding = { block: null, excludedHints: [], negativePairingBlock: null, pairingStrengthBlock: null };
 
 function fmtPlan(plan: AiViabilityCard): string {
   const L: string[] = [];
@@ -160,7 +168,23 @@ export async function buildAiPlanGroundingBlock(db: AppDb, caseId: string, quest
     const negRecs = negEnabled && claimedForNeg ? lookupNegativePairings(claimedForNeg, candidateUpstreams) : [];
     const negativePairingBlock = formatNegativePairingBlock(negRecs);
 
-    return { block: fmtPlan(plan), excludedHints, negativePairingBlock };
+    // CURATED PAIRING STRENGTH (2026-07-22) — the positive counterpart: surface the physician-graded strength
+    // + deciding PMIDs for any graded candidate pathway, so Ask-Aegis backs an established pairing by default.
+    // Same flag discipline (PAIRING_STRENGTH_ADVISORY=on); default OFF → null → byte-identical. Fail-open.
+    const strEnabled = process.env.PAIRING_STRENGTH_ADVISORY === 'on';
+    // DEAD-END PRECEDENCE (mirror the verdict's `dead ? not_supportable : graded`): never surface a STRENGTH
+    // grade for an upstream that ALSO hit a curated NOT-SUPPORTABLE entry — the dead-end wins, so the model can
+    // never see "NOT SUPPORTABLE" and "STRONG grade" for the same pairing. Computed independently of the
+    // negative DISPLAY flag so precedence holds even if only the strength block is shown. (The registries are
+    // disjoint by curation + a build gate today; this makes it structural.)
+    const deadUpstreams = new Set(
+      (claimedForNeg ? lookupNegativePairings(claimedForNeg, candidateUpstreams) : []).map((r) => norm(r.upstream)),
+    );
+    const strCandidates = candidateUpstreams.filter((u) => !deadUpstreams.has(norm(u)));
+    const strRecs = strEnabled && claimedForNeg ? lookupPairingStrengths(claimedForNeg, strCandidates) : [];
+    const pairingStrengthBlock = formatPairingStrengthBlock(strRecs);
+
+    return { block: fmtPlan(plan), excludedHints, negativePairingBlock, pairingStrengthBlock };
   } catch {
     return EMPTY;
   }

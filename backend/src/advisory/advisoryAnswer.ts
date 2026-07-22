@@ -112,6 +112,11 @@ export interface AnswerArgs {
   // + reason + VA counterargument") instead of the model reaching for thin comorbidity citations.
   // RECOMMENDATION-ONLY: it never blocks the answer. null/absent → today's behavior.
   negativePairingBlock?: string | null;
+  // CURATED PAIRING STRENGTH (2026-07-22): the positive counterpart — a deterministic block (from the library
+  // [STRENGTH:] anchors) that fires when this case's claimed<-upstream pairing carries a physician-graded
+  // strength, so Ask-Aegis backs an established pairing by default (grade + deciding PMIDs) instead of talking
+  // the human out of it on thin excerpts. RECOMMENDATION-ONLY; the grade is the GENERAL strength, not a directive.
+  pairingStrengthBlock?: string | null;
   // FEATURE A — "critique THIS letter" (Ryan 2026-06-24): the case's CURRENT drafted letter text, so an
   // RN/physician can ask Ask Aegis about the draft ("is the §VII opinion strong enough?", "does the nexus
   // match the evidence?"). Fetched at the route (where db+s3 live), passed as TRANSIENT context — it is
@@ -165,6 +170,8 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
   // sees — a known "not supportable" pairing must frame the whole answer before the plan/corpus. It is
   // curated, trusted content (no chart-derived text), so no defang is needed. Recommendation-only.
   const negativePairing = (args.negativePairingBlock ?? '').trim();
+  // The positive counterpart — physician-graded strength for a graded candidate pathway (grade + PMIDs).
+  const pairingStrength = (args.pairingStrengthBlock ?? '').trim();
   // Prepend the route-picker plan block (if present) — it's the authoritative ground-truth framing for a
   // viability question (the same brain the drafter/card use).
   const planBlock = (args.viabilityPlanBlock ?? '').trim();
@@ -179,7 +186,7 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
         '=== END DRAFTED LETTER ===',
       ].join('\n')
     : '';
-  const userContent = [negativePairing, planBlock, letterBlock, corpusContent].filter((s) => s.length > 0).join('\n\n');
+  const userContent = [negativePairing, pairingStrength, planBlock, letterBlock, corpusContent].filter((s) => s.length > 0).join('\n\n');
 
   if (estimateTokens(deps.systemPrompt) + estimateTokens(userContent) > MAX_INPUT_TOKENS) {
     return { ok: false, reason: 'over_budget' };

@@ -286,6 +286,12 @@ export class DrafterStack extends Stack {
         // to the letter output when off/non-match (2-agent QA proven: adds only a top-level out.negative_pairing
         // advisory field the citation loader never reads). Kill-switch = flip to 'off' + drafter deploy.
         FRN_NEGATIVE_PAIRINGS: 'on',
+        // FRN_PAIRING_STRENGTH (Ryan 2026-07-22): the POSITIVE counterpart — step0 writes an ADVISORY-ONLY
+        // out.pairing_strength (physician-graded strength + baseline + deciding PMIDs) for the ALREADY-CHOSEN
+        // grounded pairing. REFERENCE ONLY + NON-DIRECTIVE: it grades the drafter's choice, never picks the
+        // theory (grep-proven: no picker/ranker reads the field). Byte-identical to the letter (never mutates
+        // candidates). Kill-switch = flip to 'off' + drafter deploy.
+        FRN_PAIRING_STRENGTH: 'on',
         // DRAFTER_TRANSIENT_RESILIENCE (Ryan 2026-07-05): #3/#4 hardening — a TRANSIENT LLM hiccup
         // (overload/timeout) or a DIRECT/zero-granted-SC claim (Scott/Drummond class) must NEVER fatal-with-
         // no-letter. ON: (#3) the framing self-heal degrades to a conservative DIRECT 3.303 holding when zero

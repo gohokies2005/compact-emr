@@ -28,7 +28,7 @@ export async function computeAdvisoryOutcome(
   question: string,
 ): Promise<AnswerOutcome> {
   const grounding = await buildAiPlanGroundingBlock(db, caseId, question).catch(
-    () => ({ block: null as string | null, excludedHints: [] as string[], negativePairingBlock: null as string | null }),
+    () => ({ block: null as string | null, excludedHints: [] as string[], negativePairingBlock: null as string | null, pairingStrengthBlock: null as string | null }),
   );
   const letterText = await fetchLetterText(caseId).catch(() => null);
   return answerQuestion(deps, {
@@ -37,6 +37,7 @@ export async function computeAdvisoryOutcome(
     viabilityPlanBlock: grounding.block,
     viabilityExcludedHints: grounding.excludedHints,
     negativePairingBlock: grounding.negativePairingBlock,
+    pairingStrengthBlock: grounding.pairingStrengthBlock,
     letterText,
   });
 }

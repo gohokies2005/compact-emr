@@ -328,6 +328,12 @@ export class ApiStack extends Stack {
         // LIVE. Kill-switch: pass --context negative_pairings_advisory=false + deploy (or set in cdk.json) to
         // flip off without a code change. Mirrors the drafter's FRN_NEGATIVE_PAIRINGS.
         NEGATIVE_PAIRINGS_ADVISORY: (this.node.tryGetContext('negative_pairings_advisory') as string | undefined) ?? 'on',
+        // PAIRING_STRENGTH_ADVISORY (Ryan 2026-07-22): the POSITIVE counterpart — surfaces the physician-graded
+        // pairing STRENGTH ("library grade STRONG/MODERATE… + baseline + deciding PMIDs") in Ask Aegis so an
+        // established pairing is backed by default (recommendation-only, fail-open, grade never a directive).
+        // Default 'on' → LIVE. Kill-switch: --context pairing_strength_advisory=false + deploy. The verdict
+        // consumes the same registry directly (not flag-gated there — the grade is just guidance to the model).
+        PAIRING_STRENGTH_ADVISORY: (this.node.tryGetContext('pairing_strength_advisory') as string | undefined) ?? 'on',
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue

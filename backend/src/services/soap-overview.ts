@@ -483,12 +483,22 @@ export function withMeasurementsInObjective(objective: string, measurements: rea
  * would need the card's Section to segment/markdown-render, which is a UI change with its own screenshot pair).
  */
 export function formatMechanismVerdictLead(verdict: MechanismVerdict | null): string | null {
-  if (!verdict || verdict.verdict === 'viable') return null;
-  const label = verdict.verdict === 'not_viable' ? 'NOT SUPPORTABLE AS FRAMED' : 'BORDERLINE MECHANISM';
+  if (!verdict) return null;
+  // Ryan 2026-07-22: the decision ALWAYS leads the Assessment in a clear labeled line, WHATEVER it is — VIABLE
+  // included (was suppressed → a sound case had NO verdict line, which read as "not presented right"). ✓ marks
+  // the go, ⚠ marks a caution; the glyph + UPPERCASE label carry the emphasis in plain text (no markdown).
+  const viable = verdict.verdict === 'viable';
+  const marker = viable ? '✓' : '⚠';
+  const label = viable ? 'MEDICALLY VIABLE'
+    : verdict.verdict === 'not_viable' ? 'NOT SUPPORTABLE AS FRAMED'
+    : 'BORDERLINE MECHANISM';
   const head = (verdict.headline || '').trim();
   const reason = (verdict.reason || '').trim();
   const body = [head, reason].filter((s) => s.length > 0).join(' — ');
-  const lead = `⚠ MECHANISM CHECK — ${label}: ${body || 'the proposed connection lacks a clear physiologic mechanism; confirm before drafting'}`;
+  const fallback = viable
+    ? 'a recognized physiologic mechanism supports this connection'
+    : 'the proposed connection lacks a clear physiologic mechanism; confirm before drafting';
+  const lead = `${marker} MECHANISM CHECK — ${label}: ${body || fallback}`;
   return /[.!?]$/.test(lead) ? lead : `${lead}.`;
 }
 
@@ -588,14 +598,16 @@ function isNonViable(p: MechanismPairing | null): boolean {
 export function formatDualMechanismAssessmentLead(dual: DualMechanismVerdict): string | null {
   const { veteran, lead, claimed } = dual;
   if (!veteran) return null; // no distinct veteran theory — caller uses the single-verdict path
-  if (!isNonViable(veteran) && !isNonViable(lead)) return null; // both sound → no warning
-  // Labels UPPERCASED (Ryan 2026-07-22) so the two verdict lines stand out — the SOAP card renders the
-  // Assessment as plain text (no markdown), so caps are the plain-text equivalent of bolding.
+  // Ryan 2026-07-22: render the dual decision ALWAYS (both-viable included, was suppressed) — ✓ when both are
+  // sound, ⚠ when any pairing is a caution. Labels UPPERCASED so the two verdict lines stand out (the SOAP card
+  // renders the Assessment as plain text with no markdown, so the glyph + caps are the plain-text bolding).
+  const anyCaution = isNonViable(veteran) || isNonViable(lead);
+  const marker = anyCaution ? '⚠' : '✓';
   const parts: string[] = [dualPairingClause("VETERAN'S THEORY", veteran, claimed)];
   if (lead) parts.push(dualPairingClause('LEAD ALTERNATIVE ASSESSED', lead, claimed));
   // Strip each clause's trailing period before the '. ' join so two clauses never produce "collapse.. Lead".
   const joined = parts.map((p) => p.replace(/\.+\s*$/, '')).join('. ');
-  const lead2 = `⚠ MECHANISM CHECK — ${joined}`;
+  const lead2 = `${marker} MECHANISM CHECK — ${joined}`;
   return /[.!?]$/.test(lead2) ? lead2 : `${lead2}.`;
 }
 

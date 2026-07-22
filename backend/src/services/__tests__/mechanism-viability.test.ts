@@ -149,13 +149,9 @@ describe('KNOWN-GOOD pairings stay viable/borderline (do NOT scare good drafts)'
         'core, well-established OSA mechanism.\nCOUNTER: Obesity is often not itself service-connected.',
       expect: ['viable'],
     },
-    {
-      claimed: 'obstructive sleep apnea', upstream: 'migraine',
-      reply: 'VERDICT: borderline\nHEADLINE: Migraine and OSA are associated but the causal direction is ' +
-        'weak.\nREASON: Epidemiologic association exists; a direct migraine->OSA anatomic mechanism is not ' +
-        'well established — plausible, not a powerhouse.\nCOUNTER: The association may be bidirectional or confounded.',
-      expect: ['borderline', 'viable'],
-    },
+    // NOTE: migraine -> OSA was previously a KNOWN-GOOD borderline case ("plausible not powerhouse"). Under the
+    // recalibration (Ryan 2026-07-22) it is a wrong-direction anatomic dead-end and now reads not_viable — see
+    // the "RECALIBRATION" acceptance block below, which owns the migraine/tinnitus not_viable cases.
     {
       claimed: 'lumbar radiculopathy', upstream: 'lumbar degenerative disc disease',
       reply: 'VERDICT: viable\nHEADLINE: Lumbar DDD directly causes radiculopathy.\nREASON: Disc ' +
@@ -176,17 +172,163 @@ describe('KNOWN-GOOD pairings stay viable/borderline (do NOT scare good drafts)'
   }
 });
 
+// ── RECALIBRATION (Kuntz CLM-1CED1BDF5A mis-verdict fix, Ryan 2026-07-22) ───────────────────────────────
+//
+// THE BUG: PTSD -> OSA (the single most established VA secondary claim) came back "BORDERLINE MECHANISM" on
+// Kuntz because the retrieved excerpts were EPIDEMIOLOGIC (~60% PTSD-OSA co-prevalence + an "endotypes
+// similar with/without PTSD" line) and the old SYSTEM stance demanded a spelled-out physiologic mechanism —
+// so it read "association shown, no mechanism passage -> borderline" and scared a good draft. The verdict
+// must be a scalpel for BOGUS pairings, not a tax on established ones.
+//
+// The MODEL judgment lives in the SYSTEM prompt (its stance) and is proven end-to-end by the live smoke
+// (scripts/smoke-mechanism-viability.ts). These offline tests lock (1) that the recalibrated STANCE is
+// actually assembled into the prompt, (2) that the pipeline routes each verdict band correctly, and
+// (3) that an established pairing on ASSOCIATION-ONLY excerpts is carried to the model ungrounded-of-
+// mechanism yet still reads viable — i.e. the pipeline no longer requires a mechanistic excerpt.
+
+function viableReply(headline: string, reason: string): string {
+  return ['VERDICT: viable', `HEADLINE: ${headline}`, `REASON: ${reason}`, 'COUNTER: causation is arguable'].join('\n');
+}
+function notViableReply(headline: string, reason: string): string {
+  return ['VERDICT: not_viable', `HEADLINE: ${headline}`, `REASON: ${reason}`, 'COUNTER: co-occurrence is not a mechanism'].join('\n');
+}
+
+// The Kuntz-shaped retrieval: association-level ONLY, no spelled-out physiologic pathway. This is exactly
+// what tripped the old prompt into borderline.
+const PTSD_OSA_EPIDEMIOLOGIC_CHUNKS = [
+  'Obstructive sleep apnea is markedly more prevalent among veterans with PTSD; pooled estimates put ' +
+    'co-occurrence near ~60%. (PMID:32000001)',
+  'OSA endotypes (collapsibility, loop gain, arousal threshold) are broadly similar in patients with and ' +
+    'without comorbid PTSD. (PMID:32000002)',
+];
+
+describe('RECALIBRATION — the SYSTEM stance no longer taxes an established pairing', () => {
+  it('the assembled SYSTEM prompt defaults established VA secondary pathways to viable and treats association-level excerpts as sufficient', async () => {
+    const { fn, calls } = fakeInvoke(viableReply('h', 'r'));
+    await assessMechanismViability('obstructive sleep apnea', 'PTSD', PTSD_OSA_EPIDEMIOLOGIC_CHUNKS, { invoke: fn });
+    const { system } = calls[0];
+    // the stance flip: established pathway -> viable by default
+    expect(system).toMatch(/DEFAULT TO VIABLE for a recognized/i);
+    // association-level evidence is explicitly declared sufficient (the exact failure the bug turned on)
+    expect(system).toMatch(/association-level evidence[\s\S]*sufficient/i);
+    expect(system).toMatch(/must NOT downgrade an established pairing/i);
+    // PTSD -> OSA is named as a recognized pathway
+    expect(system).toMatch(/PTSD[\s\S]*obstructive sleep apnea/i);
+    // and the anti-scare framing is explicit
+    expect(system).toMatch(/scares a good draft/i);
+    // the not_viable bar is still direction-discipline, and migraine/tinnitus -> OSA are named dead-ends
+    expect(system).toMatch(/Reserve NOT_VIABLE for a pairing with NO plausible/i);
+    expect(system).toMatch(/migraine -> OSA and[\s\S]*tinnitus -> OSA/i);
+    // borderline is reserved for novel pairings, NOT established-but-thin ones
+    expect(system).toMatch(/Do NOT use borderline for an established pathway/i);
+  });
+
+  it('KUNTZ REPRO: PTSD -> OSA on ASSOCIATION-ONLY excerpts is carried to the model and reads VIABLE (was borderline)', async () => {
+    const { fn, calls } = fakeInvoke(viableReply(
+      'PTSD is a recognized aggravator of OSA.',
+      'PTSD -> OSA is a settled VA secondary pathway; the ~60% co-prevalence supports it and no mechanistic ' +
+        'passage is required for an accepted pathway.',
+    ));
+    const v = await assessMechanismViability('obstructive sleep apnea', 'PTSD', PTSD_OSA_EPIDEMIOLOGIC_CHUNKS, { invoke: fn });
+    expect(v).not.toBeNull();
+    expect(v!.verdict).toBe('viable');
+    // grounded: the epidemiologic excerpts actually reached the model (not free-reasoned away)
+    const { user } = calls[0];
+    expect(user).toContain('co-occurrence near ~60%');
+    expect(user).toContain('endotypes');
+  });
+
+  // VIABLE (never borderline/not_viable) — the established VA secondaries.
+  const viableCases: Array<{ claimed: string; upstream: string; headline: string; reason: string }> = [
+    { claimed: 'obstructive sleep apnea', upstream: 'PTSD', headline: 'PTSD aggravates OSA.', reason: 'recognized 3.310(b) aggravation pathway.' },
+    { claimed: 'obstructive sleep apnea', upstream: 'obesity', headline: 'Obesity drives OSA.', reason: 'para-pharyngeal fat load promotes upper-airway collapse.' },
+    { claimed: 'hypertension', upstream: 'obstructive sleep apnea', headline: 'OSA causes hypertension.', reason: 'intermittent hypoxia and sympathetic surge raise blood pressure — accepted pathway.' },
+    { claimed: 'hypertension', upstream: 'PTSD', headline: 'PTSD aggravates hypertension.', reason: 'chronic sympathetic activation; recognized VA secondary.' },
+    { claimed: 'GERD', upstream: 'PTSD', headline: 'PTSD aggravates GERD.', reason: 'autonomic and medication effects; recognized VA secondary.' },
+  ];
+  for (const c of viableCases) {
+    it(`VIABLE: ${c.upstream} -> ${c.claimed} reads viable (never scared)`, async () => {
+      const { fn } = fakeInvoke(viableReply(c.headline, c.reason));
+      const v = await assessMechanismViability(c.claimed, c.upstream, ['(association-level supportive excerpt)'], { invoke: fn });
+      expect(v).not.toBeNull();
+      expect(v!.verdict).toBe('viable');
+    });
+  }
+
+  // NOT_VIABLE (must stay) — wrong-direction / no-pathway dead-ends.
+  const notViableCases: Array<{ claimed: string; upstream: string; headline: string; reason: string; gap: RegExp }> = [
+    {
+      claimed: 'obstructive sleep apnea', upstream: 'burn pit / airborne hazard exposure',
+      headline: 'Burn-pit exposure does not cause OSA.',
+      reason: 'Airborne hazards injure the LOWER airway / lung parenchyma; OSA is UPPER-airway pharyngeal collapse — no bridging pathway.',
+      gap: /lower[- ]airway/i,
+    },
+    {
+      claimed: 'obstructive sleep apnea', upstream: 'migraine',
+      headline: 'Migraine does not cause OSA.',
+      reason: 'Migraine is a neurovascular headache disorder; OSA is upper-airway collapse. No pathway runs migraine -> airway; if anything OSA -> headache.',
+      gap: /headache|upper[- ]airway/i,
+    },
+    {
+      claimed: 'obstructive sleep apnea', upstream: 'tinnitus',
+      headline: 'Tinnitus does not cause OSA.',
+      reason: 'Tinnitus is a cochlear / auditory-nerve disorder; OSA is upper-airway collapse. No physiologic pathway connects them.',
+      gap: /cochlear|auditory|upper[- ]airway/i,
+    },
+  ];
+  for (const c of notViableCases) {
+    it(`NOT_VIABLE: ${c.upstream} -> ${c.claimed} stays not_viable and names the gap`, async () => {
+      const { fn } = fakeInvoke(notViableReply(c.headline, c.reason));
+      const v = await assessMechanismViability(c.claimed, c.upstream, ['(excerpt)'], { invoke: fn });
+      expect(v).not.toBeNull();
+      expect(v!.verdict).toBe('not_viable');
+      expect(v!.reason).toMatch(c.gap);
+    });
+  }
+});
+
+describe('RECALIBRATION — Kuntz dual verdict prepends NO scary lead when PTSD -> OSA is viable', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('lead PTSD -> OSA viable + veteran also names PTSD (same pairing) → single viable verdict, assessment LED with the viable line', async () => {
+    vi.stubEnv('SOAP_MECHANISM_VERDICT_ENABLED', 'true');
+    const mechInvoke: MechanismInvokeFn = async () => ({ text: viableReply('PTSD aggravates OSA.', 'recognized VA secondary; association-level support is sufficient.') });
+    const dual = await deriveDualMechanismVerdict('obstructive sleep apnea', 'PTSD', 'my sleep apnea is because of my PTSD', {
+      mechanismInvoke: mechInvoke,
+      veteranInvoke: async () => ({ text: '{"upstream":"PTSD","echo":"because of my PTSD","framing":"secondary"}' }),
+      retrieve: emptyRetrieve,
+    });
+    expect(dual.lead).not.toBeNull();
+    expect(dual.lead!.verdict.verdict).toBe('viable');
+    expect(dual.veteran).toBeNull(); // veteran ~ lead → collapses to the single viable lead
+    // Ryan 2026-07-22: the decision ALWAYS leads — a viable case now gets a positive ✓ MEDICALLY VIABLE lead
+    // (collapsed single path, since veteran ~ lead), never left bare.
+    const out = withDualMechanismVerdict(dnote('Well-supported dual-prong secondary claim.', 'Draft the letter.'), dual);
+    expect(out.assessment.startsWith('✓ MECHANISM CHECK — MEDICALLY VIABLE:')).toBe(true);
+    expect(out.assessment).toContain('Well-supported dual-prong secondary claim.');
+    // the DUAL formatter still returns null here (veteran collapsed to null → single path owns the lead)
+    expect(formatDualMechanismAssessmentLead(dual)).toBeNull();
+  });
+});
+
 // ── The additive SOAP lead (wiring in soap-overview.ts) ────────────────────────────────────────────────
 function note(assessment: string): SoapNote {
   return { subjective: 's', objective: 'o', assessment, plan: 'p', confidence: 'moderate', action: 'draft', caveat: null };
 }
 
 describe('formatMechanismVerdictLead / withMechanismVerdictLead', () => {
-  it('a VIABLE verdict produces NO lead and leaves the note byte-identical (good drafts untouched)', () => {
+  it('a VIABLE verdict prepends a positive MEDICALLY VIABLE lead (Ryan 2026-07-22 — the decision always leads)', () => {
     const v = { verdict: 'viable' as const, headline: 'ok', reason: 'r', strongestCounterargument: 'c' };
-    expect(formatMechanismVerdictLead(v)).toBeNull();
+    const lead = formatMechanismVerdictLead(v);
+    expect(lead).not.toBeNull();
+    expect(lead!.startsWith('✓ MECHANISM CHECK — MEDICALLY VIABLE:')).toBe(true);
     const n = note('The theory is sound.');
-    expect(withMechanismVerdictLead(n, v)).toBe(n); // same reference — untouched
+    const out = withMechanismVerdictLead(n, v);
+    expect(out.assessment.startsWith('✓ MECHANISM CHECK — MEDICALLY VIABLE:')).toBe(true);
+    expect(out.assessment).toContain('The theory is sound.');
+    // recommendation-only: decision-bearing fields untouched
+    expect(out.action).toBe('draft');
+    expect(out.confidence).toBe('moderate');
   });
 
   it('a null verdict leaves the note unchanged (fail-open)', () => {
@@ -457,15 +599,19 @@ describe('withDualMechanismVerdict / dual formatters (render)', () => {
     expect(out.plan).toContain('confirm which theory to plead');
   });
 
-  it('BOTH VIABLE → no Assessment warning (never scare a sound draft) but a supportable Plan line', () => {
+  it('BOTH VIABLE → the dual decision LEADS with a positive ✓ SUPPORTABLE line (Ryan 2026-07-22), plus a supportable Plan line', () => {
     const dual: DualMechanismVerdict = {
       claimed: CLAIMED,
       lead: mkPairing('obesity', 'viable'),
       veteran: mkPairing('PTSD', 'viable'),
     };
     const out = withDualMechanismVerdict(dnote('Base assessment.', 'Base plan.'), dual);
-    expect(out.assessment).toBe('Base assessment.'); // no warning prepended
-    expect(formatDualMechanismAssessmentLead(dual)).toBeNull();
+    expect(out.assessment.startsWith('✓ MECHANISM CHECK —')).toBe(true);
+    expect(out.assessment).toContain('Base assessment.');
+    const dualLead = formatDualMechanismAssessmentLead(dual);
+    expect(dualLead).not.toBeNull();
+    expect(dualLead!.startsWith('✓ MECHANISM CHECK —')).toBe(true);
+    expect(dualLead).toContain('SUPPORTABLE'); // both pairings read SUPPORTABLE (dualVerdictWord for viable)
     expect(out.plan.startsWith('Viability: supportable as framed')).toBe(true);
   });
 

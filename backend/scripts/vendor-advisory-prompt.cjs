@@ -78,3 +78,8 @@ for (const rel of VENDOR_FILES) {
   fs.copyFileSync(from, to);
   console.log(`vendored ${to}: ${fs.statSync(to).size}B`);
 }
+
+// Also regenerate the typed NEGATIVE PAIRINGS const (backend/src/advisory/negativePairings.generated.ts)
+// from FRN's negative_pairings.json — a codegen sibling of systemPrompt.ts, not a runtime vendor copy.
+// Keeps the Ask-Aegis negative-pairing pre-check in lockstep with the FRN source on every re-vendor.
+require('./vendor-negative-pairings.cjs').generate();

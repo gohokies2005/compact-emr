@@ -323,6 +323,11 @@ export class ApiStack extends Stack {
         // + deploy (or set it in cdk.json). Note: the flag is NOT in soapNoteFingerprint, so existing stored
         // notes only pick up the verdict when they next recompute (schema bump or a per-case recompute).
         SOAP_MECHANISM_VERDICT_ENABLED: (this.node.tryGetContext('soap_mechanism_verdict_enabled') as string | undefined) ?? 'true',
+        // NEGATIVE_PAIRINGS_ADVISORY (Ryan 2026-07-22): surfaces the curated negative-pairing "not supportable +
+        // reason + counterargument + PMIDs" block in Ask Aegis (recommendation-only, fail-open). Default 'on' →
+        // LIVE. Kill-switch: pass --context negative_pairings_advisory=false + deploy (or set in cdk.json) to
+        // flip off without a code change. Mirrors the drafter's FRN_NEGATIVE_PAIRINGS.
+        NEGATIVE_PAIRINGS_ADVISORY: (this.node.tryGetContext('negative_pairings_advisory') as string | undefined) ?? 'on',
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue

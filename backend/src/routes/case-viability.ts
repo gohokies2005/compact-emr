@@ -99,6 +99,13 @@ export function createCaseViabilityRouter(db: AppDb): Router {
           firedRecompute = true;
         }
       } catch { routePickerFraming = null; /* fail-open: SOAP falls back to strategy strings */ }
+      // REGEN → also fire the async verdict recompute (Ryan 2026-07-22): a forceRegenerate does a 25s SYNC
+      // rebuild that cannot run the Opus mechanism-verdict (it's async-only, in precomputeSoapNoteForCase), so
+      // a manual "Regenerate with new info" would never surface the A&P viability verdict. Fire the off-request
+      // recompute so it lands the verdict into the persisted note (the FE pollOnly loop / next open serves the
+      // refreshed note). Fire-and-forget + fail-open; guarded !draftingNow (never spin the chip mid-draft) +
+      // !firedRecompute (the plan-read above may already have fired one — no double-dispatch).
+      if (body.forceRegenerate === true && !draftingNow && !firedRecompute) void fireRecomputeViability(caseId);
       // CONTEXT ASSEMBLY (Ryan 2026-06-22, Zimmelman reliability). When a route-picker plan GROUNDS the note,
       // build the SoapContext from the SAME server-side assembler the OFF-REQUEST precompute uses
       // (assembleSoapContextForCase) — so the fingerprint the sync read computes EQUALS the one the async job

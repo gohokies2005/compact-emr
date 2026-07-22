@@ -106,6 +106,12 @@ export interface AnswerArgs {
   // answer that REVIVES an excluded pathway is caught (block-class). Without this the self-check's
   // excluded-pair guard is a dead wire (QA 2026-06-19, ai-sme #3).
   viabilityExcludedHints?: readonly string[];
+  // CURATED NEGATIVE PAIRING PRE-CHECK (2026-07-22): a deterministic block (from negative_pairings.md) that
+  // fires when this case's claimed<->upstream pairing matches a curated "NOT SUPPORTABLE secondary" entry.
+  // Prepended ABOVE everything else so a known mechanistic dead-end is answered confidently ("not supportable
+  // + reason + VA counterargument") instead of the model reaching for thin comorbidity citations.
+  // RECOMMENDATION-ONLY: it never blocks the answer. null/absent → today's behavior.
+  negativePairingBlock?: string | null;
   // FEATURE A — "critique THIS letter" (Ryan 2026-06-24): the case's CURRENT drafted letter text, so an
   // RN/physician can ask Ask Aegis about the draft ("is the §VII opinion strong enough?", "does the nexus
   // match the evidence?"). Fetched at the route (where db+s3 live), passed as TRANSIENT context — it is
@@ -155,8 +161,12 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
     coverageGap, // { reason, condition, pubmed_pmids } — tells us if PubMed fired, returned PMIDs, or errored
   }));
   const corpusContent = assembleUserContent(retrieval.chunks, slice.text, question);
-  // Prepend the route-picker plan block (if present) as the FIRST thing the model sees — it's the
-  // authoritative ground-truth framing for a viability question (the same brain the drafter/card use).
+  // Prepend the deterministic curated NEGATIVE PAIRING pre-check (if any) as the VERY FIRST thing the model
+  // sees — a known "not supportable" pairing must frame the whole answer before the plan/corpus. It is
+  // curated, trusted content (no chart-derived text), so no defang is needed. Recommendation-only.
+  const negativePairing = (args.negativePairingBlock ?? '').trim();
+  // Prepend the route-picker plan block (if present) — it's the authoritative ground-truth framing for a
+  // viability question (the same brain the drafter/card use).
   const planBlock = (args.viabilityPlanBlock ?? '').trim();
   // FEATURE A: inject the case's CURRENT drafted letter as a delimited, read-only block so the RN/physician
   // can ask about it. It is OUR draft (not corpus, not chart) — explicitly labeled NOT-citable, and defanged
@@ -169,7 +179,7 @@ export async function answerQuestion(deps: AnswerDeps, args: AnswerArgs): Promis
         '=== END DRAFTED LETTER ===',
       ].join('\n')
     : '';
-  const userContent = [planBlock, letterBlock, corpusContent].filter((s) => s.length > 0).join('\n\n');
+  const userContent = [negativePairing, planBlock, letterBlock, corpusContent].filter((s) => s.length > 0).join('\n\n');
 
   if (estimateTokens(deps.systemPrompt) + estimateTokens(userContent) > MAX_INPUT_TOKENS) {
     return { ok: false, reason: 'over_budget' };

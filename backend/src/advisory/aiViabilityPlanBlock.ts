@@ -16,6 +16,7 @@
 
 import type { AppDb } from '../services/db-types.js';
 import { type AiViabilityCard, AI_VIABILITY_PLAN_SCHEMA_VERSION } from '../services/ai-viability.js';
+import { lookupNegativePairings, formatNegativePairingBlock } from './negativePairingLookup.js';
 
 // Gate: only ground a question that is actually about whether a claim/pairing works / how it anchors.
 // Tightened (QA 2026-06-19): dropped the bare "support(ed)?" token (matched "what records SUPPORT the dx")
@@ -62,9 +63,15 @@ export interface PlanGrounding {
   readonly block: string | null;
   /** Excluded-anchor names for the deterministic self-check (never-argue hints). Empty when no block. */
   readonly excludedHints: readonly string[];
+  /**
+   * Deterministic CURATED NEGATIVE PAIRING PRE-CHECK block (from negative_pairings.md), or null when no
+   * candidate upstream for this claim hits a curated "not supportable" entry. RECOMMENDATION-ONLY — it
+   * augments the answer with the crisp mechanism reason + VA counterargument + deciding PMIDs. Fail-open.
+   */
+  readonly negativePairingBlock: string | null;
 }
 
-const EMPTY: PlanGrounding = { block: null, excludedHints: [] };
+const EMPTY: PlanGrounding = { block: null, excludedHints: [], negativePairingBlock: null };
 
 function fmtPlan(plan: AiViabilityCard): string {
   const L: string[] = [];
@@ -131,7 +138,29 @@ export async function buildAiPlanGroundingBlock(db: AppDb, caseId: string, quest
     const excludedHints = (plan.excluded ?? [])
       .map((e) => String(e.upstream ?? '').trim())
       .filter((u) => u.length >= 6);
-    return { block: fmtPlan(plan), excludedHints };
+
+    // CURATED NEGATIVE PAIRING PRE-CHECK (2026-07-22). Check the claimed condition against EVERY upstream
+    // the plan considered — the lead pathway plus alternatives + excluded anchors — for a curated
+    // "NOT SUPPORTABLE secondary" hit. This enriches a "why not X" answer with the crisp mechanism reason,
+    // the VA counterargument, and the deciding PMIDs (better than the plan's terse excluded-reason gloss).
+    // Deterministic + fail-open: a bad lookup throws nothing and simply yields no block.
+    const claimedForNeg =
+      String(plan.lead?.claimed || plan.inputClaimed || row?.claimedCondition || '').trim();
+    const candidateUpstreams = [
+      plan.lead?.upstream,
+      ...(plan.alternatives ?? []).map((a) => a.upstream),
+      ...(plan.excluded ?? []).map((e) => e.upstream),
+    ]
+      .map((u) => String(u ?? '').trim())
+      .filter((u) => u.length > 0);
+    // KILL-SWITCH (Ryan 2026-07-22): the advisory negative-pairing block is gated so it can be flipped OFF
+    // without a redeploy (mirrors the drafter's FRN_NEGATIVE_PAIRINGS). Default OFF → block null → byte-identical
+    // to pre-feature behavior; set NEGATIVE_PAIRINGS_ADVISORY=on (cdk env) to surface curated negatives.
+    const negEnabled = process.env.NEGATIVE_PAIRINGS_ADVISORY === 'on';
+    const negRecs = negEnabled && claimedForNeg ? lookupNegativePairings(claimedForNeg, candidateUpstreams) : [];
+    const negativePairingBlock = formatNegativePairingBlock(negRecs);
+
+    return { block: fmtPlan(plan), excludedHints, negativePairingBlock };
   } catch {
     return EMPTY;
   }

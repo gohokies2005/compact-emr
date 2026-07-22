@@ -4,6 +4,7 @@ import { findChartReadinessOverride } from './chart-readiness-override.js';
 import {
   parseCredentialBlock,
   substituteSignerSentinels,
+  substituteHardcodedSection1Credentials,
   signerNameAppears,
   findForeignSignerNames,
 } from './credential-block.js';
@@ -155,8 +156,11 @@ export async function computeApproveBlockers(
   // never block the GET; approve itself still enforces them authoritatively). ──
   if (signerCreds !== null && cur !== null && deps.s3 !== undefined && deps.bucketName !== undefined) {
     const text = await readTxtFromS3(deps.s3, deps.bucketName, cur.txtKey);
-    // Same substitution approve performs before its positive identity check.
-    const finalText = substituteSignerSentinels(text, signerCreds, 'their');
+    // Same two substitutions approve performs before its positive identity check: sentinel
+    // substitution, then the legacy hardcoded-Kasky Section I rewrite (so a DPT-assigned
+    // hardcoded-Kasky letter does not show a false signer_name_absent banner pre-attest).
+    const sentinelText = substituteSignerSentinels(text, signerCreds, 'their');
+    const finalText = substituteHardcodedSection1Credentials(sentinelText, signerCreds, coSignerName);
     if (!signerNameAppears(finalText, signerCreds.fullNameWithCredential)) {
       blockers.push({
         code: 'signer_name_absent',

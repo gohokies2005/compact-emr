@@ -38,9 +38,11 @@ import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import {
   parseCredentialBlock,
   substituteSignerSentinels,
+  substituteHardcodedSection1Credentials,
   findForeignSignerNames,
   signerNameAppears,
   buildRendererCredentialLines,
+  type SignerCredentials,
 } from '../services/credential-block.js';
 import type { AppDb } from '../services/db-types.js';
 
@@ -70,7 +72,11 @@ const PRESIGN_TTL_SECONDS = 300;
 // txt exists in S3 (a dx/event hold leaves currentVersion untouched → GET /letter resolves null → editor
 // shows nothing to edit). sign-offs.ts SEPARATELY refuses needs_rn_decision so a held-for-defect letter can
 // never be physician-signed while parked. 'needs_records' stays OUT — by definition no draft exists there.
-const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'rn_review', 'physician_review', 'correction_requested', 'correction_review', 'needs_rn_decision']);
+// Exported as the SINGLE SOURCE OF TRUTH for "a draft in this status is still editable" so the
+// cases router's best-effort assign-physician draft re-render (routes/cases.ts) can never overwrite a
+// delivered / paid / approved / rejected letter's artifacts in place (the delivered set is
+// deliberately OUTSIDE this set — see the note above). Kept here, next to the editor that owns the concept.
+export const EDITABLE_STATUSES: ReadonlySet<string> = new Set(['drafting', 'rn_review', 'physician_review', 'correction_requested', 'correction_review', 'needs_rn_decision']);
 
 /**
  * G4 — ratified sign/edit lifecycle (Ryan 2026-06-12): "nurse cannot edit the version the doctor
@@ -381,6 +387,38 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
     }
   }
 
+  // Resolve the assigned signer's credentials + co-signer name for DISPLAY substitution on the read
+  // path, so the editor shows the SAME Section I the letter will be signed under (the drafter bakes Dr.
+  // Kasky's Section I; a DPT/other assigned signer must see THEIR name — Kevin Luiz, 2026-07-21). This
+  // is display-only on the READ path (the PUT save is untouched); approve re-substitutes independently.
+  // CAVEAT: if the letter is SAVED while a non-Kasky signer is assigned, the editor buffer (already
+  // display-substituted) is persisted, so the stored draft drifts off the Kasky anchor for that signer.
+  // That is SAFE — a later signer mismatch fails LOUD at approve (409 signer_name_absent), never a
+  // silent mis-sign — but re-canonicalizing Section I on save is an owed hardening follow-up. FAIL-OPEN —
+  // any missing/incomplete signer or co-signer → null → the caller shows the canonical draft unchanged.
+  // NEVER throws (a read must not break the way approve legitimately 409s on an incomplete signer). The
+  // Kasky no-op is handled inside substituteHardcodedSection1Credentials (NPI identity).
+  async function resolveAssignedSignerForDisplay(
+    caseRow: { assignedPhysicianId: string | null },
+  ): Promise<{ creds: SignerCredentials; coSignerName: string | null } | null> {
+    try {
+      if (caseRow.assignedPhysicianId === null) return null;
+      const signer = await db.physician.findFirst({ where: { id: caseRow.assignedPhysicianId } });
+      if (signer === null) return null;
+      const creds = parseCredentialBlock(signer.credentialBlockJson);
+      if (creds === null) return null;
+      let coSignerName: string | null = null;
+      if (signer.coSignedByPhysicianId != null) {
+        const coSigner = await db.physician.findFirst({ where: { id: signer.coSignedByPhysicianId } });
+        const coCreds = coSigner !== null ? parseCredentialBlock(coSigner.credentialBlockJson) : null;
+        if (coCreds !== null) coSignerName = coCreds.fullNameWithCredential;
+      }
+      return { creds, coSignerName };
+    } catch {
+      return null;
+    }
+  }
+
   // Delegates to the shared service reader so an S3 NoSuchKey surfaces as a structured 404
   // ("Letter artifact missing from storage for v<N>…") instead of an unhandled 500 (CLM-BBFCB3F8CE).
   async function readTxtFromS3(bucketName: string, key: string, ctx?: LetterTxtContext): Promise<string> {
@@ -485,17 +523,28 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // plain DraftJob has no source (null → the normal rendered-letter lifecycle).
       const meta = await resolveCurrentRevisionMeta(db, caseId, c.currentVersion);
 
+      // DISPLAY substitution (Kevin Luiz DPT, 2026-07-21): show the ASSIGNED signer's Section I in the
+      // editor so it matches the letter that will actually be signed (approve applies the same
+      // substitution to finalText). Display-only — the stored draft stays canonical (Kasky-anchored);
+      // save is untouched. No-op for Kasky (NPI identity) and fail-open (null signer → canonical shown).
+      // locked_ranges + leaks are computed on displayTxt so the greyed Section I + any leak offsets match
+      // exactly what the editor renders.
+      const signerForDisplay = await resolveAssignedSignerForDisplay(c);
+      const displayTxt = signerForDisplay === null
+        ? txt
+        : substituteHardcodedSection1Credentials(txt, signerForDisplay.creds, signerForDisplay.coSignerName);
+
       res.json({
         data: {
           version: cur.version,
-          txt,
-          locked_ranges: computeLockedRanges(txt),
+          txt: displayTxt,
+          locked_ranges: computeLockedRanges(displayTxt),
           rendered: { pdfUrl, docxUrl },
           role: user.role,
           source: meta?.source ?? null,
           // Loud warning whenever the letter is opened: forbidden content (editing meta-commentary,
           // PMIDs) that blocks delivery and needs a re-draft (Ryan 2026-06-20). Empty = clean.
-          leaks: detectLetterLeaks(txt).map((l) => ({ code: l.code, note: l.note, match: l.match })),
+          leaks: detectLetterLeaks(displayTxt).map((l) => ({ code: l.code, note: l.note, match: l.match })),
         },
       });
     }),
@@ -1046,6 +1095,11 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       // A signer with NO co-signer passes NOTHING new: the single-signer render payload below is
       // byte-identical (the c0-A regression guard).
       let cosignerFields: { cosigner_name: string; cosigner_signature_image_s3_key: string } | undefined;
+      // The co-signer's SINGLE-LINE credentialed name — used to (a) excuse the co-signer from the
+      // foreign-name gate below and (b) name them in the Section I concurrence for a legacy
+      // hardcoded-Kasky letter now signed by a different primary (e.g. a DPT). Distinct from
+      // cosignerFields.cosigner_name, which is the MULTI-LINE render block.
+      let coSignerName: string | null = null;
       if (signer.coSignedByPhysicianId != null) {
         const coSigner = await db.physician.findFirst({ where: { id: signer.coSignedByPhysicianId } });
         if (coSigner === null) {
@@ -1066,12 +1120,18 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         // fullNameWithCredential, or the board-cert + NPI lines vanish from the rendered co-sign
         // block (regression caught by QA 2026-07-19).
         cosignerFields = { cosigner_name: buildRendererCredentialLines(coSignerCreds), cosigner_signature_image_s3_key: coSignatureKey };
+        coSignerName = coSignerCreds.fullNameWithCredential;
       }
 
       // Substitute any signer sentinels with the assigned signer's rendered blocks (no-op on the
       // legacy hardcoded-credential letters). Pronoun defaults to "their" (gender-neutral; no
       // veteran-pronoun field exists yet) and is irrelevant to no-sentinel letters.
-      const finalText = substituteSignerSentinels(text, signerCreds, 'their');
+      const sentinelText = substituteSignerSentinels(text, signerCreds, 'their');
+      // Then rewrite the LEGACY hardcoded-Kasky Section I facts to the assigned signer when they are
+      // not Kasky (e.g. Kevin Luiz, DPT), appending a co-signer concurrence when co-signed. This is a
+      // BYTE-IDENTICAL no-op for a Kasky-signed Kasky letter and for any letter lacking the hardcoded
+      // sentence — so the name gate below passes for a DPT WITHOUT weakening it for anyone.
+      const finalText = substituteHardcodedSection1Credentials(sentinelText, signerCreds, coSignerName);
 
       // Positive identity check: the assigned signer's credentialed name must appear (whole-name).
       if (!signerNameAppears(finalText, signerCreds.fullNameWithCredential)) {
@@ -1087,7 +1147,12 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
       const rosterNames = roster
         .map((p) => parseCredentialBlock(p.credentialBlockJson)?.fullNameWithCredential)
         .filter((n): n is string => typeof n === 'string')
-        .filter((n) => cosignerFields === undefined || n !== cosignerFields.cosigner_name);
+        // Exclude the legit co-signer by their SINGLE-LINE credentialed name (coSignerName). The old
+        // comparison against cosignerFields.cosigner_name — the MULTI-LINE render block — could never
+        // match a single-line roster name, so a Section I concurrence that legitimately names the
+        // co-signer (DPT-signed letters) would false-trip foreign_signer_name. This excludes exactly
+        // the one validated co-signer; every other physician is still detected.
+        .filter((n) => coSignerName === null || n !== coSignerName);
       const foreign = findForeignSignerNames(finalText, rosterNames, signerCreds.fullNameWithCredential);
       if (foreign.length > 0) {
         throw new HttpError(409, 'conflict', `Cannot approve: the letter names ${foreign.join(', ')} but the assigned signing physician is ${signerCreds.fullNameWithCredential}. A letter must be signed by the physician it is authored under. Reassign the case to the named physician or regenerate the letter, then approve.`, { reason: 'foreign_signer_name', caseId, physicianId: signer.id, foreignNames: foreign });

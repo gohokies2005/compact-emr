@@ -2,10 +2,12 @@ import '../bootstrap/bigint-serialization.js'; // installs BigInt->string JSON (
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createCasesRouter } from '../routes/cases.js';
+import { createCasesRouter, type CasesRouterDeps } from '../routes/cases.js';
 import type { ApproveBlockerDeps } from '../services/approve-blockers.js';
 import { CASE_STATUSES } from '../services/case-status-transitions.js';
-import type { AppDb, CaseRecord, Role } from '../services/db-types.js';
+import type { AppDb, CaseRecord, PhysicianRecord, Role } from '../services/db-types.js';
+import type { RenderInvokeInput, RenderInvokeResult } from '../routes/letter.js';
+import { KASKY_CREDENTIALS, DRAFTER_HARDCODED_SECTION1_FACTS } from '../services/credential-block.js';
 
 // The request user shape the routes actually read off req.user (Cognito JWT claims).
 interface MockUser { readonly sub: string; readonly email?: string; readonly roles: Role[]; }
@@ -1014,5 +1016,222 @@ describe('cases routes', () => {
       const res = await request(appFor(db)).post(RTP).send({ version: 4, message: REASON });
       expect(res.status).toBe(409);
     });
+  });
+});
+
+// ── POST /cases/:id/assign-physician — assigned-signer draft re-render (2026-07-21) ──────────────
+// The assignment endpoint now runs a BEST-EFFORT, FAIL-OPEN step after commit that overwrites the
+// current draft's pdf/docx to the assigned signer's Section I (so "Open PDF" on an unsigned draft
+// shows the signer, not the drafter's hardcoded Kasky). These pin: it fires for a non-Kasky signer
+// with the CURRENT version's pdf/docx keys (NOT a new version) + a SIDECAR txt key (canonical TXT
+// preserved); no-ops for Kasky; fails open when renderLetter throws; re-derives each new signer from
+// the canonical (Kasky) TXT on re-assignment; and skips when there is no current letter.
+describe('POST /cases/:id/assign-physician — assigned-signer draft re-render', () => {
+  const CV = 5; // current draft version
+  const TXT_KEY = `letter-revisions/CASE-1/v${CV}/letter.txt`;
+  const PDF_KEY = `letter-revisions/CASE-1/v${CV}/letter.pdf`;
+  const DOCX_KEY = `letter-revisions/CASE-1/v${CV}/letter.docx`;
+  // The drafter's hardcoded Kasky Section I facts — the anchor substituteHardcodedSection1Credentials
+  // rewrites — plus the fixed treatment-relationship tail that must be preserved verbatim.
+  const CANONICAL_TXT =
+    `RE: Independent Medical Opinion\nVeteran: John Vet\n\nI. Physician Qualifications\n\n` +
+    `${DRAFTER_HARDCODED_SECTION1_FACTS} I have no treatment relationship with this veteran. ` +
+    `This letter is an independent medical opinion prepared for the purpose of his VA disability claim.\n`;
+
+  const KEVIN: PhysicianRecord = {
+    id: 'PHYS-KEVIN', cognitoSub: null, fullName: 'Kevin Luiz', npi: '1999999999', specialty: '',
+    medicalLicense: '', email: 'kevin@example.com', phone: null, signatureImageS3Key: 'sig/kevin.png',
+    credentialBlockJson: { fullNameWithCredential: 'Kevin Luiz, DPT', specialty: '', boardName: '', boardAbbreviation: '', licenseState: '', licenseNumber: '', npi: '1999999999' },
+    coSignedByPhysicianId: null, active: true, createdAt: new Date('2026-07-01'), updatedAt: new Date('2026-07-01'), version: 1,
+  };
+  const JANE: PhysicianRecord = {
+    id: 'PHYS-JANE', cognitoSub: null, fullName: 'Jane Roe', npi: '1888888888', specialty: 'Internal Medicine',
+    medicalLicense: 'MD1234', email: 'jane@example.com', phone: null, signatureImageS3Key: 'sig/jane.png',
+    credentialBlockJson: { fullNameWithCredential: 'Jane Roe, MD', specialty: 'Internal Medicine', boardName: 'American Board of Internal Medicine', boardAbbreviation: 'ABIM', licenseState: 'Nevada', licenseNumber: 'MD1234', npi: '1888888888' },
+    coSignedByPhysicianId: null, active: true, createdAt: new Date('2026-07-01'), updatedAt: new Date('2026-07-01'), version: 1,
+  };
+  const KASKY_PHYS: PhysicianRecord = {
+    id: 'PHYS-KASKY', cognitoSub: null, fullName: 'Ryan J. Kasky', npi: KASKY_CREDENTIALS.npi, specialty: 'Family Medicine',
+    medicalLicense: 'DO2996', email: 'ryan@example.com', phone: null, signatureImageS3Key: 'sig/kasky.png',
+    credentialBlockJson: { ...KASKY_CREDENTIALS }, coSignedByPhysicianId: null, active: true,
+    createdAt: new Date('2026-07-01'), updatedAt: new Date('2026-07-01'), version: 1,
+  };
+
+  // S3 stub: HeadObject → exists; GetObject → the CANONICAL txt (unconditionally — models the fact that
+  // the real canonical txtKey is never overwritten by the re-render); ListObjectsV2 → empty.
+  function makeS3(canonical = CANONICAL_TXT) {
+    return {
+      send: vi.fn(async (cmd: { constructor: { name: string } }) => {
+        const name = cmd?.constructor?.name;
+        if (name === 'HeadObjectCommand') return {};
+        if (name === 'GetObjectCommand') return { Body: { transformToString: async () => canonical } };
+        if (name === 'ListObjectsV2Command') return { CommonPrefixes: [] };
+        throw new Error(`unexpected s3 command ${name}`);
+      }),
+    } as unknown as CasesRouterDeps['s3'];
+  }
+
+  function makeAssignDb(opts: {
+    physiciansById: Record<string, PhysicianRecord>;
+    currentVersion?: number;
+    hasLetter?: boolean;
+    status?: CaseRecord['status'];
+    letterSource?: string;
+    signOffs?: { id: string; signedVersion: number | null }[];
+  }) {
+    const currentVersion = opts.currentVersion ?? CV;
+    let current = baseCase({ status: opts.status ?? 'physician_review', currentVersion, assignedPhysicianId: null, version: 3, veteranId: 'VET-1', claimedCondition: 'sleep apnea' });
+    const caseFindFirst = vi.fn(async () => current);
+    const caseUpdate = vi.fn(async (a: { data: Record<string, unknown> }) => { current = { ...current, ...a.data, version: current.version + 1 } as CaseRecord; return current; });
+    const activityLogCreate = vi.fn(async () => ({}));
+    const physicianFindFirst = vi.fn(async (a: { where: { id: string } }) => opts.physiciansById[a.where.id] ?? null);
+    const veteranFindUnique = vi.fn(async () => ({ id: 'VET-1', firstName: 'John', lastName: 'Vet' }));
+    // A realistic LetterRevision row (resolveCurrentRevisionMeta reads id + source). source defaults to a
+    // normal draft provenance; the external_import guard test overrides it.
+    const letterRow = opts.hasLetter === false ? null : { id: 'LR-CURRENT', version: currentVersion, source: opts.letterSource ?? 'drafter_mirror', artifactTxtS3Key: TXT_KEY, artifactPdfS3Key: PDF_KEY, artifactDocxS3Key: DOCX_KEY };
+    const letterRevisionFindFirst = vi.fn(async () => letterRow);
+    const letterRevisionFindMany = vi.fn(async () => (letterRow ? [letterRow] : []));
+    const draftJobFindFirst = vi.fn(async () => null);
+    const draftJobFindMany = vi.fn(async () => []);
+    const signOffFindMany = vi.fn(async () => opts.signOffs ?? []);
+    const tx = {
+      case: { findFirst: caseFindFirst, update: caseUpdate },
+      activityLog: { create: activityLogCreate },
+    };
+    const db = {
+      case: { findFirst: caseFindFirst, update: caseUpdate },
+      physician: { findFirst: physicianFindFirst },
+      veteran: { findUnique: veteranFindUnique },
+      letterRevision: { findFirst: letterRevisionFindFirst, findMany: letterRevisionFindMany },
+      draftJob: { findFirst: draftJobFindFirst, findMany: draftJobFindMany },
+      signOff: { findMany: signOffFindMany },
+      activityLog: { create: activityLogCreate },
+      $transaction: vi.fn(async (fn: (innerTx: typeof tx) => unknown) => fn(tx)),
+    } as unknown as AppDb;
+    return { db, spies: { caseUpdate, physicianFindFirst } };
+  }
+
+  function appForRerender(db: AppDb, deps: CasesRouterDeps) {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { if (mockUser) (req as express.Request & { user?: MockUser }).user = mockUser; next(); });
+    app.use('/api/v1', createCasesRouter(db, deps));
+    return app;
+  }
+
+  const okRender = () => vi.fn(async (input: RenderInvokeInput): Promise<RenderInvokeResult> => ({ ok: true, version: input.version, keys: input.keys, sizes: { txt: 1, pdf: 1, docx: 1 } }));
+
+  beforeEach(() => { mockUser = { sub: 'USER-1', email: 'a@example.com', roles: ['admin'] }; });
+
+  it('1) non-Kasky signer (Kevin DPT): renders once, in place, from a sidecar txt key', async () => {
+    const { db } = makeAssignDb({ physiciansById: { [KEVIN.id]: KEVIN } });
+    const renderLetter = okRender();
+    const res = await request(appForRerender(db, { s3: makeS3(), bucketName: 'phi-bucket', renderLetter }))
+      .post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: KEVIN.id, version: 3 });
+    expect(res.status).toBe(200);
+    expect(renderLetter).toHaveBeenCalledTimes(1);
+    const input = renderLetter.mock.calls[0][0] as RenderInvokeInput;
+    expect(input.letterText).toContain('Kevin Luiz, DPT');
+    expect(input.letterText).toContain('1999999999');
+    // Kasky's hardcoded Section I facts must be GONE (substituted), but the fixed tail preserved.
+    expect(input.letterText).not.toContain(DRAFTER_HARDCODED_SECTION1_FACTS);
+    expect(input.letterText).toContain('I have no treatment relationship with this veteran.');
+    expect(input.caseData.signer_name).toBe('Kevin Luiz, DPT\nNPI: 1999999999');
+    expect(input.caseData.signature_image_s3_key).toBe('sig/kevin.png');
+    expect(input.draft).toBe(true);
+    expect(input.version).toBe(CV); // CURRENT version, not a new one
+    // pdf/docx overwritten IN PLACE at the current keys; txt routed to a SIDECAR (canonical preserved).
+    expect(input.keys.pdfKey).toBe(PDF_KEY);
+    expect(input.keys.docxKey).toBe(DOCX_KEY);
+    expect(input.keys.txtKey).not.toBe(TXT_KEY);
+    expect(input.keys.txtKey).toBe(`${TXT_KEY}.assigned-signer-preview.txt`);
+  });
+
+  it('2) Kasky signer: renderLetter is NOT called (canonical PDF already Kasky)', async () => {
+    const { db } = makeAssignDb({ physiciansById: { [KASKY_PHYS.id]: KASKY_PHYS } });
+    const renderLetter = okRender();
+    const res = await request(appForRerender(db, { s3: makeS3(), bucketName: 'phi-bucket', renderLetter }))
+      .post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: KASKY_PHYS.id, version: 3 });
+    expect(res.status).toBe(200);
+    expect(renderLetter).not.toHaveBeenCalled();
+  });
+
+  it('3) renderLetter throws: assign still returns 200 and the assignment persisted (fail-open)', async () => {
+    const { db, spies } = makeAssignDb({ physiciansById: { [KEVIN.id]: KEVIN } });
+    const renderLetter = vi.fn(async () => { throw new Error('render boom'); });
+    const res = await request(appForRerender(db, { s3: makeS3(), bucketName: 'phi-bucket', renderLetter: renderLetter as unknown as CasesRouterDeps['renderLetter'] }))
+      .post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: KEVIN.id, version: 3 });
+    expect(res.status).toBe(200);
+    expect(renderLetter).toHaveBeenCalledTimes(1);
+    // The assignment transaction committed regardless of the re-render failure.
+    expect(spies.caseUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ assignedPhysicianId: KEVIN.id }) }));
+  });
+
+  it('4) re-assign Kevin -> Jane: Jane\'s Section I is derived from the canonical (Kasky) txt, not Kevin\'s', async () => {
+    const { db } = makeAssignDb({ physiciansById: { [KEVIN.id]: KEVIN, [JANE.id]: JANE } });
+    const renderLetter = okRender();
+    const app = appForRerender(db, { s3: makeS3(), bucketName: 'phi-bucket', renderLetter });
+    const r1 = await request(app).post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: KEVIN.id, version: 3 });
+    expect(r1.status).toBe(200);
+    const r2 = await request(app).post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: JANE.id, version: 4 });
+    expect(r2.status).toBe(200);
+    expect(renderLetter).toHaveBeenCalledTimes(2);
+    const second = renderLetter.mock.calls[1][0] as RenderInvokeInput;
+    expect(second.letterText).toContain('Jane Roe, MD');
+    expect(second.letterText).not.toContain('Kevin Luiz, DPT'); // proves it re-derived from canonical, not Kevin's render
+    expect(second.caseData.signer_name).toBe('Jane Roe, MD\nBoard-Certified in Internal Medicine, ABIM\nNPI: 1888888888');
+  });
+
+  it('5) no current letter (currentVersion 0): assign returns 200, no render, no throw', async () => {
+    const { db } = makeAssignDb({ physiciansById: { [KEVIN.id]: KEVIN }, currentVersion: 0, hasLetter: false });
+    const renderLetter = okRender();
+    const res = await request(appForRerender(db, { s3: makeS3(), bucketName: 'phi-bucket', renderLetter }))
+      .post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: KEVIN.id, version: 3 });
+    expect(res.status).toBe(200);
+    expect(renderLetter).not.toHaveBeenCalled();
+  });
+
+  it('skips entirely (no throw) when renderLetter/s3 are unwired', async () => {
+    const { db } = makeAssignDb({ physiciansById: { [KEVIN.id]: KEVIN } });
+    const res = await request(appForRerender(db, {}))
+      .post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: KEVIN.id, version: 3 });
+    expect(res.status).toBe(200);
+  });
+
+  // ── SIGNED-ARTIFACT PROTECTION GUARDS (deploy-blocker fix, 2026-07-21) ──────────────────────────
+  it('GUARD 1: reassign on a DELIVERED case → renderLetter NOT called (never overwrite signed bytes)', async () => {
+    const { db } = makeAssignDb({ physiciansById: { [KEVIN.id]: KEVIN }, status: 'delivered' });
+    const renderLetter = okRender();
+    const res = await request(appForRerender(db, { s3: makeS3(), bucketName: 'phi-bucket', renderLetter }))
+      .post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: KEVIN.id, version: 3 });
+    expect(res.status).toBe(200);
+    expect(renderLetter).not.toHaveBeenCalled();
+  });
+
+  it('GUARD 2: current revision source=external_import → renderLetter NOT called (explicit, not docx=null)', async () => {
+    const { db } = makeAssignDb({ physiciansById: { [KEVIN.id]: KEVIN }, letterSource: 'external_import' });
+    const renderLetter = okRender();
+    const res = await request(appForRerender(db, { s3: makeS3(), bucketName: 'phi-bucket', renderLetter }))
+      .post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: KEVIN.id, version: 3 });
+    expect(res.status).toBe(200);
+    expect(renderLetter).not.toHaveBeenCalled();
+  });
+
+  it('GUARD 3: a SignOff bound to currentVersion → renderLetter NOT called (never rewrite a signed version)', async () => {
+    const { db } = makeAssignDb({ physiciansById: { [KEVIN.id]: KEVIN }, signOffs: [{ id: 'SO-1', signedVersion: CV }] });
+    const renderLetter = okRender();
+    const res = await request(appForRerender(db, { s3: makeS3(), bucketName: 'phi-bucket', renderLetter }))
+      .post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: KEVIN.id, version: 3 });
+    expect(res.status).toBe(200);
+    expect(renderLetter).not.toHaveBeenCalled();
+  });
+
+  it('GUARD 3 boundary: a SignOff bound to a DIFFERENT (older) version still re-renders the current draft', async () => {
+    const { db } = makeAssignDb({ physiciansById: { [KEVIN.id]: KEVIN }, signOffs: [{ id: 'SO-OLD', signedVersion: CV - 2 }] });
+    const renderLetter = okRender();
+    const res = await request(appForRerender(db, { s3: makeS3(), bucketName: 'phi-bucket', renderLetter }))
+      .post('/api/v1/cases/CASE-1/assign-physician').send({ physicianId: KEVIN.id, version: 3 });
+    expect(res.status).toBe(200);
+    expect(renderLetter).toHaveBeenCalledTimes(1);
   });
 });

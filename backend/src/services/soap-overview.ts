@@ -24,6 +24,9 @@ import { planViabilityToAction, type SoapAction, type RoutePickerViability } fro
 // SSOT for "this text carries a study severity index" — shared with documentDigest's severity pre-pass so the
 // harvest and the SOAP_OBJECTIVE_AHI_DROPPED canary below can never drift on what "severity" means.
 import { SEVERITY_LINE_RE } from '../advisory/documentDigest.js';
+// Mechanism-grounded viability verdict (Ryan 2026-07-21) — an ADDITIVE, recommendation-only lead line on the
+// Assessment. Type-only import so this module never pulls the Bedrock caller into the SOAP build path.
+import type { MechanismVerdict } from './mechanism-viability.js';
 export { planViabilityToAction };
 export type { SoapAction, RoutePickerViability };
 
@@ -466,6 +469,82 @@ export function withMeasurementsInObjective(objective: string, measurements: rea
   const line = `Objective measurements: ${measurements.map((m) => m.display).join('; ')}.`;
   const base = objective.trim();
   return base ? `${base} ${line}` : line;
+}
+
+/**
+ * MECHANISM VERDICT LEAD (Ryan 2026-07-21) — format the bold, RN-facing leading sentence for the SOAP
+ * Assessment from a mechanism-grounded verdict. Pure. Returns null for a `viable` verdict (or a null verdict):
+ * we DELIBERATELY do not prepend anything to a good pairing — the whole point is to flag the implausible
+ * one, never to scare a sound draft. `borderline`/`not_viable` get a prominent uppercase-labeled lead.
+ *
+ * Plain-text (not markdown) by design: the SOAP card renders the Assessment as a plain string with no
+ * markdown parser, so `**bold**` would show literal asterisks. The uppercase "MECHANISM CHECK — …:" prefix +
+ * the ⚠ glyph carry the visual weight in plain text; a true-bold FE treatment is a separate follow-up (it
+ * would need the card's Section to segment/markdown-render, which is a UI change with its own screenshot pair).
+ */
+export function formatMechanismVerdictLead(verdict: MechanismVerdict | null): string | null {
+  if (!verdict || verdict.verdict === 'viable') return null;
+  const label = verdict.verdict === 'not_viable' ? 'NOT SUPPORTABLE AS FRAMED' : 'BORDERLINE MECHANISM';
+  const head = (verdict.headline || '').trim();
+  const reason = (verdict.reason || '').trim();
+  const body = [head, reason].filter((s) => s.length > 0).join(' — ');
+  const lead = `⚠ MECHANISM CHECK — ${label}: ${body || 'the proposed connection lacks a clear physiologic mechanism; confirm before drafting'}`;
+  return /[.!?]$/.test(lead) ? lead : `${lead}.`;
+}
+
+/**
+ * Prepend the mechanism-verdict lead to a SOAP note's Assessment (Ryan 2026-07-21). ADDITIVE + RECOMMENDATION-
+ * ONLY: it touches ONLY `note.assessment` prose — never `action`, `confidence`, `viabilityBand`, or any
+ * decision-bearing field, and never the route-picker band the drafter reads. Fail-open: a null/viable verdict
+ * (or a note with no assessment) returns the note UNCHANGED, so a good draft is never touched and any failure
+ * upstream (the model returned null) leaves the note exactly as it renders today. Pure + idempotent-safe (it
+ * will not double-prepend an identical lead). This is the ONE place the verdict reaches the note; buildSoapNote
+ * is deliberately left untouched so its model behavior, grounding contract, and fingerprint are unchanged.
+ */
+export function withMechanismVerdictLead(note: SoapNote, verdict: MechanismVerdict | null): SoapNote {
+  const lead = formatMechanismVerdictLead(verdict);
+  if (lead === null) return note;
+  const assessment = (note.assessment ?? '').trim();
+  if (assessment.startsWith(lead)) return note; // already led (idempotent) — never double-prepend
+  return { ...note, assessment: assessment.length > 0 ? `${lead}\n\n${assessment}` : lead };
+}
+
+/**
+ * The one-line VIABILITY recommendation for the SOAP Plan (Ryan 2026-07-22). The Assessment lead is easy
+ * to skim past; the Plan is where the RN/physician reads "what do I do next", so the mechanism verdict
+ * ALSO surfaces here as a plain-language action line. Maps the three bands to Ryan's wording:
+ *   viable      → supportable, records permitting good to draft
+ *   borderline  → recommend a provider review the viability before drafting
+ *   not_viable  → records may be complete, but not supportable as framed → provider review first
+ * A null verdict (flag OFF / model returned null / any failure) → null → the Plan is UNCHANGED
+ * (byte-identical). Recommendation ONLY: it does NOT alter the Plan's own records/draft/decline work-order
+ * logic (that prose still follows); it PREFIXES a viability read the human weighs alongside it.
+ */
+export function formatMechanismVerdictPlanLine(verdict: MechanismVerdict | null): string | null {
+  if (!verdict) return null;
+  switch (verdict.verdict) {
+    case 'viable':
+      return 'Viability: supportable as framed — records permitting, good to draft.';
+    case 'borderline':
+      return '⚠ Viability: BORDERLINE — recommend a provider review the viability before drafting.';
+    case 'not_viable':
+      return '⚠ Viability: NOT SUPPORTABLE AS FRAMED — the records may be complete, but the proposed connection is not supportable; recommend a provider review the viability before drafting.';
+  }
+}
+
+/**
+ * Prepend the viability recommendation to a SOAP note's Plan (Ryan 2026-07-22). ADDITIVE + RECOMMENDATION-
+ * ONLY, exactly like withMechanismVerdictLead for the Assessment: touches ONLY `note.plan` prose — never
+ * `action`, `confidence`, `viabilityBand`, or any decision field, and never the route-picker band the
+ * drafter reads. Fail-open: a null verdict (or a note with no plan) returns the note UNCHANGED, so a good
+ * draft is untouched and an upstream failure leaves the Plan exactly as it renders today. Idempotent-safe.
+ */
+export function withMechanismVerdictPlan(note: SoapNote, verdict: MechanismVerdict | null): SoapNote {
+  const line = formatMechanismVerdictPlanLine(verdict);
+  if (line === null) return note;
+  const plan = (note.plan ?? '').trim();
+  if (plan.startsWith(line)) return note; // already prefixed (idempotent) — never double-prepend
+  return { ...note, plan: plan.length > 0 ? `${line}\n\n${plan}` : line };
 }
 
 export interface SoapContext {

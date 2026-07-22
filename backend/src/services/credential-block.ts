@@ -101,6 +101,105 @@ export function buildRendererCredentialLines(c: SignerCredentials): string {
 }
 
 /**
+ * The Section I credential-FACTS sentence(s) ONLY — the leading clause of the qualifications
+ * paragraph that carries the signer's name, board certification, license, and NPI, WITHOUT the
+ * fixed "I have no treatment relationship … VA disability claim." tail. This is the exact span the
+ * approve path rewrites when a non-Kasky physician signs a legacy hardcoded-Kasky letter (the tail
+ * — including the drafter-chosen veteran pronoun — is signer-agnostic and is left untouched).
+ *
+ * BYTE-IDENTITY: for a fully-credentialed physician (board + license present) this reproduces the
+ * historically-hardcoded Kasky prefix VERBATIM, so it is exactly `renderSection1Credentials(c, p)`
+ * minus its tail — the credential-block round-trip test pins this against demo-letter.txt.
+ *
+ * DPT-AWARE (mirrors buildRendererCredentialLines): a Doctor of Physical Therapy carries no board
+ * certification and letters render NPI-only, so the board clause and the license clause are each
+ * emitted only when their fields are present. A name+NPI-only provider renders a valid, board-free
+ * qualifications sentence rather than a malformed "board-certified in  through the  ()" fragment.
+ */
+export function renderSection1CredentialFacts(c: SignerCredentials): string {
+  const hasBoard = c.specialty.trim() !== '' && c.boardName.trim() !== '' && c.boardAbbreviation.trim() !== '';
+  const hasLicense = c.licenseState.trim() !== '' && c.licenseNumber.trim() !== '';
+  if (hasBoard && hasLicense) {
+    // Kasky path — BYTE-IDENTICAL to today's hardcoded Section I facts sentence.
+    return (
+      `I, ${c.fullNameWithCredential}, am board-certified in ${c.specialty} through the ` +
+      `${c.boardName} (${c.boardAbbreviation}). I hold an active medical license in ` +
+      `${c.licenseState} (License #${c.licenseNumber}) with NPI ${c.npi}.`
+    );
+  }
+  if (hasBoard && !hasLicense) {
+    return (
+      `I, ${c.fullNameWithCredential}, am board-certified in ${c.specialty} through the ` +
+      `${c.boardName} (${c.boardAbbreviation}). My National Provider Identifier (NPI) is ${c.npi}.`
+    );
+  }
+  if (!hasBoard && hasLicense) {
+    return (
+      `I am ${c.fullNameWithCredential}. I hold an active medical license in ` +
+      `${c.licenseState} (License #${c.licenseNumber}) with NPI ${c.npi}.`
+    );
+  }
+  // DPT path: the post-nominal in the name carries the qualification; NPI is the universal identifier.
+  return `I am ${c.fullNameWithCredential}. My National Provider Identifier (NPI) is ${c.npi}.`;
+}
+
+/**
+ * Rewrite the LEGACY hardcoded-Kasky Section I credential sentence so it names the ASSIGNED signer.
+ * The Fargate drafter bakes Dr. Kasky's Section I facts into the letter body and emits NO signer
+ * sentinel; when a different physician (e.g. Kevin Luiz, DPT) is the assigned signer, the positive
+ * name gate would 409 (`signer_name_absent`) because the body still reads "Ryan J. Kasky, DO …".
+ * This replaces the known hardcoded facts prefix with the assigned signer's facts, and — when the
+ * letter is co-signed — appends a one-sentence concurrence naming the co-signer.
+ *
+ * The replaced span is the pronoun-INDEPENDENT facts prefix (up through "… NPI 1073018958."); the
+ * fixed treatment-relationship tail that follows it in the body (with the drafter's veteran pronoun)
+ * is preserved verbatim.
+ *
+ * BYTE-IDENTICAL GUARANTEE (the c0 regression guard):
+ *   - When the assigned signer IS Dr. Kasky (NPI identity), return the input unchanged AND never
+ *     append a concurrence — the output is the input, character for character. Keyed on NPI, NOT a
+ *     rendered-form comparison: the drafter bakes the NPI-only form while renderSection1CredentialFacts
+ *     (KASKY) yields the license form, so a form-equality guard would REWRITE every real Kasky letter.
+ *   - When no known hardcoded-Kasky Section I prefix is present (already-sentinel-substituted,
+ *     hand-edited, or authored under a different name), nothing matches → the input passes through
+ *     untouched and the downstream name gate still fires. This never manufactures a passing letter.
+ * split().join() (not replaceAll) so a `$` in any credential can never be read as a replacement pattern.
+ */
+export function substituteHardcodedSection1Credentials(
+  letterText: string,
+  signerCreds: SignerCredentials,
+  coSignerCredentialedName: string | null,
+): string {
+  // Kasky signs a Kasky letter → byte-identical no-op, keyed on NPI identity (see doc above).
+  if (signerCreds.npi.trim() === KASKY_CREDENTIALS.npi.trim()) return letterText;
+  const replacement = renderSection1CredentialFacts(signerCreds);
+  const concurrence =
+    coSignerCredentialedName !== null && coSignerCredentialedName.trim() !== ''
+      ? ` This opinion has been independently reviewed and concurred in by ${coSignerCredentialedName}.`
+      : '';
+  // Anchor on the drafter's ACTUAL baked prefix first (the NPI form the Fargate drafter emits today),
+  // then the legacy license form as a fallback for any older letter that still carries it. First anchor
+  // present wins; none present → not a hardcoded-Kasky letter → untouched.
+  const legacyLicenseForm = renderSection1CredentialFacts(KASKY_CREDENTIALS);
+  for (const anchor of [DRAFTER_HARDCODED_SECTION1_FACTS, legacyLicenseForm]) {
+    if (letterText.includes(anchor)) return letterText.split(anchor).join(replacement + concurrence);
+  }
+  return letterText;
+}
+
+/**
+ * The Section I credential-facts prefix the Fargate drafter ACTUALLY bakes into every letter body
+ * (app/services/claude.js `lockedSectionI`). NPI-only form adopted 2026-06-10 when the medical-license
+ * line was removed from rendered letters. The prior anchor re-derived this from KASKY_CREDENTIALS (which
+ * carries a Nevada license) → the LICENSE form, which matches only the stale demo-letter.txt fixture and
+ * NEVER a real letter, so the substitution silently no-op'd on every live letter (Kevin Luiz DPT could
+ * not sign, 2026-07-21). Kept as a verbatim literal so it tracks the drafter's real output. If the
+ * drafter's Section I wording ever changes, THIS constant must change with it (there is a paired test).
+ */
+export const DRAFTER_HARDCODED_SECTION1_FACTS =
+  'I, Ryan J. Kasky, DO, am board-certified in Family Medicine through the American Board of Osteopathic Family Physicians (ABOFP). My National Provider Identifier (NPI) is 1073018958.';
+
+/**
  * Replace the signer sentinels in a letter with the assigned physician's rendered blocks. A
  * no-op when no sentinel is present (the legacy hardcoded-credential letters that exist today
  * pass through byte-identical). Idempotent. split().join() rather than replaceAll so a `$` in a

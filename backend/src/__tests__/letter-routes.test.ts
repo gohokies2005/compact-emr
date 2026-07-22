@@ -4,7 +4,7 @@ import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLetterRouter, staleSignOffOutcome, type LetterRouterDeps } from '../routes/letter.js';
 import { isHttpError, sendError } from '../http/errors.js';
-import { KASKY_CREDENTIALS, type SignerCredentials } from '../services/credential-block.js';
+import { KASKY_CREDENTIALS, renderSection1Credentials, type SignerCredentials } from '../services/credential-block.js';
 import type { AppDb, CaseRecord, LetterRevisionRecord, PhysicianRecord, Role } from '../services/db-types.js';
 
 interface MockUser { readonly sub: string; readonly email?: string; readonly roles: Role[]; }
@@ -20,6 +20,29 @@ vi.mock('../auth/roles', () => ({
       next();
     },
 }));
+
+// The read path presigns pdf/docx URLs; stub the presigner so GET /letter reaches a full 200 in the
+// harness (the real presigner needs live client credentials). We assert on the response TEXT, not URLs.
+vi.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: vi.fn(async () => 'https://signed.example/artifact') }));
+
+// The EXACT Section I the live Fargate drafter bakes (app/services/claude.js lockedSectionI, NPI form)
+// + the fixed treatment tail — the production shape a real letter carries (NOT demo-letter.txt's
+// license form). This is the string the display/approve substitution MUST match.
+const REAL_DRAFTER_LETTER = [
+  'July 15, 2026', '', 'RE: Independent Medical Opinion', 'Veteran: Lawrence Tomek',
+  'I. Physician Qualifications', '',
+  'I, Ryan J. Kasky, DO, am board-certified in Family Medicine through the American Board of ' +
+    'Osteopathic Family Physicians (ABOFP). My National Provider Identifier (NPI) is 1073018958. ' +
+    'I have no treatment relationship with this veteran. This letter is an independent medical opinion ' +
+    'prepared for the purpose of his VA disability claim.',
+  '', 'II. Methodology', '',
+  'An in-person or telehealth examination is not required for an independent medical opinion.',
+].join('\n');
+const KEVIN_DPT_CREDS: SignerCredentials = {
+  fullNameWithCredential: 'Kevin Luiz, DPT',
+  specialty: '', boardName: '', boardAbbreviation: '', licenseState: '', licenseNumber: '',
+  npi: '1861292955',
+};
 
 const LETTER_TXT = [
   'I, Ryan J. Kasky, DO, am board-certified in Family Medicine.',
@@ -89,7 +112,7 @@ function makeDb(
   const roster = opts.roster ?? [physician()];
   const tx = {
     case: { findFirst: vi.fn(async () => initialCase), findUnique: vi.fn(async () => initialCase), findMany: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn(async () => initialCase) },
-    veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
+    veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })), findFirst: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
     letterRevision: { findFirst: vi.fn(async () => ({ ...currentRevision(initialCase.currentVersion), ...(opts.currentRevisionOverride ?? {}) })), findMany: vi.fn(async () => []), create: vi.fn(async () => currentRevision()), update: vi.fn(async () => currentRevision()) },
     draftJob: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
     activityLog: { create: vi.fn(async () => ({})) },
@@ -183,6 +206,35 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     expect(res.body.error.details.reason).toBe('no_letter');
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('no_artifact caseId=CASE-1 currentVersion=0'));
     warnSpy.mockRestore();
+  });
+
+  it('GET /letter DISPLAYS the assigned DPT signer in Section I — the editor matches the letter that will be signed (Kevin Luiz, 2026-07-21)', async () => {
+    // THE bug: Kevin Luiz DPT assigned to a hardcoded-Kasky letter, but admin/physician opening the
+    // editor still saw "Ryan J. Kasky, DO". The read path now substitutes the assigned signer's Section I
+    // for DISPLAY (stored draft stays canonical; save untouched; approve applies the same substitution).
+    mockUser = { sub: 'PHYS-SUB', roles: ['admin'] };
+    const kevin = physician({ fullName: 'Kevin Luiz, DPT', npi: '1861292955', credentialBlockJson: { ...KEVIN_DPT_CREDS } });
+    const { db } = makeDb(baseCase(), { signer: kevin, self: kevin, roster: [kevin] });
+    const d = deps({ s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => REAL_DRAFTER_LETTER } })) } as unknown as LetterRouterDeps['s3'] });
+    const res = await request(appFor(db, d)).get('/api/v1/cases/CASE-1/letter');
+    expect(res.status).toBe(200);
+    expect(res.body.data.txt, 'the editor must show the assigned DPT, not Kasky').toContain('Kevin Luiz, DPT');
+    expect(res.body.data.txt).toContain('1861292955');
+    expect(res.body.data.txt).not.toContain('I, Ryan J. Kasky, DO, am board-certified');
+    // The locked treatment tail still survives (it is signer-agnostic).
+    expect(res.body.data.txt).toContain('I have no treatment relationship with this veteran');
+    // locked_ranges computed on the DISPLAYED text, so the greyed Section I covers Kevin's line.
+    expect(Array.isArray(res.body.data.locked_ranges)).toBe(true);
+  });
+
+  it('GET /letter is BYTE-IDENTICAL (canonical, unchanged) when Dr. Kasky is the assigned signer', async () => {
+    // The critical regression guard: the read path is a pure no-op for a Kasky-signed letter.
+    mockUser = { sub: 'PHYS-SUB', roles: ['admin'] };
+    const { db } = makeDb(); // signer defaults to Kasky (PHYS-001)
+    const d = deps({ s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => REAL_DRAFTER_LETTER } })) } as unknown as LetterRouterDeps['s3'] });
+    const res = await request(appFor(db, d)).get('/api/v1/cases/CASE-1/letter');
+    expect(res.status).toBe(200);
+    expect(res.body.data.txt).toBe(REAL_DRAFTER_LETTER);
   });
 
   it('surgical-ai PROPOSE returns a proposal + preview + cost (no save)', async () => {
@@ -554,7 +606,7 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
           findFirst: vi.fn(async () => caseRow), findUnique: vi.fn(async () => caseRow),
           update: vi.fn(async (a: { data: Record<string, unknown> }) => { caseUpdates.push(a.data); return caseRow; }),
         },
-        veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
+        veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })), findFirst: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
         letterRevision: {
           // STRICT resolve at v39 → null (stranded); the recovery winner v40 → the good row.
           findFirst: vi.fn(async (a: { where?: { version?: number } }) => (a.where?.version === 40 ? v40row : null)),
@@ -701,7 +753,7 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
           findFirst: vi.fn(async () => caseRow), findUnique: vi.fn(async () => caseRow),
           update: vi.fn(async (a: { data: Record<string, unknown> }) => { caseUpdates.push(a.data); return caseRow; }),
         },
-        veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
+        veteran: { findUnique: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })), findFirst: vi.fn(async () => ({ id: 'VET-1', firstName: 'Robert', lastName: 'Testcase' })) },
         letterRevision: {
           findFirst: vi.fn(async (a: { where?: { version?: number } }) => (a.where?.version === 40 ? v40row : null)),
           findMany: recoveryWalk,
@@ -1042,6 +1094,56 @@ describe('letter editor routes — surgical-AI / approve / decline', () => {
     const res = await request(appFor(db, deps())).post('/api/v1/cases/CASE-1/letter/approve').send({});
     expect(res.status).toBe(409);
     expect(res.body.error.details.reason).toBe('co_signer_not_found');
+  });
+
+  // ── LEGACY hardcoded-Kasky Section I → assigned-signer rewrite (Kevin Luiz, DPT, 2026-07-21) ──
+  // The Fargate drafter bakes Kasky's Section I facts into the body + emits no sentinel; a non-Kasky
+  // assigned signer would 409 signer_name_absent. The approve path now rewrites that sentence.
+  const KASKY_SECTION1 = renderSection1Credentials(KASKY_CREDENTIALS, 'his');
+  const LETTER_KASKY_FULL = ['I. Physician Qualifications', '', KASKY_SECTION1, '', 'The veteran has lumbosacral strain.'].join('\n');
+  const KEVIN_DPT_BLOCK = {
+    fullNameWithCredential: 'Kevin Luiz, DPT', specialty: '', boardName: '', boardAbbreviation: '',
+    licenseState: '', licenseNumber: '', npi: '1861292955',
+  };
+
+  it('c0 BYTE-IDENTICAL: Kasky signing a hardcoded-Kasky letter renders the EXACT input text (no rewrite)', async () => {
+    // The regression guard: the substitution must not alter a single byte when the assigned signer
+    // is the physician already named in the body.
+    const { db } = makeDb();
+    const d = deps({ s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => LETTER_KASKY_FULL } })) } as unknown as LetterRouterDeps['s3'] });
+    const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(200);
+    const letterText = (d.renderLetter as ReturnType<typeof vi.fn>).mock.calls[0][0].letterText as string;
+    expect(letterText).toBe(LETTER_KASKY_FULL); // byte-for-byte
+  });
+
+  it('DPT primary + Kasky co-sign: approve 200, Section I rewritten to the DPT + Kasky concurrence, no foreign 409', async () => {
+    mockUser = { sub: 'ADMIN', roles: ['admin'] };
+    const dptSigner = physician({
+      id: 'PHYS-DPT', cognitoSub: 'DPT-SUB', fullName: 'Kevin Luiz, DPT', npi: '1861292955',
+      specialty: '', medicalLicense: '',
+      signatureImageS3Key: 'physician-signatures/PHYS-DPT/sig.png',
+      credentialBlockJson: { ...KEVIN_DPT_BLOCK },
+      coSignedByPhysicianId: 'PHYS-OWNER',
+    });
+    // Co-signer = Kasky (default physician creds), a real signature on file.
+    const kaskyCoSigner = physician({ id: 'PHYS-OWNER', cognitoSub: 'OWNER-SUB', signatureImageS3Key: 'physician-signatures/PHYS-OWNER/kasky.png' });
+    const { db } = makeDb(baseCase({ assignedPhysicianId: 'PHYS-DPT' }), { signer: dptSigner, coSigner: kaskyCoSigner, roster: [dptSigner, kaskyCoSigner] });
+    const d = deps({ s3: { send: vi.fn(async () => ({ Body: { transformToString: async () => LETTER_KASKY_FULL } })) } as unknown as LetterRouterDeps['s3'] });
+    const res = await request(appFor(db, d)).post('/api/v1/cases/CASE-1/letter/approve').send({});
+    expect(res.status).toBe(200); // did NOT 409 signer_name_absent or foreign_signer_name
+    const call = (d.renderLetter as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const letterText = call.letterText as string;
+    // Section I now names the DPT + NPI + a Kasky concurrence; Kasky is no longer the primary author.
+    expect(letterText).toContain('I am Kevin Luiz, DPT. My National Provider Identifier (NPI) is 1861292955.');
+    expect(letterText).toContain('This opinion has been independently reviewed and concurred in by Ryan J. Kasky, DO.');
+    expect(letterText).toContain('I have no treatment relationship with this veteran'); // locked tail survives
+    expect(letterText).not.toContain('I, Ryan J. Kasky, DO, am board-certified');
+    expect(letterText).not.toContain('board-certified in Family Medicine');
+    // Render payload: signer block = DPT (no board line); co-signer block = Kasky (multi-line).
+    expect(call.caseData.signer_name).toBe('Kevin Luiz, DPT\nNPI: 1861292955');
+    expect(call.caseData.cosigner_name).toBe('Ryan J. Kasky, DO\nBoard-Certified in Family Medicine, ABOFP\nNPI: 1073018958');
+    expect(call.caseData.cosigner_signature_image_s3_key).toBe('physician-signatures/PHYS-OWNER/kasky.png');
   });
 
   // ── Chart-readiness machine-read gate at approve: descriptive 409 + honored override

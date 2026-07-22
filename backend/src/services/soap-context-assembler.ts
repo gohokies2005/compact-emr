@@ -17,7 +17,8 @@
 // Fail-open everywhere: any sub-derivation that throws degrades to a null/empty field, never blocks the note.
 
 import type { AppDb } from './db-types.js';
-import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote, reconcileStickyAction } from './soap-overview.js';
+import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote, reconcileStickyAction, withMechanismVerdictLead, withMechanismVerdictPlan } from './soap-overview.js';
+import { deriveMechanismVerdict, type MechanismVerdict } from './mechanism-viability.js';
 import { type AiViabilityCard, getAiViabilityState } from './ai-viability.js';
 import { buildDigestForCase } from '../advisory/chartSlice.js';
 import { loadExtractionCoverageForCase } from './extraction-coverage.js';
@@ -251,10 +252,29 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
     // band decided it) — an UNGROUNDED recompute keeps the prior decision so the chip does not flicker. Prose is
     // still regenerated freely. `framing !== null` is exactly "is this run grounded".
     const grounded = framing !== null;
+    // MECHANISM VERDICT (Ryan 2026-07-21) — an ADDITIVE, recommendation-only lead on the Assessment that
+    // flags a medically-implausible LEAD pairing (the burn-pit -> OSA class the table-based band missed).
+    // Computed HERE (the 110s async budget) rather than on the 25s sync open, because it is a second Opus
+    // call; DARK by default (SOAP_MECHANISM_VERDICT_ENABLED). It reads the LEAD pairing off the SAME persisted
+    // route-picker plan the note grounds on (card.lead.upstream / .claimed) — no new source of truth. Baking
+    // it into the persisted note here means every serve path (decideServeStored / pollOnly / the sync build)
+    // renders it for $0 with NO change to the sync path. Fail-open: null verdict -> the note is unchanged; it
+    // NEVER blocks the drafter (which reads the route-picker band, not this note) and never blocks a draft.
+    let mechanismVerdict: MechanismVerdict | null = null;
+    try {
+      if (card && card.lead && card.lead.upstream) {
+        mechanismVerdict = await deriveMechanismVerdict(card.lead.claimed || card.inputClaimed, card.lead.upstream);
+      }
+    } catch { mechanismVerdict = null; }
     const built = await getOrBuildSoapNote(db as unknown as SoapOverviewCacheDb, caseId, ctx, {
       forceRegenerate: true,
       timeoutMs,
-      reconcile: (fresh, stored) => reconcileStickyAction(fresh, stored, grounded),
+      // The verdict is folded AFTER sticky-action reconciliation, so it touches only the Assessment + Plan
+      // prose and never the chip-bearing action reconcileStickyAction owns. withMechanismVerdictLead
+      // (Assessment) is a no-op on a null/viable verdict; withMechanismVerdictPlan (Plan, Ryan 2026-07-22)
+      // adds a one-line viability recommendation on the Plan (all 3 bands) and is a no-op on a null verdict.
+      // Both are recommendation-only prose prefixes; a good draft's decision fields are untouched.
+      reconcile: (fresh, stored) => withMechanismVerdictPlan(withMechanismVerdictLead(reconcileStickyAction(fresh, stored, grounded), mechanismVerdict), mechanismVerdict),
     });
     // Observability (Bays SOAP banner, 2026-06-26): log the PERSISTED outcome, not just "didn't throw".
     // fallback:true = a truncated/error brief was served and NOT persisted (the heal did NOT happen this

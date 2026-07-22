@@ -314,6 +314,15 @@ export class ApiStack extends Stack {
         // TURN ON: pass --context veteran_theory_ai_enabled=true (or set it in cdk.json) + deploy. Display-only;
         // never influences the drafter (enforced by veteran-theory-drafter-isolation.test.ts).
         VETERAN_THEORY_AI_ENABLED: (this.node.tryGetContext('veteran_theory_ai_enabled') as string | undefined) ?? 'false',
+        // SOAP_MECHANISM_VERDICT_ENABLED (Ryan 2026-07-22): the mechanism viability verdict — a bold
+        // MEDICALLY VIABLE / BORDERLINE / NOT-SUPPORTABLE-AS-FRAMED lead on the SOAP Assessment, grounded
+        // in the library/PubMed retrieval. Recommendation ONLY (never gates a draft); fail-open; computed
+        // in the async SOAP precompute (Opus call, off the 25s sync open). Default 'true' → LIVE. Like the
+        // flag above it lives in THIS CDK env map so it survives a converge (a console env edit would be
+        // reverted by the next `cdk deploy --all`). REVERT: pass --context soap_mechanism_verdict_enabled=false
+        // + deploy (or set it in cdk.json). Note: the flag is NOT in soapNoteFingerprint, so existing stored
+        // notes only pick up the verdict when they next recompute (schema bump or a per-case recompute).
+        SOAP_MECHANISM_VERDICT_ENABLED: (this.node.tryGetContext('soap_mechanism_verdict_enabled') as string | undefined) ?? 'true',
         // Phase 7B: literal worker token from Secrets Manager. unsafeUnwrap embeds the
         // secret value in the Lambda env at deploy time (visible to iam:GetFunction holders).
         // Acceptable for now; future hardening is to switch to runtime SecretsManager.GetSecretValue

@@ -21,7 +21,15 @@ import {
 import { isAssignedPhysicianForCase, resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor, type RequestActor } from '../services/request-actor.js';
 import { computeApproveBlockers, type ApproveBlocker, type ApproveBlockerDeps } from '../services/approve-blockers.js';
-import { resolveCurrentRefStrict, resolveViewableCurrentTxtKey, type CurrentRef } from '../services/letter-current.js';
+import { resolveCurrentRefStrict, resolveViewableCurrentTxtKey, readTxtFromS3, resolveCurrentRevisionMeta, type CurrentRef } from '../services/letter-current.js';
+import {
+  parseCredentialBlock,
+  substituteSignerSentinels,
+  substituteHardcodedSection1Credentials,
+  buildRendererCredentialLines,
+  KASKY_CREDENTIALS,
+} from '../services/credential-block.js';
+import { EDITABLE_STATUSES, type RenderInvoker } from './letter.js';
 import { assertDeliveryEligible } from '../services/delivery-eligibility.js';
 import { generateDoctorPackForCase } from '../services/doctor-pack-generate.js';
 import { fireRecomputeViability } from '../services/recompute-viability-trigger.js';
@@ -358,10 +366,158 @@ function roleGuardForStatusTransition(db: AppDb) {
   });
 }
 
-// deps carries S3 (+ bucket) ONLY for the advisory approve-blocker pre-flight on GET /cases/:id
-// (the signer-name check reads the current letter TXT). Optional: when absent the text-dependent
-// checks are skipped and everything else still works (fail-open).
-export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Router {
+/**
+ * BEST-EFFORT, FAIL-OPEN draft re-render after a physician is assigned (2026-07-21).
+ *
+ * When a case that already has a drafted (unsigned) letter is assigned to a NON-Kasky signer, the
+ * interim draft PDF/DOCX still shows the drafter's hardcoded "Ryan J. Kasky, DO" Section I — only the
+ * editor TXT (GET /letter) and the final SIGNED letter (approve) reflected the assigned signer before
+ * this feature. This step overwrites the CURRENT draft version's pdf/docx IN PLACE so the "Open PDF"
+ * preview on an unsigned draft matches the assigned signer, MIRRORING the approve path's signer +
+ * co-signer resolution (routes/letter.ts). It does NOT touch the approve route, the PUT save, the GET
+ * display block, or the drafter.
+ *
+ * ISOLATION CONTRACT — this must NEVER break the assign response, the approve/sign path, the letter
+ * save, or the drafter:
+ *   - Wrapped entirely in try/catch; every failure (resolution, S3 read, render) is logged + SWALLOWED.
+ *     It NEVER throws. The assign endpoint returns its normal 200 regardless.
+ *   - SKIPPED whole when renderLetter / s3 / bucket are not wired (unit tests, local) — no behavior change.
+ *   - No-op for Kasky (NPI identity): the canonical draft is already Kasky, so renderLetter is not called.
+ *   - Does NOT create a new version, does NOT move Case.currentVersion, does NOT write a LetterRevision,
+ *     and does NOT rewrite the canonical TXT.
+ *
+ * CANONICAL-TXT PRESERVATION (load-bearing — the re-assignment correctness guard): the render Lambda
+ * PutObjects ALL THREE keys it is handed, INCLUDING keys.txtKey (render-lambda-handler.js writes
+ * letterText to txtKey unconditionally). Handing it the REAL current txtKey would clobber the drafter's
+ * Kasky-anchored canonical TXT with the substituted signer text — so a LATER re-assignment (Kevin→Jane)
+ * would find no Kasky anchor left to substitute and would freeze on the first signer. To keep the
+ * canonical TXT immutable we hand the renderer a THROWAWAY sidecar txt key and point ONLY pdf/docx at
+ * the real current keys: the pdf/docx bytes change in place, the canonical TXT does not. Every
+ * assignment always re-substitutes the current signer's Section I from the same canonical Kasky text.
+ */
+async function reRenderCurrentDraftForAssignedSigner(
+  db: AppDb,
+  deps: CasesRouterDeps,
+  caseId: string,
+): Promise<void> {
+  try {
+    const { renderLetter, s3, bucketName } = deps;
+    // Fail-open: the re-render needs the render Lambda + S3 wired. Absent → skip (no behavior change).
+    if (renderLetter === undefined || s3 === undefined || bucketName === undefined) return;
+
+    // Fresh case row (post-commit): the assigned signer + the current draft pointer + status.
+    const c = await db.case.findFirst({
+      where: { id: caseId },
+      select: { id: true, veteranId: true, currentVersion: true, claimedCondition: true, assignedPhysicianId: true, status: true },
+    });
+    if (c === null || c.assignedPhysicianId === null) return;
+
+    // ── SIGNED-ARTIFACT PROTECTION (deploy-blocker fix, 2026-07-21) ──────────────────────────────────
+    // assign-physician is allowed on ANY status (admin/ops reassignment), but this in-place overwrite is
+    // ONLY safe for an editable DRAFT. On a delivered/paid/approved case, resolveViewableCurrentTxtKey
+    // resolves the SIGNED version's real pdf/docx keys, and overwriting them with a draft-watermarked
+    // (possibly different-signer) render would CORRUPT the veteran-facing signed artifact — and the
+    // normal-path delivery gate hashes the TXT (which we preserve), so it would NOT catch it. Three
+    // independent fail-open guards, all logged, all before any render:
+    //   1) Only re-render an EDITABLE status (delivered/paid/approved/rejected are OUT — the SSOT set
+    //      lives in routes/letter.ts so this can never drift from what the editor treats as mutable).
+    if (!EDITABLE_STATUSES.has(c.status)) return;
+    //   2) Never touch an externally-imported letter: its PDF is the authoritative signed artifact and
+    //      has no re-renderable canonical TXT. EXPLICIT, not reliant on the docx key happening to be null.
+    const revMeta = await resolveCurrentRevisionMeta(db, caseId, c.currentVersion);
+    if (revMeta !== null && revMeta.source === 'external_import') return;
+    //   3) Belt-and-suspenders: never overwrite the exact bytes a physician has already signed off on
+    //      (a SignOff bound to the current version). The G4 re-sign lifecycle should have moved status
+    //      already, but this guarantees we never rewrite a signed version's artifacts even if it didn't.
+    const signOffs = await db.signOff.findMany({ where: { caseId } });
+    if (signOffs.some((s) => s.signedVersion === c.currentVersion)) return;
+
+    // Resolve the assigned signer + creds (mirror approve). Inactive / missing / incomplete-credential /
+    // no-signature → SKIP (fail-open): an unsignable signer is the approve route's authoritative gate,
+    // never something the assign endpoint should surface or fail on.
+    const signer = await db.physician.findFirst({ where: { id: c.assignedPhysicianId } });
+    if (signer === null || !signer.active) return;
+    const signerCreds = parseCredentialBlock(signer.credentialBlockJson);
+    if (signerCreds === null) return;
+    // No-op for Kasky (NPI identity) — the canonical draft PDF is already Kasky. renderLetter not called.
+    if (signerCreds.npi.trim() === KASKY_CREDENTIALS.npi.trim()) return;
+    const signatureKey = signer.signatureImageS3Key;
+    if (signatureKey === null || signatureKey.trim() === '') return;
+
+    // Co-signer (mirror approve). If a co-sign is configured but not fully renderable, SKIP the whole
+    // re-render (fail-open) — co-signer completeness is enforced at approve, not here.
+    let cosignerFields: { cosigner_name: string; cosigner_signature_image_s3_key: string } | undefined;
+    let coSignerName: string | null = null;
+    if (signer.coSignedByPhysicianId != null) {
+      const coSigner = await db.physician.findFirst({ where: { id: signer.coSignedByPhysicianId } });
+      if (coSigner === null || !coSigner.active) return;
+      const coSignerCreds = parseCredentialBlock(coSigner.credentialBlockJson);
+      if (coSignerCreds === null) return;
+      const coSignatureKey = coSigner.signatureImageS3Key;
+      if (coSignatureKey === null || coSignatureKey.trim() === '') return;
+      cosignerFields = { cosigner_name: buildRendererCredentialLines(coSignerCreds), cosigner_signature_image_s3_key: coSignatureKey };
+      coSignerName = coSignerCreds.fullNameWithCredential;
+    }
+
+    // Resolve the CURRENT letter (txt + pdf/docx keys) via the SAME recovery-capable resolver the
+    // editor/read path uses. No current letter (currentVersion 0 / nothing resolvable), or missing
+    // pdf/docx to overwrite → SKIP.
+    const ref = await resolveViewableCurrentTxtKey(db, s3, bucketName, caseId, c.currentVersion);
+    if (ref === null || ref.pdfKey === null || ref.docxKey === null) return;
+
+    // Read the CANONICAL txt (drafter Kasky-anchored) and substitute the assigned signer's Section I —
+    // mirror approve: sentinel substitution (no-op on legacy letters) then the hardcoded-Kasky rewrite.
+    const canonicalTxt = await readTxtFromS3(s3, bucketName, ref.txtKey, { caseId, version: ref.version });
+    const sentinelText = substituteSignerSentinels(canonicalTxt, signerCreds, 'their');
+    const substituted = substituteHardcodedSection1Credentials(sentinelText, signerCreds, coSignerName);
+
+    const veteran = await db.veteran.findUnique({ where: { id: c.veteranId } });
+    if (veteran === null) return;
+    const caseData = {
+      id: caseId,
+      veteran_name: `${veteran.firstName} ${veteran.lastName}`.trim(),
+      veteran_last: veteran.lastName,
+      claimed_condition: c.claimedCondition,
+      // Multi-line NPI-only credential block (name + board-cert + NPI) — same builder approve uses.
+      signer_name: buildRendererCredentialLines(signerCreds),
+      signature_image_s3_key: signatureKey,
+      ...(cosignerFields ?? {}),
+    };
+
+    // Overwrite the CURRENT version's pdf/docx IN PLACE (same version, draft watermark). The txt is
+    // routed to a THROWAWAY sidecar key so the canonical Kasky TXT is preserved (see doc above). No new
+    // version, no currentVersion change, no LetterRevision row.
+    const previewTxtKey = `${ref.txtKey}.assigned-signer-preview.txt`;
+    await renderLetter({
+      caseData,
+      letterText: substituted,
+      version: ref.version,
+      draft: true,
+      bucket: bucketName,
+      keys: { txtKey: previewTxtKey, pdfKey: ref.pdfKey, docxKey: ref.docxKey },
+    });
+  } catch (err) {
+    // FAIL-OPEN: the assign endpoint must return its normal 200 regardless — log structured + swallow.
+    console.warn(JSON.stringify({
+      msg: 'assign_physician_rerender_failed',
+      caseId,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+}
+
+// deps carries S3 (+ bucket) for the advisory approve-blocker pre-flight on GET /cases/:id (the
+// signer-name check reads the current letter TXT) AND — optionally — renderLetter for the best-effort
+// assign-physician draft re-render (below). All optional: when absent the text-dependent checks and
+// the re-render are skipped and everything else still works (fail-open).
+export interface CasesRouterDeps extends ApproveBlockerDeps {
+  // The SAME render-Lambda invoker the letter editor uses (server.ts). Present in prod, ABSENT in unit
+  // tests / local / render-less envs — in which case the assign-physician draft re-render is skipped
+  // entirely (zero behavior change). Never required for any existing cases-route behavior.
+  readonly renderLetter?: RenderInvoker;
+}
+
+export function createCasesRouter(db: AppDb, deps: CasesRouterDeps = {}): Router {
   const router = Router();
 
 
@@ -1317,11 +1473,18 @@ export function createCasesRouter(db: AppDb, deps: ApproveBlockerDeps = {}): Rou
         return row;
       });
 
+      // BEST-EFFORT, FAIL-OPEN (2026-07-21): now that the assignment has COMMITTED, refresh the current
+      // draft's pdf/docx to the newly-assigned signer's Section I so the "Open PDF" preview on an
+      // unsigned draft matches the signer. NEVER throws (fully try/catch-wrapped internally) and is a
+      // no-op when the render Lambda / S3 are unwired or the signer is Kasky. The assign response is
+      // returned regardless — this can never break assign, approve/sign, save, or the drafter.
+      await reRenderCurrentDraftForAssignedSigner(db, deps, id);
+
       res.json({ data: withRecordsSignal(updated as unknown as Record<string, unknown>) });
     }),
   );
 
-  
+
 
   router.post(
     '/cases/:id/assign-rn',

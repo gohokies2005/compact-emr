@@ -145,11 +145,19 @@ export function createApp(options: CreateAppOptions = {}) {
 
   app.use('/api/v1', authenticateJwt(), createVeteransRouter(db));
   app.use('/api/v1', authenticateJwt(), createDocumentsRouter());
+  // Shared render-Lambda invoker: the letter editor uses it for PUT/approve re-render, and the cases
+  // router uses the SAME invoker for the best-effort assign-physician draft re-render. undefined when
+  // RENDER_LAMBDA_NAME is unset (local/render-less/test) → the cases re-render skips, the letter router
+  // 503s. Built once here so both mounts share one client.
+  const renderLambdaName = process.env.RENDER_LAMBDA_NAME;
+  const renderLetterInvoker = renderLambdaName ? makeRenderInvoker(renderLambdaName) : undefined;
   // S3 + bucket feed the advisory approve-blocker pre-flight on GET /cases/:id (the signer-name
-  // check reads the current letter TXT); absent bucket = text checks skipped, never an error.
+  // check reads the current letter TXT); absent bucket = text checks skipped, never an error. renderLetter
+  // (optional) powers the best-effort assign-physician draft re-render; absent = that step is skipped.
   app.use('/api/v1', authenticateJwt(), createCasesRouter(db, {
     s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
     bucketName: process.env.PHI_BUCKET_NAME,
+    ...(renderLetterInvoker ? { renderLetter: renderLetterInvoker } : {}),
   }));
   app.use('/api/v1', authenticateJwt(), createEmailsRouter(db, { bucketName: process.env.PHI_BUCKET_NAME, s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }) }));
   app.use('/api/v1', authenticateJwt(), createMailboxesRouter(db));
@@ -208,12 +216,11 @@ export function createApp(options: CreateAppOptions = {}) {
   // the API_ANTHROPIC_KEY_SECRET_ARN the API Lambda can read at runtime (filled post-deploy, no
   // redeploy needed). Both fail soft to a clear 503 when absent, so local dev and a render-less env
   // stay safe and GET (view) always works.
-  const renderLambdaName = process.env.RENDER_LAMBDA_NAME;
   const surgicalAiAvailable = Boolean(process.env.ANTHROPIC_API_KEY || process.env.API_ANTHROPIC_KEY_SECRET_ARN);
   app.use('/api/v1', authenticateJwt(), createLetterRouter(db, {
-    renderLetter: renderLambdaName
-      ? makeRenderInvoker(renderLambdaName)
-      : async () => { throw new HttpError(503, 'internal_error', 'Letter render is not configured in this environment.', { reason: 'render_unavailable' }); },
+    // Reuse the shared invoker built above (RENDER_LAMBDA_NAME); 503 when the render Lambda is unconfigured.
+    renderLetter: renderLetterInvoker
+      ?? (async () => { throw new HttpError(503, 'internal_error', 'Letter render is not configured in this environment.', { reason: 'render_unavailable' }); }),
     ...(surgicalAiAvailable ? { proposeSurgicalEdit: makeSurgicalProposerFromEnv() } : {}),
     // Citation Enricher (Feature B, 2026-06-24): the grounded NCBI retrieve + apply-time re-verify are
     // always wired (they need only outbound HTTPS to eutils, available via the existing NAT — no

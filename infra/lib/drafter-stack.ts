@@ -280,6 +280,12 @@ export class DrafterStack extends Stack {
         //     (29332084); live Washington bridge now returns 3 real "OCD after TBI" papers.
         // Flag OFF stays byte-identical/safe as the instant kill-switch if anything regresses.
         FRN_AI_FOLDER_PICKER: 'on',
+        // FRN_NEGATIVE_PAIRINGS (Ryan 2026-07-22): step0 surfaces a curated NEGATIVE-PAIRING recommendation
+        // (not-supportable + mechanistic reason + counterargument + PMIDs) when the lead/veteran pairing matches
+        // a known dead-end — RECOMMENDATION ONLY, never a hard-block; the drafter always drafts. Byte-identical
+        // to the letter output when off/non-match (2-agent QA proven: adds only a top-level out.negative_pairing
+        // advisory field the citation loader never reads). Kill-switch = flip to 'off' + drafter deploy.
+        FRN_NEGATIVE_PAIRINGS: 'on',
         // DRAFTER_TRANSIENT_RESILIENCE (Ryan 2026-07-05): #3/#4 hardening — a TRANSIENT LLM hiccup
         // (overload/timeout) or a DIRECT/zero-granted-SC claim (Scott/Drummond class) must NEVER fatal-with-
         // no-letter. ON: (#3) the framing self-heal degrades to a conservative DIRECT 3.303 holding when zero

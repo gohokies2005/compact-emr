@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   buildDeliveryEmail,
   buildCoverMemoText,
+  extractLetterCondition,
   DELIVERY_EMAIL_SUBJECT,
   DELIVERY_FROM_ADDRESS,
   FRN_FOOTER,
 } from '../services/delivery-templates.js';
+import { formatConditionLabel } from '../services/condition-label.js';
 import { KASKY_CREDENTIALS } from '../services/credential-block.js';
 
 // Chunk E2 (work-order 5a-bis2): the delivery email body order is greeting → intro → payment
@@ -180,6 +182,69 @@ describe('buildCoverMemoText (E4 bug fixes)', () => {
   it('HLR pathway with a valid date prints it', () => {
     const memo = buildCoverMemoText({ ...base, pathway: 'hlr_request', priorDecisionDate: '2026-01-15' });
     expect(memo).toContain('Higher-Level Review of the prior decision dated January 15, 2026.');
+  });
+});
+
+// ── Memo condition = the approved letter's Condition line, VERBATIM (Ryan 2026-07-22) ─────────────
+// "make the subject and body match the Condition line of the approved letter precisely; it's a bad
+// look when it's wrong, and it's wrong a lot." The chart/plan-derived path also re-cased the label
+// wrongly (formatConditionLabel turns "(Lumbar" → "(lumbar"). letterCondition wins and is verbatim.
+describe('cover memo condition from the approved letter', () => {
+  const base = {
+    pathway: 'board_appeal' as const,
+    veteranFullName: 'Frank Midgett',
+    veteranLastName: 'Midgett',
+    claimedCondition: 'lumbar_strain', // the drifted chart claim — must be OVERRIDDEN by the letter
+    signer: KASKY_CREDENTIALS,
+    letterDate: '2026-07-23',
+    priorDecisionDate: null,
+  };
+  const LETTER_COND = 'Lumbar Spinal Stenosis With Radiculopathy / Spondylosis (Lumbar Back / Sciatica)';
+
+  it('extractLetterCondition pulls the Condition line verbatim from a real letter header', () => {
+    const letter = [
+      'July 21, 2026',
+      '',
+      'RE: Independent Medical Opinion',
+      'Veteran: Jesse Wafford Lovell',
+      'Condition: Obstructive Sleep Apnea (OSA)',
+      'I. Physician Qualifications',
+    ].join('\n');
+    expect(extractLetterCondition(letter)).toBe('Obstructive Sleep Apnea (OSA)');
+    // No parseable line (e.g. an external_import placeholder) → null so the caller can fall back.
+    expect(extractLetterCondition('RE: Independent Medical Opinion\n(no condition line)')).toBeNull();
+    expect(extractLetterCondition('')).toBeNull();
+    expect(extractLetterCondition(null)).toBeNull();
+  });
+
+  it('REGRESSION WITNESS: the OLD path (formatConditionLabel) mis-cases the letter label — the bug', () => {
+    // This is exactly the screenshot bug: "(Lumbar" comes back "(lumbar". letterCondition avoids it.
+    expect(formatConditionLabel(LETTER_COND)).toContain('(lumbar');
+    expect(formatConditionLabel(LETTER_COND)).not.toContain('(Lumbar Back');
+  });
+
+  it('header uses the letter Condition VERBATIM (no re-casing) and OVERRIDES the chart claim', () => {
+    const memo = buildCoverMemoText({ ...base, letterCondition: LETTER_COND });
+    expect(memo).toContain(`Independent Medical Opinion regarding ${LETTER_COND}`);
+    // The fix: the correctly-cased "(Lumbar Back / Sciatica)" survives; the mangled "(lumbar Back" is gone.
+    expect(memo).toContain('(Lumbar Back / Sciatica)');
+    expect(memo).not.toContain('(lumbar Back');
+    // The drifted chart claim never appears.
+    expect(memo).not.toMatch(/lumbar strain/i);
+  });
+
+  it('body uses the letter Condition lowercased for mid-sentence, acronyms preserved', () => {
+    const memo = buildCoverMemoText({ ...base, letterCondition: 'Obstructive Sleep Apnea (OSA)', claimedCondition: 'ptsd' });
+    // board_appeal body: "...appeal regarding <cond>..." — lowercased prose, (OSA) acronym kept.
+    expect(memo).toMatch(/appeal regarding obstructive sleep apnea \(OSA\)/);
+    expect(memo).not.toMatch(/appeal regarding ptsd/i);
+  });
+
+  it('NO letterCondition → falls back to formatConditionLabel(claimedCondition) (prior behavior intact)', () => {
+    const memo = buildCoverMemoText({ ...base, claimedCondition: 'osa' });
+    expect(memo).toContain('Independent Medical Opinion regarding Obstructive Sleep Apnea (OSA)');
+    const blank = buildCoverMemoText({ ...base, claimedCondition: 'osa', letterCondition: '   ' });
+    expect(blank).toContain('Independent Medical Opinion regarding Obstructive Sleep Apnea (OSA)');
   });
 });
 

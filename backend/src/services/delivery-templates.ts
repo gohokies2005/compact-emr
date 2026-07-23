@@ -143,12 +143,38 @@ function conditionLowercase(s: string): string {
   );
 }
 
+/**
+ * Pull the "Condition:" line VERBATIM from an approved nexus letter's header — e.g.
+ *   RE: Independent Medical Opinion
+ *   Veteran: Jesse ... Lovell
+ *   Condition: Obstructive Sleep Apnea (OSA)
+ * That line is the ground-truth condition the veteran and the Board read on the letter itself, so the
+ * cover memo's Re: line + body must match it precisely rather than re-deriving from the chart claim or
+ * the viability plan (which drift, and which formatConditionLabel can re-case wrongly, e.g. "(Lumbar"
+ * → "(lumbar"). Returns the trimmed value, or null when there is no parseable Condition line (e.g. an
+ * external_import placeholder TXT) so the caller can fall back. (Ryan 2026-07-22.)
+ */
+export function extractLetterCondition(letterText: string | null | undefined): string | null {
+  if (!letterText) return null;
+  const m = /^[ \t]*Condition:[ \t]*(.+?)[ \t]*$/m.exec(letterText);
+  if (m === null) return null;
+  const v = m[1]!.trim();
+  return v.length > 0 ? v : null;
+}
+
 export interface BuildCoverMemoInput {
   readonly pathway: CoverMemoPathway;
   readonly veteranFullName: string;
   readonly veteranLastName: string;
   readonly salutation?: 'Mr.' | 'Mrs.' | 'Ms.' | 'Mx.';
   readonly claimedCondition: string;
+  /**
+   * The approved letter's "Condition:" line, VERBATIM (from extractLetterCondition). When present it
+   * WINS over claimedCondition and is used AS-IS for the header (no formatConditionLabel re-casing) and
+   * only lowercased for mid-sentence body use — so the memo matches the letter exactly. Null/absent →
+   * fall back to formatConditionLabel(claimedCondition), the prior behavior.
+   */
+  readonly letterCondition?: string | null;
   /** ISO yyyy-mm-dd. Required for supplemental/hlr_request blocks. */
   readonly priorDecisionDate?: string | null;
   /** Signer = the ASSIGNED physician's credential block (D2). */
@@ -219,10 +245,13 @@ function reliablePriorDate(input: BuildCoverMemoInput): string | null {
 
 function bodyForPathway(input: BuildCoverMemoInput): string[] {
   const v = honorificLast(input);
-  // Canonicalize the raw slug ("osa") to the proper label FIRST, then lowercase the prose words while
-  // conditionLowercase PRESERVES the acronym → "obstructive sleep apnea (OSA)", not "osa" (Ryan
-  // 2026-06-14: the body first sentence still read lowercase "osa"). The header uses the title-case label.
-  const cond = conditionLowercase(formatConditionLabel(input.claimedCondition));
+  // Condition for mid-sentence body use. The approved letter's Condition line (letterCondition) WINS
+  // and is used as-is (only lowercased, acronyms preserved) so the memo matches the letter verbatim.
+  // Otherwise canonicalize the raw slug ("osa") to the proper label FIRST, then lowercase the prose
+  // words while conditionLowercase PRESERVES the acronym → "obstructive sleep apnea (OSA)" (Ryan
+  // 2026-06-14 + 2026-07-22). The header uses the title-case / verbatim label.
+  const letterCond = input.letterCondition && input.letterCondition.trim().length > 0 ? input.letterCondition.trim() : null;
+  const cond = conditionLowercase(letterCond ?? formatConditionLabel(input.claimedCondition));
   const priorDate = reliablePriorDate(input);
   const p = pronounsFor(input);
 
@@ -298,10 +327,13 @@ export function buildCoverMemoText(input: BuildCoverMemoInput): string {
   const letterDateLong = input.letterDate
     ? formatDateLong(input.letterDate)
     : formatDateLong(new Date().toISOString().slice(0, 10));
-  // Subject line is HEADER context → properly-cased label ("OSA", "Obstructive Sleep Apnea (OSA)"),
-  // never the raw lowercased slug ("osa"). Mirrors coverMemo.js formatConditionTitleCase + the EMR
-  // UI's formatConditionLabel. (E4 bug fix 2026-06-14: header was emitting the raw lowercased value.)
-  const conditionTitle = formatConditionLabel(input.claimedCondition) || input.claimedCondition.trim();
+  // Subject line is HEADER context. Prefer the approved letter's Condition line VERBATIM — it is already
+  // the clean, final label the veteran/Board see, and passing it through formatConditionLabel would
+  // re-case it wrongly (e.g. "(Lumbar" → "(lumbar"). Only when no letter condition is available do we
+  // canonicalize the raw claim ("osa" → "Obstructive Sleep Apnea (OSA)"), never the raw lowercased slug.
+  const conditionTitle = (input.letterCondition && input.letterCondition.trim().length > 0)
+    ? input.letterCondition.trim()
+    : (formatConditionLabel(input.claimedCondition) || input.claimedCondition.trim());
   const header = [
     'PHYSICIAN COVER MEMORANDUM',
     '',

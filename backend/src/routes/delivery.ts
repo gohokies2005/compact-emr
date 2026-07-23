@@ -11,6 +11,7 @@ import { buildOpinionExcerpt } from '../services/letter-opinion-excerpt.js';
 import {
   buildDeliveryEmail,
   buildCoverMemoText,
+  extractLetterCondition,
   DELIVERY_FROM_ADDRESS,
   DELIVERY_EMAIL_SUBJECT,
   type CoverMemoPathway,
@@ -97,6 +98,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
     priorDenialReason: string | null;
     priorDecisionDate: Date | null;
     claimedCondition: string;
+    currentVersion: number;
     assignedPhysicianId: string | null;
     coverMemoSuppressed?: boolean | null;
     coverMemoTextOverride?: string | null;
@@ -133,9 +135,21 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
           ? override
           : `${override}\n\nRespectfully submitted,\n\n[SIGNATURE]\n${signer.fullNameWithCredential}`;
       } else {
-        // (B) condition LABEL from the route-picker plan (the letter's actual theory), NOT the broad intake
-        // claim bucket (Spring: memo said "Skin (eczema, Psoriasis, Dermatitis, Scars)" but the letter was
-        // direct ACNE). Falls back to claimedCondition when no ready plan. $0 read-only.
+        // Condition source, in priority order (Ryan 2026-07-22 — "make the memo match the Condition line
+        // of the approved letter precisely; it's a bad look when it's wrong, and it's wrong a lot"):
+        //   1. The APPROVED LETTER's "Condition:" line, VERBATIM — the exact text the veteran/Board read
+        //      on the letter. This is authoritative and already cleanly cased. $0 read-only.
+        //   2. The route-picker viability plan's lead condition (the letter's theory) — used only when the
+        //      letter has no parseable Condition line (e.g. an external_import placeholder TXT).
+        //   3. The chart claim (claimedCondition) — last-resort fallback.
+        let letterCondition: string | null = null;
+        const bucketNameForMemo = bucket();
+        if (bucketNameForMemo !== undefined) {
+          try {
+            const cur = await resolveCurrent(c.id, c.currentVersion);
+            if (cur !== null) letterCondition = extractLetterCondition(await readTxtFromS3(bucketNameForMemo, cur.txtKey));
+          } catch { /* fall back to the plan / chart claim below */ }
+        }
         let memoCondition = c.claimedCondition;
         try {
           const ai = await getAiViabilityState(db, c.id, { compute: false });
@@ -148,6 +162,7 @@ export function createDeliveryRouter(db: AppDb, deps: DeliveryRouterDeps = {}): 
           veteranFullName: `${vFirst ?? ''} ${vLast}`.trim(),
           veteranLastName: vLast,
           claimedCondition: memoCondition,
+          letterCondition,
           priorDecisionDate: c.priorDecisionDate ? c.priorDecisionDate.toISOString().slice(0, 10) : null,
           signer,
         });

@@ -12,6 +12,8 @@ import { resolveGroundedFraming } from '../services/grounded-framing.js';
 import { stampCaseFraming } from '../services/case-framing-stamp.js';
 import { caseViabilityEnabled, stampCaseViability } from '../services/case-viability-stamp.js';
 import { stampAiViabilityPlan } from '../services/ai-viability-plan-stamp.js';
+import { getAiViabilityState } from '../services/ai-viability.js';
+import { SOAP_NOTE_SCHEMA_VERSION } from '../services/soap-overview.js';
 import { publishDraftJobQueued } from '../services/draft-job-queue.js';
 import { getDraftConcurrency, type DraftConcurrency } from '../services/draft-concurrency.js';
 import {
@@ -2072,6 +2074,99 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
         }),
       };
       res.json({ data });
+    }),
+  );
+
+  /**
+   * GET /api/v1/internal/drafter/soap-audit?ids=CLM-a,CLM-b  (drafter-principal)
+   *
+   * PRE-DRAFT TRUST AUDIT (Ryan 2026-07-23, "verify the SOAP notes are telling the RNs the right things —
+   * how much can we trust these"). Read-ONLY. For each requested case returns EXACTLY what the RN sees on the
+   * Action tab — the persisted route-picker VERDICT (viability band + lead theory) and the persisted SOAP note
+   * (assessment / plan / action) — PLUS the staleness signals the audit needs to tell "current-system read" from
+   * "stale note the RN is still looking at": whether the persisted plan hash is current (getAiViabilityState
+   * status), the SOAP schemaVersion vs the live SOAP_NOTE_SCHEMA_VERSION, and the plan/soap compute timestamps.
+   * The LOCAL auditor (Claude Max) then pulls the full chart (extract-documents) and judges the verdict against
+   * the record. ZERO writes, no LLM spend, no recompute — this reflects the on-screen state, not a fresh run.
+   */
+  router.get(
+    '/internal/drafter/soap-audit',
+    asyncHandler(async (req: Request, res: Response) => {
+      const idsRaw = String((req.query['ids'] as string | undefined) ?? '').trim();
+      const ids = idsRaw ? idsRaw.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 60) : [];
+      if (ids.length === 0) throw badRequest('ids_required', { hint: 'Pass ?ids=CLM-a,CLM-b (comma-separated, max 60)' });
+
+      const soapDb = db as unknown as { soapOverview: { findMany: (a: unknown) => Promise<Array<{ caseId: string; inputHash: string; schemaVersion: number; resultJson: unknown; updatedAt: Date }>> } };
+      const [cases, soapRows] = await Promise.all([
+        db.case.findMany({ where: { id: { in: ids } } }),
+        soapDb.soapOverview.findMany({ where: { caseId: { in: ids } } }),
+      ]);
+      const caseById = new Map(cases.map((c) => [c.id, c]));
+      const soapByCase = new Map(soapRows.map((r) => [r.caseId, r]));
+      const vetIds = [...new Set(cases.map((c) => c.veteranId))];
+      const vets = vetIds.length ? await db.veteran.findMany({ where: { id: { in: vetIds } } }) : [];
+      const vById = new Map(vets.map((v) => [v.id, v]));
+
+      // One getAiViabilityState per case (compute:false → $0 read of the persisted plan; 'ready' ONLY when the
+      // plan hash matches the CURRENT inputs, so a 'none'/'computing'/'error' status IS the stale/absent signal).
+      const states = await Promise.all(ids.map(async (id) => {
+        if (!caseById.has(id)) return { id, state: { status: 'missing' as const } };
+        try { return { id, state: await getAiViabilityState(db, id, { compute: false }) }; }
+        catch (e) { return { id, state: { status: 'error' as const, error: e instanceof Error ? e.message : String(e) } }; }
+      }));
+      const stateById = new Map(states.map((s) => [s.id, s.state]));
+
+      const audit = ids.map((id) => {
+        const c = caseById.get(id);
+        if (!c) return { caseId: id, found: false };
+        const v = vById.get(c.veteranId);
+        const state = stateById.get(id);
+        const cx = c as unknown as { aiViabilityPlanStatus?: string | null; aiViabilityPlanComputedAt?: Date | null; upstreamScCondition?: string | null };
+        const rawPlan = (c as { aiViabilityPlanJson?: unknown }).aiViabilityPlanJson as
+          | { viability?: string; lead?: Record<string, unknown>; missing?: unknown; overall?: string; nuance?: string }
+          | null | undefined;
+        const card = state && state.status === 'ready' ? (state as unknown as { card: Record<string, unknown> }).card : null;
+        const soapRow = soapByCase.get(id);
+        const soap = soapRow && soapRow.resultJson && typeof soapRow.resultJson === 'object'
+          ? (soapRow.resultJson as Record<string, unknown>) : null;
+        return {
+          caseId: id,
+          found: true,
+          veteranName: v ? `${v.firstName} ${v.lastName}`.trim() : '',
+          status: c.status,
+          claimedCondition: c.claimedCondition,
+          upstreamScCondition: cx.upstreamScCondition ?? null,
+          // The route-picker VERDICT the RN's chip/Assessment banner is driven by.
+          viability: {
+            liveStatus: state ? state.status : 'unknown',          // ready=hash-current | none/computing/error=stale/absent
+            planStatus: cx.aiViabilityPlanStatus ?? null,
+            planComputedAt: cx.aiViabilityPlanComputedAt ? new Date(cx.aiViabilityPlanComputedAt).toISOString() : null,
+            // The verdict CONTENT: prefer the hash-current card; fall back to the raw persisted plan (what the RN
+            // is still seeing even if the hash drifted) so the audit can catch a stale on-screen verdict.
+            band: (card?.['viability'] as string | undefined) ?? rawPlan?.viability ?? null,
+            lead: (card?.['lead'] as unknown) ?? rawPlan?.lead ?? null,
+            missing: (card?.['missing'] as unknown) ?? rawPlan?.missing ?? null,
+            overall: (card?.['overall'] as string | undefined) ?? rawPlan?.overall ?? null,
+            nuance: (card?.['nuance'] as string | undefined) ?? rawPlan?.nuance ?? null,
+            planIsHashCurrent: state ? state.status === 'ready' : false,
+          },
+          // The SOAP note the RN reads. schemaCurrent=false ⇒ the RN is looking at a pre-v31 (stale-shape) note.
+          soap: soap ? {
+            assessment: (soap['assessment'] as string | undefined) ?? null,
+            plan: (soap['plan'] as string | undefined) ?? null,
+            action: (soap['action'] as string | undefined) ?? null,
+            viability: (soap['viability'] as string | undefined) ?? null,
+            subjective: (soap['subjective'] as string | undefined) ?? null,
+            objective: (soap['objective'] as string | undefined) ?? null,
+            fallback: (soap['fallback'] as boolean | undefined) ?? null,
+            assessmentChars: typeof soap['assessment'] === 'string' ? (soap['assessment'] as string).length : 0,
+            schemaVersion: soapRow?.schemaVersion ?? null,
+            schemaCurrent: soapRow?.schemaVersion === SOAP_NOTE_SCHEMA_VERSION,
+            updatedAt: soapRow ? new Date(soapRow.updatedAt).toISOString() : null,
+          } : null,
+        };
+      });
+      res.json({ data: { generatedAt: new Date().toISOString(), soapSchemaVersion: SOAP_NOTE_SCHEMA_VERSION, audit } });
     }),
   );
 

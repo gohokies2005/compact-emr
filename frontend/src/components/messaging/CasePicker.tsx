@@ -43,7 +43,9 @@ export function CasePicker({
   readonly value: SelectedCase | null;
   readonly onChange: (next: SelectedCase | null) => void;
 }) {
-  const [enabled, setEnabled] = useState(false);
+  // Default OFF, but START ON when the compose seeded a case (initialCase, e.g. the inbox opened from a
+  // chart) so the pre-filled link is visible + clearable instead of silently hidden (Ryan 2026-07-22).
+  const [enabled, setEnabled] = useState(value !== null);
   const [query, setQuery] = useState('');
   // When a veteran with >1 case is picked we hold them here and show their per-case rows.
   const [pendingVeteran, setPendingVeteran] = useState<PendingVeteran | null>(null);

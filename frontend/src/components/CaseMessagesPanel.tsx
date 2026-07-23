@@ -8,7 +8,7 @@ import { EmptyState } from './ui/EmptyState';
 import { Spinner } from './ui/Spinner';
 import { ForbiddenError } from '../api/client';
 import { getCaseThreads } from '../api/messaging';
-import { listUsers } from '../api/users';
+import { listUsers, listDirectory } from '../api/users';
 import { listPhysicians } from '../api/physicians';
 import { formatRelativeTime } from '../lib/date';
 import { ThreadView } from './messaging/ThreadView';
@@ -60,28 +60,21 @@ export function CaseMessagesPanel({ caseId, caseLabel, assignedRn, assignedPhysi
   });
 
   // Staff + physician directory (sub -> { name, role }) so bubbles + the thread list show names/roles
-  // rather than raw Cognito subs. Mirrors InboxPage.useSubDirectory; the assigned RN/physician + any
-  // thread participants resolve through it.
+  // rather than the generic "Staff" fallback. Built from /users/directory, which keys EVERY row by the
+  // COGNITO SUB — the same id message authors match on. (The old builder keyed staff by AppUser.id,
+  // which never matched authorSub, so ops/admin-authored messages showed "Staff".) usersQuery +
+  // physiciansQuery below remain — they resolve the assigned RN/physician EMAIL → default recipients.
   const usersQuery = useQuery({ queryKey: ['users', 'all'], queryFn: () => listUsers() });
   const physiciansQuery = useQuery({ queryKey: ['physicians', 'all'], queryFn: () => listPhysicians() });
+  const directoryQuery = useQuery({ queryKey: ['users', 'directory'], queryFn: () => listDirectory() });
 
   const directory = useMemo<SubDirectory>(() => {
     const dir: Record<string, { name: string; role: BubbleRole }> = {};
-    for (const u of usersQuery.data?.data ?? []) {
-      const role: BubbleRole = u.roles.includes('admin')
-        ? 'admin'
-        : u.roles.includes('ops_staff')
-          ? 'ops_staff'
-          : u.roles.includes('physician')
-            ? 'physician'
-            : 'unknown';
-      dir[u.id] = { name: u.name ?? u.email, role };
-    }
-    for (const p of physiciansQuery.data?.data ?? []) {
-      if (p.cognitoSub) dir[p.cognitoSub] = { name: p.fullName, role: 'physician' };
+    for (const e of directoryQuery.data?.data ?? []) {
+      dir[e.sub] = { name: e.name, role: e.role };
     }
     return dir;
-  }, [usersQuery.data, physiciansQuery.data]);
+  }, [directoryQuery.data]);
 
   // Default recipients for a new case-linked thread = the assigned RN + physician. The case carries only
   // their email (assignedRn/assignedPhysician), so we resolve each to a Cognito `sub` via the directory
@@ -145,7 +138,10 @@ export function CaseMessagesPanel({ caseId, caseLabel, assignedRn, assignedPhysi
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <Link to="/inbox" className="text-sm font-medium text-navy hover:text-navyDeep">
+          <Link
+            to={`/inbox?caseId=${encodeURIComponent(caseId)}&caseLabel=${encodeURIComponent(display)}`}
+            className="text-sm font-medium text-navy hover:text-navyDeep"
+          >
             Open in Inbox →
           </Link>
           <Button type="button" variant="primary" onClick={() => setComposing(true)}>

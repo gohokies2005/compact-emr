@@ -1,40 +1,31 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import { AppShell } from '../../layout/AppShell';
 import { BridgeRotation } from '../../components/BridgeRotation';
 import { Button } from '../../components/ui/Button';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { getInbox } from '../../api/messaging';
-import { listUsers } from '../../api/users';
-import { listPhysicians } from '../../api/physicians';
+import { listDirectory } from '../../api/users';
 import { ThreadView } from '../../components/messaging/ThreadView';
 import { ComposeMessageModal } from '../../components/messaging/ComposeMessageModal';
 import { ThreadListPane } from './ThreadListPane';
 import type { SubDirectory, BubbleRole } from '../../components/messaging/directory';
 import { useCaseLabelDirectory } from '../../components/messaging/caseLabel';
 
-// Build the sub -> { name, role } directory by unioning staff users + physicians. Used to label
-// senders and color bubbles in both the list pane and the ThreadView. `sub` is the cross-role key.
+// Build the sub -> { name, role } directory from the messaging directory endpoint. That endpoint keys
+// EVERY row by the COGNITO SUB (the same id message authors/recipients match on), so staff, admin, and
+// physician senders all resolve to their real name. The old builder keyed staff by AppUser.id, which
+// never matched authorSub → every ops/admin-authored message fell back to the generic "Staff" label.
 function useSubDirectory(): SubDirectory {
-  const usersQuery = useQuery({ queryKey: ['users', 'all'], queryFn: () => listUsers() });
-  const physiciansQuery = useQuery({ queryKey: ['physicians', 'all'], queryFn: () => listPhysicians() });
+  const directoryQuery = useQuery({ queryKey: ['users', 'directory'], queryFn: () => listDirectory() });
   return useMemo(() => {
     const dir: Record<string, { name: string; role: BubbleRole }> = {};
-    for (const u of usersQuery.data?.data ?? []) {
-      const role: BubbleRole = u.roles.includes('admin')
-        ? 'admin'
-        : u.roles.includes('ops_staff')
-          ? 'ops_staff'
-          : u.roles.includes('physician')
-            ? 'physician'
-            : 'unknown';
-      dir[u.id] = { name: u.name ?? u.email, role };
-    }
-    for (const p of physiciansQuery.data?.data ?? []) {
-      if (p.cognitoSub) dir[p.cognitoSub] = { name: p.fullName, role: 'physician' };
+    for (const e of directoryQuery.data?.data ?? []) {
+      dir[e.sub] = { name: e.name, role: e.role };
     }
     return dir;
-  }, [usersQuery.data, physiciansQuery.data]);
+  }, [directoryQuery.data]);
 }
 
 export function InboxPage() {
@@ -46,6 +37,15 @@ export function InboxPage() {
   // C4 (messaging, 2026-06-14): resolve linked-case UUIDs to "Veteran — Condition" for the list chip
   // + the open thread's header.
   const caseLabels = useCaseLabelDirectory();
+
+  // Open-from-chart default (Ryan 2026-07-22): the chart's "Open in Inbox →" link carries the case it
+  // was opened from (?caseId=&caseLabel=). When present, a new message pre-links that case so the user
+  // doesn't have to re-search the veteran by name. It's a DEFAULT, not a lock — the compose still shows
+  // the case picker (via initialCase, not lockedCase), so they can clear or change it.
+  const [searchParams] = useSearchParams();
+  const linkedCaseId = searchParams.get('caseId');
+  const linkedCaseLabel = searchParams.get('caseLabel');
+  const initialCase = linkedCaseId ? { id: linkedCaseId, label: linkedCaseLabel ?? linkedCaseId } : undefined;
 
   const inboxQuery = useQuery({
     queryKey: ['messages', 'inbox'],
@@ -114,6 +114,7 @@ export function InboxPage() {
 
       {composing ? (
         <ComposeMessageModal
+          {...(initialCase ? { initialCase } : {})}
           onClose={() => setComposing(false)}
           onSent={(threadId) => {
             setComposing(false);

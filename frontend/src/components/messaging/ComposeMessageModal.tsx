@@ -10,8 +10,11 @@ import { MessageAttachmentPicker, type StagedAttachment } from './MessageAttachm
 // Compose-new modal (frame mirrors QuickNotePopup/TransitionModal: fixed overlay + centered card +
 // stop-propagation). Send is disabled until >=1 recipient + subject + body + no pending upload.
 //
-// Two modes:
+// Three modes:
 //   - Inbox (default): free-form case link via the optional CasePicker (toggle OFF by default).
+//   - Inbox opened from a chart: `initialCase` PRE-FILLS the case link but keeps the CasePicker visible,
+//     so the default can be cleared or changed. Used so a message composed from the inbox after viewing a
+//     chart defaults to that veteran's case without re-searching by name (Ryan 2026-07-22).
 //   - Chart Messages tab: `lockedCase` pre-links the thread to that case and HIDES the CasePicker (the
 //     case is non-editable here — every chart-composed thread is collaboration-scoped to this case).
 //     `initialRecipients` seeds the recipient list (the case's assigned RN + physician).
@@ -19,18 +22,20 @@ export function ComposeMessageModal({
   onClose,
   onSent,
   lockedCase,
+  initialCase,
   initialRecipients,
 }: {
   readonly onClose: () => void;
   readonly onSent: (threadId: string) => void;
   readonly lockedCase?: SelectedCase;
+  readonly initialCase?: SelectedCase;
   readonly initialRecipients?: readonly SelectedRecipient[];
 }) {
   const qc = useQueryClient();
   const [recipients, setRecipients] = useState<readonly SelectedRecipient[]>(initialRecipients ?? []);
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
-  const [linkedCase, setLinkedCase] = useState<SelectedCase | null>(lockedCase ?? null);
+  const [linkedCase, setLinkedCase] = useState<SelectedCase | null>(lockedCase ?? initialCase ?? null);
   const [attachments, setAttachments] = useState<readonly StagedAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);

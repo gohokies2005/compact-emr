@@ -29,6 +29,13 @@ import type { CaseStatus } from '../types/prisma';
 
 const PRE_DRAFT_STATUSES: ReadonlySet<CaseStatus> = new Set<CaseStatus>([
   'intake', 'records', 'viability', 'drafting',
+  // needs_records / needs_rn_decision (Ryan 2026-07-23, Victor Guzman CLM-6003603722): a case PARKED here
+  // after a chart-EXTRACTION FAILURE (not a dx/event Gate-2 halt) has NO reachable force-draft path — the
+  // Gate-2 panel only renders for a real Gate-2 halt (isGate2Halt), the drafter panel is parked, and this
+  // escape hatch previously excluded these statuses. That left the physician unable to force a draft — a
+  // no-block-rule violation. The banner still only appears when real chart blockers remain AND auto-recovery
+  // is exhausted, so a cleanly-paused case (no chart problem) never sees it.
+  'needs_records', 'needs_rn_decision',
 ]);
 
 interface ChartRecoveryBannerProps {
@@ -78,13 +85,17 @@ export function ChartRecoveryBanner({ caseId, status, canDraft }: ChartRecoveryB
   // and nagged the RN mid-build. The backend computes `autoRecoveryExhausted` from the same
   // (caseId, triggerHash) `case_auto_remediated` marker the /draft route checks — single source of truth.
   const autoRecoveryExhausted = readiness?.autoRecoveryExhausted === true;
+  // extract_failed (Ryan 2026-07-23, Victor Guzman): a HARD chart-extraction failure — a huge PDF that
+  // couldn't be processed — is its own last-resort state. It may carry NO per-file blocker and may never
+  // mark auto-recovery "exhausted", yet the physician still MUST be able to force a draft (no-block rule).
+  // Treat it as a show-trigger on its own.
+  const extractFailed = extractionState === 'extract_failed';
+  const noBlockerFailure = extractFailed && blockingFiles.length === 0;
 
-  // Render only the genuine last-resort state: pre-draft, chart settled, real blockers remain, AND
-  // auto-recovery is exhausted, and not dismissed. NOT during a build, and NOT before the first
-  // auto-remediation attempt (the SendToDrafter panel's auto-resume handles that window).
-  if (dismissed || !isPreDraft || readiness === undefined || stillBuilding || blockingFiles.length === 0 || !autoRecoveryExhausted) {
-    return null;
-  }
+  // Render the genuine last-resort states: pre-draft + chart settled + not dismissed, AND EITHER a hard
+  // extract failure, OR real per-file blockers remain with auto-recovery exhausted.
+  if (dismissed || !isPreDraft || readiness === undefined || stillBuilding) return null;
+  if (!extractFailed && (blockingFiles.length === 0 || !autoRecoveryExhausted)) return null;
 
   const first = blockingFiles[0];
   const firstDocId = first?.documentId ?? first?.id ?? null;
@@ -105,14 +116,22 @@ export function ChartRecoveryBanner({ caseId, status, canDraft }: ChartRecoveryB
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="max-w-2xl">
           <p className="font-semibold">
-            {count === 1
-              ? 'A document couldn’t be read and needs you'
-              : `${count} documents couldn’t be read and need you`}
+            {noBlockerFailure
+              ? 'The chart analysis failed — you can draft anyway'
+              : count === 1
+                ? 'A document couldn’t be read and needs you'
+                : `${count} documents couldn’t be read and need you`}
           </p>
           <p className="mt-1 text-amber-800">
-            We tried to read {count === 1 ? 'this file' : 'these files'} automatically and rebuild the chart, but {count === 1 ? 'it' : 'they'} still can’t be read.
-            {first ? <> The file is <span className="font-medium">{documentFileName(first.filePath)}</span>.</> : null}{' '}
-            Add a brief summary of what {count === 1 ? 'it' : 'they'} show (on the <span className="font-medium">Overview</span> tab), open {count === 1 ? 'it' : 'them'} to check, or draft without {count === 1 ? 'it' : 'them'}.
+            {noBlockerFailure ? (
+              <>The chart couldn’t be built from the records (a large file likely couldn’t be fully processed), so the assessment above is a provisional read. Re-run extraction from the Documents tab, or override to draft now on the records as-is and review the letter against the chart.</>
+            ) : (
+              <>
+                We tried to read {count === 1 ? 'this file' : 'these files'} automatically and rebuild the chart, but {count === 1 ? 'it' : 'they'} still can’t be read.
+                {first ? <> The file is <span className="font-medium">{documentFileName(first.filePath)}</span>.</> : null}{' '}
+                Add a brief summary of what {count === 1 ? 'it' : 'they'} show (on the <span className="font-medium">Overview</span> tab), open {count === 1 ? 'it' : 'them'} to check, or draft without {count === 1 ? 'it' : 'them'}.
+              </>
+            )}
           </p>
           {!canDraft ? (
             <p className="mt-2 font-medium text-amber-700">Assign a physician and an RN liaison first (Assignments, on the Overview tab) before you can draft.</p>

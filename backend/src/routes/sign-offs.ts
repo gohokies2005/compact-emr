@@ -8,7 +8,8 @@ import { resolveCurrentPhysician } from '../services/physician-resolver.js';
 import { currentActor } from '../services/request-actor.js';
 import { loadReconciledChartReadiness, buildChartNotReadyMessage, originalFileName } from '../services/chart-readiness.js';
 import { resolveOverrideReason } from '../services/chart-readiness-override.js';
-import { resolveViewableCurrentTxtWithHash } from '../services/letter-current.js';
+import { resolveViewableCurrentTxtWithHash, sha256OfText } from '../services/letter-current.js';
+import { parseCredentialBlock, applySignerSubstitution } from '../services/credential-block.js';
 import type { AppDb } from '../services/db-types.js';
 
 export interface SignOffsRouterDeps {
@@ -127,7 +128,28 @@ export function createSignOffsRouter(db: AppDb, deps: SignOffsRouterDeps = {}): 
         const cur = await resolveViewableCurrentTxtWithHash(db, s3Client, bucketName, caseId, c.currentVersion);
         if (cur !== null) {
           signedVersion = cur.version;
+          // DEFINITIVE DPT-DELIVERY FIX (Ryan 2026-07-22): bind the sign-off to the hash of the FINAL
+          // provider-substituted bytes — the SAME transform (applySignerSubstitution) + inputs (this
+          // signer's creds + co-signer name) the approve lane renders and delivers — so a DPT/co-signed
+          // letter delivers on its OWN signature, no Kasky re-sign. `substituteHardcodedSection1Credentials`
+          // is a Kasky-NPI no-op, so a Kasky letter binds to the identical canonical hash as before (zero
+          // regression). FAIL-OPEN: if the signer creds can't be resolved, keep the canonical hash.
           signedContentSha256 = cur.sha256;
+          try {
+            const signerPhysician = await db.physician.findFirst({ where: { id: physicianId } });
+            const signerCreds = signerPhysician ? parseCredentialBlock(signerPhysician.credentialBlockJson) : null;
+            if (signerCreds !== null) {
+              let coSignerName: string | null = null;
+              if (signerPhysician!.coSignedByPhysicianId != null) {
+                const coSigner = await db.physician.findFirst({ where: { id: signerPhysician!.coSignedByPhysicianId } });
+                const coSignerCreds = coSigner ? parseCredentialBlock(coSigner.credentialBlockJson) : null;
+                coSignerName = coSignerCreds?.fullNameWithCredential ?? null;
+              }
+              signedContentSha256 = sha256OfText(applySignerSubstitution(cur.txt, signerCreds, coSignerName));
+            }
+          } catch {
+            // fail-open: keep the canonical hash (Kasky-safe; the delivery byte-gate still binds to it)
+          }
         }
       }
 

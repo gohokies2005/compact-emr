@@ -37,7 +37,7 @@ import { resolveChangesSinceSigned } from '../services/letter-change-diff.js';
 import { parseSignOffCreate } from '../services/sign-off-validation.js';
 import {
   parseCredentialBlock,
-  substituteSignerSentinels,
+  applySignerSubstitution,
   substituteHardcodedSection1Credentials,
   findForeignSignerNames,
   signerNameAppears,
@@ -1123,15 +1123,13 @@ export function createLetterRouter(db: AppDb, deps: LetterRouterDeps): Router {
         coSignerName = coSignerCreds.fullNameWithCredential;
       }
 
-      // Substitute any signer sentinels with the assigned signer's rendered blocks (no-op on the
-      // legacy hardcoded-credential letters). Pronoun defaults to "their" (gender-neutral; no
-      // veteran-pronoun field exists yet) and is irrelevant to no-sentinel letters.
-      const sentinelText = substituteSignerSentinels(text, signerCreds, 'their');
-      // Then rewrite the LEGACY hardcoded-Kasky Section I facts to the assigned signer when they are
-      // not Kasky (e.g. Kevin Luiz, DPT), appending a co-signer concurrence when co-signed. This is a
-      // BYTE-IDENTICAL no-op for a Kasky-signed Kasky letter and for any letter lacking the hardcoded
-      // sentence — so the name gate below passes for a DPT WITHOUT weakening it for anyone.
-      const finalText = substituteHardcodedSection1Credentials(sentinelText, signerCreds, coSignerName);
+      // Turn the canonical letter into the FINAL provider-substituted bytes via the SHARED helper the
+      // sign-off byte-binding ALSO calls (credential-block.applySignerSubstitution) — so the signed hash and
+      // this delivered finalText are the same bytes by construction (fixes the DPT-delivery 409). It resolves
+      // signer sentinels ('their' pronoun) then rewrites the hardcoded-Kasky Section I to the assigned signer
+      // + a co-signer concurrence. BYTE-IDENTICAL no-op for a Kasky-signed Kasky letter and for any letter
+      // lacking the hardcoded sentence/sentinels — so the name gate below passes for a DPT without weakening it.
+      const finalText = applySignerSubstitution(text, signerCreds, coSignerName);
 
       // Positive identity check: the assigned signer's credentialed name must appear (whole-name).
       if (!signerNameAppears(finalText, signerCreds.fullNameWithCredential)) {

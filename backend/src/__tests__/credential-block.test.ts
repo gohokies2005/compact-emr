@@ -10,6 +10,7 @@ import {
   buildRendererCredentialLines,
   substituteSignerSentinels,
   substituteHardcodedSection1Credentials,
+  applySignerSubstitution,
   findForeignSignerNames,
   signerNameAppears,
   SECTION1_CREDENTIALS_SENTINEL,
@@ -18,6 +19,7 @@ import {
   DRAFTER_HARDCODED_SECTION1_FACTS,
   type SignerCredentials,
 } from '../services/credential-block.js';
+import { sha256OfText } from '../services/letter-current.js';
 
 const KEVIN_DPT: SignerCredentials = {
   fullNameWithCredential: 'Kevin Luiz, DPT',
@@ -332,5 +334,46 @@ describe('credential-block — signerNameAppears (whole-name positive check)', (
   it('does not match when the name is glued to surrounding letters or absent', () => {
     expect(signerNameAppears('Ryan J. Kasky, DOx is here', 'Ryan J. Kasky, DO')).toBe(false);
     expect(signerNameAppears('The veteran has a back condition.', 'Ryan J. Kasky, DO')).toBe(false);
+  });
+});
+
+// ── DPT-DELIVERY 409 FIX (Ryan 2026-07-22): sign-hash == delivery-hash via the shared applySignerSubstitution.
+// The sign lane (sign-offs.ts) and the approve/delivery lane (letter.ts → delivery-eligibility.ts) MUST hash the
+// SAME provider-substituted bytes, or every non-Kasky letter false-trips `signed_bytes_changed` at delivery.
+describe('applySignerSubstitution — sign-hash equals delivery-hash (the DPT 409 fix)', () => {
+  // A canonical letter carrying the drafter's real hardcoded Section I sentence + a medical body.
+  const canonical =
+    `Section I. ${DRAFTER_HARDCODED_SECTION1_FACTS} I have no treatment relationship with this veteran.\n\n` +
+    `Section VI. The veteran's obstructive sleep apnea is more likely than not due to service.\n`;
+
+  it('KASKY signer → byte-identical no-op → sign-hash == delivery-hash == canonical hash (zero regression)', () => {
+    const signBytes = applySignerSubstitution(canonical, KASKY_CREDENTIALS, null);
+    expect(signBytes).toBe(canonical); // Kasky-NPI no-op
+    expect(sha256OfText(signBytes)).toBe(sha256OfText(canonical));
+  });
+
+  it('DPT signer + co-sign → the sign lane and the delivery lane hash the SAME substituted bytes (fixed)', () => {
+    const coName = 'Ryan J. Kasky, DO';
+    // sign lane (sign-offs.ts): binds sha256(applySignerSubstitution(canonical, signerCreds, coSignerName))
+    const signHash = sha256OfText(applySignerSubstitution(canonical, KEVIN_DPT, coName));
+    // approve lane produces this exact finalText and delivers it; delivery-eligibility re-hashes it
+    const deliveredFinalText = applySignerSubstitution(canonical, KEVIN_DPT, coName);
+    const deliveryHash = sha256OfText(deliveredFinalText);
+    expect(signHash).toBe(deliveryHash); // MATCH → no false signed_bytes_changed 409
+    // the substitution really rewrote Section I + appended the concurrence (so it was NOT a no-op)
+    expect(deliveredFinalText).not.toBe(canonical);
+    expect(deliveredFinalText).toContain('concurred in by Ryan J. Kasky, DO');
+    expect(deliveredFinalText).not.toContain(DRAFTER_HARDCODED_SECTION1_FACTS); // Kasky sentence replaced
+    // REGRESSION WITNESS: binding the RAW canonical (the OLD sign-lane behavior) would NOT match delivery —
+    // this is exactly the mismatch that 409'd every DPT letter.
+    expect(sha256OfText(canonical)).not.toBe(deliveryHash);
+  });
+
+  it('a real medical-body edit STILL changes the delivered hash → delivery still 409s (anti-fraud intact)', () => {
+    const coName = 'Ryan J. Kasky, DO';
+    const signed = sha256OfText(applySignerSubstitution(canonical, KEVIN_DPT, coName));
+    const tampered = canonical.replace('more likely than not due to service', 'due to a NON-service cause');
+    const tamperedHash = sha256OfText(applySignerSubstitution(tampered, KEVIN_DPT, coName));
+    expect(tamperedHash).not.toBe(signed); // a genuine content change is still caught by the byte-gate
   });
 });

@@ -222,6 +222,30 @@ export function substituteSignerSentinels(
   return out;
 }
 
+/**
+ * SHARED signer/co-sign substitution (Ryan 2026-07-22 — definitive fix for the DPT-delivery 409). This is
+ * THE transform that turns a canonical letter (hardcoded-Kasky Section I and/or signer sentinels) into the
+ * FINAL provider-substituted bytes: first resolve any signer sentinels ('their' pronoun, matching the approve
+ * lane), then rewrite the hardcoded Section I credentials to the assigned signer + append a co-signer
+ * concurrence. BYTE-IDENTICAL no-op for a Kasky signer of a hardcoded-Kasky letter (the Section-I step is a
+ * Kasky-NPI no-op and legacy letters carry no sentinels).
+ *
+ * BOTH lanes that fingerprint the letter now call this: the APPROVE lane (which renders + delivers this exact
+ * finalText) and the SIGN-OFF byte-binding (which must hash the SAME final bytes). Before this, sign-off bound
+ * the raw Kasky-form canonical while approve delivered the DPT-form → every non-Kasky/co-signed letter
+ * false-tripped `signed_bytes_changed` at delivery and could only be cleared by Dr. Kasky re-signing (which
+ * defeats spreading signatures across providers). Sharing the transform makes signed-hash == delivered-hash by
+ * construction, while a real medical-body edit still changes the hash and still blocks (anti-fraud intact).
+ */
+export function applySignerSubstitution(
+  letterText: string,
+  signerCreds: SignerCredentials,
+  coSignerCredentialedName: string | null,
+): string {
+  const sentinelText = substituteSignerSentinels(letterText, signerCreds, 'their');
+  return substituteHardcodedSection1Credentials(sentinelText, signerCreds, coSignerCredentialedName);
+}
+
 const WORD_CHAR = /[A-Za-z]/;
 
 /**

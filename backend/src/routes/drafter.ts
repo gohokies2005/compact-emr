@@ -1972,6 +1972,110 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
   );
 
   /**
+   * GET /api/v1/internal/drafter/ops-pipeline  (drafter-principal)
+   *
+   * Read-only case-pipeline SNAPSHOT for the LOCAL RN task-list + exec-report + 24h AI draft audit (Ryan
+   * 2026-07-23, "all local, pull from the cloud"). Returns every NON-ARCHIVED case with the signals the tasker
+   * needs — status (Stage-2 stuck vs pipeline), intake age, whether a draft exists + when it was last touched
+   * (Stage-1 vs Stage-2 split), assigned RN/physician, paid + invoiced state, and the latest staff note (the
+   * "why stuck" cue) — PLUS the last-24h SIGN-OFFS (for the physician signed-vs-original audit). The LOCAL tool
+   * applies ALL task/audit LOGIC (who to invoice/remind/draft; the AI letter review), so the smart context
+   * stays local. RDS = source of truth; findMany only, ZERO writes. Archived cases are excluded by construction
+   * (archivedAt: null) — that fixes the "Taa / archived names on the report" bug (the old section was
+   * Jotform-only and blind to case state).
+   */
+  router.get(
+    '/internal/drafter/ops-pipeline',
+    asyncHandler(async (_req: Request, res: Response) => {
+      const now = Date.now();
+      const cutoff24h = new Date(now - 24 * 60 * 60 * 1000);
+      const dayMs = 24 * 60 * 60 * 1000;
+
+      const cases = await db.case.findMany({ where: { archivedAt: null }, orderBy: { updatedAt: 'desc' }, take: 2000 });
+      if (cases.length === 0) { res.json({ data: { generatedAt: new Date(now).toISOString(), cases: [], recentSignoffs: [] } }); return; }
+
+      const caseIds = cases.map((c) => c.id);
+      const caseById = new Map(cases.map((c) => [c.id, c]));
+      const vetIds = [...new Set(cases.map((c) => c.veteranId))];
+      const physIds = [...new Set(cases.map((c) => c.assignedPhysicianId).filter((x): x is string => typeof x === 'string' && x.length > 0))];
+      const rnIds = [...new Set(cases.map((c) => c.assignedRnId).filter((x): x is string => typeof x === 'string' && x.length > 0))];
+
+      const [vets, phys, rns, payments, invoiceEmails, notes, curRevs, signoffs] = await Promise.all([
+        db.veteran.findMany({ where: { id: { in: vetIds } } }),
+        physIds.length ? db.physician.findMany({ where: { id: { in: physIds } } }) : Promise.resolve([]),
+        rnIds.length ? db.appUser.findMany({ where: { id: { in: rnIds } } }) : Promise.resolve([]),
+        db.payment.findMany({ where: { caseId: { in: caseIds } } }),
+        db.email.findMany({ where: { caseId: { in: caseIds }, direction: 'outbound', subject: { contains: 'invoice', mode: 'insensitive' } } }),
+        db.chartNote.findMany({ where: { veteranId: { in: vetIds } }, orderBy: { createdAt: 'desc' } }),
+        db.letterRevision.findMany({ where: { caseId: { in: caseIds } }, orderBy: { version: 'desc' } }),
+        db.signOff.findMany({ where: { signedAt: { gte: cutoff24h } }, orderBy: { signedAt: 'desc' } }),
+      ]);
+
+      const vById = new Map(vets.map((v) => [v.id, v]));
+      const pById = new Map(phys.map((p) => [p.id, p]));
+      const rById = new Map(rns.map((r) => [r.id, r]));
+      const vetName = (id: string): string => { const v = vById.get(id); return v ? `${v.firstName} ${v.lastName}`.trim() : ''; };
+
+      const payByCase = new Map<string, { kind: string; status: string }[]>();
+      for (const p of payments) {
+        const a = payByCase.get(p.caseId) ?? []; a.push({ kind: String(p.kind), status: String(p.status) }); payByCase.set(p.caseId, a);
+      }
+      const invByCase = new Map<string, string>();
+      for (const e of invoiceEmails) {
+        if (e.sentAt && e.caseId && !invByCase.has(e.caseId)) invByCase.set(e.caseId, new Date(e.sentAt).toISOString());
+      }
+      const noteByVet = new Map<string, { body: string; createdAt: string; isQuickNote: boolean }>();
+      for (const n of notes) {
+        if (!noteByVet.has(n.veteranId)) noteByVet.set(n.veteranId, { body: String(n.body).slice(0, 500), createdAt: new Date(n.createdAt).toISOString(), isQuickNote: !!n.isQuickNote });
+      }
+      const curRevByCase = new Map<string, string>(); // caseId -> current (highest-version) letter's createdAt
+      for (const r of curRevs) {
+        if (!curRevByCase.has(r.caseId)) curRevByCase.set(r.caseId, new Date(r.createdAt).toISOString());
+      }
+
+      const data = {
+        generatedAt: new Date(now).toISOString(),
+        cases: cases.map((c) => {
+          const pays = payByCase.get(c.id) ?? [];
+          const paidLetter = pays.some((p) => /letter_(500|350)/.test(p.kind) && /paid|succeed|complete/i.test(p.status));
+          const rn = c.assignedRnId ? rById.get(c.assignedRnId) : null;
+          const ph = c.assignedPhysicianId ? pById.get(c.assignedPhysicianId) : null;
+          return {
+            caseId: c.id,
+            veteranName: vetName(c.veteranId),
+            condition: c.claimedCondition,
+            status: c.status,
+            createdAt: new Date(c.createdAt).toISOString(),
+            ageDays: Math.floor((now - new Date(c.createdAt).getTime()) / dayMs),
+            currentVersion: c.currentVersion,
+            hasDraft: c.currentVersion > 0,
+            letterUpdatedAt: curRevByCase.get(c.id) ?? null,
+            assignedRn: rn ? (rn.name ?? rn.email) : null,
+            assignedPhysician: ph ? ph.fullName : null,
+            paid: c.status === 'paid' || paidLetter,
+            invoicedAt: invByCase.get(c.id) ?? null,
+            payments: pays,
+            latestNote: noteByVet.get(c.veteranId) ?? null,
+          };
+        }),
+        // Last-24h sign-offs → the physician signed-vs-original audit (local tool reads both versions from S3).
+        recentSignoffs: signoffs.map((s) => {
+          const c = caseById.get(s.caseId);
+          return {
+            caseId: s.caseId,
+            veteranName: c ? vetName(c.veteranId) : '',
+            condition: c ? c.claimedCondition : null,
+            physician: s.physicianId ? (pById.get(s.physicianId)?.fullName ?? null) : null,
+            signedAt: new Date(s.signedAt).toISOString(),
+            signedVersion: s.signedVersion ?? null,
+          };
+        }),
+      };
+      res.json({ data });
+    }),
+  );
+
+  /**
    * POST /api/v1/internal/drafter/cases/:id/revised-letter   (drafter-principal)
    *
    * REVISED-LETTER RECOVERY (2026-07-16). Push an OUT-OF-BAND, physician-corrected nexus-letter TXT

@@ -17,8 +17,9 @@
 // Fail-open everywhere: any sub-derivation that throws degrades to a null/empty field, never blocks the note.
 
 import type { AppDb } from './db-types.js';
-import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote, reconcileStickyAction, withDualMechanismVerdict } from './soap-overview.js';
-import { deriveDualMechanismVerdict, type DualMechanismVerdict } from './mechanism-viability.js';
+import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote, reconcileStickyAction, withDualMechanismVerdict, withDirectScVerdictLead, withDirectScVerdictPlan } from './soap-overview.js';
+import { deriveDualMechanismVerdict, type DualMechanismVerdict, type MechanismVerdict } from './mechanism-viability.js';
+import { deriveDirectScVerdict, directScVerdictEnabled } from './direct-viability.js';
 import { type AiViabilityCard, getAiViabilityState } from './ai-viability.js';
 import { buildDigestForCase } from '../advisory/chartSlice.js';
 import { loadExtractionCoverageForCase } from './extraction-coverage.js';
@@ -272,6 +273,35 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
         );
       }
     } catch { dualVerdict = null; }
+    // DIRECT-SC VERDICT (Ryan 2026-07-23) — the DIRECT-axis twin: when the lead theory has NO upstream SC
+    // condition (a 3.303 direct claim, e.g. PTSD → in-service stressors), the mechanism check does not apply,
+    // so run the LLM direct-viability checker instead. Gated (SOAP_DIRECT_SC_VERDICT_ENABLED) → DARK by default:
+    // OFF skips the DB reads + model call entirely (byte-identical note). Facts reuse the SAME structured
+    // builders the direct-SC axis uses (buildInServiceEvents/buildDxConstellation), lazy-imported so the vendor
+    // graph stays off the static path. Fail-open: any failure → null → the note renders exactly as today.
+    let directVerdict: MechanismVerdict | null = null;
+    try {
+      if (directScVerdictEnabled() && card && card.lead && !card.lead.upstream) {
+        const claimed = (card.lead.claimed || card.inputClaimed || ctx.claimedCondition || '').trim();
+        const { buildInServiceEvents, buildDxConstellation } = await import('./case-viability-stamp.js');
+        const [events, dxConstellation] = await Promise.all([
+          buildInServiceEvents(db, caseId),
+          buildDxConstellation(db, caseId),
+        ]);
+        const cl = claimed.toLowerCase();
+        // Coarse element-1 hint ONLY (the model uses the full dxConstellation list as authority). Guard BOTH
+        // sides on length so a short token can't substring-false-positive; yields true or null, never false.
+        const currentDxPresent = cl.length > 2 && dxConstellation.some((d) => { const dl = d.toLowerCase(); return dl.length > 2 && (dl.includes(cl) || cl.includes(dl)); }) ? true : null;
+        directVerdict = await deriveDirectScVerdict(claimed, {
+          currentDxPresent,
+          dxConstellation,
+          inServiceEvents: events.map((e) => ({ event_canonical: e.event_canonical, evidence_span: e.evidence_span })),
+          continuityEvidence: null,
+          upstreamScIfAny: null,
+          veteranStatement: ctx.veteranStatement ?? null,
+        });
+      }
+    } catch { directVerdict = null; }
     const built = await getOrBuildSoapNote(db as unknown as SoapOverviewCacheDb, caseId, ctx, {
       forceRegenerate: true,
       timeoutMs,
@@ -280,7 +310,13 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
       // both pairings when the veteran theory differs from the lead, and delegates to the single-verdict
       // Assessment+Plan folds (byte-identical to today) when it does not. Recommendation-only prose prefixes;
       // a good draft's decision fields are untouched.
-      reconcile: (fresh, stored) => withDualMechanismVerdict(reconcileStickyAction(fresh, stored, grounded), dualVerdict),
+      reconcile: (fresh, stored) => {
+        // Fold the mechanism (secondary) verdict, then the direct-SC verdict. On any given case exactly ONE is
+        // non-null (secondary has an upstream; direct does not), and both folds are fail-open no-ops on null, so
+        // the note is byte-identical to today whenever the direct flag is off or the axis doesn't apply.
+        const withMech = withDualMechanismVerdict(reconcileStickyAction(fresh, stored, grounded), dualVerdict);
+        return withDirectScVerdictPlan(withDirectScVerdictLead(withMech, directVerdict), directVerdict);
+      },
     });
     // Observability (Bays SOAP banner, 2026-06-26): log the PERSISTED outcome, not just "didn't throw".
     // fallback:true = a truncated/error brief was served and NOT persisted (the heal did NOT happen this

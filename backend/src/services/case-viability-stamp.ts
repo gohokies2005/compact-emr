@@ -103,7 +103,7 @@ function concededFlag(v: string | null | undefined): boolean {
  * the 3rd arg — resolveInServiceEvents already dedupes it behind the deterministic floor. Until then
  * this is the deterministic floor alone. Fail-open: any error → [] (the secondary axis still stands).
  */
-async function buildInServiceEvents(db: AppDb, caseId: string): Promise<InServiceEvent[]> {
+export async function buildInServiceEvents(db: AppDb, caseId: string): Promise<InServiceEvent[]> {
   try {
     const row = (await db.case.findFirst({
       where: { id: caseId },

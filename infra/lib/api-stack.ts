@@ -331,6 +331,13 @@ export class ApiStack extends Stack {
         // + deploy (or set it in cdk.json). Note: the flag is NOT in soapNoteFingerprint, so existing stored
         // notes only pick up the verdict when they next recompute (schema bump or a per-case recompute).
         SOAP_MECHANISM_VERDICT_ENABLED: (this.node.tryGetContext('soap_mechanism_verdict_enabled') as string | undefined) ?? 'true',
+        // SOAP_DIRECT_SC_VERDICT_ENABLED (Ryan 2026-07-23): the DIRECT-axis twin of the mechanism verdict — a
+        // bold "DIRECT SERVICE CONNECTION — SUPPORTABLE / BORDERLINE / NOT SUPPORTABLE" lead on the SOAP
+        // Assessment + Plan for a DIRECT 3.303 claim (no upstream SC condition), LLM-judged (3.303 three-element
+        // + 3.304(f) Criterion A + Walker continuity). Recommendation ONLY (never gates a draft); fail-open;
+        // computed in the async SOAP precompute (Opus call). Offline eval + LIVE Bedrock smoke 10/10 (both owner
+        // anchors) before flip. Default 'true' → LIVE. REVERT: --context soap_direct_sc_verdict_enabled=false.
+        SOAP_DIRECT_SC_VERDICT_ENABLED: (this.node.tryGetContext('soap_direct_sc_verdict_enabled') as string | undefined) ?? 'true',
         // NEGATIVE_PAIRINGS_ADVISORY (Ryan 2026-07-22): surfaces the curated negative-pairing "not supportable +
         // reason + counterargument + PMIDs" block in Ask Aegis (recommendation-only, fail-open). Default 'on' →
         // LIVE. Kill-switch: pass --context negative_pairings_advisory=false + deploy (or set in cdk.json) to

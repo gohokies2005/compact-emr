@@ -232,6 +232,31 @@ export function routePickerFramingFromCard(card: AiViabilityCard | null, liveCla
  * `timeoutMs` should be the remaining Lambda budget (the picker already ran). Fail-open: returns false on any
  * issue (the sync open then falls back to its own bounded generate — degraded but never blank).
  */
+/**
+ * Is the route-picker LEAD a DIRECT (3.303/3.304) theory rather than a SECONDARY (3.310) one? Load-bearing
+ * for verdict ROUTING: the picker encodes a DIRECT claim's in-service BASIS in `lead.upstream` as an EVENT
+ * token (e.g. "in_service_events_border_patrol_duty_El_Paso_…"), NOT an SC condition — so "upstream present"
+ * alone would misroute a direct claim to the mechanism (secondary) checker. Signals, any of which = direct:
+ * a 3.303/3.304 cfr_basis, a "direct" framing string, or an in-service-event/exposure-shaped upstream token.
+ */
+export function leadIsDirectTheory(lead: { upstream?: string; framing?: string; cfr_basis?: string } | null | undefined): boolean {
+  if (!lead) return false;
+  const u = (lead.upstream ?? '').toLowerCase();
+  const f = (lead.framing ?? '').toLowerCase();
+  const b = (lead.cfr_basis ?? '').toLowerCase();
+  return /3\.30[34]/.test(b) || /\bdirect\b/.test(f) || /^in[_\s-]?service|in[_\s-]?service[_\s-]?event|\bexposure\b/.test(u);
+}
+
+/** Humanize a route-picker event token ("in_service_events_border_patrol_duty_El_Paso_Oct2022_Nov2023") into
+ *  readable prose for the direct checker's in-service-event list. Strips the machine prefix + underscores. */
+function humanizeEventToken(token: string): string {
+  return (token ?? '')
+    .replace(/^in[_\s-]?service[_\s-]?events?[_\s-]?/i, '')
+    .replace(/[_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || token;
+}
+
 export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeoutMs: number): Promise<boolean> {
   try {
     const state = await getAiViabilityState(db, caseId, { compute: false });
@@ -263,9 +288,14 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
     // (SOAP_MECHANISM_VERDICT_ENABLED). Fail-open: any failure degrades to the lead verdict alone (or a null
     // note); it NEVER blocks the drafter (which reads the route-picker band, not this note) and never blocks a
     // draft. When there is no distinct veteran theory the render is BYTE-IDENTICAL to the single-verdict path.
+    // ROUTING (Ryan 2026-07-23): a DIRECT lead (3.303/3.304, or an in-service-event upstream token) goes to the
+    // direct-SC checker below; only a genuine SECONDARY lead (an SC-condition upstream) runs the mechanism check.
+    // This fixes the misroute where the picker's event-token upstream sent a direct PTSD claim to the mechanism
+    // path (wrong "MECHANISM CHECK" label + a raw token as the "upstream").
+    const leadDirect = !!(card && card.lead) && leadIsDirectTheory(card.lead);
     let dualVerdict: DualMechanismVerdict | null = null;
     try {
-      if (card && card.lead && card.lead.upstream) {
+      if (card && card.lead && card.lead.upstream && !leadDirect) {
         dualVerdict = await deriveDualMechanismVerdict(
           card.lead.claimed || card.inputClaimed,
           card.lead.upstream,
@@ -281,13 +311,23 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
     // graph stays off the static path. Fail-open: any failure → null → the note renders exactly as today.
     let directVerdict: MechanismVerdict | null = null;
     try {
-      if (directScVerdictEnabled() && card && card.lead && !card.lead.upstream) {
+      if (directScVerdictEnabled() && card && card.lead && (leadDirect || !card.lead.upstream)) {
         const claimed = (card.lead.claimed || card.inputClaimed || ctx.claimedCondition || '').trim();
         const { buildInServiceEvents, buildDxConstellation } = await import('./case-viability-stamp.js');
-        const [events, dxConstellation] = await Promise.all([
+        const [structuredEvents, dxConstellation] = await Promise.all([
           buildInServiceEvents(db, caseId),
           buildDxConstellation(db, caseId),
         ]);
+        const events = structuredEvents.map((e) => ({ event_canonical: e.event_canonical, evidence_span: e.evidence_span }));
+        // The picker carries a DIRECT claim's in-service BASIS in lead.upstream (an event token). Feed it as an
+        // element-2 basis so a document-heavy case (statement/stressors in PDFs, not the structured columns —
+        // e.g. Haines) has a real basis to judge and does NOT abstain. Humanize the token + carry the rationale.
+        if (leadDirect && card.lead.upstream) {
+          events.push({
+            event_canonical: humanizeEventToken(card.lead.upstream),
+            evidence_span: (card.lead.rationale || card.lead.mechanism || 'route-picker direct in-service basis').slice(0, 400),
+          });
+        }
         const cl = claimed.toLowerCase();
         // Coarse element-1 hint ONLY (the model uses the full dxConstellation list as authority). Guard BOTH
         // sides on length so a short token can't substring-false-positive; yields true or null, never false.
@@ -295,7 +335,7 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
         directVerdict = await deriveDirectScVerdict(claimed, {
           currentDxPresent,
           dxConstellation,
-          inServiceEvents: events.map((e) => ({ event_canonical: e.event_canonical, evidence_span: e.evidence_span })),
+          inServiceEvents: events,
           continuityEvidence: null,
           upstreamScIfAny: null,
           veteranStatement: ctx.veteranStatement ?? null,

@@ -23,6 +23,7 @@ import {
   type SoapNote,
 } from '../soap-overview.js';
 import type { MechanismInvokeFn } from '../mechanism-viability.js';
+import { leadIsDirectTheory } from '../soap-context-assembler.js';
 
 /** An injected invoke that returns a canned reply AND captures the (system,user) it was given. */
 function fakeInvoke(reply: string): { fn: MechanismInvokeFn; calls: Array<{ system: string; user: string }> } {
@@ -48,6 +49,24 @@ const baseFacts: DirectScChartFacts = {
   upstreamScIfAny: null,
   veteranStatement: 'my statement',
 };
+
+// ── Routing: leadIsDirectTheory decides direct vs mechanism (the Haines misroute fix) ────────────────
+describe('leadIsDirectTheory routes direct claims away from the mechanism checker', () => {
+  it('DIRECT: 3.303/3.304 cfr_basis, "direct" framing, or an in-service-event upstream token', () => {
+    expect(leadIsDirectTheory({ cfr_basis: '3.304(f)', upstream: '', framing: '' })).toBe(true);
+    expect(leadIsDirectTheory({ cfr_basis: '38 CFR 3.303', upstream: '', framing: '' })).toBe(true);
+    expect(leadIsDirectTheory({ framing: 'direct', upstream: '', cfr_basis: '' })).toBe(true);
+    // Haines: the picker put the in-service basis in lead.upstream as an event token.
+    expect(leadIsDirectTheory({ upstream: 'in_service_events_border_patrol_duty_El_Paso_Oct2022_Nov2023', framing: '', cfr_basis: '' })).toBe(true);
+    expect(leadIsDirectTheory({ upstream: 'burn-pit exposure', framing: '', cfr_basis: '' })).toBe(true);
+  });
+  it('SECONDARY: an SC-condition upstream with 3.310 / secondary framing stays on the mechanism path', () => {
+    expect(leadIsDirectTheory({ upstream: 'PTSD', framing: 'secondary', cfr_basis: '3.310' })).toBe(false);
+    expect(leadIsDirectTheory({ upstream: 'obstructive sleep apnea', framing: 'aggravation', cfr_basis: '3.310' })).toBe(false);
+    expect(leadIsDirectTheory(null)).toBe(false);
+    expect(leadIsDirectTheory({})).toBe(false);
+  });
+});
 
 // ── Parser (both vocabularies) ──────────────────────────────────────────────────────────────────────
 describe('parseDirectScVerdict', () => {

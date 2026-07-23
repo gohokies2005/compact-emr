@@ -339,6 +339,9 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
           continuityEvidence: null,
           upstreamScIfAny: null,
           veteranStatement: ctx.veteranStatement ?? null,
+          // The chart digest is the authoritative record for element 1 (dx) + element 2 (stressors) when they
+          // live in uploaded documents rather than the structured columns (Haines). Bounded in the builder.
+          recordContext: typeof ctx.chartDigest === 'string' ? ctx.chartDigest : null,
         });
       }
     } catch { directVerdict = null; }

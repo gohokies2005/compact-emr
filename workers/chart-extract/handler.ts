@@ -56,13 +56,33 @@ function workerToken(): string {
   return t;
 }
 
+// Page window per request. Kept well under the ~6 MB Lambda sync-response ceiling: 300 OCR'd pages ≈ <1 MB
+// (typical page ~1-3 KB). A single monster document (e.g. a 2,294-page VA Blue Button export, which used to
+// 500 the whole extraction) now streams across N windows. (Ryan 2026-07-23.)
+const EXTRACT_PAGE_LIMIT = 300;
+
 async function fetchDocuments(caseId: string): Promise<BundleDocument[]> {
-  const res = await fetch(`${apiBase()}/api/v1/internal/cases/${caseId}/extract-documents`, {
-    headers: { 'X-Internal-Worker-Token': workerToken() },
-  });
-  if (!res.ok) throw new Error(`extract-documents GET failed: ${res.status}`);
-  const json = (await res.json()) as { data: { documents: BundleDocument[] } };
-  return json.data.documents;
+  const byId = new Map<string, BundleDocument>();
+  const order: string[] = []; // preserve document order across windows
+  let pageOffset = 0;
+  // Loop the page windows until the API signals the last one (nextPageOffset === null). A hard cap on
+  // iterations guards against a pathological loop (300 * 100000 pages ≈ far beyond any real chart).
+  for (let guard = 0; guard < 100000; guard++) {
+    const res = await fetch(`${apiBase()}/api/v1/internal/cases/${caseId}/extract-documents?pageOffset=${pageOffset}&pageLimit=${EXTRACT_PAGE_LIMIT}`, {
+      headers: { 'X-Internal-Worker-Token': workerToken() },
+    });
+    if (!res.ok) throw new Error(`extract-documents GET failed: ${res.status}`);
+    const json = (await res.json()) as { data: { documents: BundleDocument[]; nextPageOffset?: number | null } };
+    for (const d of json.data.documents) {
+      let acc = byId.get(d.id);
+      if (acc === undefined) { acc = { id: d.id, filename: d.filename, docTag: d.docTag, pages: [] }; byId.set(d.id, acc); order.push(d.id); }
+      for (const p of d.pages) acc.pages.push(p);
+    }
+    const next = json.data.nextPageOffset;
+    if (next === null || next === undefined) break; // last window (or a legacy non-paginated response)
+    pageOffset = next;
+  }
+  return order.map((id) => byId.get(id) as BundleDocument);
 }
 
 // Idempotency precheck (audit 2026-06-13 ROOT FIX for double/triple-billing). Returns the run's current

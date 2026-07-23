@@ -847,7 +847,35 @@ export function createInternalWorkerRouter(db: AppDb): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const caseId = String(req.params.caseId);
       const documents = await loadBundleDocuments(db, caseId);
-      res.json({ data: { caseId, documents } });
+
+      // PAGINATION (Ryan 2026-07-23, Victor Guzman 2,294-page export): returning EVERY OCR'd page in one
+      // JSON response blew past the ~6 MB AWS Lambda sync-response limit → API Gateway 500 → the whole chart
+      // extraction failed. The API can hold all pages in memory fine (~5 MB); it just can't RETURN them at
+      // once. So the worker pulls a PAGE WINDOW at a time (?pageOffset=&pageLimit=) and reassembles. Each
+      // window carries every document's METADATA (cheap) but only the pages inside [offset, offset+limit) of
+      // the flattened (doc-order, page-order) stream. nextPageOffset=null signals the last window.
+      const pageOffset = Math.max(0, Number(req.query['pageOffset']) || 0);
+      const pageLimit = Math.max(0, Number(req.query['pageLimit']) || 0);
+      if (pageLimit <= 0) {
+        // Back-compat (no pagination params): return everything. Only safe for small charts — the worker
+        // now always paginates, so this path is for ad-hoc/legacy callers on modest documents.
+        res.json({ data: { caseId, documents } });
+        return;
+      }
+      // Flatten pages in stable (document, pageNumber) order, window the slice, regroup into documents.
+      const flat: { documentId: string; pageNumber: number; text: string; confidence: number | null }[] = [];
+      for (const d of documents) for (const p of d.pages) flat.push({ documentId: d.id, pageNumber: p.pageNumber, text: p.text ?? '', confidence: p.confidence ?? null });
+      const totalPages = flat.length;
+      const windowPages = flat.slice(pageOffset, pageOffset + pageLimit);
+      const nextPageOffset = pageOffset + windowPages.length < totalPages ? pageOffset + windowPages.length : null;
+      const pagesByDoc = new Map<string, { pageNumber: number; text: string; confidence: number | null }[]>();
+      for (const p of windowPages) {
+        const arr = pagesByDoc.get(p.documentId) ?? [];
+        arr.push({ pageNumber: p.pageNumber, text: p.text, confidence: p.confidence });
+        pagesByDoc.set(p.documentId, arr);
+      }
+      const windowedDocs = documents.map((d) => ({ id: d.id, filename: d.filename, docTag: d.docTag, pages: pagesByDoc.get(d.id) ?? [] }));
+      res.json({ data: { caseId, documents: windowedDocs, totalPages, nextPageOffset } });
     }),
   );
 

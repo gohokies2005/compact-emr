@@ -205,8 +205,8 @@ describe('direct-SC render layer', () => {
     expect(withDirectScVerdictLead(note, null)).toBe(note);
   });
   it('formatDirectScVerdictPlanLine + withDirectScVerdictPlan mirror the Assessment behavior', () => {
-    expect(formatDirectScVerdictPlanLine({ verdict: 'viable', headline: '', reason: '', strongestCounterargument: '' }))
-      .toContain('Direct SC viability: supportable');
+    // viable → NO plan line (redundant, Ryan 2026-07-23); only cautions get a plan prefix.
+    expect(formatDirectScVerdictPlanLine({ verdict: 'viable', headline: '', reason: '', strongestCounterargument: '' })).toBeNull();
     const note: SoapNote = { subjective: '', objective: '', assessment: '', plan: 'Draft now.', action: null, confidence: null } as unknown as SoapNote;
     const v = { verdict: 'not_viable' as const, headline: '', reason: '', strongestCounterargument: '' };
     const planned = withDirectScVerdictPlan(note, v);

@@ -76,6 +76,13 @@ export function createStaffMessagesRouter(db: AppDb, deps: StaffMessagesDeps = {
     if (user.role === 'physician') {
       return isAssignedPhysicianForCase(db, user.sub, (c as { assignedPhysicianId: string | null }).assignedPhysicianId);
     }
+    // ops_staff (RN liaisons + ops) work the WHOLE pipeline and can already SEE every case in the EMR, so for
+    // messaging COLLABORATION any ops_staff may link/discuss any case. Restricting to the assigned RN blocked a
+    // legitimate "message Kim about case X" flow with a 403 (Ryan 2026-07-23, Johnson case). The case must
+    // exist (checked above). This is case-collaboration access, not a new PHI grant beyond what ops_staff has.
+    if (user.role === 'ops_staff') return true;
+    // Any other staff role: fall back to the assigned-RN match (defensive — ops_staff is the only non-admin/
+    // non-physician role today).
     const me = await db.appUser.findUnique({ where: { cognitoSub: user.sub } });
     return me !== null && (me as { id: string }).id === (c as { assignedRnId: string | null }).assignedRnId;
   }

@@ -365,12 +365,16 @@ describe('formatMechanismVerdictLead / withMechanismVerdictLead', () => {
 });
 
 describe('formatMechanismVerdictPlanLine / withMechanismVerdictPlan (Ryan 2026-07-22 — viability on the Plan)', () => {
-  it('a VIABLE verdict adds a supportable/good-to-draft Plan line, preserving the original work-order', () => {
+  it('a VIABLE verdict adds NO Plan line (redundant — Ryan 2026-07-23); the Plan stays byte-identical', () => {
     const v = { verdict: 'viable' as const, headline: 'ok', reason: 'r', strongestCounterargument: 'c' };
-    expect(formatMechanismVerdictPlanLine(v)).toContain('good to draft');
-    const out = withMechanismVerdictPlan(note('a'), v);
-    expect(out.plan.startsWith('Viability: supportable as framed')).toBe(true);
-    expect(out.plan).toContain('p'); // the original plan work-order still follows the viability line
+    expect(formatMechanismVerdictPlanLine(v)).toBeNull();
+    const n = note('a');
+    expect(withMechanismVerdictPlan(n, v)).toBe(n); // unchanged — no viability prefix on a viable plan
+  });
+  it('a BORDERLINE verdict DOES add a caution Plan line (the caution is not redundant)', () => {
+    const b = { verdict: 'borderline' as const, headline: 'h', reason: 'r', strongestCounterargument: 'c' };
+    expect(formatMechanismVerdictPlanLine(b)).toContain('BORDERLINE');
+    expect(withMechanismVerdictPlan(note('a'), b).plan.startsWith('⚠ Viability: BORDERLINE')).toBe(true);
   });
 
   it('a null verdict leaves the note byte-identical (fail-open / flag off)', () => {
@@ -612,7 +616,8 @@ describe('withDualMechanismVerdict / dual formatters (render)', () => {
     expect(dualLead).not.toBeNull();
     expect(dualLead!.startsWith('✓ MECHANISM CHECK —')).toBe(true);
     expect(dualLead).toContain('SUPPORTABLE'); // both pairings read SUPPORTABLE (dualVerdictWord for viable)
-    expect(out.plan.startsWith('Viability: supportable as framed')).toBe(true);
+    // Both-viable → NO viability Plan prefix (redundant, Ryan 2026-07-23); the Plan keeps its own work-order.
+    expect(out.plan.startsWith('Viability: supportable as framed')).toBe(false);
   });
 
   it('dual folds are idempotent (no double-prepend on re-apply)', () => {

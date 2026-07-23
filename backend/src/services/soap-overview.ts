@@ -66,7 +66,10 @@ const MODEL = process.env['SOAP_NOTE_MODEL'] || 'claude-sonnet-4-6';
 // (which were starved by the same cap on Foster and never saw the reading). This changes the digest string on
 // any severity-bearing chart → renderContext → the fingerprint, so pre-v30 stored notes self-invalidate; the
 // bump also forces the BMI-only cached notes (whose digest fit under the cap but dropped the AHI) to recompute.
-export const SOAP_NOTE_SCHEMA_VERSION = 30;
+// v31 (2026-07-23, concise assessments): the assessment tool-field prompt was tightened (3-4 tight sentences
+// MAX, state the mechanism ONCE, no restating) — the assessments were running too long/repetitive (Ryan). Prompt
+// change only (shape unchanged), so pre-v31 verbose notes must be invalidated to recompute under the new prompt.
+export const SOAP_NOTE_SCHEMA_VERSION = 31;
 
 export type SoapConfidence = 'high' | 'moderate' | 'low';
 // SoapAction + RoutePickerViability are imported+re-exported from ./soap-action-map.js (top of file).
@@ -534,7 +537,10 @@ export function formatMechanismVerdictPlanLine(verdict: MechanismVerdict | null)
   if (!verdict) return null;
   switch (verdict.verdict) {
     case 'viable':
-      return 'Viability: supportable as framed — records permitting, good to draft.';
+      // Redundant on the Plan for a VIABLE case (Ryan 2026-07-23): the Assessment already leads with the bold
+      // "✓ … MEDICALLY VIABLE" verdict and the Plan's own prose says "Draft now" — a "supportable, good to draft"
+      // prefix just repeats both. Only the CAUTIONS (borderline / not-supportable) add a warning worth surfacing.
+      return null;
     case 'borderline':
       return '⚠ Viability: BORDERLINE — recommend a provider review the viability before drafting.';
     case 'not_viable':
@@ -600,7 +606,7 @@ export function formatDirectScVerdictPlanLine(verdict: MechanismVerdict | null):
   if (!verdict) return null;
   switch (verdict.verdict) {
     case 'viable':
-      return 'Direct SC viability: supportable as framed — records permitting, good to draft.';
+      return null; // redundant on a VIABLE plan (Ryan 2026-07-23) — see formatMechanismVerdictPlanLine
     case 'borderline':
       return '⚠ Direct SC viability: BORDERLINE — recommend a provider review the direct theory before drafting.';
     case 'not_viable':
@@ -691,9 +697,10 @@ export function formatDualMechanismPlanLine(dual: DualMechanismVerdict): string 
   const vLabel = `the veteran's theory (${veteran.upstream} → ${c})`;
   const lLabel = lead ? `the lead alternative (${lead.upstream} → ${c})` : null;
 
-  // Both supportable → good to draft.
+  // Both supportable → NO Plan line (redundant, Ryan 2026-07-23): the Assessment already leads with the bold
+  // ✓ verdict and the Plan's own prose says draft. Only a CAUTION (a non-viable side) earns a Plan prefix.
   if (vSupportable && (lSupportable || lBand === null)) {
-    return 'Viability: supportable as framed — records permitting, good to draft.';
+    return null;
   }
   // A supportable pathway exists on exactly one side → name it, flag the other, ask the provider to choose.
   if (vSupportable || lSupportable) {
@@ -949,7 +956,7 @@ const SOAP_TOOL: Anthropic.Tool = {
           },
         },
       },
-      assessment: { type: 'string', description: 'Tie it together as a clinician + VA-claims expert would: the medical mechanism linking the claim to the service-connected condition(s), how it fits VA theory and language (secondary causation/aggravation under 38 CFR 3.310, direct under 3.303, etc., as applicable), the strongest counterpoint, and an honest overall read of how strong what we have is. 3-5 sentences of smooth prose. No internal jargon (no M-tiers, no BVA percentages, no "pair-atlas").' },
+      assessment: { type: 'string', description: 'Tie it together as a clinician + VA-claims expert would: the medical mechanism linking the claim to the service-connected condition(s), how it fits VA theory and language (secondary causation/aggravation under 38 CFR 3.310, direct under 3.303, etc., as applicable), the strongest counterpoint, and an honest overall read of how strong what we have is. BE CONCISE — 3-4 tight, skimmable sentences MAX (Ryan 2026-07-23: the assessments were running too long). State the mechanism ONCE; do NOT restate it or the counterpoint in different words. The RN needs the gist, not an exhaustive brief. No internal jargon (no M-tiers, no BVA percentages, no "pair-atlas").' },
       plan: { type: 'string', description: 'The concrete next step in plain language, written as an RN WORK ORDER — but DO NOT force a "draft now" recommendation; choose honestly. TIERS: (a) ESSENTIALS MISSING → the FIRST LINE must be a capitalized "NEED THESE RECORDS: <specific list>" and the action is get_records — do NOT draft yet. Essentials = a provider-documented current DIAGNOSIS; for an APPEAL/supplemental, the prior VA DENIAL letter we are asked to rebut; for a SECONDARY, the primary condition\'s VA RATING decision. (b) ESSENTIALS PRESENT but an IDEAL record missing (sleep study for OSA severity, buddy statement, imaging) → drafting is reasonable; name the ideal record to request in parallel — not a show-stopper. (c) READY → draft now. (d) DECLINE (action reject) when it does not make sense OR is OUT OF SCOPE. An Ask-Aegis check is an OPTIONAL second read ("Ask-Aegis can help if useful"), never required. Never write "route to a physician to decide". One or two sentences (plus the NEED THESE RECORDS line when applicable), and WHY.' },
       confidence: { type: 'string', enum: ['high', 'moderate', 'low'], description: 'Overall confidence in what we have to support this claim as filed.' },
       action: { type: 'string', enum: ['draft', 'get_records', 'clarify', 'physician_review', 'reject'], description: 'The single recommended next action, matching the plan and matching the go/no-go DIRECTION of the DECIDED FRAMING band when one is given (defer to it; vary only on framing nuance). draft = ready. get_records = an ESSENTIAL record is missing (the "NEED THESE RECORDS" case) — this is the amber hold, NOT a decline. clarify = one targeted question to the veteran. reject = a firm no: it does not make sense, OR it is out of scope (we do NEXUS letters only — no TDIU, no rating-increase letters), OR the claimed condition is ALREADY service-connected (nothing to connect). physician_review = a closer RN/Ask-Aegis review is needed before drafting (the RN owns that step — it does NOT hand the go/no-go to a physician).' },

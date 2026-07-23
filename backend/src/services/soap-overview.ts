@@ -557,6 +557,67 @@ export function withMechanismVerdictPlan(note: SoapNote, verdict: MechanismVerdi
   return { ...note, plan: plan.length > 0 ? `${line}\n\n${plan}` : line };
 }
 
+// ── DIRECT-SC VERDICT (Ryan 2026-07-23) — the DIRECT-axis lead, a PARALLEL formatter ────────────────────────
+//
+// The direct checker (direct-viability.ts) shares the MechanismVerdict SHAPE, but the mechanism formatter
+// hard-codes "MECHANISM CHECK — …" / "physiologic mechanism" wording that is WRONG for a direct 3.303 claim
+// (which has no upstream pairing). So the lead is a parallel formatter — "DIRECT SERVICE CONNECTION — …" — while
+// the prepend machinery (idempotent, additive, recommendation-only) mirrors withMechanismVerdictLead exactly.
+// The two verdicts stay visually distinct in the SOAP card when a dual-theory claim renders both.
+
+/** The bold DIRECT-SC lead for the Assessment. viable → ✓ SUPPORTABLE; borderline/not_viable → ⚠ + label.
+ *  Plain-text (glyph + UPPERCASE label carry the emphasis; the card has no markdown), mirroring the
+ *  mechanism lead. null verdict → null (note unchanged). */
+export function formatDirectScVerdictLead(verdict: MechanismVerdict | null): string | null {
+  if (!verdict) return null;
+  const supportable = verdict.verdict === 'viable';
+  const marker = supportable ? '✓' : '⚠';
+  const label = supportable ? 'SUPPORTABLE'
+    : verdict.verdict === 'not_viable' ? 'NOT SUPPORTABLE'
+    : 'BORDERLINE';
+  const head = (verdict.headline || '').trim();
+  const reason = (verdict.reason || '').trim();
+  const body = [head, reason].filter((s) => s.length > 0).join(' — ');
+  const fallback = supportable
+    ? 'the in-service basis is a recognized cause/onset of the claimed condition'
+    : 'the direct theory needs a provider review before drafting';
+  const lead = `${marker} DIRECT SERVICE CONNECTION — ${label}: ${body || fallback}`;
+  return /[.!?]$/.test(lead) ? lead : `${lead}.`;
+}
+
+/** Prepend the DIRECT-SC lead to the Assessment. ADDITIVE + RECOMMENDATION-ONLY + idempotent, mirroring
+ *  withMechanismVerdictLead: touches ONLY note.assessment, never a decision field or the route-picker band. */
+export function withDirectScVerdictLead(note: SoapNote, verdict: MechanismVerdict | null): SoapNote {
+  const lead = formatDirectScVerdictLead(verdict);
+  if (lead === null) return note;
+  const assessment = (note.assessment ?? '').trim();
+  if (assessment.startsWith(lead)) return note; // idempotent — never double-prepend
+  return { ...note, assessment: assessment.length > 0 ? `${lead}\n\n${assessment}` : lead };
+}
+
+/** The one-line DIRECT-SC recommendation for the Plan, mirroring formatMechanismVerdictPlanLine. */
+export function formatDirectScVerdictPlanLine(verdict: MechanismVerdict | null): string | null {
+  if (!verdict) return null;
+  switch (verdict.verdict) {
+    case 'viable':
+      return 'Direct SC viability: supportable as framed — records permitting, good to draft.';
+    case 'borderline':
+      return '⚠ Direct SC viability: BORDERLINE — recommend a provider review the direct theory before drafting.';
+    case 'not_viable':
+      return '⚠ Direct SC viability: NOT SUPPORTABLE — the direct theory is not supportable as framed; recommend a provider review before drafting.';
+  }
+}
+
+/** Prepend the DIRECT-SC recommendation to the Plan. ADDITIVE + RECOMMENDATION-ONLY + idempotent, mirroring
+ *  withMechanismVerdictPlan. */
+export function withDirectScVerdictPlan(note: SoapNote, verdict: MechanismVerdict | null): SoapNote {
+  const line = formatDirectScVerdictPlanLine(verdict);
+  if (line === null) return note;
+  const plan = (note.plan ?? '').trim();
+  if (plan.startsWith(line)) return note; // idempotent — never double-prepend
+  return { ...note, plan: plan.length > 0 ? `${line}\n\n${plan}` : line };
+}
+
 // ── DUAL MECHANISM VERDICT (Ryan 2026-07-22) — render the VETERAN'S theory AND the LEAD alternative ─────────
 //
 // Extends the single-verdict lead/plan above so an RN never sees a "not supportable" for a pairing the veteran

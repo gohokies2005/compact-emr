@@ -28,6 +28,11 @@ import { SERVICE_ACTORS } from '../services/service-actors.js';
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { RenderInvoker, EnrichVerifier } from './letter.js';
+// Reuse the editor-save regrade mechanism (Ryan 2026-07-08): the SAME fast Sonnet probative grader
+// (gradeLetterText) and the SAME best-effort, txn-decoupled persist (persistLetterGrade) that a letter
+// EDITOR-SAVE runs, so a pushed revised letter shows a Grade like a drafter letter. No new grader.
+import { persistLetterGrade } from './letter.js';
+import { gradeLetterText, type LetterRegrade } from '../services/letter-grade.js';
 import { cleanProseForSave, sanityCheckLetterText, type SanityFinding } from '../services/letter-sanity.js';
 import { extractCitationTokenMap } from '../services/letter-citation-integrity.js';
 import { isValidCaseStatusTransition } from '../services/case-status-transitions.js';
@@ -1215,6 +1220,10 @@ export interface DrafterWorkerRouterDeps {
   // unit tests stub it. The revised-letter push FAILS CLOSED when this is absent but the pushed letter
   // carries PMIDs (a recovery push must never smuggle an unverified cite through an unconfigured env).
   verifyPmid?: EnrichVerifier;
+  // Revised-letter GRADE (2026-07-22): the fast Sonnet probative regrader the editor-save runs. Injected
+  // (optional) ONLY so unit tests can stub it without a network call; production leaves it undefined and
+  // the handler falls back to the real `gradeLetterText`. Fail-open — a null/throw never blocks the push.
+  gradeLetter?: (input: { letterText: string; claimedCondition: string }) => Promise<LetterRegrade | null>;
 }
 
 /**
@@ -1861,6 +1870,108 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
   );
 
   /**
+   * GET /api/v1/internal/drafter/resolve-case?vet=<name>&condition=<cond>   (drafter-principal)
+   *
+   * PLAIN-SPEAKING case resolver for the ops window (2026-07-22). Turns a veteran NAME (+ optional
+   * condition) into a single caseId so an operator can push a letter by "John Smith / OSA" instead
+   * of a CLM id. RDS is the source of truth — unlike the S3 case_lookup stopgap this resolves a
+   * LETTERLESS case too (a case with no rendered letter yet). Strictly READ-ONLY: no writes, no
+   * render, no token/NCBI spend.
+   *
+   *   exactly one match  -> 200 { data: { caseId, veteranName, condition, status, assignedPhysician } }
+   *   multiple matches   -> 409 conflict  details:{ reason:'ambiguous', candidates:[...] }  (ops picks)
+   *   no match           -> 404 not_found details:{ reason:'no_match' } ( + nameMatches[] when the
+   *                             NAME matched but the condition filter excluded every case — a useful
+   *                             hint so the operator sees "found John Smith, but no OSA case; his are…")
+   *
+   * Name match: EVERY whitespace-separated token of `vet` must appear (case-insensitive substring) in
+   * firstName OR lastName. "John Smith" => firstName~John AND lastName~Smith; "Smith" => either field.
+   * Condition match (optional): loose substring against claimedCondition OR any claimedConditions member.
+   */
+  router.get(
+    '/internal/drafter/resolve-case',
+    asyncHandler(async (req: Request, res: Response) => {
+      const vetRaw = req.query['vet'];
+      const vet = typeof vetRaw === 'string' ? vetRaw.trim() : '';
+      if (vet.length === 0) badRequest('vet is required (veteran name; first/last, substring ok)', { field: 'vet' });
+      if (vet.length > 120) badRequest('vet is too long (max 120 chars)', { field: 'vet' });
+      let condition: string | undefined;
+      const condRaw = req.query['condition'];
+      if (condRaw !== undefined && condRaw !== null) {
+        if (typeof condRaw !== 'string' || condRaw.length > 120) badRequest('condition must be a string under 120 chars', { field: 'condition' });
+        if ((condRaw as string).trim().length > 0) condition = (condRaw as string).trim();
+      }
+
+      // Every token must substring-match firstName OR lastName (case-insensitive). Cap at 6 tokens so
+      // a pathological query can't explode the AND. On Postgres, `mode: 'insensitive'` is applied by
+      // Prisma; the hand-written delegate takes `unknown` args so this stays type-clean.
+      const tokens = vet.split(/\s+/).filter(Boolean).slice(0, 6);
+      const nameAnd = tokens.map((t) => ({
+        OR: [
+          { firstName: { contains: t, mode: 'insensitive' } },
+          { lastName: { contains: t, mode: 'insensitive' } },
+        ],
+      }));
+      const vets = await db.veteran.findMany({ where: { inactive: false, AND: nameAnd }, take: 50 });
+      if (vets.length === 0) {
+        throw new HttpError(404, 'not_found', `No veteran matches "${vet}".`, { reason: 'no_match', vet, condition: condition ?? null });
+      }
+      const vetById = new Map(vets.map((v) => [v.id, v]));
+
+      // Name-matched, non-archived cases (RDS = source of truth; a letterless case still resolves).
+      const nameCases = await db.case.findMany({
+        where: { veteranId: { in: [...vetById.keys()] }, archivedAt: null },
+        orderBy: { updatedAt: 'desc' },
+        take: 100,
+      });
+
+      // Optional loose condition narrowing (claimedCondition OR any claimedConditions member contains cond).
+      const matched = condition === undefined
+        ? nameCases
+        : nameCases.filter((c) => {
+            const needle = condition.toLowerCase();
+            if ((c.claimedCondition ?? '').toLowerCase().includes(needle)) return true;
+            return (c.claimedConditions ?? []).some((x) => x.toLowerCase().includes(needle));
+          });
+
+      // Resolve assigned-physician display names in one query (id -> fullName).
+      const physIds = [...new Set(
+        (matched.length > 0 ? matched : nameCases)
+          .map((c) => c.assignedPhysicianId)
+          .filter((id): id is string => typeof id === 'string' && id.length > 0),
+      )];
+      const physById = new Map<string, string>();
+      if (physIds.length > 0) {
+        const phys = await db.physician.findMany({ where: { id: { in: physIds } } });
+        for (const p of phys) physById.set(p.id, p.fullName);
+      }
+      const toCandidate = (c: (typeof nameCases)[number]) => {
+        const v = vetById.get(c.veteranId);
+        return {
+          caseId: c.id,
+          veteranName: v ? `${v.firstName} ${v.lastName}`.trim() : '',
+          condition: c.claimedCondition,
+          status: c.status,
+          assignedPhysician: (c.assignedPhysicianId && physById.get(c.assignedPhysicianId)) || null,
+        };
+      };
+
+      if (matched.length === 1) { res.json({ data: toCandidate(matched[0]) }); return; }
+      if (matched.length > 1) {
+        throw new HttpError(409, 'conflict', `Multiple cases match "${vet}"${condition !== undefined ? ` / "${condition}"` : ''}; pass --case CLM-… to disambiguate.`, {
+          reason: 'ambiguous', vet, condition: condition ?? null, candidates: matched.map(toCandidate),
+        });
+      }
+      // No case survived the (optional) condition filter. When the NAME matched cases, hand them back
+      // as a hint so the operator can see the real conditions and re-run with the right term (or --case).
+      throw new HttpError(404, 'not_found', `No case matches "${vet}"${condition !== undefined ? ` with condition "${condition}"` : ''}.`, {
+        reason: 'no_match', vet, condition: condition ?? null,
+        ...(nameCases.length > 0 ? { nameMatches: nameCases.map(toCandidate) } : {}),
+      });
+    }),
+  );
+
+  /**
    * POST /api/v1/internal/drafter/cases/:id/revised-letter   (drafter-principal)
    *
    * REVISED-LETTER RECOVERY (2026-07-16). Push an OUT-OF-BAND, physician-corrected nexus-letter TXT
@@ -2108,7 +2219,26 @@ export function createDrafterWorkerRouter(db: AppDb, deps: DrafterWorkerRouterDe
         throw err;
       }
 
-      res.json({ ok: true, version, warnings, verifiedPmids });
+      // 12. Grade the pushed letter (reuse the editor-save regrade mechanism, Ryan 2026-07-08) so it shows
+      //     a Grade like a drafter letter. FAIL-OPEN, DECOUPLED, and strictly AFTER the persist above: the
+      //     letter is ALREADY saved+editable+in physician_review, so nothing here can block or roll back the
+      //     push. gradeLetterText is fail-open (null on LLM error/timeout/too-short, never throws) and
+      //     persistLetterGrade is a best-effort try/catch write (Case.grade + LetterRevision.gradeJson).
+      //     A null/failed grade just leaves the letter ungraded until the first editor-save regrades it.
+      let grade: string | null = null;
+      let probativeScore: number | null = null;
+      try {
+        const doGrade = deps.gradeLetter ?? gradeLetterText;
+        const regrade = await doGrade({ letterText: cleaned, claimedCondition: c.claimedCondition });
+        if (regrade !== null) { grade = regrade.grade; probativeScore = regrade.probative_score; }
+        await persistLetterGrade(db, caseId, version, regrade);
+      } catch (gradeErr) {
+        // Defence-in-depth: neither gradeLetterText nor persistLetterGrade should throw, but a thrown grade
+        // must NEVER 500 a push whose letter already landed. Swallow with a warning (grade stays absent).
+        console.warn(JSON.stringify({ msg: 'revised_letter_regrade_failed_open', caseId, version, error: gradeErr instanceof Error ? gradeErr.message : String(gradeErr) }));
+      }
+
+      res.json({ ok: true, version, warnings, verifiedPmids, grade, probativeScore });
     }),
   );
 

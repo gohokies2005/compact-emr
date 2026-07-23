@@ -251,7 +251,7 @@ function assertTripleArtifacts(keys: { txtKey?: string | null; pdfKey?: string |
  * displayed grade simply stays at the prior version's, and no gate reads either field (routing = the
  * untouched shipRecommendation). No-op when the grade failed open (regrade === null).
  */
-async function persistLetterGrade(db: AppDb, caseId: string, version: number, regrade: LetterRegrade | null): Promise<void> {
+export async function persistLetterGrade(db: AppDb, caseId: string, version: number, regrade: LetterRegrade | null): Promise<void> {
   if (regrade === null) return;
   try {
     await db.$transaction(async (tx) => {

@@ -23,7 +23,12 @@ export function useVeteranTheory(caseId: string, opts?: { readonly enabled?: boo
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
+  // Surface the payload when EITHER overlay produced content: the veteran's restated `theory` (Part B) OR the
+  // letter-vs-veteran `letterTheory` (Dr. Kasky 2026-07-22). A letter-only payload has theory === null but a
+  // non-empty letterTheory, and must still reach buildPreSignTheory. null (both empty) -> deterministic fallback.
   const d = q.data?.data ?? null;
-  const data: VeteranTheoryData | null = d && typeof d.theory === 'string' && d.theory.trim().length > 0 ? d : null;
+  const hasTheory = !!d && typeof d.theory === 'string' && d.theory.trim().length > 0;
+  const hasLetterTheory = !!d && typeof d.letterTheory === 'string' && d.letterTheory.trim().length > 0;
+  const data: VeteranTheoryData | null = d && (hasTheory || hasLetterTheory) ? d : null;
   return { data, isLoading: q.isLoading };
 }

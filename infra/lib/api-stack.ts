@@ -314,6 +314,14 @@ export class ApiStack extends Stack {
         // TURN ON: pass --context veteran_theory_ai_enabled=true (or set it in cdk.json) + deploy. Display-only;
         // never influences the drafter (enforced by veteran-theory-drafter-isolation.test.ts).
         VETERAN_THEORY_AI_ENABLED: (this.node.tryGetContext('veteran_theory_ai_enabled') as string | undefined) ?? 'false',
+        // LETTER_THEORY_AI_ENABLED (Ryan 2026-07-22): the letter-vs-veteran overlay on the SAME lazy physician
+        // endpoint — a Sonnet call that reads the DRAFTED letter's final §VII opinion and returns "what the
+        // letter argues" + "where it differs from the veteran", so the panel stops trusting the route-picker
+        // plan (which diverges from the letter by design). Runs IN THE API LAMBDA → the flag lives HERE (or it
+        // is permanently dark; a code-only flag with no env line is un-enableable — QA 2026-07-22). Default
+        // 'on' → LIVE (Ryan wants the panel fixed). Fail-open + display-only + drafter-isolated. REVERT: pass
+        // --context letter_theory_ai_enabled=false + deploy.
+        LETTER_THEORY_AI_ENABLED: (this.node.tryGetContext('letter_theory_ai_enabled') as string | undefined) ?? 'true',
         // SOAP_MECHANISM_VERDICT_ENABLED (Ryan 2026-07-22): the mechanism viability verdict — a bold
         // MEDICALLY VIABLE / BORDERLINE / NOT-SUPPORTABLE-AS-FRAMED lead on the SOAP Assessment, grounded
         // in the library/PubMed retrieval. Recommendation ONLY (never gates a draft); fail-open; computed

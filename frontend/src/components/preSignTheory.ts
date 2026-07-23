@@ -31,9 +31,20 @@ export interface PreSignTheoryInput {
    * lives server-side in veteran-theory-ai.ts).
    */
   readonly veteranTheoryAi?: {
-    readonly theory: string;
-    readonly framing: 'secondary' | 'direct' | 'aggravation' | 'unclear';
+    readonly theory: string | null;
+    readonly framing: 'secondary' | 'direct' | 'aggravation' | 'unclear' | null;
     readonly upstream: string | null;
+    /**
+     * Letter-vs-veteran overlay (Dr. Kasky 2026-07-22): what the LETTER argues, read by an LLM from the
+     * letter's FINAL §VII opinion. The route-picker plan (`aiViabilityPlanJson.lead`) diverges from the
+     * drafted letter BY DESIGN (the drafter runs a deeper Opus pass and may land on a better theory — that
+     * is EXPECTED, not a bug). When present, `letterTheory` SUPERSEDES the plan-derived `letterTheory` line
+     * AND `difference` SUPERSEDES the deterministic `reconcileLlmWithPlan` (which string-matched the WRONG —
+     * plan — lead and silently dropped the differ line). Both absent (flag off / letter unreadable / LLM
+     * fail-open) -> the deterministic plan-based path below is used unchanged (no regression).
+     */
+    readonly letterTheory?: string | null;
+    readonly difference?: string | null;
   } | null;
 }
 
@@ -300,8 +311,24 @@ export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
 
   const plan = c.aiViabilityPlanJson ?? null;
   const lead = plan?.lead ?? null;
+  // The claimed diagnosis is an intake fact (the letter's subject) — it does NOT diverge between the plan and
+  // the drafted letter, so it stays sourced from the plan. Only the causal THEORY (upstream + framing) is the
+  // divergent thing the LLM letter overlay corrects.
   const letterDx = nonEmpty(lead?.claimed);
-  const letterTheory = lead ? letterTheoryLine(lead) : null;
+
+  // LLM LETTER OVERLAY (Dr. Kasky 2026-07-22 — the "read the letter, not the plan" decision). The route-picker
+  // plan diverges from the drafted letter BY DESIGN, so when the letter-vs-veteran model has read the FINAL
+  // §VII opinion, its `letterTheory` SUPERSEDES the plan-derived line and its `difference` SUPERSEDES the
+  // deterministic reconcileLlmWithPlan (which string-matched the wrong — plan — lead). Fail-open: absent ->
+  // the deterministic plan path is used unchanged, byte-identical to today.
+  const llmLetterTheory = nonEmpty(c.veteranTheoryAi?.letterTheory);
+  const llmDifference = nonEmpty(c.veteranTheoryAi?.difference);
+  const letterTheory = llmLetterTheory ?? (lead ? letterTheoryLine(lead) : null);
+  // The LLM difference is a single plain sentence -> the same `mismatch` shape the UI already renders. null
+  // when the two theories align (the model returned no difference).
+  const llmLetterMismatch: PreSignTheory['mismatch'] = llmDifference
+    ? { reason: null, suggestEdit: false, summary: llmDifference }
+    : null;
 
   // Part B (Ryan 2026-07-11): when the veteran-theory model produced a grounded restatement, it SUPERSEDES
   // the deterministic template — show its prose and reconcile using its statement-grounded upstream/framing
@@ -309,7 +336,13 @@ export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
   // which is unchanged (no regression). The stale-upstream guard for THIS path lives server-side.
   const llmTheory = nonEmpty(c.veteranTheoryAi?.theory);
   if (c.veteranTheoryAi && llmTheory) {
-    const llmMismatch = plan && lead ? reconcileLlmWithPlan(c.veteranTheoryAi.framing, c.veteranTheoryAi.upstream ?? null, plan, veteranStatement) : null;
+    // Mismatch source: the LLM letter overlay when present (plan out entirely), else the deterministic
+    // reconcile over the plan (unchanged Part B behavior).
+    const mismatch: PreSignTheory['mismatch'] = llmLetterTheory
+      ? llmLetterMismatch
+      : plan && lead
+        ? reconcileLlmWithPlan(c.veteranTheoryAi.framing ?? 'unclear', c.veteranTheoryAi.upstream ?? null, plan, veteranStatement)
+        : null;
     return {
       veteranStatement,
       veteranClaim,
@@ -317,7 +350,7 @@ export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
       veteranTheoryProse: llmTheory,
       letterDx,
       letterTheory,
-      mismatch: llmMismatch,
+      mismatch,
       hasContent: !!(veteranStatement || llmTheory || veteranClaim || letterTheory),
     };
   }
@@ -326,11 +359,14 @@ export function buildPreSignTheory(c: PreSignTheoryInput): PreSignTheory {
   // specific-or-silent logic as the LLM path, so the useless generic "they differ" never shows on either
   // path (AI-SME work-QA I-1). Feed the TRUSTED upstream only — an untrusted/stale upstream (Jay's "Ankle")
   // is dropped to null so it can never anchor a "veteran points to…" line. Map the derived bucket to the
-  // veteran-theory framing vocabulary ('other' → 'unclear').
+  // veteran-theory framing vocabulary ('other' → 'unclear'). The LLM letter overlay (if present) still wins.
   const derivedFraming: 'secondary' | 'direct' | 'aggravation' | 'unclear' =
     vBucket === 'secondary' ? 'secondary' : vBucket === 'aggravation' ? 'aggravation' : vBucket === 'direct' ? 'direct' : 'unclear';
-  const mismatch: PreSignTheory['mismatch'] =
-    plan && lead ? reconcileLlmWithPlan(derivedFraming, upstreamTrusted ? c.upstreamScCondition ?? null : null, plan, veteranStatement) : null;
+  const mismatch: PreSignTheory['mismatch'] = llmLetterTheory
+    ? llmLetterMismatch
+    : plan && lead
+      ? reconcileLlmWithPlan(derivedFraming, upstreamTrusted ? c.upstreamScCondition ?? null : null, plan, veteranStatement)
+      : null;
 
   const hasContent = !!(veteranStatement || veteranTheory || veteranClaim || letterTheory);
   return { veteranStatement, veteranClaim, veteranTheory, veteranTheoryProse: null, letterDx, letterTheory, mismatch, hasContent };

@@ -388,3 +388,93 @@ describe('buildPreSignTheory — Part B LLM overlay (full-scope reconciliation)'
     expect(t.mismatch).toBeNull();
   });
 });
+
+// LLM LETTER OVERLAY (Dr. Kasky 2026-07-22): what the letter argues is READ FROM THE LETTER'S §VII opinion,
+// not the route-picker plan (which diverges from the drafted letter by design). When the letter overlay is
+// present it SUPERSEDES the plan-derived letterTheory + the deterministic reconcile. Absent → byte-identical
+// to today's plan-based path.
+describe('buildPreSignTheory — LLM letter overlay (letterTheory / difference)', () => {
+  it('LOVELL: plan.lead says SINUSITIS, but the letter §VII argues PTSD → letterTheory names PTSD, NOT sinusitis', () => {
+    // The exact proven-bug shape: the drafter landed on PTSD (dual-prong) while the plan led with chronic
+    // sinusitis. The panel must show what the LETTER argues (PTSD), sourced from the LLM letter overlay, and
+    // the "where they differ" line must be the LLM difference (not silently dropped by the plan-lead match).
+    const t = buildPreSignTheory({
+      claimedCondition: 'Obstructive Sleep Apnea',
+      veteranStatement: 'I have PTSD, chronic sinusitis, chronic rhinitis, and tinnitus, and I think my sleep apnea is connected to all of them.',
+      aiViabilityPlanJson: plan({ claimed: 'Obstructive Sleep Apnea', framing: 'secondary', upstream: 'chronic sinusitis' }),
+      veteranTheoryAi: {
+        theory: 'Veteran attributes his obstructive sleep apnea to PTSD, chronic sinusitis, chronic rhinitis, and tinnitus together.',
+        framing: 'secondary',
+        upstream: 'PTSD',
+        letterTheory: "The letter argues the veteran's obstructive sleep apnea is secondary to, and in the alternative aggravated by, his service-connected PTSD (38 CFR 3.310(a) and (b)).",
+        difference: 'The letter rests the opinion on PTSD alone, while the veteran attributes his sleep apnea to several conditions together.',
+      },
+    });
+    expect(t.letterTheory).toContain('PTSD'); // from the LLM letter overlay, read from §VII
+    expect(t.letterTheory).not.toMatch(/sinusitis/i); // the plan's diverging lead must NOT drive this line
+    expect(t.mismatch).not.toBeNull();
+    expect(t.mismatch!.summary).toMatch(/PTSD alone/); // the LLM difference, not a dropped/plan-derived line
+  });
+
+  it('overlay letterTheory supersedes the plan-derived letterTheory even when the two theories ALIGN (difference null → no mismatch)', () => {
+    const t = buildPreSignTheory({
+      claimedCondition: 'Obstructive Sleep Apnea',
+      framingChoice: 'secondary',
+      upstreamScCondition: 'PTSD',
+      aiViabilityPlanJson: plan({ claimed: 'Obstructive Sleep Apnea', framing: 'secondary', upstream: 'PTSD' }),
+      veteranTheoryAi: {
+        theory: 'Veteran attributes his obstructive sleep apnea to service-connected PTSD.',
+        framing: 'secondary',
+        upstream: 'PTSD',
+        letterTheory: "The letter argues the veteran's obstructive sleep apnea is secondary to his service-connected PTSD.",
+        difference: null, // aligned
+      },
+    });
+    // Plan-derived line would be "Obstructive Sleep Apnea secondary to PTSD"; the LLM sentence supersedes it.
+    expect(t.letterTheory).toBe("The letter argues the veteran's obstructive sleep apnea is secondary to his service-connected PTSD.");
+    expect(t.mismatch).toBeNull(); // difference null → aligned → no "where they differ" line
+  });
+
+  it('overlay wins in the DETERMINISTIC veteran path too (no veteran-theory prose)', () => {
+    const t = buildPreSignTheory({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'PTSD',
+      aiViabilityPlanJson: plan({ claimed: 'OSA', framing: 'secondary', upstream: 'chronic sinusitis' }),
+      // No `theory` → the veteran-prose path is skipped; the letter overlay must still supersede the plan.
+      veteranTheoryAi: {
+        theory: null,
+        framing: null,
+        upstream: null,
+        letterTheory: 'The letter argues OSA is secondary to service-connected PTSD.',
+        difference: 'The letter argues PTSD; the plan/route led with chronic sinusitis.',
+      },
+    });
+    expect(t.letterTheory).toBe('The letter argues OSA is secondary to service-connected PTSD.');
+    expect(t.mismatch!.summary).toMatch(/PTSD/);
+  });
+
+  it('overlay ABSENT → letterTheory + mismatch are byte-identical to the deterministic plan-based path', () => {
+    const withAbsentOverlay = buildPreSignTheory({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'Ankle',
+      aiViabilityPlanJson: plan(
+        { claimed: 'OSA', framing: 'secondary', upstream: 'PTSD' },
+        [{ upstream: 'Ankle', framing: 'secondary', why_not: 'The ankle-to-OSA mechanism is not well supported.' }],
+      ),
+      // veteranTheoryAi present but WITHOUT letterTheory/difference (e.g. veteran overlay ran, letter overlay
+      // failed open) — must NOT alter the plan-derived letterTheory or the deterministic reconcile.
+      veteranTheoryAi: { theory: 'Veteran points to the ankle.', framing: 'secondary', upstream: 'Ankle' },
+    });
+    const baseline = buildPreSignTheory({
+      framingChoice: 'secondary',
+      upstreamScCondition: 'Ankle',
+      aiViabilityPlanJson: plan(
+        { claimed: 'OSA', framing: 'secondary', upstream: 'PTSD' },
+        [{ upstream: 'Ankle', framing: 'secondary', why_not: 'The ankle-to-OSA mechanism is not well supported.' }],
+      ),
+    });
+    expect(withAbsentOverlay.letterTheory).toBe(baseline.letterTheory); // plan-derived, unchanged
+    // The prose path's own reconcile still runs against the plan (Part B behavior), unchanged by the overlay.
+    expect(withAbsentOverlay.mismatch?.reason).toContain('ankle-to-OSA');
+  });
+});

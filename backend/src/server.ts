@@ -178,9 +178,15 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/v1', authenticateJwt(), createStrategyPreviewRouter(db));
   // P4 anchor-viability card (caseViability v1) — DARK behind EMR_CASE_VIABILITY_ENABLED.
   app.use('/api/v1', authenticateJwt(), createCaseViabilityRouter(db));
-  // Veteran-theory restatement (Part B "Ankle nowhere") — lazy physician sub-resource, DARK behind
-  // VETERAN_THEORY_AI_ENABLED. Display-only; the SINGLE importer of veteran-theory-ai.ts.
-  app.use('/api/v1', authenticateJwt(), createVeteranTheoryRouter(db));
+  // Veteran-theory restatement (Part B "Ankle nowhere") + letter-vs-veteran reconciliation (Dr. Kasky
+  // 2026-07-22) — lazy physician sub-resource, each overlay DARK behind its own flag
+  // (VETERAN_THEORY_AI_ENABLED / LETTER_THEORY_AI_ENABLED). Display-only; the veteran-theory overlay is the
+  // SINGLE importer of veteran-theory-ai.ts. s3 + bucketName let the letter overlay read the CURRENT letter's
+  // §VII opinion (the same "current letter" the physician sees); null when S3 is unconfigured -> overlay off.
+  app.use('/api/v1', authenticateJwt(), createVeteranTheoryRouter(db, {
+    s3: new S3Client({ forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true' }),
+    bucketName: process.env.PHI_BUCKET_NAME,
+  }));
   // Recommended-plan outreach email (Sonnet 4.6 draft for the RN to copy; never auto-sent).
   app.use('/api/v1', authenticateJwt(), createRecommendationEmailRouter(db));
   app.use('/api/v1', authenticateJwt(), requireRole(['admin', 'ops_staff', 'physician']), createCaseMessagesRouter(db));

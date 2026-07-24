@@ -835,6 +835,29 @@ export function withReconciledCaseVerdict(
   };
 }
 
+/**
+ * STAGE-1 CANNED NOTE (Ryan 2026-07-23, Step 2): a no-model "await records" note for a case that has NO
+ * veteran-uploaded medical records yet. Ryan: "When we only have stage 1 we don't even need to calculate all
+ * that stuff — it can just have the problem, subjective, and A&P just read 'await records' so [RNs] aren't
+ * confused." Rendering a manufactured viability verdict on an empty chart is exactly that confusion. This is
+ * NOT a clinical grade — it is the honest "there is nothing to read yet" state. No viabilityBand → the chip
+ * renders neutral (not a verdict). fallback:false so it persists ($0 on reopen); it self-heals to a real note
+ * the moment records arrive (the chart digest changes → the fingerprint diverges → recompute).
+ */
+export function buildAwaitRecordsNote(): SoapNote {
+  return {
+    subjective: 'Awaiting records — the veteran\'s reported history will be assessed once medical records are uploaded.',
+    objective: 'Awaiting records — no medical records have been uploaded yet.',
+    assessment: 'Awaiting records — no medical records are on file yet, so there is nothing to assess. This is a Stage-1 intake; the viability read runs once the records are in.',
+    plan: 'Await records. Obtain the veteran\'s VA claims file / medical records, then the viability read will run automatically.',
+    confidence: 'low',
+    action: 'get_records',
+    caveat: null,
+    measurements: [],
+    fallback: false,
+  };
+}
+
 export interface SoapContext {
   readonly claimedCondition: string;
   /** The veteran's own words (their reported history / goal) — the Subjective source. */

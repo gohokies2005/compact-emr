@@ -17,7 +17,7 @@
 // Fail-open everywhere: any sub-derivation that throws degrades to a null/empty field, never blocks the note.
 
 import type { AppDb } from './db-types.js';
-import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote, reconcileStickyAction, withReconciledCaseVerdict } from './soap-overview.js';
+import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote, reconcileStickyAction, withReconciledCaseVerdict, buildAwaitRecordsNote } from './soap-overview.js';
 import { deriveDualMechanismVerdict, type DualMechanismVerdict, type MechanismVerdict } from './mechanism-viability.js';
 import { deriveDirectScVerdict, directScVerdictEnabled } from './direct-viability.js';
 import { type AiViabilityCard, getAiViabilityState } from './ai-viability.js';
@@ -271,6 +271,18 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
     const framing = routePickerFramingFromCard(card, card?.inputClaimed ?? '');
     const ctx = await assembleSoapContextForCase(db, caseId, framing);
     if (!ctx.claimedCondition) return false; // nothing to write about (no claimed condition) → genuinely skip
+    // STAGE-1 SHORT-CIRCUIT (Ryan 2026-07-23, Step 2): NO veteran-uploaded medical records yet → persist a canned
+    // "await records" note with ZERO model spend (skips the mechanism/direct verdict calls AND buildSoapNote).
+    // ctx.uploadedDocs already excludes our screening-summary artifact + empty docs, so this fires ONLY when there
+    // is genuinely nothing to read — it never hides a real chart (which would wrongly turn away a live case). The
+    // canned note self-heals to a real read the moment records arrive (the digest changes → fingerprint diverges).
+    if ((ctx.uploadedDocs?.length ?? 0) === 0) {
+      await getOrBuildSoapNote(db as unknown as SoapOverviewCacheDb, caseId, ctx, {
+        forceRegenerate: true, timeoutMs, generate: () => Promise.resolve(buildAwaitRecordsNote()),
+      });
+      console.warn(JSON.stringify({ msg: 'soap precompute outcome', caseId, stage1AwaitRecords: true, persisted: true }));
+      return true;
+    }
     // STICKY VERDICT (Dr. Kasky 2026-06-28, chip-wobble keystone): this precompute force-REGENERATES the note,
     // which used to clobber the persisted `action` (hence the chip color) on every recompute — even when the
     // case had not actually changed. reconcileStickyAction compares the fresh note against the stored one and

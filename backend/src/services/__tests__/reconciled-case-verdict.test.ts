@@ -2,7 +2,7 @@
 // contradict the route-picker band. These cases are drawn from the real pre-draft trust audit (15 charts) so a
 // regression here means the exact contradiction the audit found has come back.
 import { describe, it, expect } from 'vitest';
-import { withReconciledCaseVerdict, type SoapNote } from '../soap-overview.js';
+import { withReconciledCaseVerdict, buildAwaitRecordsNote, type SoapNote } from '../soap-overview.js';
 import type { MechanismVerdict, MechanismPairing, DualMechanismVerdict } from '../mechanism-viability.js';
 import type { RoutePickerViability } from '../soap-action-map.js';
 
@@ -93,5 +93,18 @@ describe('withReconciledCaseVerdict — the three verdict voices become ONE', ()
     expect(out.action).toBe('draft');
     expect(out.assessment).toBe(n.assessment);
     expect(out.plan).toBe(n.plan);
+  });
+});
+
+describe('buildAwaitRecordsNote — Stage-1 no-records note (Step 2)', () => {
+  it('all sections say await records, no manufactured verdict, persistable', () => {
+    const n = buildAwaitRecordsNote();
+    expect(n.action).toBe('get_records');
+    expect(n.fallback).toBe(false);                 // persists ($0 on reopen)
+    expect(n.viabilityBand).toBeUndefined();         // no verdict → chip renders neutral, not amber/green
+    for (const section of [n.subjective, n.objective, n.assessment, n.plan]) {
+      expect(section.toLowerCase()).toContain('await');
+    }
+    expect(n.assessment).not.toMatch(/⚠|BORDERLINE|supportable/i); // no fabricated viability read
   });
 });

@@ -69,7 +69,11 @@ const MODEL = process.env['SOAP_NOTE_MODEL'] || 'claude-sonnet-4-6';
 // v31 (2026-07-23, concise assessments): the assessment tool-field prompt was tightened (3-4 tight sentences
 // MAX, state the mechanism ONCE, no restating) — the assessments were running too long/repetitive (Ryan). Prompt
 // change only (shape unchanged), so pre-v31 verbose notes must be invalidated to recompute under the new prompt.
-export const SOAP_NOTE_SCHEMA_VERSION = 31;
+// v32 (2026-07-23, ONE reconciled verdict — Step 1): withReconciledCaseVerdict now folds the route-picker band +
+// the SOAP model action + the mechanism/direct skeptic into ONE self-consistent decision — the action can no
+// longer contradict the band, and ⚠ caution prose is suppressed on a DRAFT. Note shape/prose change → every
+// pre-v32 stored note must self-heal (recompute) so the RN stops seeing the old three-way contradiction.
+export const SOAP_NOTE_SCHEMA_VERSION = 32;
 
 export type SoapConfidence = 'high' | 'moderate' | 'low';
 // SoapAction + RoutePickerViability are imported+re-exported from ./soap-action-map.js (top of file).
@@ -752,6 +756,83 @@ export function withDualMechanismVerdict(note: SoapNote, dual: DualMechanismVerd
     }
   }
   return out;
+}
+
+// ── STEP 1: ONE RECONCILED CASE VERDICT (Ryan 2026-07-23) ────────────────────────────────────────────────
+//
+// The pre-draft trust audit found the note contradicting itself: the route-picker BAND, the SOAP model's OWN
+// free `action`, and the prepended mechanism/direct verdict prose each decided independently, so an RN could
+// read "band=supportable" + "⚠ BORDERLINE — recommend provider review" + "Draft now" in one note (Guzman), or a
+// "draft" action sitting on an amber band (Lozano/Haines/Treadway/Palmer). This folds those THREE voices into
+// ONE decision that drives the action AND which verdict prose renders.
+//
+// The rule is LLM-ONLY — it reconciles two model opinions by CAUTION, it is NOT a deterministic clinical grade:
+//   1. finalAction = the MORE CAUTIOUS of {band→action, the SOAP model's own action}. The band can only make it
+//      MORE cautious (an amber band caps a model "draft" at a hold); the model can only make it MORE cautious
+//      (a model "get_records" on a supportable band keeps the records hold). A DRAFT therefore requires BOTH
+//      brains to agree — the safest possible draft affordance, and it can never regress a letter (the drafter
+//      reads the band directly, not this note).
+//   2. A hard skeptic VETO: a mechanism/direct verdict of `not_viable` downgrades a would-be DRAFT to a hold
+//      (this preserves the skeptic that correctly kills tinnitus→OSA). A `borderline` NEVER downgrades a
+//      supportable band — borderline is often a strawman graded on a theory we are not even pleading (Guzman),
+//      and a false caution scares a good draft (Ryan's calibration: that is the more harmful error).
+//   3. Prose consistency: when finalAction is DRAFT, the ⚠ caution leads/plan-lines are suppressed (they would
+//      contradict the go — and they are the bulk of the "not brief" bloat); the ✓ affirming lead stays. When
+//      finalAction is a HOLD, the caution prose renders as before (it explains WHY we are holding).
+// Recommendation-only; never blocks a draft (NO-BLOCK-DRAFT holds). Fail-open: no band → today's behavior.
+
+const ACTION_CAUTION_RANK: Record<SoapAction, number> = {
+  draft: 0, get_records: 1, clarify: 1, physician_review: 2, reject: 3,
+};
+function mostCautiousAction(a: SoapAction, b: SoapAction): SoapAction {
+  return ACTION_CAUTION_RANK[b] > ACTION_CAUTION_RANK[a] ? b : a;
+}
+function verdictIsNotViable(m: MechanismVerdict | null | undefined): boolean {
+  return !!m && m.verdict === 'not_viable';
+}
+function anyNotViable(dual: DualMechanismVerdict | null, direct: MechanismVerdict | null): boolean {
+  return verdictIsNotViable(dual?.veteran?.verdict) || verdictIsNotViable(dual?.lead?.verdict) || verdictIsNotViable(direct);
+}
+/** Strip the prepended ⚠ caution paragraph(s) from the front of a SOAP field, leaving the model prose (and any
+ *  ✓ affirming lead) intact. The verdict folds always prepend the caution as a leading `⚠ …\n\n` block, so we
+ *  drop only leading paragraphs that begin with the ⚠ glyph — model prose does not emit it. */
+function dropLeadingCautionParas(s: string): string {
+  let out = (s ?? '').trim();
+  let guard = 0;
+  while (out.startsWith('⚠') && guard++ < 6) {
+    const idx = out.indexOf('\n\n');
+    if (idx === -1) return '';
+    out = out.slice(idx + 2).trim();
+  }
+  return out;
+}
+
+/**
+ * The ONE entry point that reconciles the route-picker band + the SOAP model action + the mechanism/direct
+ * skeptic verdicts into a single, self-consistent note (Ryan 2026-07-23, Step 1). Replaces the raw
+ * withDualMechanismVerdict → withDirectScVerdict fold chain at the assembler reconcile. `band` is the grounding
+ * route-picker viability (null when this run is ungrounded → today's behavior, byte-identical).
+ */
+export function withReconciledCaseVerdict(
+  note: SoapNote,
+  band: RoutePickerViability | null,
+  dual: DualMechanismVerdict | null,
+  direct: MechanismVerdict | null,
+): SoapNote {
+  // Fold the verdict prose exactly as today first (dual delegates to the single path when no distinct veteran
+  // theory; both folds are no-ops on null → byte-identical when no verdict applies).
+  const folded = withDirectScVerdictPlan(withDirectScVerdictLead(withDualMechanismVerdict(note, dual), direct), direct);
+  if (!band) return folded; // ungrounded run — no band to reconcile against; keep today's behavior.
+  let finalAction = mostCautiousAction(planViabilityToAction(band), note.action);
+  if (finalAction === 'draft' && anyNotViable(dual, direct)) finalAction = 'physician_review'; // hard skeptic veto
+  if (finalAction !== 'draft') return { ...folded, action: finalAction }; // HOLD: caution prose explains it.
+  // DRAFT: both brains agree + no hard veto → suppress the ⚠ caution prose that would contradict the go.
+  return {
+    ...folded,
+    action: 'draft',
+    assessment: dropLeadingCautionParas(folded.assessment ?? ''),
+    plan: dropLeadingCautionParas(folded.plan ?? ''),
+  };
 }
 
 export interface SoapContext {

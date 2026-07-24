@@ -17,7 +17,7 @@
 // Fail-open everywhere: any sub-derivation that throws degrades to a null/empty field, never blocks the note.
 
 import type { AppDb } from './db-types.js';
-import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote, reconcileStickyAction, withDualMechanismVerdict, withDirectScVerdictLead, withDirectScVerdictPlan } from './soap-overview.js';
+import { type SoapContext, type SoapOverviewCacheDb, getOrBuildSoapNote, reconcileStickyAction, withReconciledCaseVerdict } from './soap-overview.js';
 import { deriveDualMechanismVerdict, type DualMechanismVerdict, type MechanismVerdict } from './mechanism-viability.js';
 import { deriveDirectScVerdict, directScVerdictEnabled } from './direct-viability.js';
 import { type AiViabilityCard, getAiViabilityState } from './ai-viability.js';
@@ -354,11 +354,14 @@ export async function precomputeSoapNoteForCase(db: AppDb, caseId: string, timeo
       // Assessment+Plan folds (byte-identical to today) when it does not. Recommendation-only prose prefixes;
       // a good draft's decision fields are untouched.
       reconcile: (fresh, stored) => {
-        // Fold the mechanism (secondary) verdict, then the direct-SC verdict. On any given case exactly ONE is
-        // non-null (secondary has an upstream; direct does not), and both folds are fail-open no-ops on null, so
-        // the note is byte-identical to today whenever the direct flag is off or the axis doesn't apply.
-        const withMech = withDualMechanismVerdict(reconcileStickyAction(fresh, stored, grounded), dualVerdict);
-        return withDirectScVerdictPlan(withDirectScVerdictLead(withMech, directVerdict), directVerdict);
+        // STEP 1 (Ryan 2026-07-23): ONE reconciled verdict. withReconciledCaseVerdict folds the mechanism +
+        // direct verdict prose AND reconciles the note's `action` against the route-picker band (framing.viability)
+        // so the three verdict voices can no longer contradict (band vs the model's free action vs the caution
+        // prose). The band caps the action (an amber band can't render a "draft"), a hard not_viable skeptic
+        // vetoes a draft, and ⚠ caution prose is dropped on a DRAFT. Ungrounded run (framing null) → today's
+        // behavior. reconcileStickyAction still runs first so the sticky (chip-wobble) action feeds the reconcile.
+        const band = framing ? framing.viability : null;
+        return withReconciledCaseVerdict(reconcileStickyAction(fresh, stored, grounded), band, dualVerdict, directVerdict);
       },
     });
     // Observability (Bays SOAP banner, 2026-06-26): log the PERSISTED outcome, not just "didn't throw".
